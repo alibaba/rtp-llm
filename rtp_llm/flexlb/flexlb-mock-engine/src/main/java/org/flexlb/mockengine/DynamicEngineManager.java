@@ -64,6 +64,8 @@ final class DynamicEngineManager {
     private final JavaMockEngineCluster.ClusterStats stats;
     /** Null when the cluster runs without --discovery-file (add/remove still work, file not maintained). */
     private final DiscoveryFileStore discoveryFileStore;
+    /** Cluster-shared engine_events.jsonl writer (null = event stream disabled); wired onto every dynamically added engine. */
+    private final JavaMockEngineCluster.EngineEventLog engineEventLog;
     /** Cluster-single mutation lock: serializes add/remove including the file rewrite. */
     private final Object mutationLock = new Object();
     /** Monotonic id for dynamically added engine names, appended to the role index. */
@@ -86,7 +88,8 @@ final class DynamicEngineManager {
                          EventLoopGroup workerGroup,
                          ScheduledExecutorService scheduler,
                          JavaMockEngineCluster.ClusterStats stats,
-                         DiscoveryFileStore discoveryFileStore) {
+                         DiscoveryFileStore discoveryFileStore,
+                         JavaMockEngineCluster.EngineEventLog engineEventLog) {
         this.config = config;
         this.performance = performance;
         this.services = services;
@@ -96,6 +99,7 @@ final class DynamicEngineManager {
         this.scheduler = scheduler;
         this.stats = stats;
         this.discoveryFileStore = discoveryFileStore;
+        this.engineEventLog = engineEventLog;
         // The manager is constructed right after the initial roles started, so
         // services.size() == nPrefill + nDecode — the first dynamic engine takes
         // the next global index.
@@ -121,6 +125,7 @@ final class DynamicEngineManager {
                     config, performance, serversByPort, bossGroup, workerGroup,
                     services, scheduler, stats, roleName, engineName, grpcPort,
                     nextEngineIndex.getAndIncrement());
+            service.setEngineEventLog(engineEventLog);
             try {
                 rewriteDiscoveryFileLocked();
             } catch (IOException e) {

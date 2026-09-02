@@ -359,7 +359,8 @@ consolidate_run_outputs_now() {
     consolidate_mock_port_args+=(--mock-http-port "$((MOCK_BASE_GRPC_PORT - 1))")
   fi
   # Consolidate the run directory into the per-component JSON+log layout
-  # (run_meta/mock/master/client .json + .log, merged per_request.jsonl[.gz];
+  # (run_meta/mock/master/client .json + .log, merged client_events.jsonl[.gz],
+  # run-root engine_events.jsonl[.gz];
   # see consolidate_run_outputs.py's docstring for the full keep/delete list).
   # Runs while the mock cluster and master are still alive (cleanup kills them
   # on EXIT), so the final cluster snapshot is captured from the control plane.
@@ -867,6 +868,8 @@ if [[ "${START_MOCK}" == "1" ]]; then
     --event-loop-threads "${JAVA_MOCK_EVENT_LOOP_THREADS}" \
     --completion-threads "${JAVA_MOCK_COMPLETION_THREADS}" \
     --stats-interval-ms "${JAVA_MOCK_STATS_INTERVAL_MS}" \
+    --stats-stdout \
+    --events-file "${RUN_DIR}/engine_events.jsonl" \
     --decode-max-concurrency "${JAVA_MOCK_DECODE_MAX_CONCURRENCY}" \
     --performance "${PERFORMANCE_FILE}" \
     --master-config "${PROCESS_CONFIG_FILE}" \
@@ -1316,7 +1319,8 @@ if [[ "${SLO_BATCH_ANALYSIS}" == "1" ]]; then
 fi
 
 # Consolidate the run directory into the per-component JSON+log layout
-# (run_meta/mock/master/client .json + .log, merged per_request.jsonl[.gz];
+# (run_meta/mock/master/client .json + .log, merged client_events.jsonl[.gz],
+# run-root engine_events.jsonl[.gz];
 # see consolidate_run_outputs.py's docstring for the full keep/delete list).
 # Runs while the mock cluster and master are still alive (cleanup kills them
 # on EXIT), so the final cluster snapshot is captured from the control plane.
@@ -1331,10 +1335,15 @@ echo "run_meta=${RUN_DIR}/run_meta.json"
 echo "mock=${RUN_DIR}/mock.json (${RUN_DIR}/mock.log)"
 echo "master=${RUN_DIR}/master.json (${RUN_DIR}/master.log)"
 echo "client=${RUN_DIR}/client.json (${RUN_DIR}/client.log)"
-if [[ -f "${RUN_DIR}/per_request.jsonl" ]]; then
-  echo "per_request=${RUN_DIR}/per_request.jsonl"
+if [[ -f "${RUN_DIR}/client_events.jsonl" ]]; then
+  echo "client_events=${RUN_DIR}/client_events.jsonl"
 else
-  echo "per_request=${RUN_DIR}/per_request.jsonl.gz"
+  echo "client_events=${RUN_DIR}/client_events.jsonl.gz"
+fi
+if [[ -f "${RUN_DIR}/engine_events.jsonl" ]]; then
+  echo "engine_events=${RUN_DIR}/engine_events.jsonl"
+else
+  echo "engine_events=${RUN_DIR}/engine_events.jsonl.gz"
 fi
 echo "jfr=${JFR_FILE}"
 

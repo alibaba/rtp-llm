@@ -53,9 +53,12 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>Replays trace JSONL files against a running FlexLB master via gRPC Schedule RPC.
  * Supports multi-shard replay, configurable speed, semaphore-based concurrency control,
  * and optional engine stream reading for TTFT/total latency. The client records raw
- * data only — per_request.jsonl rows, the terminal server_latency.json snapshot, and
- * pushgateway metrics; every derived statistic is computed by the run-level
- * aggregator (aggregate_canvas_run.py), never here.
+ * data only — client_events.jsonl rows (renamed from per_request.jsonl: the
+ * client-side half of the multi-component JSONL event streams, rid-joined
+ * offline against the mock engine's engine_events.jsonl), the terminal
+ * server_latency.json snapshot, and pushgateway metrics; every derived
+ * statistic is computed by the run-level aggregator (aggregate_canvas_run.py),
+ * never here.
  *
  * <p>FETCH_OUTPUT_STREAM (default true) controls ONLY the client-side read of engine
  * output streams (phase-2 FetchResponse/GenerateStreamCall). With FETCH_OUTPUT_STREAM=0
@@ -599,6 +602,10 @@ public final class JavaLoadClient {
             scheduleResponse = stub.schedule(scheduleReq);
 
             result.scheduleMs = (System.nanoTime() - scheduleStartNanos) / 1_000_000.0;
+            // sched_done epoch-ms (client_events.jsonl): the absolute moment the
+            // schedule RPC returned — send_start_epoch_ms + scheduleMs keeps the
+            // same wall clock as the engine-side engine_arrival_ms stamps.
+            result.schedDoneEpochMs = sendStartEpochMs + result.scheduleMs;
             result.enqueuedByMaster = scheduleResponse.getEnqueuedByMaster();
 
             if (scheduleResponse.getCode() != 200 || !scheduleResponse.getSuccess()) {
@@ -1263,7 +1270,11 @@ public final class JavaLoadClient {
     // ---- Output Writing ----
 
     private void writePerRequestResults() throws IOException {
-        Path perRequestPath = Path.of(config.outputDir, "per_request.jsonl");
+        // client_events.jsonl (renamed from per_request.jsonl): the client-side
+        // half of the multi-component JSONL event streams — one row per
+        // request, rid-joined offline by aggregate_canvas_run.py against the
+        // mock engine's engine_events.jsonl.
+        Path perRequestPath = Path.of(config.outputDir, "client_events.jsonl");
         try (BufferedWriter writer = Files.newBufferedWriter(perRequestPath)) {
             for (RequestResult result : results) {
                 writer.write(perRequestNode(result).toString());
@@ -1290,6 +1301,7 @@ public final class JavaLoadClient {
         node.put("output_len", result.outputLen);
         node.put("status", result.status);
         node.put("schedule_ms", result.scheduleMs);
+        node.put("sched_done_epoch_ms", result.schedDoneEpochMs);
         node.put("ttft_ms", result.ttftMs);
         node.put("total_ms", result.totalMs);
         node.put("enqueued_by_master", result.enqueuedByMaster);
@@ -2003,6 +2015,8 @@ public final class JavaLoadClient {
         int outputLen;
         String status = "unknown";
         double scheduleMs;
+        /** Absolute epoch-ms when the schedule RPC returned (send_start + schedule_ms); 0 on the direct fallback path (no master schedule hop). */
+        double schedDoneEpochMs;
         double ttftMs;
         double totalMs;
         boolean enqueuedByMaster;

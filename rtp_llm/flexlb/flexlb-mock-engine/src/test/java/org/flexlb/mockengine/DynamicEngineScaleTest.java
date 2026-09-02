@@ -404,7 +404,7 @@ class DynamicEngineScaleTest {
                 config.prefillDomain, config.decodeDomain);
         discoveryFileStore.rewrite(services);
         engineManager = new DynamicEngineManager(config, model, services, serversByPort,
-                bossGroup, workerGroup, scheduler, stats, discoveryFileStore);
+                bossGroup, workerGroup, scheduler, stats, discoveryFileStore, null);
         controlServer = new MockControlServer(services, serversByPort, bossGroup, workerGroup,
                 "127.0.0.1", 0, engineManager);
         controlServer.start();

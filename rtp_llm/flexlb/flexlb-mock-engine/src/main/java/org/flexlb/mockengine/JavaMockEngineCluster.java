@@ -1,6 +1,7 @@
 package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.grpc.Context;
 import io.grpc.Server;
 import io.grpc.netty.NettyServerBuilder;
@@ -15,8 +16,12 @@ import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.dao.route.RoleType;
 
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -111,11 +116,18 @@ public final class JavaMockEngineCluster {
         });
 
         MockControlServer controlServer;
+        // Per-request JSONL event stream (engine_events.jsonl): opened BEFORE
+        // any engine starts so every FastRpcService (initial and dynamically
+        // added) receives the same log instance via setEngineEventLog.
+        EngineEventLog engineEventLog = EngineEventLog.open(config.eventsFile);
         try {
             startRole(config, performance, serversByPort, bossGroup, workerGroup, services, scheduler, stats,
                     0, config.nPrefill, "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL);
             startRole(config, performance, serversByPort, bossGroup, workerGroup, services, scheduler, stats,
                     config.nPrefill, config.nDecode, "decode", EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE);
+            for (FastRpcService service : services.values()) {
+                service.setEngineEventLog(engineEventLog);
+            }
             writeDiscoveryFiles(config);
             // File-based discovery mode (--discovery-file): maintain the dynamic
             // domain→hosts mapping consumed by FileServiceDiscovery on the master,
@@ -128,7 +140,7 @@ public final class JavaMockEngineCluster {
             }
             DynamicEngineManager engineManager = new DynamicEngineManager(
                     config, performance, services, serversByPort, bossGroup, workerGroup,
-                    scheduler, stats, discoveryFileStore);
+                    scheduler, stats, discoveryFileStore, engineEventLog);
             controlServer = new MockControlServer(
                     services, serversByPort, bossGroup, workerGroup, config.host, config.baseGrpcPort - 1,
                     engineManager);
@@ -140,8 +152,15 @@ public final class JavaMockEngineCluster {
             throw error;
         }
 
-        scheduler.scheduleAtFixedRate(() -> System.out.print(buildStatsLine(services.values(), stats)),
-                config.statsIntervalMs, config.statsIntervalMs, TimeUnit.MILLISECONDS);
+        if (config.statsStdout) {
+            // Debug surface (default OFF): consolidate_run_outputs.py parses
+            // the java_mock_stats lines out of mock_engine.log to build the
+            // mock.json stats timeline, so run_online_eval.sh passes
+            // --stats-stdout explicitly to keep that chain alive; ad-hoc
+            // launches get a quiet stdout.
+            scheduler.scheduleAtFixedRate(() -> System.out.print(buildStatsLine(services.values(), stats)),
+                    config.statsIntervalMs, config.statsIntervalMs, TimeUnit.MILLISECONDS);
+        }
 
         scheduler.scheduleAtFixedRate(() -> {
             for (FastRpcService service : services.values()) {
@@ -172,6 +191,9 @@ public final class JavaMockEngineCluster {
                 service.shutdown();
             }
             shutdown(serversByPort, bossGroup, workerGroup);
+            if (engineEventLog != null) {
+                engineEventLog.close();
+            }
         }, "java-mock-engine-shutdown"));
 
         System.out.printf("Java mock engine ready: prefill=%d decode=%d ports=%d-%d eventLoops=%d performance=%s completionThreads=%d statsIntervalMs=%d%n",
@@ -179,6 +201,9 @@ public final class JavaMockEngineCluster {
                 config.baseGrpcPort + config.nPrefill + config.nDecode - 1,
                 config.eventLoopThreads, config.performanceFile, config.completionThreads,
                 config.statsIntervalMs);
+        if (config.eventsFile != null) {
+            System.out.printf("Engine event stream enabled: %s%n", config.eventsFile);
+        }
         System.out.printf("HTTP control server listening on port %d%n", config.baseGrpcPort - 1);
         if (config.discoveryFile != null) {
             System.out.printf("File service discovery enabled: %s (add/remove_engine keep it in sync)%n",
@@ -536,6 +561,28 @@ public final class JavaMockEngineCluster {
         private final String roleName;
         private final EngineRpcService.RoleTypePB roleType;
         private final int grpcPort;
+        /**
+         * Cluster-shared JSONL event log (engine_events.jsonl), injected via
+         * {@link #setEngineEventLog} after construction (main wires the file
+         * opened from {@code --events-file}; tests inject per-service logs).
+         * Null = event streaming disabled — the per-request terminal rows
+         * (prefill_done / decode_done) are then simply not written, exactly
+         * like the stdout trace lines they replaced.
+         */
+        private volatile EngineEventLog engineEventLog;
+        /**
+         * Per-request engine-side arrival stamps (epoch ms) for
+         * engine_events.jsonl: recorded at enqueue/admission, consumed and
+         * removed by the terminal callback that writes the event row. Bounded
+         * indirectly by periodicCleanup (rids no longer tracked anywhere).
+         */
+        private final ConcurrentHashMap<Long, Long> eventArrivalMs = new ConcurrentHashMap<>();
+        /**
+         * Per-request execution-start stamps (epoch ms): prefill batch start /
+         * decode running-slot admission, consumed with {@link #eventArrivalMs}
+         * by the terminal callback.
+         */
+        private final ConcurrentHashMap<Long, Long> eventStartMs = new ConcurrentHashMap<>();
         private final Map<Integer, FastRpcService> services;
         private final ScheduledExecutorService scheduler;
         private final MockPerformanceModel performance;
@@ -671,6 +718,14 @@ public final class JavaMockEngineCluster {
             double accumulatedExecMs;
             /** Set under decodeQueueLock when this step's terminal ownership is claimed (cancel may win it first). */
             boolean owned;
+            /**
+             * Decode batch size (running streams INCLUDING this one) at the
+             * terminal claim — the batch this request's last step executed in.
+             * Set under decodeQueueLock by claimDecodeTerminalLocked (after the
+             * stream's removal from decodeRunning, before the top-up), read by
+             * the engine_events.jsonl decode_done row.
+             */
+            int terminalBatchSize;
             /** True while a step is already executing (tick pending) and this
              * stream joined mid-step: the stream joins the running batch at the
              * NEXT step boundary and produces its first tokens there, mirroring
@@ -955,6 +1010,7 @@ public final class JavaMockEngineCluster {
                         long requestId = input.getInput().getRequestId();
                         response.addSuccessesBuilder().setRequestId(requestId);
                         recordLifecycleStart(requestId, request.getBatchId(), "enqueue_batch");
+                        recordEventArrival(requestId);
                     }
                 }
                 // ── EnqueueBatch ack fault injections: all phases above ran
@@ -1242,6 +1298,7 @@ public final class JavaMockEngineCluster {
             lastEnqueueTime.set(System.nanoTime());
             requestStates.put(requestId, "running");
             recordLifecycleStart(requestId, -1, "generate_stream");
+            recordEventArrival(requestId);
 
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
                     responseQueues.computeIfAbsent(requestId, k -> new LinkedBlockingQueue<>());
@@ -1470,6 +1527,11 @@ public final class JavaMockEngineCluster {
                 throw new IllegalArgumentException("response poll timeout must be >= 1 ms");
             }
             this.responsePollTimeoutMs = responsePollTimeoutMs;
+        }
+
+        /** Wire the cluster-shared engine_events.jsonl writer (null disables). */
+        void setEngineEventLog(EngineEventLog engineEventLog) {
+            this.engineEventLog = engineEventLog;
         }
 
         /**
@@ -2214,18 +2276,17 @@ public final class JavaMockEngineCluster {
                         activeCount++;
                     }
                     recordCompletion(shape, batchId, executionMs, dpRank);
-                    // Per-rid prefill terminal trace line (kv style, same stdout
-                    // channel as mock_decode_done -> mock_engine.log /
-                    // consolidated mock.log). aggregate_canvas_run.py joins this
-                    // line against the load client's send_start_epoch_ms by
+                    // Per-rid prefill terminal event row (engine_events.jsonl,
+                    // replaces the former mock_prefill_done stdout trace line —
+                    // per-request data now streams as structured JSONL, not
+                    // stdout grep). aggregate_canvas_run.py joins prefill_done_ms
+                    // / exec_ms against the load client's send_start_epoch_ms by
                     // request_id to bucket prefill exec percentiles on the
                     // request-BIRTH axis (same axis as e2e/full_e2e); exec_ms is
                     // the BATCH execution duration — prefill runs whole batches,
                     // so every member of one batch logs the same value.
-                    System.out.printf(
-                            "mock_prefill_done rid=%d ts_epoch_ms=%d exec_ms=%d input_len=%d cancelled=%b%n",
-                            requestId, doneTsMs, executionMs,
-                            shape.inputLen(), alreadyCancelled);
+                    writePrefillDoneEvent(shape, requestId, batchId, doneTsMs,
+                            executionMs, shapes.size(), alreadyCancelled);
                     if (!alreadyCancelled) {
                         // rtp_llm_context_tps accounting (production caliber):
                         // compute = il - hit (actually-computed context tokens,
@@ -2369,6 +2430,9 @@ public final class JavaMockEngineCluster {
             for (MockPerformanceModel.RequestShape shape : shapes) {
                 runningTasks.put(shape.input().getRequestId(),
                         task(shape, batchId, dpRank, EngineRpcService.TaskPhase.TASK_PHASE_RUNNING));
+                // engine_events.jsonl: execution-start stamp (lane serialization
+                // actually begins for this batch member).
+                recordEventStart(shape.input().getRequestId());
             }
         }
 
@@ -2424,6 +2488,10 @@ public final class JavaMockEngineCluster {
         private boolean scheduleDecodeCompletion(MockPerformanceModel.RequestShape shape, long batchId,
                 LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue) {
             long requestId = shape.input().getRequestId();
+            // engine_events.jsonl arrival stamp: decode-engine arrival is the
+            // hand-off moment (covers BOTH the immediate-admission and the
+            // parked-in-waiting-queue paths below).
+            recordEventArrival(requestId);
             // Shutdown drain in progress — reject before any claim so a
             // cross-engine prefill hand-off racing the drain cannot re-populate
             // runningTasks after the cancel sweep. The caller degrades exactly
@@ -2483,6 +2551,7 @@ public final class JavaMockEngineCluster {
                             new DecodeStream(shape, batchId, responseQueue,
                                     performance.decodeSteps(shape.outputLen()), decodeStepScheduled));
                     stats.decodeAdmitted.increment();
+                    recordEventStart(requestId);
                     scheduleDecodeStepLocked();
                 } else {
                     // Concurrency gate hit — park the request in the unbounded
@@ -2671,6 +2740,7 @@ public final class JavaMockEngineCluster {
                                 decodeStepScheduled));
                 stats.decodeAdmitted.increment();
                 recordLifecycleRunning(candidateId);
+                recordEventStart(candidateId);
                 lastEnqueueTime.set(System.nanoTime());
             }
         }
@@ -2699,6 +2769,7 @@ public final class JavaMockEngineCluster {
                 runningTasks.put(requestId, removed);
             }
             stream.owned = true;
+            stream.terminalBatchSize = decodeRunning.size() + 1;
             activeDecodeRequests.decrementAndGet();
             // Capacity model v2: the lease is handed to the LRU OUTSIDE this
             // lock by publishDecodeCompletion (admitBlockLease) — release !=
@@ -2723,17 +2794,15 @@ public final class JavaMockEngineCluster {
             // Feed the per-sample decode completion window (java_mock_stats
             // decode_done / decode_exec_*): Σ actual step durations.
             stats.recordDecodeDone(executionMs);
-            // Per-rid decode terminal trace line (kv style, same stdout channel
-            // as java_mock_stats → mock_engine.log / consolidated mock.log).
-            // aggregate_canvas_run.py joins this ts against the load client's
+            // Per-rid decode terminal event row (engine_events.jsonl, replaces
+            // the former mock_decode_done stdout trace line). aggregate_canvas_run.py
+            // joins decode_done_ms / exec_ms against the load client's
             // per-request send_start_epoch_ms by request_id to build the
             // schedule-only full-e2e metric (client send → decode end); without
-            // this line the engine side has no per-rid persisted terminal time
+            // this row the engine side has no per-rid persisted terminal time
             // (completions queue / requestLifecycles are in-memory only).
-            System.out.printf(
-                    "mock_decode_done rid=%d ts_epoch_ms=%d exec_ms=%d output_len=%d cancelled=%b%n",
-                    requestId, System.currentTimeMillis(), executionMs,
-                    shape.outputLen(), cancelledRequests.containsKey(requestId));
+            writeDecodeDoneEvent(stream, executionMs,
+                    cancelledRequests.containsKey(requestId));
             // Per-engine decode busy: one executionMs per completed request.
             busyMs.addAndGet(executionMs);
             boolean alreadyCancelled = cancelledRequests.containsKey(requestId);
@@ -3142,6 +3211,15 @@ public final class JavaMockEngineCluster {
             long ttlDeadline = System.nanoTime()
                     - TimeUnit.SECONDS.toNanos(CANCELLED_MARKER_TTL_SECONDS);
             cancelledRequests.entrySet().removeIf(e -> e.getValue() < ttlDeadline);
+            // engine_events.jsonl stamp safety net: a cancelled-in-queue request
+            // that never reached a terminal callback leaves its arrival/start
+            // stamps behind. A rid is truly gone once it is neither a running
+            // task nor has a live response queue (queued prefill/decode members
+            // always hold a runningTasks entry).
+            eventArrivalMs.keySet().removeIf(id ->
+                    !runningTasks.containsKey(id) && !responseQueues.containsKey(id));
+            eventStartMs.keySet().removeIf(id ->
+                    !runningTasks.containsKey(id) && !responseQueues.containsKey(id));
         }
 
         /**
@@ -3541,6 +3619,102 @@ public final class JavaMockEngineCluster {
             }
         }
 
+        /** Stamp the engine-side arrival epoch-ms for engine_events.jsonl (first arrival wins). */
+        private void recordEventArrival(long requestId) {
+            if (engineEventLog == null) {
+                return;
+            }
+            eventArrivalMs.putIfAbsent(requestId, System.currentTimeMillis());
+        }
+
+        /** Stamp the execution-start epoch-ms (prefill batch start / decode slot admission). */
+        private void recordEventStart(long requestId) {
+            if (engineEventLog == null) {
+                return;
+            }
+            eventStartMs.putIfAbsent(requestId, System.currentTimeMillis());
+        }
+
+        private static long orZero(Long value) {
+            return value != null ? value : 0L;
+        }
+
+        /**
+         * engine_events.jsonl terminal row for one prefill batch member
+         * (normal or cancelled) — the structured replacement of the former
+         * mock_prefill_done stdout line. exec_ms is the BATCH execution
+         * duration (prefill runs whole batches, every member logs the same
+         * value); ttft_ms is the engine-resident time arrival → prefill
+         * terminal (includes engine-side queueing — the engine-internal TTFT
+         * caliber); kv_used_tokens reads the still-live block lease (blocks ×
+         * spb). Missing stamps (row written for a request whose arrival was
+         * never stamped — e.g. log injected mid-run) serialize as 0.
+         */
+        private void writePrefillDoneEvent(MockPerformanceModel.RequestShape shape,
+                                           long requestId, long batchId, long doneTsMs,
+                                           long executionMs, int batchSize, boolean cancelled) {
+            EngineEventLog log = engineEventLog;
+            long arrivalMs = orZero(eventArrivalMs.remove(requestId));
+            long startMs = orZero(eventStartMs.remove(requestId));
+            if (log == null) {
+                return;
+            }
+            ObjectNode row = OBJECT_MAPPER.createObjectNode();
+            row.put("event", "prefill_done");
+            row.put("rid", requestId);
+            row.put("engine_name", engineName);
+            row.put("batch_id", batchId);
+            row.put("engine_arrival_ms", arrivalMs);
+            row.put("prefill_start_ms", startMs);
+            row.put("prefill_done_ms", doneTsMs);
+            row.put("ttft_ms", arrivalMs > 0 ? Math.max(0L, doneTsMs - arrivalMs) : 0L);
+            row.put("exec_ms", executionMs);
+            row.put("batch_size", batchSize);
+            row.put("input_len", shape.inputLen());
+            row.put("cache_hit_tokens", shape.hitTokens());
+            MockLruBlockCache.BlockLease lease = activeBlockLeases.get(requestId);
+            row.put("kv_used_tokens",
+                    lease != null ? (long) lease.totalBlocks() * seqSizePerBlock : 0L);
+            row.put("cancelled", cancelled);
+            log.write(row);
+        }
+
+        /**
+         * engine_events.jsonl terminal row for one decode stream — the
+         * structured replacement of the former mock_decode_done stdout line.
+         * exec_ms is the summed booked step durations (per-step continuous
+         * batching caliber); batch_size is the terminal-step running batch
+         * (claimed under decodeQueueLock, includes this stream); kv_used_tokens
+         * reads the still-live block lease (the lease hands over to the LRU
+         * only AFTER this row, on the normal path).
+         */
+        private void writeDecodeDoneEvent(DecodeStream stream, long executionMs, boolean cancelled) {
+            MockPerformanceModel.RequestShape shape = stream.shape;
+            long requestId = shape.input().getRequestId();
+            EngineEventLog log = engineEventLog;
+            long arrivalMs = orZero(eventArrivalMs.remove(requestId));
+            long startMs = orZero(eventStartMs.remove(requestId));
+            if (log == null) {
+                return;
+            }
+            ObjectNode row = OBJECT_MAPPER.createObjectNode();
+            row.put("event", "decode_done");
+            row.put("rid", requestId);
+            row.put("engine_name", engineName);
+            row.put("batch_id", stream.batchId);
+            row.put("engine_arrival_ms", arrivalMs);
+            row.put("decode_start_ms", startMs);
+            row.put("decode_done_ms", System.currentTimeMillis());
+            row.put("exec_ms", executionMs);
+            row.put("batch_size", stream.terminalBatchSize);
+            row.put("output_len", shape.outputLen());
+            MockLruBlockCache.BlockLease lease = activeBlockLeases.get(requestId);
+            row.put("kv_used_tokens",
+                    lease != null ? (long) lease.totalBlocks() * seqSizePerBlock : 0L);
+            row.put("cancelled", cancelled);
+            log.write(row);
+        }
+
         /** Snapshot of the bounded request lifecycle map with string keys (Python /requests). */
         Map<String, Map<String, Object>> getRequestLifecycleSnapshot() {
             Map<String, Map<String, Object>> result = new LinkedHashMap<>();
@@ -3889,6 +4063,60 @@ public final class JavaMockEngineCluster {
         }
     }
 
+    /**
+     * Cluster-shared append-only JSONL event log (engine_events.jsonl): one
+     * structured row per request terminal per engine (prefill_done on the
+     * prefill engine, decode_done on the decode engine), replacing the former
+     * mock_prefill_done / mock_decode_done stdout trace lines. The offline
+     * aggregator (aggregate_canvas_run.py) rid-joins these rows against the
+     * load client's client_events.jsonl to rebuild each request's full
+     * lifecycle; components keep ZERO summarization duty (all derived stats
+     * live in the aggregation layer).
+     *
+     * <p>Writes are synchronized (every engine in the cluster shares one file)
+     * and autoflush per line — the same durability the per-line stdout printf
+     * had: a killed JVM keeps every row a completion callback already wrote.
+     * Opened (appending) from {@code --events-file}; a null/blank path
+     * disables the stream entirely.
+     */
+    static final class EngineEventLog implements AutoCloseable {
+        private final PrintWriter writer;
+
+        private EngineEventLog(PrintWriter writer) {
+            this.writer = writer;
+        }
+
+        /** Opens (appending) the events file; null/blank path → null (disabled). */
+        static EngineEventLog open(String path) {
+            if (path == null || path.isBlank()) {
+                return null;
+            }
+            try {
+                Path file = Path.of(path);
+                if (file.getParent() != null) {
+                    Files.createDirectories(file.getParent());
+                }
+                PrintWriter printWriter = new PrintWriter(Files.newBufferedWriter(file,
+                        StandardCharsets.UTF_8, StandardOpenOption.CREATE,
+                        StandardOpenOption.APPEND), true);
+                return new EngineEventLog(printWriter);
+            } catch (IOException e) {
+                throw new UncheckedIOException("cannot open engine events file: " + path, e);
+            }
+        }
+
+        /** Appends one serialized row (synchronized: all engines share one file). */
+        synchronized void write(ObjectNode row) {
+            writer.println(row.toString());
+        }
+
+        @Override
+        public synchronized void close() {
+            writer.flush();
+            writer.close();
+        }
+    }
+
     static final class Config {
         // Package-private for direct assertions in ClusterConfigParamTest.
         int nPrefill = 2;
@@ -3927,6 +4155,22 @@ public final class JavaMockEngineCluster {
         int blockSize = 0;
         int decodeMaxConcurrency = DEFAULT_DECODE_MAX_CONCURRENCY;
         int statsIntervalMs = 5000;
+        /**
+         * Per-request JSONL event stream target (engine_events.jsonl). Null =
+         * disabled (no event rows; the former mock_prefill_done /
+         * mock_decode_done stdout lines are gone either way — the jsonl file is
+         * the ONLY per-request engine-side output now).
+         */
+        String eventsFile;
+        /**
+         * Emit the java_mock_stats line on stdout every statsIntervalMs.
+         * Default OFF: the stats timeline is a debug surface, and a quiet
+         * stdout keeps mock_engine.log small. run_online_eval.sh passes
+         * --stats-stdout explicitly because consolidate_run_outputs.py still
+         * builds mock.json's stats timeline by parsing those lines from
+         * mock_engine.log.
+         */
+        boolean statsStdout = false;
         /**
          * Unique per-engine loopback advertisement IPs (127.x.y.z), default on:
          * keeps the master-side engineIp Prometheus label distinct per engine.
@@ -3978,6 +4222,8 @@ public final class JavaMockEngineCluster {
                     case "--block-size" -> config.blockSize = Integer.parseInt(value);
                     case "--decode-max-concurrency" -> config.decodeMaxConcurrency = Integer.parseInt(value);
                     case "--stats-interval-ms" -> config.statsIntervalMs = Integer.parseInt(value);
+                    case "--events-file" -> config.eventsFile = value;
+                    case "--stats-stdout" -> config.statsStdout = parseBooleanFlag(value, "--stats-stdout");
                     case UNIQUE_ENGINE_IPS_FLAG -> config.uniqueEngineIps =
                             parseBooleanFlag(value, UNIQUE_ENGINE_IPS_FLAG);
                     default -> throw new IllegalArgumentException("Unknown argument: " + key);

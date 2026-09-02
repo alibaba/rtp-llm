@@ -151,7 +151,7 @@ class LoadClientPriorityTest {
         assertTrue(real.has("priority"));
         assertEquals(70, real.get("priority").asInt());
 
-        // per_request.jsonl rows distinguish synthesized entries by key
+        // client_events.jsonl rows distinguish synthesized entries by key
         // absence — a literal 0 would pollute downstream priority stats.
         ObjectNode synthetic = JavaLoadClient.perRequestNode(syntheticResult("timeout"));
         assertFalse(synthetic.has("priority"),

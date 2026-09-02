@@ -24,7 +24,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * {@code future.get(remaining)} per future in submission order, so one slow
  * RPC parked the collection cursor until the global deadline and every later
  * future — including ones that had completed — was synthesized as an empty
- * timeout row without send_start, truncating per_request.jsonl real rows to
+ * timeout row without send_start, truncating client_events.jsonl real rows to
  * the first ~58% of the send window.
  */
 class JavaLoadClientResultCollectionTest {

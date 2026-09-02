@@ -15,7 +15,7 @@ and fault scripts.  Provides:
                    port planning, per-spec environment reuse and teardown.
   * ProcessOps   — managed subprocess handles (kill -9, restart, pgrep sweep).
   * ClientOps    — JavaLoadClient driver (all 35 env vars explicit) plus
-                   per_request.jsonl parsing.
+                   client_events.jsonl parsing.
   * EngineOps    — mock HTTP control-plane + gRPC schedule/cancel/stream
                    (see engine_ops.py).
   * AssertUtils  — wait_for / inflight-clean / TTFT helpers.
@@ -1224,7 +1224,9 @@ class LoadClientResult:
 
     Phase B removed summary.json (the client records raw rows only), so the
     derived total/ok/errors summary fields are gone with it — per_request()
-    rows are the sole client-side source (no-backward-compat).
+    rows are the sole client-side source (no-backward-compat). The underlying
+    file is client_events.jsonl (renamed from per_request.jsonl together with
+    the multi-component JSONL event streams).
     """
 
     def __init__(self, output_dir: Path, returncode: int):
@@ -1232,7 +1234,7 @@ class LoadClientResult:
         self.returncode = returncode
 
     def per_request(self) -> list[dict]:
-        path = self.output_dir / "per_request.jsonl"
+        path = self.output_dir / "client_events.jsonl"
         rows = []
         if path.is_file():
             for line in path.read_text(encoding="utf-8").splitlines():

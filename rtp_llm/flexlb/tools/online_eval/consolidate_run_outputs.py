@@ -33,13 +33,16 @@ Target layout (run root), one JSON + one log per component:
                              records raw rows only and aggregate_canvas_run.py
                              is the single derived-statistics source)
   client.log                 client_shard_*.stdout merged with shard headers
-  per_request.jsonl(.gz)     merged per-request streams (plain when the total is
-                             under PER_REQUEST_PLAIN_LIMIT_BYTES, gzip at
-                             GZIP_COMPRESS_LEVEL otherwise)
+  client_events.jsonl(.gz)   merged client-side per-request event stream
+                             (renamed from per_request.jsonl; plain when the
+                             total is under PER_REQUEST_PLAIN_LIMIT_BYTES,
+                             gzip at GZIP_COMPRESS_LEVEL otherwise)
 
 Kept in place (skill / tooling contract):
   endpoints.json, flexlb_env.txt, client_env.json,
   mock_per_engine_timeseries.json.gz (A-split target),
+  engine_events.jsonl (flipped to engine_events.jsonl.gz past the same
+  size threshold as client_events.jsonl),
   load_client/server_latency.json (aggregate validity input; the skill's
   fetch_server_latency also reads it),
   flexlb_logs/pv.log (only produced with FLEXLB_PV_LOG=on).
@@ -50,7 +53,7 @@ master_counters_timeseries.txt, mock_metrics_per_engine.prom,
 master_prometheus_timeseries.prom, master_inflight_timeseries.jsonl,
 process_usage_timeseries.txt, client_shard_*.stdout, client.stdout,
 flexlb.log (run root), flexlb_logs/ (minus pv.log), load_client/shard_*/,
-load_client/per_request.jsonl, slo_batch_analysis.stdout.
+load_client/client_events.jsonl, slo_batch_analysis.stdout.
 load_client/slo_batch_analysis.json is deleted only once its content is
 embedded in client.json.
 
@@ -391,7 +394,7 @@ def count_jsonl_rows(paths: list[Path]) -> int:
 
     Phase B: replaces the streaming PerSecondAggregator — client.json's
     per_second timeline had no consumers left (aggregate_canvas_run.py
-    recomputes per_second from the run-root per_request.jsonl itself, and
+    recomputes per_second from the run-root client_events.jsonl itself, and
     the canvas report reads the aggregate), so
     only the cheap row-count metadata survives. Counts lines without
     json.loads: a single pass, no per-row parsing.
@@ -423,14 +426,15 @@ def append_section(sink, header: str, paths: list[Path]) -> list[Path]:
 def collect_per_request_sources(run_dir: Path, load_client: Path) -> list[Path]:
     """Mergeable per-request sources (shard dirs / single-worker file).
 
-    The run-root merged files (per_request.jsonl / .gz) are deliberately NOT
-    listed: they are consolidation outputs, not inputs, so a re-run never
-    re-merges (or deletes) its own output.
+    The run-root merged files (client_events.jsonl / .gz — renamed from
+    per_request.jsonl) are deliberately NOT listed: they are consolidation
+    outputs, not inputs, so a re-run never re-merges (or deletes) its own
+    output.
     """
     sources: list[Path] = []
     if load_client.is_dir():
-        sources.extend(sorted(load_client.glob("shard_*/per_request.jsonl")))
-        single = load_client / "per_request.jsonl"
+        sources.extend(sorted(load_client.glob("shard_*/client_events.jsonl")))
+        single = load_client / "client_events.jsonl"
         if single.is_file() and not sources:
             sources.append(single)
     return sources
@@ -607,9 +611,10 @@ def consolidate(
     # SLO freshness gate: slo_batch_analysis.json is regenerable at any time
     # by re-running analyze_slo_batch.py, so a stale leftover from an older
     # run would silently poison slo_batch_summary. The analysis is only
-    # trusted when its mtime is >= the run's per_request.jsonl mtime (i.e.
-    # it was produced from THIS run's data).
-    per_request_path = load_client / "per_request.jsonl"
+    # trusted when its mtime is >= the run's client_events.jsonl mtime (i.e.
+    # it was produced from THIS run's data; the JSON key keeps the legacy
+    # per_request_mtime name — canvas_report_gen.py renders it).
+    per_request_path = load_client / "client_events.jsonl"
     slo_integrity = None
     if slo_path.is_file() and per_request_path.is_file():
         slo_mtime = slo_path.stat().st_mtime
@@ -728,13 +733,15 @@ def consolidate(
             if kept not in deleted:
                 report["kept"].append(str(kept.relative_to(run_dir)))
 
-    # ---- per_request merge (before shard cleanup, feeds client.json) -------
+    # ---- client_events merge (before shard cleanup, feeds client.json) -----
     per_request_sources = collect_per_request_sources(run_dir, load_client)
     row_count = 0
     if per_request_sources:
         total_bytes = sum(path.stat().st_size for path in per_request_sources)
         plain = total_bytes < PER_REQUEST_PLAIN_LIMIT_BYTES
-        target = run_dir / ("per_request.jsonl" if plain else "per_request.jsonl.gz")
+        target = run_dir / (
+            "client_events.jsonl" if plain else "client_events.jsonl.gz"
+        )
         tmp = target.with_name(target.name + ".tmp")
 
         def fill_per_request(sink) -> None:
@@ -750,7 +757,9 @@ def consolidate(
         os.replace(tmp, target)
         # Never leave both compression variants behind (a legacy run root may
         # carry the opposite sibling from an earlier consolidation decision).
-        alternate = run_dir / ("per_request.jsonl.gz" if plain else "per_request.jsonl")
+        alternate = run_dir / (
+            "client_events.jsonl.gz" if plain else "client_events.jsonl"
+        )
         if alternate.is_file():
             alternate.unlink()
         row_count = count_jsonl_rows([target])
@@ -758,11 +767,40 @@ def consolidate(
     else:
         # Re-run on a consolidated dir: the merged run-root file is the only
         # row source left (read-only) — recover the row count from it.
-        for name in ("per_request.jsonl", "per_request.jsonl.gz"):
+        for name in ("client_events.jsonl", "client_events.jsonl.gz"):
             path = run_dir / name
             if path.is_file():
                 row_count = count_jsonl_rows([path])
                 break
+
+    # ---- engine_events.jsonl gzip flip (run root) ---------------------------
+    # The mock engine writes its per-rid event rows straight to the run root
+    # (engine-side half of the multi-component JSONL event streams). The same
+    # size-based plain/gzip policy as client_events keeps large replay runs
+    # from exploding the run dir. Same liveness semantics as the mock_engine.log
+    # merge above: consolidation runs while the engine process is still up,
+    # but the client has exited and drained, so no new event rows are expected
+    # — the autoflushed prefix is the complete stream.
+    for name in ("engine_events.jsonl", "engine_events.jsonl.gz"):
+        engine_events = run_dir / name
+        if not engine_events.is_file():
+            continue
+        if name.endswith(".gz") or (
+            engine_events.stat().st_size < PER_REQUEST_PLAIN_LIMIT_BYTES
+        ):
+            report["kept"].append(name)
+        else:
+            gz_target = run_dir / "engine_events.jsonl.gz"
+            gz_tmp = gz_target.with_name(gz_target.name + ".tmp")
+            with engine_events.open("rb") as src, gzip.open(
+                gz_tmp, "wb", compresslevel=GZIP_COMPRESS_LEVEL
+            ) as sink:
+                shutil.copyfileobj(src, sink)
+            os.replace(gz_tmp, gz_target)
+            engine_events.unlink()
+            report["created"].append(gz_target.name)
+            report["deleted"].append(engine_events.name)
+        break
 
     # ---- client.json / client.log -------------------------------------------
     # Phase B: load_client/summary.json no longer exists (the Java client

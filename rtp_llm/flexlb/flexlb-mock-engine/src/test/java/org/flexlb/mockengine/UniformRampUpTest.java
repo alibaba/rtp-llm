@@ -68,7 +68,7 @@ class UniformRampUpTest {
 
     private List<JsonNode> readPerRequest(Path outDir) throws IOException {
         List<JsonNode> rows = new ArrayList<>();
-        for (String line : Files.readAllLines(outDir.resolve("per_request.jsonl"))) {
+        for (String line : Files.readAllLines(outDir.resolve("client_events.jsonl"))) {
             if (!line.isBlank()) {
                 rows.add(MAPPER.readTree(line));
             }
@@ -152,7 +152,7 @@ class UniformRampUpTest {
     }
 
     // ------------------------------------------------------------------
-    // End-to-end: run() in dry-run mode, inspect per_request.jsonl.
+    // End-to-end: run() in dry-run mode, inspect client_events.jsonl.
     // ------------------------------------------------------------------
 
     @Test

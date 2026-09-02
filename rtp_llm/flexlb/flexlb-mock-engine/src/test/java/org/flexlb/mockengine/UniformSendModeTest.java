@@ -27,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * but ideal send times form a fixed-interval schedule t0 + i*interval where
  * interval = NUM_SHARDS / SEND_MODE_QPS. Verified end-to-end by driving
  * {@code run()} in dry-run mode (no gRPC channels; every request fails fast)
- * and inspecting the per_request.jsonl send_due_epoch_ms schedule.
+ * and inspecting the client_events.jsonl send_due_epoch_ms schedule.
  */
 class UniformSendModeTest {
 
@@ -65,7 +65,7 @@ class UniformSendModeTest {
 
     private List<JsonNode> readPerRequest(Path outDir) throws IOException {
         List<JsonNode> rows = new ArrayList<>();
-        for (String line : Files.readAllLines(outDir.resolve("per_request.jsonl"))) {
+        for (String line : Files.readAllLines(outDir.resolve("client_events.jsonl"))) {
             if (!line.isBlank()) {
                 rows.add(MAPPER.readTree(line));
             }
