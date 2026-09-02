@@ -11,12 +11,9 @@ import asyncio
 import gc
 import json
 import os
-import resource
 import struct
 import sys
-import time
 import unittest
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import grpc
@@ -24,7 +21,6 @@ import grpc
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.dash_sc.proxy import __main__ as proxy_main
-from rtp_llm.dash_sc.proxy import servicer as proxy_servicer
 from rtp_llm.dash_sc.proxy.service_route import BackendAddr, VipServerServiceDiscovery
 from rtp_llm.dash_sc.proxy.service_route_config import (
     LEGACY_FORWARD_ENV_KEY,
@@ -146,126 +142,6 @@ async def _drain(aiter):
 async def _request_gen(*reqs):
     for r in reqs:
         yield r
-
-
-def _timing_point() -> dict[str, int]:
-    wall_ns = time.monotonic_ns()
-    thread_cpu_ns = time.thread_time_ns()
-    usage = resource.getrusage(resource.RUSAGE_THREAD)
-    return {
-        "wall_ns": wall_ns,
-        "thread_cpu_ns": thread_cpu_ns,
-        "voluntary_context_switches": usage.ru_nvcsw,
-        "involuntary_context_switches": usage.ru_nivcsw,
-    }
-
-
-def _timing_delta(start: dict[str, int], end: dict[str, int]) -> dict[str, float | int]:
-    return {
-        "wall_ms": (end["wall_ns"] - start["wall_ns"]) / 1_000_000,
-        "thread_cpu_ms": (end["thread_cpu_ns"] - start["thread_cpu_ns"]) / 1_000_000,
-        "voluntary_context_switches": end["voluntary_context_switches"]
-        - start["voluntary_context_switches"],
-        "involuntary_context_switches": end["involuntary_context_switches"]
-        - start["involuntary_context_switches"],
-    }
-
-
-def _parse_cpu_stat(path: Path) -> dict[str, int]:
-    values: dict[str, int] = {}
-    for line in path.read_text().splitlines():
-        key, value = line.split(maxsplit=1)
-        values[key] = int(value)
-    return values
-
-
-def _cpu_cgroup_snapshot() -> dict[str, str | int]:
-    """Best-effort action-cgroup snapshot for remote timing diagnosis."""
-    v2_rel = ""
-    v1_rel = ""
-    try:
-        for line in Path("/proc/self/cgroup").read_text().splitlines():
-            hierarchy, controllers, relative = line.split(":", maxsplit=2)
-            if hierarchy == "0" and not controllers:
-                v2_rel = relative.lstrip("/")
-            elif "cpu" in controllers.split(","):
-                v1_rel = relative.lstrip("/")
-    except (OSError, ValueError):
-        pass
-
-    v2_root = Path("/sys/fs/cgroup")
-    v2_candidates = [v2_root / v2_rel, v2_root] if v2_rel else [v2_root]
-    for candidate in v2_candidates:
-        try:
-            snapshot: dict[str, str | int] = {
-                "version": 2,
-                "path": str(candidate),
-                "cpu.max": (candidate / "cpu.max").read_text().strip(),
-            }
-            snapshot.update(_parse_cpu_stat(candidate / "cpu.stat"))
-            return snapshot
-        except (OSError, ValueError):
-            continue
-
-    v1_roots = [Path("/sys/fs/cgroup/cpu"), Path("/sys/fs/cgroup/cpu,cpuacct")]
-    for root in v1_roots:
-        candidate = root / v1_rel if v1_rel else root
-        try:
-            snapshot = {
-                "version": 1,
-                "path": str(candidate),
-                "cpu.cfs_quota_us": int(
-                    (candidate / "cpu.cfs_quota_us").read_text().strip()
-                ),
-                "cpu.cfs_period_us": int(
-                    (candidate / "cpu.cfs_period_us").read_text().strip()
-                ),
-            }
-            snapshot.update(_parse_cpu_stat(candidate / "cpu.stat"))
-            return snapshot
-        except (OSError, ValueError):
-            continue
-
-    return {"status": "unavailable"}
-
-
-def _thread_schedstat_snapshot() -> list[int] | str:
-    try:
-        return [
-            int(value)
-            for value in Path("/proc/thread-self/schedstat").read_text().split()
-        ]
-    except (OSError, ValueError):
-        return "unavailable"
-
-
-def _numeric_delta(
-    start: dict[str, str | int], end: dict[str, str | int]
-) -> dict[str, int]:
-    return {
-        key: value - start[key]
-        for key, value in end.items()
-        if isinstance(value, int)
-        and not isinstance(value, bool)
-        and isinstance(start.get(key), int)
-        and key != "version"
-    }
-
-
-def _timed_sync_call(name, func, timings):
-    def wrapped(*args, **kwargs):
-        start = _timing_point()
-        try:
-            return func(*args, **kwargs)
-        finally:
-            timings.append(
-                {
-                    "stage": name,
-                    **_timing_delta(start, _timing_point()),
-                }
-            )
-
-    return wrapped
 
 
 class _SuccessfulContext:
@@ -1756,33 +1632,22 @@ class StreamCloseTimingTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_close_timing_with_counting_wrapper(self) -> None:
-        """Verifies the unconditional counting wrapper closes its inner call.
-
-        This final alphabetic timing case also records action-cgroup and
-        per-thread scheduling evidence so a wall-time failure can be separated
-        from synchronous finalizer work without weakening the 50 ms contract.
-        """
+        """Verifies the unconditional counting wrapper closes its inner call."""
+        loop = asyncio.get_running_loop()
         finish_ts: list[float] = []
         close_ts: list[float] = []
-        finish_points: list[dict[str, int]] = []
-        close_points: list[dict[str, int]] = []
         leaked: list[bool] = []
-        stage_timings: list[dict[str, str | float | int]] = []
 
         async def downstream_gen():
             try:
                 yield self._make_token_resp("token1")
-                finish_point = _timing_point()
-                finish_points.append(finish_point)
-                finish_ts.append(finish_point["wall_ns"] / 1_000_000_000)
+                finish_ts.append(loop.time())
                 yield self._make_finished_resp()
                 await asyncio.sleep(5.0)
                 leaked.append(True)
                 yield self._make_token_resp("leaked")
             except GeneratorExit:
-                close_point = _timing_point()
-                close_points.append(close_point)
-                close_ts.append(close_point["wall_ns"] / 1_000_000_000)
+                close_ts.append(loop.time())
                 raise
 
         self.mock_stub.ModelStreamInfer.return_value = downstream_gen()
@@ -1792,80 +1657,14 @@ class StreamCloseTimingTest(unittest.IsolatedAsyncioTestCase):
         # inside the measured tail can trigger a full cyclic-GC pass and measure
         # mock-fixture cleanup instead of proxy close latency.
         context = _SuccessfulContext()
-        original_resolve_status = GrpcAccessRecord.resolve_status
-        original_emit_access_log = proxy_servicer.emit_access_log
-        original_report_done = proxy_servicer.report_forwarder_rpc_done
-        original_finish_traces = proxy_servicer._finish_proxy_traces
+        gc.collect()
         collected = []
-        with patch.object(
-            GrpcAccessRecord,
-            "resolve_status",
-            new=_timed_sync_call(
-                "resolve_status", original_resolve_status, stage_timings
-            ),
-        ), patch.object(
-            proxy_servicer,
-            "emit_access_log",
-            new=_timed_sync_call(
-                "emit_access_log", original_emit_access_log, stage_timings
-            ),
-        ), patch.object(
-            proxy_servicer,
-            "report_forwarder_rpc_done",
-            new=_timed_sync_call(
-                "report_forwarder_rpc_done", original_report_done, stage_timings
-            ),
-        ), patch.object(
-            proxy_servicer,
-            "_finish_proxy_traces",
-            new=_timed_sync_call(
-                "finish_proxy_traces", original_finish_traces, stage_timings
-            ),
+        async for resp in self.servicer.ModelStreamInfer(
+            _request_gen(_make_request("req1")), context
         ):
-            # Keep unrelated cyclic-mock cleanup outside the measured SLA
-            # window while leaving the production finalizer order untouched.
-            gc.collect()
-            cgroup_before = _cpu_cgroup_snapshot()
-            schedstat_before = _thread_schedstat_snapshot()
-            async for resp in self.servicer.ModelStreamInfer(
-                _request_gen(_make_request("req1")), context
-            ):
-                collected.append(resp)
-            outer_point = _timing_point()
-            outer_ts = outer_point["wall_ns"] / 1_000_000_000
-
-        schedstat_after = _thread_schedstat_snapshot()
-        cgroup_after = _cpu_cgroup_snapshot()
+            collected.append(resp)
+        outer_ts = loop.time()
         self._assert_successful_context(context)
-        finish_to_close = (
-            _timing_delta(finish_points[0], close_points[0])
-            if close_points
-            else "not observed"
-        )
-        close_to_outer = (
-            _timing_delta(close_points[0], outer_point)
-            if close_points
-            else "not observed"
-        )
-        schedstat_delta = (
-            [end - start for start, end in zip(schedstat_before, schedstat_after)]
-            if isinstance(schedstat_before, list) and isinstance(schedstat_after, list)
-            else "unavailable"
-        )
-        print(
-            "\n[StreamCloseTimingTest:with_counting_wrapper:diagnostics]\n"
-            f"  finish -> close timing  : {json.dumps(finish_to_close, sort_keys=True)}\n"
-            f"  close -> outer timing   : {json.dumps(close_to_outer, sort_keys=True)}\n"
-            f"  finalizer stages        : {json.dumps(stage_timings, sort_keys=True)}\n"
-            f"  cgroup before           : {json.dumps(cgroup_before, sort_keys=True)}\n"
-            f"  cgroup after            : {json.dumps(cgroup_after, sort_keys=True)}\n"
-            f"  cgroup numeric delta    : "
-            f"{json.dumps(_numeric_delta(cgroup_before, cgroup_after), sort_keys=True)}\n"
-            f"  schedstat before        : {json.dumps(schedstat_before)}\n"
-            f"  schedstat after         : {json.dumps(schedstat_after)}\n"
-            f"  schedstat delta         : {json.dumps(schedstat_delta)}",
-            flush=True,
-        )
 
         self._assert_prompt_close(
             "with_counting_wrapper",
