@@ -14,7 +14,25 @@ from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreO
 from rtp_llm.models_py.modules.base.common.kvcache_store import (
     create_write_cache_store_impl as _create_write_cache_store_impl,
 )
+from rtp_llm.ops import AttentionConfigs, KvCacheDataType
 from rtp_llm.ops.compute_ops import KVCache, LayerKVCache, PyAttentionInputs
+
+
+def requires_native_bf16_fp8_prefill(attn_configs: AttentionConfigs) -> bool:
+    """Whether TRTLLM-Gen lacks the required mixed-dtype context cubin.
+
+    FlashInfer's TRTLLM-Gen context API currently fixes BF16-query/FP8-KV to
+    transform mode 0.  The SM100 cubin bundle does not contain that mode for
+    head-dim 256 with 64-token pages, so dispatch this shape to the native
+    paged prefill implementation.  Decode has an explicit transform-mode API
+    and remains on TRTLLM-Gen.
+    """
+    return (
+        attn_configs.dtype == torch.bfloat16
+        and attn_configs.kv_cache_dtype == KvCacheDataType.FP8
+        and attn_configs.size_per_head == 256
+        and attn_configs.kernel_tokens_per_block == 64
+    )
 
 
 def reshape_paged_kv_cache(
