@@ -42,6 +42,7 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
                 compress_ratios=(0, 0, 0),
                 window_size=128,
                 norm_eps=1e-6,
+                fp8_kv_cache=True,
             )
             self._gen_num_per_cycle = 3
             self.v4 = SimpleNamespace(

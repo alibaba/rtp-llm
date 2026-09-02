@@ -327,6 +327,39 @@ def test_cp_gather_restore_overflow():
     )
 
 
+def test_sm120_fallback_buffers_reuse_capacity_and_isolate_roles():
+    ws = PrefillWorkspace(
+        torch.device("cpu"), q_rows=1, q_dim=1, reserve_cp=False, align_bytes=1
+    )
+
+    swa_cache = ws.sm120_packed_cache("swa", num_tokens=65, page_size=64)
+    assert tuple(swa_cache.shape) == (2, 64, 584)
+    assert (
+        ws.sm120_packed_cache("swa", num_tokens=32, page_size=64).data_ptr()
+        == swa_cache.data_ptr()
+    )
+
+    extra_cache = ws.sm120_packed_cache("extra_2", num_tokens=65, page_size=64)
+    assert extra_cache.data_ptr() != swa_cache.data_ptr()
+
+    slots = ws.sm120_linear_slots("swa", 65)
+    assert tuple(slots.shape) == (65,)
+    assert slots.dtype == torch.int64
+    assert ws.sm120_linear_slots("swa", 32).data_ptr() == slots.data_ptr()
+    assert ws.sm120_linear_slots("extra_2", 65).data_ptr() != slots.data_ptr()
+
+    grown_cache = ws.sm120_packed_cache("swa", num_tokens=129, page_size=64)
+    assert tuple(grown_cache.shape) == (3, 64, 584)
+    assert (
+        ws.sm120_packed_cache("swa", num_tokens=65, page_size=64).data_ptr()
+        == grown_cache.data_ptr()
+    )
+
+    grown_slots = ws.sm120_linear_slots("swa", 129)
+    assert tuple(grown_slots.shape) == (129,)
+    assert ws.sm120_linear_slots("swa", 65).data_ptr() == grown_slots.data_ptr()
+
+
 if __name__ == "__main__":
     test_dynamic_workspace_rows_disabled_keeps_configured_capacity()
     print("PASS test_dynamic_workspace_rows_disabled_keeps_configured_capacity")
@@ -360,4 +393,6 @@ if __name__ == "__main__":
     print("PASS test_cp_restore_region_does_not_alias_gather_region")
     test_cp_gather_restore_overflow()
     print("PASS test_cp_gather_restore_overflow")
+    test_sm120_fallback_buffers_reuse_capacity_and_isolate_roles()
+    print("PASS test_sm120_fallback_buffers_reuse_capacity_and_isolate_roles")
     print("ALL TESTS PASSED")

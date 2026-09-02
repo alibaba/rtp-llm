@@ -1029,7 +1029,8 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsCo
     model_input.input_lengths = torch::tensor({2, 3}, torch::kInt32);
     model_input.combo_tokens  = torch::tensor({10, 11, 20, 21, 22}, torch::kInt32);
     model_input.combo_position_ids =
-        torch::tensor({100, 101, 102, 110, 111, 112, 200, 201, 202, 210, 211, 212, 220, 221, 222}, torch::kInt32);
+        torch::tensor({100, 101, 102, 110, 111, 112, 200, 201, 202, 210, 211, 212, 220, 221, 222}, torch::kInt32)
+            .cuda();
     GptModelOutputs model_output;
     model_output.all_hidden_states =
         torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f, 0.9f, 1.0f}, torch::kFloat32).reshape({5, 2});
@@ -1037,6 +1038,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsCo
     sampler_output.token_ids = torch::tensor({1, -2, 12, 1, 2, 23}, torch::kInt32).reshape({2, 3});
     TensorHolder holder;
     processor.updatePrefillPostDraftModelInput(stream_groups, model_input, model_output, sampler_output, holder);
+    EXPECT_TRUE(model_input.combo_position_ids.is_cuda());
     EXPECT_EQ((vector<int>{11, 12, 21, 22, 23}), toVec<int>(model_input.combo_tokens));
     EXPECT_EQ((vector<int>{110, 111, 112, 112, 112, 112, 210, 211, 212, 220, 221, 222, 222, 222, 222}),
               toVec<int>(model_input.combo_position_ids));

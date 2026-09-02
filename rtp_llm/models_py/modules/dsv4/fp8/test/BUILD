@@ -121,6 +121,7 @@ py_test(
 py_test(
     name = "test_dsv4_persistent_topk_sm120",
     srcs = ["test_dsv4_persistent_topk.py"],
+    main = "test_dsv4_persistent_topk.py",
     deps = _DSV4_FP8_TEST_DEPS,
     tags = ["RTX_5000_PRO"],
     exec_properties = {

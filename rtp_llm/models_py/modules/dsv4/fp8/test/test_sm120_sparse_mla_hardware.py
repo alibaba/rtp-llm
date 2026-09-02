@@ -131,9 +131,10 @@ class Sm120SparseMlaHardwareTest(unittest.TestCase):
         swa_indices[1, :4] = torch.tensor([2, 4, 7, 9], device=self.device)
         swa_indices[2, :2] = torch.tensor([1, 10], device=self.device)
         swa_lengths = torch.tensor([3, 4, 2], dtype=torch.int32, device=self.device)
+        swa_cache = self._packed_cache(swa_values, block_size=64)
 
         extra_values = extra_indices = extra_lengths = None
-        extra_page_size = None
+        extra_cache = None
         if variant != "swa":
             extra_values = torch.randn(9, dim, dtype=torch.bfloat16, device=self.device)
             extra_indices = torch.full(
@@ -145,7 +146,9 @@ class Sm120SparseMlaHardwareTest(unittest.TestCase):
             extra_lengths = torch.tensor(
                 [2, 3, 1], dtype=torch.int32, device=self.device
             )
-            extra_page_size = 64 if variant == "csa" else 2
+            extra_cache = self._packed_cache(
+                extra_values, block_size=64 if variant == "csa" else 2
+            )
 
         layer = AttentionFP8.__new__(AttentionFP8)
         torch.nn.Module.__init__(layer)
@@ -172,13 +175,12 @@ class Sm120SparseMlaHardwareTest(unittest.TestCase):
                 prefill_workspace=workspace,
                 profile_name=f"sm120.prefill.{variant}",
                 out=out,
-                sm120_swa_kv=swa_values if variant != "swa" else None,
-                sm120_extra_kv=extra_values,
-                sm120_swa_indices=swa_indices if variant != "swa" else None,
-                sm120_swa_lens=swa_lengths if variant != "swa" else None,
+                sm120_swa_cache=swa_cache,
+                sm120_extra_cache=extra_cache,
+                sm120_swa_indices=swa_indices,
+                sm120_swa_lens=swa_lengths,
                 sm120_extra_indices=extra_indices,
                 sm120_extra_lens=extra_lengths,
-                sm120_extra_page_size=extra_page_size,
             )
 
         def reference() -> torch.Tensor:
@@ -197,17 +199,22 @@ class Sm120SparseMlaHardwareTest(unittest.TestCase):
         eager_out = torch.empty(
             tokens, heads * dim, dtype=torch.bfloat16, device=self.device
         )
-        forward(eager_out)
-        torch.testing.assert_close(eager_out, reference(), rtol=3e-2, atol=3e-2)
+        with patch(
+            "rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton."
+            "quantize_and_insert_k_cache",
+            side_effect=AssertionError("prefill must reuse the paged FP8 cache"),
+        ):
+            forward(eager_out)
+            torch.testing.assert_close(eager_out, reference(), rtol=3e-2, atol=3e-2)
 
-        graph_out = torch.empty_like(eager_out)
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            forward(graph_out)
-        query.copy_(torch.randn_like(query))
-        graph.replay()
-        torch.cuda.synchronize(self.device)
-        torch.testing.assert_close(graph_out, reference(), rtol=3e-2, atol=3e-2)
+            graph_out = torch.empty_like(eager_out)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                forward(graph_out)
+            query.copy_(torch.randn_like(query))
+            graph.replay()
+            torch.cuda.synchronize(self.device)
+            torch.testing.assert_close(graph_out, reference(), rtol=3e-2, atol=3e-2)
 
     def test_swa_prefill_eager_and_cuda_graph(self) -> None:
         self._assert_prefill_variant("swa")
@@ -217,6 +224,50 @@ class Sm120SparseMlaHardwareTest(unittest.TestCase):
 
     def test_hca_prefill_eager_and_cuda_graph(self) -> None:
         self._assert_prefill_variant("hca")
+
+    def test_large_decode_window_uses_graph_safe_generic_fallback(self) -> None:
+        width, heads, dim = 1152, 8, 512
+        scale = dim**-0.5
+        source = torch.randn(width + 7, dim, dtype=torch.bfloat16, device=self.device)
+        cache = self._packed_cache(source, block_size=64)
+        indices = torch.arange(width, dtype=torch.int32, device=self.device).view(
+            1, 1, width
+        )
+        lengths = torch.tensor([width], dtype=torch.int32, device=self.device)
+        query = torch.randn(1, 1, heads, dim, dtype=torch.bfloat16, device=self.device)
+        sink = torch.linspace(-0.2, 0.3, heads, dtype=torch.float32, device=self.device)
+        op = SparseAttnV4DecodeFp8Op(heads, dim, scale)
+
+        def forward() -> torch.Tensor:
+            return op.forward(
+                query,
+                cache,
+                sink,
+                indices,
+                sched_meta=None,
+                topk_length=lengths,
+            )
+
+        def reference() -> torch.Tensor:
+            expected = self._reference_sparse_prefill(
+                query.reshape(1, heads, dim),
+                sink,
+                source,
+                indices.reshape(1, width),
+                lengths,
+                scale,
+            )
+            return expected.view_as(query)
+
+        eager = forward()
+        torch.testing.assert_close(eager, reference(), rtol=4e-2, atol=4e-2)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            graph_output = forward()
+        query.copy_(torch.randn_like(query))
+        graph.replay()
+        torch.cuda.synchronize(self.device)
+        torch.testing.assert_close(graph_output, reference(), rtol=4e-2, atol=4e-2)
 
     @staticmethod
     def _reference_dual_pool_attention(

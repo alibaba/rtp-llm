@@ -9,6 +9,7 @@ from flashinfer import fp4_quantize
 
 from rtp_llm.config.quant_config import init_quant_config
 from rtp_llm.device.device_impl import CudaImpl
+from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear import (
     CudaFp4GEMMLinear,
 )
@@ -98,6 +99,9 @@ class CudaFp4GEMMLinearTest(unittest.TestCase):
         """Test dependency availability check"""
         # Test that we can at least import the module
         self.assertIsNotNone(CudaFp4GEMMLinear)
+
+    def test_modelopt_fp4_strategy_is_registered_on_cuda(self):
+        self.assertIn(CudaFp4GEMMLinear, LinearFactory._strategies)
 
     def test_explicit_legacy_backend_fails_during_construction_when_unavailable(self):
         with patch.dict(

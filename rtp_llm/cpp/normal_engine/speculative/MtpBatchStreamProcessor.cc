@@ -841,13 +841,20 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
         model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().pin_memory() : model_input.input_lengths;
     torch::Tensor combo_tokens_cpu =
         model_input.combo_tokens.is_cuda() ? model_input.combo_tokens.cpu().pin_memory() : model_input.combo_tokens;
+    const bool combo_position_ids_were_cuda =
+        model_input.combo_position_ids.defined() && model_input.combo_position_ids.is_cuda();
+    torch::Tensor combo_position_ids_cpu;
+    if (model_input.combo_position_ids.defined()) {
+        combo_position_ids_cpu = combo_position_ids_were_cuda ?
+                                     model_input.combo_position_ids.cpu().contiguous().pin_memory() :
+                                     model_input.combo_position_ids.contiguous();
+    }
 
     int* input_lengths = input_lengths_cpu.data_ptr<int>();
     int* combo_tokens  = combo_tokens_cpu.data_ptr<int>();
 
-    int  offset = 0;
-    int* combo_position_ids =
-        model_input.combo_position_ids.defined() ? model_input.combo_position_ids.data_ptr<int>() : nullptr;
+    int  offset             = 0;
+    int* combo_position_ids = combo_position_ids_cpu.defined() ? combo_position_ids_cpu.data_ptr<int>() : nullptr;
     const size_t position_id_len_factor = model_input_gatherer_config_.position_id_len_factor;
     auto         all_streams            = stream_groups.allStreams();
     auto         stream_it              = all_streams.begin();
@@ -875,6 +882,10 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
 
     model_input.input_lengths = toCudaInt32(input_lengths_cpu, host_holder);
     model_input.combo_tokens  = toCudaInt32(combo_tokens_cpu, host_holder);
+    if (combo_position_ids_cpu.defined()) {
+        model_input.combo_position_ids =
+            combo_position_ids_were_cuda ? toCudaInt32(combo_position_ids_cpu, host_holder) : combo_position_ids_cpu;
+    }
 }
 
 torch::Tensor MtpBatchStreamProcessor::compactAcceptedPositionIds(const torch::Tensor&    combo_position_ids,
