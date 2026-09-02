@@ -4,44 +4,6 @@
 
 ---
 
-## FastSafeTensors configuration ownership moves to AutoLoader
-
-**Introduced in:** [PR #1354](https://github.com/alibaba/rtp-llm/pull/1354).
-
-**Summary:** RTP no longer constructs a private `ParallelLoader` variant or
-forces its loader tuning through constructor keywords. Backend selection,
-buffer size, shared-memory copier, producer/queue depth, tensor ordering and
-loading progress are read from the installed FastSafeTensors configuration.
-RTP supplies only rank-local key selection and the transitional stacked-MoE
-delivery policy.
-
-**Impact and migration:** Previous RTP code forced a 2 GiB read buffer,
-selected shm versus nogds from `FASTSAFETENSORS_NOGDS`, and enabled the loading
-progress bar. New deployments should express equivalent intent through
-`FASTSAFETENSORS_CONFIG_JSON`; the exact keys are versioned upstream. For the
-current pinned wheel, a minimal nogds/progress example is:
-
-```json
-{"loader":"base","base":{"copier_type":"nogds"},"parallel":{"use_tqdm_on_load":true}}
-```
-
-At startup, degraded-but-usable FastSafeTensors paths report
-`requested_mode`, `effective_mode` and `degraded_reason`. Scratch fallbacks use
-the `falls back to scratch` marker. Missing optional APIs independently disable
-bounded per-expert delivery or rank-local copy-out; a missing package,
-AutoLoader/import/API/ABI compatibility failure, unmet AUTO prerequisite or
-insufficient AUTO memory preflight selects scratch. Explicit per-expert loading
-is a user override and skips preflight; checkpoint/data errors remain fail-fast.
-AUTO reserves the wrapper-reported peak plus an empirical 2 GiB for RTP-owned
-TensorCollector overlap, pending stacked-MoE peak-memory calibration.
-
-**Rollback:** Set `LOAD_METHOD=scratch` for the conservative native loader, or
-temporarily set `RTP_FASTSAFETENSORS_STACKED_MOE_MODE=full-stacked` when the
-installed AutoLoader lacks `stacked_moe_tensors` (or its legacy
-`dim0_split_templates` alias) and sufficient GPU memory is available.
-
----
-
 ## JIT cache unified local root and remote snapshot boundary
 
 **Introduced in:** [PR #1112](https://github.com/alibaba/rtp-llm/pull/1112) (JIT remote cache).

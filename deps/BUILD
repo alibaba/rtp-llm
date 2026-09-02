@@ -5,10 +5,7 @@ load(":pip.bzl", "PIP_EXTRA_ARGS")
 exports_files([
     "http.bzl",
     "requirements_base.txt",
-    "requirements_lock_cuda13_arm.txt",
     "requirements_lock_rocm.txt",
-    "requirements_lock_torch_gpu_cuda12_9.txt",
-    "requirements_lock_torch_gpu_cuda13.txt",
     "requirements_rocm.txt",
 ])
 

@@ -13,10 +13,7 @@ from safetensors.torch import save_file
 
 # The production entry installs the UE8M0 dist.broadcast compatibility shim.
 import rtp_llm.ops as _rtp_ops  # noqa: F401
-from rtp_llm.utils.database import (
-    FASTSAFETENSORS_STACKED_MOE_MODE_PER_EXPERT,
-    CkptDatabase,
-)
+from rtp_llm.utils.database import CkptDatabase
 
 _CHUNKED_TENSOR_NUMEL = 20 * 1024  # 80 KiB in float32, above the 64 KiB limits.
 _UE8M0_RAW_BYTES = [0, 1, 2, 63, 127, 128, 200, 254]
@@ -82,7 +79,6 @@ def _run_real_fastsafetensors_rank(
                 "cuda",
                 stacked_key_config={"stacked": "experts.{expert_id}.weight"},
                 local_copyout_filter=wanted_keys.__contains__,
-                stacked_moe_mode=FASTSAFETENSORS_STACKED_MOE_MODE_PER_EXPERT,
             )
         )
 
