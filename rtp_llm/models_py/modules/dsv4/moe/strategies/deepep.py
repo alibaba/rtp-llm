@@ -31,6 +31,13 @@ _EAGER_FIXED_EP_BOUND = int(os.environ.get("DSV4_SM120_EAGER_FIXED_EP", "0"))
 # 0 = off (canonical NCCL emulation).
 _DEEPEP_REAL = int(os.environ.get("DSV4_DEEPEP_REAL", "0"))
 _DEEPEP_REAL_MAX_TOKENS = int(os.environ.get("DSV4_DEEPEP_MAX_TOKENS", "8192"))
+# C2 (Sep 2, bench/results_20260902_q4c/VERDICT.md): split the prefill a2a
+# strategy into prepare_dispatch (host-serial: mxfp8 quantize + count-AG +
+# .cpu() sync + payload pack), which moe_layer runs BEFORE shared_start, and
+# run_dispatch_prepared (a2a -> GEMM -> combine), which runs AFTER — the
+# dispatch a2a then launches while the aux-stream shared expert (1.8 ms/layer)
+# is still executing instead of behind the host stall. Off = stock order.
+_C2_PREPARE = int(os.environ.get("DSV4_C2_PREPARE_DISPATCH", "0"))
 # Lever 1b (Sep 2): overlap variant of the real deep_ep path. The raw DeepEP
 # pair (dispatch ~3 ms + combine ~6 ms/layer) is SLOWER than the NCCL pair
 # it replaces (6.64 ms exposed — boot #3 measured +16% @32K synchronous), so
@@ -65,6 +72,7 @@ def _deepep_disable(reason: str):
 _DIAG_ATA = [0]
 _SERVE_PATH_CT = {"__total": 0}
 _DIAG_FE = [0]
+_C2_PREP_CT = [0]  # C2 engagement proof (DSV4_DIAG, first 3 fires)
 def _stream_is_capturing() -> bool:
     # Driver-level capture check: raw C++ cudaStreamBeginCapture does not update
     # torch's per-stream capture cache, so torch.cuda.is_current_stream_capturing()
@@ -710,7 +718,63 @@ class DeepEPStrategy(RoutedExpertsStrategy):
                 pass
             raise
 
+    def prepare_dispatch(self, x, weights, indices):
+        """C2 front half (see ``_C2_PREPARE``): host-serial mxfp8 quantize,
+        count-AllGather, the blocking ``.cpu()`` sync and the payload pack.
+        moe_layer calls this BEFORE shared_start so the dispatch a2a (back
+        half, ``run_dispatch_prepared``) launches while the aux-stream shared
+        expert is still running instead of behind the host stall.
+
+        Rank-invariance: the guards below are a strict subset of forward's
+        own decision — a non-None return guarantees the stock forward would
+        have taken the eager SM120 all_to_all path; None always falls back to
+        the stock order. Collectives never move relative to each other, only
+        relative to a local op. No cache keys.
+        """
+        if not _C2_PREPARE:
+            return None
+        if self._sm120_grouped is None:
+            return None
+        # Only the eager all_to_all path is split. Capture/symbolic calls go
+        # to fixed_ep inside forward; replicated-TP goes to collective; a
+        # positive eager bound or real deep_ep kernels change the decision —
+        # all of these keep the stock order (forward re-decides identically).
+        if _EAGER_FIXED_EP_BOUND > 0 or _DEEPEP_REAL > 0:
+            return None
+        if not (x.is_cuda and torch.cuda.get_device_capability(x.device)[0] == 12):
+            return None
+        if _stream_is_capturing() or isinstance(x.size(0), torch.SymInt):
+            return None
+        dist = torch.distributed
+        if not dist.is_initialized():
+            return None
+        if _sm120_uses_replicated_tp_tokens(
+                self.cfg, dist.get_world_size(dist.group.WORLD)):
+            return None
+        prep = self._prepare_sm120_all_to_all(x, weights, indices)
+        if os.environ.get("DSV4_DIAG") and _C2_PREP_CT[0] < 3:
+            _C2_PREP_CT[0] += 1
+            import sys
+            print("[C2-PREP] rank=%d mode=%s counts=%r x0=%d" % (
+                dist.get_rank(dist.group.WORLD), prep["mode"],
+                prep.get("recv_counts"), int(x.size(0))),
+                file=sys.stderr, flush=True)
+        return prep
+
+    def run_dispatch_prepared(self, prep: dict) -> torch.Tensor:
+        """C2 back half for a dict returned by ``prepare_dispatch``."""
+        mode = prep["mode"]
+        if mode == "fixed_ep":
+            return self._forward_sm120_fixed_ep(
+                prep["x"], prep["weights"], prep["indices"])
+        return self._run_sm120_all_to_all_prepared(prep)
+
     def _forward_sm120_all_to_all_impl(self, x, weights, indices) -> torch.Tensor:
+        # Stock combinator: identical op order to the pre-C2 single body.
+        return self._run_sm120_all_to_all_prepared(
+            self._prepare_sm120_all_to_all(x, weights, indices))
+
+    def _prepare_sm120_all_to_all(self, x, weights, indices) -> dict:
         dist = torch.distributed
         group = dist.group.WORLD; world = dist.get_world_size(group)
         cfg = self.cfg
@@ -754,7 +818,11 @@ class DeepEPStrategy(RoutedExpertsStrategy):
                     torch.distributed.get_rank(torch.distributed.group.WORLD)
                     if torch.distributed.is_initialized() else -1,
                     recv_counts), file=sys.stderr, flush=True)
-            return self._forward_sm120_fixed_ep(x, weights, indices)
+            # C2: counts come from one count-AllGather, so every rank sees
+            # the same values and takes this branch together;
+            # run_dispatch_prepared routes it to the fixed_ep path.
+            return {"mode": "fixed_ep", "x": x, "weights": weights,
+                    "indices": indices}
         try:
             _sz = int(x.size(0))
         except Exception:
@@ -788,11 +856,45 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             torch.where(owned, indices_i32, torch.full_like(indices_i32, -1),
                         out=send_indices[dst])
         send_payload = send_payload_by_peer.view(-1, payload_cols)
+        return {
+            "mode": "a2a",
+            "x": x,
+            "recv_counts": recv_counts,
+            "send_counts": send_counts,
+            "payload_cols": payload_cols,
+            "send_payload": send_payload,
+            "recv_payload": recv_payload,
+            "x_end": x_end,
+            "scale_end": scale_end,
+            "weight_end": weight_end,
+            "scale_cols": scale_cols,
+        }
+
+    def _run_sm120_all_to_all_prepared(self, prep: dict) -> torch.Tensor:
+        dist = torch.distributed
+        group = dist.group.WORLD; world = dist.get_world_size(group)
+        cfg = self.cfg
+        # The quantize import lived at the top of the pre-split single body;
+        # the run half needs it for the combine quantize (function-local
+        # imports do not cross the split boundary).
+        from flashinfer import mxfp8_quantize
+        x = prep["x"]
+        recv_counts = prep.pop("recv_counts")
+        send_counts = prep.pop("send_counts")
+        payload_cols = prep.pop("payload_cols")
+        send_payload = prep.pop("send_payload")
+        recv_payload = prep.pop("recv_payload")
+        x_end = prep.pop("x_end")
+        scale_end = prep.pop("scale_end")
+        weight_end = prep.pop("weight_end")
+        scale_cols = prep.pop("scale_cols")
+        prep.clear()  # the locals above now own the refs (see the del below)
         dist.all_to_all_single(recv_payload, send_payload,
             output_split_sizes=recv_counts, input_split_sizes=send_counts, group=group)
         # The dispatch payload is the largest transient (world x T rows ~0.5
         # GiB at 32K ISL) — release it before the local GEMM allocations.
-        del send_payload_by_peer, send_payload
+        # The by-peer base dies with its last view ref (prep was cleared).
+        del send_payload
         recv_tokens = sum(recv_counts)
         recv_x = recv_payload[:, :x_end].contiguous().view(torch.float8_e4m3fn)
         recv_scale = recv_payload[:, x_end:scale_end].contiguous()

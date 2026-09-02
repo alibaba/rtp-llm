@@ -339,11 +339,17 @@ class MoE(nn.Module):
             out.copy_(routed)
             return
 
+        # C2 prepared-dispatch split — see the comment at the forward()
+        # call site; identical contract, chunked-tile flavor.
+        prepared = self._strategy.prepare_dispatch(x, weights, indices)
         with record_function_range("dsv4.moe.shared_expert_start"):
             self._shared_executor.start(self.shared_experts, x)
         try:
             with record_function_range("dsv4.moe.routed_experts"):
-                routed = self._strategy(x, weights, indices)
+                if prepared is not None:
+                    routed = self._strategy.run_dispatch_prepared(prepared)
+                else:
+                    routed = self._strategy(x, weights, indices)
         except Exception:
             with record_function_range("dsv4.moe.shared_expert_finish"):
                 self._shared_executor.finish()
@@ -561,11 +567,21 @@ class MoE(nn.Module):
                 out[:T].copy_(y)
                 return out[:T].view(shape)
 
+        # C2 (bench/results_20260902_q4c/VERDICT.md): run the strategy's
+        # host-serial dispatch front half (quantize + count-AG + .cpu() sync
+        # + pack) BEFORE the shared expert starts, so the dispatch a2a
+        # launches while the aux-stream shared expert is still running.
+        # prepare_dispatch returns None for every strategy/path it does not
+        # own (base default None) — the stock order then runs unchanged.
+        prepared = self._strategy.prepare_dispatch(x, weights, indices)
         with record_function_range("dsv4.moe.shared_expert_start"):
             self._shared_executor.start(self.shared_experts, x)
         try:
             with record_function_range("dsv4.moe.routed_experts"):
-                y = self._strategy(x, weights, indices)
+                if prepared is not None:
+                    y = self._strategy.run_dispatch_prepared(prepared)
+                else:
+                    y = self._strategy(x, weights, indices)
         except Exception:
             with record_function_range("dsv4.moe.shared_expert_finish"):
                 self._shared_executor.finish()

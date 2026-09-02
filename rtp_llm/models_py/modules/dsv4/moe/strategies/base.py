@@ -116,6 +116,27 @@ class RoutedExpertsStrategy(nn.Module):
             f"{self.__class__.__name__} does not support MegaMoE gate-pack"
         )
 
+    def prepare_dispatch(self, x, weights, indices):
+        """Optional C2 split (bench/results_20260902_q4c/VERDICT.md): run the
+        host-serial front half of the dispatch (quantize + count exchange +
+        payload pack) before the layer starts the shared expert, so the
+        collective back half can overlap it.
+
+        Default: unsupported — return ``None`` and the MoE layer calls
+        ``forward`` in the stock order. Strategies that return None are
+        always safe; a non-None value MUST only be produced when the stock
+        ``forward`` would have taken the exact same collectives (rank
+        invariance).
+        """
+        return None
+
+    def run_dispatch_prepared(self, prepared):
+        """Execute the back half for a dict returned by ``prepare_dispatch``."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} returned a prepared dispatch but does "
+            "not implement run_dispatch_prepared"
+        )
+
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
         """Whether this strategy is applicable for ``cfg`` in the current

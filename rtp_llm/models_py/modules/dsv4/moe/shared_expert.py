@@ -21,6 +21,7 @@ from .warmup_sync import cuda_graph_warmup_forward_enabled
 
 _SHARED_EXPERT_WORKSPACE_CACHE: dict[tuple, dict[str, torch.Tensor | int | torch.device]] = {}
 _SHARED_EXPERT_STREAM_CACHE: dict[int, torch.cuda.Stream] = {}
+_SHARED_OVL_ENGAGED = [0]  # Design-C engagement proof (DSV4_DIAG, first 3 fires)
 
 
 def _mode() -> str:
@@ -492,6 +493,14 @@ class OverlapSharedExpertExecutor(SharedExpertExecutor):
             with record_function_range("dsv4.moe.shared_expert"):
                 self._out = _run_shared_expert(shared_experts, x, self._fast_path)
         self._active_stream = stream
+        # Design-C boot gate: prove the overlap branch actually fired (the q4ovl1
+        # lesson — a silently-sequential boot measures nothing). DSV4_DIAG-gated,
+        # first 3 layers only.
+        if os.environ.get("DSV4_DIAG") and not capturing and _SHARED_OVL_ENGAGED[0] < 3:
+            _SHARED_OVL_ENGAGED[0] += 1
+            import sys
+            print("[SHARED-OVL] engaged T=%d stream=%s" % (int(x.size(0)), stream),
+                  file=sys.stderr, flush=True)
 
     def finish(self) -> torch.Tensor:
         assert self._out is not None
