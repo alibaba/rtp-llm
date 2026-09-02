@@ -1,3 +1,4 @@
+import copy
 import json
 import logging
 import os
@@ -22,6 +23,7 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
+from rtp_llm.device.device_type import is_hip
 from rtp_llm.model_factory_register import _model_factory, ensure_model_registered
 from rtp_llm.ops import (
     ProfilingDebugLoggingConfig,
@@ -180,10 +182,28 @@ class ModelFactory:
             if alias_names and target_model.weight is None:
                 raise RuntimeError("speculative shared-weight owner is not loaded")
 
+            propose_hw_kernel_config = engine_config.hw_kernel_config
+            if (
+                sp_type == SpeculativeType.DSPARK
+                and propose_model_config.model_type == "qwen_3_dspark"
+                and is_hip()
+                and propose_hw_kernel_config.use_swizzleA
+            ):
+                # The target's FP8 PTPC path benefits from ROCm swizzle, but the
+                # Qwen3 DSpark checkpoint is BF16.  hipBLASLt on MI308X has no
+                # preshuffled BF16 solution for the draft's 5120x5120 GEMMs.
+                # Keep the target config unchanged and give the draft an
+                # independent raw-layout config for both loading and dispatch.
+                propose_hw_kernel_config = copy.deepcopy(propose_hw_kernel_config)
+                propose_hw_kernel_config.use_swizzleA = False
+                logging.info(
+                    "disable ROCm swizzleA for BF16 qwen_3_dspark propose model"
+                )
+
             gpt_model = model_cls.from_config(
                 model_config=propose_model_config,
                 parallelism_config=engine_config.parallelism_config,
-                hw_kernel_config=engine_config.hw_kernel_config,
+                hw_kernel_config=propose_hw_kernel_config,
                 kv_cache_config=engine_config.kv_cache_config,
                 fmha_config=engine_config.fmha_config,
                 moe_config=engine_config.moe_config,
