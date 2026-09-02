@@ -36,6 +36,7 @@ route_logger = logging.getLogger("route_logger")
 
 SUCCESS_CODE = 200
 FALLBACK_ERROR_CODE = 8600
+DEFAULT_MASTER_CONNECT_TIMEOUT_MS = 100
 # gRPC = HTTP + 2 for FlexLB's own servers (consistent with FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET).
 # This is NOT the same as the backend engine offset (HTTP+1)—see CommonConstants.GRPC_PORT_OFFSET.
 FLEXLB_GRPC_PORT_OFFSET = 2
@@ -168,6 +169,14 @@ class MasterClient:
         self.master_config = (
             master_config if master_config is not None else MasterConfig()
         )
+        connect_timeout_ms = getattr(
+            self.master_config,
+            "master_connect_timeout_ms",
+            DEFAULT_MASTER_CONNECT_TIMEOUT_MS,
+        )
+        if connect_timeout_ms <= 0:
+            raise ValueError("Master gRPC connect timeout must be positive")
+        self._connect_timeout_s = connect_timeout_ms / 1000.0
         self.host_service: Optional[HostService] = host_service
         self._channels: Dict[str, grpc.aio.Channel] = {}
         self.latest_queue_length: int = 0
@@ -214,19 +223,67 @@ class MasterClient:
     ) -> _ScheduleAttemptSucceeded | _ScheduleAttemptTransportFailure:
         """Send one gRPC schedule attempt and return its explicit transport result."""
         target = self._get_grpc_target(addr)
-        start = time.time()
+        attempt_started_at = time.monotonic()
+        channel = self._get_channel(target)
+        connect_timeout_s = self._connect_timeout_s
+        if timeout_s is not None:
+            connect_timeout_s = min(connect_timeout_s, timeout_s)
+
         try:
-            channel = self._get_channel(target)
-            stub = FlexlbServiceStub(channel)
+            await asyncio.wait_for(
+                channel.channel_ready(),
+                timeout=connect_timeout_s,
+            )
+        except asyncio.TimeoutError:
+            elapsed = time.monotonic() - attempt_started_at
+            route_logger.error(
+                "gRPC channel readiness timed out, addr=%s, request_id=%s, "
+                "connect_timeout=%.3fs, elapsed=%.3fs",
+                addr,
+                request_id,
+                connect_timeout_s,
+                elapsed,
+            )
+            return _ScheduleAttemptTransportFailure()
+        except asyncio.CancelledError:
+            # Schedule has not been sent, so there is no server-side work to cancel.
+            raise
+        except Exception:
+            elapsed = time.monotonic() - attempt_started_at
+            route_logger.exception(
+                "gRPC channel readiness failed, addr=%s, request_id=%s, elapsed=%.3fs",
+                addr,
+                request_id,
+                elapsed,
+            )
+            return _ScheduleAttemptTransportFailure()
+
+        schedule_timeout_s = timeout_s
+        if timeout_s is not None:
+            schedule_timeout_s = timeout_s - (time.monotonic() - attempt_started_at)
+            if schedule_timeout_s <= 0:
+                elapsed = time.monotonic() - attempt_started_at
+                route_logger.error(
+                    "gRPC channel readiness exhausted schedule budget, "
+                    "addr=%s, request_id=%s, timeout=%.3fs, elapsed=%.3fs",
+                    addr,
+                    request_id,
+                    timeout_s,
+                    elapsed,
+                )
+                return _ScheduleAttemptTransportFailure()
+
+        stub = FlexlbServiceStub(channel)
+        try:
             route_logger.debug(
                 "gRPC Schedule sending, request_id=%s, proto_priority=%d",
                 request_id,
                 request_pb.priority,
             )
-            response = await stub.Schedule(request_pb, timeout=timeout_s)
+            response = await stub.Schedule(request_pb, timeout=schedule_timeout_s)
             return _ScheduleAttemptSucceeded(response)
         except grpc.aio.AioRpcError as e:
-            elapsed = time.time() - start
+            elapsed = time.monotonic() - attempt_started_at
             route_logger.error(
                 "gRPC schedule failed, addr=%s, request_id=%s, status=%s, detail=%s, elapsed=%.3fs",
                 addr,
@@ -251,7 +308,7 @@ class MasterClient:
                 )
             raise
         except Exception:
-            elapsed = time.time() - start
+            elapsed = time.monotonic() - attempt_started_at
             route_logger.exception(
                 "Unexpected gRPC error, addr=%s, request_id=%s, elapsed=%.3fs",
                 addr,

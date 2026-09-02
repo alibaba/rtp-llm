@@ -1,5 +1,6 @@
 import asyncio
 import socket
+import time
 import unittest
 from types import SimpleNamespace
 from typing import cast
@@ -33,6 +34,7 @@ from rtp_llm.server.master_client import (
 
 
 class _FakeMasterConfig:
+    master_connect_timeout_ms = 100
     master_max_connect_pool_size = 4
     master_session_timeout_s = 1
     master_default_timeout_ms = 3600000
@@ -209,10 +211,15 @@ class MasterClientGrpcConcurrencyTest(unittest.IsolatedAsyncioTestCase):
     async def test_deadline_does_not_cancel_concurrent_rpc_on_shared_channel(self):
         service = _FlexlbService(delay=0.2)
         server, grpc_port = await _start_server(service)
+        follower_service = _FlexlbService()
+        follower_server, follower_grpc_port = await _start_server(follower_service)
 
         master_addr = f"127.0.0.1:{grpc_port - FLEXLB_GRPC_PORT_OFFSET}"
         client = MasterClient(
-            host_service=_StaticHostService(master_addr),
+            host_service=_StaticHostService(
+                master_addr,
+                f"127.0.0.1:{follower_grpc_port - FLEXLB_GRPC_PORT_OFFSET}",
+            ),
             master_config=_FakeMasterConfig(),
         )
         long_request_id = 201
@@ -244,6 +251,7 @@ class MasterClientGrpcConcurrencyTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(long_result.is_ok)
             self.assertEqual(long_result.role_addrs[0].ip, "10.0.0.8")
             self.assertEqual(len(service.schedule_requests), 2)
+            self.assertEqual(follower_service.schedule_requests, [])
             self.assertTrue(
                 any(
                     request.request_id == short_request_id
@@ -256,6 +264,7 @@ class MasterClientGrpcConcurrencyTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.gather(long_task, return_exceptions=True)
             await client.close()
             await server.stop(None)
+            await follower_server.stop(None)
 
     async def test_transport_failure_retries_follower_with_explicit_attempt(self):
         service = _FlexlbService()
@@ -283,6 +292,76 @@ class MasterClientGrpcConcurrencyTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await client.close()
             await server.stop(None)
+
+    async def test_channel_readiness_timeout_retries_follower_before_deadline(self):
+        connected = asyncio.Event()
+        release_connections = asyncio.Event()
+        handler_tasks: set[asyncio.Task[None]] = set()
+
+        async def hold_without_http2_handshake(
+            _reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+        ) -> None:
+            task = asyncio.current_task()
+            self.assertIsNotNone(task)
+            handler_tasks.add(cast(asyncio.Task[None], task))
+            connected.set()
+            try:
+                await release_connections.wait()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+                handler_tasks.discard(cast(asyncio.Task[None], task))
+
+        blackhole_server = await asyncio.start_server(
+            hold_without_http2_handshake,
+            "127.0.0.1",
+            0,
+        )
+        blackhole_socket = blackhole_server.sockets[0]
+        blackhole_grpc_port = int(blackhole_socket.getsockname()[1])
+
+        follower_service = _FlexlbService()
+        follower_server, follower_grpc_port = await _start_server(follower_service)
+        client = MasterClient(
+            host_service=_StaticHostService(
+                f"127.0.0.1:{blackhole_grpc_port - FLEXLB_GRPC_PORT_OFFSET}",
+                f"127.0.0.1:{follower_grpc_port - FLEXLB_GRPC_PORT_OFFSET}",
+            ),
+            master_config=_FakeMasterConfig(),
+        )
+        started_at = time.monotonic()
+        try:
+            response = await client.get_backend_role_addrs(
+                block_cache_keys=[11, 12],
+                cache_key_block_size=1024,
+                input=_FakeInput(ttft_timeout_ms=1_000),
+                request_id=204,
+            )
+            elapsed_s = time.monotonic() - started_at
+
+            self.assertTrue(connected.is_set())
+            self.assertTrue(response.is_ok)
+            self.assertEqual(response.role_addrs[0].ip, "10.0.0.8")
+            self.assertEqual(len(follower_service.schedule_requests), 1)
+            self.assertLess(elapsed_s, 0.8)
+        finally:
+            await client.close()
+            await follower_server.stop(None)
+            blackhole_server.close()
+            release_connections.set()
+            await asyncio.gather(*tuple(handler_tasks), return_exceptions=True)
+            await blackhole_server.wait_closed()
+
+    def test_non_positive_connect_timeout_is_rejected(self):
+        master_config = _FakeMasterConfig()
+        master_config.master_connect_timeout_ms = 0
+
+        with self.assertRaisesRegex(ValueError, "connect timeout must be positive"):
+            MasterClient(
+                host_service=_StaticHostService("master:1234"),
+                master_config=master_config,
+            )
 
 
 class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
