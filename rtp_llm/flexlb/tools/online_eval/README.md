@@ -175,7 +175,7 @@ sources: merged into the component JSON and then deleted, same treatment as
 
 | File (pre-consolidation) | Source | Lands in |
 |---|---|---|
-| `mock_metrics_per_engine.prom` | mock control port (`MOCK_BASE_GRPC_PORT-1`) `/metrics?per_engine=true`; the poller keeps only the analyzer-consumed series per engine — the queue-depth pair (`mock_engine_running` / `waiting`), the production-caliber TPS trio (`rtp_llm_context_tps` / `rtp_llm_context_tps_with_cache` / `rtp_llm_generate_tps`) and the KV v2 block-pool family (`mock_engine_cache_blocks` / `available_blocks` / `held_blocks` / `referenced_blocks` + `mock_engine_cache_evictions_total` / `kv_admission_fails_total` / `lack_mem_rejects_total` / `decode_reuse_blocks_total`) — 13 series total, every entry with a downstream consumer (aggregate `mock_tps_ts` / `kv_blocks_ts_by_role` → the report-layer 2.3 / 5. KV panels; no dead keys; C whitelist ≈ ÷4 bytes vs the full ~29-series surface), each sample appended after a `# ts=<epoch_ms>` separator (~2.2KB × N_engines per sample) | `mock_per_engine_timeseries.json.gz` (A-split) |
+| `mock_metrics_per_engine.prom` | mock control port (`MOCK_BASE_GRPC_PORT-1`) `/metrics?per_engine=true`; the poller keeps only the analyzer-consumed series per engine — the queue-depth pair (`mock_engine_running` / `waiting`), the production-caliber TPS trio (`rtp_llm_context_tps` / `rtp_llm_context_tps_with_cache` / `rtp_llm_generate_tps`), the KV v2 block-pool family (`mock_engine_cache_blocks` / `available_blocks` / `held_blocks` / `referenced_blocks` + `mock_engine_cache_evictions_total` / `kv_admission_fails_total` / `lack_mem_rejects_total` / `decode_reuse_blocks_total`) and the cache key-hit pair (`mock_engine_cache_key_hits_total` / `mock_engine_cache_keys_requested_total`, the production recent_cache_key_hit caliber) — 15 series total, every entry with a downstream consumer (aggregate `mock_tps_ts` / `kv_blocks_ts_by_role` / `cache_hit_ts` → the report-layer 2.3 / 5. KV / 5c cache hit-rate panels; no dead keys; C whitelist ≈ ÷4 bytes vs the full ~29-series surface), each sample appended after a `# ts=<epoch_ms>` separator (~2.2KB × N_engines per sample) | `mock_per_engine_timeseries.json.gz` (A-split) |
 | `master_prometheus_timeseries.prom` | management port `/actuator/prometheus` (fallback `/prometheus`), whitelisted to the analyzer-consumed series (`flexlb_app_cache_*`, `flexlb_app_flexlb_batcher_queue_size`, `flexlb_app_routing_queue_length`, `flexlb_app_flexlb_inflight_max_age_ms`, `flexlb_app_engine_balancing_master_dispatch_reason_total`, `jvm_memory_used` / `jvm_gc_pause` / `process_cpu` / `system_cpu`), same `# ts=` grouping | `master.json` `prometheus_timeseries` |
 | `master_inflight_timeseries.jsonl` | master HTTP port `/rtp_llm/inflight_status`, one JSON line `{"ts_epoch_ms", "inflight"}` per second | `master.json` `inflight_timeseries` |
 | `process_usage_timeseries.txt` | `ps -o pid,%cpu,rss,etime` over the mock / master / load-client JVM pids (`ts_epoch_ms=... label=... pid=... cpu_pct=... rss_kb=... etime=...` kv lines; exited pids tolerated) | `run_meta.json` `process_usage` |
@@ -352,6 +352,46 @@ node rtp_llm/flexlb/tools/online_eval/sanitize_online_log_fixtures.mjs \
 The sanitizer drops request/header identity data, converts timestamps to relative
 time, pseudonymizes endpoints and block hashes, and remaps plus shuffles token IDs.
 The random mapping is not written to disk.
+
+## Cache hit-rate calibers
+
+Since 20260902 the canvas report carries a cache hit-rate observation built
+from THREE calibers plus two gap semantics. The master's own metric family is
+untouched — everything master-side is parsed from the existing whale-lb
+`flexlb_app_cache_*` series already whitelisted in G3; the only new
+instrumentation is the engine's cache key-hit counter pair (see the
+flexlb-mock-engine README):
+
+- **master routing caliber** — "how much the master thinks it can reuse":
+  the `flexlb_app_cache_routing_selected_match_hit_tokens_total` /
+  `flexlb_app_cache_routing_selected_match_total_tokens_total` counter pair
+  from `master.json`'s Prometheus timeseries (adjacent-sample positive diffs
+  per window, counter resets clamped away; run level = last-sample ratio).
+  Aligns with the production whale-lb `app.cache` family.
+- **engine key-level (theoretical)** — "matched keys / requested keys":
+  `mock_engine_cache_key_hits_total` / `mock_engine_cache_keys_requested_total`
+  (booked at prefill admission's `prefixHitBlocks` call; empty-block-hash
+  requests contribute 0/0 by construction). Aligns with production
+  `recent_cache_key_hit_count / total_count`.
+- **engine token-level (actual)** — "ΣhitTokens / Σ input tokens": run
+  level = `summary.cache_saved_tokens` ÷ ok-row Σinput_len; the timeline
+  derives `(context_tps_with_cache − context_tps) / context_tps_with_cache`
+  per `mock_tps_ts` window (engine-side P-completion accounting, so numerator
+  and denominator share the window). Aligns with production reuse/input.
+
+The 5c panels render: (1) "master routing vs engine execution" dual line —
+the gap = **scheduling loss** (the master matched a prefix but the engine did
+not reuse it: routed to a non-holding engine / affinity not honored / LRU
+eviction inside the execution window); (2) "key-level (theoretical) vs
+token-level (actual)" dual line — the gap = **hit-depth coverage** (partial
+prefix hits: a key matched but the prefix broke at block N, so the reused
+tokens fall short of the matched key count); (3) a run-level summary bar
+chart whose caption names the production-alignment mapping. Fail-closed:
+whenever a panel is rendered the HTML must carry its scope annotations
+(「master 路由口径」「engine 执行口径」「调度损耗」 / 「key 级理论口径」「token
+级实际口径」「命中深度覆盖」 / 「对齐生产」). Old aggregates without the new
+counters/series degrade per caliber — a missing caliber simply drops its
+column/panel, never fabricates 0.
 
 ## Capacity reading
 

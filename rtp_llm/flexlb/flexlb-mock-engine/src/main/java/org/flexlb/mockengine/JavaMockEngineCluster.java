@@ -639,6 +639,19 @@ public final class JavaMockEngineCluster {
          *  drained): /metrics carries it as mock_engine_decode_reuse_blocks_total,
          *  /snapshot as decode_reuse_blocks. */
         private final LongAdder decodeReuseBlocks = new LongAdder();
+        /** Key-level cache-hit observability (production recent_cache_key_hit_count /
+         *  total_count caliber): cumulative counters recorded at the prefill
+         *  admission hit computation (MockPerformanceModel.shape's prefixHitBlocks
+         *  call — BOTH the enqueue-batch path and the direct generate_stream
+         *  path). cacheKeyHits = Σ raw prefix-match run lengths (keys),
+         *  cacheKeysRequested = Σ request blockKeys sizes; an empty-bh request
+         *  adds 0/0 by construction and never contributes. Cumulative counters
+         *  (never drained, reset only by crash-restart fresh-process semantics):
+         *  /metrics carries them as mock_engine_cache_key_hits_total /
+         *  mock_engine_cache_keys_requested_total, /snapshot as cache_key_hits /
+         *  cache_keys_requested. */
+        private final LongAdder cacheKeyHits = new LongAdder();
+        private final LongAdder cacheKeysRequested = new LongAdder();
         // Per-engine busy time. Prefill engines accumulate batch execution ms
         // (maxPrefillConcurrency=1 -> busy == wall-clock occupancy; utilization =
         // busy/elapsed). Decode engines accumulate per-request execution ms under
@@ -953,6 +966,12 @@ public final class JavaMockEngineCluster {
                     for (EngineRpcService.EnqueueBatchExternalInputPB input : slot.getRequestsList()) {
                         long requestId = input.getInput().getRequestId();
                         MockPerformanceModel.RequestShape shape = performance.shape(input.getInput(), cache);
+                        // Key-level cache-hit accounting at the admission hit
+                        // computation point (recorded whether or not the request
+                        // later admits — a rejected request still observed the
+                        // engine's index state for its keys).
+                        cacheKeyHits.add(shape.hitBlocks());
+                        cacheKeysRequested.add(shape.blockKeys().size());
                         // Phase 1.5 (KV capacity model v2): block-pool admission.
                         // A request whose blocks cannot be provisioned (free + LRU
                         // below need, or the reserve watermark would be breached) is
@@ -1294,6 +1313,10 @@ public final class JavaMockEngineCluster {
 
             long requestId = request.getRequestId();
             MockPerformanceModel.RequestShape shape = performance.shape(request, cache);
+            // Key-level cache-hit accounting (direct path, same admission hit
+            // computation point as the enqueue-batch path above).
+            cacheKeyHits.add(shape.hitBlocks());
+            cacheKeysRequested.add(shape.blockKeys().size());
             acceptedCount.incrementAndGet();
             lastEnqueueTime.set(System.nanoTime());
             requestStates.put(requestId, "running");
@@ -3404,6 +3427,8 @@ public final class JavaMockEngineCluster {
             rpcCancel.set(0);
             busyMs.set(0);
             kvAdmissionFails.reset();
+            cacheKeyHits.reset();
+            cacheKeysRequested.reset();
             acceptedCount.set(0);
             completedCount.set(0);
             cancelledCount.set(0);
@@ -3828,6 +3853,8 @@ public final class JavaMockEngineCluster {
             snap.put("kv_admission_fails", kvAdmissionFails.sum());
             snap.put("lack_mem_rejects", prefillLackMemRejects.sum());
             snap.put("decode_reuse_blocks", decodeReuseBlocks.sum());
+            snap.put("cache_key_hits", cacheKeyHits.sum());
+            snap.put("cache_keys_requested", cacheKeysRequested.sum());
             Map<String, Object> injectConfig = new LinkedHashMap<>();
             injectConfig.put("enqueue_error", faultConfig.isFailOnEnqueue());
             injectConfig.put("fetch_error", faultConfig.isFetchError());

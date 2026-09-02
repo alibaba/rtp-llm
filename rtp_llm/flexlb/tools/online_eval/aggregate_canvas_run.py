@@ -1918,6 +1918,142 @@ kv_blocks_ts_by_role = {
     for _role, ts_map in _kv_by_role_ts.items()
 }
 
+# ---- cache 命中率三口径（cache_hit_ts / cache_hit_summary，20260902）----
+# 三口径对齐生产观测（报告层「cache 命中率」小节消费）：
+#   口径 1｜master 路由（master 以为能复用多少）：master 选引擎时
+#     GlobalCacheIndex 前缀匹配的 counter 对
+#     flexlb_app_cache_routing_selected_match_{hit,total}_tokens_total
+#     （G3 whale-lb app.cache 族，实测只有 role="PREFILL" 变体，sum
+#     折叠即集群值）。时序 = counter 相邻同拍正差分得窗口 hit/total
+#     增量对 → 窗口命中率；run 级 = 末拍累计比（对齐生产 app.cache
+#     族口径，master 代码零改动）。
+#   口径 2｜engine key 级（理论）：新 counter mock_engine_cache_key_
+#     hits/keys_requested_total（引擎 prefill 准入 prefixHitBlocks 记账
+#     点累计，对齐生产 recent_cache_key_hit_count/total_count 口径）
+#     跨引擎同拍求和后同法差分。空 bh 请求 0/0 自然不贡献。只有
+#     prefill 引擎跑准入记账，但两 counter 同记账点，role 不拆。
+#   口径 3｜engine token 级（实际）：ΣhitTokens/Σil（对齐生产 reuse/
+#     input）。时序从 mock_tps_ts 逐窗导出 (context_tps_with_cache −
+#     context_tps)/context_tps_with_cache（P 完成事件记账，两列同窗
+#     口径自洽）；run 级 = cache_saved_tokens（Σ引擎 hit_tokens_total）
+#     ÷ ok_input_tokens（client ok 行 Σil，完成请求口径）。
+# 差值语义（报告层标注）：master_routing − engine_token = 调度损耗
+# （master 匹配到却未复用：路由到非持有引擎/affinity 未采纳/执行窗口
+# 内 LRU 淘汰）；engine_key − engine_token = 命中深度覆盖（部分前缀
+# 命中：命中 key 但前缀在第 N 块断掉，复用 tokens 不足整 key 数）。
+# 旧 run 任一口径数据缺失 → 该列整体缺省（不造 0），summary 相应键
+# 缺省，报告层按口径独立省略。
+
+
+def _counter_pair_ratio(num_pts, den_pts):
+    """两条同源累计 counter → (窗口比率时序, run 级末值比).
+
+    相邻同拍样本正差分（counter 重置/回退的负差分窗丢弃）得窗口增量
+    对，den 增量 >0 才产出窗口比率；run 级 = 末拍 num/den（counter
+    只增，末拍比即末拍前全程累计比）。num/den 按共同 ts 对齐（同源
+    系列一次采样同拍输出）。
+    """
+    num_by_ts = dict(num_pts)
+    den_by_ts = dict(den_pts)
+    common = sorted(set(num_by_ts) & set(den_by_ts))
+    windows = []
+    for ts0, ts1 in zip(common, common[1:]):
+        num_d = num_by_ts[ts1] - num_by_ts[ts0]
+        den_d = den_by_ts[ts1] - den_by_ts[ts0]
+        if den_d <= 0 or num_d < 0:
+            continue
+        windows.append((ts1, num_d / den_d))
+    run_ratio = None
+    if common and den_by_ts[common[-1]] > 0:
+        run_ratio = num_by_ts[common[-1]] / den_by_ts[common[-1]]
+    return windows, run_ratio
+
+
+# 口径 1：master 路由 counter 对（G3 prometheus 差分窗口）。
+_route_hit_pts = prom_ts_extract(
+    "flexlb_app_cache_routing_selected_match_hit_tokens_total", agg="sum"
+)
+_route_total_pts = prom_ts_extract(
+    "flexlb_app_cache_routing_selected_match_total_tokens_total", agg="sum"
+)
+_master_route_windows, _master_route_run = _counter_pair_ratio(
+    _route_hit_pts, _route_total_pts
+)
+
+# 口径 2：engine key 级 counter 对（G1 per-engine，跨引擎同拍求和后
+# 差分；prefill 引擎的准入记账，两 counter 同点可比）。
+_key_col_map = {
+    "mock_engine_cache_key_hits_total": "hits",
+    "mock_engine_cache_keys_requested_total": "requested",
+}
+_key_by_ts = defaultdict(dict)
+for _key_base, _key_col in _key_col_map.items():
+    for _role_engines in _ts_role_ip_split(mock_per_engine_ts, _key_base).values():
+        for _key_pts in _role_engines.values():
+            for _ts, _v in _key_pts:
+                _krow = _key_by_ts[_ts]
+                _krow[_key_col] = _krow.get(_key_col, 0.0) + _v
+_engine_key_windows, _engine_key_run = _counter_pair_ratio(
+    [(ts, vals["hits"]) for ts, vals in sorted(_key_by_ts.items()) if "hits" in vals],
+    [
+        (ts, vals["requested"])
+        for ts, vals in sorted(_key_by_ts.items())
+        if "requested" in vals
+    ],
+)
+
+# 口径 3：engine token 级 —— mock_tps_ts 逐窗导出（行 t 已是 rel 轴
+# 秒，不再 rel_axis；窗口内 with_cache=含复用总吞吐、context=实际计算
+# 吞吐，差值即复用节省占比）。
+_engine_token_windows = []
+for _tps_row in mock_tps_ts:
+    _wc = _tps_row.get("context_tps_with_cache")
+    _nc = _tps_row.get("context_tps")
+    if isinstance(_wc, (int, float)) and isinstance(_nc, (int, float)) and _wc > 0:
+        _engine_token_windows.append((_tps_row["t"], max(0.0, _wc - _nc) / _wc))
+_engine_token_run = None
+if cache_saved_tokens_calc and ok_input_tokens:
+    _engine_token_run = cache_saved_tokens_calc / ok_input_tokens
+
+# 三口径按 t（秒，rel 轴）合并成行序列；任一口径缺数据 → 该列整体
+# 缺省（旧 run 优雅降级，报告层按列独立画线/省略）。
+_cache_hit_by_t = defaultdict(dict)
+for _t, _v in rel_axis(_master_route_windows):
+    _cache_hit_by_t[round(_t, 1)]["master_routing"] = round(_v, 4)
+for _t, _v in rel_axis(_engine_key_windows):
+    _cache_hit_by_t[round(_t, 1)]["engine_key"] = round(_v, 4)
+for _t, _v in _engine_token_windows:
+    _cache_hit_by_t[round(_t, 1)]["engine_token"] = round(_v, 4)
+cache_hit_ts = [{"t": t, **vals} for t, vals in sorted(_cache_hit_by_t.items())]
+
+# run 级三口径汇总（各口径独立缺省；counter 末拍读数同时落 summary
+# 供报告 KPI 读数行与对账取证）。
+cache_hit_summary = {}
+if _master_route_run is not None:
+    cache_hit_summary["master_routing_hit_pct"] = round(_master_route_run * 100.0, 1)
+    if _route_hit_pts and _route_total_pts:
+        cache_hit_summary["master_routing_hit_tokens"] = int(
+            round(_route_hit_pts[-1][1])
+        )
+        cache_hit_summary["master_routing_total_tokens"] = int(
+            round(_route_total_pts[-1][1])
+        )
+if _engine_key_run is not None:
+    cache_hit_summary["engine_key_hit_pct"] = round(_engine_key_run * 100.0, 1)
+    if _key_by_ts:
+        _last_key_ts = max(_key_by_ts)
+        _last_key_vals = _key_by_ts[_last_key_ts]
+        if "hits" in _last_key_vals:
+            cache_hit_summary["engine_key_hits"] = int(round(_last_key_vals["hits"]))
+        if "requested" in _last_key_vals:
+            cache_hit_summary["engine_keys_requested"] = int(
+                round(_last_key_vals["requested"])
+            )
+if _engine_token_run is not None:
+    cache_hit_summary["engine_token_hit_pct"] = round(_engine_token_run * 100.0, 1)
+    cache_hit_summary["engine_hit_tokens"] = cache_saved_tokens_calc
+    cache_hit_summary["engine_input_tokens"] = ok_input_tokens
+
 # ---- token 对账（20260901 纠偏；同日二次修复补在途项）：client 完成 ----
 # ---- token vs mock 自报累计 ----
 # 原 canvas 2.3 节 input/output 侧 client 对账面板移除后，丢请求 /
@@ -2181,6 +2317,13 @@ out = {
         # KV 复用收益量化（20260901）：引擎累计 Σhit_tokens_total
         # （final_snapshot，consolidate live fetch 链路）。
         "cache_saved_tokens": cache_saved_tokens_calc,
+        # cache 命中率 run 级三口径汇总（20260902）：master 路由 /
+        # engine key 级（理论）/ engine token 级（实际），各口径独立
+        # 缺省（旧 run 无新 counter/系列 → 键缺省，不造 0）。报告层
+        # 「cache 命中率」小节 KPI 读数行消费（caption 注明与生产
+        # app.cache 族 / recent_cache_key_hit / reuse-input 的对齐
+        # 关系）。
+        "cache_hit_summary": cache_hit_summary,
         # token 对账诊断（20260901 in-flight 修复）：两侧 client/mock/
         # in-flight/residual/tolerance 取证值（validity 判定的数值依据，
         # 报告层不消费；rows 缺失 → None）。
@@ -2228,6 +2371,11 @@ out = {
     # role 拆分跨引擎求和；报告层 5. KV 块池面板消费——除以引擎数得
     # 每引擎平均、counter 列累计差分得速率）。
     "kv_blocks_ts_by_role": kv_blocks_ts_by_role,
+    # cache 命中率三口径时序（master_routing/engine_key/engine_token
+    # 列按窗口命中率，各口径独立缺省；报告层 5c「cache 命中率」小节
+    # 消费——「master 路由 vs engine 执行」双曲线（差值=调度损耗）+
+    # 「key 级理论 vs token 级实际」双曲线（差值=命中深度覆盖））。
+    "cache_hit_ts": cache_hit_ts,
     "dispatch_reason_ts": dispatch_reason_ts,
     "dispatch_batch_size_ts": dispatch_batch_size_ts,
     "batch_size_final": batch_size_final,

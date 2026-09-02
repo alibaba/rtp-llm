@@ -641,6 +641,11 @@ def main():
     # 跨引擎求和，三态 gauge + 准入/复用/淘汰累计 counter；旧
     # aggregate 无键 -> 空表 -> 5. KV 块池面板整组省略）。
     kv_blocks_by_role = agg.get("kv_blocks_ts_by_role") or {}
+    # cache 命中率三口径（aggregate cache_hit_ts 窗口命中率列 +
+    # summary.cache_hit_summary run 级汇总；旧 aggregate 无键 ->
+    # 空表/空 dict -> 5c 面板与 KPI 读数行整体省略）。
+    cache_hit_rows = agg.get("cache_hit_ts") or []
+    cache_hit_sm = sm.get("cache_hit_summary") or {}
     dispatch_reason_ts = agg.get("dispatch_reason_ts") or []
     dispatch_batch_size_ts = agg.get("dispatch_batch_size_ts") or []
     cancel_ts = agg.get("cancel_qps_ts") or []
@@ -3386,11 +3391,202 @@ def main():
                 )
             )
             kv_pool_rate_present = True
-    if kv_containers or kv_pool_containers:
+    # 5c. cache 命中率三口径（20260902）：aggregate cache_hit_ts
+    # （master_routing/engine_key/engine_token 窗口命中率列，各口径
+    # 独立缺省）+ summary.cache_hit_summary（run 级三口径）。两图均
+    # 以 engine_token（实际复用）为参照系：
+    #   * 「master 路由 vs engine 执行」——master_routing − engine_token
+    #     = 调度损耗（master 匹配到却未复用上：路由到非持有引擎/
+    #     affinity 未采纳/路由到执行窗口内 LRU 淘汰）；
+    #   * 「key 级（理论）vs token 级（实际）」——engine_key −
+    #     engine_token = 命中深度覆盖（部分前缀命中：命中 key 但前缀
+    #     在第 N 块断掉，复用 tokens 不足整 key 数）。
+    # 两口径齐备才画对应图（单列孤悬不画）；KPI 读数行按口径独立
+    # 缺省。旧 aggregate 无键 -> 空表 -> 本节整体省略。窗口比率桶化
+    # 取均值后前向填充（跨拍差分窗落在末端桶，中间空桶沿用前值
+    # ——命中率是水平量不是计数率，缺桶 ≠ 0；首部无前值桶从 0 爬升，
+    # 与 QPS 图同观感）。
+    cache_hit_containers = []
+    cache_hit_route_present = False
+    cache_hit_depth_present = False
+    cache_hit_kpi_present = False
+    # 三口径 run 级读数柱状图（「KPI/读数行」的 canvas 呈现形态：反抽
+    # KPI 通道 kpis[:5] 属头部紧凑行，三口径读数以 BarChart 呈现进
+    # HTML——categories 即口径名（含语义标注串），caption 注明与生产
+    # 对齐关系与差值读法；各口径独立缺省（缺的口径不画柱）。
+    _ch_bar_cats = []
+    _ch_bar_vals = []
+    if cache_hit_sm.get("master_routing_hit_pct") is not None:
+        _ch_bar_cats.append("master 路由口径")
+        _ch_bar_vals.append(cache_hit_sm["master_routing_hit_pct"])
+    if cache_hit_sm.get("engine_key_hit_pct") is not None:
+        _ch_bar_cats.append("key 级理论口径")
+        _ch_bar_vals.append(cache_hit_sm["engine_key_hit_pct"])
+    if cache_hit_sm.get("engine_token_hit_pct") is not None:
+        _ch_bar_cats.append("token 级实际口径")
+        _ch_bar_vals.append(cache_hit_sm["engine_token_hit_pct"])
+    if _ch_bar_vals:
+        cache_hit_containers.append(
+            emit_container(
+                "cache 命中率三口径：run 级汇总",
+                "三口径 run 级命中率（各口径独立缺省）：master 路由口径"
+                "（master 选引擎时 GlobalCacheIndex 前缀匹配，master 以为能"
+                "复用；对齐生产 whale-lb app.cache 族 routing_selected_match "
+                "counter 对末拍比）/ key 级理论口径（命中 key 数/请求 key "
+                "数，prefill 准入 prefixHitBlocks 记账；对齐生产 "
+                "recent_cache_key_hit）/ token 级实际口径（ΣhitTokens/"
+                "Σil，完成请求口径；对齐生产 reuse/input）；柱差读法："
+                "master 路由 − token 级实际 = 调度损耗，key 级理论 − "
+                "token 级实际 = 命中深度覆盖（部分前缀命中：命中 key 但"
+                "前缀在第 N 块断掉）",
+                emit_chart(
+                    "BarChart",
+                    const("cacheHitKpiCats", str_arr(_ch_bar_cats)),
+                    230,
+                    [
+                        (
+                            "hit",
+                            "run 级命中率",
+                            const("cacheHitKpiVals", num_arr(_ch_bar_vals)),
+                            "info",
+                        )
+                    ],
+                    suffix="%",
+                    domain="[0, 100]",
+                ),
+            )
+        )
+        cache_hit_kpi_present = True
+    _ch_buckets = {}
+    for r in cache_hit_rows:
+        try:
+            _t = float(r.get("t", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if _t < 0:
+            continue
+        for _col in ("master_routing", "engine_key", "engine_token"):
+            _v = r.get(_col)
+            if _v is None:
+                continue
+            _ch_buckets.setdefault(int(_t), {}).setdefault(_col, []).append(float(_v))
+    _ch_mean = {
+        _b: {c: sum(vs) / len(vs) for c, vs in _cols.items()}
+        for _b, _cols in _ch_buckets.items()
+    }
+    if _ch_mean:
+        _ch_grid = sorted(_ch_mean)
+
+        def _ch_has(col):
+            return any(
+                (_cols or {}).get(col) is not None for _cols in _ch_mean.values()
+            )
+
+        def _ch_series(col):
+            vals = []
+            prev = 0.0
+            for _t in _ch_grid:
+                _v = (_ch_mean[_t] or {}).get(col)
+                if _v is None:
+                    vals.append(round(prev * 100.0, 1))
+                else:
+                    prev = _v
+                    vals.append(round(_v * 100.0, 1))
+            return vals
+
+        _CH_AXIS = const("cacheHitT", str_arr(sparse_cats(_ch_grid)))
+        reg_time(_CH_AXIS, _ch_grid)
+        # engine_token 数据 const 只建一次，两图共用（同名 const 重复
+        # 定义会产出非法 JS）。
+        _ch_tok_const = None
+        if _ch_has("engine_token"):
+            _ch_tok_const = const("cacheHitTok", num_arr(_ch_series("engine_token")))
+        # 图 1：master 路由 vs engine 执行（差值 = 调度损耗）
+        if _ch_has("master_routing") and _ch_tok_const is not None:
+            cache_hit_containers.append(
+                emit_container(
+                    "cache 命中率：master 路由 vs engine 执行（差值 = 调度损耗）",
+                    "master 路由口径（master 选引擎时 GlobalCacheIndex 前缀"
+                    "匹配，master 以为能复用多少 tokens；对齐生产 whale-lb "
+                    "app.cache 族 routing_selected_match counter 对差分）vs "
+                    "engine 执行口径（engine token 级实际复用，ΣhitTokens/"
+                    "Σil；对齐生产 reuse/input）；x = 压测时间（s，1s 窗口"
+                    "差分）；y = 命中率 %；双曲线差值 = 调度损耗（master "
+                    "匹配到却未复用上：路由到非持有引擎/affinity 未采纳/"
+                    "路由到执行窗口内 LRU 淘汰）",
+                    emit_chart(
+                        "LineChart",
+                        _CH_AXIS,
+                        230,
+                        [
+                            (
+                                "mRoute",
+                                "master 路由口径（以为能复用）",
+                                const(
+                                    "cacheHitRoute",
+                                    num_arr(_ch_series("master_routing")),
+                                ),
+                                "warning",
+                            ),
+                            (
+                                "eTok",
+                                "engine 执行口径（实际复用）",
+                                _ch_tok_const,
+                                "success",
+                            ),
+                        ],
+                        suffix="%",
+                        domain="[0, 100]",
+                    ),
+                )
+            )
+            cache_hit_route_present = True
+        # 图 2：key 级（理论）vs token 级（实际）（差值 = 命中深度覆盖）
+        if _ch_has("engine_key") and _ch_tok_const is not None:
+            cache_hit_containers.append(
+                emit_container(
+                    "engine 命中率：key 级（理论）vs token 级（实际）"
+                    "（差值 = 命中深度覆盖）",
+                    "key 级理论口径（命中 key 数/请求 key 数，prefill 准入"
+                    " prefixHitBlocks 记账；对齐生产 recent_cache_key_hit_"
+                    "count/total_count）vs token 级实际口径（ΣhitTokens/"
+                    "Σil；对齐生产 reuse/input）；x = 压测时间（s，1s 窗口"
+                    "差分）；y = 命中率 %；双曲线差值 = 命中深度覆盖（部分"
+                    "前缀命中：命中 key 但前缀在第 N 块断掉，复用 tokens "
+                    "不足整 key 数）——key 级 ≥ token 级为常态，差值越大"
+                    "说明命中越浅",
+                    emit_chart(
+                        "LineChart",
+                        _CH_AXIS,
+                        230,
+                        [
+                            (
+                                "eKey",
+                                "key 级·理论（命中 key 数/请求 key 数）",
+                                const("cacheHitKey", num_arr(_ch_series("engine_key"))),
+                                "info",
+                            ),
+                            (
+                                "eTok",
+                                "token 级·实际（ΣhitTokens/Σil）",
+                                _ch_tok_const,
+                                "success",
+                            ),
+                        ],
+                        suffix="%",
+                        domain="[0, 100]",
+                    ),
+                )
+            )
+            cache_hit_depth_present = True
+    if kv_containers or kv_pool_containers or cache_hit_containers:
         lines.append("      <Divider />")
         lines.append("")
         lines.append("      <H2>5. KV</H2>")
-        lines.extend(emit_grid(kv_containers + kv_pool_containers))
+        if kv_containers or kv_pool_containers or cache_hit_containers:
+            lines.extend(
+                emit_grid(kv_containers + kv_pool_containers + cache_hit_containers)
+            )
         lines.append("")
 
     # 6. 资源（mock heap + 进程 CPU/RSS，run_meta process_usage）
@@ -4157,6 +4353,52 @@ def main():
             + "annotation missing"
         )
 
+    # 10) cache 命中率三口径面板（20260902）：「master 路由 vs engine
+    #     执行」双曲线存在时 HTML 必含「master 路由口径」「engine
+    #     执行口径」「调度损耗」语义标注（防止把两线当同口径重复读）；
+    #     「key 级（理论）vs token 级（实际）」双曲线存在时必含
+    #     「key 级理论口径」「token 级实际口径」「命中深度覆盖」标注
+    #     （防止把理论/实际混读）；run 级汇总柱状图存在时必含「对齐
+    #     生产」生产对齐标注（防误当 mock 独创口径读）。
+    if cache_hit_route_present:
+        assert "master 路由口径" in html_out, (
+            TAG
+            + " cache-hit routing panel present but master-routing "
+            + "annotation missing"
+        )
+        assert "engine 执行口径" in html_out, (
+            TAG
+            + " cache-hit routing panel present but engine-execution "
+            + "annotation missing"
+        )
+        assert "调度损耗" in html_out, (
+            TAG
+            + " cache-hit routing panel present but dispatch-loss "
+            + "annotation missing"
+        )
+    if cache_hit_depth_present:
+        assert "key 级理论口径" in html_out, (
+            TAG
+            + " cache-hit depth panel present but key-level-theory "
+            + "annotation missing"
+        )
+        assert "token 级实际口径" in html_out, (
+            TAG
+            + " cache-hit depth panel present but token-level-actual "
+            + "annotation missing"
+        )
+        assert "命中深度覆盖" in html_out, (
+            TAG
+            + " cache-hit depth panel present but depth-coverage "
+            + "annotation missing"
+        )
+    if cache_hit_kpi_present:
+        assert "对齐生产" in html_out, (
+            TAG
+            + " cache-hit run-level KPI chart present but "
+            + "production-alignment annotation missing"
+        )
+
     out_dir = os.path.dirname(os.path.abspath(args.out))
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
@@ -4186,8 +4428,10 @@ def main():
         sections.append("dist")
     if inflight_ts or inflight_age:
         sections.append("inflight")
-    if kv_containers or kv_pool_containers:
+    if kv_containers or kv_pool_containers or cache_hit_containers:
         sections.append("kv")
+    if cache_hit_containers:
+        sections.append("cache-hit")
     if res_containers:
         sections.append("resource")
     sections.append("summary")

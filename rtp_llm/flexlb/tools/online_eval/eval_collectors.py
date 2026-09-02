@@ -61,6 +61,12 @@ MOCK_KEEP_SERIES = {
     "mock_engine_kv_admission_fails_total",
     "mock_engine_lack_mem_rejects_total",
     "mock_engine_decode_reuse_blocks_total",
+    # Key-level cache-hit pair (production recent_cache_key_hit_count /
+    # total_count caliber): cumulative counters recorded at the prefill
+    # admission hit computation; consumed by aggregate cache_hit_ts /
+    # cache_hit_summary and the report-layer cache 命中率面板.
+    "mock_engine_cache_key_hits_total",
+    "mock_engine_cache_keys_requested_total",
 }
 
 # G3 C whitelist — every entry is a consumer-backed series (B3 queue curves,

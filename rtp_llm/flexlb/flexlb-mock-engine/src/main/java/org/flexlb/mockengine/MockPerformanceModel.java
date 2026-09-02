@@ -316,9 +316,17 @@ final class MockPerformanceModel {
                 // Fall back to protobuf lengths when metadata is absent or malformed.
             }
         }
-        long hitTokens = (long) cache.prefixHitBlocks(blockKeys) * blockSize;
+        // hitBlocks carries the RAW prefix-match run length (key count) — the
+        // key-level cache-hit caliber (production recent_cache_key_hit_count /
+        // total_count analogue) recorded by the engine at this admission hit
+        // computation point. Unlike hitTokens it is NOT clamped to inputLen, so
+        // a trace whose bh keys exceed the request's own block count keeps an
+        // honest requested/hit key pair.
+        int hitBlocks = cache.prefixHitBlocks(blockKeys);
+        long hitTokens = (long) hitBlocks * blockSize;
         hitTokens = Math.min(hitTokens, inputLen);
-        return new RequestShape(input, inputLen, Math.max(1, outputLen), List.copyOf(blockKeys), hitTokens);
+        return new RequestShape(input, inputLen, Math.max(1, outputLen), List.copyOf(blockKeys),
+                hitTokens, hitBlocks);
     }
 
     long prefillMs(List<RequestShape> requests) {
@@ -498,7 +506,8 @@ final class MockPerformanceModel {
                         int inputLen,
                         int outputLen,
                         List<Long> blockKeys,
-                        long hitTokens) {
+                        long hitTokens,
+                        int hitBlocks) {
     }
 
     private record DecodePoint(int batchSize, double stepMs) {

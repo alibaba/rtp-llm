@@ -183,6 +183,23 @@ zero). Caliber note: the gauges are the mock's simulated block pool at
 memory pages — read the shapes and the admission/reuse events, not
 absolute block counts against production.
 
+**Cache key-hit series (`mock_engine_*`, 20260902)**: `/metrics` also reports
+two cumulative counters aligning the mock with the production
+`recent_cache_key_hit_count / total_count` caliber —
+`mock_engine_cache_key_hits_total` (Σ block keys matched by the
+admission-time `prefixHitBlocks` call: keys the engine could reuse) and
+`mock_engine_cache_keys_requested_total` (Σ requested `blockKeys`;
+empty-block-hash requests contribute 0/0 by construction). Both are booked
+at the SAME point — prefill admission's prefix-match computation — so the
+pair is self-consistent (never one-sided); they carry per-engine AND role
+labels in both emission modes, are never drained (cumulative since engine
+start), and `/snapshot`'s terminal view adds the final `cache_key_hits` /
+`cache_keys_requested` per engine. They ride the eval chain: G1 whitelist →
+aggregate `cache_hit_ts` (engine-key column) → the canvas 5c cache
+hit-rate panels (the "key-level (theoretical)" caliber; the full
+caliber trio — master routing / engine key-level / engine token-level —
+is documented in the online_eval README).
+
 **Engine addressing**: POST bodies accept either `{"engine": "prefill-0"}` (engine
 name, same naming scheme as the cluster) or `{"port": N}` (gRPC port).
 
@@ -200,7 +217,7 @@ name, same naming scheme as the cluster) or `{"port": N}` (gRPC port).
 - `/metrics`: aggregated by role by default; append `?per_engine=true` for
   per-engine labels (`engine_name`/`role`/`grpc_port`/`engine_ip`).
 
-## Test Suite (229 test methods)
+## Test Suite (231 test methods)
 
 | Test | Methods | Description |
 |------|---------|-------------|
@@ -222,6 +239,7 @@ name, same naming scheme as the cluster) or `{"port": N}` (gRPC port).
 | MetricsValidationTest | 3 | /metrics + /snapshot validation, KV block-pool tracking + pressure-surface consistency |
 | TpsMetricsAccountingTest | 3 | rtp_llm_* TPS series: completion-event accounting, drain semantics, cancelled exclusion, hit_tokens_total |
 | BlockPoolMetricsObservabilityTest | 3 | Block-pool series in both /metrics modes: three-state gauges over a request's life, prefill-602 vs decode-degrade counter split, decode reuse accumulation (cumulative, never drained) |
+| CacheKeyHitMetricsTest | 2 | Cache key-hit counters: prefix-match run accumulation (hit/requested key sums across requests, /metrics + /snapshot terminal fields) and empty-block-hash 0/0 contribution |
 | RealisticTimingTest | 1 | Real timing verification |
 
 ## JavaLoadClient
@@ -466,7 +484,7 @@ deep engine-side queues, so the cap must be explicitly requested. Do not
 ### Test-suite size on this branch
 
 The v2 baseline table above ("Test Suite (68 test methods)") is outdated
-here: this branch's test surface totals **223 test methods**. Three v2
+here: this branch's test surface totals **225 test methods**. Three v2
 baseline classes grew — `JavaLoadClientParityTest` 14 → **15**,
 `ClusterConfigParamTest` 7 → **9** (one auto-tpm param + one per-role KV pool
 override) and `MetricsValidationTest` 1 → **3** (KV pool tracking +
