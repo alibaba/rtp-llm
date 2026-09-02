@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -49,13 +50,19 @@ bool hasNonEmptyCoredump(const std::filesystem::path& dir) {
 }
 
 int runChild(const std::string& mode) {
-    const bool teardown = mode == "teardown";
-    const auto out_dir  = testRoot() / mode;
+    const bool use_profiler  = mode != "plain";
+    const bool stop_profiler = mode == "stopped";
+    const auto out_dir       = testRoot() / mode;
     std::filesystem::create_directories(out_dir);
 
-    std::fprintf(stderr, "CHILD mode=%s profiler_start\n", mode.c_str());
-    rtp_llm::TorchProfile profiler("torch_profile_", out_dir.string());
-    profiler.start();
+    std::unique_ptr<rtp_llm::TorchProfile> profiler;
+    if (use_profiler) {
+        std::fprintf(stderr, "CHILD mode=%s profiler_start\n", mode.c_str());
+        profiler = std::make_unique<rtp_llm::TorchProfile>("torch_profile_", out_dir.string());
+        profiler->start();
+    } else {
+        std::fprintf(stderr, "CHILD mode=%s profiler_skipped\n", mode.c_str());
+    }
 
     warmupKernel<<<1, 1>>>();
     if (cudaDeviceSynchronize() != cudaSuccess) {
@@ -63,18 +70,18 @@ int runChild(const std::string& mode) {
         return 2;
     }
 
-    profiler.stop();
-    std::fprintf(stderr, "CHILD mode=%s profiler_stopped\n", mode.c_str());
-
-    if (teardown) {
-        // Kineto tears CUPTI down asynchronously and finalizes from a CUDA API
-        // exit callback. Repeated harmless API calls give that path a chance to
-        // complete before the trap is launched.
+    if (stop_profiler) {
+        profiler->stop();
+        std::fprintf(stderr, "CHILD mode=%s profiler_stopped\n", mode.c_str());
+        // Kineto teardown has CUDA/CUPTI callbacks. Repeated harmless API calls
+        // give that path a chance to run before the trap is launched.
         for (int i = 0; i < 100; ++i) {
             int device = -1;
             (void)cudaGetDevice(&device);
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
+    } else if (use_profiler) {
+        std::fprintf(stderr, "CHILD mode=%s profiler_left_active\n", mode.c_str());
     }
 
     std::fprintf(stderr, "CHILD mode=%s trap_launch\n", mode.c_str());
@@ -121,7 +128,7 @@ ChildResult runIsolated(const std::string& mode) {
         unsetenv("CUDA_ENABLE_USER_TRIGGERED_COREDUMP");
         unsetenv("CUDA_COREDUMP_PIPE");
 
-        if (mode == "teardown") {
+        if (mode == "stopped") {
             setenv("TEARDOWN_CUPTI", "1", 1);
             // Leave lazy re-init enabled: after teardown the subscriber stays
             // absent until another profiling session explicitly starts.
@@ -167,18 +174,28 @@ void logResult(const char* mode, const ChildResult& result) {
                  result.status);
 }
 
-TEST(CuptiTrapCoredumpReproTest, PersistentSubscriberBlocksTrapCoredump) {
-    const ChildResult teardown = runIsolated("teardown");
-    logResult("teardown", teardown);
-    ASSERT_NE(teardown.status, -1) << "failed to start or wait for teardown child";
-    ASSERT_FALSE(teardown.timed_out) << "CUPTI teardown control hung";
-    ASSERT_TRUE(teardown.has_core) << "CUPTI teardown control did not generate a CUDA coredump";
+TEST(CuptiTrapCoredumpReproTest, CuptiSubscriberDisablesTrapCoredump) {
+    const ChildResult plain = runIsolated("plain");
+    logResult("plain", plain);
 
-    const ChildResult persistent = runIsolated("persistent");
-    logResult("persistent", persistent);
-    ASSERT_NE(persistent.status, -1) << "failed to start or wait for persistent child";
-    EXPECT_TRUE(persistent.timed_out) << "persistent CUPTI subscriber did not reproduce the handler hang";
-    EXPECT_FALSE(persistent.has_core) << "persistent CUPTI subscriber unexpectedly completed a CUDA coredump";
+    const ChildResult stopped = runIsolated("stopped");
+    logResult("stopped", stopped);
+
+    const ChildResult active = runIsolated("active");
+    logResult("active", active);
+
+    ASSERT_NE(plain.status, -1) << "failed to start or wait for plain child";
+    ASSERT_NE(stopped.status, -1) << "failed to start or wait for stopped child";
+    ASSERT_NE(active.status, -1) << "failed to start or wait for active child";
+
+    EXPECT_FALSE(plain.timed_out) << "plain CUDA coredump control hung";
+    EXPECT_TRUE(plain.has_core) << "plain CUDA trap did not generate a CUDA coredump";
+
+    EXPECT_FALSE(stopped.timed_out) << "stopped CUPTI child hung";
+    EXPECT_FALSE(stopped.has_core) << "stopped CUPTI child unexpectedly generated a CUDA coredump";
+
+    EXPECT_FALSE(active.timed_out) << "active CUPTI child hung";
+    EXPECT_FALSE(active.has_core) << "active CUPTI child unexpectedly generated a CUDA coredump";
 }
 
 }  // namespace
