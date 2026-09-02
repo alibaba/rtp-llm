@@ -657,8 +657,11 @@ public final class JavaLoadClient {
             semaphore.release();
         }
 
-        // Parity with Python: on schedule failure (exception or schedule_error),
-        // try fallback direct to engines — outside the semaphore.
+        // Escape hatch (default OFF — see enableFallback javadoc): on schedule
+        // failure (exception or schedule_error), try fallback direct to
+        // engines, outside the semaphore. Only reachable when the operator
+        // explicitly opted in; standard load tests keep it off so every
+        // failure surfaces as an error row instead of bypassing the master.
         if (scheduleResponse == null
                 || "schedule_error".equals(result.status)
                 || "exception".equals(result.status)) {
@@ -729,7 +732,9 @@ public final class JavaLoadClient {
                 }
                 result.wallClockTs = System.currentTimeMillis() / 1000.0;
             } catch (Exception e) {
-                // Parity with Python: on fetch/stream failure, try fallback.
+                // Escape hatch (default OFF): on fetch/stream failure, try
+                // fallback — only when the operator explicitly opted in;
+                // otherwise the failure is recorded as an error row.
                 if (config.enableFallback && !fallbackPrefillAddrs.isEmpty()) {
                     attemptFallback(record, result, startedNanos, "fetch=" + e);
                 } else {
@@ -1654,6 +1659,17 @@ public final class JavaLoadClient {
         final int maxInputLen;
         final int maxOutputLen;
         final String pushgatewayUrl;
+        /**
+         * Direct-to-engine fallback escape hatch (bypasses the master when
+         * the Schedule RPC fails or the engine stream read fails). DEFAULT
+         * OFF and it must stay off for load tests: a fallback send skips
+         * master admission, routing and the schedule-latency leg entirely
+         * (route_path="fallback", schedule_ms=0), so any fallback traffic
+         * pollutes load-test calibers. Opt in explicitly with
+         * ENABLE_FALLBACK=1 plus ENDPOINTS_FILE=&lt;a valid endpoints.json&gt;
+         * only for case-test-style direct-connect scenarios that
+         * deliberately want the escape hatch.
+         */
         final boolean enableFallback;
         final String endpointsFile;
         final boolean dryRun;
@@ -1858,6 +1874,11 @@ public final class JavaLoadClient {
                     envInt("MAX_INPUT_LEN", 0),
                     envInt("MAX_OUTPUT_LEN", 0),
                     env("PUSHGATEWAY_URL", ""),
+                    // Fallback default OFF (load-test accuracy): fallback
+                    // traffic bypasses the master and pollutes calibers;
+                    // case-test direct-connect scenarios opt in explicitly
+                    // via ENABLE_FALLBACK=1 + ENDPOINTS_FILE. See the
+                    // enableFallback field javadoc.
                     envBool("ENABLE_FALLBACK", false),
                     env("ENDPOINTS_FILE", ""),
                     envBool("DRY_RUN", false),

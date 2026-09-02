@@ -112,6 +112,15 @@ GRADIENT_START_SPEED="${GRADIENT_START_SPEED:-10}"
 # output streams after Schedule; 0 = skip client stream reads while the engine
 # still executes prefill+decode in full (BATCH dispatcher only).
 FETCH_OUTPUT_STREAM="${FETCH_OUTPUT_STREAM:-1}"
+# Client fallback (direct-to-engine escape hatch on Schedule-RPC / stream-read
+# failure): default OFF and it must stay OFF for load tests — a fallback send
+# bypasses the master entirely (admission, routing, schedule-latency leg), so
+# any fallback traffic pollutes the calibers the aggregator computes.
+# ENABLE_FALLBACK=1 (plus ENDPOINTS_FILE=<endpoints.json>) is the explicit
+# opt-in for case-test-style direct-connect scenarios only; this script never
+# turns it on by itself — the default below is 0 and a deliberate opt-in
+# (exporting ENABLE_FALLBACK=1) is the only way to enable it.
+ENABLE_FALLBACK="${ENABLE_FALLBACK:-0}"
 # FORCE_PRIORITY pins every replayed request to one Auto-TPM QoS level,
 # overriding both the per-record trace priority and the PRIORITY env default.
 # Defaults to 50 (single-QoS baseline runs): all requests share one priority,
@@ -1193,7 +1202,7 @@ launch_java_load_client() {
       "MAX_INPUT_LEN=${MAX_INPUT_LEN}" \
       "MAX_OUTPUT_LEN=${MAX_OUTPUT_LEN}" \
       "PUSHGATEWAY_URL=${PUSHGATEWAY_URL}" \
-      "ENABLE_FALLBACK=${ENABLE_FALLBACK:-0}" \
+      "ENABLE_FALLBACK=${ENABLE_FALLBACK}" \
       "ENDPOINTS_FILE=${ENDPOINTS_FILE:-}" \
       "DRY_RUN=${DRY_RUN:-0}" \
       "CLIENT_PACING_LAG_P99_LIMIT_MS=${CLIENT_PACING_LAG_P99_LIMIT_MS}"
@@ -1232,7 +1241,7 @@ launch_java_load_client() {
     "MAX_INPUT_LEN=${MAX_INPUT_LEN}" \
     "MAX_OUTPUT_LEN=${MAX_OUTPUT_LEN}" \
     "PUSHGATEWAY_URL=${PUSHGATEWAY_URL}" \
-    "ENABLE_FALLBACK=${ENABLE_FALLBACK:-0}" \
+    "ENABLE_FALLBACK=${ENABLE_FALLBACK}" \
     "ENDPOINTS_FILE=${ENDPOINTS_FILE:-}" \
     "DRY_RUN=${DRY_RUN:-0}"
 }
