@@ -596,6 +596,22 @@ class TestHandleInputsWithHidden(unittest.TestCase):
             )
         )
 
+    def test_handle_inputs_keeps_caller_lengths_global(self):
+        """MTP+CP snapshots the caller's lengths to rebuild the draft batch."""
+        total_tokens = torch.tensor([10, 11, 12, 13, 14, 15], dtype=torch.int32)
+        input_lengths = torch.tensor([6], dtype=torch.int32)
+
+        caller_view, published = cp_test.handle_inputs_caller_lengths(
+            total_tokens, input_lengths, 0, 2
+        )
+        self.assertTrue(
+            torch.equal(caller_view, torch.tensor([6], dtype=torch.int32))
+        )
+        self.assertTrue(torch.equal(published, torch.tensor([4], dtype=torch.int32)))
+        self.assertTrue(
+            torch.equal(input_lengths, torch.tensor([6], dtype=torch.int32))
+        )
+
     def test_rank_local_hidden_states_pass_through_standard_split(self):
         """MTP/DSpARK draft commit may re-enter CP with local feature rows."""
         total_tokens = torch.tensor([10, 11, 12, 13, 14, 15], dtype=torch.int32)

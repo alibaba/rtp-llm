@@ -1,4 +1,14 @@
 {
+    "_comment": [
+        "Regenerated from the smoke_actual artifact of run 65789165, case",
+        "next_moe_nvfp4_cudagraph_tp2_sm100. Goldens were matched to files by case name, so",
+        "this file and its DP2 sibling (q_r_35b_nvfp4_py_dp2_ll_cg_sm100_arm.json) are not",
+        "interchanged even though their expected text differs.",
+        "Unlike the DP2 sibling, this configuration is batch-invariant: TP2 has no DeepEP",
+        "dispatch, so batch 1 and batch 3 take the same expert routing and all four slots",
+        "expect identical output. See the DP2 file's _comment for why that one legitimately",
+        "diverges across batch sizes."
+    ],
     "model_type": "qwen35_moe",
     "model_path": "/mnt/nas1/smoke/Qwen3.5-35B-A3B-NVFP4-reshard",
     "query_result": [
@@ -13,7 +23,7 @@
                 }
             },
             "result": {
-                "response": "\n\n<think>\nOkay, the user asked me to introduce myself. Let me start by recalling my identity",
+                "response": "\n\n<think>\n\n</think>\n\nHello! I'm **Qwen3.5**, the latest large language",
                 "finished": true
             }
         },
@@ -32,13 +42,13 @@
             "result": {
                 "response_batch": [
                     {
-                        "response": "\n\n<think>\nOkay, the user asked me to introduce myself. Let me start by recalling my identity"
+                        "response": "\n\n<think>\n\n</think>\n\nHello! I'm **Qwen3.5**, the latest large language"
                     },
                     {
-                        "response": "\n\n<think>\nOkay, the user asked me to introduce myself. Let me start by recalling my identity"
+                        "response": "\n\n<think>\n\n</think>\n\nHello! I'm **Qwen3.5**, the latest large language"
                     },
                     {
-                        "response": "\n\n<think>\nOkay, the user asked me to introduce myself. Let me start by recalling my identity"
+                        "response": "\n\n<think>\n\n</think>\n\nHello! I'm **Qwen3.5**, the latest large language"
                     }
                 ]
             }

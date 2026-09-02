@@ -1,4 +1,5 @@
 import glob
+import importlib.metadata
 import json
 import logging
 import os
@@ -24,6 +25,12 @@ DEFAULT_MODEL_ARG = "Qwen3-30B"
 DEFAULT_TASK_IDS_FILE = "passing_tasks.json"
 DEFAULT_SCRIPT_FILE = "run_tau2_bench.py"
 EVALSCOPE_PINNED_VERSION = "1.6.0"
+# tau2-bench only declares `litellm>=1.65.0`; its pdm.lock resolves 1.65.1, which
+# is the version the benchmark's reward numbers were established against. Left
+# unpinned, pip drags in whatever litellm is newest, and newer releases both drop
+# python 3.10 support and shift agent tool-calling behaviour enough to move the
+# score by double digits.
+LITELLM_PINNED_VERSION = "1.65.1"
 
 _REPORT_PATH_RE = re.compile(r"Dump report to:\s*(\S+\.json)")
 
@@ -42,6 +49,7 @@ class Tau2BenchComparer(BaseComparer):
         extract_root = self._download_and_extract(out_dir)
         self._install_evalscope()
         self._install_tau2_from_tarball(extract_root)
+        self._install_litellm()
         task_ids_path = self._resolve_task_ids_file(extract_root, task_ids_file)
         script_path = self._resolve_script_file(extract_root, script_file)
 
@@ -134,6 +142,22 @@ class Tau2BenchComparer(BaseComparer):
             QueryStatus.OTHERS,
             f"no installable tau2 package (wheel/setup.py/pyproject.toml) found under {extract_root}",
         )
+
+    def _install_litellm(self) -> None:
+        # Read the version through metadata, not `import litellm`: a litellm that
+        # is too new for this interpreter raises on import, which is exactly the
+        # case this pin exists to repair.
+        try:
+            current = importlib.metadata.version("litellm")
+        except importlib.metadata.PackageNotFoundError:
+            current = None
+        if current == LITELLM_PINNED_VERSION:
+            logging.info(f"[TAU2] litellm=={current} matches pinned, skip install")
+            return
+        logging.info(
+            f"[TAU2] litellm=={current} != pinned {LITELLM_PINNED_VERSION}, install pinned"
+        )
+        self._pip_install([f"litellm=={LITELLM_PINNED_VERSION}"])
 
     def _download_and_extract(self, work_dir: str) -> str:
         dest_dir = os.path.join(work_dir, "tau2-bench")
