@@ -64,6 +64,9 @@ class Hy4DecoderLayer(nn.Module):
             global_weights=global_weights,
             has_indexer=dsa_layer_has_indexer(config, layer_idx),
             reuse_topk_indices=dsa_layer_skips_topk(config, layer_idx),
+            indexer_layernorm_eps=config.indexer_layernorm_eps,
+            indexer_scale_fmt=config.indexer_scale_fmt,
+            indexer_use_hadamard=config.indexer_use_hadamard,
         )
         if layer_idx in config.moe_layer_index:
             self.mlp = GenericMoeLayer(

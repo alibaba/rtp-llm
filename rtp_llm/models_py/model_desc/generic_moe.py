@@ -60,6 +60,32 @@ class _FusedSharedExpertSentinel(nn.Module):
         raise RuntimeError("shared expert is fused into MegaMoE")
 
 
+def _validate_hy4_mxfp8_moe_strategy(
+    config: ModelConfig, moe_config: MoeConfig
+) -> None:
+    """Reject MXFP8 HY4 expert backends that silently drop SwiGLU clamp.
+
+    HY4 applies ``swiglu_limit`` only to routed experts. The dedicated
+    ``mega_moe_fp8`` wrapper forwards that limit to DeepGEMM while leaving the
+    separately evaluated shared expert unclamped. The generic and fused-shared
+    executors currently accept ``extra_expert_args`` but do not implement this
+    asymmetric clamp, so allowing them would produce plausible-shaped but
+    numerically different output.
+    """
+    if config.model_type not in ("hy_v4", "hy_v4_mtp"):
+        return
+    quant_config = config.quant_config
+    quant_method = quant_config.get_method() if quant_config is not None else None
+    if quant_method != "MXFP8" or float(config.swiglu_limit) <= 0:
+        return
+    if moe_config.moe_strategy != "mega_moe_fp8":
+        raise ValueError(
+            "HY V4 MXFP8 routed experts require moe_strategy=mega_moe_fp8: "
+            f"moe_strategy={moe_config.moe_strategy!r} does not preserve the "
+            "routed-only SwiGLU clamp"
+        )
+
+
 class GenericMoeLayer(nn.Module):
     """Generic MoE layer supporting both Qwen3 and internal model."""
 
@@ -120,6 +146,7 @@ class GenericMoeLayer(nn.Module):
 
         # Get quant_config from model_config
         quant_config = config.quant_config
+        _validate_hy4_mxfp8_moe_strategy(config, moe_config)
         self._hy4_fp32_router = getattr(config, "model_type", "") in (
             "hy_v4",
             "hy_v4_mtp",
@@ -499,6 +526,13 @@ class GenericMoeDecoderLayer(nn.Module):
                 global_weights=global_weights,
                 has_indexer=dsa_layer_has_indexer(config, layer_idx),
                 reuse_topk_indices=dsa_layer_skips_topk(config, layer_idx),
+                indexer_layernorm_eps=getattr(
+                    config, "indexer_layernorm_eps", None
+                ),
+                indexer_scale_fmt=getattr(config, "indexer_scale_fmt", None),
+                indexer_use_hadamard=getattr(
+                    config, "indexer_use_hadamard", True
+                ),
             )
         else:
             attn_configs = config.getAttentionConfigs(

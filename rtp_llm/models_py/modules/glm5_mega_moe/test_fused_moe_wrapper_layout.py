@@ -13,6 +13,9 @@ from rtp_llm.models_py.modules.glm5_mega_moe import (
     mega_moe_wrapper,
     quant_layouts,
 )
+from rtp_llm.models_py.model_desc.generic_moe import (
+    _validate_hy4_mxfp8_moe_strategy,
+)
 from rtp_llm.utils.model_weight import W
 
 
@@ -71,6 +74,19 @@ def _parallelism(role_type=None):
 
 
 class MegaMoeWrapperLayoutTest(unittest.TestCase):
+    def test_hy4_mxfp8_rejects_backend_that_drops_routed_clamp(self):
+        config = _config(swiglu_limit=10.0)
+        config.model_type = "hy_v4"
+        config.quant_config = SimpleNamespace(get_method=lambda: "MXFP8")
+        with self.assertRaisesRegex(ValueError, "routed-only SwiGLU clamp"):
+            _validate_hy4_mxfp8_moe_strategy(
+                config, SimpleNamespace(moe_strategy="auto")
+            )
+
+        _validate_hy4_mxfp8_moe_strategy(
+            config, SimpleNamespace(moe_strategy="mega_moe_fp8")
+        )
+
     def test_fp8_scale_recipe_infers_mxfp8_and_legacy_block_fp8(self):
         mxfp8_scale = torch.empty((2, 64, 4), dtype=torch.float32)
         self.assertEqual(

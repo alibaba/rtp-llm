@@ -51,6 +51,36 @@ def _transpose_stacked_gate_up(ts: List[torch.Tensor]) -> torch.Tensor:
     return torch.cat((stacked[:, half:, :], stacked[:, :half, :]), dim=1)
 
 
+def _move_indexer_rope_to_front(
+    ts: List[torch.Tensor],
+    *,
+    output_dim: int,
+    head_dim: int,
+    rope_dim: int,
+) -> torch.Tensor:
+    """Adapt HY V4 indexer output channels from ``[nope, rope]`` to RTP's
+    existing ``[rope, nope]`` contract.
+
+    Checkpoint kernels and MXFP8 scales both have one row per output channel,
+    so the same merge function keeps them aligned. Coarser per-block/per-tensor
+    scales do not distinguish the two half-heads and remain unchanged.
+    """
+    tensor = identity(ts)
+    if tensor.dim() == 0 or tensor.size(0) != output_dim:
+        return tensor
+    if head_dim != 2 * rope_dim or output_dim % head_dim:
+        raise ValueError(
+            "invalid HY V4 indexer layout: "
+            f"output_dim={output_dim}, head_dim={head_dim}, rope_dim={rope_dim}"
+        )
+    grouped = tensor.reshape(output_dim // head_dim, head_dim, *tensor.shape[1:])
+    grouped = torch.cat(
+        (grouped[:, head_dim - rope_dim :], grouped[:, : head_dim - rope_dim]),
+        dim=1,
+    )
+    return grouped.reshape(tensor.shape).contiguous()
+
+
 class Hy4Weight(DeepSeekV2Weight):
     """Checkpoint mapping for HY V4 backbone weights."""
 
@@ -97,6 +127,34 @@ class Hy4Weight(DeepSeekV2Weight):
 
     def _get_hf_layer_weight_info(self, layer_id: int):
         layer_weights = super()._get_hf_layer_weight_info(layer_id)
+        index_head_dim = self.model_config.attn_config.indexer_head_dim
+        rope_dim = self.model_config.attn_config.rope_head_dim
+        indexer_output_dims = {
+            W.mla_indexer_qb_w: (
+                self.model_config.attn_config.indexer_head_num * index_head_dim
+            ),
+            W.mla_indexer_k_w: index_head_dim,
+            W.mla_indexer_k_norm_w: index_head_dim,
+            W.mla_indexer_k_norm_b: index_head_dim,
+        }
+        # The shared Indexer implementation predates HY V4 and expects the
+        # RoPE channels first. Adapt only HY V4 checkpoint descriptors here;
+        # quant wrappers propagate CkptWeightInfo.merge_fun to both kernel and
+        # scale descriptors, so MXFP8 weight/scale rows receive the same swap.
+        for weight in layer_weights:
+            for component in weight.get_components():
+                output_dim = indexer_output_dims.get(component.name)
+                if output_dim is None:
+                    continue
+                merge_fun = functools.partial(
+                    _move_indexer_rope_to_front,
+                    output_dim=output_dim,
+                    head_dim=index_head_dim,
+                    rope_dim=rope_dim,
+                )
+                for ckpt_weight in component.weights:
+                    ckpt_weight.merge_fun = merge_fun
+
         attn_config = self._mla_config()
         layer_weights.extend(
             [
@@ -400,6 +458,16 @@ class Hy4(BaseModel):
         config.vocab_size = int(raw["vocab_size"])
         config.max_seq_len = int(raw["max_position_embeddings"])
         config.layernorm_eps = float(raw.get("rms_norm_eps", 1e-6))
+        # HY V4 uses a dedicated LayerNorm inside the sparse-attention
+        # indexer. Its checkpoint contract fixes epsilon at 1e-6; this is
+        # intentionally independent from the model RMSNorm epsilon.
+        config.indexer_layernorm_eps = 1e-6
+        config.indexer_scale_fmt = "ue8m0"
+        # Unlike the shared DSV3.2/GLM5 indexer path, the HY V4 reference
+        # quantizes the post-RoPE vectors directly. A Hadamard transform
+        # preserves an exact dot product, but changes FP8 absmax scales and
+        # can therefore change the selected top-k tokens.
+        config.indexer_use_hadamard = False
         config.tie_word_embeddings = bool(raw.get("tie_word_embeddings", False))
         config.enable_fp32_lm_head = bool(raw.get("enable_lm_head_fp32", True))
         config.config_dtype = raw.get("dtype", raw.get("torch_dtype"))

@@ -64,6 +64,43 @@ class TestFusedLogitsHeadGate(unittest.TestCase):
             with self.subTest(T=T):
                 self._run(T, K=6144, N=64)
 
+    def test_hy4_high_precision(self):
+        """HY4 uses TF32x3 because the result directly gates discrete top-k."""
+        device = "cuda"
+        for T in (128, 1024):
+            with self.subTest(T=T):
+                K, N = 6144, 32
+                x = torch.randn(T, K, dtype=torch.bfloat16, device=device)
+                weight = (
+                    torch.randn(N, K, dtype=torch.float32, device=device) * 0.02
+                )
+                q_scale = (
+                    torch.randn(T, N, 1, dtype=torch.float32, device=device).abs()
+                    + 0.1
+                )
+                scale_const = K**-0.5 * N**-0.5
+                linear = nn.Linear(K, N, bias=False, device=device)
+                linear.weight.data.copy_(weight)
+
+                ref = _baseline_logits_head_gate(x, q_scale, linear, scale_const)
+                out = fused_logits_head_gate(
+                    x,
+                    q_scale,
+                    weight,
+                    scale_const,
+                    fallback_proj=linear,
+                    high_precision=True,
+                )
+
+                self.assertTrue(torch.allclose(out, ref, atol=1e-5, rtol=1e-5))
+                topk = min(8, N)
+                self.assertTrue(
+                    torch.equal(
+                        out.squeeze(-1).topk(topk, dim=-1).indices,
+                        ref.squeeze(-1).topk(topk, dim=-1).indices,
+                    )
+                )
+
     def test_smaller_n(self):
         for T, K, N in [(32, 7168, 16), (32, 4096, 32), (32, 2048, 128)]:
             with self.subTest(T=T, K=K, N=N):
