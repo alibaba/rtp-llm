@@ -234,6 +234,7 @@ def ref_sparse_mla_forward(
     topk_indices_global: torch.Tensor,
     scale: float,
     kv_lora_rank: int,
+    attn_sink: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     参考实现：使用 PyTorch 实现 sparse MLA attention
@@ -290,8 +291,18 @@ def ref_sparse_mla_forward(
     )
     attn_scores[invalid_mask_2d] = float("-inf")
 
+    # HY4's learnable sink is an extra per-head logit with a zero value. It
+    # contributes to the softmax denominator, but not to the weighted V sum.
+    if attn_sink is not None:
+        sink_logits = attn_sink.float().view(1, num_heads, 1)
+        attn_scores = torch.cat(
+            [attn_scores, sink_logits.expand(num_tokens, -1, -1)], dim=-1
+        )
+
     # Softmax
-    attn_weights = torch.softmax(attn_scores, dim=-1)  # [num_tokens, num_heads, top_k]
+    attn_weights = torch.softmax(attn_scores, dim=-1)[
+        ..., :top_k
+    ]  # [num_tokens, num_heads, top_k]
 
     # 处理全为 -inf 的情况
     attn_weights = torch.nan_to_num(attn_weights, 0.0)
@@ -522,6 +533,52 @@ class SparseMlaOpTest(TestCase):
             rtol=1e-2,
             atol=1e-4,
         )
+
+    def test_hy4_sink_matches_torch_reference(self):
+        """The sink is an extra softmax-denominator logit with zero value."""
+        p = TestParam(
+            num_tokens=2,
+            total_cache_len=128,
+            num_heads=64,
+            kv_lora_rank=512,
+            qk_rope_head_dim=64,
+            qk_nope_head_dim=512,
+            page_size=64,
+            top_k=128,
+            batch_size=1,
+        )
+        testcase = generate_testcase(p)
+        sink = torch.linspace(-2.0, 2.0, 64, dtype=torch.float32, device="cuda")
+        op = SparseMlaOp(
+            num_heads=p.num_heads,
+            kv_lora_rank=p.kv_lora_rank,
+            qk_rope_head_dim=p.qk_rope_head_dim,
+            qk_nope_head_dim=p.qk_nope_head_dim,
+            page_size=p.page_size,
+            softmax_extra_scale=p.softmax_extra_scale,
+            top_k=p.top_k,
+        )
+        op.plan(testcase.mla_params, testcase.block_table)
+
+        actual = op.forward(
+            testcase.q,
+            testcase.kv,
+            testcase.topk_indices,
+            attn_sink=sink,
+        )
+        global_indices = op._convert_topk_indices_to_global(  # type: ignore[reportPrivateUsage]
+            testcase.topk_indices
+        )[:, 0, :]
+        expected = ref_sparse_mla_forward(
+            testcase.q,
+            testcase.kv,
+            global_indices,
+            testcase.scale,
+            p.kv_lora_rank,
+            attn_sink=sink,
+        )
+
+        torch.testing.assert_close(actual, expected, rtol=1e-2, atol=2e-3)
 
     def test_hy4_fp8_gather_uses_native_head64(self):
         op = SparseMlaFp8Op(

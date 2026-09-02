@@ -107,7 +107,13 @@ class MLATest(TestCase):
         torch.set_default_device(device)
 
     def _run_mla_test(
-        self, seq_length, num_experts, num_expert_group, topk_group, topk
+        self,
+        seq_length,
+        num_experts,
+        num_expert_group,
+        topk_group,
+        topk,
+        routed_scaling_factor=2.5,
     ):
         dtype = torch.float32
 
@@ -139,7 +145,7 @@ class MLATest(TestCase):
             topk_group=topk_group,
             topk=topk,
             renormalize=True,
-            routed_scaling_factor=2.5,
+            routed_scaling_factor=routed_scaling_factor,
         )
         indices = indices.to(torch.int32)
 
@@ -147,7 +153,7 @@ class MLATest(TestCase):
             hidden_states=scores,
             router_logits=scores,
             correction_bias=bias,
-            routed_scaling_factor=2.5,
+            routed_scaling_factor=routed_scaling_factor,
             use_grouped_topk=True,
             top_k=topk,
             renormalize=True,
@@ -174,6 +180,19 @@ class MLATest(TestCase):
                 topk=params[4],
             ):
                 self._run_mla_test(*params)
+
+    def test_hy4_routing_shape_and_grouping(self):
+        # HY V4 uses a single expert group. The correction bias participates
+        # only in expert selection; the final weights are gathered from the
+        # unbiased sigmoid scores, normalized over top-k, then scaled.
+        self._run_mla_test(
+            seq_length=11,
+            num_experts=256,
+            num_expert_group=1,
+            topk_group=1,
+            topk=8,
+            routed_scaling_factor=2.827,
+        )
 
 
 if __name__ == "__main__":

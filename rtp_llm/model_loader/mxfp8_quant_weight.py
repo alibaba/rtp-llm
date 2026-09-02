@@ -11,7 +11,7 @@ Only two things differ from FP8_PER_BLOCK:
 """
 
 import functools
-from typing import Any, Dict, List, Union
+from typing import Any, Callable, Dict, List, Union
 
 import torch
 
@@ -26,7 +26,11 @@ from rtp_llm.model_loader.per_block_fp8_quant_weight import (
     PerBlockFp8Weight,
     create_w8a8_fp8_per_block_weight,
 )
-from rtp_llm.model_loader.weight_module import CompositeWeight, WeightModule
+from rtp_llm.model_loader.weight_module import (
+    AtomicWeight,
+    CompositeWeight,
+    WeightModule,
+)
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -47,9 +51,8 @@ MX_BLOCK = 32
 def _dequantize_mxfp8(weight: torch.Tensor, scale_exponents: torch.Tensor) -> torch.Tensor:
     """Materialize a derived BF16 attention-BMM weight from MXFP8 storage.
 
-    This is only used for ``mla_kc``/``mla_vc``. They are consumed by
-    ``torch.bmm`` rather than a Linear/MoE GEMM and therefore cannot retain the
-    checkpoint's MXFP8 representation.
+    This is used for ``mla_kc``/``mla_vc`` BMM weights and indexer WK, whose
+    reference implementation explicitly upcasts the checkpoint weight.
     """
     if weight.shape[-1] % MX_BLOCK != 0:
         raise ValueError(
@@ -63,6 +66,14 @@ def _dequantize_mxfp8(weight: torch.Tensor, scale_exponents: torch.Tensor) -> to
     blocked = weight.float().view(*weight.shape[:-1], -1, MX_BLOCK)
     scale = torch.exp2(scale_exponents.float() - 127.0)
     return (blocked * scale.unsqueeze(-1)).reshape(weight.shape).bfloat16()
+
+
+def _dequantize_mxfp8_then_merge(
+    ts: List[torch.Tensor],
+    merge_fun: Callable[[List[torch.Tensor]], torch.Tensor],
+) -> torch.Tensor:
+    """Dequantize an MXFP8 linear weight, then apply its model layout adapter."""
+    return merge_fun([_dequantize_mxfp8(ts[0], ts[1])])
 
 
 def _dequantize_mxfp8_split_k(
@@ -250,6 +261,39 @@ class Mxfp8Weight(PerBlockFp8Weight):
                 config=src_weight_info.config,
             ),
         ]
+
+    def _get_quant_weight_default(
+        self,
+        src_weight_info: AtomicWeight,
+        weight_key: str,
+        scale_key: str,
+    ):
+        if src_weight_info.name != W.mla_indexer_k_w:
+            return super()._get_quant_weight_default(
+                src_weight_info, weight_key, scale_key
+            )
+
+        # Match vLLM's HY4/DSV3.2 indexer contract: WK is dequantized once at
+        # load time and evaluated as a BF16 projection. Keeping it as an
+        # MXFP8 Linear would dynamically quantize hidden_states as well, which
+        # is an extra quantization absent from the reference and measurably
+        # changes sparse-attention top-k selections.
+        source = src_weight_info.weights[0]
+        kernel = create_w8a8_fp8_per_block_weight(
+            src_weight_info,
+            weight_key,
+            [
+                CkptWeightInfo(source.name, identity),
+                CkptWeightInfo(self._scale_name(source.name), identity),
+            ],
+            functools.partial(
+                _dequantize_mxfp8_then_merge,
+                merge_fun=source.merge_fun,
+            ),
+            data_type=torch.bfloat16,
+            config=src_weight_info.config,
+        )
+        return [kernel, None]
 
     def _get_moe_w2_quant_weight(self, src_weight_info: MoeAtomicWeight):
         source_name = src_weight_info.weights[0].name

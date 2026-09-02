@@ -51,7 +51,7 @@ SCALE_1 = torch.tensor(1.0, dtype=torch.float32, device=device)
 # ==========================================================================
 # Baseline: flashinfer rope + rtp_llm concat_and_cache_mla
 # ==========================================================================
-def baseline_rope(q, kpe, pos, csc):
+def baseline_rope(q, kpe, pos, csc, *, is_neox_style=True):
     fi_rope._apply_rope_pos_ids_cos_sin_cache(
         q=q[..., NOPE_HEAD_DIM:],
         k=kpe.unsqueeze(1),
@@ -59,7 +59,7 @@ def baseline_rope(q, kpe, pos, csc):
         k_rope=kpe.unsqueeze(1),
         cos_sin_cache=csc,
         pos_ids=pos,
-        interleave=False,
+        interleave=not is_neox_style,
     )
 
 
@@ -108,12 +108,56 @@ def fused_fp8(q, ck, kpe, kv_cache, slot, pos, csc):
     )
 
 
+def baseline_bf16_hy4(q, ck, kpe, kv_cache, slot, pos, csc):
+    baseline_rope(q, kpe, pos, csc, is_neox_style=False)
+    rtp_llm_ops.concat_and_cache_mla(ck, kpe, kv_cache, slot, "auto", SCALE_1)
+
+
+def baseline_fp8_hy4(q, ck, kpe, kv_cache, slot, pos, csc):
+    baseline_rope(q, kpe, pos, csc, is_neox_style=False)
+    rtp_llm_ops.concat_and_cache_mla(
+        ck, kpe, kv_cache, slot, "fp8_ds_mla", SCALE_1
+    )
+
+
+def fused_bf16_hy4(q, ck, kpe, kv_cache, slot, pos, csc):
+    fused_qk_rope_cat_cache_mla(
+        q,
+        ck,
+        kpe,
+        kv_cache,
+        slot,
+        pos,
+        csc,
+        kv_lora_rank=KV_LORA,
+        rope_head_dim=ROPE,
+        is_neox_style=False,
+        kv_cache_type="auto",
+    )
+
+
+def fused_fp8_hy4(q, ck, kpe, kv_cache, slot, pos, csc):
+    fused_qk_rope_cat_cache_mla(
+        q,
+        ck,
+        kpe,
+        kv_cache,
+        slot,
+        pos,
+        csc,
+        kv_lora_rank=KV_LORA,
+        rope_head_dim=ROPE,
+        is_neox_style=False,
+        kv_cache_type="fp8_ds_mla",
+    )
+
+
 # ==========================================================================
 # Input generators — exact GLM-5 production shapes and dtypes
 # ==========================================================================
-def make_cos_sin_cache():
+def make_cos_sin_cache(theta=10000.0):
     inv = 1.0 / (
-        10000.0 ** (torch.arange(0, ROPE, 2, device=device, dtype=torch.float32) / ROPE)
+        theta ** (torch.arange(0, ROPE, 2, device=device, dtype=torch.float32) / ROPE)
     )
     positions = torch.arange(16384.0, device=device)
     return torch.cat(
@@ -159,9 +203,12 @@ def make_inputs_fp8(T, num_heads=H, num_pages=8, seed=0):
 # Precision check
 # ==========================================================================
 csc = make_cos_sin_cache()
+hy4_csc = make_cos_sin_cache(theta=10_000_000.0)
 
 
-def check_precision(name, make_fn, base_fn, fused_fn, cache_cmp_bytes=False):
+def check_precision(
+    name, make_fn, base_fn, fused_fn, cache_cmp_bytes=False, cos_sin_cache=csc
+):
     print(f"\n{'='*60}")
     print(f"Precision: {name}")
     print(f"{'='*60}")
@@ -173,8 +220,8 @@ def check_precision(name, make_fn, base_fn, fused_fn, cache_cmp_bytes=False):
             slot[::3] = -1
             q2, ck2, kpe2, kvc2 = q1.clone(), ck1.clone(), kpe1.clone(), kvc1.clone()
 
-            base_fn(q1, ck1, kpe1, kvc1, slot, pos, csc)
-            fused_fn(q2, ck2, kpe2, kvc2, slot, pos, csc)
+            base_fn(q1, ck1, kpe1, kvc1, slot, pos, cos_sin_cache)
+            fused_fn(q2, ck2, kpe2, kvc2, slot, pos, cos_sin_cache)
             torch.cuda.synchronize()
 
             q_ok = torch.equal(q1, q2)
@@ -220,7 +267,25 @@ fp8_ok = check_precision(
     cache_cmp_bytes=True,
 )
 
-if not (bf16_ok and fp8_ok):
+hy4_bf16_ok = check_precision(
+    "BF16 (auto) HY4 interleaved RoPE",
+    make_inputs_bf16,
+    baseline_bf16_hy4,
+    fused_bf16_hy4,
+    cache_cmp_bytes=False,
+    cos_sin_cache=hy4_csc,
+)
+
+hy4_fp8_ok = check_precision(
+    "FP8 (fp8_ds_mla) HY4 interleaved RoPE",
+    make_inputs_fp8,
+    baseline_fp8_hy4,
+    fused_fp8_hy4,
+    cache_cmp_bytes=True,
+    cos_sin_cache=hy4_csc,
+)
+
+if not (bf16_ok and fp8_ok and hy4_bf16_ok and hy4_fp8_ok):
     print("\nPRECISION FAILED — skipping perf")
     sys.exit(1)
 

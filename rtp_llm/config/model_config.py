@@ -91,6 +91,9 @@ class ModelConfig(CppModelConfig):
         "index_skip_topk_offset",
         "index_topk_pattern",
         "indexer_types",
+        "indexer_layernorm_eps",
+        "indexer_scale_fmt",
+        "indexer_use_hadamard",
         # HY V4 Python execution fields. The generic C++ model does not
         # consume the iHC/gated-MLA schedule.
         "enable_ihc",
