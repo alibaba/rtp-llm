@@ -340,12 +340,15 @@ class AtomicWeight(WeightModule):
 
     @property
     def need_transpose(self) -> bool:
-        if isinstance(
-            self.process_fun, functools.partial
-        ) and self.process_fun.func.__name__ in ["transpose_pad", "transpose"]:
-            return True
-        else:
-            return False
+        process_fun = (
+            self.process_fun.func
+            if isinstance(self.process_fun, functools.partial)
+            else self.process_fun
+        )
+        return getattr(process_fun, "__name__", None) in {
+            "transpose_pad",
+            "transpose",
+        }
 
     def _load_raw_tensor(
         self,

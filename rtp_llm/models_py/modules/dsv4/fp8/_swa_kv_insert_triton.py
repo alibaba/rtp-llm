@@ -248,6 +248,8 @@ def _insert_packed_k_cache_flat_kernel(
         block_ptr + cache_block_size * 576 + pos * 8 + scale_offsets,
         tl.load(packed_ptr + token * 584 + 576 + scale_offsets),
     )
+
+
 def insert_packed_k_cache_flat(
     packed: torch.Tensor,
     k_cache: torch.Tensor,
@@ -261,9 +263,7 @@ def insert_packed_k_cache_flat(
     if num_tokens == 0:
         return
     if slot_mapping is None:
-        slot_mapping = torch.arange(
-            num_tokens, dtype=torch.int64, device=packed.device
-        )
+        slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=packed.device)
     else:
         assert slot_mapping.shape == (num_tokens,)
         slot_mapping = slot_mapping.to(device=packed.device, dtype=torch.int64)
@@ -282,6 +282,8 @@ def insert_packed_k_cache_flat(
         cache_block_size=int(k_cache.shape[1]),
         block_stride=int(k_cache.stride(0)),
     )
+
+
 def quantize_and_insert_k_cache_cp_byte_sliced(
     k: torch.Tensor,
     k_cache_raw: torch.Tensor,

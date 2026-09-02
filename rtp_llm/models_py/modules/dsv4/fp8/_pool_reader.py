@@ -71,6 +71,7 @@ class CompressedKPoolReader:
     ) -> None:
         raise NotImplementedError
 
+
 class LocalPoolReader(CompressedKPoolReader):
     def fill(
         self,
@@ -220,6 +221,7 @@ class CPShardedPoolReader(CompressedKPoolReader):
 
         # Step 4: restore to request-concatenated logical order.
         self._restore_dequant_scatter(gathered, out, seq_lens, offset)
+
     def start_fill_async(
         self,
         *,

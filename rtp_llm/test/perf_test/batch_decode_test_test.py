@@ -75,6 +75,33 @@ class BatchDecodeTest(unittest.TestCase):
         self.assertEqual(result.success_requests, 1)
         self.assertEqual(result.fail_requests, 1)
 
+    def test_multi_run_trimming_ignores_zero_success_rounds(self):
+        success = ResponseInfo(
+            {
+                "aux_info": {
+                    "input_len": 4,
+                    "output_len": 2,
+                    "cost_time": 3.0,
+                    "first_token_cost_time": 2.0,
+                    "wait_time": 1.0,
+                }
+            }
+        )
+        runner = self._batch_perf([])
+        runner.measure_runs = 3
+        runner._curl_server_responses.side_effect = [
+            [ResponseInfo({}, False)],
+            [ResponseInfo({}, False)],
+            [success],
+        ]
+
+        result = runner.run()
+
+        self.assertEqual(result.total_requests, 3)
+        self.assertEqual(result.success_requests, 1)
+        self.assertEqual(result.fail_requests, 2)
+        self.assertEqual(result.avg_decode_time, 1.0)
+
     def test_main_stops_server_when_runner_raises(self):
         args = argparse.Namespace(
             generate_config="{}",

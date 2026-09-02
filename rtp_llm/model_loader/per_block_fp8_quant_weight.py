@@ -954,14 +954,25 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         preserve_output_major = _preserve_output_major_fp8_layout(
             quant_kernel, load_config
         )
+        # AtomicWeight._load_raw_tensor has already applied process_fun.
+        # SM120 wants output-major [N, K], so an identity descriptor can be
+        # preserved while transpose/transpose_pad descriptors must be
+        # transposed back.  Looking only at the target architecture silently
+        # returned [K, N] for real descriptors with rectangular weights.
+        transpose_kernel = quant_kernel.dim() == 2 and (
+            not preserve_output_major or self.kernel.need_transpose
+        )
         if self.kernel.name == W.moe_w1 or self.kernel.name == W.moe_w2:
             pass
-        elif quant_kernel.dim() == 2 and not preserve_output_major:
+        elif transpose_kernel:
             quant_kernel = quant_kernel.T
 
         res = {self.kernel.name: quant_kernel.contiguous().to(device)}
         if self.scale:
-            scale = scale.T if scale.dim() == 2 and not preserve_output_major else scale
+            transpose_scale = scale.dim() == 2 and (
+                not preserve_output_major or self.scale.need_transpose
+            )
+            scale = scale.T if transpose_scale else scale
             res.update({self.scale.name: scale.contiguous().to(device)})
 
         return res

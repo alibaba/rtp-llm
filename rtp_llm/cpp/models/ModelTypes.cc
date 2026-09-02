@@ -297,6 +297,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                                  {combo_position_ids_size},
                                                  pickAlloc(GptModelInputDeviceBit::kDeviceBitComboPositionIds));
+        } else {
+            // tpSyncModelInputs can run more than once for the same logical
+            // batch (for example target -> draft under CP+MTP).  A zero-sized
+            // root tensor is a state update too: do not retain the local
+            // position ids produced by the preceding target forward.
+            inputs.combo_position_ids = torch::Tensor();
         }
         if (hidden_states_size) {
             // DSpARK prefill seeding makes last_hidden_states' row count

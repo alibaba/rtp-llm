@@ -82,9 +82,10 @@ struct MtpExecutorTestConfig {
 };
 
 struct PyCommitModelObservation {
-    bool          initialized   = false;
-    bool          saw_kv_cache  = false;
-    int           forward_count = 0;
+    bool          initialized           = false;
+    bool          saw_kv_cache          = false;
+    int           forward_count         = 0;
+    int           propose_forward_count = 0;
     torch::Tensor input_ids;
     torch::Tensor input_hiddens;
 };
@@ -585,6 +586,17 @@ public:
                                                                0;
                     return torch_ext::PyModelOutputs(
                         torch::empty({0, hidden_width}, py_commit_observation->input_hiddens.options()));
+                });
+            py_sp_model.attr("forward_propose") =
+                py::cpp_function([py_commit_observation](const torch_ext::PyModelInputs& inputs, py::object) {
+                    py_commit_observation->propose_forward_count++;
+                    auto hidden_states = inputs.input_hiddens;
+                    if (!hidden_states.defined() || hidden_states.numel() == 0) {
+                        hidden_states = torch::zeros(
+                            {inputs.input_ids.numel(), 2},
+                            torch::TensorOptions().dtype(torch::kBFloat16).device(inputs.input_ids.device()));
+                    }
+                    return torch_ext::PyModelOutputs(std::move(hidden_states));
                 });
             params.py_sp_model = std::move(py_sp_model);
         }
@@ -1509,10 +1521,16 @@ TEST_F(MtpExecutorTest, testDSparkDecodeKeepsProposalAndMarkovContract) {
     test_config.vocab_size_override  = test_config.vocab_size;
     test_config.dspark_mask_token_id = 0;
     test_config.role_type            = RoleType::DECODE;
+    test_config.use_python_sp_model  = true;
 
     auto components = createMtpExecutorComponents(test_config);
 
     EXPECT_FALSE(components.executor->dspark_prefill_commit_only_);
+    EXPECT_NE(dynamic_cast<PyWrappedModel*>(components.executor->draft_model_.get()), nullptr);
+    EXPECT_NE(dynamic_cast<PyWrappedModel*>(components.executor->sp_prefill_draft_model_.get()), nullptr);
+    ASSERT_NE(components.py_commit_observation, nullptr);
+    EXPECT_TRUE(components.py_commit_observation->initialized);
+    EXPECT_TRUE(components.py_commit_observation->saw_kv_cache);
     EXPECT_TRUE(components.executor->dspark_markov_w1_.defined());
     EXPECT_TRUE(components.executor->dspark_markov_w2_.defined());
 }
