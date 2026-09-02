@@ -294,7 +294,13 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                                             && seq_size_per_block % static_cast<size_t>(cp_size) == 0;
         const size_t canonical_seq_size_per_block =
             uses_cp_canonical_keys ? seq_size_per_block / static_cast<size_t>(cp_size) : seq_size_per_block;
-        const int prefix_length = prefix_lengths_host[context_index];
+        const size_t base_seq_size_per_block = cache_config.seq_size_per_block;
+        RTP_LLM_CHECK_WITH_INFO(base_seq_size_per_block > 0, "cache-store base tokens_per_block must be positive");
+        const size_t unsharded_key_stride = !uses_cp_canonical_keys && seq_size_per_block >= base_seq_size_per_block
+                                                    && seq_size_per_block % base_seq_size_per_block == 0 ?
+                                                seq_size_per_block / base_seq_size_per_block :
+                                                1;
+        const int    prefix_length        = prefix_lengths_host[context_index];
         RTP_LLM_CHECK_WITH_INFO(prefix_length % static_cast<int>(canonical_seq_size_per_block) == 0,
                                 "cache-store tag=%s prefix_length=%d is not aligned to canonical "
                                 "tokens_per_block=%zu (physical tokens_per_block=%zu, cp_size=%d)",
@@ -313,6 +319,11 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         const int canonical_block_num       = (input_length + static_cast<int>(canonical_seq_size_per_block) - 1)
                                         / static_cast<int>(canonical_seq_size_per_block);
         const int canonical_total_blocks = canonical_block_num + canonical_reuse_block_num;
+        const int global_reuse_block_num = prefix_length / static_cast<int>(base_seq_size_per_block);
+        const int global_block_num =
+            (input_length + static_cast<int>(base_seq_size_per_block) - 1) / static_cast<int>(base_seq_size_per_block);
+        const size_t global_key_count = static_cast<size_t>(
+            std::min<int>(global_block_num + global_reuse_block_num, static_cast<int>(cache_keys_per_batch)));
         const int total_blocks =
             uses_cp_canonical_keys ? (canonical_total_blocks + cp_size - 1) / cp_size : block_num + reuse_block_num;
         if (total_blocks <= 0) {
@@ -434,15 +445,21 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         // CP projection is valid only when a physical group block can be
         // expressed as an integral number of canonical CP blocks. Smaller
         // tag-local blocks keep their full key/offset namespace.
-        const int  plan_cp_rank = uses_cp_canonical_keys ? cp_rank : 0;
-        const int  plan_cp_size = uses_cp_canonical_keys ? cp_size : 1;
-        const auto block_plan   = buildCacheStorePlan(
-            group.policy,
-            static_cast<size_t>(std::min<int>(canonical_total_blocks, static_cast<int>(cache_keys_per_batch))),
-            /*reuse_block_size=*/0,
-            use_group_cache_transfer_policy,
-            plan_cp_rank,
-            plan_cp_size);
+        const int    plan_cp_rank = uses_cp_canonical_keys ? cp_rank : 0;
+        const int    plan_cp_size = uses_cp_canonical_keys ? cp_size : 1;
+        const size_t plan_block_count =
+            uses_cp_canonical_keys ?
+                static_cast<size_t>(std::min<int>(canonical_total_blocks, static_cast<int>(cache_keys_per_batch))) :
+                std::min(static_cast<size_t>(total_blocks),
+                         (global_key_count + unsharded_key_stride - 1) / unsharded_key_stride);
+        const auto block_plan = buildCacheStorePlan(group.policy,
+                                                    plan_block_count,
+                                                    /*reuse_block_size=*/0,
+                                                    use_group_cache_transfer_policy,
+                                                    plan_cp_rank,
+                                                    plan_cp_size,
+                                                    unsharded_key_stride,
+                                                    global_key_count);
         for (const auto& pair : block_plan) {
             addBlock(pair.key_index, pair.offset_index);
         }

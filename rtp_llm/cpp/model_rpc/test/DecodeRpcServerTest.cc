@@ -363,11 +363,61 @@ TEST(DecodeRpcServerTest, CompactStateGroupLoadsGlobalTailKeysIntoCanonicalSlots
     EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{9, 4}, {10, 5}}));
 }
 
+TEST(DecodeRpcServerTest, UnshardedFullGroupUsesTerminalKeyOfEachTagBlock) {
+    auto       policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    const auto plan   = DecodeRpcServer::buildGroupLoadPlan(policy,
+                                                          /*local_block_num=*/3,
+                                                          /*cache_key_count=*/6,
+                                                          /*reuse_block_size=*/0,
+                                                          /*use_hybrid=*/true,
+                                                          /*group_seq_size_per_block=*/2,
+                                                          /*base_seq_size_per_block=*/1,
+                                                          /*physical_cp_size=*/1);
+
+    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{1, 0}, {3, 1}, {5, 2}}));
+}
+
+TEST(DecodeRpcServerTest, UnshardedSameGeometryKeepsCompleteKeyNamespace) {
+    auto       policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    const auto plan   = DecodeRpcServer::buildGroupLoadPlan(policy,
+                                                          /*local_block_num=*/44,
+                                                          /*cache_key_count=*/44,
+                                                          /*reuse_block_size=*/0,
+                                                          /*use_hybrid=*/false,
+                                                          /*group_seq_size_per_block=*/8,
+                                                          /*base_seq_size_per_block=*/8,
+                                                          /*physical_cp_size=*/1);
+
+    ASSERT_EQ(plan.size(), 44u);
+    for (size_t i = 0; i < plan.size(); ++i) {
+        EXPECT_EQ(plan[i].key_index, static_cast<int>(i));
+        EXPECT_EQ(plan[i].offset_index, static_cast<int>(i));
+    }
+}
+
+TEST(DecodeRpcServerTest, PhysicallyShardedFullGroupKeepsLogicalPlanForPeerSplit) {
+    auto       policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    const auto plan   = DecodeRpcServer::buildGroupLoadPlan(policy,
+                                                          /*local_block_num=*/11,
+                                                          /*cache_key_count=*/11,
+                                                          /*reuse_block_size=*/0,
+                                                          /*use_hybrid=*/false,
+                                                          /*group_seq_size_per_block=*/8,
+                                                          /*base_seq_size_per_block=*/4,
+                                                          /*physical_cp_size=*/2);
+
+    ASSERT_EQ(plan.size(), 11u);
+    for (size_t i = 0; i < plan.size(); ++i) {
+        EXPECT_EQ(plan[i].key_index, static_cast<int>(i));
+        EXPECT_EQ(plan[i].offset_index, static_cast<int>(i));
+    }
+}
+
 TEST(DecodeRpcServerTest, CompactStateGroupLoadPlanMatchesProducerStorePlan) {
     // The consumer must project exactly like the producer: same (key, offset)
     // pairs, or the decode reads a key the prefill never registered.
-    const auto policy = makeCompactStatePolicy(/*active_tail_blocks=*/2);
-    const auto decode_plan = DecodeRpcServer::buildGroupLoadPlan(policy,
+    const auto policy        = makeCompactStatePolicy(/*active_tail_blocks=*/2);
+    const auto decode_plan   = DecodeRpcServer::buildGroupLoadPlan(policy,
                                                                  /*local_block_num=*/6,
                                                                  /*cache_key_count=*/11,
                                                                  /*reuse_block_size=*/0,

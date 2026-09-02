@@ -79,7 +79,9 @@ inline std::vector<CacheStoreBlockPair> buildCacheStorePlan(const CacheGroupPoli
                                                             size_t                  reuse_block_size,
                                                             bool                    use_hybrid,
                                                             int                     cp_rank,
-                                                            int                     cp_size) {
+                                                            int                     cp_size,
+                                                            size_t                  unsharded_key_stride = 1,
+                                                            size_t                  cache_key_count      = 0) {
     std::vector<CacheStoreBlockPair> plan;
     if (total_logical_blocks == 0) {
         return plan;
@@ -115,7 +117,19 @@ inline std::vector<CacheStoreBlockPair> buildCacheStorePlan(const CacheGroupPoli
         if (sharded_full && block_pos % cp_size != cp_rank) {
             continue;
         }
-        plan.push_back({block_pos, sharded_full ? block_pos / cp_size : block_pos});
+        int key_index = block_pos;
+        if (cp_size == 1 && unsharded_key_stride > 1) {
+            if (cache_key_count == 0) {
+                return {};
+            }
+            // An unsharded tag-local block may span several entries in the
+            // global cache-key namespace. Its identity is the terminal hash of
+            // that span; the final partial block uses the last available key.
+            const size_t full_spans   = cache_key_count / unsharded_key_stride;
+            const size_t terminal_key = pos < full_spans ? (pos + 1) * unsharded_key_stride - 1 : cache_key_count - 1;
+            key_index                 = static_cast<int>(terminal_key);
+        }
+        plan.push_back({key_index, sharded_full ? block_pos / cp_size : block_pos});
     }
     return plan;
 }

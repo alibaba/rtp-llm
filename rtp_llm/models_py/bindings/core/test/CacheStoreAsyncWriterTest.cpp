@@ -246,16 +246,36 @@ TEST_F(CacheStoreAsyncWriterTest, SelectsRequestedMtpCacheConfig) {
     EXPECT_EQ(writer.cp_size_, 1);
 }
 
-TEST_F(CacheStoreAsyncWriterTest, UsesExplicitForwardCpTopology) {
-    CacheStoreAsyncWriter writer(/*device_id=*/-1,
-                                 /*cache_manager=*/nullptr,
-                                 /*cache_model_id=*/0,
-                                 /*mtp_cache_config_index=*/std::nullopt,
-                                 /*forward_cp_rank=*/1,
-                                 /*forward_cp_size=*/2);
+TEST_F(CacheStoreAsyncWriterTest, UsesPhysicalCpTopologyFromAllocatorMapper) {
+    auto              config = makeWriterTestCacheConfig("default", /*kv_stride=*/16);
+    ParallelismConfig parallelism;
+    parallelism.tp_rank                            = 1;
+    parallelism.tp_size                            = 2;
+    parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    auto cache_manager                             = std::make_shared<KVCacheManager>(
+        config, /*warmup=*/true, /*metrics_reporter=*/nullptr, KVCacheConfig{}, parallelism);
+    CacheStoreAsyncWriter writer(/*device_id=*/-1, cache_manager);
 
     EXPECT_EQ(writer.cp_rank_, 1);
     EXPECT_EQ(writer.cp_size_, 2);
+}
+
+TEST_F(CacheStoreAsyncWriterTest, ForwardCpWithoutPhysicalShardingKeepsCompleteNamespace) {
+    for (size_t tp_rank = 0; tp_rank < 2; ++tp_rank) {
+        auto              config = makeWriterTestCacheConfig("default", /*kv_stride=*/16);
+        ParallelismConfig parallelism;
+        parallelism.tp_rank                            = tp_rank;
+        parallelism.tp_size                            = 2;
+        parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+        parallelism.prefill_cp_config.kv_cache_sharded = false;
+        auto cache_manager                             = std::make_shared<KVCacheManager>(
+            config, /*warmup=*/true, /*metrics_reporter=*/nullptr, KVCacheConfig{}, parallelism);
+        CacheStoreAsyncWriter writer(/*device_id=*/-1, cache_manager);
+
+        EXPECT_EQ(writer.cp_rank_, 0) << "tp_rank=" << tp_rank;
+        EXPECT_EQ(writer.cp_size_, 1) << "tp_rank=" << tp_rank;
+    }
 }
 
 TEST_F(CacheStoreAsyncWriterTest, ExceptionPropagation) {

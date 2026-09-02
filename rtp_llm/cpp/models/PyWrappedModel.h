@@ -381,15 +381,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         throw std::runtime_error("PyWrappedModel constructor: Python model initialization failed.");
     }
 
-    // Forward CP controls cache-key projection even when the KV allocator is
-    // not physically sharded, so pass this topology independently of CPSlotMapper.
     cache_store_async_writer_ =
         std::make_shared<CacheStoreAsyncWriter>(static_cast<int>(params.parallelism_config.local_rank),
                                                 cache_manager_,
                                                 model_id_,
-                                                params.mtp_cache_config_index,
-                                                enable_prefill_cp_ ? static_cast<int>(device_props_.tp_rank) : 0,
-                                                enable_prefill_cp_ ? static_cast<int>(device_props_.tp_size) : 1);
+                                                params.mtp_cache_config_index);
 
     if (py::hasattr(py_model_, "has_mtp_hidden_buffer")) {
         has_mtp_hidden_buffer_ = py_model_.attr("has_mtp_hidden_buffer")().cast<bool>();

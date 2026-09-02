@@ -786,6 +786,21 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCpRoundRobinUsesCanonicalKeyCount) {
         EXPECT_EQ(reinterpret_cast<uintptr_t>(it->second.addr), base_addr + local_block * physical_row_stride);
         EXPECT_EQ(it->second.len, physical_row_stride);
     }
+
+    auto rank1_store = std::make_shared<MockCacheStore>();
+    ASSERT_NO_THROW(runtimeWriteCacheStore(
+        inputs, layer_cache, config, rank1_store, /*cache_model_id=*/0, /*cp_rank=*/1, /*cp_size=*/2, nullptr));
+    ASSERT_EQ(rank1_store->records.size(), 1u);
+    const auto& rank1_record = rank1_store->records.front();
+    ASSERT_EQ(rank1_record.blocks.size(), canonical_block_num / 2);
+    for (size_t local_block = 0; local_block < canonical_block_num / 2; ++local_block) {
+        const size_t key_index = local_block * 2 + 1;
+        const auto   key       = "kv_" + cacheKeyAt(inputs, key_index, layer_cache.layer_id, layer_cache.tag);
+        const auto   it        = rank1_record.blocks.find(key);
+        ASSERT_NE(it, rank1_record.blocks.end()) << "missing block " << key;
+        EXPECT_EQ(reinterpret_cast<uintptr_t>(it->second.addr), base_addr + local_block * physical_row_stride);
+        EXPECT_EQ(it->second.len, physical_row_stride);
+    }
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreFailureBufferContainsEveryBlockKey) {

@@ -148,12 +148,13 @@ DecodeRpcServer::makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propo
 }
 
 std::vector<CacheStoreBlockPair> DecodeRpcServer::buildGroupLoadPlan(const CacheGroupPolicy& policy,
-                                                                    size_t                  local_block_num,
-                                                                    size_t                  cache_key_count,
-                                                                    size_t                  reuse_block_size,
-                                                                    bool                    use_hybrid,
-                                                                    size_t                  group_seq_size_per_block,
-                                                                    size_t                  base_seq_size_per_block) {
+                                                                     size_t                  local_block_num,
+                                                                     size_t                  cache_key_count,
+                                                                     size_t                  reuse_block_size,
+                                                                     bool                    use_hybrid,
+                                                                     size_t                  group_seq_size_per_block,
+                                                                     size_t                  base_seq_size_per_block,
+                                                                     int                     physical_cp_size) {
     std::vector<CacheStoreBlockPair> plan;
     if (local_block_num == 0 || cache_key_count == 0) {
         return plan;
@@ -166,16 +167,27 @@ std::vector<CacheStoreBlockPair> DecodeRpcServer::buildGroupLoadPlan(const Cache
                                 group_seq_size_per_block / base_seq_size_per_block :
                                 1;
     const bool   compact  = policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK && cp_scale > 1;
+    const bool   unsharded_strided_full =
+        policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN && physical_cp_size <= 1 && cp_scale > 1;
     // A compact table is addressed in canonical slots over the full key namespace,
     // so the planner needs every logical block; a flat table is addressed by
     // logical position, which a speculative reserve tail may outrun.
-    const size_t total_logical_blocks = compact ? cache_key_count : std::min(local_block_num, cache_key_count);
+    const size_t unsharded_group_blocks = (cache_key_count + cp_scale - 1) / cp_scale;
+    const size_t total_logical_blocks   = compact                ? cache_key_count :
+                                          unsharded_strided_full ? std::min(local_block_num, unsharded_group_blocks) :
+                                                                   std::min(local_block_num, cache_key_count);
     // Decode owns whole logical blocks of BLOCK_ROUND_ROBIN groups; the per-peer
     // split happens later, per block, so only compact groups are CP-projected here.
     const int cp_size = compact ? static_cast<int>(cp_scale) : 1;
 
-    const auto raw_plan = buildCacheStorePlan(
-        policy, total_logical_blocks, reuse_block_size, use_hybrid, /*cp_rank=*/cp_size - 1, cp_size);
+    const auto raw_plan = buildCacheStorePlan(policy,
+                                              total_logical_blocks,
+                                              reuse_block_size,
+                                              use_hybrid,
+                                              /*cp_rank=*/cp_size - 1,
+                                              cp_size,
+                                              unsharded_strided_full ? cp_scale : 1,
+                                              cache_key_count);
     plan.reserve(raw_plan.size());
     for (const auto& pair : raw_plan) {
         if (static_cast<size_t>(pair.offset_index) < local_block_num
@@ -995,7 +1007,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                   static_cast<size_t>(std::max<int64_t>(load_context.reuse_block_size, 0)),
                                   cfg_use_hybrid,
                                   cfg.seqSizePerBlockForGroup(gid),
-                                  cfg.seq_size_per_block);
+                                  cfg.seq_size_per_block,
+                                  load_context.prefill_cp_size);
     };
     for (int i = 0; i < load_context.peer_addrs.size(); i++) {
         auto&                                            peer_addr = load_context.peer_addrs[i];
@@ -1159,7 +1172,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                             size_t      model_id  = module_plan.cache_model_id;
 
                             CacheGroupType group_type = groupType(mtp_cache_cfg, mtp_use_hybrid, gid);
-                            const auto load_plan = groupLoadPlan(mtp_cache_cfg, mtp_use_hybrid, gid, block_num);
+                            const auto     load_plan  = groupLoadPlan(mtp_cache_cfg, mtp_use_hybrid, gid, block_num);
 
                             if (!shouldLoadGroupFromPeer(mtp_cache_cfg, group_type, gid, i)) {
                                 continue;

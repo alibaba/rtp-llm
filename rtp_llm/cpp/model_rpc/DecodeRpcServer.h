@@ -105,8 +105,9 @@ private:
                                                                size_t                  reuse_block_size,
                                                                bool                    use_hybrid,
                                                                size_t                  group_seq_size_per_block,
-                                                               size_t                  base_seq_size_per_block);
-    static grpc::Status                   generateRequestReadFailureStatus(bool cancelled);
+                                                               size_t                  base_seq_size_per_block,
+                                                               int                     physical_cp_size = 1);
+    static grpc::Status                     generateRequestReadFailureStatus(bool cancelled);
     // Classifies error.type for the synthesized Decode phase spans. Static and
     // side-effect free so the classification itself is unit testable.
     static const char* phaseErrorType(bool                         request_ok,
