@@ -19,7 +19,7 @@ triton==3.6.0
 
 # Self-built wheels (built from GitHub deepseek-ai/{DeepGEMM,FlashMLA} main
 # against torch 2.11+cu130 with gcc-toolset-12; SHAs encoded in filename).
-http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_b200/deep_gemm-2.5.0%2B8a4dfba-cp310-cp310-linux_x86_64.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_b200/deep_gemm-2.5.0%2B8a4dfba-cp310-cp310-linux_x86_64.whl
 https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl
 
 # rtp_kernel built from gitlab cuda_extension main (sm_80/90a/100a)
@@ -32,7 +32,7 @@ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/rtp_kernel-0.1.0%2Bcu
 # on PyPI but the import is `fast_safetensors`; both wheels installed.
 # Required by --load_method fastsafetensors smoke targets.
 https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl
-https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl
+https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130/fastsafetensors-0.3.4.dev20260901%2Bali.fuseshm.g78ac75c8.aone67880226-cp310-cp310-linux_x86_64.whl
 # fast_safetensors rebuilt against torch 2.11+cu130.
 
 # Pin safetensors and tabulate for parity with cu12_9 lock.

@@ -602,7 +602,7 @@ decord==0.6.0 ; platform_machine == "x86_64" \
 deep-ep @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/pkg%2Facclep%2Fdeep_ep-1.2.1.10%2Bd7d7b48-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:4854e041c6df768efac4e7ff7bbb7c474577b7d877c86bb1ea378b37b2b870fe
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
-deep-gemm @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_b200/deep_gemm-2.5.0%2B8a4dfba-cp310-cp310-linux_x86_64.whl \
+deep-gemm @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_b200/deep_gemm-2.5.0%2B8a4dfba-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:5844fee49160525128ca49b0e8ae73aac1eb4db44da108ede222cc85e9aac50a
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
 distro==1.9.0 \
@@ -626,8 +626,8 @@ fastapi==0.115.6 \
     --hash=sha256:9ec46f7addc14ea472958a96aae5b5de65f39721a46aaf5705c480d9a8b76654 \
     --hash=sha256:e9240b29e36fa8f4bb7290316988e90c381e5092e0cbe84e7818cc3713bcf305
     # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
-fastsafetensors @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:04f3a2e8b082af33e7c78536d79db2e6ebb72debebc934fc90087b9b873db552
+fastsafetensors @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130/fastsafetensors-0.3.4.dev20260901%2Bali.fuseshm.g78ac75c8.aone67880226-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:bb084a01e6b3d97a8790e583cb5c0fcadcef1960e64b069bb2a97fff0079fe40
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
 filelock==3.20.0 \
     --hash=sha256:339b4732ffda5cd79b13f4e2711a31b0365ce445d95d243bb996273d072546a2 \
