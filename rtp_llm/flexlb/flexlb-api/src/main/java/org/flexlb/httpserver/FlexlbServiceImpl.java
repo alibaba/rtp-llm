@@ -573,7 +573,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                         request.getModel(),
                         request.getInferenceSessionId(),
                         status.getServerIp() + ":" + status.getHttpPort(),
-                        request.getRequestId(),
                         request.getSessionPlacementEpoch()));
     }
 

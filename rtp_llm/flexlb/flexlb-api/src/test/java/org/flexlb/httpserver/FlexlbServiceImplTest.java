@@ -8,6 +8,8 @@ import org.flexlb.balance.scheduler.DeliveryClaimKind;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.scheduler.RequestLifecycleState;
 import org.flexlb.balance.session.SessionPlacementStore;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
@@ -22,22 +24,31 @@ import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
-import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.slf4j.LoggerFactory;
+
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.function.BiConsumer;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.*;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 class FlexlbServiceImplTest {
 
@@ -606,7 +617,7 @@ class FlexlbServiceImplTest {
         service.schedule(request, mock(StreamObserver.class));
 
         verify(sessionPlacementStore).record(
-                "kimi-k3", "isess_v1_example", "10.0.0.2:8080", 100_003L, 1L);
+                "kimi-k3", "isess_v1_example", "10.0.0.2:8080", 1L);
     }
 
     @Test
@@ -641,7 +652,7 @@ class FlexlbServiceImplTest {
         service.schedule(request, mock(StreamObserver.class));
 
         verify(sessionPlacementStore).record(
-                "kimi-k3", "isess_v1_pdfusion", "10.0.0.3:8081", 100_004L, 2L);
+                "kimi-k3", "isess_v1_pdfusion", "10.0.0.3:8081", 2L);
     }
 
     @Test

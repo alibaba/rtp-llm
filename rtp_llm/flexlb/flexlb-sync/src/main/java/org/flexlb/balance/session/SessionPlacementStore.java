@@ -56,13 +56,12 @@ public final class SessionPlacementStore {
         return Optional.of(placement);
     }
 
-    public void record(String model, String sessionId, String ipPort,
-                       long requestId, long expectedEpoch) {
+    public void record(String model, String sessionId, String ipPort, long expectedEpoch) {
         if (!valid(sessionId) || ipPort == null || ipPort.isBlank()) {
             return;
         }
         Key key = new Key(model, sessionId);
-        Placement placement = new Placement(ipPort, requestId, clock.getAsLong());
+        Placement placement = new Placement(ipPort, clock.getAsLong());
         placements.asMap().compute(key, (ignored, state) -> {
             if (state == null) {
                 return null;
@@ -122,7 +121,7 @@ public final class SessionPlacementStore {
     private record Key(String model, String sessionId) {
     }
 
-    public record Placement(String ipPort, long requestId, long storedAtMs) {
+    public record Placement(String ipPort, long storedAtMs) {
     }
 
     private record State(long epoch, Placement placement) {

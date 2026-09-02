@@ -506,7 +506,7 @@ class ShortestTtftCacheAffinityTest {
     }
 
     private void record(String ipPort) {
-        sessionPlacementStore.record("kimi-k3", "session-1", ipPort, 1L,
+        sessionPlacementStore.record("kimi-k3", "session-1", ipPort,
                 sessionPlacementStore.currentEpoch("kimi-k3", "session-1"));
     }
 

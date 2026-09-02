@@ -126,7 +126,7 @@ class CostBasedPrefillStrategyTest {
         affinity.setTtlMs(1_800_000L);
         affinity.setMaxExtraTtftMs(100L);
         config.getRouter().getRoles().getPrefill().setSessionAffinity(affinity);
-        sessionPlacementStore.record("kimi-k3", "session-1", "10.0.0.2:8080", 1L,
+        sessionPlacementStore.record("kimi-k3", "session-1", "10.0.0.2:8080",
                 sessionPlacementStore.currentEpoch("kimi-k3", "session-1"));
         BalanceContext context = buildContext(1000, 101L, config);
         context.getRequest().setModel("kimi-k3");
