@@ -1,6 +1,17 @@
 load("//:def.bzl", "copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
+cc_test(
+    name = "cuda_graph_capture_range_test",
+    srcs = ["CudaGraphCaptureRangeTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_capture_range",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
 cc_library(
     name = "test_cuda_graph_runner_libs",
     srcs = [

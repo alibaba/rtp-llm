@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_capture_range.h"
 #include <optional>
 
 namespace rtp_llm {
@@ -95,18 +96,18 @@ void CudaGraphRunner::capturePrefill() {
 }
 
 std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
-    // Draft model prefill (num_tokens_per_bs_ != max_seq_len_): capture at multiples of num_tokens_per_bs_
+    // Draft-model prefill produces num_tokens_per_bs_ tokens for every decode
+    // request. Use the same batch buckets as decode so both graph families pad
+    // requests consistently; capturing every batch size defeats sparse decode
+    // capture configurations and creates many graphs that replay never selects.
     if (num_tokens_per_bs_ != max_seq_len_) {
-        std::vector<int> result;
-        for (int i = 1; i <= max_bs_; ++i) {
-            result.push_back(i * num_tokens_per_bs_);
-        }
-        RTP_LLM_LOG_INFO(
-            "Draft model prefill: capture seq_lens at %d intervals, %zu total (max_bs=%d, num_tokens_per_bs=%d)",
-            num_tokens_per_bs_,
-            result.size(),
-            max_bs_,
-            num_tokens_per_bs_);
+        const auto batch_sizes = getDecodeBatchSizesToCapture();
+        auto       result      = draftPrefillCaptureSeqLens(batch_sizes, num_tokens_per_bs_);
+        RTP_LLM_LOG_INFO("Draft model prefill: capture %zu seq_lens from decode batch buckets "
+                         "(max_bs=%d, num_tokens_per_bs=%d)",
+                         result.size(),
+                         max_bs_,
+                         num_tokens_per_bs_);
         return result;
     }
 
