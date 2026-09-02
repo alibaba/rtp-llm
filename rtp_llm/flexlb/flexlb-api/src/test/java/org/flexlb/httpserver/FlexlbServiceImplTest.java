@@ -610,6 +610,41 @@ class FlexlbServiceImplTest {
     }
 
     @Test
+    void successfulLocalDeliveryRecordsPdfusionSessionPlacement() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        ServerStatus pdfusion = new ServerStatus();
+        pdfusion.setRole(RoleType.PDFUSION);
+        pdfusion.setServerIp("10.0.0.3");
+        pdfusion.setHttpPort(8081);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        response.setServerStatus(List.of(pdfusion));
+        when(routeService.route(any(BalanceContext.class)))
+                .thenAnswer(invocation -> {
+                    BalanceContext context = invocation.getArgument(0);
+                    context.setConfig(configService.loadBalanceConfig());
+                    context.getRequest().setSessionPlacementEpoch(2L);
+                    return CompletableFuture.completedFuture(response);
+                });
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(100_004L)
+                        .setModel("kimi-k3")
+                        .setSessionRoutingHint(FlexlbScheduleProtocol.SessionRoutingHintPB
+                                .newBuilder()
+                                .setSchemaVersion(1)
+                                .setSessionId("isess_v1_pdfusion")
+                                .setState(FlexlbScheduleProtocol.SessionStatePB.ESTABLISHED))
+                        .build();
+
+        service.schedule(request, mock(StreamObserver.class));
+
+        verify(sessionPlacementStore).record(
+                "kimi-k3", "isess_v1_pdfusion", "10.0.0.3:8081", 100_004L, 2L);
+    }
+
+    @Test
     void queueTimeoutComesFromFlexlbConfigAndOverridesCallerTimeout() {
         FlexlbConfig queueConfig = ConfigService.parse("""
                 {

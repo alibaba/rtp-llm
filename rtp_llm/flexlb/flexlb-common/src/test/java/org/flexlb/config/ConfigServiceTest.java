@@ -235,6 +235,13 @@ class ConfigServiceTest {
                   }}}}
                 }
                 """));
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {
+                  "router":{"roles":{"prefill":{"sessionAffinity":{
+                    "ttlMs":3600001,"maxExtraTtftMs":10
+                  }}}}
+                }
+                """));
     }
 
     @Test
