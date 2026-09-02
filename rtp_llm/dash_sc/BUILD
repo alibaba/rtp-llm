@@ -47,6 +47,7 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//rtp_llm:telemetry",
         "//rtp_llm/server:server",
         ":grpcio",
         ":jsonschema",

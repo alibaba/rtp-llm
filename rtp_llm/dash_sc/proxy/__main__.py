@@ -14,6 +14,21 @@ import logging
 
 from rtp_llm.dash_sc.proxy.servicer import DashScProxyServicer
 from rtp_llm.dash_sc.server import DashScGrpcServer
+from rtp_llm.telemetry import init_telemetry, shutdown_telemetry
+
+
+def _init_trace_telemetry() -> None:
+    try:
+        init_telemetry("dash_sc", 0)
+    except Exception as e:
+        logging.warning("[DashScProxy] telemetry init failed: %s", e)
+
+
+def _shutdown_trace_telemetry() -> None:
+    try:
+        shutdown_telemetry()
+    except Exception as e:
+        logging.warning("[DashScProxy] telemetry shutdown failed: %s", e)
 
 
 def main() -> None:
@@ -45,7 +60,11 @@ def main() -> None:
         server = await grpc_server.start(args.port, servicer=servicer)
         await server.wait_for_termination()
 
-    asyncio.run(_run())
+    _init_trace_telemetry()
+    try:
+        asyncio.run(_run())
+    finally:
+        _shutdown_trace_telemetry()
 
 
 if __name__ == "__main__":

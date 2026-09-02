@@ -112,8 +112,13 @@ void PrefillGenerateContext::stopStream() {
         stream_.reset();
     }
 }
-grpc::Status PrefillGenerateContext::closeGrpcStream() {
+grpc::Status PrefillGenerateContext::closeGrpcStream(const std::string& attempt_error_override,
+                                                     bool               override_transport_error) {
     if (grpc_stream_closed) {
+        // The first close owns the transport/application terminal state. A
+        // later settlement callback is expected during stream teardown; it
+        // must remain idempotent and quiet rather than suggesting that the
+        // late override changed the already-finished attempt.
         return last_grpc_stream_closed_status;
     }
     grpc_stream_closed = true;
@@ -123,9 +128,57 @@ grpc::Status PrefillGenerateContext::closeGrpcStream() {
     if (client_stream) {
         client_stream->WritesDone();
         last_grpc_stream_closed_status = client_stream->Finish();
-        return last_grpc_stream_closed_status;
+    } else {
+        last_grpc_stream_closed_status = grpc::Status::OK;
     }
-    last_grpc_stream_closed_status = grpc::Status::OK;
+    // P->D CLIENT span reflects the bidi-stream terminal status;
+    // idempotent, destructor of the guard is the final fallback.
+    if (pd_client_span_guard) {
+        // Session stage breakdown (values already accumulated by
+        // PrefillStatInfo::nextStage for kmonitor): the span covers the whole
+        // ALLOCATE -> load-cache -> GENERATE session. Keys mirror the
+        // PrefillStatInfo field names 1:1; these three dominate the span
+        // duration (allocate RTT + wait local prefill + wait remote decode
+        // token stream), so their sum ~= span length minus us-level stages.
+        // Written here so the final retry attempt's guard gets the settled
+        // values.
+        // pollRemoteOutput() calls closeGrpcStream() as its own last step,
+        // i.e. before the stage is settled by the trailing nextStage() in
+        // GenerateStreamCall (and this method is idempotent, so the value
+        // would stay 0 forever). Settle the in-flight stage locally without
+        // touching stat_info so the kmonitor path keeps its own accounting.
+        int64_t poll_remote_output_rt_us = stat_info.poll_remote_output_rt_us;
+        if (stat_info.stage == PrefillStatInfo::pollRemoteOutput) {
+            poll_remote_output_rt_us += currentTimeUs() - stat_info.begin_time;
+        }
+        int64_t remote_allocate_resource_rt_us = stat_info.remote_allocate_resource_rt_us;
+        if (stat_info.stage == PrefillStatInfo::remoteAllocateResource) {
+            // A failed allocation closes the attempt from inside the gRPC error
+            // macro, before GenerateStreamCall can advance and settle the stage.
+            remote_allocate_resource_rt_us += currentTimeUs() - stat_info.begin_time;
+        }
+        pd_client_span_guard->setAttribute(telemetry::kAttrRtpLlmAllocateRtUs, remote_allocate_resource_rt_us);
+        pd_client_span_guard->setAttribute(telemetry::kAttrRtpLlmPollLocalOutputRtUs,
+                                           stat_info.poll_local_output_rt_us);
+        pd_client_span_guard->setAttribute(telemetry::kAttrRtpLlmPollRemoteOutputRtUs, poll_remote_output_rt_us);
+        pd_client_span_guard->setAttribute(telemetry::kAttrRpcResponseStatusCode,
+                                           telemetry::grpcStatusCodeValue(last_grpc_stream_closed_status.error_code()));
+        if (!attempt_error_override.empty() && (last_grpc_stream_closed_status.ok() || override_transport_error)) {
+            // The caller knows the semantic first cause. Retry attempts use this
+            // only when transport is OK; priority preemption explicitly keeps it
+            // authoritative even when TryCancel makes Finish() return CANCELLED.
+            pd_client_span_guard->setAttribute(telemetry::kAttrErrorType, attempt_error_override);
+            pd_client_span_guard->finish(opentelemetry::trace::StatusCode::kError,
+                                         "Prefill-to-decode RPC attempt failed before receiving a response");
+        } else if (last_grpc_stream_closed_status.ok()) {
+            pd_client_span_guard->finish(opentelemetry::trace::StatusCode::kOk);
+        } else {
+            const char* error_name = telemetry::grpcStatusCodeName(last_grpc_stream_closed_status.error_code());
+            pd_client_span_guard->setAttribute(telemetry::kAttrErrorType, error_name);
+            pd_client_span_guard->finish(opentelemetry::trace::StatusCode::kError,
+                                         telemetry::grpcStatusDescription(last_grpc_stream_closed_status.error_code()));
+        }
+    }
     return last_grpc_stream_closed_status;
 }
 
@@ -196,11 +249,9 @@ bool PrefillGenerateContext::isPriorityPreempted() const {
 
 bool PrefillGenerateContext::tryMarkOtherTerminal() {
     std::lock_guard<std::mutex> lock(terminal_transition_mu_);
-    auto expected = PrefillTerminalCause::ACTIVE;
-    if (terminal_cause_.compare_exchange_strong(expected,
-                                                PrefillTerminalCause::OTHER,
-                                                std::memory_order_acq_rel,
-                                                std::memory_order_acquire)) {
+    auto                        expected = PrefillTerminalCause::ACTIVE;
+    if (terminal_cause_.compare_exchange_strong(
+            expected, PrefillTerminalCause::OTHER, std::memory_order_acq_rel, std::memory_order_acquire)) {
         return true;
     }
     return expected == PrefillTerminalCause::OTHER;
@@ -243,16 +294,16 @@ bool PrefillGenerateContext::finalizePriorityPreemption() {
     details.set_error_message(error_info.ToString());
     std::string serialized_details;
     details.SerializeToString(&serialized_details);
-    error_status = grpc::Status(transErrorCodeToGrpc(ErrorCode::PRIORITY_PREEMPTED),
-                                error_info.ToString(),
-                                serialized_details);
+    error_status =
+        grpc::Status(transErrorCodeToGrpc(ErrorCode::PRIORITY_PREEMPTED), error_info.ToString(), serialized_details);
 
     // TryCancel is only the stop trigger. Finish joins the existing P->D RPC
     // execution; Decode's cancellation finalizer runs before Finish returns.
     tryCancelDownstream();
-    (void)closeGrpcStream();
+    (void)closeGrpcStream(ErrorCodeToString(ErrorCode::PRIORITY_PREEMPTED), true);
 
-    if (stream_) {
+    const auto finalized_stream = stream_;
+    if (finalized_stream) {
         stream_->reportError(ErrorCode::PRIORITY_PREEMPTED, "preempted by a higher-priority request");
         // A Prefill stream is scheduler-owned once published. Retry on the
         // managed finalizer executor until the scheduler has completed its
@@ -269,7 +320,8 @@ bool PrefillGenerateContext::finalizePriorityPreemption() {
     if (meta) {
         meta->markPriorityPreemptionCanceled(request_id,
                                              static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED),
-                                             "preempted by a higher-priority request");
+                                             "preempted by a higher-priority request",
+                                             finalized_stream);
     }
     priority_finalized_ = true;
     return true;

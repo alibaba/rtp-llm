@@ -1,5 +1,5 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("@arch_config//:arch_select.bzl", "telemetry_test_deps", "torch_deps")
 load("//bazel:device_defs.bzl",
     "device_impl_target", "device_test_envs")
 
@@ -26,9 +26,10 @@ py_test (
     srcs = ["model_rpc_client_test.py"],
     deps = [
         "//rtp_llm/cpp/model_rpc:model_rpc_client",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
         "//rtp_llm:testlib",
         "//rtp_llm/test/model_test/test_util:test_util",
-    ],
+    ] + telemetry_test_deps(),
     data = [
         "//:th_transformer"
     ],
@@ -167,7 +168,9 @@ cc_test(
         "RpcWriterCancellationTest.cc",
     ],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + [
+        "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
+    ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

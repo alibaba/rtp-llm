@@ -8,12 +8,18 @@ or async generator so the whole proxy path stays on a single asyncio event loop.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
 import grpc
 
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
-from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
+from rtp_llm.dash_sc.access_record import (
+    GrpcAccessRecord,
+    extract_body_trace_headers,
+    extract_span_external_request_id,
+    to_optional_int,
+)
 from rtp_llm.dash_sc.codec import (
     DASH_ERROR_BAD_REQUEST,
     DASH_ERROR_CAPACITY,
@@ -23,6 +29,13 @@ from rtp_llm.dash_sc.codec import (
 from rtp_llm.dash_sc.grpc_metrics import report_chunk, report_forwarder_rpc_done
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.proxy.service_route import create_service_discovery_from_env
+from rtp_llm.telemetry import CURRENT_TRACE_STATE
+from rtp_llm.telemetry import attributes as trace_attrs
+from rtp_llm.telemetry import start_client_span, start_server_span
+from rtp_llm.telemetry.tracing import (
+    metadata_to_headers,
+    select_valid_server_trace_carrier,
+)
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 
 _FORWARD_CHANNEL_OPTS: list[tuple[str, int]] = [
@@ -32,6 +45,15 @@ _FORWARD_CHANNEL_OPTS: list[tuple[str, int]] = [
     ("grpc.http2.max_pings_without_data", 0),
 ]
 _CHANNEL_CLEANUP_INTERVAL_S = 60
+_TRACE_METADATA_KEYS = frozenset({"traceparent", "tracestate", "baggage"})
+_BODY_TRACE_PARAMETER_KEYS = ("traceparent", "tracestate", "baggage")
+_DASH_RPC_METHOD = "GRPCInferenceService/ModelStreamInfer"
+_DASH_PROXY_SERVER_SPAN_NAME = "dash_sc.proxy.ModelStreamInfer"
+_DASH_PROXY_CLIENT_SPAN_NAME = "dash_sc.proxy.forward"
+_DASH_SERVER_ATTRIBUTES = {
+    "rpc.system": "grpc",
+    "rpc.method": _DASH_RPC_METHOD,
+}
 
 
 def _is_stream_done(resp: predict_v2_pb2.ModelStreamInferResponse) -> bool:
@@ -62,6 +84,67 @@ async def _close_request_iterator_quietly(request_iter) -> None:
         pass
 
 
+def _merge_trace_metadata(upstream_metadata, trace_metadata):
+    """Preserves application metadata while replacing the W3C trace carrier."""
+    upstream = tuple(upstream_metadata or ())
+    replaced_keys = _TRACE_METADATA_KEYS if trace_metadata else frozenset({"baggage"})
+    merged = []
+    for entry in upstream:
+        try:
+            key, value = entry
+        except Exception:
+            continue
+        if str(key).lower() not in replaced_keys:
+            merged.append((key, value))
+    merged.extend(trace_metadata)
+    return tuple(merged)
+
+
+def _strip_body_trace_carrier(request):
+    keys = [
+        key
+        for key in _BODY_TRACE_PARAMETER_KEYS
+        if key in request.parameters
+        and request.parameters[key].HasField("string_param")
+        and request.parameters[key].string_param
+    ]
+    if not keys:
+        return request
+    forwarded = predict_v2_pb2.ModelInferRequest()
+    forwarded.CopyFrom(request)
+    for key in keys:
+        del forwarded.parameters[key]
+    return forwarded
+
+
+def _finish_proxy_traces(server_state, client_span, record, exc) -> None:
+    error_type = ""
+    if record.status != "OK":
+        error_type = "Cancelled" if record.status == "CANCELLED" else record.status
+    trace_error = exc if error_type else None
+    try:
+        if client_span is not None:
+            client_span.finish(error=trace_error, error_type=error_type)
+        if server_state is not None:
+            server_state.finish(error=trace_error, error_type=error_type)
+    finally:
+        if CURRENT_TRACE_STATE.get() is server_state:
+            CURRENT_TRACE_STATE.set(None)
+
+
+def _status_exception_for_proxy(
+    record: GrpcAccessRecord, exc: Optional[BaseException]
+) -> Optional[BaseException]:
+    # grpc.aio context.abort() records the requested code on the context and
+    # then raises AbortError. When the abort relays a downstream RpcError, use
+    # that context code instead of replacing it with UNKNOWN_AbortError.
+    if isinstance(exc, grpc.aio.AbortError) and record.backend_rpc_code:
+        if isinstance(exc.__cause__, grpc.aio.AioRpcError):
+            return exc.__cause__
+        return None
+    return exc
+
+
 def _append_downstream_frontend_addr(details: str, addr: Optional[str]) -> str:
     if not addr:
         return details
@@ -82,7 +165,10 @@ async def _abort_with_downstream_grpc_error(
         getattr(code, "name", str(code)),
         details,
     )
-    await context.abort(code, details)
+    try:
+        await context.abort(code, details)
+    except grpc.aio.AbortError as abort_error:
+        raise abort_error from exc
 
 
 class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
@@ -138,19 +224,51 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         )
 
     async def ModelStreamInfer(self, request_iterator, context):
+        request_start_time = time.time_ns()
+        request_start_ns = time.monotonic_ns()
+        try:
+            invocation_metadata = context.invocation_metadata() or ()
+        except Exception:
+            invocation_metadata = ()
+        client_span = None
         # Self-managed access-log lifecycle (the shared interceptor is gone).
         # Create/arrival/query go first — before any inbound frame — so a
         # frame-less RPC (peer closed before sending) still reports arrival and
         # produces an access line via the ``finally`` below.
+        # The record is built before the SERVER span and the two reporting calls
+        # sit inside the ``try``: nothing that can raise runs between span start
+        # and ``try``, so the span can never escape without ``finally`` ending it
+        # and clearing CURRENT_TRACE_STATE.
         record = GrpcAccessRecord.create(
             context,
             "ModelStreamInfer",
             "bidi_stream",
             raw_mode=True,
         )
-        emit_query_log(record, rank_id=self._rank_id, server_id=self._server_id)
+        metadata_headers = metadata_to_headers(invocation_metadata)
+        server_state = None
+
+        def _ensure_span(body_headers=None):
+            nonlocal server_state
+            if server_state is not None:
+                return server_state
+            headers, source = select_valid_server_trace_carrier(
+                body_headers or {}, metadata_headers
+            )
+            server_state = start_server_span(
+                _DASH_PROXY_SERVER_SPAN_NAME,
+                headers,
+                _DASH_SERVER_ATTRIBUTES,
+                start_time=request_start_time,
+                request_start_ns=request_start_ns,
+            )
+            if server_state is not None:
+                server_state.set_attribute("rtp_llm.trace_context_source", source)
+            return server_state
+
         exc: Optional[BaseException] = None
         try:
+            emit_query_log(record, rank_id=self._rank_id, server_id=self._server_id)
             request_iter = request_iterator.__aiter__()
             try:
                 first_request = await request_iter.__anext__()
@@ -158,7 +276,16 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 record.mark_request_done("eof")
                 return
             record.req_count = 1
+            _ensure_span(extract_body_trace_headers(first_request))
+            external_request_id = extract_span_external_request_id(
+                invocation_metadata, first_request
+            )
             record.record_request_frame(first_request)
+            if server_state is not None:
+                server_state.set_attribute(
+                    trace_attrs.RTP_LLM_EXTERNAL_REQUEST_ID,
+                    external_request_id,
+                )
 
             invalid_message = _invalid_max_new_tokens_message(first_request)
             if invalid_message is not None:
@@ -178,13 +305,23 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 yield resp
                 return
 
+            strip_body_carrier = False
+
             async def validated_request_iter():
                 status = "eof"
                 try:
-                    yield first_request
+                    yield (
+                        _strip_body_trace_carrier(first_request)
+                        if strip_body_carrier
+                        else first_request
+                    )
                     async for req in request_iter:
                         record.req_count += 1
-                        yield req
+                        yield (
+                            _strip_body_trace_carrier(req)
+                            if strip_body_carrier
+                            else req
+                        )
                 except BaseException:
                     status = "error"
                     raise
@@ -234,8 +371,30 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 return
 
             stub = predict_v2_pb2_grpc.GRPCInferenceServiceStub(channel)
+            client_span, trace_metadata = start_client_span(
+                _DASH_PROXY_CLIENT_SPAN_NAME, grpc_target
+            )
+            if client_span is not None:
+                # Keep the caller's id for correlation without using request_id,
+                # which would make this transport hop a model-topology node. No
+                # rpc.system / rpc.method here: start_client_span documents that
+                # rpc.system breaks the top-bar Total tokens aggregation. No
+                # gen_ai.* either because this hop does not invoke a model.
+                client_span.set_attribute(
+                    trace_attrs.RTP_LLM_EXTERNAL_REQUEST_ID,
+                    external_request_id,
+                )
+            downstream_metadata = _merge_trace_metadata(
+                invocation_metadata, trace_metadata
+            )
+            strip_body_carrier = bool(trace_metadata)
             async for resp in self._forward(
-                stub, grpc_target, validated_request_iter(), context, record
+                stub,
+                grpc_target,
+                validated_request_iter(),
+                context,
+                record,
+                downstream_metadata,
             ):
                 self._record_and_report_chunk(record, resp)
                 yield resp
@@ -244,7 +403,7 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             if (
                 record.backend_addr
                 and isinstance(e, Exception)
-                and not isinstance(e, grpc.aio.AioRpcError)
+                and not isinstance(e, (grpc.aio.AioRpcError, grpc.aio.AbortError))
             ):
                 logging.exception(
                     "[DashScGrpc] proxy failed after downstream frontend selected: "
@@ -253,21 +412,26 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 )
             raise
         finally:
-            end_ts = record.resolve_status(context, exc)
-            # Log first, metrics second — a kmonitor hiccup must never delay or
-            # drop the access record (user-mandated ordering).
-            emit_access_log(
-                record,
-                rank_id=self._rank_id,
-                server_id=self._server_id,
-                end_ts=end_ts,
-            )
-            report_forwarder_rpc_done(
-                record,
-                rank_id=self._rank_id,
-                server_id=self._server_id,
-                status=record.status,
-            )
+            _ensure_span()
+            status_exc = _status_exception_for_proxy(record, exc)
+            end_ts = record.resolve_status(context, status_exc)
+            try:
+                # Log first, metrics second — a kmonitor hiccup must never delay or
+                # drop the access record (user-mandated ordering).
+                emit_access_log(
+                    record,
+                    rank_id=self._rank_id,
+                    server_id=self._server_id,
+                    end_ts=end_ts,
+                )
+                report_forwarder_rpc_done(
+                    record,
+                    rank_id=self._rank_id,
+                    server_id=self._server_id,
+                    status=record.status,
+                )
+            finally:
+                _finish_proxy_traces(server_state, client_span, record, status_exc)
 
     async def _forward(
         self,
@@ -276,21 +440,14 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         request_iterator,
         context,
         access_record: GrpcAccessRecord,
+        downstream_metadata,
     ):
         access_record.mark_backend_call_start(addr)
 
-        # Propagate client-sent metadata to the downstream stub so that
-        # correlation headers (``x-dashscope-request-id`` / ``x-request-id``
-        # / ``traceparent`` / …) travel end-to-end. Without this the backend
-        # frontend's access log has no way to link a ``req_count=0`` RPC to
-        # the upstream dashscope-serving request that provoked it.
         try:
-            md = context.invocation_metadata() or ()
-        except Exception:
-            md = ()
-
-        try:
-            upstream_iter = stub.ModelStreamInfer(request_iterator, metadata=md)
+            upstream_iter = stub.ModelStreamInfer(
+                request_iterator, metadata=downstream_metadata
+            )
         except grpc.aio.AioRpcError as e:
             access_record.mark_backend_error(e)
             access_record.mark_backend_done()

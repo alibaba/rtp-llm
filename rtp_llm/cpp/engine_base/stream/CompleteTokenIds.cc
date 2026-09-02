@@ -151,14 +151,10 @@ bool CompleteTokenIds::update(const torch::Tensor& new_tokens,
     RTP_LLM_CHECK_WITH_INFO(
         new_batch_size <= max_batch_size_, "too many batches, expect < %d, found %d", max_batch_size_, new_batch_size);
 
-    if (seq_length_ == input_length) {
-        first_token_time_us_    = autil::TimeUtility::currentTimeInMicroSeconds();
-        first_token_latency_us_ = first_token_time_us_ - begin_time_us;
-    }
-
     if (seq_length_ + num_new_tokens > max_token_num) {
         num_new_tokens = max_token_num - seq_length_;
     }
+    const bool commits_first_token = seq_length_ == input_length && num_new_tokens > 0;
 
     // # NOTE: new tokens indicate num of newly genearted tokens
     // # typically 1 but can be > 1 under speculative decoding
@@ -195,6 +191,10 @@ bool CompleteTokenIds::update(const torch::Tensor& new_tokens,
     }
     batch_size_ = new_batch_size;
     setSeqLength(seq_length_ + num_new_tokens);
+    if (commits_first_token) {
+        first_token_time_us_    = autil::TimeUtility::currentTimeInMicroSeconds();
+        first_token_latency_us_ = first_token_time_us_ - begin_time_us;
+    }
 
     RTP_LLM_LOG_DEBUG("update token, num_new_tokens: %d, after update is %s", num_new_tokens, showStatus(0).c_str());
     return true;

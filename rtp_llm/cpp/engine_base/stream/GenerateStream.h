@@ -297,6 +297,10 @@ public:
             recordCanRunTime();
         }
         generate_status_->reportEvent(event, error_code, std::forward<T>(error_msg));
+        if (event == StreamEvents::GenerateDone && !generation_done_) {
+            generation_done_         = true;
+            generation_done_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+        }
         if (event == StreamEvents::Error || event == StreamEvents::GenerateDone
             || event == StreamEvents::NeedRemoteGenerate) {
             consumer_cv_->notify_all();
@@ -359,10 +363,7 @@ public:
     void        reportMetric();
     std::string debugString() const;
 
-    void    resetBeginTime(int64_t begin_time_us);
-    int64_t beginTimeUs() const {
-        return begin_time_us_;
-    }
+    void resetBeginTime(int64_t begin_time_us);
 
     // for test
     void          setIsContextStream(bool is_context_stream);
@@ -757,10 +758,15 @@ public:
 
 public:
     struct TimeInfo {
-        int64_t begin_time_us;
-        int64_t wait_time_us;
-        int64_t first_token_time_us;
-        int64_t first_token_rt_us;
+        int64_t begin_time_us           = 0;
+        int64_t wait_time_us            = 0;  // legacy metric/metadata field
+        bool    running_started         = false;
+        int64_t running_started_time_us = 0;
+        bool    first_token_committed   = false;
+        int64_t first_token_time_us     = 0;
+        int64_t first_token_rt_us       = 0;
+        bool    generation_done         = false;
+        int64_t generation_done_time_us = 0;
     };
     TimeInfo getTimeInfo();
     bool     queryPdSep() const;
@@ -808,6 +814,10 @@ protected:
     int64_t                               first_running_time_us_       = 0;
     int64_t                               loading_cache_latency_us_    = 0;
     int64_t                               load_done_to_running_us_     = 0;
+    bool                                  running_started_             = false;
+    int64_t                               running_started_time_us_     = 0;
+    bool                                  generation_done_             = false;
+    int64_t                               generation_done_time_us_     = 0;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
     std::shared_ptr<bool>                 is_context_stream_;
     size_t                                iter_count_    = 0;

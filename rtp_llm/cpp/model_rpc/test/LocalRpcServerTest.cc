@@ -10,6 +10,7 @@
 
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 
 using namespace ::testing;
@@ -67,6 +68,16 @@ public:
     }
 
     std::vector<GenerateOutputsPB> outputs_;
+};
+
+class FailingWriter: public LocalRpcServer::WriterInterface {
+public:
+    bool Write(const GenerateOutputsPB&, grpc::WriteOptions) override {
+        ++write_count_;
+        return false;
+    }
+
+    size_t write_count_{0};
 };
 
 enum class WakeReason {
@@ -187,6 +198,25 @@ TEST(LocalRpcServerTest, PollInterruptsBlockedNextOutputAfterClientCancellation)
     EXPECT_EQ(wait_status, std::future_status::ready);
     EXPECT_EQ(poll_result.get().error_code(), grpc::StatusCode::CANCELLED);
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
+}
+
+TEST(LocalRpcServerTest, PollClassifiesClosedResponseStreamAsCancelled) {
+    TestLocalRpcServer server;
+    FailingWriter      writer;
+    auto               mock_stream = createMockStream();
+    EXPECT_CALL(*mock_stream, nextOutput(_)).WillOnce(InvokeWithoutArgs([] {
+        GenerateOutputs outputs;
+        outputs.request_id = 1;
+        return ErrorResult<GenerateOutputs>(std::move(outputs));
+    }));
+    std::shared_ptr<GenerateStream> stream = mock_stream;
+
+    const auto status = server.poll(&writer, stream);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::CANCELLED);
+    EXPECT_EQ(status.error_message(), "request output consumer closed");
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
+    EXPECT_EQ(writer.write_count_, 1);
 }
 
 TEST(LocalRpcServerTest, CollectInterruptsBlockedNextOutputAfterClientCancellation) {
