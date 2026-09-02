@@ -3025,8 +3025,8 @@ rpds-py==0.30.0 \
     # via
     #   jsonschema
     #   referencing
-rtp-kernel @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/rtp_kernel-0.1.0%2Bcu13.4a1a7e3-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:69992ef98016b1f176a092741841b79c9eba540c819fcaec663ad7550eb6aa52
+rtp-kernel @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/cu13/rtp_kernel_260902/rtp_kernel-0.1.0%2B3bc0ca45.cu13-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:722d87433086d9775248905e72e7fc357ef15daae15c390cbfda1bebe94bafbd
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
 safetensors==0.6.2 \
     --hash=sha256:1d2d2b3ce1e2509c68932ca03ab8f20570920cd9754b05063d4368ee52833ecd \

@@ -22,10 +22,11 @@ triton==3.6.0
 http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_b200/deep_gemm-2.5.0%2B8a4dfba-cp310-cp310-linux_x86_64.whl
 https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl
 
-# rtp_kernel built from gitlab cuda_extension main (sm_80/90a/100a)
+# rtp_kernel built from gitlab cuda_extension main@3bc0ca45
+# (sm_80/90a/100a/103a/120a)
 # against torch 2.11+cu130; flashinfer-dependent submodules (xqa,
 # sparse_attention*, clustered_gather) are import-tolerant in this build.
-https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/rtp_kernel-0.1.0%2Bcu13.4a1a7e3-cp310-cp310-linux_x86_64.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/cu13/rtp_kernel_260902/rtp_kernel-0.1.0%2B3bc0ca45.cu13-cp310-cp310-linux_x86_64.whl
 
 # fastsafetensors / fast_safetensors rebuilt against torch 2.11+cu130
 # (originals were torch 2.1.2 + cu121).  Project name is `fast-safetensors`
