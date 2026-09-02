@@ -239,11 +239,14 @@ class DeviceResource:
                     seen.add(key)
                     candidates.append(candidate)
 
-        if not candidates:
-            for start in range(0, len(self.total_gpus), self.required_gpu_count):
-                candidate = self.total_gpus[start : start + self.required_gpu_count]
-                if len(candidate) == self.required_gpu_count:
-                    candidates.append(candidate)
+        # NUMA grouping is only a preference: fall back to every window over the
+        # visible GPUs so a busy NUMA node can never starve the whole request.
+        for start in range(0, len(self.total_gpus) - self.required_gpu_count + 1):
+            candidate = self.total_gpus[start : start + self.required_gpu_count]
+            key = tuple(candidate)
+            if key not in seen:
+                seen.add(key)
+                candidates.append(candidate)
         if candidates:
             logging.info(f"candidate gpu groups: {candidates}")
         return candidates
@@ -258,17 +261,23 @@ class DeviceResource:
             )
             if result.returncode != 0:
                 return []
+            numa_column = -1
             groups: Dict[str, List[int]] = {}
             for raw_line in result.stdout.splitlines():
-                line = raw_line.strip()
-                if not line.startswith("GPU"):
+                columns = [column.strip() for column in raw_line.split("\t")]
+                if numa_column < 0:
+                    if "NUMA Affinity" in columns:
+                        numa_column = columns.index("NUMA Affinity")
                     continue
-                parts = line.split()
-                if len(parts) < 3 or not parts[0][3:].isdigit():
+                name = columns[0]
+                if not name.startswith("GPU") or not name[3:].isdigit():
                     continue
-                gpu_id = int(parts[0][3:])
-                numa_id = parts[-2]
-                groups.setdefault(numa_id, []).append(gpu_id)
+                if numa_column >= len(columns):
+                    continue
+                numa_id = columns[numa_column]
+                if not numa_id.isdigit():
+                    continue
+                groups.setdefault(numa_id, []).append(int(name[3:]))
             return [sorted(group) for _, group in sorted(groups.items())]
         except Exception:
             return []
