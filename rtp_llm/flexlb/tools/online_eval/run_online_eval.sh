@@ -868,7 +868,7 @@ if [[ "${START_MOCK}" == "1" ]]; then
     --event-loop-threads "${JAVA_MOCK_EVENT_LOOP_THREADS}" \
     --completion-threads "${JAVA_MOCK_COMPLETION_THREADS}" \
     --stats-interval-ms "${JAVA_MOCK_STATS_INTERVAL_MS}" \
-    --stats-stdout \
+    --stats-stdout true \
     --events-file "${RUN_DIR}/engine_events.jsonl" \
     --decode-max-concurrency "${JAVA_MOCK_DECODE_MAX_CONCURRENCY}" \
     --performance "${PERFORMANCE_FILE}" \
