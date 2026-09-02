@@ -31,7 +31,7 @@ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/rtp_kernel-0.1.0%2Bcu
 # (originals were torch 2.1.2 + cu121).  Project name is `fast-safetensors`
 # on PyPI but the import is `fast_safetensors`; both wheels installed.
 # Required by --load_method fastsafetensors smoke targets.
-https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl
+https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130/fast_safetensors-0.7.4.dev0%2Btorch2.11.0.cu130.aone67401633-cp310-cp310-linux_x86_64.whl
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130/fastsafetensors-0.3.4.dev20260901%2Bali.fuseshm.g78ac75c8.aone67880226-cp310-cp310-linux_x86_64.whl
 # fast_safetensors rebuilt against torch 2.11+cu130.
 
