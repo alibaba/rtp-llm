@@ -428,6 +428,8 @@ class OpenaiEndpoint(object):
         tokenizer: Optional[Any] = None,
     ) -> ChatCompletionResponse:
         all_choices = []
+        content_parts: List[List[str]] = []
+        reasoning_content_parts: List[List[str]] = []
         usage = None
         aux_info = None
         extra_outputs = None
@@ -439,7 +441,7 @@ class OpenaiEndpoint(object):
                             index=i,
                             message=ChatMessage(
                                 role=choice.delta.role or RoleEnum.assistant,
-                                content=choice.delta.content or None,
+                                content=None,
                                 function_call=choice.delta.function_call or None,
                                 tool_calls=choice.delta.tool_calls or None,
                             ),
@@ -448,6 +450,8 @@ class OpenaiEndpoint(object):
                         )
                         for i, choice in enumerate(response.choices)
                     ]
+                    content_parts = [[] for _ in all_choices]
+                    reasoning_content_parts = [[] for _ in all_choices]
                 else:
                     raise ValueError(
                         f"response.choices has different length! "
@@ -455,22 +459,6 @@ class OpenaiEndpoint(object):
                     )
             else:
                 for i in range(len(all_choices)):
-                    if all_choices[i].message.content == None:
-                        all_choices[i].message.content = (
-                            response.choices[i].delta.content or None
-                        )
-                    else:
-                        all_choices[i].message.content += (
-                            response.choices[i].delta.content or ""
-                        )
-                    if all_choices[i].message.reasoning_content == None:
-                        all_choices[i].message.reasoning_content = (
-                            response.choices[i].delta.reasoning_content or None
-                        )
-                    else:
-                        all_choices[i].message.reasoning_content += (
-                            response.choices[i].delta.reasoning_content or ""
-                        )
                     all_choices[i].message.role = (
                         response.choices[i].delta.role or all_choices[i].message.role
                     )
@@ -495,9 +483,20 @@ class OpenaiEndpoint(object):
                             ].logprobs.content
                     else:
                         all_choices[i].logprobs = response.choices[i].logprobs
+            for i, choice in enumerate(response.choices):
+                if choice.delta.content:
+                    content_parts[i].append(choice.delta.content)
+                if choice.delta.reasoning_content:
+                    reasoning_content_parts[i].append(choice.delta.reasoning_content)
             usage = response.usage or usage
             aux_info = response.aux_info or aux_info
             extra_outputs = response.extra_outputs or extra_outputs
+
+        for i, choice in enumerate(all_choices):
+            content = "".join(content_parts[i])
+            reasoning_content = "".join(reasoning_content_parts[i])
+            choice.message.content = content or None
+            choice.message.reasoning_content = reasoning_content or None
 
         if usage == None:
             logging.warning(f"No usage returned from stream response. use empty value.")
