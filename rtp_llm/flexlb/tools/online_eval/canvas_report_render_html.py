@@ -27,8 +27,6 @@ Spec schema（core.py 产）：
         'env':      {'clientEnv': Opt[dict], 'flexlbEnv': Opt[dict]},# detail
         'sources': {'runDir': str, 'aggregate': str,
                     'engineDist': Optional[str]},                    # detail
-        'scale':   {'p': num, 'd': num, 'shards': num,
-                    'replay': num, 'durationS': Optional[num]},      # detail
     }],
     'timeAxis': Optional[{'min': number, 'max': number}],  # 报告级统一时间轴
     'panels':   [panel],
@@ -46,12 +44,13 @@ Spec schema（core.py 产）：
     'series':  [{'name': str, 'data': [num], 'color': str}],
   }
 
-头部三层（2026-09 规范化）：subtitle = 实验条件行；KPI 两行 = 指标五连 +
-结果五连；可见 meta 面板只留时间轴口径 + 采样说明（口径标注纪律），其余
-（代码版本 / 数据集 / 实验参数 / FINAL ENV / 数据源 / 规模）收进
-<details id="detail"> 折叠块默认收起。路径用等宽字体、
-overflow-wrap:anywhere 保留完整可复制。旧 spec 无 meta 键时两个面板
-均不渲染（向后兼容）。
+头部三层（2026-09 规范化）：subtitle = 实验条件行（拓扑/倍率/ramp/
+duration/shards 等全部规模信息在此承担）；KPI 两行 = 指标五连 +
+结果五连；可见 meta 面板只留时间轴口径 + 采样说明（口径标注纪律），
+其余（代码版本 / 数据集 / 实验参数 / FINAL ENV / 数据源）收进
+<details id="detail"> 折叠块默认收起；规模不设分区（与 subtitle 重复，
+已删）。路径用等宽字体、overflow-wrap:anywhere 保留完整可复制。
+旧 spec 无 meta 键时两个面板均不渲染（向后兼容）。
 
 时间轴语义：timeAxis.min = 0（t=0 = 压测正式开始，warmup 后）；
 timeAxis.max = T_END（全部时序面板最后采样点，ceil 整秒，含收尾排空）。
@@ -199,17 +198,11 @@ h1{margin:0 0 6px;font-size:22px}
   color:rgba(0,0,0,.72);
   font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
   font-size:11.5px}
-.meta-scale{display:flex;flex-wrap:wrap;gap:6px;align-content:flex-start}
-.meta-chip{background:rgba(22,119,255,.06);border:1px solid rgba(22,119,255,.18);
-  border-radius:4px;padding:1px 8px;color:rgba(0,0,0,.72);white-space:nowrap;
-  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
-  font-size:11.5px}
-.meta-chip b{font-weight:600;color:#1677ff}
 .meta-ta p{margin:0;color:rgba(0,0,0,.6)}
 .meta-ta b{font-weight:600;color:#1677ff;
   font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
 /* detail 折叠层（三层第三层）：代码版本 / 数据集 / 参数 / FINAL ENV /
-   数据源 / 规模，默认收起；长表（params / env）限高滚动防长屏。 */
+   数据源，默认收起；长表（params / env）限高滚动防长屏。 */
 .detail-panel{background:var(--card);border:1px solid var(--border);border-radius:8px;
   margin:0 0 24px;font-size:12px;color:var(--sub)}
 .detail-panel>summary{cursor:pointer;padding:10px 16px;font-size:12px;
@@ -267,7 +260,7 @@ if (SPEC.summary.kpis.length)
     kb.appendChild(row);
   }
 // 可见口径面板：时间轴口径 + 采样说明（口径标注纪律：必须直观可读；
-// 数据源/规模/版本等溯源性质信息全部下沉 detail 折叠层）。
+// 数据源/版本等溯源性质信息下沉 detail 折叠层，scale 由 subtitle 承担）。
 (function renderMeta(){
   const meta = SPEC.meta;
   const host = document.getElementById('meta');
@@ -293,7 +286,8 @@ if (SPEC.summary.kpis.length)
   sec.appendChild(box); host.appendChild(sec);
 })();
 // detail 折叠层（三层第三层，默认收起）：代码版本 / 测试数据集 / 数据源 /
-// 规模 chips / 实验参数全量 / FINAL ENV（client_env + flexlb_env）。
+// 实验参数全量 / FINAL ENV（client_env + flexlb_env）；scale 分区已删——
+// 与 subtitle 实验条件重复（20260902）。
 (function renderDetail(){
   const meta = SPEC.meta;
   const host = document.getElementById('detail');
@@ -328,21 +322,9 @@ if (SPEC.summary.kpis.length)
   addRow(s3,'engine_dist',so.engineDist);
   addRow(s3,'run 目录',so.runDir);
   body.appendChild(s3);
-  // —— 分区四：规模 chips（P / D / shards / replay / duration）——
-  const sc = meta.scale||{};
-  const s4 = div('detail-sec'); s4.appendChild(h4('规模'));
-  const wrap = div('meta-scale');
-  const chip=(k,v,suf)=>{ if(v==null||v==='') return;
-    const c=div('meta-chip'); c.appendChild(document.createTextNode(k+'='));
-    const b=document.createElement('b'); b.textContent=String(v)+(suf||''); c.appendChild(b);
-    wrap.appendChild(c); };
-  chip('P',sc.p); chip('D',sc.d); chip('shards',sc.shards); chip('replay',sc.replay);
-  chip('duration',sc.durationS,'s');
-  if(!wrap.childNodes.length) wrap.textContent='—';
-  s4.appendChild(wrap); body.appendChild(s4);
-  // —— 分区五：实验参数全量（run_meta.params：拓扑/端口/容量/JVM/配置
+  // —— 分区四：实验参数全量（run_meta.params：拓扑/端口/容量/JVM/配置
   //    文件路径等；键排序 + 限高滚动，flexlb_config 长值完整保留）——
-  const s5 = div('detail-sec detail-wide'); s5.appendChild(h4('实验参数（run_meta.params）'));
+  const s4 = div('detail-sec detail-wide'); s4.appendChild(h4('实验参数（run_meta.params）'));
   const params = meta.params;
   if (params && Object.keys(params).length){
     const envBox = div('detail-env');
@@ -353,15 +335,15 @@ if (SPEC.summary.kpis.length)
       vv.textContent=String(params[k]);
       r.appendChild(kk); r.appendChild(vv); envBox.appendChild(r);
     });
-    s5.appendChild(envBox);
+    s4.appendChild(envBox);
   } else {
-    const r=div('meta-row'); r.textContent='—（未提供）'; s5.appendChild(r);
+    const r=div('meta-row'); r.textContent='—（未提供）'; s4.appendChild(r);
   }
-  body.appendChild(s5);
-  // —— 分区六：环境变量 FINAL ENV（JavaLoadClient client_env + FlexLB
+  body.appendChild(s4);
+  // —— 分区五：环境变量 FINAL ENV（JavaLoadClient client_env + FlexLB
   //    flexlb_env 快照，consolidate 阶段嵌入 run_meta.json）——
   const env = meta.env||{};
-  const s6 = div('detail-sec detail-wide'); s6.appendChild(h4('环境变量（FINAL ENV）'));
+  const s5 = div('detail-sec detail-wide'); s5.appendChild(h4('环境变量（FINAL ENV）'));
   const envRender=(title,data)=>{
     if (!data || !Object.keys(data).length) return;
     const sub=div('detail-env');
@@ -375,14 +357,14 @@ if (SPEC.summary.kpis.length)
       vv.textContent=String(data[k]);
       r.appendChild(kk); r.appendChild(vv); sub.appendChild(r);
     });
-    s6.appendChild(sub);
+    s5.appendChild(sub);
   };
   envRender('JavaLoadClient（client_env.json）', env.clientEnv);
   envRender('FlexLB（flexlb_env.txt）', env.flexlbEnv);
-  if (!s6.querySelector('.detail-env')){
-    const r=div('meta-row'); r.textContent='—（未提供）'; s6.appendChild(r);
+  if (!s5.querySelector('.detail-env')){
+    const r=div('meta-row'); r.textContent='—（未提供）'; s5.appendChild(r);
   }
-  body.appendChild(s6);
+  body.appendChild(s5);
 })();
 // y 轴自适应：只按 legend 可见系列重算 max（beginAtZero），legend/双击后 update()。
 // 时间轴面板数据点为 {x, y}（linear x 轴），此处兼容两种形态。

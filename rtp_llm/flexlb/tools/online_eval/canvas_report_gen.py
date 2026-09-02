@@ -25,8 +25,9 @@ outputs/flexlb-run-*-chartjs.html（浅色主题 / 白卡 / 6 列 KPI / 2 列 pa
   * detail（<details> 折叠，默认收起）：代码版本（branch/commit）、测试
     数据集（trace 路径/行数/sha256）、实验参数（run_meta.params 全量）、
     环境变量（client_env / flexlb_env FINAL ENV 快照）、数据源（绝对
-    路径）、规模 chips。旧 meta 三分区中的数据源/规模从可见面板移入
-    detail；时间轴口径 + 采样说明保留在可见 meta 面板（口径标注纪律）。
+    路径）。旧 meta 三分区中的数据源从可见面板移入 detail；规模信息由
+    subtitle 实验条件行承担，不设分区（信息重复）；时间轴口径 + 采样
+    说明保留在可见 meta 面板（口径标注纪律）。
 
 报告级统一时间轴：全部时序面板（x = 压测时间）共享同一 x 轴 [0, T_END]。
 T_END = 全部时序面板最大采样点（ceil 整秒，含收尾排空）；min 固定 0
@@ -4141,8 +4142,8 @@ def main():
     # ---- 元数据区 spec（三层规范化，20260902）----
     # 可见 meta 面板：时间轴口径 + 采样说明（口径标注纪律，报告头必须
     # 直观可读）。detail 层（<details> 折叠，默认收起）：代码版本 /
-    # 数据集 / 实验参数 / 环境变量 / 数据源 / 规模 chips——旧三分区中
-    # 的数据源与规模从可见面板移入 detail，规模信息已由 subtitle 承担。
+    # 数据集 / 实验参数 / 环境变量 / 数据源——旧三分区中的数据源从可见
+    # 面板移入 detail；规模不设分区（与 subtitle 实验条件重复，已删）。
     # detail 取数链：aggregate meta（aggregate_canvas_run.py 20260902+
     # 写入）> 同目录 run_meta.json；均缺则对应分区显示 —（未提供）。
     ed_embedded = (
@@ -4170,13 +4171,6 @@ def main():
                 if ed_embedded
                 else (os.path.abspath(ed_path) if ed is not None else None)
             ),
-        },
-        "scale": {
-            "p": p_engines,
-            "d": d_engines,
-            "shards": shards,
-            "replay": replay_speed,
-            "durationS": int(duration_s) if duration_s else None,
         },
         "timeAxis": ({"tEnd": time_axis["max"]} if time_axis else None),
         "sampling": sampling_note,
@@ -4262,7 +4256,7 @@ def main():
                 )
 
     # ---- 元数据区 / leak KPI 自检（fail-closed）----
-    # 1) 元数据区存在性：spec.meta 齐全（sources/scale/version/dataset/
+    # 1) 元数据区存在性：spec.meta 齐全（sources/version/dataset/
     #    params/env），渲染输出含数据源绝对路径与 T_END 时间轴口径字样
     #    （有时间轴时）；
     # 2) leak chip 负向：头部 KPI 无「泄漏判定」且渲染 HTML 全文无该字样
@@ -4273,9 +4267,9 @@ def main():
     #    非 CLI 缺省）；KPI 含结果行五连。
     _meta_chk = spec.get("meta") or {}
     _meta_src = _meta_chk.get("sources") or {}
-    assert isinstance(_meta_chk.get("sources"), dict) and isinstance(
-        _meta_chk.get("scale"), dict
-    ), (TAG + " meta panel spec incomplete: sources/scale missing")
+    assert isinstance(_meta_chk.get("sources"), dict), (
+        TAG + " meta panel spec incomplete: sources missing"
+    )
     assert _meta_src.get("aggregate") == os.path.abspath(args.aggregate), (
         TAG + " meta sources.aggregate must be the input aggregate absolute path"
     )
@@ -4301,6 +4295,12 @@ def main():
     )
     assert '<details id="detail" open' not in html_out, (
         TAG + " detail panel must be collapsed by default (no open attr)"
+    )
+    # 规模分区已删（与 subtitle 实验条件重复），渲染输出不得再含该字样
+    assert "规模" not in html_out, (
+        TAG
+        + " rendered HTML must not contain scale section "
+        + "(duplicated with subtitle experiment conditions)"
     )
     # subtitle 倍率：replay 模式且倍率可得时必含 replay@<speed>x；倍率
     # 不可得时不显示倍率段（而非回退硬编码缺省——replay@1000x bug 回归门）
@@ -4805,18 +4805,7 @@ def main():
         + " meta panel: sources(runDir/aggregate"
         + ("/summary" if _meta_src.get("summary") else "")
         + ("/engineDist" if _meta_src.get("engineDist") else "")
-        + ") · scale(P="
-        + str(meta_spec["scale"]["p"])
-        + " D="
-        + str(meta_spec["scale"]["d"])
-        + " shards="
-        + str(meta_spec["scale"]["shards"])
-        + " replay="
-        + str(meta_spec["scale"]["replay"])
-        + " duration="
-        + str(meta_spec["scale"]["durationS"])
-        + "s)"
-        + " · version("
+        + ") · version("
         + (git_branch or "?")
         + "@"
         + (git_commit or "?")
