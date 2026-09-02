@@ -13,6 +13,8 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import (
     MoeAtomicWeight,
     MoeConfig,
@@ -28,7 +30,7 @@ from rtp_llm.model_loader.per_channel_fp8_quant_weight import (
     per_channel_cast_to_fp8_expert,
 )
 from rtp_llm.model_loader.tensor_source import TensorCollector
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, transpose
 
 
 class FakeDatabase:
@@ -187,8 +189,10 @@ class TestPerBlockOnlineSm120Layout(unittest.TestCase):
         loader.group_size = 128
         loader.kernel = MagicMock()
         loader.kernel.name = W.attn_o_w
+        loader.kernel.need_transpose = False
         loader.scale = MagicMock()
         loader.scale.name = W.attn_o_s
+        loader.scale.need_transpose = False
 
         raw_weight = torch.linspace(-1.0, 1.0, 256 * 384).reshape(256, 384)
         loader.kernel._load_raw_tensor.return_value = {W.attn_o_w: raw_weight}
@@ -205,6 +209,43 @@ class TestPerBlockOnlineSm120Layout(unittest.TestCase):
                 MagicMock(), layer_id=0, device="cpu", load_config=MagicMock()
             )
 
+        self.assertEqual(loaded[W.attn_o_w].shape, (256, 384))
+        self.assertEqual(loaded[W.attn_o_s].shape, (2, 3))
+        self.assertTrue(torch.equal(loaded[W.attn_o_w], expected_weight))
+        torch.testing.assert_close(loaded[W.attn_o_s], expected_scale)
+
+    def test_real_transpose_descriptor_restores_output_major_layout(self):
+        raw_weight = torch.linspace(-1.0, 1.0, 256 * 384).reshape(256, 384)
+        descriptor = AttnAtomicWeight(
+            W.attn_o_w,
+            [CkptWeightInfo("layers.{i}.self_attn.o_proj.weight")],
+            transpose,
+        )
+        loader = LoadQuantPerBlockFp8Weight(
+            descriptor,
+            Fp8BlockWiseQuantConfig(is_quanted=False),
+            name=descriptor.name,
+        )
+        tensor_source = MagicMock()
+        tensor_source.load_tensor.return_value = [raw_weight]
+        load_config = MagicMock(compute_dtype=torch.float32)
+        expected_weight, expected_scale = per_block_cast_to_fp8(
+            raw_weight, loader.group_size
+        )
+
+        with patch(
+            "rtp_llm.model_loader.per_block_fp8_quant_weight."
+            "_preserve_output_major_fp8_layout",
+            return_value=True,
+        ):
+            loaded = loader._load_raw_tensor(
+                tensor_source, layer_id=0, device="cpu", load_config=load_config
+            )
+
+        tensor_source.load_tensor.assert_called_once_with(
+            "layers.0.self_attn.o_proj.weight", torch.float32
+        )
+        self.assertTrue(loader.kernel.need_transpose)
         self.assertEqual(loaded[W.attn_o_w].shape, (256, 384))
         self.assertEqual(loaded[W.attn_o_s].shape, (2, 3))
         self.assertTrue(torch.equal(loaded[W.attn_o_w], expected_weight))

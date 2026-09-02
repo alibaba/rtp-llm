@@ -215,22 +215,6 @@ class BatchPerfImpl(object):
             measurements.append(metric)
             all_measure_responses.extend(responses)
 
-        if measure_runs >= 3:
-            # Trim min and max, average the rest
-            measurements.sort(key=lambda m: getattr(m, key))
-            values = [f"{getattr(m, key):.2f}" for m in measurements]
-            trimmed = measurements[1:-1]
-            avg_val = sum(getattr(m, key) for m in trimmed) / len(trimmed)
-            logging.debug(
-                f"{measure_runs} runs {key}: {values}, "
-                f"trimmed [{values[0]}, {values[-1]}], avg={avg_val:.2f}"
-            )
-            results = trimmed[len(trimmed) // 2]  # use median of trimmed as base
-            setattr(results, key, avg_val)  # override with trimmed average
-        else:
-            # Too few runs to trim: pool every response of every run instead.
-            results = analyze_results(all_measure_responses)
-
         aggregate_results = analyze_results(all_measure_responses)
         if aggregate_results.success_requests == 0:
             raise RuntimeError(
@@ -238,6 +222,25 @@ class BatchPerfImpl(object):
                 f"({aggregate_results.fail_requests}/"
                 f"{aggregate_results.total_requests} failed)"
             )
+
+        # Failed rounds have zero-valued latency fields and must not
+        # participate in min/max trimming.  Keep the aggregate object as the
+        # result so request counts still describe every submitted request.
+        successful_measurements = [
+            metric for metric in measurements if metric.success_requests > 0
+        ]
+        results = aggregate_results
+        if len(successful_measurements) >= 3:
+            # Trim min and max, average the rest
+            successful_measurements.sort(key=lambda m: getattr(m, key))
+            values = [f"{getattr(m, key):.2f}" for m in successful_measurements]
+            trimmed = successful_measurements[1:-1]
+            avg_val = sum(getattr(m, key) for m in trimmed) / len(trimmed)
+            logging.debug(
+                f"{len(successful_measurements)} successful runs {key}: {values}, "
+                f"trimmed [{values[0]}, {values[-1]}], avg={avg_val:.2f}"
+            )
+            setattr(results, key, avg_val)  # override with trimmed average
 
         if self.profile and self.profile_runs > 0:
             # Pre-arm via /start_profile with enable_all_rank=true so that

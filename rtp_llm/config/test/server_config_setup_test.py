@@ -11,6 +11,7 @@ from rtp_llm.config.py_config_modules import PyEnvConfigs, ServerConfig
 from rtp_llm.config.server_config_setup import (
     _auto_deepep_supported_on_visible_devices,
     _configure_nccl_p2p_disable,
+    auto_configure_deepep,
     set_parallelism_config,
     setup_and_configure_server,
 )
@@ -73,6 +74,52 @@ class ServerConfigPortLayoutTest(TestCase):
 
 
 class AutoDeepEpArchitectureTest(TestCase):
+    def test_single_ep_model_skips_architecture_probe(self):
+        config = PyEnvConfigs()
+        config.parallelism_config.ep_size = 1
+        config.parallelism_config.world_size = 1
+        config.parallelism_config.local_world_size = 1
+
+        with patch(
+            "rtp_llm.config.server_config_setup."
+            "_auto_deepep_supported_on_visible_devices",
+            side_effect=AssertionError("irrelevant architecture probe"),
+        ) as architecture_probe:
+            auto_configure_deepep(
+                config.moe_config,
+                config.deep_ep_config,
+                config.parallelism_config,
+                RoleType.PDFUSION,
+            )
+
+        architecture_probe.assert_not_called()
+        self.assertFalse(config.moe_config.use_deepep_moe)
+        self.assertFalse(config.moe_config.use_deepep_low_latency)
+        self.assertFalse(config.moe_config.use_deepep_internode)
+
+    def test_frontend_role_skips_architecture_probe(self):
+        config = PyEnvConfigs()
+        config.parallelism_config.ep_size = 8
+        config.parallelism_config.world_size = 8
+        config.parallelism_config.local_world_size = 8
+
+        with patch(
+            "rtp_llm.config.server_config_setup."
+            "_auto_deepep_supported_on_visible_devices",
+            side_effect=AssertionError("irrelevant architecture probe"),
+        ) as architecture_probe:
+            auto_configure_deepep(
+                config.moe_config,
+                config.deep_ep_config,
+                config.parallelism_config,
+                RoleType.FRONTEND,
+            )
+
+        architecture_probe.assert_not_called()
+        self.assertFalse(config.moe_config.use_deepep_moe)
+        self.assertFalse(config.moe_config.use_deepep_low_latency)
+        self.assertFalse(config.moe_config.use_deepep_internode)
+
     @patch(
         "rtp_llm.config.server_config_setup.torch.cuda.get_device_capability",
         side_effect=[(12, 0), (12, 0)],

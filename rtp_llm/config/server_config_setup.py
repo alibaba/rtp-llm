@@ -164,7 +164,19 @@ def auto_configure_deepep(
         and deep_ep_config.use_mori_ep is None
     ):
         # All are None, use auto configuration
-        if _auto_deepep_supported_on_visible_devices(
+        auto_selection_relevant = ep_size > 1 and role_type in {
+            RoleType.PREFILL,
+            RoleType.DECODE,
+            RoleType.PDFUSION,
+        }
+        if not auto_selection_relevant:
+            # DeepEP is an MoE expert-parallel backend.  Dense/single-EP
+            # engines and control-plane roles must not fail startup merely
+            # because an unrelated visible GPU has an unsupported revision.
+            moe_config.use_deepep_moe = False
+            moe_config.use_deepep_low_latency = False
+            moe_config.use_deepep_internode = False
+        elif _auto_deepep_supported_on_visible_devices(
             parallelism_config.local_world_size
         ):
             _apply_auto_deepep_config(
