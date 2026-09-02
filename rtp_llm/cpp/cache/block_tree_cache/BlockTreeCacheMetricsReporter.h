@@ -31,7 +31,7 @@ struct BlockTreePoolMetricsSnapshot {
     size_t      request_ref_blocks{0};
     size_t      block_cache_ref_blocks{0};
     size_t      load_ref_blocks{0};
-    size_t      eviction_ref_blocks{0};
+    size_t      eviction_target_ref_blocks{0};
     size_t      store_ref_blocks{0};
 };
 
@@ -106,7 +106,7 @@ public:
     void    reportTransferFinished(CacheTransferOperation                 operation,
                                    Tier                                   source_tier,
                                    Tier                                   target_tier,
-                                   size_t                                 descriptor_count,
+                                   size_t                                 descriptors_per_transfer,
                                    int64_t                                begin_time_us,
                                    bool                                   success,
                                    const std::vector<TransferDescriptor>& successful_descriptors,
@@ -118,11 +118,11 @@ private:
     static constexpr size_t kDirectionCount = 5;
 
     static int transferDirectionIndex(Tier source_tier, Tier target_tier);
-    void       reportEvictionTransfer(const TransferDescriptor&       desc,
-                                      const EvictionTimingSnapshot&   timing,
-                                      const std::vector<GroupSetPtr>& group_sets,
-                                      int64_t                         finish_time_us,
-                                      bool                            report_candidate_times) const;
+    void       reportEvictedDescriptor(const TransferDescriptor&       desc,
+                                       const EvictionTimingSnapshot&   timing,
+                                       const std::vector<GroupSetPtr>& group_sets,
+                                       int64_t                         finish_time_us,
+                                       bool                            report_candidate_times) const;
     void
     reportEvictionTrigger(Tier source_tier, CacheGroupType group_type, const char* trigger_type, int64_t count) const;
     void reportStoreBlocks(Tier target_tier, const char* outcome, size_t block_count) const;
