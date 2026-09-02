@@ -120,7 +120,12 @@ py_test(
         "//rtp_llm:torch",
         "//rtp_llm:utils",
     ],
+    env = {
+        "GPU_COUNT": "2",
+        "WORLD_SIZE": "2",
+    },
     exec_properties = {"gpu": "H20", "gpu_count": "2"},
+    tags = ["multi_device"],
     target_compatible_with = select({
         "@//:using_cuda12_9_x86": [],
         "@//:using_cuda13_x86": [],
