@@ -49,6 +49,71 @@ class GenerateConfigTest(TestCase):
             "max_new_tokens": 20,
         }
 
+    def test_add_thinking_params_tokenizes_boundaries_when_thinking_disabled(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 0
+        generate_env_config.think_start_tag = "<|open|>think<|sep|>"
+        generate_env_config.think_end_tag = (
+            "<|close|>think<|sep|><|open|>response<|sep|>"
+        )
+
+        token_ids = {
+            generate_env_config.think_start_tag: [10, 12, 13],
+            generate_env_config.think_end_tag: [11, 12, 13, 10, 14, 13],
+        }
+
+        class Tokenizer:
+            def encode(self, text, add_special_tokens=False):
+                return token_ids[text]
+
+        generate_config = GenerateConfig()
+        generate_config.add_thinking_params(Tokenizer(), generate_env_config)
+
+        self.assertFalse(generate_config.in_think_mode)
+        self.assertEqual(generate_config.begin_think_token_ids, [10, 12, 13])
+        self.assertEqual(
+            generate_config.end_think_token_ids,
+            [11, 12, 13, 10, 14, 13],
+        )
+
+    def test_add_thinking_params_preserves_request_boundary_overrides(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_end_token_id = 102
+
+        class Tokenizer:
+            def encode(self, text, add_special_tokens=False):
+                raise AssertionError("explicit boundary ids must not be overwritten")
+
+        generate_config = GenerateConfig(
+            begin_think_token_ids=[10, 12, 13],
+            end_think_token_ids=[11, 12, 13],
+        )
+        generate_config.add_thinking_params(Tokenizer(), generate_env_config)
+
+        self.assertTrue(generate_config.in_think_mode)
+        self.assertEqual(generate_config.begin_think_token_ids, [10, 12, 13])
+        self.assertEqual(generate_config.end_think_token_ids, [11, 12, 13])
+
+    def test_add_thinking_params_zero_budget_disables_thinking(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        generate_env_config.think_start_tag = "<think>"
+        generate_env_config.think_end_tag = "</think>"
+
+        token_ids = {"<think>": [10], "</think>": [11]}
+
+        class Tokenizer:
+            def encode(self, text, add_special_tokens=False):
+                return token_ids[text]
+
+        generate_config = GenerateConfig(max_thinking_tokens=0)
+        generate_config.add_thinking_params(Tokenizer(), generate_env_config)
+
+        self.assertFalse(generate_config.in_think_mode)
+        self.assertEqual(generate_config.begin_think_token_ids, [10])
+        self.assertEqual(generate_config.end_think_token_ids, [11])
+
     def test_simple(self):
         special_tokens = SpecialTokens()
         generate_config = Pipeline.create_generate_config(
@@ -599,6 +664,10 @@ class OpenaiGenerateConfigTest(TestCase):
 
         self.assertTrue(config.in_think_mode)
         self.assertEqual(config.max_thinking_tokens, 10)
+        self.assertEqual(
+            config.begin_think_token_ids,
+            self.tokenizer.encode("<think>\n", add_special_tokens=False),
+        )
         self.assertEqual(
             config.end_think_token_ids,
             self.tokenizer.encode("</think>\n\n", add_special_tokens=False),

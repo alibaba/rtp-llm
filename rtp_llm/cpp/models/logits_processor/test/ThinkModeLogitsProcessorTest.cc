@@ -1,6 +1,8 @@
 
 #include "gtest/gtest.h"
 
+#include <string>
+
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/logits_processor/ThinkModeLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
@@ -28,6 +30,8 @@ public:
 
         size_t batch_size = max_thinking_tokens.size();
         for (size_t i = 0; i < batch_size; i++) {
+            auto dfa_ptr = std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids);
+            dfa_ptr->forceSetStatus(think_status[i]);
             auto think_info = StreamThinkInfo(think_mode,
                                               max_thinking_tokens[i],
                                               {},
@@ -35,8 +39,7 @@ public:
                                               0,
                                               0,
                                               0,
-                                              std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids));
-            think_info.dfa_ptr->forceSetStatus(think_status[i]);
+                                              std::move(dfa_ptr));
             think_infos.push_back(think_info);
         }
 
@@ -93,6 +96,20 @@ public:
 };
 
 class SamplerTest: public DeviceTestBase {};
+
+struct ModelThinkBoundaryCase {
+    const char*      name;
+    std::vector<int> begin_think_token_ids;
+    std::vector<int> end_think_token_ids;
+    int              vocab_size;
+};
+
+class ModelThinkBoundaryTest: public DeviceTestBase,
+                              public testing::WithParamInterface<ModelThinkBoundaryCase> {};
+
+std::string modelThinkBoundaryCaseName(const testing::TestParamInfo<ModelThinkBoundaryCase>& info) {
+    return info.param.name;
+}
 
 #define EXPECT_SIMILAR(vec1, vec2, eps)                                                                                \
     do {                                                                                                               \
@@ -254,14 +271,14 @@ TEST_F(SamplerTest, testForceThinkEndToken) {
     }
 }
 
-TEST_F(SamplerTest, testNoThinkingMasksThinkBoundaryTokensBeforeSampling) {
+TEST_F(SamplerTest, testNoThinkingMasksFirstThinkBoundaryTokens) {
     SamplerDataBuilder builder;
 
     auto generate_input                                    = std::make_shared<GenerateInput>();
     generate_input->generate_config                        = std::make_shared<GenerateConfig>();
     generate_input->generate_config->in_think_mode         = false;
     generate_input->generate_config->max_thinking_tokens   = 0;
-    generate_input->generate_config->begin_think_token_ids = {128821, 201};
+    generate_input->generate_config->begin_think_token_ids = {128821, 198};
     generate_input->generate_config->end_think_token_ids   = {128822, 271};
     generate_input->input_ids                              = torch::tensor({1, 2, 3}, torch::kInt32);
 
@@ -274,8 +291,9 @@ TEST_F(SamplerTest, testNoThinkingMasksThinkBoundaryTokensBeforeSampling) {
     float neg_inf = -std::numeric_limits<float>::max();
     EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128821].item<float>());
     EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128822].item<float>());
-    EXPECT_EQ(0, sampler_inputs.logits[0][201].item<float>());
+    EXPECT_EQ(0, sampler_inputs.logits[0][198].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
+
 }
 
 TEST_F(SamplerTest, testZeroThinkBudgetMasksThinkBoundaryTokensBeforeSampling) {
@@ -297,9 +315,8 @@ TEST_F(SamplerTest, testZeroThinkBudgetMasksThinkBoundaryTokensBeforeSampling) {
     sampler_inputs.sequence_lengths = torch::tensor({3}, torch::kInt32);
     processor->process(sampler_inputs, 0, 1);
 
-    float neg_inf = -std::numeric_limits<float>::max();
-    EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128821].item<float>());
-    EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128822].item<float>());
+    EXPECT_EQ(-std::numeric_limits<float>::max(), sampler_inputs.logits[0][128821].item<float>());
+    EXPECT_EQ(-std::numeric_limits<float>::max(), sampler_inputs.logits[0][128822].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][201].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
 }
@@ -323,8 +340,7 @@ TEST_F(SamplerTest, testThinkingAllowsNaturalThinkEndBeforeBudgetEnforce) {
     sampler_inputs.sequence_lengths = torch::tensor({3}, torch::kInt32);
     processor->process(sampler_inputs, 0, 1);
 
-    float neg_inf = -std::numeric_limits<float>::max();
-    EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128821].item<float>());
+    EXPECT_EQ(-std::numeric_limits<float>::max(), sampler_inputs.logits[0][128821].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][201].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][128822].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
@@ -350,9 +366,8 @@ TEST_F(SamplerTest, testThinkingMasksThinkBoundaryTokensAfterThinkEnd) {
     sampler_inputs.sequence_lengths = torch::tensor({5}, torch::kInt32);
     processor->process(sampler_inputs, 0, 1);
 
-    float neg_inf = -std::numeric_limits<float>::max();
-    EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128821].item<float>());
-    EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128822].item<float>());
+    EXPECT_EQ(-std::numeric_limits<float>::max(), sampler_inputs.logits[0][128821].item<float>());
+    EXPECT_EQ(-std::numeric_limits<float>::max(), sampler_inputs.logits[0][128822].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][201].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
 }
@@ -386,6 +401,78 @@ TEST_F(SamplerTest, testDsv4TrailingNewlineThinkEndForcesPadAfterSemanticToken) 
     EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128821].item<float>());
     EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128822].item<float>());
 }
+
+TEST_P(ModelThinkBoundaryTest, NaturalBoundaryCompletesBeforeResponseSampling) {
+    const auto& profile = GetParam();
+    constexpr int kStopTokenId = 3;
+    constexpr int kEosTokenId  = 4;
+    SamplerDataBuilder builder;
+
+    auto generate_input                                    = std::make_shared<GenerateInput>();
+    generate_input->generate_config                        = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->in_think_mode         = true;
+    generate_input->generate_config->max_thinking_tokens   = 32;
+    generate_input->generate_config->begin_think_token_ids = profile.begin_think_token_ids;
+    generate_input->generate_config->end_think_token_ids   = profile.end_think_token_ids;
+    generate_input->generate_config->stop_words_list       = {{kStopTokenId}};
+    generate_input->input_ids                              = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    auto processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, 1, kEosTokenId);
+    ASSERT_NE(processor, nullptr);
+    processor->updateStatus(torch::tensor(profile.end_think_token_ids, torch::kInt32).unsqueeze(0),
+                            static_cast<int32_t>(profile.end_think_token_ids.size()));
+
+    SamplerInputs inputs    = builder.allocate({1, static_cast<size_t>(profile.vocab_size), 8}, {processor}, {1});
+    inputs.input_lengths    = torch::tensor({3}, torch::kInt32);
+    inputs.sequence_lengths = torch::tensor({3 + static_cast<int>(profile.end_think_token_ids.size())},
+                                            torch::kInt32);
+    processor->process(inputs, 0, 1);
+
+    EXPECT_EQ(inputs.logits[0][kStopTokenId].item<float>(), 0.0f);
+    EXPECT_EQ(inputs.logits[0][kEosTokenId].item<float>(), 0.0f);
+}
+
+TEST_P(ModelThinkBoundaryTest, NaturalCloseForcesTrailingBoundaryToken) {
+    const auto& profile = GetParam();
+    ASSERT_EQ(profile.end_think_token_ids.size(), 2);
+    SamplerDataBuilder builder;
+
+    auto generate_input                                    = std::make_shared<GenerateInput>();
+    generate_input->generate_config                        = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->in_think_mode         = true;
+    generate_input->generate_config->max_thinking_tokens   = 32;
+    generate_input->generate_config->begin_think_token_ids = profile.begin_think_token_ids;
+    generate_input->generate_config->end_think_token_ids   = profile.end_think_token_ids;
+    generate_input->input_ids                              = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    auto processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, 1);
+    ASSERT_NE(processor, nullptr);
+    processor->updateStatus(torch::tensor({{profile.end_think_token_ids.front()}}, torch::kInt32), 1);
+
+    SamplerInputs inputs    = builder.allocate({1, static_cast<size_t>(profile.vocab_size), 8}, {processor}, {1});
+    inputs.input_lengths    = torch::tensor({3}, torch::kInt32);
+    inputs.sequence_lengths = torch::tensor({4}, torch::kInt32);
+    processor->process(inputs, 0, 1);
+
+    const float neg_inf = -std::numeric_limits<float>::max();
+    const int   trailing_token_id = profile.end_think_token_ids.back();
+    EXPECT_EQ(inputs.logits[0][trailing_token_id].item<float>(), 1.0f);
+    EXPECT_EQ(inputs.logits[0][profile.end_think_token_ids.front()].item<float>(), neg_inf);
+
+    processor->updateStatus(torch::tensor({{trailing_token_id}}, torch::kInt32), 1);
+    inputs.logits.zero_();
+    inputs.sequence_lengths = torch::tensor({5}, torch::kInt32);
+    processor->process(inputs, 0, 1);
+
+    EXPECT_EQ(inputs.logits[0][trailing_token_id].item<float>(), 0.0f);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    ModelBoundaries,
+    ModelThinkBoundaryTest,
+    testing::Values(ModelThinkBoundaryCase{"DeepSeekV4", {128821, 198}, {128822, 271}, 248100},
+                    ModelThinkBoundaryCase{"Qwen35", {248068, 198}, {248069, 271}, 248100}),
+    modelThinkBoundaryCaseName);
 
 TEST_F(SamplerTest, testThinkingForcesRemainingThinkEndAfterNaturalPrefix) {
     SamplerDataBuilder builder;
@@ -429,9 +516,14 @@ TEST_F(SamplerTest, testNoThinkingMasksThinkEndTokenWithoutBeginTokenConfig) {
     SamplerInputs sampler_inputs = builder.allocate({1, 128900, 8}, {}, {});
     processor->process(sampler_inputs, 0, 1);
 
-    float neg_inf = -std::numeric_limits<float>::max();
     EXPECT_EQ(0, sampler_inputs.logits[0][201].item<float>());
-    EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128822].item<float>());
+    EXPECT_EQ(-std::numeric_limits<float>::max(), sampler_inputs.logits[0][128822].item<float>());
+    EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
+
+    processor->updateStatus(torch::tensor({{128822}}, torch::kInt32), 1);
+    sampler_inputs.logits.zero_();
+    processor->process(sampler_inputs, 0, 1);
+    EXPECT_EQ(-std::numeric_limits<float>::max(), sampler_inputs.logits[0][128822].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
 }
 
@@ -452,10 +544,85 @@ TEST_F(SamplerTest, testZeroThinkBudgetMasksThinkEndTokenWithoutBeginTokenConfig
     SamplerInputs sampler_inputs = builder.allocate({1, 128900, 8}, {}, {});
     processor->process(sampler_inputs, 0, 1);
 
-    float neg_inf = -std::numeric_limits<float>::max();
     EXPECT_EQ(0, sampler_inputs.logits[0][201].item<float>());
-    EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128822].item<float>());
+    EXPECT_EQ(-std::numeric_limits<float>::max(), sampler_inputs.logits[0][128822].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
+}
+
+TEST_F(SamplerTest, testKimiK3NaturalBoundaryAndReasoningStops) {
+    SamplerDataBuilder builder;
+
+    constexpr int kEosTokenId     = 163585;
+    constexpr int kEndOfMessageId = 163586;
+    constexpr int kOpenTokenId    = 163587;
+    constexpr int kCloseTokenId   = 163588;
+    auto generate_input = std::make_shared<GenerateInput>();
+    generate_input->generate_config = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->in_think_mode       = true;
+    generate_input->generate_config->max_thinking_tokens = 32;
+    generate_input->generate_config->begin_think_token_ids = {kOpenTokenId, 39964, 163589};
+    generate_input->generate_config->end_think_token_ids = {
+        kCloseTokenId, 39964, 163589, kOpenTokenId, 12092, 163589};
+    generate_input->generate_config->stop_words_list = {{kEndOfMessageId}};
+    generate_input->input_ids = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    auto processor = ThinkModeLogitsProcessor::fromGenerateInput(
+        generate_input, 1, kEosTokenId, "kimi_k3");
+    ASSERT_NE(processor, nullptr);
+
+    SamplerInputs inputs    = builder.allocate({1, 163600, 8}, {processor}, {1});
+    inputs.input_lengths    = torch::tensor({3}, torch::kInt32);
+    inputs.sequence_lengths = torch::tensor({3}, torch::kInt32);
+    processor->process(inputs, 0, 1);
+
+    float neg_inf = -std::numeric_limits<float>::max();
+    EXPECT_EQ(neg_inf, inputs.logits[0][kEosTokenId].item<float>());
+    EXPECT_EQ(neg_inf, inputs.logits[0][kEndOfMessageId].item<float>());
+    EXPECT_EQ(neg_inf, inputs.logits[0][kOpenTokenId].item<float>());
+    EXPECT_EQ(0, inputs.logits[0][kCloseTokenId].item<float>());
+
+    processor->updateStatus(torch::tensor({{kCloseTokenId, 39964, 163589, kOpenTokenId, 12092, 163589}},
+                                          torch::kInt32),
+                            6);
+    inputs.logits.zero_();
+    inputs.sequence_lengths = torch::tensor({9}, torch::kInt32);
+    processor->process(inputs, 0, 1);
+
+    EXPECT_EQ(0, inputs.logits[0][kEosTokenId].item<float>());
+    EXPECT_EQ(0, inputs.logits[0][kEndOfMessageId].item<float>());
+    EXPECT_EQ(0, inputs.logits[0][kOpenTokenId].item<float>());
+    EXPECT_EQ(0, inputs.logits[0][kCloseTokenId].item<float>());
+}
+
+TEST_F(SamplerTest, testKimiK3SpecMasksReasoningStops) {
+    auto generate_input = std::make_shared<GenerateInput>();
+    generate_input->generate_config = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->in_think_mode         = true;
+    generate_input->generate_config->max_thinking_tokens   = 32;
+    generate_input->generate_config->begin_think_token_ids = {7, 1};
+    generate_input->generate_config->end_think_token_ids   = {8, 2};
+    generate_input->generate_config->stop_words_list       = {{10}};
+    generate_input->input_ids = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    auto processor = ThinkModeLogitsProcessor::fromGenerateInput(
+        generate_input, 1, /*eos_token_id=*/11, "kimi_k3");
+    ASSERT_NE(processor, nullptr);
+
+    const size_t         words = SpecLogitsProcessor::bitmaskWordCount(16);
+    std::vector<int32_t> draft = {10};
+    std::vector<int32_t> bitmask(2 * words, SpecLogitsProcessor::kBitmaskAllowAll);
+    SpecLogitsProcessorRequest request;
+    request.draft_tokens       = draft.data();
+    request.propose_step       = 1;
+    request.bitmask_cpu_out    = bitmask.data();
+    request.bitmask_size_int32 = words;
+    request.vocab_size         = 16;
+
+    EXPECT_EQ(0, processor->tryAcceptAndFillBitmask(request));
+    EXPECT_FALSE((static_cast<uint32_t>(bitmask[0]) & (1u << 10)) != 0u);
+    EXPECT_FALSE((static_cast<uint32_t>(bitmask[0]) & (1u << 11)) != 0u);
+    EXPECT_FALSE((static_cast<uint32_t>(bitmask[0]) & (1u << 7)) != 0u);
+    EXPECT_TRUE((static_cast<uint32_t>(bitmask[0]) & (1u << 8)) != 0u);
 }
 
 TEST_F(SamplerTest, testThinkingBudgetEnforceStartsAfterReasoningBudget) {
@@ -492,7 +659,7 @@ TEST_F(SamplerTest, testThinkingBudgetEnforceStartsAfterReasoningBudget) {
     EXPECT_EQ(neg_inf, enforce_inputs.logits[0][9].item<float>());
 }
 
-TEST_F(SamplerTest, testForcedSingleTokenThinkEndDoesNotRepeatBeforeAsyncStatusUpdate) {
+TEST_F(SamplerTest, testForcedSingleTokenThinkEndDoesNotRepeatAfterStatusUpdate) {
     SamplerDataBuilder builder;
 
     auto generate_input                                  = std::make_shared<GenerateInput>();
@@ -512,6 +679,7 @@ TEST_F(SamplerTest, testForcedSingleTokenThinkEndDoesNotRepeatBeforeAsyncStatusU
 
     float neg_inf = -std::numeric_limits<float>::max();
     EXPECT_EQ(1, enforce_inputs.logits[0][8].item<float>());
+    processor->updateStatus(torch::tensor({{8}}, torch::kInt32), 1);
 
     SamplerInputs next_inputs    = builder.allocate({1, 16, 8}, {processor}, {1});
     next_inputs.input_lengths    = torch::tensor({2}, torch::kInt32);

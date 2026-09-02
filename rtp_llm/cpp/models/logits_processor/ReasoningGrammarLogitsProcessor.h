@@ -26,7 +26,9 @@ public:
                                     std::vector<int>                   begin_think_token_ids,
                                     std::vector<int>                   end_think_token_ids,
                                     int32_t                            input_length,
-                                    ErrorReporter                      error_reporter = nullptr);
+                                    ErrorReporter                      error_reporter = nullptr,
+                                    const std::vector<std::vector<int>>& stop_words_list = {},
+                                    std::string                        model_type = {});
     ~ReasoningGrammarLogitsProcessor() override = default;
 
     void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
@@ -47,6 +49,7 @@ private:
     bool applyReasoningOrGrammarMaskLocked(const SamplerInputs& inputs, size_t batch_idx);
     bool applyGrammarMaskLocked(const torch::Tensor& logits);
     bool forceThinkEndTokenLocked(const torch::Tensor& logits);
+    void maskStopTokens(const torch::Tensor& logits);
     void acceptCommittedGrammarTokenLocked(int32_t token_id);
     void reportErrorOnce(ErrorCode error_code, const std::string& error_msg, bool stream_lock_held);
     void forceToken(const torch::Tensor& logits, int64_t token_id);

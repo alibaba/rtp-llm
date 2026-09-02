@@ -52,6 +52,9 @@ Required on both hosts:
 
 Model and cache (normally change these together on both roles):
   TOKENIZER_PATH                         defaults to CHECKPOINT_PATH
+  THINK_START_TAG                        defaults to the K3 XTML think opener
+  THINK_END_TAG                          defaults to the complete K3 XTML
+                                         think-to-response boundary
   MAX_SEQ_LEN                            defaults to 16384
   MAX_BATCH_TOKENS_SIZE                  optional token admission limit
   KV_CACHE_MEM_MB                        defaults: Prefill 43000, Decode 46000;
@@ -348,6 +351,8 @@ export LOG_PATH="${LOG_PATH:-${run_root}/logs/${role,,}}"
 export START_PORT="${start_port}"
 export FRONTEND_SERVER_COUNT="${FRONTEND_SERVER_COUNT:-1}"
 export MODEL_TYPE=kimi_k3
+export THINK_START_TAG="${THINK_START_TAG:-<|open|>think<|sep|>}"
+export THINK_END_TAG="${THINK_END_TAG:-<|close|>think<|sep|><|open|>response<|sep|>}"
 export CHECKPOINT_PATH
 export TOKENIZER_PATH="${tokenizer_path}"
 export LOAD_METHOD="${LOAD_METHOD:-fastsafetensors}"
@@ -432,6 +437,8 @@ echo "  local endpoint:  ${local_endpoint}"
 echo "  remote endpoint: ${remote_endpoint}"
 echo "  PD no-proxy:      ${pd_no_proxy_hosts}"
 echo "  checkpoint:      ${CHECKPOINT_PATH}"
+echo "  think start:     ${THINK_START_TAG}"
+echo "  think end:       ${THINK_END_TAG}"
 echo "  topology:        TP${tp_size}/DP${dp_size}/EP8"
 if [[ "${role}" == "DECODE" ]]; then
     echo "  decode topology: ${decode_topology}"

@@ -262,24 +262,27 @@ class GenerateConfig(BaseModel):
             generate_env_config: GenerateEnvConfig object.
         """
 
-        end_think_token_id = generate_env_config.think_end_token_id
-        self.end_think_token_ids = (
-            [end_think_token_id] if end_think_token_id != -1 else []
-        )
-        if (
-            bool(generate_env_config.think_mode)
-            and tokenizer
-            and end_think_token_id == -1
-        ):
-            think_end_tag: str = generate_env_config.think_end_tag.encode(
-                "utf-8"
-            ).decode("unicode_escape")
-            tokenized_result: List[int] = tokenizer.encode(
-                think_end_tag, add_special_tokens=False
+        def encode_tag(tag: str) -> List[int]:
+            if not tokenizer:
+                return []
+            decoded_tag = (tag or "").encode("utf-8").decode("unicode_escape")
+            if not decoded_tag:
+                return []
+            return list(tokenizer.encode(decoded_tag, add_special_tokens=False))
+
+        if not self.begin_think_token_ids:
+            self.begin_think_token_ids = encode_tag(
+                generate_env_config.think_start_tag
             )
-            self.end_think_token_ids = tokenized_result
+        if not self.end_think_token_ids:
+            end_token_id = generate_env_config.think_end_token_id
+            self.end_think_token_ids = (
+                [end_token_id]
+                if end_token_id != -1
+                else encode_tag(generate_env_config.think_end_tag)
+            )
         self.in_think_mode = (
-            bool(generate_env_config.think_mode) and len(self.end_think_token_ids) >= 0
+            bool(generate_env_config.think_mode) and self.max_thinking_tokens > 0
         )
 
     def add_stop_ids_from_str(self, tokenizer):

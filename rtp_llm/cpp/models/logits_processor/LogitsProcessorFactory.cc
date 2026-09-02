@@ -7,6 +7,7 @@
 #include "autil/legacy/any.h"
 #include "autil/legacy/json.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackendCpp.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
@@ -140,7 +141,8 @@ GrammarKeyCpp keyFromGenerateConfig(const GenerateConfig& config) {
 BaseLogitsProcessorPtr createGrammarProcessor(std::shared_ptr<GenerateInput>        generate_input,
                                               int64_t                               eos_token_id,
                                               const GrammarKeyCpp&                  key,
-                                              LogitsProcessorFactory::ErrorReporter error_reporter) {
+                                              LogitsProcessorFactory::ErrorReporter error_reporter,
+                                              const std::string&                    model_type) {
     auto config = generate_input->generate_config;
     XGrammarBackendCppPtr backend;
     {
@@ -187,7 +189,9 @@ BaseLogitsProcessorPtr createGrammarProcessor(std::shared_ptr<GenerateInput>    
                                                                  config->begin_think_token_ids,
                                                                  config->end_think_token_ids,
                                                                  generate_input->inputLength(),
-                                                                 std::move(error_reporter));
+                                                                 std::move(error_reporter),
+                                                                 config->stop_words_list,
+                                                                 model_type);
     }
 
     auto matcher = backend->createMatcher(
@@ -197,8 +201,11 @@ BaseLogitsProcessorPtr createGrammarProcessor(std::shared_ptr<GenerateInput>    
 
 void appendThinkProcessor(std::vector<BaseLogitsProcessorPtr>& result,
                           std::shared_ptr<GenerateInput>       generate_input,
-                          int32_t                              max_batch_size) {
-    auto think_processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, max_batch_size);
+                          int32_t                              max_batch_size,
+                          int64_t                              eos_token_id,
+                          const std::string&                   model_type) {
+    auto think_processor =
+        ThinkModeLogitsProcessor::fromGenerateInput(generate_input, max_batch_size, eos_token_id, model_type);
     if (think_processor != nullptr) {
         result.push_back(std::static_pointer_cast<BaseLogitsProcessor>(think_processor));
     }
@@ -208,8 +215,10 @@ void appendGrammarProcessor(std::vector<BaseLogitsProcessorPtr>&       result,
                             std::shared_ptr<GenerateInput>             generate_input,
                             int64_t                                    eos_token_id,
                             const GrammarKeyCpp&                       grammar_key,
-                            LogitsProcessorFactory::ErrorReporter      error_reporter) {
-    auto grammar_processor = createGrammarProcessor(generate_input, eos_token_id, grammar_key, error_reporter);
+                            LogitsProcessorFactory::ErrorReporter      error_reporter,
+                            const std::string&                         model_type) {
+    auto grammar_processor =
+        createGrammarProcessor(generate_input, eos_token_id, grammar_key, error_reporter, model_type);
     if (grammar_processor != nullptr) {
         result.push_back(std::move(grammar_processor));
     }
@@ -240,10 +249,10 @@ bool LogitsProcessorFactory::hasGrammarConstraint(const GenerateConfig& config) 
     }
 }
 
-void LogitsProcessorFactory::init(const std::string&   ckpt_path,
+void LogitsProcessorFactory::init(const ModelConfig&   model_config,
                                   const std::string&   tree_decode_config,
                                   const GrammarConfig& grammar_config) {
-    PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(ckpt_path, tree_decode_config);
+    PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(model_config.ckpt_path, tree_decode_config);
 
     std::lock_guard<std::mutex> lock(g_grammar_backend_mutex);
     g_grammar_backend.reset();
@@ -284,6 +293,7 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
                                                int32_t                        init_batch_size,
                                                int32_t                        max_batch_size,
                                                int64_t                        eos_token_id,
+                                               const std::string&             model_type,
                                                ErrorReporter                  error_reporter) {
     std::vector<BaseLogitsProcessorPtr> result;
     auto                                config = generate_input->generate_config;
@@ -301,7 +311,7 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
     }
 
     if (grammar_key.empty()) {
-        appendThinkProcessor(result, generate_input, max_batch_size);
+        appendThinkProcessor(result, generate_input, max_batch_size, eos_token_id, model_type);
     } else if (config->in_think_mode) {
         if (config->hasNumBeams() || config->num_return_sequences > 1) {
             if (error_reporter) {
@@ -316,7 +326,12 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
                                false);
             }
         } else {
-            appendGrammarProcessor(result, generate_input, eos_token_id, grammar_key, error_reporter);
+            appendGrammarProcessor(result,
+                                   generate_input,
+                                   eos_token_id,
+                                   grammar_key,
+                                   error_reporter,
+                                   model_type);
         }
     } else if (config->hasNumBeams() || config->num_return_sequences > 1) {
         if (error_reporter) {
@@ -325,7 +340,12 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
                            false);
         }
     } else {
-        appendGrammarProcessor(result, generate_input, eos_token_id, grammar_key, error_reporter);
+        appendGrammarProcessor(result,
+                               generate_input,
+                               eos_token_id,
+                               grammar_key,
+                               error_reporter,
+                               model_type);
     }
 
     appendTreeAndMultiSeqProcessors(result, generate_input, init_batch_size, eos_token_id);

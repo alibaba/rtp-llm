@@ -100,6 +100,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         init_batch_size,
         maxBatchSize(),
         special_tokens_.eos_token_id,
+        model_config.model_type,
         [this](ErrorCode error_code, const std::string& error_msg, bool stream_lock_held) {
             if (stream_lock_held) {
                 reportEventWithoutLock(StreamEvents::Error, error_code, error_msg);
