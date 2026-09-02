@@ -500,6 +500,31 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherReusesSnapshotPayloadAndExponential
     EXPECT_GE(second_retry_delay.count(), 60);
 }
 
+TEST(KVCacheEventPublisherTest, KVCMPublisherHeartbeatsWhileSnapshotUploadKeepsFailing) {
+    KVCacheEventPublisherConfig config;
+    config.queue_capacity        = 8;
+    config.report_batch_size     = 8;
+    config.flush_interval_ms     = 1;
+    config.heartbeat_interval_ms = 10;
+    config.snapshot_interval_ms  = 60000;
+    config.retry_interval_ms     = 1;
+
+    auto reporter = std::make_shared<RecordingReporter>();
+    reporter->failNextBodiesContaining("EVENT_BLOCK_SNAPSHOT", 100);
+    KVCMPublisher publisher(
+        config,
+        makeContext(),
+        [] {
+            return KVCacheSnapshot{1, {10, 20}};
+        },
+        reporter);
+
+    ASSERT_TRUE(publisher.start());
+    ASSERT_TRUE(reporter->waitForBodyCount("EVENT_BLOCK_SNAPSHOT", 3, kAsyncTestTimeout));
+    ASSERT_TRUE(reporter->waitForBodyCount("EVENT_HEARTBEAT", 2, kAsyncTestTimeout));
+    publisher.stop();
+}
+
 TEST(KVCacheEventPublisherTest, KVCMPublisherPreservesMutationsCreatedWhileSnapshotIsInFlight) {
     KVCacheEventPublisherConfig config;
     config.queue_capacity        = 8;

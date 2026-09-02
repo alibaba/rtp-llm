@@ -623,6 +623,7 @@ private:
         };
 
         bool   registered                  = false;
+        bool   heartbeat_schedule_started  = false;
         size_t consecutive_dirty_snapshots = 0;
         auto   next_heartbeat              = std::chrono::steady_clock::now();
         auto   next_reconcile              = std::chrono::steady_clock::now();
@@ -640,8 +641,11 @@ private:
                     }
                     registered = true;
                     dirty_generation_.fetch_add(1, std::memory_order_relaxed);
-                    next_heartbeat = std::chrono::steady_clock::now()
-                                     + std::chrono::milliseconds(std::max(config_.heartbeat_interval_ms, 1));
+                    if (!heartbeat_schedule_started) {
+                        next_heartbeat = std::chrono::steady_clock::now()
+                                         + std::chrono::milliseconds(std::max(config_.heartbeat_interval_ms, 1));
+                        heartbeat_schedule_started = true;
+                    }
                 }
 
                 const auto now = std::chrono::steady_clock::now();
