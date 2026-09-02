@@ -22,6 +22,7 @@ from rtp_llm.models.hy_v4 import (
     Hy4,
     Hy4MtpWeight,
     Hy4Weight,
+    _move_indexer_rope_to_front,
     _transpose_stacked_gate_up,
 )
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, stack_
@@ -71,6 +72,40 @@ class Hy4ConfigTest(unittest.TestCase):
         self.assertTrue(config.force_sparse_mla)
         self.assertFalse(config.attn_config.rope_config.is_neox_style)
         self.assertFalse(config.attn_config.rope_config.indexer_is_neox_style)
+        self.assertEqual(config.indexer_layernorm_eps, 1e-6)
+        self.assertEqual(config.indexer_scale_fmt, "ue8m0")
+        self.assertFalse(config.indexer_use_hadamard)
+
+    def test_indexer_layernorm_epsilon_is_independent_from_model_rmsnorm(self):
+        raw = {
+            "hidden_size": 32,
+            "num_hidden_layers": 1,
+            "vocab_size": 128,
+            "max_position_embeddings": 4096,
+            "num_attention_heads": 4,
+            "q_lora_rank": 16,
+            "kv_lora_rank": 8,
+            "qk_nope_head_dim": 6,
+            "qk_rope_head_dim": 2,
+            "v_head_dim": 8,
+            "index_head_dim": 4,
+            "index_n_heads": 2,
+            "index_topk": 16,
+            "indexer_types": ["full"],
+            "mlp_layer_types": ["dense"],
+            "intermediate_size": 48,
+            "moe_intermediate_size": 12,
+            "n_routed_experts": 8,
+            "num_experts_per_tok": 2,
+            "rms_norm_eps": 1e-5,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "config.json").write_text(json.dumps(raw))
+            config = Hy4._create_config(tmp)
+        self.assertEqual(config.layernorm_eps, 1e-5)
+        self.assertEqual(config.indexer_layernorm_eps, 1e-6)
+        self.assertEqual(config.indexer_scale_fmt, "ue8m0")
+        self.assertFalse(config.indexer_use_hadamard)
 
     def test_rejects_unknown_indexer_type(self):
         raw = {
@@ -125,6 +160,82 @@ class Hy4ConfigTest(unittest.TestCase):
 
 
 class Hy4WeightTest(unittest.TestCase):
+    def test_indexer_checkpoint_layout_moves_rope_to_front_per_head(self):
+        tensor = torch.arange(2 * 128 * 3).reshape(2 * 128, 3)
+        actual = _move_indexer_rope_to_front(
+            [tensor], output_dim=2 * 128, head_dim=128, rope_dim=64
+        )
+        expected = torch.cat(
+            (
+                tensor.reshape(2, 128, 3)[:, 64:],
+                tensor.reshape(2, 128, 3)[:, :64],
+            ),
+            dim=1,
+        ).reshape_as(tensor)
+        torch.testing.assert_close(actual, expected)
+
+    def test_indexer_coarse_scale_layout_is_unchanged(self):
+        scale = torch.arange(2 * 3).reshape(2, 3)
+        actual = _move_indexer_rope_to_front(
+            [scale], output_dim=2 * 128, head_dim=128, rope_dim=64
+        )
+        torch.testing.assert_close(actual, scale)
+
+    def test_indexer_layout_adapter_matches_vllm_rope_norm_chain(self):
+        def interleaved_rope(tensor, offset):
+            output = tensor.clone()
+            angles = torch.arange(32, dtype=tensor.dtype) / 17
+            even = tensor[offset : offset + 64 : 2]
+            odd = tensor[offset + 1 : offset + 64 : 2]
+            output[offset : offset + 64 : 2] = (
+                even * angles.cos() - odd * angles.sin()
+            )
+            output[offset + 1 : offset + 64 : 2] = (
+                odd * angles.cos() + even * angles.sin()
+            )
+            return output
+
+        def layer_norm(tensor, weight, bias):
+            normalized = (tensor - tensor.mean()) * torch.rsqrt(
+                tensor.var(unbiased=False) + 1e-6
+            )
+            return normalized * weight + bias
+
+        def swap(tensor):
+            return _move_indexer_rope_to_front(
+                [tensor], output_dim=128, head_dim=128, rope_dim=64
+            )
+
+        q = torch.arange(128, dtype=torch.float64) - 37
+        wk_output = torch.arange(128, dtype=torch.float64).flip(0) + 11
+        norm_weight = torch.arange(128, dtype=torch.float64) / 127 + 0.5
+        norm_bias = torch.arange(128, dtype=torch.float64) / 251
+
+        # vLLM/PTM path: K norm in checkpoint order, then RoPE on the tail.
+        k = layer_norm(wk_output, norm_weight, norm_bias)
+        q_roped = interleaved_rope(q, offset=64)
+        k_roped = interleaved_rope(k, offset=64)
+
+        # RTP path after load-time adaptation: projection rows and LayerNorm
+        # parameters are all swapped, then the existing first-slice RoPE runs.
+        k_swapped = layer_norm(
+            swap(wk_output), swap(norm_weight), swap(norm_bias)
+        )
+        torch.testing.assert_close(k_swapped, swap(k))
+        q_swapped_roped = interleaved_rope(swap(q), offset=0)
+        k_swapped_roped = interleaved_rope(k_swapped, offset=0)
+
+        # RTP stores the two half-heads in the opposite order, but after the
+        # load-time permutation every value is exactly the corresponding vLLM
+        # value. Per-vector absmax quantization and QK scores are invariant to
+        # this fixed permutation.
+        torch.testing.assert_close(q_swapped_roped, swap(q_roped))
+        torch.testing.assert_close(k_swapped_roped, swap(k_roped))
+        torch.testing.assert_close(
+            q_swapped_roped * k_swapped_roped,
+            swap(q_roped * k_roped),
+        )
+
     def test_fused_gate_up_checkpoint_order_is_swapped_for_rtp(self):
         expert0 = torch.tensor([[1.0], [2.0], [11.0], [12.0]])
         expert1 = torch.tensor([[3.0], [4.0], [13.0], [14.0]])
@@ -246,6 +357,68 @@ class Hy4Mxfp8WeightTest(unittest.TestCase):
         self.assertEqual(config.checkpoint_scale_suffix, ".weight_scale")
         self.assertEqual(config.packed_scale_suffix, "_scale")
 
+    def test_indexer_q_layout_merge_propagates_to_mxfp8_weight_and_scale(self):
+        prefix = "model.layers.{i}.self_attn.indexer.wq_b"
+
+        def merge(ts):
+            return _move_indexer_rope_to_front(
+                ts, output_dim=128, head_dim=128, rope_dim=64
+            )
+
+        src = MlaAttnAtomicWeight(
+            W.mla_indexer_qb_w,
+            [CkptWeightInfo(f"{prefix}.weight", merge)],
+            identity,
+            config=self.mla_config,
+        )
+        wrapped = self._assert_mapping(
+            src,
+            [f"{prefix}.weight"],
+            [f"{prefix}.weight_scale"],
+        )
+        kernel = torch.arange(128 * 4).reshape(128, 4)
+        scale = torch.arange(128 * 2).reshape(128, 2)
+        expected_kernel = torch.cat((kernel[64:], kernel[:64]))
+        expected_scale = torch.cat((scale[64:], scale[:64]))
+        torch.testing.assert_close(
+            wrapped.kernel.weights[0].merge_fun([kernel]), expected_kernel
+        )
+        torch.testing.assert_close(
+            wrapped.scale.weights[0].merge_fun([scale]), expected_scale
+        )
+
+    def test_indexer_wk_is_dequantized_to_bf16(self):
+        prefix = "model.layers.{i}.self_attn.indexer.wk"
+
+        def merge(ts):
+            return _move_indexer_rope_to_front(
+                ts, output_dim=128, head_dim=128, rope_dim=64
+            )
+
+        src = MlaAttnAtomicWeight(
+            W.mla_indexer_k_w,
+            [CkptWeightInfo(f"{prefix}.weight", merge)],
+            identity,
+            config=self.mla_config,
+        )
+        self.assertTrue(Mxfp8Weight.support(self.quant_config, src))
+        wrapped = src.create(src, self.quant_config)
+        self.assertIsInstance(wrapped, Mxfp8Weight)
+        self.assertEqual(wrapped.kernel.data_type, torch.bfloat16)
+        self.assertIsNone(wrapped.scale)
+        self.assertEqual(
+            self._ckpt_names(wrapped.kernel),
+            [f"{prefix}.weight", f"{prefix}.weight_scale"],
+        )
+
+        weight = torch.arange(128 * 32, dtype=torch.float32).reshape(128, 32)
+        weight = (weight.remainder(31) - 15).to(torch.float8_e4m3fn)
+        scale_exponents = torch.full((128, 1), 125.0)
+        dequantized = (weight.float() * 0.25).bfloat16()
+        expected = merge([dequantized])
+        actual = wrapped.kernel.process_fun([weight, scale_exponents])
+        torch.testing.assert_close(actual, expected)
+
     def test_mla_and_indexer_mappings(self):
         prefix = "model.layers.{i}.self_attn"
         cases = [
@@ -253,7 +426,6 @@ class Hy4Mxfp8WeightTest(unittest.TestCase):
             (W.mla_kv_b_w, [f"{prefix}.kv_b_proj.weight"]),
             (W.mla_q_b_w, [f"{prefix}.q_b_proj.weight"]),
             (W.mla_indexer_qb_w, [f"{prefix}.indexer.wq_b.weight"]),
-            (W.mla_indexer_k_w, [f"{prefix}.indexer.wk.weight"]),
         ]
         for internal_name, kernel_names in cases:
             with self.subTest(internal_name=internal_name):

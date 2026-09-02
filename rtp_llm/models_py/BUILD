@@ -85,6 +85,27 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+py_test(
+    name = "hy4_ihc_test",
+    srcs = ["modules/hy_v4/test_ihc.py"],
+    main = "modules/hy_v4/test_ihc.py",
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20", "gpu_count": "1"},
+)
+
+py_test(
+    name = "hy4_mega_moe_layout_test",
+    srcs = ["modules/glm5_mega_moe/test_fused_moe_wrapper_layout.py"],
+    main = "modules/glm5_mega_moe/test_fused_moe_wrapper_layout.py",
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+)
+
 py_library(
     name = "dsv4_fused_kernel_sources",
     srcs = [
