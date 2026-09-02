@@ -42,6 +42,7 @@ class V0ConfigDocumentParserTest {
         NormalizedConfig converted = new V0ConfigDocumentParser().parse("""
                 {
                   "enableQueueing": true,
+                  "fallbackBatchTokenCapacity": 4194304,
                   "cacheAffinityFirstMaxExtraWorkTokens": 8000,
                   "p2pHitDiscount": 0,
                   "flexlbSyncConsistencyConfig": {
@@ -108,6 +109,7 @@ class V0ConfigDocumentParserTest {
 
         assertThat(behavior.isQueue()).isTrue();
         assertThat(converted.sourceSchemaVersion()).isEqualTo(ConfigSchemaVersion.V0_COMPATIBILITY);
+        assertThat(behavior.getFallbackBatchTokenCapacity()).isEqualTo(4_194_304L);
         assertThat(behavior.getDispatcher()).isInstanceOf(NonBatchDispatcherConfig.class);
         assertThat(((QueueSchedulerConfig) behavior.getScheduler()).getCapacity()
                 .getMaxOutstandingRequestsGlobal()).isEqualTo(200000);

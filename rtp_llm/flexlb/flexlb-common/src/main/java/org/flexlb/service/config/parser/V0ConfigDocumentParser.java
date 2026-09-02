@@ -73,6 +73,7 @@ public final class V0ConfigDocumentParser implements ConfigDocumentParser {
         flexlbConfig.put("schemaVersion", ConfigSchemaVersion.STANDARD);
         copyField(v0Config, flexlbConfig, "blockHashStrategy");
         copyField(v0Config, flexlbConfig, "enableFallback");
+        copyField(v0Config, flexlbConfig, "fallbackBatchTokenCapacity");
 
         configureScheduling(v0Config, flexlbConfig);
         configureRouting(v0Config, flexlbConfig);

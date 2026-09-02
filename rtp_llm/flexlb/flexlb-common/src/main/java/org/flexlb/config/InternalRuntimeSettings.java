@@ -30,6 +30,5 @@ public final class InternalRuntimeSettings {
     private final int batchDispatchThreads = 64;
     private final int batchDispatchQueueCapacity = 256;
     private final int nonBatchWaitingRequestsPerPrefillWorker = 1024;
-    private final int fallbackBatchTokenCapacity = 1_048_576;
     private final long masterForwardRpcTimeoutMs = 5000;
 }

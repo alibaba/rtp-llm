@@ -34,6 +34,7 @@ public final class FlexlbConfig {
     private ConsistencyConfig consistency = new NoConsistencyConfig();
     private BlockHashStrategyType blockHashStrategy = BlockHashStrategyType.VLLM;
     private boolean enableFallback = false;
+    private long fallbackBatchTokenCapacity = 1_048_576L;
 
     @JsonIgnore
     private final InternalRuntimeSettings internalRuntime = new InternalRuntimeSettings();

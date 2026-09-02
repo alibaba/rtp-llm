@@ -88,6 +88,9 @@ Nacos 部分更新示例：
 - `blockHashStrategy`：cache block hash 策略。
 - `enableFallback`：默认 `false`；启用时调度入口在转发和路由前返回错误码 `8600`，
   由调用方执行 domain fallback。
+- `fallbackBatchTokenCapacity`：默认 `1048576`；Engine 未声明
+  `max_batch_tokens_size` 和 `max_seq_len` 时使用的最终 batch token 容量兜底值。
+  优先使用 Engine 上报的 `max_batch_tokens_size`，其次使用 `max_seq_len`。
 - `internalRuntime`：代码内部设置，不接受公共 JSON 输入。
 
 `DIRECT + BATCH` 非法；可选配置应省略，不能写 `null`。完整示例和 selector

@@ -31,6 +31,7 @@ public final class FlexlbConfigValidator {
         require(config.getConsistency() != null, "consistency", "is required");
         require(config.getBlockHashStrategy() != null,
                 "blockHashStrategy", "is required");
+        positive(config.getFallbackBatchTokenCapacity(), "fallbackBatchTokenCapacity");
 
         if (config.isDirect()) {
             require(config.getDispatcher() instanceof NonBatchDispatcherConfig,

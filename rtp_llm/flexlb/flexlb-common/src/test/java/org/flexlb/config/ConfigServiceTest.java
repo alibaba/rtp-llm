@@ -50,6 +50,7 @@ class ConfigServiceTest {
         assertFalse(config.isPriorityOrdering());
         assertTrue(config.isBatchDispatch());
         assertFalse(config.isEnableFallback());
+        assertEquals(1_048_576L, config.getFallbackBatchTokenCapacity());
         assertEquals(ConfigSchemaVersion.STANDARD, config.getSchemaVersion());
         assertNull(configService.modelServiceConfig());
     }
@@ -305,7 +306,8 @@ class ConfigServiceTest {
                     "masterRefreshIntervalMs": 6000
                   },
                   "blockHashStrategy": "SGLANG",
-                  "enableFallback": true
+                  "enableFallback": true,
+                  "fallbackBatchTokenCapacity": 2097152
                 }
                 """);
 
@@ -342,6 +344,7 @@ class ConfigServiceTest {
                 ZookeeperConsistencyConfig.class, config.getConsistency());
         assertEquals("zk-1:2181,zk-2:2181", consistency.getConnectString());
         assertTrue(config.isEnableFallback());
+        assertEquals(2_097_152L, config.getFallbackBatchTokenCapacity());
     }
 
     @Test
@@ -408,6 +411,8 @@ class ConfigServiceTest {
 
     @Test
     void validates_cross_component_semantics() {
+        assertThrows(ConfigValidationException.class,
+                () -> FlexlbConfigMerger.mergeWithDefaults("{\"fallbackBatchTokenCapacity\":0}"));
         assertThrows(ConfigValidationException.class, () -> FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{"type":"DIRECT"},
