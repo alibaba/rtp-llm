@@ -409,6 +409,10 @@ class StrategySelectTest(unittest.TestCase):
         ), mock.patch(
             "rtp_llm.models_py.modules.dsv4.moe.strategies.sm120_fused_moe.is_sm120",
             return_value=True,
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp4."
+            "torch.cuda.get_device_capability",
+            return_value=(12, 0),
         ):
             self.assertIs(
                 select_strategy(_cfg(ep_size=4)),

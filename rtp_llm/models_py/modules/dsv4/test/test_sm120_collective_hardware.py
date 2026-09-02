@@ -12,11 +12,16 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.nn.functional as F
 
+from rtp_llm.models_py.distributed.collective_torch import (
+    destroy_distributed_environment,
+    init_distributed_environment,
+)
 from rtp_llm.models_py.modules.dsv4.moe.strategies.base import MoeCfg
 from rtp_llm.models_py.modules.dsv4.moe.strategies.sm120_fused_moe import (
     Sm120FusedMoeStrategy,
 )
 from rtp_llm.models_py.utils.arch import is_sm120
+from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
 
 
@@ -96,8 +101,31 @@ def _dense_fp4_reference(
 def _run_collective_rank(rank: int, world_size: int, port: int) -> None:
     os.environ["MASTER_ADDR"] = "127.0.0.1"
     os.environ["MASTER_PORT"] = str(port)
+    # RTX 5000 Pro multi-process workers do not have a reliable peer-to-peer
+    # path in every CI topology.  Set this before NCCL creates any communicator.
+    os.environ["NCCL_P2P_DISABLE"] = "1"
+    assert os.environ["NCCL_P2P_DISABLE"] == "1"
     torch.cuda.set_device(rank)
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    parallelism_config = ParallelismConfig()
+    parallelism_config.world_rank = rank
+    parallelism_config.world_size = world_size
+    parallelism_config.local_rank = rank
+    parallelism_config.tp_size = world_size
+    parallelism_config.dp_size = 1
+    base_port = port + 11
+    nccl_comm_config = NcclCommConfig(
+        nccl_ip="127.0.0.1",
+        tp_nccl_port=base_port - 2,
+        dp_tp_nccl_port=base_port - 10,
+        ffn_tp_nccl_port=base_port - 5,
+    )
+    init_distributed_environment(
+        parallelism_config,
+        nccl_comm_config=nccl_comm_config,
+        nccl_init_port=port,
+        backend="nccl",
+        timeout=60,
+    )
     try:
         device = torch.device("cuda", rank)
         if not is_sm120(device):
@@ -319,7 +347,7 @@ def _run_collective_rank(rank: int, world_size: int, port: int) -> None:
         )
     finally:
         if dist.is_initialized():
-            dist.destroy_process_group()
+            destroy_distributed_environment()
 
 
 class Sm120CollectiveHardwareTest(unittest.TestCase):

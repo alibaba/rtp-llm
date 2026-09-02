@@ -10,6 +10,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import _decode_sched_meta
 from rtp_llm.models_py.modules.dsv4.fp8.sm120_sparse_mla import (
     SM120_EXTRA_TOPK_WIDTHS,
     canonical_topk,
+    run_chunked_reference,
     validate_sm120_swa_topk_width,
 )
 
@@ -113,19 +114,65 @@ class Sm120SparseMlaCanonicalTest(unittest.TestCase):
             validate_sm120_swa_topk_width(513, context="DeepSeek-V4 decode"),
             1024,
         )
-        with self.assertRaisesRegex(RuntimeError, "DeepSeek-V4 decode.*1025"):
-            validate_sm120_swa_topk_width(1025, context="DeepSeek-V4 decode")
+        self.assertEqual(
+            validate_sm120_swa_topk_width(1025, context="DeepSeek-V4 decode"),
+            1025,
+        )
 
     def test_dspark_gamma_is_included_in_startup_width_validation(self):
         window = 1024
         gamma = 3
         dspark_width = ((window + gamma + 127) // 128) * 128
         self.assertEqual(dspark_width, 1152)
-        with self.assertRaisesRegex(RuntimeError, "DSpark decode.*1152"):
+        self.assertEqual(
             validate_sm120_swa_topk_width(
                 dspark_width,
                 context="DeepSeek-V4 DSpark decode",
+            ),
+            1152,
+        )
+
+    def test_chunked_large_width_fallback_matches_dense_softmax(self):
+        torch.manual_seed(7)
+        rows, heads, dim = 2, 2, 512
+        query = torch.randn(rows, heads, dim, dtype=torch.float32) / 16
+        cache_rows = torch.randn(8, dim, dtype=torch.float32) / 16
+        indices = torch.tensor([[0, 2, 4, -1, -1], [1, 3, 5, 7, -1]])
+        lengths = torch.tensor([3, 4], dtype=torch.int32)
+        sinks = torch.tensor([0.2, -0.3], dtype=torch.float32)
+        actual = torch.empty_like(query)
+
+        def fake_dequantize(_cache, slots):
+            safe = slots.clamp_min(0).to(torch.long)
+            result = cache_rows.index_select(0, safe)
+            return result.masked_fill((slots < 0).unsqueeze(1), 0.0)
+
+        with patch(
+            "rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton."
+            "dequantize_slots_to_bf16",
+            side_effect=fake_dequantize,
+        ):
+            run_chunked_reference(
+                query=query,
+                swa_cache=torch.empty(0),
+                swa_indices=indices,
+                swa_lens=lengths,
+                out=actual,
+                scale=0.5,
+                sinks=sinks,
+                chunk_size=2,
             )
+
+        expected = torch.empty_like(actual)
+        for row in range(rows):
+            selected = cache_rows.index_select(
+                0, indices[row, : lengths[row]].to(torch.long)
+            )
+            logits = torch.einsum("hd,kd->hk", query[row], selected) * 0.5
+            denom_logits = torch.cat((logits, sinks[:, None]), dim=1)
+            weights = torch.softmax(denom_logits, dim=1)[:, :-1]
+            expected[row] = torch.einsum("hk,kd->hd", weights, selected)
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
 
     def test_hca_long_context_widths_cover_one_million_tokens(self):
         for source_width, expected_width in (

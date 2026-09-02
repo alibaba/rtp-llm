@@ -8,6 +8,7 @@ Covers:
   - LoadQuantPerChannelFp8Weight.get_tensor_names: excludes scale keys
 """
 
+import functools
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -30,7 +31,13 @@ from rtp_llm.model_loader.per_channel_fp8_quant_weight import (
     per_channel_cast_to_fp8_expert,
 )
 from rtp_llm.model_loader.tensor_source import TensorCollector
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, transpose
+from rtp_llm.utils.model_weight import (
+    CkptWeightInfo,
+    W,
+    identity,
+    transpose,
+    transpose_pad,
+)
 
 
 class FakeDatabase:
@@ -247,6 +254,46 @@ class TestPerBlockOnlineSm120Layout(unittest.TestCase):
         )
         self.assertTrue(loader.kernel.need_transpose)
         self.assertEqual(loaded[W.attn_o_w].shape, (256, 384))
+        self.assertEqual(loaded[W.attn_o_s].shape, (2, 3))
+        self.assertTrue(torch.equal(loaded[W.attn_o_w], expected_weight))
+        torch.testing.assert_close(loaded[W.attn_o_s], expected_scale)
+
+    def test_real_transpose_pad_descriptor_quantizes_non_aligned_tensor(self):
+        raw_weight = torch.linspace(-1.0, 1.0, 130 * 257).reshape(130, 257)
+        descriptor = AttnAtomicWeight(
+            W.attn_o_w,
+            [CkptWeightInfo("layers.{i}.self_attn.o_proj.weight")],
+            functools.partial(transpose_pad, align_size=128, dim=0),
+        )
+        loader = LoadQuantPerBlockFp8Weight(
+            descriptor,
+            Fp8BlockWiseQuantConfig(is_quanted=False),
+            name=descriptor.name,
+        )
+        tensor_source = MagicMock()
+        tensor_source.load_tensor.return_value = [raw_weight]
+        load_config = MagicMock(compute_dtype=torch.float32)
+
+        processed = transpose_pad([raw_weight], align_size=128, dim=0)
+        expected_weight, expected_scale = per_block_cast_to_fp8(
+            processed, loader.group_size
+        )
+        expected_weight = expected_weight.T.contiguous()
+        expected_scale = expected_scale.reshape(
+            expected_scale.shape[0], -1
+        ).T.contiguous()
+
+        with patch(
+            "rtp_llm.model_loader.per_block_fp8_quant_weight."
+            "_preserve_output_major_fp8_layout",
+            return_value=True,
+        ):
+            loaded = loader._load_raw_tensor(
+                tensor_source, layer_id=0, device="cpu", load_config=load_config
+            )
+
+        self.assertTrue(loader.kernel.need_transpose)
+        self.assertEqual(loaded[W.attn_o_w].shape, (256, 257))
         self.assertEqual(loaded[W.attn_o_s].shape, (2, 3))
         self.assertTrue(torch.equal(loaded[W.attn_o_w], expected_weight))
         torch.testing.assert_close(loaded[W.attn_o_s], expected_scale)

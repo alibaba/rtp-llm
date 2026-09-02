@@ -223,32 +223,42 @@ class SparseAttnV4DecodeFp8Op:
             SM120_SWA_TOPK_WIDTHS,
             canonical_topk,
             run,
+            run_chunked_reference,
+            uses_generic_fallback,
             warmup,
         )
 
         batch, q_len, heads, dim = q.shape
         rows = batch * q_len
         swa_indices = topk_idxs.squeeze(2) if topk_idxs.dim() == 4 else topk_idxs
-        swa_indices, swa_topk_lens = canonical_topk(
-            swa_indices.reshape(rows, -1),
-            topk_length,
-            SM120_SWA_TOPK_WIDTHS,
-        )
         extra_indices = extra_topk_idxs
         if extra_indices is not None and extra_indices.dim() == 4:
             extra_indices = extra_indices.squeeze(2)
+        swa_width = int(swa_indices.reshape(rows, -1).shape[-1])
+        extra_width = (
+            int(extra_indices.reshape(rows, -1).shape[-1])
+            if extra_indices is not None
+            else 0
+        )
+        generic_fallback = uses_generic_fallback(swa_width, extra_width)
+        swa_indices, swa_topk_lens = canonical_topk(
+            swa_indices.reshape(rows, -1),
+            topk_length,
+            (swa_width,) if generic_fallback else SM120_SWA_TOPK_WIDTHS,
+        )
         if extra_indices is not None:
             extra_indices, extra_topk_lens = canonical_topk(
                 extra_indices.reshape(rows, -1),
                 extra_topk_length,
-                SM120_EXTRA_TOPK_WIDTHS,
+                (extra_width,) if generic_fallback else SM120_EXTRA_TOPK_WIDTHS,
             )
         else:
             extra_topk_lens = None
         # CUDA graph replay cannot allocate a 128 MiB workspace.  It must be
         # touched during eager warmup; workspace() raises if a new allocation
         # is attempted while capture is active.
-        warmup(q.device)
+        if not generic_fallback:
+            warmup(q.device)
         # FlashInfer's SM120 ABI consumes paged slot IDs and derives page size
         # plus block stride from the original cache tensor.  Passing the cache
         # directly avoids copying every static top-k slot into two persistent
@@ -261,7 +271,8 @@ class SparseAttnV4DecodeFp8Op:
         )
         flat_q = q.reshape(batch * q_len, heads, dim).contiguous()
         flat_out = torch.empty_like(flat_q)
-        run(
+        sparse_runner = run_chunked_reference if generic_fallback else run
+        sparse_runner(
             query=flat_q,
             swa_cache=swa_decode_cache,
             swa_indices=swa_indices,

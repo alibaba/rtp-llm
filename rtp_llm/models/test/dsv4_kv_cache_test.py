@@ -1,7 +1,11 @@
 import os
+import tempfile
 from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import MagicMock, patch
+
+import torch
+from safetensors.torch import save_file
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
@@ -9,6 +13,7 @@ from rtp_llm.config.server_config_setup import setup_default_args
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
+from rtp_llm.model_loader.tensor_source import DatabaseTensorSource
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.deepseek_v4 import (
     DeepSeekV4,
@@ -48,6 +53,7 @@ from rtp_llm.ops import (
     RoleType,
     TaskType,
 )
+from rtp_llm.utils.database import CkptDatabase
 from rtp_llm.utils.model_weight import CkptWeightInfo, W
 
 # CSA / HCA / SWA / SWA / CSA -- covers every routing branch plus a repeat.
@@ -153,6 +159,82 @@ class Dsv4KvCacheSpecTest(TestCase):
         )
         self.assertNotIn("mtp.0.mlp.experts.weight", checkpoint_key_map)
         self.assertNotIn("mtp.markov.weight", checkpoint_key_map)
+
+    def test_dspark_prefill_pruning_controls_real_checkpoint_reads(self):
+        descriptor = DeepSeekV4DSparkWeight.__new__(DeepSeekV4DSparkWeight)
+        descriptor.role_type = RoleType.PREFILL
+
+        def weight(name, checkpoint_name):
+            return AtomicWeight(name, [CkptWeightInfo(checkpoint_name)])
+
+        source_info = ModelWeightInfo(
+            layer_weights=[
+                [
+                    weight(W.v4_attn_wkv_w, "mtp.{i}.self_attn.wkv.weight"),
+                    weight(W.v4_attn_kv_norm, "mtp.{i}.self_attn.kv_norm.weight"),
+                    weight(W.v4_routed_w1_w, "mtp.{i}.mlp.experts.weight"),
+                ]
+            ],
+            weights=[
+                weight(W.embedding, "embed.weight"),
+                weight(W.lm_head, "lm_head.weight"),
+                weight(W.v4_dspark_main_norm, "mtp.main_norm.weight"),
+                weight(W.v4_dspark_main_proj_w, "mtp.main_proj.weight"),
+                weight(W.v4_dspark_markov_w1, "mtp.markov.weight"),
+            ],
+        )
+        with patch.object(
+            DeepSeekV4Weight, "get_weight_info", return_value=source_info
+        ):
+            filtered = descriptor.get_weight_info()
+
+        checkpoint = {
+            "mtp.0.self_attn.wkv.weight": torch.arange(6, dtype=torch.float32).reshape(
+                2, 3
+            ),
+            "mtp.0.self_attn.kv_norm.weight": torch.arange(3, dtype=torch.float32),
+            "mtp.0.mlp.experts.weight": torch.full((2, 3), 101.0),
+            "embed.weight": torch.full((2, 3), 2.0),
+            "lm_head.weight": torch.full((2, 3), 3.0),
+            "mtp.main_norm.weight": torch.full((3,), 4.0),
+            "mtp.main_proj.weight": torch.full((2, 3), 5.0),
+            "mtp.markov.weight": torch.full((2, 3), 103.0),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            save_file(checkpoint, os.path.join(directory, "model.safetensors"))
+            database = CkptDatabase(directory)
+            tensor_source = DatabaseTensorSource(database)
+            load_config = SimpleNamespace(compute_dtype=torch.float32)
+            try:
+                with patch.object(
+                    database, "load_tensor", wraps=database.load_tensor
+                ) as load_tensor:
+                    for layer_weight in filtered.layer_weights[0]:
+                        layer_weight._load_raw_tensor(
+                            tensor_source, 0, "cpu", load_config
+                        )
+                    for global_weight in filtered.weights:
+                        global_weight._load_raw_tensor(
+                            tensor_source, None, "cpu", load_config
+                        )
+                read_names = {call.args[0] for call in load_tensor.call_args_list}
+            finally:
+                for checkpoint_file in database.pretrain_file_list:
+                    checkpoint_file.close_safetensor_handle()
+
+        self.assertEqual(
+            read_names,
+            {
+                "mtp.0.self_attn.wkv.weight",
+                "mtp.0.self_attn.kv_norm.weight",
+                "embed.weight",
+                "lm_head.weight",
+                "mtp.main_norm.weight",
+                "mtp.main_proj.weight",
+            },
+        )
+        self.assertNotIn("mtp.0.mlp.experts.weight", read_names)
+        self.assertNotIn("mtp.markov.weight", read_names)
 
     def test_dspark_model_type_routes_to_production_wrapper(self):
         self.assertIs(
