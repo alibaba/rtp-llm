@@ -1,4 +1,4 @@
-load("//:def.bzl", "cc_test_wrapper", "copts")
+load("//:def.bzl", "cc_test_wrapper", "copts", "cuda_copts")
 load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
@@ -27,4 +27,21 @@ cc_test(
     env = {
         "FT_SERVER_TEST": "1",
     },
+)
+
+cc_test(
+    name = "cupti_trap_coredump_repro_test",
+    srcs = ["CuptiTrapCoredumpReproTest.cu"],
+    copts = cuda_copts(),
+    deps = [
+        "//rtp_llm/cpp/engine_base:profiler",
+        "@com_google_googletest//:gtest",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {
+        "FT_SERVER_TEST": "1",
+    },
+    tags = ["manual"],
+    timeout = "moderate",
 )
