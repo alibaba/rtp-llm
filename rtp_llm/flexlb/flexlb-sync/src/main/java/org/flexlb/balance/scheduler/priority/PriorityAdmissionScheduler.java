@@ -4,6 +4,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.RequestInflight;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.PrefillQueueManager;
 import org.flexlb.balance.scheduler.PriorityScheduler;
@@ -1495,7 +1496,7 @@ public class PriorityAdmissionScheduler {
 
         try {
 
-            ServerStatus prefill = PriorityScheduler.findServer(routeResponse, RoleType.PREFILL);
+            ServerStatus prefill = PriorityScheduler.findPrefillServer(routeResponse);
             ServerStatus decode = PriorityScheduler.findServer(routeResponse, RoleType.DECODE);
             if (prefill == null) {
                 rollbackRoute(routeResponse);
@@ -1503,8 +1504,10 @@ public class PriorityAdmissionScheduler {
             }
 
             String prefillIpPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
-            PrefillEndpoint prefillEp = endpointRegistry.getPrefill(prefillIpPort);
-            if (prefillEp == null) {
+            WorkerEndpoint selectedEndpoint = prefill.getRole() == RoleType.PREFILL
+                    ? endpointRegistry.getPrefill(prefillIpPort)
+                    : endpointRegistry.get(prefill.getRole(), prefillIpPort);
+            if (!(selectedEndpoint instanceof PrefillEndpoint prefillEp)) {
                 rollbackRoute(routeResponse);
                 return PlacementOutcome.infeasible(null);
             }

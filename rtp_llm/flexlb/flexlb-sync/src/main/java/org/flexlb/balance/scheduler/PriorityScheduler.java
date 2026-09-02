@@ -4,6 +4,7 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.RequestInflight;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.priority.AdmissionFailure;
 import org.flexlb.balance.scheduler.priority.AdmissionFailureClassifier;
 import org.flexlb.balance.scheduler.priority.AdmissionLease;
@@ -429,7 +430,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                     return future;
                 }
 
-                ServerStatus prefill = findServer(routeResponse, RoleType.PREFILL);
+                ServerStatus prefill = findPrefillServer(routeResponse);
                 ServerStatus decode = findServer(routeResponse, RoleType.DECODE);
                 if (prefill == null) {
                     rollback(routeResponse);
@@ -438,10 +439,15 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 }
 
                 String prefillIpPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
-                PrefillEndpoint prefillEp = endpointRegistry.getPrefill(prefillIpPort);
-                if (prefillEp == null) {
+                WorkerEndpoint selectedEndpoint = prefill.getRole() == RoleType.PREFILL
+                        ? endpointRegistry.getPrefill(prefillIpPort)
+                        : endpointRegistry.get(prefill.getRole(), prefillIpPort);
+                if (!(selectedEndpoint instanceof PrefillEndpoint prefillEp)) {
                     rollback(routeResponse);
-                    completeError(future, StrategyErrorType.NO_PREFILL_WORKER, null);
+                    StrategyErrorType errorType = prefill.getRole() == RoleType.PDFUSION
+                            ? StrategyErrorType.NO_PDFUSION_WORKER
+                            : StrategyErrorType.NO_PREFILL_WORKER;
+                    completeError(future, errorType, null);
                     return future;
                 }
 
@@ -4122,6 +4128,12 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
             }
         }
         return null;
+    }
+
+    /** Locate the selected Prefill endpoint, falling back to the fused P/D role. */
+    public static ServerStatus findPrefillServer(Response response) {
+        ServerStatus prefill = findServer(response, RoleType.PREFILL);
+        return prefill != null ? prefill : findServer(response, RoleType.PDFUSION);
     }
 
     private static Response copyResponse(Response src) {
