@@ -10,6 +10,7 @@
 
 #include "autil/EnvUtil.h"
 #include "autil/LockFreeThreadPool.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
@@ -43,26 +44,25 @@ CacheStoreAsyncWriter::PendingTaskGuard::~PendingTaskGuard() {
 CacheStoreAsyncWriter::CacheStoreAsyncWriter(int                             device_id,
                                              std::shared_ptr<KVCacheManager> cache_manager,
                                              size_t                          cache_model_id,
-                                             std::optional<int>              mtp_cache_config_index,
-                                             int                             forward_cp_rank,
-                                             int                             forward_cp_size,
+                                             std::optional<int> mtp_cache_config_index,
                                              std::optional<std::chrono::milliseconds> store_completion_timeout):
     device_id_(device_id),
     store_completion_timeout_(resolveStoreCompletionTimeout(store_completion_timeout)),
-    cache_manager_(std::move(cache_manager)),
-    cache_model_id_(cache_model_id),
-    cp_rank_(forward_cp_rank),
-    cp_size_(forward_cp_size) {
-    RTP_LLM_CHECK_WITH_INFO(cp_size_ > 0 && cp_rank_ >= 0 && cp_rank_ < cp_size_,
-                            "CacheStoreAsyncWriter: invalid forward CP topology rank=%d size=%d",
-                            cp_rank_,
-                            cp_size_);
+    cache_manager_(std::move(cache_manager)), cache_model_id_(cache_model_id) {
     if (cache_manager_) {
         const CacheConfig* selected_config = &cache_manager_->cacheConfig();
         if (mtp_cache_config_index.has_value()) {
             selected_config = &cache_manager_->getMTPModuleCacheConfig(*mtp_cache_config_index);
         }
         cache_config_ = std::shared_ptr<const CacheConfig>(cache_manager_, selected_config);
+
+        // Cache-store key/offset projection follows physical KV ownership, not
+        // forward-only CP execution. An unsharded allocator deliberately leaves
+        // this mapper null so every rank publishes the complete namespace.
+        if (const auto cp_slot_mapper = cache_manager_->cpSlotMapper()) {
+            cp_rank_ = cp_slot_mapper->cpRank();
+            cp_size_ = cp_slot_mapper->cpSize();
+        }
     }
 
     constexpr size_t kThreadCount = 3;
