@@ -219,8 +219,6 @@ bool BlockTreeEvictor::evictLocked(size_t group_set_id, Tier source_tier, bool f
     if (eviction_desc->target_tier == Tier::NONE) {
         EvictionDropTask task = createDropTask(std::move(*eviction_desc));
         runDropTask(task);
-        metrics_reporter_->reportEvictionTriggered(
-            source_tier, tree_->groupSets()[group_set_id]->groupType(), force_drop);
         return true;
     }
 
@@ -245,7 +243,6 @@ bool BlockTreeEvictor::evictLocked(size_t group_set_id, Tier source_tier, bool f
         rollbackTransferLocked(task_ptr->desc);
         return false;
     }
-    metrics_reporter_->reportEvictionTriggered(source_tier, tree_->groupSets()[group_set_id]->groupType(), force_drop);
     return true;
 }
 
@@ -356,12 +353,17 @@ std::optional<TransferDescriptor> BlockTreeEvictor::chooseVictim(size_t group_se
 
 void BlockTreeEvictor::scheduleWatermarkEvictionsLocked(Tier tier, double watermark_ratio) {
     for (const GroupSetPtr& group_set : tree_->groupSets()) {
-        size_t excess = computeGroupSetExcess(*group_set, tier, watermark_ratio);
+        size_t excess             = computeGroupSetExcess(*group_set, tier, watermark_ratio);
+        bool   eviction_triggered = false;
         while (excess > 0) {
             if (!evictLocked(group_set->groupSetId(), tier, /*force_drop=*/false)) {
                 break;
             }
-            excess = std::min(excess - 1, computeGroupSetExcess(*group_set, tier, watermark_ratio));
+            eviction_triggered = true;
+            excess             = std::min(excess - 1, computeGroupSetExcess(*group_set, tier, watermark_ratio));
+        }
+        if (eviction_triggered) {
+            metrics_reporter_->reportEvictionTriggered(tier, group_set->groupType(), /*force_drop=*/false);
         }
     }
 }

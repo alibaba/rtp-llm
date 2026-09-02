@@ -32,15 +32,15 @@ struct KVCachePoolMetricsSnapshot {
     size_t      free_blocks            = 0;
     size_t      used_blocks            = 0;
     size_t      active_blocks          = 0;
-    size_t      available_blocks       = 0;
-    size_t      total_blocks           = 0;
-    size_t      reserve_blocks         = 0;
-    size_t      request_ref_blocks     = 0;
-    size_t      block_cache_ref_blocks = 0;
-    size_t      load_ref_blocks        = 0;
-    size_t      eviction_ref_blocks    = 0;
-    size_t      store_ref_blocks       = 0;
-    float       used_ratio             = 0.0f;
+    size_t      available_blocks           = 0;
+    size_t      total_blocks               = 0;
+    size_t      reserve_blocks             = 0;
+    size_t      request_ref_blocks         = 0;
+    size_t      block_cache_ref_blocks     = 0;
+    size_t      load_ref_blocks            = 0;
+    size_t      eviction_target_ref_blocks = 0;
+    size_t      store_ref_blocks           = 0;
+    float       used_ratio                 = 0.0f;
 };
 
 class KVCacheAllocator {

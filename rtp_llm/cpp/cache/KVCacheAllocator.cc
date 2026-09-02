@@ -467,17 +467,17 @@ std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots()
         snapshot.pool_index             = pool_index;
         snapshot.pool_name              = pool->poolName();
         snapshot.block_size_bytes       = pool->blockSizeBytes();
-        snapshot.total_blocks           = pool->totalBlocksNum();
-        snapshot.free_blocks            = pool->freeBlocksNum();
-        snapshot.used_blocks            = snapshot.total_blocks - snapshot.free_blocks;
-        snapshot.active_blocks          = pool->activeBlocksNum();
-        snapshot.available_blocks       = pool->availableBlocksNum();
-        snapshot.reserve_blocks         = reserveBlocksForPoolMetrics(pool_index);
-        snapshot.request_ref_blocks     = pool->referencedBlocksNum();
-        snapshot.block_cache_ref_blocks = pool->referencedBlocksNum(BlockTreeRefType::CACHE);
-        snapshot.load_ref_blocks        = pool->referencedBlocksNum(BlockTreeRefType::LOAD);
-        snapshot.eviction_ref_blocks    = pool->referencedBlocksNum(BlockTreeRefType::EVICTION);
-        snapshot.store_ref_blocks       = pool->referencedBlocksNum(BlockTreeRefType::STORE);
+        snapshot.total_blocks               = pool->totalBlocksNum();
+        snapshot.free_blocks                = pool->freeBlocksNum();
+        snapshot.used_blocks                = snapshot.total_blocks - snapshot.free_blocks;
+        snapshot.active_blocks              = pool->activeBlocksNum();
+        snapshot.available_blocks           = pool->availableBlocksNum();
+        snapshot.reserve_blocks             = reserveBlocksForPoolMetrics(pool_index);
+        snapshot.request_ref_blocks         = pool->referencedBlocksNum();
+        snapshot.block_cache_ref_blocks     = pool->referencedBlocksNum(BlockTreeRefType::CACHE);
+        snapshot.load_ref_blocks            = pool->referencedBlocksNum(BlockTreeRefType::LOAD);
+        snapshot.eviction_target_ref_blocks = pool->referencedBlocksNum(BlockTreeRefType::EVICTION);
+        snapshot.store_ref_blocks           = pool->referencedBlocksNum(BlockTreeRefType::STORE);
         snapshot.used_ratio =
             snapshot.total_blocks == 0 ?
                 0.0f :
