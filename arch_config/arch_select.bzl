@@ -4,6 +4,7 @@ load("@pip_arm_torch//:requirements.bzl", requirement_arm="requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")
 load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9="requirement")
 load("@pip_gpu_cuda13_torch//:requirements.bzl", requirement_gpu_cuda13="requirement")
+load("@pip_cuda13_arm_torch//:requirements.bzl", requirement_cuda13_arm="requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
 load("@rtp_llm//bazel:defs.bzl", "copy_so")
 
@@ -25,11 +26,13 @@ _DSV4_PLATFORM_ONLY = ["xgrammar"]
 def requirement(names):
     for name in names:
         cuda13_x86_deps = [] if name in _CUDA13_DEFERRED else [requirement_gpu_cuda13(name)]
+        cuda13_arm_deps = [] if name in _CUDA13_DEFERRED else [requirement_cuda13_arm(name)]
         if name in _DSV4_PLATFORM_ONLY:
             native.py_library(
                 name = name,
                 deps = select({
                     "@rtp_llm//:using_cuda13_x86": cuda13_x86_deps,
+                    "@rtp_llm//:using_cuda13_arm": cuda13_arm_deps,
                     "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
                     "//conditions:default": [],
                 }),
@@ -41,6 +44,7 @@ def requirement(names):
             deps = select({
                 "@rtp_llm//:cuda_pre_12_9": [requirement_gpu_cuda12(name)],
                 "@rtp_llm//:using_cuda13_x86": cuda13_x86_deps,
+                "@rtp_llm//:using_cuda13_arm": cuda13_arm_deps,
                 "@rtp_llm//:using_cuda12_9_x86": [requirement_gpu_cuda12_9(name)],
                 "@rtp_llm//:using_rocm": [requirement_gpu_rocm(name)],
                 "@rtp_llm//:using_arm": [requirement_arm(name)],
@@ -81,6 +85,12 @@ def subscribe_deps():
 
 def whl_deps():
     return select({
+        "@rtp_llm//:using_cuda13_arm": [
+            "torch@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
+            "torchvision@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
+            "fast-safetensors@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_aarch64.whl",
+            "fastsafetensors@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130_arm/fastsafetensors-0.3.4.dev20260901%2Bali.fuseshm.g78ac75c8.aone67880226-cp310-cp310-linux_aarch64.whl",
+        ],
         "@rtp_llm//:using_cuda13_x86": [
             "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
             "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
@@ -114,6 +124,11 @@ def platform_deps():
 
 def torch_deps():
     deps = select({
+        "@rtp_llm//:using_cuda13_arm": [
+            "@torch_2.11_py310_cuda_aarch64//:torch_api",
+            "@torch_2.11_py310_cuda_aarch64//:torch",
+            "@torch_2.11_py310_cuda_aarch64//:torch_libs",
+        ],
         "@rtp_llm//:using_rocm": [
             "@torch_rocm//:torch_api",
             "@torch_rocm//:torch",

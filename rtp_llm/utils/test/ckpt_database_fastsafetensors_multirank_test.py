@@ -77,6 +77,7 @@ def _run_real_fastsafetensors_rank(
         outputs = dict(
             database.fastsafetensors_weights_iterator(
                 "cuda",
+                use_tqdm_on_load=False,
                 stacked_key_config={"stacked": "experts.{expert_id}.weight"},
                 local_copyout_filter=wanted_keys.__contains__,
             )
