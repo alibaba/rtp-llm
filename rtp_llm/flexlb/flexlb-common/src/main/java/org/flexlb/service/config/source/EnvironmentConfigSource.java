@@ -1,6 +1,7 @@
 package org.flexlb.service.config.source;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.config.ConfigSchemaVersion;
 import org.flexlb.config.ConfigService;
 import org.flexlb.service.config.ConfigSource;
 import org.flexlb.service.config.NormalizedConfig;
@@ -53,7 +54,9 @@ final class EnvironmentConfigSource implements ConfigSource {
     @Override
     public NormalizedConfig loadConfig() {
         String rawFlexlbConfig = load();
-        return rawFlexlbConfig == null ? new NormalizedConfig(null, modelServiceConfigContent) : normalize(rawFlexlbConfig);
+        return rawFlexlbConfig == null
+                ? new NormalizedConfig(null, modelServiceConfigContent, ConfigSchemaVersion.V0_COMPATIBILITY)
+                : normalize(rawFlexlbConfig);
     }
 
     @Override

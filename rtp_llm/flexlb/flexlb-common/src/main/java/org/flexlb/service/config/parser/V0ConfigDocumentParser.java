@@ -44,7 +44,7 @@ public final class V0ConfigDocumentParser implements ConfigDocumentParser {
             ObjectNode document = parseV0Document(rawFlexlbConfig);
             NormalizedConfig converted = convertV0Document(document);
             return rawModelServiceConfig == null || rawModelServiceConfig.isBlank() ? converted
-                    : new NormalizedConfig(converted.flexlbConfig(), rawModelServiceConfig);
+                    : new NormalizedConfig(converted.flexlbConfig(), rawModelServiceConfig, schemaVersion());
         } catch (JsonProcessingException error) {
             throw new IllegalArgumentException("Invalid V0 configuration document", error);
         }
@@ -65,7 +65,7 @@ public final class V0ConfigDocumentParser implements ConfigDocumentParser {
         if (!unmappedFields.isEmpty()) {
             log.warn("V0 configuration contains unmapped compatibility fields: {}", unmappedFields);
         }
-        return new NormalizedConfig(MAPPER.writeValueAsString(flexlbConfig), modelServiceConfig);
+        return new NormalizedConfig(MAPPER.writeValueAsString(flexlbConfig), modelServiceConfig, ConfigSchemaVersion.V0_COMPATIBILITY);
     }
 
     private static ObjectNode convertFlexlbConfig(ObjectNode v0Config) {

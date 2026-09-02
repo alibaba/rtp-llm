@@ -1,5 +1,7 @@
 package org.flexlb.service.config.source;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.KvcmCacheMatchingConfig;
@@ -11,6 +13,7 @@ import org.flexlb.service.config.parser.StandardConfigDocumentParser;
 import org.flexlb.service.config.parser.V0ConfigDocumentParser;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 
 import java.util.ArrayList;
@@ -192,6 +195,32 @@ class ConfigServiceTest {
                 .getAvailabilityHysteresisPercent()).isEqualTo(10);
         assertThat(updatedSnapshot.getObservability().getLogging().getLevel())
                 .isEqualTo(LogLevel.WARN);
+    }
+
+    @Test
+    void runtimeUpdateLogsTheNewSourceSchemaVersion() {
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(ConfigService.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            FakeConfigSource source = new FakeConfigSource("Nacos", 200, "{\"schemaVersion\":0,\"enableQueueing\":true}");
+            createService(List.of(environmentSource(Map.of()), source));
+            assertThat(appender.list)
+                    .extracting(ILoggingEvent::getFormattedMessage)
+                    .anyMatch(message -> message.startsWith("FlexLB config loaded: schemaVersion=0,"));
+
+            appender.list.clear();
+            source.emit("{\"schemaVersion\":1,\"scheduler\":{\"type\":\"QUEUE\"},\"dispatcher\":{\"type\":\"NON_BATCH\"}}");
+
+            assertThat(appender.list)
+                    .extracting(ILoggingEvent::getFormattedMessage)
+                    .anyMatch(message -> message.startsWith("FlexLB config loaded: schemaVersion=1,"));
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
     }
 
     @Test

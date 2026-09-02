@@ -31,14 +31,14 @@ class V0ConfigDocumentParserTest {
     }
 
     @Test
-    void rejectsMissingV2CompatibilityDocument() {
+    void rejectsMissingV0CompatibilityDocument() {
         V0ConfigDocumentParser parser = new V0ConfigDocumentParser();
         assertThatThrownBy(() -> parser.parse(null, null)).isInstanceOf(IllegalArgumentException.class).hasMessage("V0 compatibility configuration document must not be null or blank");
         assertThatThrownBy(() -> parser.parse("   ", null)).isInstanceOf(IllegalArgumentException.class).hasMessage("V0 compatibility configuration document must not be null or blank");
     }
 
     @Test
-    void convertsV2NacosDocumentIntoCurrentSplitContracts() {
+    void convertsV0NacosDocumentIntoCurrentSplitContracts() {
         NormalizedConfig converted = new V0ConfigDocumentParser().parse("""
                 {
                   "enableQueueing": true,
@@ -107,6 +107,7 @@ class V0ConfigDocumentParserTest {
         var modelService = service.modelServiceConfig();
 
         assertThat(behavior.isQueue()).isTrue();
+        assertThat(converted.sourceSchemaVersion()).isEqualTo(ConfigSchemaVersion.V0_COMPATIBILITY);
         assertThat(behavior.getDispatcher()).isInstanceOf(NonBatchDispatcherConfig.class);
         assertThat(((QueueSchedulerConfig) behavior.getScheduler()).getCapacity()
                 .getMaxOutstandingRequestsGlobal()).isEqualTo(200000);
@@ -150,6 +151,11 @@ class V0ConfigDocumentParserTest {
         @Override
         public String loadModelServiceConfig() {
             return converted.modelServiceConfig();
+        }
+
+        @Override
+        public NormalizedConfig loadConfig() {
+            return converted;
         }
     }
 }

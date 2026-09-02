@@ -104,7 +104,7 @@ class NacosConfigSourceTest {
     }
 
     @Test
-    void loadsV2CompatibilityThroughSchemaVersionZero() throws Exception {
+    void loadsV0CompatibilityThroughSchemaVersionZero() throws Exception {
         com.alibaba.nacos.api.config.ConfigService client =
                 mock(com.alibaba.nacos.api.config.ConfigService.class);
         when(client.getConfig(
@@ -122,6 +122,7 @@ class NacosConfigSourceTest {
                     ReflectionTestUtils.setField(source, "client", client);
                     source.initialize();
                     assertThat(source.name()).isEqualTo("Nacos");
+                    assertThat(source.loadConfig().sourceSchemaVersion()).isEqualTo(0);
                     ConfigService configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
                     configService.close();
                 });
@@ -140,7 +141,7 @@ class NacosConfigSourceTest {
     }
 
     @Test
-    void currentSchemaInNacosOverridesTheV2FallbackMode() throws Exception {
+    void currentSchemaInNacosOverridesTheV0FallbackMode() throws Exception {
         com.alibaba.nacos.api.config.ConfigService client =
                 mock(com.alibaba.nacos.api.config.ConfigService.class);
         ArgumentCaptor<Listener> listenerCaptor = ArgumentCaptor.forClass(Listener.class);
@@ -170,6 +171,7 @@ class NacosConfigSourceTest {
                             """);
 
                     assertThat(source.name()).isEqualTo("Nacos");
+                    assertThat(source.loadConfig().sourceSchemaVersion()).isEqualTo(1);
                     ConfigService configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
                     configService.close();
                 });

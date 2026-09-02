@@ -32,6 +32,7 @@ public class ConfigService {
     private final AtomicReference<ServiceRoute> currentModelServiceConfig;
     private final List<Consumer<FlexlbConfig>> updateListeners = new ArrayList<>();
     private final Object updateLock = new Object();
+    private int configSchemaVersion = ConfigSchemaVersion.V0_COMPATIBILITY;
 
     public ConfigService(List<ConfigDocumentParser> parsers) {
         if (parsers.isEmpty()) {
@@ -40,7 +41,7 @@ public class ConfigService {
         this.currentFlexlbConfig = new AtomicReference<>(new FlexlbConfig());
         this.currentModelServiceConfig = new AtomicReference<>();
         initializeConfigSources();
-        logEffectiveConfig(currentFlexlbConfig.get());
+        logEffectiveConfig(currentFlexlbConfig.get(), configSchemaVersion);
     }
 
     public static synchronized void register(ConfigSource source) {
@@ -87,7 +88,12 @@ public class ConfigService {
 
     private void initializeConfigSource(ConfigSource source, NormalizedConfig normalized) {
         try {
-            currentFlexlbConfig.set(FlexlbConfigMerger.merge(currentFlexlbConfig.get(), normalized.flexlbConfig(), source.name()));
+            FlexlbConfig previous = currentFlexlbConfig.get();
+            FlexlbConfig updated = FlexlbConfigMerger.merge(previous, normalized.flexlbConfig(), source.name());
+            currentFlexlbConfig.set(updated);
+            if (updated != previous) {
+                configSchemaVersion = normalized.sourceSchemaVersion();
+            }
         } catch (Exception error) {
             throw new IllegalStateException("Failed to initialize FlexLB configuration from " + source.name(), error);
         }
@@ -111,8 +117,9 @@ public class ConfigService {
                     return;
                 }
                 currentFlexlbConfig.set(updated);
+                configSchemaVersion = normalized.sourceSchemaVersion();
                 notifyUpdateListeners(updated);
-                logEffectiveConfig(updated);
+                logEffectiveConfig(updated, configSchemaVersion);
                 log.info("Applied FlexLB configuration update from {} source", source.name());
             } catch (Exception error) {
                 log.error("Rejected invalid FlexLB configuration update from {} source; "
@@ -132,14 +139,14 @@ public class ConfigService {
         }
     }
 
-    private static void logEffectiveConfig(FlexlbConfig config) {
+    private static void logEffectiveConfig(FlexlbConfig config, int configSchemaVersion) {
         String scheduler = config.isDirect() ? "DIRECT" : "QUEUE";
         String ordering = config.isDirect() ? "N/A"
                 : config.isPriorityOrdering() ? "PRIORITY" : "FIFO";
         String dispatcher = config.isBatchDispatch() ? "BATCH" : "NON_BATCH";
         log.info("FlexLB config loaded: schemaVersion={}, scheduler={}, ordering={}, dispatcher={}, "
                         + "cacheMatching={}, consistency={}, prefillSelector={}, decodeSelector={}, groupRules={}",
-                config.getSchemaVersion(), scheduler, ordering, dispatcher,
+                configSchemaVersion, scheduler, ordering, dispatcher,
                 config.getCacheMatching().getClass().getSimpleName(),
                 config.getConsistency().getClass().getSimpleName(),
                 config.getRouter().getRoles().getPrefill().getSelector()

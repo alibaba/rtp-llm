@@ -19,6 +19,6 @@ public final class StandardConfigDocumentParser implements ConfigDocumentParser 
 
     @Override
     public NormalizedConfig parse(String rawFlexlbConfig, String rawModelServiceConfig) {
-        return new NormalizedConfig(rawFlexlbConfig, rawModelServiceConfig);
+        return new NormalizedConfig(rawFlexlbConfig, rawModelServiceConfig, schemaVersion());
     }
 }

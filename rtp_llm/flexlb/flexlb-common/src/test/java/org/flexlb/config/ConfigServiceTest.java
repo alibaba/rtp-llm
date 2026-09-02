@@ -1,5 +1,7 @@
 package org.flexlb.config;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.flexlb.config.RoutingConfig.EstimatedTtftSelectorConfig;
 import org.flexlb.config.RoutingConfig.FormulaEstimatorConfig;
 import org.flexlb.config.RoutingConfig.RandomWithinToleranceConfig;
@@ -11,6 +13,7 @@ import org.flexlb.service.config.parser.StandardConfigDocumentParser;
 import org.flexlb.service.config.parser.V0ConfigDocumentParser;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 
 import java.util.List;
@@ -49,6 +52,28 @@ class ConfigServiceTest {
         assertFalse(config.isEnableFallback());
         assertEquals(ConfigSchemaVersion.STANDARD, config.getSchemaVersion());
         assertNull(configService.modelServiceConfig());
+    }
+
+    @Test
+    void effectiveLogUsesSourceSchemaVersionBeforeNormalization() throws Exception {
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(ConfigService.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            new EnvironmentVariables().remove("FLEXLB_CONFIG_SCHEMA_VERSION").execute(() ->
+                    createConfigService(Map.of(FLEXLB_CONFIG_ENV, "{\"enableQueueing\":true}")));
+
+            assertTrue(appender.list.stream()
+                    .map(ILoggingEvent::getFormattedMessage)
+                    .anyMatch(message -> message.startsWith("FlexLB config loaded: schemaVersion=0,")
+                            && message.contains("scheduler=QUEUE")
+                            && message.contains("dispatcher=NON_BATCH")));
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
     }
 
     @Test
@@ -500,7 +525,9 @@ class ConfigServiceTest {
                     @Override
                     public NormalizedConfig loadConfig() {
                         String rawFlexlbConfig = load();
-                        return rawFlexlbConfig == null ? new NormalizedConfig(null, loadModelServiceConfig()) : normalize(rawFlexlbConfig);
+                        return rawFlexlbConfig == null
+                                ? new NormalizedConfig(null, loadModelServiceConfig(), ConfigSchemaVersion.V0_COMPATIBILITY)
+                                : normalize(rawFlexlbConfig);
                     }
                 });
                 configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
