@@ -1079,8 +1079,8 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
   fi
   wait_for_endpoints_ready "${FLEXLB_HTTP_PORT}" "${N_PREFILL}" "${N_DECODE}"
   if [[ "${FLEXLB_WARMUP_SECONDS:-10}" -gt 0 ]]; then
-    echo "Warming up FlexLB for ${FLEXLB_WARMUP_SECONDS}s before starting load..."
-    sleep "${FLEXLB_WARMUP_SECONDS}"
+    echo "Warming up FlexLB for ${FLEXLB_WARMUP_SECONDS:-10}s before starting load..."
+    sleep "${FLEXLB_WARMUP_SECONDS:-10}"
   fi
   assert_mock_engine_healthy
   # Discovery can be healthy once and then degrade during warmup. Revalidate the
