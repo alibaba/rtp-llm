@@ -5,6 +5,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -199,6 +200,46 @@ class WorkerBatcherTest {
         assertEquals(0, ctx.readyDeliveryCount());
         assertEquals(0, ctx.pendingDeliveryCount());
         assertTrue(ctx.sortedQueuedItems().isEmpty());
+    }
+
+    @Test
+    void nonBatchRouteDoesNotApplyWorkerBatchTokenCapacity() {
+        SchedulingTestConfig.useNonBatchDispatcher(config);
+        WorkerStatus status = new WorkerStatus();
+        status.setMaxBatchTokensSize(2);
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.getStatus()).thenReturn(status);
+        when(endpoint.availableRequestSlots(0)).thenReturn(1);
+        PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(
+                11, WorkerBatcher.PRIORITY_QUEUE_ORDER);
+        BatchItem item = routeItem(1, 50, System.currentTimeMillis());
+        queue.add(item);
+        AtomicReference<List<BatchItem>> delivered = new AtomicReference<>();
+        BatcherContext ctx = context(endpoint, queue, new AtomicInteger(1), new DecisionGroupHandler() {
+            @Override
+            public void onExpired(BatchItem head) {
+            }
+
+            @Override
+            public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {
+                delivered.set(items);
+            }
+
+            @Override
+            public void onOfferFailure(BatchItem failed, Throwable error) {
+                throw new AssertionError("route-only delivery must not use batch token capacity", error);
+            }
+
+            @Override
+            public void onDeliveryFailure(BatchItem failed, Throwable error) {
+                throw new AssertionError("route-only delivery must complete", error);
+            }
+        });
+
+        new ImmediateNonBatchAlgorithm().processQueue(ctx);
+
+        assertEquals(List.of(item), delivered.get());
+        assertEquals(0, ctx.size());
     }
 
     @Test

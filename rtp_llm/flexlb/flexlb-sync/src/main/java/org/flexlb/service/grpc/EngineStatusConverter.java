@@ -8,23 +8,28 @@ import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.enums.KvCacheGroupMode;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.util.Logger;
 
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Converter between gRPC protobuf messages and Java objects for engine status
  */
 public class EngineStatusConverter {
 
+    private static final AtomicBoolean KVCM_COMPATIBILITY_LAYOUT_REPORTED = new AtomicBoolean();
+
     /**
      * Convert WorkerStatusPB to WorkerStatusResponse
      */
     public static WorkerStatusResponse convertToWorkerStatusResponse(EngineRpcService.WorkerStatusPB workerStatusPB) {
         WorkerStatusResponse response = new WorkerStatusResponse();
+        WorkerStatusFields fields = WorkerStatusFields.decode(workerStatusPB);
 
         response.setRole(RoleTypeProtoConverter.fromWorkerStatus(workerStatusPB));
         // Compatibility only: LocalRpcServer::GetWorkerStatus does not currently
@@ -37,22 +42,22 @@ public class EngineStatusConverter {
         response.setIterateCount(workerStatusPB.getIterateCount());
         response.setDpSize(workerStatusPB.getDpSize());
         response.setTpSize(workerStatusPB.getTpSize());
-        response.setDpRank(workerStatusPB.getDpRank());
-        response.setBlockHashLookaheadTokens(workerStatusPB.getBlockHashLookaheadTokens());
-        response.setCacheMatchRollbackBlocks(workerStatusPB.getCacheMatchRollbackBlocks());
-        response.setKvCacheGroupMode(convertKvCacheGroupMode(workerStatusPB.getKvCacheGroupMode()));
+        response.setDpRank(fields.dpRank());
+        response.setBlockHashLookaheadTokens(fields.blockHashLookaheadTokens());
+        response.setCacheMatchRollbackBlocks(fields.cacheMatchRollbackBlocks());
+        response.setKvCacheGroupMode(fields.kvCacheGroupMode());
         response.setStatusVersion(workerStatusPB.getStatusVersion());
         response.setLatestFinishedVersion(workerStatusPB.getLatestFinishedVersion());
         response.setAlive(workerStatusPB.getAlive());
-        response.setAvailableKvCacheTokens(workerStatusPB.getAvailableKvCache());
-        response.setTotalKvCacheTokens(workerStatusPB.getTotalKvCache());
-        response.setMaxSeqLen(workerStatusPB.getMaxSeqLen());
-        response.setMaxBatchTokensSize(workerStatusPB.getMaxBatchTokensSize());
-        if (workerStatusPB.getBlockSize() > 0) {
+        response.setAvailableKvCacheTokens(fields.availableKvCache());
+        response.setTotalKvCacheTokens(fields.totalKvCache());
+        response.setMaxSeqLen(fields.maxSeqLen());
+        response.setMaxBatchTokensSize(fields.maxBatchTokensSize());
+        if (fields.blockSize() > 0) {
             response.setCacheStatus(CacheStatus.builder()
-                    .availableKvCache(workerStatusPB.getAvailableKvCache())
-                    .totalKvCache(workerStatusPB.getTotalKvCache())
-                    .blockSize(workerStatusPB.getBlockSize())
+                    .availableKvCache(fields.availableKvCache())
+                    .totalKvCache(fields.totalKvCache())
+                    .blockSize(fields.blockSize())
                     .version(workerStatusPB.getStatusVersion())
                     .build());
         }
@@ -82,6 +87,78 @@ public class EngineStatusConverter {
             case KV_CACHE_GROUP_MODE_WITH_MAMBA -> KvCacheGroupMode.WITH_MAMBA;
             default -> KvCacheGroupMode.UNSPECIFIED;
         };
+    }
+
+    private static KvCacheGroupMode convertKvCacheGroupMode(long encodedMode) {
+        if (encodedMode == EngineRpcService.KvCacheGroupModePB.KV_CACHE_GROUP_MODE_FULL_ATTENTION_ONLY_VALUE) {
+            return KvCacheGroupMode.FULL_ATTENTION_ONLY;
+        }
+        if (encodedMode == EngineRpcService.KvCacheGroupModePB.KV_CACHE_GROUP_MODE_WITH_MAMBA_VALUE) {
+            return KvCacheGroupMode.WITH_MAMBA;
+        }
+        return KvCacheGroupMode.UNSPECIFIED;
+    }
+
+    /**
+     * Resource fields from the two WorkerStatusPB layouts supported during the
+     * FlexLB/KVCM rolling upgrade.
+     *
+     * <p>The KVCM layout used fields 16-18 and 21-23 before the dsv4 layout
+     * assigned different meanings to those numbers. Its decoded shape is
+     * unambiguous when the value read as dp_rank is outside dp_size or the
+     * current cache tuple violates available &lt;= total, while the shifted tuple
+     * remains valid. Keep this repair at the protocol boundary so scheduling
+     * and cache matching consume one coherent domain object.</p>
+     */
+    private record WorkerStatusFields(
+            long dpRank,
+            long availableKvCache,
+            long totalKvCache,
+            long maxSeqLen,
+            long maxBatchTokensSize,
+            long blockSize,
+            int blockHashLookaheadTokens,
+            int cacheMatchRollbackBlocks,
+            KvCacheGroupMode kvCacheGroupMode) {
+
+        private static WorkerStatusFields decode(EngineRpcService.WorkerStatusPB status) {
+            if (!usesKvcmCompatibilityLayout(status)) {
+                return new WorkerStatusFields(
+                        status.getDpRank(), status.getAvailableKvCache(), status.getTotalKvCache(),
+                        status.getMaxSeqLen(), status.getMaxBatchTokensSize(), status.getBlockSize(),
+                        status.getBlockHashLookaheadTokens(), status.getCacheMatchRollbackBlocks(),
+                        convertKvCacheGroupMode(status.getKvCacheGroupMode()));
+            }
+            if (KVCM_COMPATIBILITY_LAYOUT_REPORTED.compareAndSet(false, true)) {
+                Logger.warn("Detected KVCM WorkerStatusPB compatibility layout; remapping resource fields 16-23");
+            }
+            return new WorkerStatusFields(
+                    0L, status.getDpRank(), status.getAvailableKvCache(), 0L, 0L,
+                    status.getTotalKvCache(), Math.toIntExact(status.getMaxSeqLen()),
+                    Math.toIntExact(status.getBlockSize()),
+                    convertKvCacheGroupMode(status.getMaxBatchTokensSize()));
+        }
+
+        private static boolean usesKvcmCompatibilityLayout(EngineRpcService.WorkerStatusPB status) {
+            long possibleAvailableKv = status.getDpRank();
+            long possibleTotalKv = status.getAvailableKvCache();
+            long possibleBlockSize = status.getTotalKvCache();
+            boolean invalidCurrentLayout = possibleAvailableKv >= status.getDpSize()
+                    || status.getAvailableKvCache() > status.getTotalKvCache();
+            return status.getDpSize() > 0
+                    && invalidCurrentLayout
+                    && possibleAvailableKv >= 0
+                    && possibleAvailableKv <= possibleTotalKv
+                    && possibleBlockSize > 0
+                    && possibleBlockSize < possibleTotalKv
+                    && status.getMaxBatchTokensSize() >= 0
+                    && status.getMaxBatchTokensSize()
+                            <= EngineRpcService.KvCacheGroupModePB.KV_CACHE_GROUP_MODE_WITH_MAMBA_VALUE
+                    && status.getBlockHashLookaheadTokens() == 0
+                    && status.getCacheMatchRollbackBlocks() == 0
+                    && status.getKvCacheGroupMode()
+                            == EngineRpcService.KvCacheGroupModePB.KV_CACHE_GROUP_MODE_UNSPECIFIED;
+        }
     }
 
     /**
