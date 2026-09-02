@@ -378,10 +378,11 @@ class FlashInferTRTLLMPrefillOp(object):
         kv_cache: Optional[LayerKVCache],
         fmha_params: FlashInferTRTLLMParams,
     ) -> torch.Tensor:
-        dtype = kv_cache.kv_cache_base.dtype
         q_type = q.dtype
-        q = q.to(dtype)
         o_type = q_type
+        # Keep the model activation dtype. FlashInfer dispatches BF16-Q/FP8-KV
+        # to its mixed-dtype path; casting Q to FP8 here loses its scale and
+        # silently corrupts the attention result.
         q = q.contiguous().view(-1, self.local_head_num, self.head_dim)
         q_scale = 1.0
         k_scale = 1.0
@@ -497,10 +498,11 @@ class FlashInferTRTLLMDecodeOp(object):
         kv_cache: Optional[LayerKVCache],
         fmha_params: FlashInferTRTLLMParams,
     ) -> torch.Tensor:
-        dtype = kv_cache.kv_cache_base.dtype
         q_type = q.dtype
-        q = q.to(dtype)
         o_type = q_type
+        # Keep the model activation dtype. FlashInfer dispatches BF16-Q/FP8-KV
+        # to its mixed-dtype path; casting Q to FP8 here loses its scale and
+        # silently corrupts both decode and MTP target verification.
 
         q = q.contiguous().view(-1, self.local_head_num, self.head_dim)
         q_scale = 1.0
@@ -570,6 +572,8 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
+        if common.requires_native_bf16_fp8_prefill(attn_configs):
+            return False
         fmha_impl = FlashInferTRTLLMPrefillOp(attn_configs)
         return fmha_impl.support(attn_inputs)
 

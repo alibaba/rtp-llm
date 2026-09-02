@@ -21,6 +21,67 @@ from rtp_llm.utils.fuser import fetch_remote_file_to_local
 RUN_AFFINITY_TIMEOUT_SEC = 10
 
 
+_TRTLLM_GEN_MAX_KERNEL_TOKENS_PER_BLOCK = 128
+_TRTLLM_GEN_SUPPORTED_KERNEL_TOKENS_PER_BLOCK = (64, 32, 16)
+
+
+def _configure_trtllm_gen_kernel_block_size(py_env_configs: PyEnvConfigs) -> None:
+    """Keep TRTLLM-Gen's logical page size within its correctness limit.
+
+    A large physical cache block is useful for reducing allocator metadata, but
+    TRTLLM-Gen paged attention returns incorrect results when its kernel page is
+    larger than 128 tokens.  RTP-LLM can expose one physical block as multiple
+    logical kernel pages, so select the largest supported divisor and preserve
+    the requested physical allocation size.
+    """
+    kv_cache_config = py_env_configs.kv_cache_config
+    physical_block_size = kv_cache_config.seq_size_per_block
+    kernel_block_size = (
+        kv_cache_config.kernel_seq_size_per_block or physical_block_size
+    )
+    if (
+        not py_env_configs.fmha_config.enable_flashinfer_trtllm_gen
+        or physical_block_size <= 0
+        or kernel_block_size <= _TRTLLM_GEN_MAX_KERNEL_TOKENS_PER_BLOCK
+        or not torch.cuda.is_available()
+    ):
+        return
+
+    try:
+        cuda_major, _ = torch.cuda.get_device_capability()
+    except (AssertionError, RuntimeError):
+        return
+    # TRTLLM-Gen is selected only on datacenter Blackwell (SM10x). SM12x has a
+    # separate fallback and older architectures do not dispatch this kernel.
+    if cuda_major != 10:
+        return
+
+    safe_kernel_block_size = next(
+        (
+            candidate
+            for candidate in _TRTLLM_GEN_SUPPORTED_KERNEL_TOKENS_PER_BLOCK
+            if physical_block_size % candidate == 0
+        ),
+        None,
+    )
+    if safe_kernel_block_size is None:
+        raise ValueError(
+            "TRTLLM-Gen requires SEQ_SIZE_PER_BLOCK to be divisible by a "
+            "supported kernel page size (64, 32, or 16) when the physical "
+            f"block is larger than 128; got {physical_block_size}"
+        )
+
+    logging.warning(
+        "TRTLLM-Gen kernel page size %d exceeds the correctness limit; "
+        "using KERNEL_SEQ_SIZE_PER_BLOCK=%d while preserving "
+        "SEQ_SIZE_PER_BLOCK=%d",
+        kernel_block_size,
+        safe_kernel_block_size,
+        physical_block_size,
+    )
+    kv_cache_config.kernel_seq_size_per_block = safe_kernel_block_size
+
+
 def auto_configure_deepep(
     moe_config,
     deep_ep_config,
@@ -434,6 +495,8 @@ def setup_default_args(py_env_configs):
         logging.info("set SEQ_SIZE_PER_BLOCK 256 by default")
     if py_env_configs.kv_cache_config.seq_size_per_block == 0:
         py_env_configs.kv_cache_config.seq_size_per_block = 64
+
+    _configure_trtllm_gen_kernel_block_size(py_env_configs)
 
     # Set NCCL_P2P_DISABLE for RTX GPUs or when CUDA is not available
     # Frontend doesn't need this setting

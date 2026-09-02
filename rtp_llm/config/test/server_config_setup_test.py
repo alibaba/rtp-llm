@@ -10,6 +10,7 @@ from rtp_llm.config.engine_config import EngineConfig, setup_pd_sep_config
 from rtp_llm.config.py_config_modules import PyEnvConfigs, ServerConfig
 from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
+    setup_default_args,
     setup_and_configure_server,
 )
 from rtp_llm.ops import CPRotateMethod, NcclCommConfig, RoleType
@@ -25,6 +26,80 @@ _PINNED_DEVICES = {
 
 def _jit_env(**values):
     return {**_PINNED_DEVICES, "MODEL_TYPE": "fake_model", **values}
+
+
+class TrtllmGenKernelBlockSizeTest(TestCase):
+    def _config(self, physical_block_size, kernel_block_size=0):
+        config = PyEnvConfigs()
+        config.model_args.model_type = "fake_model"
+        config.kv_cache_config.seq_size_per_block = physical_block_size
+        config.kv_cache_config.kernel_seq_size_per_block = kernel_block_size
+        config.fmha_config.enable_flashinfer_trtllm_gen = True
+        return config
+
+    @patch(
+        "rtp_llm.config.server_config_setup.torch.cuda.get_device_capability",
+        return_value=(10, 0),
+    )
+    @patch(
+        "rtp_llm.config.server_config_setup.torch.cuda.is_available",
+        return_value=True,
+    )
+    @patch(
+        "rtp_llm.config.server_config_setup.torch.cuda.get_device_name",
+        return_value="NVIDIA B200",
+    )
+    def test_large_physical_block_uses_safe_kernel_pages(
+        self, _mock_name, _mock_available, _mock_capability
+    ):
+        config = self._config(2048)
+
+        setup_default_args(config)
+
+        self.assertEqual(config.kv_cache_config.seq_size_per_block, 2048)
+        self.assertEqual(config.kv_cache_config.kernel_seq_size_per_block, 64)
+
+    @patch(
+        "rtp_llm.config.server_config_setup.torch.cuda.get_device_capability",
+        return_value=(10, 0),
+    )
+    @patch(
+        "rtp_llm.config.server_config_setup.torch.cuda.is_available",
+        return_value=True,
+    )
+    @patch(
+        "rtp_llm.config.server_config_setup.torch.cuda.get_device_name",
+        return_value="NVIDIA B200",
+    )
+    def test_unsafe_explicit_kernel_page_is_corrected(
+        self, _mock_name, _mock_available, _mock_capability
+    ):
+        config = self._config(2048, kernel_block_size=512)
+
+        setup_default_args(config)
+
+        self.assertEqual(config.kv_cache_config.kernel_seq_size_per_block, 64)
+
+    @patch(
+        "rtp_llm.config.server_config_setup.torch.cuda.get_device_capability",
+        return_value=(9, 0),
+    )
+    @patch(
+        "rtp_llm.config.server_config_setup.torch.cuda.is_available",
+        return_value=True,
+    )
+    @patch(
+        "rtp_llm.config.server_config_setup.torch.cuda.get_device_name",
+        return_value="NVIDIA H20",
+    )
+    def test_non_sm10x_configuration_is_unchanged(
+        self, _mock_name, _mock_available, _mock_capability
+    ):
+        config = self._config(2048)
+
+        setup_default_args(config)
+
+        self.assertEqual(config.kv_cache_config.kernel_seq_size_per_block, 0)
 
 
 class ServerConfigPortLayoutTest(TestCase):

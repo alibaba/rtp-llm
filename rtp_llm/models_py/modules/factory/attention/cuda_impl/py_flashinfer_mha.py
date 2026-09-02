@@ -874,7 +874,7 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         3. MhaRotaryEmbeddingOp supports the inputs
         """
         return (
-            not is_sm10x()
+            (not is_sm10x() or common.requires_native_bf16_fp8_prefill(attn_configs))
             and PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
             and attn_configs.rope_config.style != RopeStyle.Mrope
         )

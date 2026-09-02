@@ -2,11 +2,14 @@ import math
 import os
 import random
 import sys
+from types import SimpleNamespace
 from typing import List, Optional
 from unittest import SkipTest, TestCase, main
+from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.modules.factory.attention.cuda_impl import trtllm_gen
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.atten_test_util import (
     attention_prefill_ref,
     gen_attention_inputs,
@@ -14,11 +17,16 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.atten_test_util 
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.trtllm_gen import (
     FlashInferTRTLLMDecodeOp,
+    FlashInferTRTLLMPrefillImpl,
     FlashInferTRTLLMPrefillOp,
     _compute_cg_grid,
     _prepare_cg_decode_kernel,
     _prepare_cg_prefill_kernel,
     _prepare_cg_spec_decode_kernel,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+    PyFlashinferPagedPrefillImpl,
+    PyFlashinferPrefillPagedAttnOp,
 )
 from rtp_llm.models_py.utils.arch import is_sm10x
 from rtp_llm.test.utils.numeric_util import assert_close_with_mismatch_tolerance
@@ -34,6 +42,53 @@ def set_seed(seed: int):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+class FlashInferTRTLLMDispatchTest(TestCase):
+    def _config(self, head_dim: int = 256, page_size: int = 64) -> AttentionConfigs:
+        config = AttentionConfigs()
+        config.dtype = torch.bfloat16
+        config.kv_cache_dtype = KvCacheDataType.FP8
+        config.size_per_head = head_dim
+        config.kernel_tokens_per_block = page_size
+        return config
+
+    def test_mixed_bf16_fp8_context_cubin_gap_uses_native_prefill(self):
+        config = self._config()
+        attn_inputs = SimpleNamespace()
+
+        self.assertFalse(FlashInferTRTLLMPrefillImpl.support(config, attn_inputs))
+        with (
+            patch(
+                "rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha.is_sm10x",
+                return_value=True,
+            ),
+            patch.object(
+                PyFlashinferPrefillPagedAttnOp, "support", return_value=True
+            ),
+        ):
+            self.assertTrue(PyFlashinferPagedPrefillImpl.support(config, attn_inputs))
+
+    def test_other_context_shapes_stay_on_trtllm_gen(self):
+        attn_inputs = SimpleNamespace(
+            is_prefill=True,
+            kv_cache_kernel_block_id_device=object(),
+        )
+        with (
+            patch.object(trtllm_gen, "is_blackwell", return_value=True),
+            patch.object(trtllm_gen, "is_sm12x", return_value=False),
+            patch.object(
+                trtllm_gen,
+                "get_trt_workspace_buffer",
+                return_value=torch.empty(0),
+            ),
+            patch.object(trtllm_gen, "release_trt_workspace_buffer"),
+        ):
+            self.assertTrue(
+                FlashInferTRTLLMPrefillImpl.support(
+                    self._config(head_dim=128), attn_inputs
+                )
+            )
 
 
 class FlashInferPythonMHATest(TestCase):
@@ -165,7 +220,16 @@ class FlashInferPythonMHATest(TestCase):
         if use_prefill_op:
             op = FlashInferTRTLLMPrefillOp(config)
             input_params = op.prepare(attn_inputs)
-            out_trtllm = op.forward(q_ref, kv_cache, input_params)
+            prefill_kernel = (
+                trtllm_gen.flashinfer.prefill.trtllm_batch_context_with_kv_cache
+            )
+            with patch.object(
+                trtllm_gen.flashinfer.prefill,
+                "trtllm_batch_context_with_kv_cache",
+                wraps=prefill_kernel,
+            ) as mock_kernel:
+                out_trtllm = op.forward(q_ref, kv_cache, input_params)
+            self.assertEqual(mock_kernel.call_args.kwargs["query"].dtype, q_ref.dtype)
 
             out_trtllm_f32 = out_trtllm.reshape(
                 num_tokens, self.num_heads, self.head_dim
@@ -192,7 +256,16 @@ class FlashInferPythonMHATest(TestCase):
             q = q_ref[last_token_idx]
             attn_inputs.sequence_lengths -= 1
             input_params = op.prepare(attn_inputs)
-            out_trtllm = op.forward(q, kv_cache, input_params)
+            decode_kernel = (
+                trtllm_gen.flashinfer.decode.trtllm_batch_decode_with_kv_cache
+            )
+            with patch.object(
+                trtllm_gen.flashinfer.decode,
+                "trtllm_batch_decode_with_kv_cache",
+                wraps=decode_kernel,
+            ) as mock_kernel:
+                out_trtllm = op.forward(q, kv_cache, input_params)
+            self.assertEqual(mock_kernel.call_args.kwargs["query"].dtype, q.dtype)
 
             out_trtllm_f32 = out_trtllm.reshape(
                 -1, self.num_heads, self.head_dim
