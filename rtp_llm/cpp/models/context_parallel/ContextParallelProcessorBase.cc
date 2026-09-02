@@ -261,8 +261,11 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     auto total_input_tokens =
         model_input.combo_tokens.is_cuda() ? model_input.combo_tokens.cpu().pin_memory() : model_input.combo_tokens;
     auto& total_hidden_states = model_input.last_hidden_states;
-    auto  input_lengths =
-        model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().pin_memory() : model_input.input_lengths;
+    // The rank-local rewrite below writes through this mirror, so it must not alias the
+    // caller's host tensor: MtpExecutor snapshots the pre-split global lengths from that
+    // same buffer to rebuild the draft batch.
+    auto  input_lengths    = model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().pin_memory() :
+                                                                   model_input.input_lengths.clone().pin_memory();
     auto& sequence_lengths = model_input.sequence_lengths;
     // Preserve global lengths before updating input_lengths in place for this CP rank.
     auto input_lengths_cpu_tensor = input_lengths.clone().pin_memory();
@@ -343,10 +346,13 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
             total_hidden_states.dim() == 2, "CP MTP hidden states must be 2-D, got dim=%ld", total_hidden_states.dim());
         const int64_t expected_token_num = split_hidden_states_ ? global_token_num : local_token_num;
         RTP_LLM_CHECK_WITH_INFO(total_hidden_states.size(0) == expected_token_num,
-                                "CP MTP hidden states row count mismatch: rows=%ld, expected=%ld, layout=%s",
+                                "CP MTP hidden states row count mismatch: rows=%ld, expected=%ld, layout=%s, "
+                                "global_tokens=%ld, local_tokens=%ld",
                                 total_hidden_states.size(0),
                                 expected_token_num,
-                                split_hidden_states_ ? "global" : "local");
+                                split_hidden_states_ ? "global" : "local",
+                                global_token_num,
+                                local_token_num);
     }
     std::vector<int64_t> hidden_select_indices;
     std::vector<uint8_t> hidden_valid_mask;
