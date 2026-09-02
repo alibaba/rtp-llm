@@ -1,7 +1,6 @@
 common --experimental_downloader_config=bazel/bazel_downloader.cfg
 fetch:downloader --experimental_remote_downloader=grpc://com.taobao.search.bazel.server:9092 --remote_cache=grpc://com.taobao.search.bazel.server:9092
 
-
 build --python_top=//:python310 --incompatible_use_python_toolchains=false # force use /opt/conda310/bin/python3
 
 build --spawn_strategy=local # avoid nvcc conflicts
@@ -395,6 +394,39 @@ build:rocm --copt="-DUSE_ROCM=1"
 build:rocm --copt="-DFORCE_NVSHMEM_API=1"
 build:rocm --copt="-DFLASHINFER_CUB_SUBTRACTLEFT_DEFINED"  # ROCm 7.2 hipcub uses SubtractLeft instead of FlagHeads
 test:rocm --test_env="/opt/rocm/lib/:/opt/taobao/java/jre/lib/amd64/server/:/opt/amdgpu/lib64/"
+
+# ==================== Ascend NPU ====================
+build:ascend --copt="-DENABLE_BF16=1"
+build:ascend --action_env TF_NEED_CUDA="0"
+build:ascend --host_action_env TF_NEED_CUDA="0"
+build:ascend --crosstool_top=@bazel_tools//tools/cpp:toolchain
+build:ascend --host_crosstool_top=@bazel_tools//tools/cpp:toolchain
+build:ascend --define=using_cuda=false --define=using_cuda_nvcc=false
+build:ascend --define=using_ascend=true
+build:ascend --action_env TF_NEED_ASCEND=1
+build:ascend --host_action_env TF_NEED_ASCEND=1
+build:ascend --action_env ASCEND_TOOLKIT_PATH="/usr/local/Ascend/ascend-toolkit/latest"
+build:ascend --host_action_env ASCEND_TOOLKIT_PATH="/usr/local/Ascend/ascend-toolkit/latest"
+build:ascend --copt="-DUSING_CUDA=0"
+build:ascend --copt="-DUSING_ASCEND=1"
+build:ascend --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
+build:ascend --linkopt="-L/usr/local/Ascend/ascend-toolkit/latest/lib64"
+build:ascend --linkopt="-lascendcl"
+build:ascend --linkopt="-lhccl"
+build:ascend --copt=-Wno-deprecated-declarations
+build:ascend --copt="-Wno-error=unused-result"
+build:ascend --copt="-Wno-error=array-bounds"
+build:ascend --copt=-Wno-tautological-compare
+build:ascend --copt=-Wno-array-parameter
+build:ascend --copt=-Wno-unused-variable
+build:ascend --action_env LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/add-ons/"
+build:ascend --host_action_env LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/add-ons/"
+
+test:ascend --test_env LD_LIBRARY_PATH="/usr/local/Ascend/ascend-toolkit/latest/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver/:/usr/local/Ascend/add-ons/:bazel-bin/3rdparty/aclnn_custom_ops/lib:/root/miniconda3/envs/py310/lib/python3.10/site-packages/torch/lib:/root/miniconda3/envs/py310/lib/python3.10/site-packages/torch_npu/lib:/opt/conda310/lib"
+test:ascend --test_env PYTHONHOME="/root/miniconda3/envs/py310"
+test:ascend --test_env TORCH_DEVICE_BACKEND_AUTOLOAD="0"
+test:ascend --test_env TEST_USING_DEVICE="ASCEND"
+test:ascend --test_env ASCEND_CUSTOM_OPP_PATH="bazel-bin/3rdparty/aclnn_custom_ops/opp"
 
 build:arm --copt="-DENABLE_BF16=1"
 build:arm --define=using_cuda=false --define=using_cuda_nvcc=false

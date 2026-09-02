@@ -4,7 +4,7 @@
 #include <memory>
 #include <typeinfo>
 #include <ATen/Generator.h>
-#if defined(USING_CUDA) || defined(USING_ROCM)
+#if USING_CUDA || USING_ROCM
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #endif
 #include "autil/EnvUtil.h"
@@ -157,7 +157,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     }
 
     if (generateConfig()->random_seed.has_value()) {
-#if defined(USING_CUDA) || defined(USING_ROCM)
+#if USING_CUDA || USING_ROCM
         generator_ = torch::make_generator<torch::CUDAGeneratorImpl>();
 #else
         generator_ = torch::make_generator<torch::CPUGeneratorImpl>();

@@ -1,3 +1,4 @@
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
@@ -177,9 +178,9 @@ void gatherMultimodalInputsForContextBatch(const GenerateStreamPtr&    stream,
         // features with non-negative local locations only.
         const int64_t token_offset    = std::max<int64_t>(reuse_length - feature_loc, 0);
         auto          current_feature = mm_feature.slice(0, token_offset, feature_len).contiguous();
-        if (!current_feature.is_cuda()) {
+        if (!current_feature.is_cuda() && !current_feature.is_privateuseone()) {
             host_holder.hold_host(current_feature);
-            gathered_mm_features.emplace_back(current_feature.to(torch::kCUDA, /*non_blocking=*/true));
+            gathered_mm_features.emplace_back(current_feature.to(getTorchCudaDevice(), /*non_blocking=*/true));
         } else {
             gathered_mm_features.emplace_back(std::move(current_feature));
         }
@@ -191,10 +192,10 @@ void gatherMultimodalInputsForContextBatch(const GenerateStreamPtr&    stream,
         if (!mm_extra_input.empty()) {
             auto current_extra_input =
                 sliceMultimodalExtraInput(mm_extra_input[i], mm_feature, token_offset, feature_len);
-            if (!current_extra_input.is_cuda()) {
+            if (!current_extra_input.is_cuda() && !current_extra_input.is_privateuseone()) {
                 host_holder.hold_host(current_extra_input);
                 gathered_mm_extra_input.emplace_back(
-                    current_extra_input.to(torch::kCUDA, /*non_blocking=*/true));
+                    current_extra_input.to(getTorchCudaDevice(), /*non_blocking=*/true));
             } else {
                 gathered_mm_extra_input.emplace_back(std::move(current_extra_input));
             }

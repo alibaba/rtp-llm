@@ -69,7 +69,9 @@ class TorchSymmMemCommunicator:
             return
 
         if isinstance(device, int):
-            device = torch.device(f"cuda:{device}")
+            from rtp_llm.device.device_type import get_device_type, DeviceType
+            _dn = "npu" if get_device_type() == DeviceType.Ascend else ("hip" if get_device_type() == DeviceType.ROCm else "cuda")
+            device = torch.device(f"{_dn}:{device}")
         elif isinstance(device, str):
             device = torch.device(device)
         torch.cuda.set_device(device)

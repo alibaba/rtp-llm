@@ -10,7 +10,10 @@
 #include <atomic>
 #include <mutex>
 
-#if USING_ROCM
+#if USING_CUDA
+#include <cuda_runtime.h>
+#include <ATen/cuda/CUDAContext.h>
+#elif USING_ROCM
 #include <hip/hip_runtime.h>
 #include <ATen/hip/HIPContext.h>
 #endif

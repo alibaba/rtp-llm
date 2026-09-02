@@ -64,6 +64,10 @@ cc_library(
         "ComputeInit.cc",
     ] + select({
         "@//:using_cuda12": ["//rtp_llm/models_py/bindings/core:exec_ops_srcs"],
+        # main split exec ops: ExecOps.cc compiled directly into the .so via
+        # exec_ops_srcs (so registerExecCtxOps is exported); Cuda* impls linked
+        # as deps from exec_ctx_ops (alwayslink).
+        "@//:using_ascend": ["//rtp_llm/models_py/bindings/core:exec_ops_srcs"],
         "//conditions:default": [],
     }),
     hdrs = [],
@@ -77,6 +81,7 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/cpp/utils:device_perf_wrapper",
+        "//rtp_llm/cpp/utils:kv_cache_utils",
         "@havenask//aios/autil:base64",
         "@havenask//aios/autil:zlib",
     ] + torch_deps() + select_py_bindings() + select({
@@ -86,6 +91,12 @@ cc_library(
             "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
         ],
         "@//:using_rocm": ["//rtp_llm/models_py/bindings/core:exec_ctx_rocm"],
+        "@//:using_ascend": [
+            "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
+            "@havenask//aios/autil:stack_tracer",
+            "//rtp_llm/models_py/bindings/ascend:ascend_host_utils",
+            "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
+        ],
         "//conditions:default": [],
     }) + no_block_copy_link_deps(),
     copts = copts(),
@@ -128,6 +139,10 @@ cc_library(
             "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
             "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
             "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+        ],
+        "@//:using_ascend": [
+            "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
+            "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         ],
         "//conditions:default": [],
     }),

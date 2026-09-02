@@ -494,7 +494,7 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     sampler_inputs.vocab_size = vocab_size_;
     if (return_all_probs != ReturnAllProbsMode::NONE) {
         sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size_},
-                                                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+                                                torch::TensorOptions().dtype(torch::kFloat32).device(getTorchCudaDevice()));
         if (return_all_probs == ReturnAllProbsMode::ORIGINAL) {
             sampler_inputs.return_original_all_probs = true;
         }
@@ -534,9 +534,11 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     if (spec_logits_result.has_active_processor) {
         // The runner uploads packed masks on its own (worker) stream; order this
         // stream's mask application after the uploads, then apply on GPU.
+#if !USING_ASCEND
         if (spec_logits_result.ready_event) {
             spec_logits_result.ready_event->block(cuda_graph::graphGetCurrentStream());
         }
+#endif
         SpecLogitsVerifyRunner::applyMaskToLogits(sampler_inputs.logits, spec_logits_result, sampler_inputs.vocab_size);
     }
 
@@ -836,11 +838,16 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
     // TODO(async): data_ptr iteration below is CPU-only; keep all .cpu()
     // conversions explicit, then republish model-bound tensors to CUDA.
     const torch::Tensor new_all_token_ids_cpu =
-        new_all_token_ids.is_cuda() ? new_all_token_ids.cpu() : new_all_token_ids;
-    torch::Tensor input_lengths_cpu =
-        model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().pin_memory() : model_input.input_lengths;
-    torch::Tensor combo_tokens_cpu =
-        model_input.combo_tokens.is_cuda() ? model_input.combo_tokens.cpu().pin_memory() : model_input.combo_tokens;
+        new_all_token_ids.is_cuda() || new_all_token_ids.is_privateuseone() ? new_all_token_ids.cpu() :
+                                                                              new_all_token_ids;
+    torch::Tensor input_lengths_cpu = model_input.input_lengths.is_cuda()
+                                          || model_input.input_lengths.is_privateuseone() ?
+                                          model_input.input_lengths.cpu().pin_memory() :
+                                          model_input.input_lengths;
+    torch::Tensor combo_tokens_cpu = model_input.combo_tokens.is_cuda()
+                                         || model_input.combo_tokens.is_privateuseone() ?
+                                         model_input.combo_tokens.cpu().pin_memory() :
+                                         model_input.combo_tokens;
 
     int* input_lengths = input_lengths_cpu.data_ptr<int>();
     int* combo_tokens  = combo_tokens_cpu.data_ptr<int>();
@@ -1210,7 +1217,7 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
     // on CPU. Keep the .cpu() explicit until spec-update assembly is
     // device-native.
     const torch::Tensor new_all_token_ids_cpu =
-        new_all_token_ids.is_cuda() ? new_all_token_ids.cpu() : new_all_token_ids;
+        new_all_token_ids.is_cuda() || new_all_token_ids.is_privateuseone() ? new_all_token_ids.cpu() : new_all_token_ids;
     const torch::Tensor success_cpu = sampler_output.success.defined() ? sampler_output.success.cpu() : torch::Tensor();
 
     int batch_idx_in  = 0;
@@ -1238,8 +1245,8 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
         // speculative decoding info
         torch::Tensor propose_all_probs;
         if (draft_sampler_output.all_probs.defined()) {
-            propose_all_probs =
-                draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
+            propose_all_probs = draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size)
+                                    .to(getTorchCudaDevice()).clone();
         }
 
         torch::Tensor last_hidden_states;
@@ -1286,8 +1293,8 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         // speculative decoding info
         torch::Tensor propose_all_probs;
         if (draft_sampler_output.all_probs.defined()) {
-            propose_all_probs =
-                draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size).to(torch::kCUDA).clone();
+            propose_all_probs = draft_sampler_output.all_probs.narrow(0, batch_idx_out, next_batch_size)
+                                    .to(getTorchCudaDevice()).clone();
         }
 
         // This scalar read runs on the bookkeeping worker after accept_len is
@@ -1369,7 +1376,7 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
     } else {
         RTP_LLM_PROFILE_SCOPE("normal_engine.mtp_batch_stream_processor.gather_hidden_states.fused_copy");
         all_hidden_states = torch::empty({(int64_t)all_hidden_tokens_num, (int64_t)hidden_size},
-                                         torch::TensorOptions().dtype(dtype).device(torch::kCUDA));
+                                         torch::TensorOptions().dtype(dtype).device(getTorchCudaDevice()));
 
         bool all_sources_fused_copy_ready = true;
         for (auto& stream : all_streams) {

@@ -67,12 +67,14 @@ xft_dep = select({
 arch_dep = select({
     "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
+    "@//:using_ascend": [],
     "//conditions:default": [":decord", ":av"],
 })
 
 arch_with_version_dep = select({
     "@//:using_arm": [],
     "@//:using_cuda12_arm": [],
+    "@//:using_ascend": [],
     "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
 })
 
@@ -269,6 +271,7 @@ py_library(
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
         "@//:using_cpu": [],
         "@//:using_cuda12_arm": [],
+        "@//:using_ascend": [],
         "//conditions:default": ["flash_attn"]
     }) + arch_dep,
 )
