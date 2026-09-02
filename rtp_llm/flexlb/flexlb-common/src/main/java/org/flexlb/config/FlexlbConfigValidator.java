@@ -174,7 +174,8 @@ final class FlexlbConfigValidator {
             require(prefill.getSelector() instanceof EstimatedTtftSelectorConfig,
                     "router.roles.prefill.sessionAffinity",
                     "is supported only by the ESTIMATED_TTFT selector");
-            positive(sessionAffinity.getTtlMs(),
+            range(sessionAffinity.getTtlMs(), 1,
+                    RoutingConfig.SessionAffinityConfig.MAX_TTL_MS,
                     "router.roles.prefill.sessionAffinity.ttlMs");
             nonNegative(sessionAffinity.getMaxExtraTtftMs(),
                     "router.roles.prefill.sessionAffinity.maxExtraTtftMs");

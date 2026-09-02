@@ -566,7 +566,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             return;
         }
         response.getServerStatusList().stream()
-                .filter(status -> RoleType.PREFILL.getCode().equals(status.getRole()))
+                .filter(status -> RoleType.PREFILL.getCode().equals(status.getRole())
+                        || RoleType.PDFUSION.getCode().equals(status.getRole()))
                 .findFirst()
                 .ifPresent(status -> sessionPlacementStore.record(
                         request.getModel(),

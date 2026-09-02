@@ -169,6 +169,8 @@ public final class RoutingConfig {
     @Getter
     @Setter
     public static final class SessionAffinityConfig {
+        public static final long MAX_TTL_MS = 60L * 60L * 1000L;
+
         private long ttlMs;
         private long maxExtraTtftMs;
     }

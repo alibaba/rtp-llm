@@ -2,6 +2,7 @@ package org.flexlb.balance.session;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import org.flexlb.config.RoutingConfig;
 import org.springframework.stereotype.Component;
 
 import java.util.Optional;
@@ -12,7 +13,8 @@ import java.util.function.LongSupplier;
 @Component
 public final class SessionPlacementStore {
     private static final long DEFAULT_MAXIMUM_SIZE = 1_000_000L;
-    static final long MAX_IDLE_RETENTION_MS = TimeUnit.HOURS.toMillis(1L);
+    static final long MAX_IDLE_RETENTION_MS =
+            RoutingConfig.SessionAffinityConfig.MAX_TTL_MS;
     private static final int MAX_SESSION_ID_LENGTH = 256;
 
     private final Cache<Key, State> placements;
