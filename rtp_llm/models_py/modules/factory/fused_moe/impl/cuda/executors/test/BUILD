@@ -111,6 +111,7 @@ py_test (
         "//rtp_llm:testlib",
         "//rtp_llm:flashinfer-python",
         "//rtp_llm:nvidia-cutlass-dsl",
+        "//rtp_llm:nvidia-cutlass-dsl-libs-cu13-runtime",
         "//rtp_llm:utils",
     ],
     env = {"GPU_COUNT": "1"},
@@ -130,6 +131,7 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm:flashinfer-python",
         "//rtp_llm:nvidia-cutlass-dsl",
+        "//rtp_llm:nvidia-cutlass-dsl-libs-cu13-runtime",
         "//rtp_llm:utils",
     ],
     target_compatible_with = select({

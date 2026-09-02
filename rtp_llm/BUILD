@@ -28,12 +28,16 @@ flashinfer = [
     "flashinfer-python",
 ]
 
-flashinfer_with_cache = [
+flashinfer_with_cache_packages = [
     "apache-tvm-ffi",
     "flashinfer-python",
     "flashinfer-cubin",
     "nvidia-cutlass-dsl",
     "flashinfer-jit-cache"
+]
+
+flashinfer_with_cache = flashinfer_with_cache_packages + [
+    "nvidia-cutlass-dsl-libs-cu13-runtime",
 ]
 
 flashmla = [
@@ -142,7 +146,19 @@ requirement([
     "watchdog",
     "zstandard",
     "xgrammar",
-] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
+] + deep + flashinfer_with_cache_packages + flashmla + rtp_kernel + flashattn)
+
+
+py_library(
+    name = "nvidia-cutlass-dsl-libs-cu13-runtime",
+    deps = select({
+        "@//:using_cuda12_9_x86": [
+            "@pip_gpu_cuda12_9_torch//nvidia_cutlass_dsl_libs_cu13:pkg",
+        ],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
 
 
 py_library(

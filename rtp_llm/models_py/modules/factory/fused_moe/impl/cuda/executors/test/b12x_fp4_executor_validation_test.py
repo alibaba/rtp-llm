@@ -1,5 +1,6 @@
 import importlib
 import math
+from pathlib import Path
 import threading
 import unittest
 from importlib import metadata
@@ -656,6 +657,21 @@ class B12xFlashInferCompatibilityTest(unittest.TestCase):
     def test_pinned_dependency_closure_is_available(self):
         self.assertEqual(metadata.version("cuda-tile"), "1.4.0")
         self.assertEqual(metadata.version("nvidia-cutlass-dsl"), "4.4.2")
+        self.assertEqual(
+            metadata.version("nvidia-cutlass-dsl-libs-cu13"), "4.4.2"
+        )
+
+    def test_cutlass_ir_extension_is_loaded_from_cu13_payload(self):
+        module = importlib.import_module("cutlass._mlir._mlir_libs._cutlass_ir")
+        origin = Path(module.__file__).resolve()
+        cu13_dist = metadata.distribution("nvidia-cutlass-dsl-libs-cu13")
+        cu13_extensions = [
+            cu13_dist.locate_file(path).resolve()
+            for path in (cu13_dist.files or [])
+            if path.name.startswith("_cutlass_ir") and path.suffix == ".so"
+        ]
+        self.assertEqual(cu13_extensions, [origin])
+        self.assertNotIn("nvidia_cutlass_dsl_libs_base", str(origin))
 
 
 if __name__ == "__main__":
