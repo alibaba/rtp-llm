@@ -147,7 +147,12 @@ class MegaHCAAdapter:
                 "window_page_tokens",
                 "compressed_page_tokens",
             ),
-            "q_rmsnorm_rope_cuda_": ("q", "freqs_cis", "eps"),
+            "q_rmsnorm_rope_cuda_": (
+                "q",
+                "freqs_cis",
+                "positions",
+                "eps",
+            ),
             "mla_o_inv_rope_quant": (
                 "input",
                 "positions",
@@ -285,10 +290,7 @@ class MegaHCAAdapter:
             or not hidden.is_contiguous()
         ):
             raise TypeError("DSV4 mega hidden must be contiguous CUDA bfloat16")
-        if (
-            metadata.batch_size != batch_size
-            or metadata.q_len_per_req != q_len
-        ):
+        if metadata.batch_size != batch_size or metadata.q_len_per_req != q_len:
             raise ValueError("DSV4 mega hidden and metadata geometry disagree")
         if metadata.position_ids_long is None:
             raise RuntimeError("DSV4 mega metadata is missing int64 positions")
@@ -448,12 +450,12 @@ class MegaHCAAdapter:
             compressed_page_tokens=pools.compressed_entries,
             state_ring_entries=pools.state_ring_entries,
         )
-        # opB publishes the raw projection; normalize each head and rotate the
-        # final RoPE dimensions before entering the unchanged FlashMLA path.
-        freqs_cis = attn.freqs_cis.index_select(0, positions_i64).contiguous()
+        # Index the shared RoPE table inside the normalization kernel so every
+        # HCA layer avoids materializing a gathered frequency tensor.
         q_ready = dsv4_mega.q_rmsnorm_rope_cuda_(
             q_raw.view(batch_size, q_len, g.main_heads, HEAD_DIM),
-            freqs_cis,
+            attn.freqs_cis,
+            positions_i64,
             eps=attn.eps,
         )
         attention = attn._forward_decode_compressed(
