@@ -19,7 +19,7 @@ python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbat
 
 | 参数 | 取值 | 说明 |
 | --- | --- | --- |
-| `--category` | `all` / `cancel` / `status` / `kv` / `balance` / `elastic` / `engine-fault` / `master` / `admission` / `direct` | 场景分类（默认 `all`） |
+| `--category` | `all` / `cancel` / `status` / `kv` / `balance` / `elastic` / `engine-fault` / `master` / `admission` / `priority` / `direct` | 场景分类（默认 `all`） |
 | `--profile` | `batch-window` / `single-nonbatch` / `single-batch` / `window-nonbatch` | 调度形态（默认 `batch-window`）：decision（fixed_window / single）× dispatcher（batch / non_batch）两轴组合 |
 | `--grade` | `strict` / `normal` / `loose` | 断言档位（默认 `normal`）：数值断言按档位边界评估，超出运行档界值即 FAIL；逐例记录实际达到档并汇总为运行判定（优异 / 良好 / 边缘 / 不可用） |
 | `--filter` | 子串 | 按用例名子串过滤 |
@@ -29,7 +29,7 @@ python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbat
 
 全集 **99 例**；`--list` 按当前 profile 过滤，默认 profile 下显示 98 例（1 例仅 NON_BATCH 投递形态适用）。用例间环境按需复用 / 重建。
 
-## 测试分类（99 例）
+## 测试分类（114 例）
 
 断言一律写**正确契约**而非当前实现——跑挂即 finding。表内「期望」为一句话摘要，完整断言与构造细节以各用例 docstring 为准。
 
@@ -186,6 +186,28 @@ master 自身进程级故障与冷启动行为，以及双实例 HA 链路（冻
 | `admission_placement_pool_wait` | prefill placement 池仅 1 席，A 运行中 B 到达被拒入池 | 池满为 WAIT：B 驻留 master 侧，池释放后被唤醒重试并晚于 A≥1s 完成；账目干净并恢复 |
 | `admission_engine_waiting_batch_cap_reject` | 引擎等待批上限=1（运行时注入）打满后探测批到达 | 非等待门：快速整批 backpressure 拒绝；占用者不受扰；同压力下放开 cap 可 park；账目干净并恢复 |
 | `admission_engine_kv_lack_mem_fast_reject` | 17 块引擎 KV 池被两个 8 块租约占满后第 3 个 8 块请求入队 | 非等待门：快速 602 LACK_MEM 拒绝（引擎侧码非 8431）；租约完成后归还；恢复后新请求成功、账目干净 |
+
+### priority（15 例 · 14 例固定 single-nonbatch + PRIORITY 轴 case 层注入、1 例全 profile）
+
+优先级排序 + auto-TPM 抢占/降级契约（2026-09 自源线 `flexlb-priority-auto-tpm-ft` 迁移）。PRIORITY ordering 轴经 case 层 JSON 注入（`_prio_config` 走 `build_flexlb_config(ordering="priority", decision="single", dispatcher="non_batch")`，不扩 profile 表）；优先级双通道——proto field 14 与 `x-dashscope-inner-qos-level` header，由 PriorityNormalizer 归一（proto > header > defaultPriority）。基线标注含义：`[EV-1-FIXED]` 校准于 intake3 PendingPlacementCoordinator 线（拉式 park，6ad0315f10），`[EV-2]` 为 decode 驱逐不可达基线——两者在 intake3-rebuild Java 上的成立性待远端探针核对，断言口径迁移自源线不改。
+
+| 用例 | 场景 | 期望 |
+| --- | --- | --- |
+| `prio_order_basic` | 混优先级波（70/50/30…）在 inflight=1 的 prefill 串行窗口排队 | dispatch 严格 priority 降序、inversion_ratio=0（PR1；[EV-1-FIXED] 首个 parker 豁免） |
+| `prio_same_level_fifo` | 7 个同 priority=50 逐发（rid 升序，首个兼占位） | dispatch 序=提交序（PR2 同级 FIFO 不受 priority 干扰） |
+| `prio_normalize` | 三通道归一：proto field 14 显式 70、QoS header 显式 80、双缺省走 defaultPriority=30 | metric 面 `auto_tpm.request.count` 分桶 70/80/30 各就位（PR3），行为面缺省按 30 排在显式 70 后 |
+| `prio_low_no_starvation` | 非饱和负载：30x4 先发、70x4 后到（共享 env、无 inflight cap） | 30 完成率 1.0——非挂起即唯一机械防饿保护（PR8 calibre） |
+| `prio_queue_timeout_terminal` | queueTimeout=8s、高优先级持续占位、3 个 30 排队 | 到期即 8511 终态、绝不悬挂过 deadline（PR8 band） |
+| `atpm_preempt_prefill_queued` | PREFILL_QUEUED 抢占开启，波内混优先级排队 | [EV-1-FIXED] 拉式 park 设计终形（PR10/PR5/PR6/PR4）；抢占计数与客户面终端对齐 |
+| `atpm_preempt_decode_engine_owned` | DECODE_RESERVED/DECODE_ENGINE_OWNED 抢占（engineCancellation 必配）、decode 满载波 | [EV-2] decode 驱逐不可达：零 8429、占用者完成、incoming 走 EV2 拒绝族；AT5 闭环预算 band |
+| `atpm_same_priority_zero_eviction` | 8 个显式 priority=50 + 第 9 个 50 全部 park | 零抢占（8400/8429 均不出现）；design-final 完成形状（PR4/AT3） |
+| `atpm_preemption_disabled_zero_eviction` | PRIORITY ordering 但无 preemption 块（disabled），两轮饱和 | 零 8400/8429/8430（EvictionManager 前置拒绝）；[EV-1-FIXED] 饱和后 park 而非拒（AT2） |
+| `atpm_timeout_attribution` | 短 queueTimeout 下排队到期归因 | 到期统一 8511 + reason=UNSPECIFIED（PR7；归因分类器 intake3 零调用点——已申报观察缺口） |
+| `atpm_comparator_frozen_weak` | 同一负载形态分别跑 PRIORITY env 与 FIFO env（F1 控制） | priority 半场 dispatch 序显著异于 FIFO 半场（构造期序型决定行为，PR9 弱断言） |
+| `atpm_error_code_family` | 三段独立构造 8400/8402/8403/8429/8511 触发条件 | 各码只在自身触发下出现、互不串扰（AT4 带类型终端可观测） |
+| `atpm_config_strict_reject` | 3 个非法 FLEXLB_CONFIG 原始 JSON 变体（removed 字段 / FIFO+defaultPriority / owned 无 engineCancellation） | master 启动失败 + 严格解析器报文族命中；rejected 后 current=None（AT1） |
+| `atpm_decode_reservation_priority` | decode 面三波：30<70 / 50==50 / kvBucket 偏好（D1 共享 env，kv_pressure 注入时序纪律） | [EV-2] 三波零驱逐、victim metric delta=0；[EV-1-FIXED] incoming 8511 park 终态（AT7 跨阶段一致性） |
+| `atpm_observability_integrity` | ENV-O1 复合编排（debug 日志 + FLEXLB_MONITOR_MODE=all） | 客户面形状 + `auto_tpm.request.count` 分桶 4/3/2/1 + latency success 桶 + `[priority-scheduler]` 日志 + pv.log admissionRejectReason 全在场（AT8/AT6） |
 
 ### direct（1 例 · 全 profile）
 

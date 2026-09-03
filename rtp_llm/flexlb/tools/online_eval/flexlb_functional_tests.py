@@ -68,15 +68,17 @@ from flexlb_ft.cases import (
     ENGINE_FAULT_CASES,
     KV_CASES,
     MASTER_CASES,
+    PRIORITY_CASES,
     STATUS_CASES,
 )
 from flexlb_ft.context import CaseContext, CaseDef
 from flexlb_ft.grade import GRADES, VERDICT_LABELS, GradeReport, overall_verdict
 from flexlb_ft.harness import PROFILE_CAPS, PROFILES, EnvManager
 
-# Task #85 (category reorg): the nine cases/ modules register into their
+# Task #85 (category reorg): the ten cases/ modules register into their
 # own CATEGORY_CASES lists; the runner concatenates them in the canonical
-# category order below.
+# category order below (priority after admission — the 2026-09 intake3-
+# rebuild migration, PRIORITY-axis case-layer JSON injection).
 ALL_CASES: list[CaseDef] = (
     CANCEL_CASES
     + STATUS_CASES
@@ -86,6 +88,7 @@ ALL_CASES: list[CaseDef] = (
     + ENGINE_FAULT_CASES
     + MASTER_CASES
     + ADMISSION_CASES
+    + PRIORITY_CASES
     + DIRECT_CASES
 )
 
@@ -133,10 +136,11 @@ def main():
             "engine-fault",
             "master",
             "admission",
+            "priority",
             "direct",
         ],
         default="all",
-        help="scenario category (one of the nine flexlb_ft/cases/ modules)",
+        help="scenario category (one of the ten flexlb_ft/cases/ modules)",
     )
     parser.add_argument(
         "--profile",

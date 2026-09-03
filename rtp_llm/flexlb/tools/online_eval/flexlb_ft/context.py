@@ -149,8 +149,11 @@ class CaseContext:
 # in a single < 1M window (RID_BASES + case_seq * 1M can never collide
 # across (category, profile) pairs because every pairwise base distance is
 # < 1M), so a reused master's dedup table stays collision-free across
-# profiles and reruns.  The nine categories map 1:1 onto the nine
-# flexlb_ft/cases/ modules (task #85 reorg); the pre-reorg families
+# profiles and reruns.  The ten categories map 1:1 onto the ten
+# flexlb_ft/cases/ modules (task #85 reorg; priority joined 2026-09 on
+# intake3-rebuild — PRIORITY-axis case-layer JSON injection, no profile
+# expansion, hence the compact 12.5k-spacing block below 100k); the
+# pre-reorg families
 # (scheduling / anomaly / chaos) were dissolved into status, balance,
 # kv, engine_fault, master and direct.
 RID_BASES = {
@@ -207,6 +210,16 @@ RID_BASES = {
         "single-nonbatch": 925_000,
         "single-batch": 950_000,
         "window-nonbatch": 975_000,
+    },
+    # priority: 12.5k spacing (not the 25k convention) because the 100k-975k
+    # ladder above is fully occupied by the nine legacy categories — the
+    # 50k-start block keeps every pairwise base distance in the sub-1M
+    # collision-free window while staying below the ladder's floor.
+    "priority": {
+        "batch-window": 50_000,
+        "single-nonbatch": 62_500,
+        "single-batch": 75_000,
+        "window-nonbatch": 87_500,
     },
 }
 

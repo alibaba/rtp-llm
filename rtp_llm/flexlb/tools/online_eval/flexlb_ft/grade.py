@@ -174,6 +174,100 @@ GRADE_BANDS: Dict[str, dict] = {
         "kind": "lower",
         "bands": {"strict": 0.8, "normal": 0.7, "loose": 0.6},
     },
+    # -----------------------------------------------------------------------
+    # Priority ordering + Auto-TPM family (design doc
+    # docs/priority_auto_tpm_test_design.md §3.1/§3.2 — cases/priority.py
+    # is the sole consumer).  Three measured bands + fifteen hard
+    # invariants; all initial values are DESIGN-stage estimates,
+    # pending first e2e calibration (§3.4 discipline: the first round
+    # records raw observations into these annotations, tiers are then
+    # re-set from the >= 15-run distribution with the <1% false-fail
+    # floor).
+    # -----------------------------------------------------------------------
+    # PR1 priority-order fidelity: inversion_ratio = (misordered
+    # high-over-low dispatch pairs) / (all high-low pairs), observed via
+    # engine request_lifecycle running_ms order (client
+    # schedule-completion order arbitrates same-millisecond collisions).
+    # Deterministic choreography (single prefill + serial injection +
+    # slow-prefill backlog window with
+    # dispatcher.maxInflightRequestsPerPrefillWorker=1 — consecutive
+    # dispatches are separated by one full prefill execution) makes the
+    # expected value exactly 0, same caliber as P5: nonzero tiers only
+    # tolerate observation races.  initial values, pending first e2e
+    # calibration.
+    "PR1": {
+        "kind": "upper",
+        "bands": {"strict": 0.00, "normal": 0.05, "loose": 0.10},
+    },
+    # PR8 terminal-deadline ratio: p100 of the low-priority group's
+    # terminal-arrival time / queueTimeoutMs under sustained high-priority
+    # pressure.  The absolute deadline fires after expiry-check
+    # granularity + master settlement latency, so the ratio sits slightly
+    # above 1.0; an 8s deadline maps to 10s/12s/16s absolute.  Extrapolated
+    # from the G11a deadline-rejection window (1.0-8.0s observed
+    # latencies).  initial values, pending first e2e calibration.
+    "PR8": {
+        "kind": "upper",
+        "bands": {"strict": 1.25, "normal": 1.50, "loose": 2.00},
+    },
+    # AT5 preemption-closure latency: incoming's first engine running
+    # time minus the victim terminal time (client/engine clock
+    # crossover).  Bound semantics =
+    # engineCancellation.completionTimeoutMs(1000) + cancel settlement
+    # chain + SINGLE decision-cycle margin; the mock engine cancels
+    # near-instantly so the latency body is orchestration polling.  The
+    # analysis report's "50ms bandwidth" is CI-noise unsafe — tiers are
+    # set on total closure latency instead.  initial values, pending
+    # first e2e calibration.
+    "AT5": {
+        "kind": "upper",
+        "bands": {"strict": 2000, "normal": 3500, "loose": 6000},
+    },
+    # Priority/auto-tpm hard invariants (design §3.2 — any violation is
+    # directly unusable; black-box calibre only, internal accounting is
+    # Java-unit-test territory):
+    #   PR2  same-priority FIFO (enqueueSeq tie-break)
+    #   PR3  priority normalization channels (proto > header > default)
+    #   PR4  victims strictly lower priority / equal priority never
+    #        evicted
+    #   PR5  victim-set determinism (priority asc -> newest first)
+    #   PR6  preemption terminal split (queued/reserved -> retryable
+    #        8400, engine-accepted -> 8429)
+    #   PR7  timeout attribution consistency (8430 + reason matches the
+    #        constructed queue prefix)
+    #   PR9  comparator frozen (weak form: ordering config decides queue
+    #        behavior — PRIORITY vs FIFO env behavioural contrast)
+    #   PR10 replacement precision (deficit-exact victims; infeasible ->
+    #        zero partial eviction)
+    #   AT1  strict config rejection (illegal FLEXLB_CONFIG variants
+    #        fail master startup)
+    #   AT2  omitted preemption block = eviction fully disabled
+    #   AT3  single-QoS (all-equal-priority) zero eviction
+    #   AT4  capacity-reject error-code family separation (8502 /
+    #        8402-family / 8431, no cross-contamination between
+    #        segments)
+    #   AT6  accounting integrity, black-box aggregate form (P6 +
+    #        inflight_clean + drain-all-terminal; the 14-line itemised
+    #        contract stays with the Java unit tests)
+    #   AT7  decode-stage priority rules match prefill-stage (strictly
+    #        lower / equal never evicted)
+    #   AT8  observability completeness (auto_tpm.* buckets,
+    #        [priority-scheduler] log, pv.log fields)
+    "PR2": {"kind": "invariant"},
+    "PR3": {"kind": "invariant"},
+    "PR4": {"kind": "invariant"},
+    "PR5": {"kind": "invariant"},
+    "PR6": {"kind": "invariant"},
+    "PR7": {"kind": "invariant"},
+    "PR9": {"kind": "invariant"},
+    "PR10": {"kind": "invariant"},
+    "AT1": {"kind": "invariant"},
+    "AT2": {"kind": "invariant"},
+    "AT3": {"kind": "invariant"},
+    "AT4": {"kind": "invariant"},
+    "AT6": {"kind": "invariant"},
+    "AT7": {"kind": "invariant"},
+    "AT8": {"kind": "invariant"},
 }
 
 

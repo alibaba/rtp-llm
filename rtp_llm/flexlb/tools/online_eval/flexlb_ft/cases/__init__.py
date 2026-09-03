@@ -1,11 +1,11 @@
-"""flexlb_ft case categories (task #85 reorg): nine scenario modules.
+"""flexlb_ft case categories (task #85 reorg): ten scenario modules.
 
 Each ``cases/<category>.py`` registers its cases into a CATEGORY_CASES
 list (cancel -> CANCEL_CASES, status -> STATUS_CASES, kv -> KV_CASES,
 balance -> BALANCE_CASES, elastic -> ELASTIC_CASES, engine_fault ->
 ENGINE_FAULT_CASES, master -> MASTER_CASES, admission ->
-ADMISSION_CASES, direct -> DIRECT_CASES); the runner imports the nine
-lists and concatenates them into ALL_CASES.  The framework files
+ADMISSION_CASES, direct -> DIRECT_CASES, priority -> PRIORITY_CASES);
+the runner imports the ten lists and concatenates them into ALL_CASES.  The framework files
 (harness / context / engine_ops / grade) stay in flexlb_ft/ — this
 package holds only scenario definitions, one contract theme per module.
 """
@@ -18,6 +18,7 @@ from .elastic import ELASTIC_CASES
 from .engine_fault import ENGINE_FAULT_CASES
 from .kv import KV_CASES
 from .master import MASTER_CASES
+from .priority import PRIORITY_CASES
 from .status import STATUS_CASES
 
 __all__ = [
@@ -29,5 +30,6 @@ __all__ = [
     "ENGINE_FAULT_CASES",
     "KV_CASES",
     "MASTER_CASES",
+    "PRIORITY_CASES",
     "STATUS_CASES",
 ]
