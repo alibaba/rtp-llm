@@ -80,9 +80,7 @@ bool BlockTreeTaskPool::submit(BlockTreeTaskClass        task_class,
         if (normalQueueSizeLocked() >= queue_size_) {
             return false;
         }
-        const size_t background_limit =
-            queue_size_ > kLoadReservedSlots ? queue_size_ - kLoadReservedSlots : queue_size_;
-        if (task_class == BlockTreeTaskClass::BACKGROUND && background_queue_.size() >= background_limit) {
+        if (task_class == BlockTreeTaskClass::BACKGROUND && background_queue_.size() >= backgroundLimit()) {
             return false;
         }
     }
@@ -108,19 +106,34 @@ bool BlockTreeTaskPool::submitCompletion(std::function<void()> task) {
     return true;
 }
 
-bool BlockTreeTaskPool::acquireWorkflowCredit() {
+bool BlockTreeTaskPool::acquireWorkflowCredit(BlockTreeTaskClass task_class) {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
     if (!started_ || admission_stopped_ || shutdown_ || (queue_size_ != 0 && workflow_credits_.load() >= queue_size_)) {
         return false;
+    }
+    if (queue_size_ != 0 && task_class == BlockTreeTaskClass::BACKGROUND
+        && background_workflow_credits_.load() >= backgroundLimit()) {
+        return false;
+    }
+    if (task_class == BlockTreeTaskClass::BACKGROUND) {
+        background_workflow_credits_.fetch_add(1);
     }
     workflow_credits_.fetch_add(1);
     return true;
 }
 
-void BlockTreeTaskPool::releaseWorkflowCredit() {
-    const size_t previous = workflow_credits_.fetch_sub(1);
-    assert(previous > 0);
-    (void)previous;
+void BlockTreeTaskPool::releaseWorkflowCredit(BlockTreeTaskClass task_class) {
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        if (task_class == BlockTreeTaskClass::BACKGROUND) {
+            const size_t previous_background = background_workflow_credits_.fetch_sub(1);
+            assert(previous_background > 0);
+            (void)previous_background;
+        }
+        const size_t previous = workflow_credits_.fetch_sub(1);
+        assert(previous > 0);
+        (void)previous;
+    }
     std::lock_guard<std::mutex> lock(wait_mutex_);
     wait_cv_.notify_all();
 }
@@ -128,6 +141,10 @@ void BlockTreeTaskPool::releaseWorkflowCredit() {
 void BlockTreeTaskPool::stopAdmission() {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
     admission_stopped_ = true;
+}
+
+size_t BlockTreeTaskPool::backgroundLimit() const {
+    return queue_size_ > kLoadReservedSlots ? queue_size_ - kLoadReservedSlots : queue_size_;
 }
 
 size_t BlockTreeTaskPool::normalQueueSizeLocked() const {

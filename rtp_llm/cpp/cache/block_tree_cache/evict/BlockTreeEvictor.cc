@@ -60,6 +60,7 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
     settled_(std::move(settled)),
     task_runner_(std::make_unique<EvictionTaskRunner>(
         tree->groupSets(), transfer_dispatcher, memory_timeout_ms, disk_timeout_ms)),
+    memory_timeout_ms_(memory_timeout_ms),
     disk_timeout_ms_(disk_timeout_ms),
     max_device_host_batch_(max_device_host_batch),
     max_non_device_host_batch_(max_non_device_host_batch) {
@@ -303,7 +304,7 @@ bool BlockTreeEvictor::batchDropLocked(size_t  group_set_id,
 
 bool BlockTreeEvictor::submitEvictionTask(EvictionTransferTask task) {
     auto task_ptr = std::make_shared<EvictionTransferTask>(std::move(task));
-    if (!task_pool_->acquireWorkflowCredit()) {
+    if (!task_pool_->acquireWorkflowCredit(BlockTreeTaskClass::BACKGROUND)) {
         rollbackTransferLocked(task_ptr->descs);
         return false;
     }
@@ -317,12 +318,15 @@ bool BlockTreeEvictor::submitEvictionTask(EvictionTransferTask task) {
         metrics_reporter_->reportTransferTaskQueueWait(CacheTransferOperation::EVICT,
                                                        currentTimeUs() - task_ptr->enqueue_time_us);
     };
-    task_ptr->enqueue_time_us = currentTimeUs();
-    const bool submitted      = task_pool_->submit([this, task_ptr]() { runEvictionTask(task_ptr); },
-                                              BlockTreeTaskPool::kDefaultQueueWaitTimeout,
-                                              std::move(on_timeout));
+    task_ptr->enqueue_time_us      = currentTimeUs();
+    const auto& first_desc         = task_ptr->descs.front();
+    const auto  queue_wait_timeout = std::chrono::milliseconds(
+        first_desc.source_tier == Tier::DISK || first_desc.target_tier == Tier::DISK ? disk_timeout_ms_ :
+                                                                                       memory_timeout_ms_);
+    const bool submitted = task_pool_->submit(
+        [this, task_ptr]() { runEvictionTask(task_ptr); }, queue_wait_timeout, std::move(on_timeout));
     if (!submitted) {
-        task_pool_->releaseWorkflowCredit();
+        task_pool_->releaseWorkflowCredit(BlockTreeTaskClass::BACKGROUND);
         updatePendingRelease(task_ptr->descs, false);
         rollbackTransferLocked(task_ptr->descs);
         return false;
@@ -423,10 +427,11 @@ void BlockTreeEvictor::runEvictionTask(std::shared_ptr<const EvictionTransferTas
 void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task,
                                                   bool                                        success) noexcept {
     auto settle = [this, task = std::move(task), success]() noexcept {
-        block_tree_cache_detail::ScopeRollback credit_guard([this]() { task_pool_->releaseWorkflowCredit(); });
-        bool                                   any_detached     = false;
-        bool                                   any_not_detached = false;
-        EvictionTransferTask                   settled_task;
+        block_tree_cache_detail::ScopeRollback credit_guard(
+            [this]() { task_pool_->releaseWorkflowCredit(BlockTreeTaskClass::BACKGROUND); });
+        bool                 any_detached     = false;
+        bool                 any_not_detached = false;
+        EvictionTransferTask settled_task;
         {
             std::lock_guard<std::mutex> lock(*mutex_);
             std::vector<bool>           detached;

@@ -176,7 +176,16 @@ struct KVCacheConfig {
     int64_t                                 disk_cache_sync_timeout_ms                      = 30000;
     int64_t                                 disk_cache_staging_block_count                  = 4;
     int64_t                                 memory_cache_max_descriptors_per_transfer_batch = 8;
-    int                                     linear_step = 1;  // for linear attention cache reuse
+    int64_t                                 block_tree_transfer_worker_count                = 4;
+    int64_t                                 block_tree_business_queue_max_size              = 10000;
+    int64_t                                 block_tree_transfer_queue_max_size              = 10000;
+    double block_tree_device_evict_low_watermark_ratio  = kDefaultDeviceLowWatermarkRatio;
+    double block_tree_device_evict_high_watermark_ratio = kDefaultDeviceHighWatermarkRatio;
+    double block_tree_host_evict_low_watermark_ratio    = kDefaultHostLowWatermarkRatio;
+    double block_tree_host_evict_high_watermark_ratio   = kDefaultHostHighWatermarkRatio;
+    double block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
+    double block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
+    int    linear_step                                  = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
     int         fp8_kv_cache                 = 0;
     std::string ssm_state_dtype              = "bf16";

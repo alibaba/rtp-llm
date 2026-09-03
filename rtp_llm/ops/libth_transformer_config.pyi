@@ -694,6 +694,15 @@ class KVCacheConfig:
     dsv4_hca_state_pool_blocks: int
     dsv4_fixed_pool_use_memory: bool
     block_tree_full_prefix_scan_interval_ms: int
+    block_tree_transfer_worker_count: int
+    block_tree_business_queue_max_size: int
+    block_tree_transfer_queue_max_size: int
+    block_tree_device_evict_low_watermark_ratio: float
+    block_tree_device_evict_high_watermark_ratio: float
+    block_tree_host_evict_low_watermark_ratio: float
+    block_tree_host_evict_high_watermark_ratio: float
+    block_tree_disk_evict_low_watermark_ratio: float
+    block_tree_disk_evict_high_watermark_ratio: float
     fp8_kv_cache: int
     kv_cache_mem_mb: int
     linear_step: int

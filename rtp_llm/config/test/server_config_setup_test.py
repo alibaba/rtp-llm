@@ -1,8 +1,10 @@
 import contextlib
 import io
 import os
+import re
 import sys
 import unittest
+from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -195,11 +197,20 @@ class GenerateConfigTest(TestCase):
         config.dsv4_fixed_pool_use_memory = True
         config.memory_cache_max_descriptors_per_transfer_batch = 17
         config.block_tree_full_prefix_scan_interval_ms = 5000
+        config.block_tree_transfer_worker_count = 7
+        config.block_tree_business_queue_max_size = 211
+        config.block_tree_transfer_queue_max_size = 307
+        config.block_tree_device_evict_low_watermark_ratio = 0.71
+        config.block_tree_device_evict_high_watermark_ratio = 0.81
+        config.block_tree_host_evict_low_watermark_ratio = 0.72
+        config.block_tree_host_evict_high_watermark_ratio = 0.82
+        config.block_tree_disk_evict_low_watermark_ratio = 0.73
+        config.block_tree_disk_evict_high_watermark_ratio = 0.83
         config.write_cache_sync = True
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 58)
-        self.assertEqual(state[:2], ("KVCacheConfig", 2))
+        self.assertEqual(len(state), 67)
+        self.assertEqual(state[:2], ("KVCacheConfig", 3))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -214,11 +225,42 @@ class GenerateConfigTest(TestCase):
         self.assertTrue(restored.dsv4_fixed_pool_use_memory)
         self.assertEqual(restored.memory_cache_max_descriptors_per_transfer_batch, 17)
         self.assertEqual(restored.block_tree_full_prefix_scan_interval_ms, 5000)
+        self.assertEqual(restored.block_tree_transfer_worker_count, 7)
+        self.assertEqual(restored.block_tree_business_queue_max_size, 211)
+        self.assertEqual(restored.block_tree_transfer_queue_max_size, 307)
+        self.assertEqual(restored.block_tree_device_evict_low_watermark_ratio, 0.71)
+        self.assertEqual(restored.block_tree_device_evict_high_watermark_ratio, 0.81)
+        self.assertEqual(restored.block_tree_host_evict_low_watermark_ratio, 0.72)
+        self.assertEqual(restored.block_tree_host_evict_high_watermark_ratio, 0.82)
+        self.assertEqual(restored.block_tree_disk_evict_low_watermark_ratio, 0.73)
+        self.assertEqual(restored.block_tree_disk_evict_high_watermark_ratio, 0.83)
         self.assertTrue(restored.write_cache_sync)
 
         config.enable_disk_cache = True
         restored_enabled = pickle.loads(pickle.dumps(config))
         self.assertTrue(restored_enabled.enable_disk_cache)
+
+        def restore(pickle_state):
+            value = KVCacheConfig.__new__(KVCacheConfig)
+            value.__setstate__(pickle_state)
+            return value
+
+        source_extended_state = (state[0], 1, *state[2:-1])
+        restored_source_extended = restore(source_extended_state)
+        self.assertEqual(restored_source_extended.block_tree_transfer_worker_count, 7)
+        self.assertEqual(
+            restored_source_extended.block_tree_business_queue_max_size, 211
+        )
+        self.assertFalse(restored_source_extended.write_cache_sync)
+
+        write_sync_state = (state[0], 2, *state[2:57], state[-1])
+        restored_write_sync = restore(write_sync_state)
+        default_config = KVCacheConfig()
+        self.assertEqual(
+            restored_write_sync.block_tree_transfer_worker_count,
+            default_config.block_tree_transfer_worker_count,
+        )
+        self.assertTrue(restored_write_sync.write_cache_sync)
 
     def test_kv_cache_config_pickle_rejects_incompatible_states(self):
         from rtp_llm.ops import KVCacheConfig
@@ -237,6 +279,36 @@ class GenerateConfigTest(TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "invalid KVCacheConfig state"):
                 restore(invalid_state)
+
+    def test_kv_cache_config_queue_and_watermark_bindings_match_stub(self):
+        from rtp_llm.ops import KVCacheConfig
+
+        expected_fields = {
+            "block_tree_transfer_worker_count": "int",
+            "block_tree_business_queue_max_size": "int",
+            "block_tree_transfer_queue_max_size": "int",
+            "block_tree_device_evict_low_watermark_ratio": "float",
+            "block_tree_device_evict_high_watermark_ratio": "float",
+            "block_tree_host_evict_low_watermark_ratio": "float",
+            "block_tree_host_evict_high_watermark_ratio": "float",
+            "block_tree_disk_evict_low_watermark_ratio": "float",
+            "block_tree_disk_evict_high_watermark_ratio": "float",
+        }
+        stub_path = (
+            Path(__file__).resolve().parents[2] / "ops" / "libth_transformer_config.pyi"
+        )
+        stub_text = stub_path.read_text(encoding="utf-8")
+        stub_class = stub_text.split("class KVCacheConfig:\n", maxsplit=1)[1].split(
+            "\nclass ", maxsplit=1
+        )[0]
+        stub_fields = dict(
+            re.findall(r"^    ([A-Za-z_]\w*): ([^\n]+)$", stub_class, re.MULTILINE)
+        )
+
+        for field, expected_type in expected_fields.items():
+            with self.subTest(field=field):
+                self.assertTrue(hasattr(KVCacheConfig, field))
+                self.assertEqual(stub_fields.get(field), expected_type)
 
     def test_jit_config(self):
         valid = (

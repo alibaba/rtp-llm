@@ -1282,7 +1282,7 @@ TEST_F(BlockTreeEvictorTest, RunEvictionTaskReleasesPendingSourceBeforeSettledCa
 
     // This test bypasses evictLocked(), so mirror its workflow admission
     // precondition before invoking the asynchronous runner directly.
-    ASSERT_TRUE(task_pool.acquireWorkflowCredit());
+    ASSERT_TRUE(task_pool.acquireWorkflowCredit(BlockTreeTaskClass::BACKGROUND));
     evictor_->runEvictionTask(std::make_shared<EvictionTransferTask>(*task));
     task_pool.waitForIdle();
 

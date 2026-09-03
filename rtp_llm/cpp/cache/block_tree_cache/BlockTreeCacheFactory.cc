@@ -63,6 +63,11 @@ int checkedTimeout(int64_t timeout_ms, const char* name) {
     return static_cast<int>(timeout_ms);
 }
 
+size_t checkedSize(int64_t value, const char* name) {
+    RTP_LLM_CHECK_WITH_INFO(value > 0, "%s must be > 0, got %ld", name, value);
+    return static_cast<size_t>(value);
+}
+
 int slidingWindowSize(const GroupBase& group, size_t group_id) {
     RTP_LLM_CHECK_WITH_INFO(
         group.policy.group_type == CacheGroupType::SWA, "sliding window requested for non-SWA group_id=%zu", group_id);
@@ -507,13 +512,16 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     config.host_eviction_policy   = *host_eviction_policy;
     config.disk_eviction_policy   = *disk_eviction_policy;
     if (config.enable_device_cache) {
-        config.watermark_device = {kDefaultDeviceLowWatermarkRatio, kDefaultDeviceHighWatermarkRatio};
+        config.watermark_device = {kv_cache_config.block_tree_device_evict_low_watermark_ratio,
+                                   kv_cache_config.block_tree_device_evict_high_watermark_ratio};
     }
     if (host_enabled) {
-        config.watermark_host = {kDefaultHostLowWatermarkRatio, kDefaultHostHighWatermarkRatio};
+        config.watermark_host = {kv_cache_config.block_tree_host_evict_low_watermark_ratio,
+                                 kv_cache_config.block_tree_host_evict_high_watermark_ratio};
     }
     if (disk_enabled) {
-        config.watermark_disk = {kDefaultDiskLowWatermarkRatio, kDefaultDiskHighWatermarkRatio};
+        config.watermark_disk = {kv_cache_config.block_tree_disk_evict_low_watermark_ratio,
+                                 kv_cache_config.block_tree_disk_evict_high_watermark_ratio};
     }
     const auto valid_watermark = [](const TierWatermark& watermark) {
         return (watermark.low_ratio == 0.0 && watermark.high_ratio == 0.0)
@@ -536,6 +544,12 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     config.disk_cache_sync_timeout_ms =
         disk_enabled ? checkedTimeout(kv_cache_config.disk_cache_sync_timeout_ms, "disk_cache_sync_timeout_ms") :
                        config.host_cache_sync_timeout_ms;
+    config.transfer_worker_count =
+        checkedSize(kv_cache_config.block_tree_transfer_worker_count, "block_tree_transfer_worker_count");
+    config.business_queue_max_size =
+        checkedSize(kv_cache_config.block_tree_business_queue_max_size, "block_tree_business_queue_max_size");
+    config.transfer_queue_max_size =
+        checkedSize(kv_cache_config.block_tree_transfer_queue_max_size, "block_tree_transfer_queue_max_size");
 
     if (disk_enabled) {
         const int64_t staging_block_count = kv_cache_config.disk_cache_staging_block_count;
@@ -575,7 +589,10 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
                                                      config.device_disk_staging_block_count,
                                                      config.max_descriptors_per_transfer_batch,
                                                      config.transfer_worker_count,
-                                                     config.max_descriptors_per_non_device_host_transfer_batch);
+                                                     config.max_descriptors_per_non_device_host_transfer_batch,
+                                                     config.transfer_queue_max_size,
+                                                     config.host_cache_sync_timeout_ms,
+                                                     config.disk_cache_sync_timeout_ms);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(group_sets, std::move(broadcast_manager));
@@ -586,7 +603,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
                                                   config.max_descriptors_per_transfer_batch,
                                                   config.max_descriptors_per_non_device_host_transfer_batch);
     auto task_pool = std::make_unique<BlockTreeTaskPool>(
-        static_cast<size_t>(config.task_pool_size), BlockTreeTaskPool::kDefaultQueueSize, "BlockTreeCacheTaskPool");
+        static_cast<size_t>(config.task_pool_size), config.business_queue_max_size, "BlockTreeCacheTaskPool");
 
     auto tree = std::make_unique<BlockTree>(std::move(group_sets));
 
