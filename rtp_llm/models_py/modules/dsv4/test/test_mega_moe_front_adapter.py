@@ -5,11 +5,11 @@ from unittest import mock
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.moe.mega_front import (
     MegaMoeFrontAdapter,
     _decode_capture_tokens,
 )
-from rtp_llm.models_py.modules.dsv4.block import Block
 
 
 class _FakePlan:
@@ -119,6 +119,17 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
         self.assertIsNone(block._mega_front_adapter)
         adapter_cls.assert_not_called()
 
+    def test_required_front_rejects_non_mega_se_strategy(self) -> None:
+        block = SimpleNamespace(
+            ffn=SimpleNamespace(_strategy=SimpleNamespace(name="mega")),
+            ffn_hc="hc",
+            ffn_norm="norm",
+            _mega_front_adapter=None,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "requires the mega_se MoE strategy"):
+            Block.enable_mega_front(block, required=True)
+
     def test_capture_tokens_are_sorted_and_bounded(self) -> None:
         with mock.patch.dict(
             os.environ,
@@ -138,6 +149,12 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
             {"DECODE_CAPTURE_CONFIG": "8,16,32", "GEN_NUM_PER_CIRCLE": "3"},
         ):
             self.assertEqual(_decode_capture_tokens(), (8, 16, 24, 32, 48, 64, 96, 128))
+
+    def test_front_support_is_bounded_by_extension_capacity(self) -> None:
+        adapter, _ = _fake_adapter()
+
+        self.assertTrue(adapter.supports(torch.empty(64, 2, 4, adapter.dim)))
+        self.assertFalse(adapter.supports(torch.empty(43, 3, 4, adapter.dim)))
 
     def test_learned_front_stages_and_launches_prepacked_mega(self) -> None:
         adapter, plan = _fake_adapter()

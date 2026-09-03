@@ -7,6 +7,8 @@ all experts on one device). Used to validate end-to-end correctness with
 mock per-layer KV cache before wiring into RTP-LLM's GptModelBase.
 """
 
+import logging
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
@@ -24,6 +26,23 @@ from rtp_llm.models_py.modules.dsv4.hc import build_hc_head
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     synchronized_moe_chunk_plan,
 )
+
+_TRUE_ENV_VALUES = frozenset(("1", "true", "yes", "on"))
+_FALSE_ENV_VALUES = frozenset(("0", "false", "no", "off", ""))
+
+
+def _optional_env_bool(name: str) -> Optional[bool]:
+    if name not in os.environ:
+        return None
+    value = os.environ[name].strip().lower()
+    if value in _TRUE_ENV_VALUES:
+        return True
+    if value in _FALSE_ENV_VALUES:
+        return False
+    raise RuntimeError(
+        f"{name} must be one of {sorted(_TRUE_ENV_VALUES | _FALSE_ENV_VALUES)}, "
+        f"got {os.environ[name]!r}"
+    )
 
 
 @dataclass
@@ -201,6 +220,33 @@ class V4Transformer(nn.Module):
         from rtp_llm.utils.model_weight import W
 
         gw = mw.global_weights
+        self._mega_csa_runtime = None
+        self._mega_decode_enabled = False
+        embedding_weight = None
+        if not self.commit_only:
+            embedding_weight = gw[W.embedding]
+            mega_request = _optional_env_bool("DSV4_MEGA")
+            if mega_request is not False:
+                from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_support import (
+                    mega_decode_unavailable_reason,
+                )
+
+                unavailable_reason = mega_decode_unavailable_reason(
+                    args,
+                    embedding_weight.device,
+                )
+                if unavailable_reason is not None and mega_request is True:
+                    raise RuntimeError(
+                        f"DSV4_MEGA=1 is unsupported: {unavailable_reason}"
+                    )
+                if unavailable_reason is not None:
+                    logging.info(
+                        "DSV4 Mega decode is unavailable; using the ordinary path: %s",
+                        unavailable_reason,
+                    )
+                else:
+                    self._mega_decode_enabled = True
+
         self.layers = nn.ModuleList(
             [
                 _build_block(
@@ -222,7 +268,6 @@ class V4Transformer(nn.Module):
             "separate DeepSeekV4MtpModel instance."
         )
 
-        self._mega_csa_runtime = None
         if self.commit_only:
             # The commit path neither embeds tokens nor runs the final norm,
             # LM head, or mHC head. None-valued members make accidental use of
@@ -234,40 +279,21 @@ class V4Transformer(nn.Module):
         else:
             # ``EmbeddingTorch`` keeps ``self.weight`` as a plain attribute (no
             # ``nn.Parameter``); the framework dict supplies the real tensor.
-            self.embed = EmbeddingTorch(gw[W.embedding])
+            assert embedding_weight is not None
+            self.embed = EmbeddingTorch(embedding_weight)
             self.norm = RMSNorm(gw[W.final_ln_gamma], args.norm_eps)
-            # Mega decode is the default for its supported FP8-KV/TP1 geometry.
-            # Keep the switches as per-arm opt-outs, and leave unsupported model
-            # configurations on the ordinary attention path unless explicitly
-            # forced (which retains the strict validation below).
-            mega_default = args.fp8_kv_cache and args.tp_size == 1
-            mega_flags = {
-                name: os.environ.get(name, "1" if mega_default else "0")
-                not in ("0", "", "false", "False")
-                for name in ("DSV4_MEGA_CSA", "DSV4_MEGA_HCA")
-            }
-            if any(mega_flags.values()):
-                enabled = "/".join(name for name, on in mega_flags.items() if on)
-                if not args.fp8_kv_cache or args.tp_size != 1:
-                    raise RuntimeError(f"{enabled} requires FP8 KV cache and TP1")
+            if self._mega_decode_enabled:
                 from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_csa_runtime import (
                     MegaCSARuntime,
                 )
 
                 self._mega_csa_runtime = MegaCSARuntime()
                 for layer_id, layer in enumerate(self.layers):
-                    if mega_flags["DSV4_MEGA_CSA"]:
-                        layer.enable_mega_csa(
-                            self._mega_csa_runtime, mw.weights[layer_id]
-                        )
-                    if mega_flags["DSV4_MEGA_HCA"]:
-                        layer.enable_mega_hca(
-                            self._mega_csa_runtime, mw.weights[layer_id]
-                        )
-                    # MoE-front is a Mega decode feature, not a replacement for
-                    # the ordinary attention + MoE path. Its strategy gate keeps
-                    # DSV4_USE_MEGA_MOE_SE=0 on the existing Mega route.
-                    layer.enable_mega_front()
+                    layer.enable_mega_csa(self._mega_csa_runtime, mw.weights[layer_id])
+                    layer.enable_mega_hca(self._mega_csa_runtime, mw.weights[layer_id])
+                    # EP sharding requires the same MegaMoE-SE backend as the
+                    # ordinary path; Mega only replaces its decode front-end.
+                    layer.enable_mega_front(required=int(args.ep_size) > 1)
 
             # LM head — plain weight matrix [vocab_size, dim].  Accept either
             # BF16 (ckpt-native) or FP32 (legacy path).

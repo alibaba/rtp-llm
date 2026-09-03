@@ -14,7 +14,6 @@ from .mega_csa_weights import (
     HEAD_DIM,
     MAX_BATCH,
     O_LORA_RANK,
-    PRO_GEOMETRY,
     ROPE_DIM,
     CSAGeometry,
 )
@@ -106,96 +105,9 @@ class MegaHCAAdapter:
             from rtp_kernel import dsv4_mega
 
             return dsv4_mega
+        from .mega_support import require_mega_runtime
 
-        capability = torch.cuda.get_device_capability(device)
-        if capability not in ((10, 0), (10, 3)):
-            raise RuntimeError(
-                "DSV4 Mega HCA requires sm_100a or sm_103a, "
-                f"got sm_{capability[0]}{capability[1]}"
-            )
-
-        from rtp_kernel import dsv4_mega
-
-        required = (
-            "geometry_hca",
-            "hc_reduce_fuse_out",
-            "front_mixed_gemm_hca",
-            "wq_b_proj_gemm_merged_hca",
-            "q_rmsnorm_rope_cuda_",
-            "mla_o_inv_rope_quant",
-        )
-        missing = [name for name in required if not hasattr(dsv4_mega, name)]
-        if missing:
-            raise RuntimeError(
-                "rtp-kernel does not provide the DSV4 TP1 HCA ABI: "
-                + ", ".join(missing)
-            )
-        import inspect
-
-        required_parameters = {
-            "front_mixed_gemm_hca": (
-                "normalized_mix",
-                "state_slot_mapping",
-                "state_kv",
-                "state_gate",
-                "pdl",
-            ),
-            "wq_b_proj_gemm_merged_hca": (
-                "state_ring_entries",
-                "window_cache",
-                "compressed_cache",
-                "window_page_tokens",
-                "compressed_page_tokens",
-            ),
-            "q_rmsnorm_rope_cuda_": (
-                "q",
-                "freqs_cis",
-                "positions",
-                "eps",
-            ),
-            "mla_o_inv_rope_quant": (
-                "input",
-                "positions",
-                "rope_cos",
-                "rope_sin",
-                "output_fp8",
-                "output_scale",
-            ),
-        }
-        incompatible = []
-        for function_name, parameters in required_parameters.items():
-            signature = inspect.signature(getattr(dsv4_mega, function_name))
-            absent = [name for name in parameters if name not in signature.parameters]
-            if absent:
-                incompatible.append(f"{function_name} missing {','.join(absent)}")
-        if incompatible:
-            raise RuntimeError(
-                "rtp-kernel DSV4 TP1 HCA ABI is incompatible: "
-                + "; ".join(incompatible)
-            )
-        geometry = dsv4_mega.geometry_hca()
-        g = self._geometry
-        suffix = "_pro" if g is PRO_GEOMETRY else "_flash"
-        expected = {
-            f"n_q{suffix}": g.n_main,
-            f"front_n_fp8{suffix}": g.front_fp8_rows,
-            "compress_ratio": HCA_COMPRESS_RATIO,
-            "state_width": HCA_STATE_WIDTH,
-            "slot_dtype_bits": 64,
-        }
-        mismatched = {
-            key: (geometry.get(key), want)
-            for key, want in expected.items()
-            if geometry.get(key) != want
-        }
-        if mismatched:
-            raise RuntimeError(f"rtp-kernel DSV4 HCA geometry mismatch: {mismatched}")
-        import deep_gemm
-
-        if not hasattr(deep_gemm, "tf32_hc_prenorm_gemm"):
-            raise RuntimeError(
-                "DeepGEMM is missing required DSV4 API tf32_hc_prenorm_gemm"
-            )
+        dsv4_mega = require_mega_runtime(device, ("hca",))
         self._runtime_checked = True
         return dsv4_mega
 

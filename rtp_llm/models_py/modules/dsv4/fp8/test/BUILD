@@ -66,6 +66,7 @@ _CONTRACT_TESTS = [
     "test_indexer_forward_with_pending_nested",
     "test_mega_csa_adapter",
     "test_mega_hca_adapter",
+    "test_mega_support",
     "test_prefill_mixed_layer_cache_store",
     "test_fp8_sparse_attn_decode_op",
     "test_compressor_cp_merged_gather",

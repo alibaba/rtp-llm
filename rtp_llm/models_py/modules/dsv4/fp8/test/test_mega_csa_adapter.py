@@ -63,7 +63,12 @@ def _block_stub(adapter: object | None) -> Block:
 
 class MegaCSARoutingTest(unittest.TestCase):
     @staticmethod
-    def _make_transformer(args: V4Args, layers: list[torch.nn.Module]):
+    def _make_transformer(
+        args: V4Args,
+        layers: list[torch.nn.Module],
+        *,
+        unavailable_reason: str | None = None,
+    ):
         global_weights = MagicMock()
         global_weights.__getitem__.return_value = torch.ones(1, dtype=torch.bfloat16)
         model_weights = SimpleNamespace(
@@ -81,6 +86,10 @@ class MegaCSARoutingTest(unittest.TestCase):
         ), patch(
             "rtp_llm.models_py.modules.dsv4.transformer.build_hc_head",
             return_value=torch.nn.Identity(),
+        ), patch(
+            "rtp_llm.models_py.modules.dsv4.fp8.decode.mega_support."
+            "mega_decode_unavailable_reason",
+            return_value=unavailable_reason,
         ):
             return V4Transformer(args, model_weights)
 
@@ -104,10 +113,11 @@ class MegaCSARoutingTest(unittest.TestCase):
             transformer = self._make_transformer(args, layers)
 
         self.assertIsNotNone(transformer._mega_csa_runtime)
+        self.assertTrue(transformer._mega_decode_enabled)
         for layer in layers:
             layer.enable_mega_csa.assert_called_once()
             layer.enable_mega_hca.assert_called_once()
-            layer.enable_mega_front.assert_called_once_with()
+            layer.enable_mega_front.assert_called_once_with(required=False)
 
     def test_explicit_zero_disables_default_mega_path(self) -> None:
         layer = torch.nn.Module()
@@ -122,12 +132,11 @@ class MegaCSARoutingTest(unittest.TestCase):
             tp_size=1,
         )
 
-        with patch.dict(
-            os.environ, {"DSV4_MEGA_CSA": "0", "DSV4_MEGA_HCA": "0"}, clear=True
-        ):
+        with patch.dict(os.environ, {"DSV4_MEGA": "0"}, clear=True):
             transformer = self._make_transformer(args, [layer])
 
         self.assertIsNone(transformer._mega_csa_runtime)
+        self.assertFalse(transformer._mega_decode_enabled)
         layer.enable_mega_csa.assert_not_called()
         layer.enable_mega_hca.assert_not_called()
         layer.enable_mega_front.assert_not_called()
@@ -146,9 +155,50 @@ class MegaCSARoutingTest(unittest.TestCase):
         )
 
         with patch.dict(os.environ, {}, clear=True):
-            transformer = self._make_transformer(args, [layer])
+            transformer = self._make_transformer(
+                args, [layer], unavailable_reason="TP1 is required, got TP2"
+            )
 
         self.assertIsNone(transformer._mega_csa_runtime)
+        layer.enable_mega_csa.assert_not_called()
+        layer.enable_mega_hca.assert_not_called()
+        layer.enable_mega_front.assert_not_called()
+
+    def test_missing_extension_abi_keeps_default_path(self) -> None:
+        layer = torch.nn.Module()
+        layer.enable_mega_csa = MagicMock()
+        layer.enable_mega_hca = MagicMock()
+        layer.enable_mega_front = MagicMock()
+        args = V4Args(n_layers=1, n_mtp_layers=0, compress_ratios=[4])
+
+        with patch.dict(os.environ, {}, clear=True):
+            transformer = self._make_transformer(
+                args,
+                [layer],
+                unavailable_reason="rtp-kernel is missing DSV4 Mega ABI",
+            )
+
+        self.assertFalse(transformer._mega_decode_enabled)
+        self.assertIsNone(transformer._mega_csa_runtime)
+        layer.enable_mega_csa.assert_not_called()
+        layer.enable_mega_hca.assert_not_called()
+        layer.enable_mega_front.assert_not_called()
+
+    def test_explicit_mega_fails_fast_when_runtime_is_unsupported(self) -> None:
+        layer = torch.nn.Module()
+        layer.enable_mega_csa = MagicMock()
+        layer.enable_mega_hca = MagicMock()
+        layer.enable_mega_front = MagicMock()
+        args = V4Args(n_layers=1, n_mtp_layers=0, compress_ratios=[4])
+
+        with patch.dict(os.environ, {"DSV4_MEGA": "1"}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "sm_100a or sm_103a"):
+                self._make_transformer(
+                    args,
+                    [layer],
+                    unavailable_reason="sm_100a or sm_103a is required, got sm_90",
+                )
+
         layer.enable_mega_csa.assert_not_called()
         layer.enable_mega_hca.assert_not_called()
         layer.enable_mega_front.assert_not_called()
@@ -158,6 +208,7 @@ class MegaCSARoutingTest(unittest.TestCase):
             def __init__(self) -> None:
                 super().__init__()
                 self.enable_mega_csa = MagicMock()
+                self.enable_mega_hca = MagicMock()
                 self.enable_mega_front = MagicMock()
 
         layer = _Layer()
@@ -173,9 +224,7 @@ class MegaCSARoutingTest(unittest.TestCase):
             tp_size=1,
         )
 
-        with patch.dict(
-            os.environ, {"DSV4_MEGA_CSA": "1", "DSV4_MEGA_HCA": "0"}
-        ), patch(
+        with patch.dict(os.environ, {"DSV4_MEGA": "1"}, clear=True), patch(
             "rtp_llm.models_py.modules.dsv4.transformer._build_block",
             return_value=layer,
         ), patch(
@@ -187,6 +236,10 @@ class MegaCSARoutingTest(unittest.TestCase):
         ), patch(
             "rtp_llm.models_py.modules.dsv4.transformer.build_hc_head",
             return_value=torch.nn.Identity(),
+        ), patch(
+            "rtp_llm.models_py.modules.dsv4.fp8.decode.mega_support."
+            "mega_decode_unavailable_reason",
+            return_value=None,
         ):
             transformer = V4Transformer(args, model_weights)
 
@@ -194,7 +247,10 @@ class MegaCSARoutingTest(unittest.TestCase):
         layer.enable_mega_csa.assert_called_once_with(
             transformer._mega_csa_runtime, model_weights.weights[0]
         )
-        layer.enable_mega_front.assert_called_once_with()
+        layer.enable_mega_hca.assert_called_once_with(
+            transformer._mega_csa_runtime, model_weights.weights[0]
+        )
+        layer.enable_mega_front.assert_called_once_with(required=False)
 
     def test_decode_q_len_one_uses_complete_mega_sublayer(self) -> None:
         adapter = MagicMock()
@@ -273,6 +329,42 @@ class MegaCSARoutingTest(unittest.TestCase):
 
         adapter.forward_attention_sublayer.assert_not_called()
         block.attn.forward_decode.assert_called_once()
+
+    def test_flat_token_count_above_front_limit_keeps_existing_ffn_path(self) -> None:
+        adapter = MagicMock(wraps=MegaCSAAdapter.__new__(MegaCSAAdapter))
+        front = MagicMock()
+        front.supports.return_value = False
+        block = _block_stub(adapter)
+        block._mega_front_adapter = front
+        hidden = torch.zeros(43, 3, 1, 4)
+        metadata = SimpleNamespace(batch_size=43, q_len_per_req=3)
+
+        block.forward_decode(hidden, metadata, torch.zeros(43, 3))
+
+        front.supports.assert_called_once()
+        self.assertEqual(
+            tuple(front.supports.call_args.args[0].shape), tuple(hidden.shape)
+        )
+        front.forward.assert_not_called()
+        block.ffn.assert_called_once()
+
+    def test_attention_fallback_also_keeps_existing_ffn_front(self) -> None:
+        adapter = MagicMock()
+        adapter.supports_decode_shape.return_value = False
+        front = MagicMock()
+        front.supports.return_value = True
+        block = _block_stub(adapter)
+        block._mega_front_adapter = front
+        hidden = torch.zeros(8, 1, 1, 4)
+        metadata = SimpleNamespace(batch_size=7, q_len_per_req=1)
+
+        block.forward_decode(hidden, metadata, torch.zeros(8, 1))
+
+        block.attn.forward_decode.assert_called_once()
+        adapter.forward_attention_sublayer.assert_not_called()
+        front.supports.assert_called_once()
+        front.forward.assert_not_called()
+        block.ffn.assert_called_once()
 
     def test_mega_failure_is_not_retried_on_existing_path(self) -> None:
         adapter = MagicMock()
