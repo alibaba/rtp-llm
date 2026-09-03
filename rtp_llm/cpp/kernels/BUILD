@@ -518,13 +518,13 @@ cc_library(
     name = "kernels_ep_util",
     srcs = glob([
         "moe/*.cu",
-    ]),
-    hdrs = glob([
-        "moe/*.h",
     ]) + select({
         "@//:using_cuda": ["@local_config_cuda//cuda:cuda-include"],
         "//conditions:default": [],
     }),
+    hdrs = glob([
+        "moe/*.h",
+    ]),
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/cuda/cutlass:cutlass_interface",
         "//rtp_llm/cpp/cuda:trt_utils",
