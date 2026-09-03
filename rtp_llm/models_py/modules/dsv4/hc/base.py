@@ -187,6 +187,67 @@ class HCUnitBase(nn.Module):
     ) -> torch.Tensor:
         raise NotImplementedError
 
+    def fused_post_pre(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Apply the previous writeback and this unit's readout together.
+
+        This method belongs to the *next* HC unit because its ``fn/base/scale``
+        define the pre half.  Implementations may fuse the two operations; the
+        base implementation composes the established kernels as a correctness
+        fallback.
+
+        Returns ``(updated_residual, x_pre, next_post, next_comb)``.
+        """
+
+        leading = self._check_residual_shape(residual, "fused_post_pre residual")
+        expected_x = leading + (self.dim,)
+        expected_post = leading + (self.hc_mult, 1)
+        expected_comb = leading + (self.hc_mult, self.hc_mult)
+        if tuple(x.shape) != expected_x:
+            raise ValueError(
+                f"{self.__class__.__name__}.fused_post_pre expected x "
+                f"shape={expected_x}, got {tuple(x.shape)}"
+            )
+        if tuple(post.shape) != expected_post:
+            raise ValueError(
+                f"{self.__class__.__name__}.fused_post_pre expected post "
+                f"shape={expected_post}, got {tuple(post.shape)}"
+            )
+        if tuple(comb.shape) != expected_comb:
+            raise ValueError(
+                f"{self.__class__.__name__}.fused_post_pre expected comb "
+                f"shape={expected_comb}, got {tuple(comb.shape)}"
+            )
+        layer = f"L{self.layer_id:02d}" if self.layer_id >= 0 else "Lxx"
+        name = self.name or "unit"
+        with record_function_range(f"dsv4.hc.{layer}.{name}.fused_post_pre"):
+            updated, y, next_post, next_comb = self._fused_post_pre_impl(
+                x, residual, post, comb
+            )
+        if tuple(updated.shape) != tuple(residual.shape):
+            raise ValueError(
+                f"{self.__class__.__name__}.fused_post_pre returned residual "
+                f"shape={tuple(updated.shape)}, expected {tuple(residual.shape)}"
+            )
+        self._check_pre_output(leading, y, next_post, next_comb)
+        return updated, y, next_post, next_comb
+
+    def _fused_post_pre_impl(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        updated = self._post_impl(x, residual, post, comb)
+        y, next_post, next_comb = self._pre_impl(updated)
+        return updated, y, next_post, next_comb
+
 
 class HCHeadBase(nn.Module):
     def __init__(

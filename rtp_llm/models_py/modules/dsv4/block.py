@@ -226,6 +226,71 @@ class Block(nn.Module):
         x = self.ffn_hc.post(ffn_out, residual, post, comb)
         return x
 
+    def forward_decode_deferred_mhc(
+        self,
+        x: torch.Tensor,
+        attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
+        input_ids: torch.Tensor,
+        kv_cache=None,
+        *,
+        residual: Optional[torch.Tensor] = None,
+        post: Optional[torch.Tensor] = None,
+        comb: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Decode block with the final FFN mHC post deferred.
+
+        The incoming ``x/residual/post/comb`` tuple represents the previous
+        layer's deferred FFN writeback.  Layer zero has only ``x`` and keeps a
+        standalone attention pre.  The attention writeback is fused with this
+        layer's FFN pre; the returned FFN output is fused with the next layer's
+        attention pre by the outer loop.
+        """
+
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+
+        _dbg_layer = _rt.should_record_layer(self.layer_id)
+        if post is None:
+            residual = x
+            x_pre, post, comb = self.attn_hc.pre(
+                x,
+                dbg_tag=(
+                    f"L{self.layer_id:02d}_decode_attn_hc_pre" if _dbg_layer else None
+                ),
+            )
+        else:
+            if residual is None or comb is None:
+                raise RuntimeError(
+                    "deferred mHC state requires residual/post/comb together"
+                )
+            residual, x_pre, post, comb = self.attn_hc.fused_post_pre(
+                x, residual, post, comb
+            )
+
+        bsz, q_len, dim_ = x_pre.shape
+        x_pre = self.attn_norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_in", x_pre)
+        attn_out = self.attn.forward_decode(x_pre, attn_metadata, kv_cache=kv_cache)
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_out", attn_out)
+
+        assert residual is not None and post is not None and comb is not None
+        residual, x_pre, post, comb = self.ffn_hc.fused_post_pre(
+            attn_out, residual, post, comb
+        )
+        if _dbg_layer:
+            _rt.record_if_level(
+                2, f"L{self.layer_id:02d}_decode_attn_residual", residual
+            )
+        bsz, q_len, dim_ = x_pre.shape
+        x_pre = self.ffn_norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
+        ffn_out = self.ffn(x_pre, input_ids)
+        if _dbg_layer:
+            _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
+        return ffn_out, residual, post, comb
+
     def forward(
         self,
         x: torch.Tensor,  # [T, hc, dim]

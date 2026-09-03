@@ -4,7 +4,10 @@ import os
 import torch
 
 from ....mhc.norm_fn_kernel import _mhc_pre_norm_fn_fwd_mul, round_to_tf32
-from ....mhc.pre_big_fuse_kernel import _mhc_pre_big_fuse
+from ....mhc.pre_big_fuse_kernel import (
+    _mhc_fused_post_pre_fwd,
+    _mhc_pre_big_fuse,
+)
 
 
 def _ceil_div(x: int, y: int) -> int:
@@ -187,3 +190,130 @@ def mhc_pre_big_fuse(
     layer_input = layer_input.view(*outer_shape, hidden_size)
 
     return post_mix, comb_mix, layer_input
+
+
+def mhc_fused_post_pre(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post_mix: torch.Tensor,
+    comb_mix: torch.Tensor,
+    fn: torch.Tensor,
+    mhc_scale: torch.Tensor,
+    mhc_base: torch.Tensor,
+    rms_eps: float,
+    mhc_pre_eps: float,
+    mhc_sinkhorn_eps: float,
+    mhc_post_mult_value: float,
+    sinkhorn_repeat: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    """Small-token inference fusion for ``mhc_post`` + next ``mhc_pre``.
+
+    The fused FMA kernel is intentionally limited to at most 16 tokens, the
+    decode/MTP range where launch overhead dominates.  Larger shapes return
+    ``None`` so callers retain the established post/pre implementation.
+    """
+
+    assert residual.dtype == torch.bfloat16
+    assert x.dtype == torch.bfloat16
+    assert post_mix.dtype == torch.float32
+    assert comb_mix.dtype == torch.float32
+    assert fn.dtype == torch.float32
+    assert mhc_scale.dtype == torch.float32
+    assert mhc_base.dtype == torch.float32
+
+    mhc_mult = int(residual.shape[-2])
+    hidden_size = int(residual.shape[-1])
+    mhc_mult3 = mhc_mult * (mhc_mult + 2)
+    outer_shape = residual.shape[:-2]
+    num_tokens = residual.numel() // (mhc_mult * hidden_size)
+    if num_tokens > 16:
+        return None
+
+    assert x.shape == (*outer_shape, hidden_size)
+    assert post_mix.shape in (
+        (*outer_shape, mhc_mult, 1),
+        (*outer_shape, mhc_mult),
+    )
+    assert comb_mix.shape == (*outer_shape, mhc_mult, mhc_mult)
+    assert fn.shape == (mhc_mult3, mhc_mult * hidden_size)
+    assert mhc_scale.shape == (3,)
+    assert mhc_base.shape == (mhc_mult3,)
+
+    # The vendored TileLang kernel uses one warp per block for a correct
+    # cross-warp reduction.  Split-K supplies enough blocks to fill 148 SMs.
+    tile_n = 2 if num_tokens < 8 else 3
+    n_splits = 16 if num_tokens < 8 and hidden_size <= 4096 else 8
+    if hidden_size % (n_splits * 32) != 0:
+        return None
+
+    residual_flat = residual.view(num_tokens, mhc_mult, hidden_size)
+    x_flat = x.view(num_tokens, hidden_size)
+    post_flat = post_mix.view(num_tokens, mhc_mult)
+    comb_flat = comb_mix.view(num_tokens, mhc_mult, mhc_mult)
+
+    residual_cur = torch.empty_like(residual_flat)
+    gemm_out_mul = torch.empty(
+        n_splits,
+        num_tokens,
+        mhc_mult3,
+        dtype=torch.float32,
+        device=residual.device,
+    )
+    gemm_out_sqrsum = torch.empty(
+        n_splits, num_tokens, dtype=torch.float32, device=residual.device
+    )
+    post_cur = torch.empty(
+        num_tokens, mhc_mult, dtype=torch.float32, device=residual.device
+    )
+    comb_cur = torch.empty(
+        num_tokens,
+        mhc_mult * mhc_mult,
+        dtype=torch.float32,
+        device=residual.device,
+    )
+    layer_input_cur = torch.empty(
+        num_tokens, hidden_size, dtype=torch.bfloat16, device=residual.device
+    )
+
+    _mhc_fused_post_pre_fwd(
+        mhc_mult,
+        hidden_size,
+        mhc_mult3,
+        tile_n=tile_n,
+        n_splits=n_splits,
+    )(
+        comb_flat,
+        residual_flat,
+        post_flat,
+        x_flat,
+        fn.view(mhc_mult3, mhc_mult, hidden_size),
+        gemm_out_mul,
+        gemm_out_sqrsum,
+        residual_cur,
+    )
+    _mhc_pre_big_fuse(
+        hidden_size,
+        rms_eps,
+        mhc_pre_eps,
+        mhc_sinkhorn_eps,
+        mhc_post_mult_value,
+        sinkhorn_repeat,
+        n_splits=n_splits,
+        mhc_mult=mhc_mult,
+    )(
+        gemm_out_mul,
+        gemm_out_sqrsum,
+        mhc_scale,
+        mhc_base,
+        residual_cur,
+        post_cur,
+        comb_cur,
+        layer_input_cur,
+    )
+
+    return (
+        residual_cur.view(*outer_shape, mhc_mult, hidden_size),
+        layer_input_cur.view(*outer_shape, hidden_size),
+        post_cur.view(*outer_shape, mhc_mult, 1),
+        comb_cur.view(*outer_shape, mhc_mult, mhc_mult),
+    )

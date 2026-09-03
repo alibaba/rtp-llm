@@ -7,7 +7,7 @@ from .ops.head_fuse import mhc_head_fuse
 from .ops.norm_fn import mhc_pre_norm_fn
 from .ops.post import mhc_post
 from .ops.pre_apply_mix import mhc_pre_apply_mix
-from .ops.pre_big_fuse import mhc_pre_big_fuse
+from .ops.pre_big_fuse import mhc_fused_post_pre, mhc_pre_big_fuse
 from .ops.pre_split_mixes import mhc_pre_split_mixes
 from .ops.sinkhorn import sinkhorn_normalize
 

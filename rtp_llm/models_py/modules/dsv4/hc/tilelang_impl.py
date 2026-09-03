@@ -8,6 +8,7 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4.hc.base import HCHeadBase, HCUnitBase
 from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import (
+    tk_mhc_fused_post_pre,
     tk_mhc_head,
     tk_mhc_head_fused,
     tk_mhc_head_fused_enabled,
@@ -112,6 +113,50 @@ class TileLangHCUnit(HCUnitBase):
         if out is None:
             _raise_unavailable("post", residual, self.hc_mult)
         return squeeze_hc_batch(out, wrapped, name="mhc_post output")
+
+    def _fused_post_pre_impl(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post: torch.Tensor,
+        comb: torch.Tensor,
+    ):
+        tk_x, wrapped = wrap_hc_batch(x, 3, name="mhc_fused_post_pre x")
+        tk_residual, _ = wrap_hc_batch(residual, 4, name="mhc_fused_post_pre residual")
+        tk_post, _ = wrap_hc_batch(post, 4, name="mhc_fused_post_pre post")
+        tk_comb, _ = wrap_hc_batch(comb, 4, name="mhc_fused_post_pre comb")
+        tk_x = _require_contiguous(tk_x, name="mhc_fused_post_pre x")
+        tk_residual = _require_contiguous(
+            tk_residual, name="mhc_fused_post_pre residual"
+        )
+        tk_post = _require_contiguous(tk_post, name="mhc_fused_post_pre post")
+        tk_comb = _require_contiguous(tk_comb, name="mhc_fused_post_pre comb")
+        with torch.inference_mode():
+            out = tk_mhc_fused_post_pre(
+                tk_x,
+                tk_residual,
+                tk_post,
+                tk_comb,
+                self.fn,
+                self.scale,
+                self.base,
+                norm_eps=self.norm_eps,
+                pre_eps=self.hc_eps,
+                sinkhorn_eps=self.hc_eps,
+                sinkhorn_iters=self.hc_sinkhorn_iters,
+                hc_mult=self.hc_mult,
+            )
+        if out is None:
+            # Explicit applicability fallback: disabled fusion, unsupported
+            # shape/layout, or an MTP batch with more than 16 local tokens.
+            return super()._fused_post_pre_impl(x, residual, post, comb)
+        updated, y, next_post, next_comb = out
+        return (
+            squeeze_hc_batch(updated, wrapped, name="mhc_fused residual"),
+            squeeze_hc_batch(y, wrapped, name="mhc_fused y"),
+            squeeze_hc_batch(next_post, wrapped, name="mhc_fused post"),
+            squeeze_hc_batch(next_comb, wrapped, name="mhc_fused comb"),
+        )
 
 
 class TileLangHCHead(HCHeadBase):

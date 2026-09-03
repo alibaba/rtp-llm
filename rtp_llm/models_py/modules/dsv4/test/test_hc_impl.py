@@ -252,6 +252,81 @@ class TestHCImpl(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     unit.post(x, residual, bad_post, comb)
 
+    def test_fused_post_pre_fallback_matches_composition(self) -> None:
+        hc, dim = 4, 32
+        fn, base, scale = _weights(hc, dim)
+        unit = FallbackHCUnit(
+            fn,
+            base,
+            scale,
+            dim=dim,
+            hc_mult=hc,
+            hc_sinkhorn_iters=3,
+            norm_eps=1e-6,
+            hc_eps=1e-6,
+        )
+        residual = torch.randn(2, 3, hc, dim, dtype=torch.bfloat16)
+        x = torch.randn(2, 3, dim, dtype=torch.bfloat16)
+        post = torch.randn(2, 3, hc, 1, dtype=torch.float32)
+        comb = torch.randn(2, 3, hc, hc, dtype=torch.float32)
+
+        ref_residual = unit.post(x, residual, post, comb)
+        ref_y, ref_post, ref_comb = unit.pre(ref_residual)
+        actual = unit.fused_post_pre(x, residual, post, comb)
+        for got, expected in zip(actual, (ref_residual, ref_y, ref_post, ref_comb)):
+            torch.testing.assert_close(got, expected, rtol=0.0, atol=0.0)
+
+    def test_tilelang_fused_post_pre_wrapper_preserves_flat_shape(self) -> None:
+        hc, dim, tokens = 4, 16, 5
+        fn, base, scale = _weights(hc, dim)
+        unit = TileLangHCUnit(
+            fn,
+            base,
+            scale,
+            dim=dim,
+            hc_mult=hc,
+            hc_sinkhorn_iters=3,
+            norm_eps=1e-6,
+            hc_eps=1e-6,
+        )
+        import rtp_llm.models_py.modules.dsv4.hc.tilelang_impl as tilelang_impl
+
+        seen = {}
+
+        def fake_fused(x, residual, post, comb, *args, **kwargs):
+            seen["shapes"] = tuple(tuple(t.shape) for t in (x, residual, post, comb))
+            return (
+                residual.clone(),
+                torch.zeros(1, tokens, dim, dtype=torch.bfloat16),
+                torch.zeros(1, tokens, hc, 1, dtype=torch.float32),
+                torch.zeros(1, tokens, hc, hc, dtype=torch.float32),
+            )
+
+        old_fused = tilelang_impl.tk_mhc_fused_post_pre
+        tilelang_impl.tk_mhc_fused_post_pre = fake_fused
+        self.addCleanup(
+            lambda: setattr(tilelang_impl, "tk_mhc_fused_post_pre", old_fused)
+        )
+
+        residual = torch.randn(tokens, hc, dim, dtype=torch.bfloat16)
+        x = torch.randn(tokens, dim, dtype=torch.bfloat16)
+        post = torch.randn(tokens, hc, 1, dtype=torch.float32)
+        comb = torch.randn(tokens, hc, hc, dtype=torch.float32)
+        updated, y, next_post, next_comb = unit.fused_post_pre(x, residual, post, comb)
+        self.assertEqual(
+            seen["shapes"],
+            (
+                (1, tokens, dim),
+                (1, tokens, hc, dim),
+                (1, tokens, hc, 1),
+                (1, tokens, hc, hc),
+            ),
+        )
+        self.assertEqual(tuple(updated.shape), (tokens, hc, dim))
+        self.assertEqual(tuple(y.shape), (tokens, dim))
+        self.assertEqual(tuple(next_post.shape), (tokens, hc, 1))
+        self.assertEqual(tuple(next_comb.shape), (tokens, hc, hc))
+
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_tilelang_matches_fallback_cuda(self) -> None:
         hc, dim = 4, 128
@@ -295,6 +370,82 @@ class TestHCImpl(unittest.TestCase):
             tk_comb.float(), ref_comb.float(), atol=5e-3, rtol=5e-3
         )
         torch.testing.assert_close(tk_out, ref_out, atol=2e-2, rtol=2e-2)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_tilelang_fused_post_pre_matches_reference_cuda(self) -> None:
+        hc, dim = 4, 4096
+        fn, base, scale = _weights(hc, dim, device="cuda")
+        unit = TileLangHCUnit(
+            fn,
+            base,
+            scale,
+            dim=dim,
+            hc_mult=hc,
+            hc_sinkhorn_iters=20,
+            norm_eps=1e-6,
+            hc_eps=1e-6,
+        )
+        # Keep the reference independent of DeepGEMM JIT. Under Bazel the
+        # package's relative .deep_gemm/tmp path can be removed before nvcc
+        # consumes kernel.cu. Fused TileLang uses FP32 weights/accumulation,
+        # while the reference intentionally uses its serving fallback's BF16
+        # GEMM, so layer_input needs a BF16-scale absolute tolerance. A direct
+        # fused-vs-separate TileLang check is also run in the GPU perf harness.
+        reference = FallbackHCUnit(
+            fn,
+            base,
+            scale,
+            dim=dim,
+            hc_mult=hc,
+            hc_sinkhorn_iters=20,
+            norm_eps=1e-6,
+            hc_eps=1e-6,
+        )
+        for tokens in (1, 2, 7, 8, 16):
+            with self.subTest(tokens=tokens), torch.inference_mode():
+                torch.manual_seed(tokens)
+                residual = torch.randn(
+                    1, tokens, hc, dim, device="cuda", dtype=torch.bfloat16
+                )
+                x = torch.randn(1, tokens, dim, device="cuda", dtype=torch.bfloat16)
+                post = torch.randn(1, tokens, hc, 1, device="cuda", dtype=torch.float32)
+                comb = torch.randn(
+                    1, tokens, hc, hc, device="cuda", dtype=torch.float32
+                )
+
+                ref_residual = reference.post(x, residual.clone(), post, comb)
+                ref_y, ref_post, ref_comb = reference.pre(ref_residual)
+                actual = unit.fused_post_pre(x, residual.clone(), post, comb)
+                # Fusion must retain the standalone TileLang post's BF16
+                # materialization boundary exactly; the following pre may use
+                # a different reduction schedule and is checked by tolerance.
+                tilelang_post = unit.post(x, residual.clone(), post, comb)
+                torch.testing.assert_close(actual[0], tilelang_post, rtol=0.0, atol=0.0)
+                for name, got, expected in zip(
+                    ("residual", "layer_input", "post", "comb"),
+                    actual,
+                    (ref_residual, ref_y, ref_post, ref_comb),
+                ):
+                    with self.subTest(tokens=tokens, output=name):
+                        atol = {"residual": 4e-2, "layer_input": 1.5e-1}.get(name, 2e-2)
+                        torch.testing.assert_close(got, expected, rtol=2e-2, atol=atol)
+
+        # Warmed-up static B=4 path must remain capture/replay safe.
+        tokens = 4
+        residual = torch.randn(1, tokens, hc, dim, device="cuda", dtype=torch.bfloat16)
+        x = torch.randn(1, tokens, dim, device="cuda", dtype=torch.bfloat16)
+        post = torch.randn(1, tokens, hc, 1, device="cuda", dtype=torch.float32)
+        comb = torch.randn(1, tokens, hc, hc, device="cuda", dtype=torch.float32)
+        with torch.inference_mode():
+            expected = unit.fused_post_pre(x, residual, post, comb)
+            graph = torch.cuda.CUDAGraph()
+            torch.cuda.synchronize()
+            with torch.cuda.graph(graph):
+                captured = unit.fused_post_pre(x, residual, post, comb)
+            graph.replay()
+            torch.cuda.synchronize()
+        for got, ref in zip(captured, expected):
+            torch.testing.assert_close(got, ref, rtol=0.0, atol=0.0)
 
     def test_tilelang_post_reuses_residual_buffer_in_place(self) -> None:
         # Pins the memory-saving wiring (no CUDA needed): _post_impl must pass

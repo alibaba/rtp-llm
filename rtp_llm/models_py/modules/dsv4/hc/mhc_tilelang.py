@@ -38,6 +38,7 @@ import torch
 # Lazy-imported callables (populated on first successful import).
 _tk_mhc_pre = None
 _tk_mhc_post = None
+_tk_mhc_fused_post_pre = None
 _tk_mhc_head_fused = None
 _tk_mhc_head = None
 
@@ -47,7 +48,8 @@ def _import_tk():
 
     Raises on import failure — caller wraps with shape context.
     """
-    global _tk_mhc_pre, _tk_mhc_post, _tk_mhc_head_fused, _tk_mhc_head
+    global _tk_mhc_pre, _tk_mhc_post, _tk_mhc_fused_post_pre
+    global _tk_mhc_head_fused, _tk_mhc_head
     # Importing tilelang_kernels triggers its module-level env-prep
     # (libz3 preload + TVM tmpdir setup), which must run before any tilelang
     # JIT import below.
@@ -60,9 +62,16 @@ def _import_tk():
     )
     _tk_mhc_pre = mod.mhc_pre
     _tk_mhc_post = mod.mhc_post
+    _tk_mhc_fused_post_pre = getattr(mod, "mhc_fused_post_pre", None)
     _tk_mhc_head_fused = getattr(mod, "mhc_head_fuse", None)
     _tk_mhc_head = mod.mhc_head
-    return _tk_mhc_pre, _tk_mhc_post, _tk_mhc_head_fused, _tk_mhc_head
+    return (
+        _tk_mhc_pre,
+        _tk_mhc_post,
+        _tk_mhc_fused_post_pre,
+        _tk_mhc_head_fused,
+        _tk_mhc_head,
+    )
 
 
 def _env_disabled() -> bool:
@@ -260,6 +269,68 @@ def tk_mhc_post(
         raise RuntimeError(
             "TileLang mhc_post failed: "
             + _shape_ctx(residual, hc_mult=hc_mult, extra=f"x.shape={tuple(x.shape)}")
+        ) from e
+
+
+def tk_mhc_fused_post_pre(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post_mix: torch.Tensor,
+    comb_mix: torch.Tensor,
+    fn: torch.Tensor,
+    scale: torch.Tensor,
+    base: torch.Tensor,
+    *,
+    norm_eps: float,
+    pre_eps: float,
+    sinkhorn_eps: float,
+    sinkhorn_iters: int,
+    hc_mult: int = 4,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    """Fuse the previous unit's post with this unit's pre for decode.
+
+    ``None`` is an applicability miss (disabled, unsupported layout, or more
+    than 16 tokens); import/JIT/launch failures remain fatal and carry shape
+    context, matching the standalone TileLang wrappers.
+    """
+
+    if os.environ.get("DSV4_MHC_FUSED_POST_PRE", "1") == "0":
+        return None
+    if not _can_use_tk(residual, hc_mult):
+        return None
+    if x.dtype != torch.bfloat16 or not x.is_contiguous():
+        return None
+    num_tokens = residual.numel() // (int(residual.shape[-2]) * int(residual.shape[-1]))
+    if num_tokens > 16:
+        return None
+    try:
+        if _tk_mhc_fused_post_pre is None:
+            _import_tk()
+        fused_fn = _tk_mhc_fused_post_pre
+        if fused_fn is None:
+            return None
+        return fused_fn(
+            x,
+            residual,
+            post_mix,
+            comb_mix,
+            fn,
+            scale,
+            base,
+            rms_eps=norm_eps,
+            mhc_pre_eps=pre_eps,
+            mhc_sinkhorn_eps=sinkhorn_eps,
+            mhc_post_mult_value=2.0,
+            sinkhorn_repeat=sinkhorn_iters,
+        )
+    except Exception as e:
+        raise RuntimeError(
+            "TileLang mhc_fused_post_pre failed: "
+            + _shape_ctx(
+                residual,
+                hc_mult=hc_mult,
+                extra=f"x.shape={tuple(x.shape)}, num_tokens={num_tokens}",
+            )
         ) from e
 
 

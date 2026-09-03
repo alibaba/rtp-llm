@@ -7,6 +7,7 @@ all experts on one device). Used to validate end-to-end correctness with
 mock per-layer KV cache before wiring into RTP-LLM's GptModelBase.
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -380,8 +381,30 @@ class V4Transformer(nn.Module):
             input_ids_2d = input_ids
         h = self.embed(input_ids_2d)  # [B, q_len, dim]
         h = h.unsqueeze(2).repeat(1, 1, self.hc_mult, 1)  # [B, q_len, hc, dim]
-        for layer in self.layers:
-            h = layer.forward_decode(h, attn_metadata, input_ids_2d, kv_cache=kv_cache)
+        use_deferred_mhc = (
+            os.environ.get("DSV4_MHC_FUSED_POST_PRE", "1") != "0"
+            and not _rt.ENABLED
+            and len(self.layers) > 0
+        )
+        if use_deferred_mhc:
+            residual = post = comb = None
+            for layer in self.layers:
+                h, residual, post, comb = layer.forward_decode_deferred_mhc(
+                    h,
+                    attn_metadata,
+                    input_ids_2d,
+                    kv_cache=kv_cache,
+                    residual=residual,
+                    post=post,
+                    comb=comb,
+                )
+            assert residual is not None and post is not None and comb is not None
+            h = self.layers[-1].ffn_hc.post(h, residual, post, comb)
+        else:
+            for layer in self.layers:
+                h = layer.forward_decode(
+                    h, attn_metadata, input_ids_2d, kv_cache=kv_cache
+                )
         h = self._hc_head_reduce(h)  # [B, q_len, dim]
         # Framework RMSNorm wants 2D — flatten to [T_total, dim] and
         # return that directly (the next reshape would no-op anyway).

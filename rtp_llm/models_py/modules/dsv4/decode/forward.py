@@ -19,6 +19,7 @@ decode impl.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -34,11 +35,11 @@ from rtp_llm.models_py.modules.dsv4.attn_type import (
     INDEXER_STATE,
     SWA_KV,
 )
-from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
-    build_block_tables_batched_from_group_ids,
-)
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
+)
+from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
+    build_block_tables_batched_from_group_ids,
 )
 
 
@@ -306,10 +307,31 @@ def forward_layers(
         h = prepare_hidden_fn(input_ids=input_ids, meta=attn_metadata)
     if _rt_on:
         _rt.record("decode_embed_hc_expanded", h)
-    for layer in v4.layers:
-        h = layer.forward_decode(h, attn_metadata, input_ids, kv_cache=kv_cache)
-        if _rt_on:
-            _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)
+    use_deferred_mhc = (
+        os.environ.get("DSV4_MHC_FUSED_POST_PRE", "1") != "0"
+        and not _rt_on
+        and len(v4.layers) > 0
+    )
+    if use_deferred_mhc:
+        residual = post = comb = None
+        for layer in v4.layers:
+            h, residual, post, comb = layer.forward_decode_deferred_mhc(
+                h,
+                attn_metadata,
+                input_ids,
+                kv_cache=kv_cache,
+                residual=residual,
+                post=post,
+                comb=comb,
+            )
+        # The final FFN has no following HC pre to fuse with.
+        assert residual is not None and post is not None and comb is not None
+        h = v4.layers[-1].ffn_hc.post(h, residual, post, comb)
+    else:
+        for layer in v4.layers:
+            h = layer.forward_decode(h, attn_metadata, input_ids, kv_cache=kv_cache)
+            if _rt_on:
+                _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)
     if v4._mtp_hidden_buffer is not None:
         _pre_hc_flat = h.flatten(-2).reshape(-1, h.size(-2) * h.size(-1))
         v4._write_mtp_hidden_buffer(
