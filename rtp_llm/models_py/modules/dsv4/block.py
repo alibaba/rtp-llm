@@ -29,6 +29,23 @@ def _prefill_fast_norm(norm: nn.Module, x: torch.Tensor) -> torch.Tensor:
     return norm(x)
 
 
+def _ffn_epilogue_maybe_deferred(hc_post, ffn_out, residual, post, comb):
+    """X1 (DSV4_XLAYER_C1): if the MoE returned a deferred (halves) output,
+    run the HC writeback per half — half-0's writeback is enqueued while
+    half-1's combine (c1) is still in flight, covering it. Row-wise math →
+    bit-identical to the whole-tensor call.
+    """
+    from rtp_llm.models_py.modules.dsv4.moe.moe_layer import MoeDeferredHalves
+
+    if not isinstance(ffn_out, MoeDeferredHalves):
+        return hc_post(ffn_out, residual, post, comb)
+    th = ffn_out.th
+    x_h0 = hc_post(ffn_out.y0, residual[:th], post[:th], comb[:th])
+    y1 = ffn_out.finish()
+    x_h1 = hc_post(y1, residual[th:], post[th:], comb[th:])
+    return torch.cat([x_h0, x_h1], dim=0)
+
+
 class Block(nn.Module):
     def __init__(
         self,
@@ -445,7 +462,7 @@ class Block(nn.Module):
             _BLK_MARK["ffn"] += 1
             import sys as _s
             print("[BLK] ffn done layer=%s" % (getattr(self, "layer_id", "?"),), file=_s.stderr, flush=True)
-        return ffn_hc_post(ffn_out, residual, post, comb)
+        return _ffn_epilogue_maybe_deferred(ffn_hc_post, ffn_out, residual, post, comb)
 
     def forward(
         self,
@@ -621,7 +638,9 @@ class Block(nn.Module):
                     f"L{self.layer_id:02d}_ffn_out_{dbg_pos_name}",
                     ffn_out[dbg_pos_mask].contiguous(),
                 )
-        x = self.ffn_hc.post(ffn_out, residual, post, comb)  # [T, hc, dim]
+        x = _ffn_epilogue_maybe_deferred(
+            self.ffn_hc.post, ffn_out, residual, post, comb
+        )  # [T, hc, dim]
         if _dbg_layer and dbg_pos_mask is not None:
             _rt.record_if_level(
                 2,

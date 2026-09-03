@@ -136,6 +136,41 @@ def _get_or_create_final_out(
     return cached
 
 
+class MoeDeferredHalves:
+    """X1 (DSV4_XLAYER_C1): half-0 of the MoE output is combined and ready;
+    half-1 is deferred behind the caller's half-0 epilogue (the cover for
+    c1's flight). ``finish()`` waits the strategy's combine event, dequants
+    and combines half-1, and returns ``y1`` — row-identical to the stock
+    combine.
+    """
+
+    def __init__(self, y0, deferred, shared_y, th, out):
+        self.y0 = y0
+        self.th = th
+        self._deferred = deferred
+        self._shared_y = shared_y
+        self._out = out
+
+    def finish(self) -> torch.Tensor:
+        full = self._deferred.finish()
+        y1 = combine_routed_and_shared(
+            full[self.th :],
+            self._shared_y[self.th :],
+            self.y0.dtype,
+            out=self._out[self.th :] if self._out is not None else None,
+        )
+        return y1
+
+
+def _a2_deferred_cls():
+    from .strategies.deepep import _A2DeferredHalves
+
+    return _A2DeferredHalves
+
+
+_X1_DEF_CT = [0]  # X1 engagement proof (DSV4_DIAG, first 3 fires)
+
+
 class MoE(nn.Module):
     """V4 MoE block: routed top-k experts + 1 shared expert.
 
@@ -348,6 +383,10 @@ class MoE(nn.Module):
             with record_function_range("dsv4.moe.routed_experts"):
                 if prepared is not None:
                     routed = self._strategy.run_dispatch_prepared(prepared)
+                    if isinstance(routed, _a2_deferred_cls()):
+                        # Chunked path: no split epilogue here — materialize
+                        # (the deferral only pays off on the non-chunked path).
+                        routed = routed.finish()
                 else:
                     routed = self._strategy(x, weights, indices)
         except Exception:
@@ -517,6 +556,9 @@ class MoE(nn.Module):
                     x.dtype,
                     x.device,
                 )
+                # NOTE: the X1 deferred contract is intentionally NOT wired
+                # into the gate-pack branch — it is a deepep-halves concept
+                # and Mega strategies never return deferreds.
                 y = combine_routed_and_shared(y, shared_y, x.dtype, out=out[:T])
                 return y.view(shape)
 
@@ -607,6 +649,8 @@ class MoE(nn.Module):
                 )
         if _dbg:
             with record_function_range("dsv4.moe.add_shared"):
+                if isinstance(y, _a2_deferred_cls()):
+                    y = y.finish()  # dbg path needs the full tensor eagerly
                 y = y + shared_y
             if dbg_pos_mask is not None:
                 _rt.record_if_level(
@@ -623,5 +667,35 @@ class MoE(nn.Module):
                 x.dtype,
                 x.device,
             )
+            if isinstance(y, _a2_deferred_cls()):
+                # X1 (DSV4_XLAYER_C1): half-0 rows are materialized — combine
+                # them NOW and defer half-1 behind the caller's half-0
+                # epilogue (the cover for c1's flight). The deferred carries
+                # the out-buffer slices so the h1 combine lands in the same
+                # buffer the stock path would have written.
+                y0 = combine_routed_and_shared(
+                    y.result[: y.th], shared_y[: y.th], x.dtype, out=out[: y.th]
+                )
+                if os.environ.get("DSV4_DIAG") and _X1_DEF_CT[0] < 3:
+                    _X1_DEF_CT[0] += 1
+                    import sys as _sys
+                    print(
+                        "[X1-DEF] rank=%d th=%d T=%d" % (
+                            torch.distributed.get_rank()
+                            if torch.distributed.is_initialized()
+                            else -1,
+                            y.th,
+                            T,
+                        ),
+                        file=_sys.stderr,
+                        flush=True,
+                    )
+                return MoeDeferredHalves(
+                    y0=y0,
+                    deferred=y,
+                    shared_y=shared_y,
+                    th=y.th,
+                    out=out,
+                )
             y = combine_routed_and_shared(y, shared_y, x.dtype, out=out[:T])
             return y.view(shape)

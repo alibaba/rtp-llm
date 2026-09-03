@@ -48,6 +48,13 @@ _C2_PREPARE = int(os.environ.get("DSV4_C2_PREPARE_DISPATCH", "0"))
 # + the dequant world-sum need the full exchange) — hence halves, not chunks.
 # 0 = stock single-shot. Numerically row-identical (fp32 accumulate per row).
 _A2_HALVES = int(os.environ.get("DSV4_MOE_HALVES", "0"))
+# X1 (Sep 3, DSV4_XLAYER_PIPELINE_DESIGN_20260903.md §1): when armed, the
+# halves run returns a DEFERRED after half-0 (ev_c0 waited, dequant done) and
+# pushes half-1's wait+dequant into a finish() the caller invokes AFTER
+# enqueuing its half-0 epilogue — the epilogue covers c1's flight instead of
+# the main stream idling on ev_c1. Pure reordering (same ops, same order per
+# stream) → bit-exact; requires DSV4_MOE_HALVES=2.
+_XLAYER_C1 = int(os.environ.get("DSV4_XLAYER_C1", "0"))
 # Halves pay a fixed per-layer pipeline overhead (~0.26 ms: extra rounds,
 # event waits) that wins big at 32K-class T but regressed 8K by +11 ms — so
 # arm only at/below-noise-for-32K sizes. Default keeps 8K (T=2048/rank) on
@@ -141,6 +148,40 @@ def _get_deep_ep_buffer(world: int, hidden: int, topk_pad: int):
         _DEEPEP_BUFFER = deep_ep.Buffer(
             torch.distributed.group.WORLD, num_nvl_bytes=num_nvl_bytes)
     return _DEEPEP_BUFFER
+
+
+class _A2DeferredHalves:
+    """X1 deferred half-1 of the A2 halves run (see ``_XLAYER_C1``).
+
+    ``result[:th]`` is materialized at construction; ``finish()`` waits
+    ``ev_c1``, dequants half-1 into ``result[th:]`` and returns the full
+    result. Pure reordering — the collectives and their NCCL order are
+    untouched.
+    """
+
+    def __init__(self, result, ret1, ev_c1, th, dim, world, dtype):
+        self.result = result
+        self.th = th
+        self._ret1 = ret1
+        self._ev_c1 = ev_c1
+        self._dim = dim
+        self._world = world
+        self._dtype = dtype
+        self._done = False
+
+    def finish(self) -> torch.Tensor:
+        if self._done:
+            return self.result
+        main = torch.cuda.current_stream(self.result.device)
+        main.wait_event(self._ev_c1)
+        self._ret1.record_stream(main)
+        from rtp_llm.models_py.modules.dsv4.fp8._nccl_ep_combine_triton import (
+            mxfp8_dequant_peer_sum,
+        )
+        self.result[self.th:] = mxfp8_dequant_peer_sum(
+            self._ret1, self.th, self._dim, self._world, out_dtype=self._dtype)
+        self._done = True
+        return self.result
 
 
 @register_strategy
@@ -1099,15 +1140,22 @@ class DeepEPStrategy(RoutedExpertsStrategy):
             comb1.record_stream(comm)
             ret1.record_stream(comm)  # written on comm, alloc'd on main
             ev_c1 = torch.cuda.Event(); ev_c1.record(comm)
-        # 7) main: dequant both halves into the result rows
+        # 7) main: dequant half-0 NOW. Under X1, half-1's wait+dequant is
+        # deferred into the returned handle so the caller's half-0 epilogue
+        # covers c1's flight (S4-t2 lesson: the caller-side ordering IS the
+        # timing contract — no syncs added or removed here).
         from .._nccl_ep_combine_triton import mxfp8_dequant_peer_sum
         main.wait_event(ev_c0)
         ret0.record_stream(main)
-        main.wait_event(ev_c1)
-        ret1.record_stream(main)
         result = torch.empty((int(x.size(0)), dim), dtype=x.dtype, device=dev)
         result[:th] = mxfp8_dequant_peer_sum(
             ret0, th, dim, world, out_dtype=x.dtype)
+        if _XLAYER_C1:
+            return _A2DeferredHalves(
+                result=result, ret1=ret1, ev_c1=ev_c1, th=th,
+                dim=dim, world=world, dtype=x.dtype)
+        main.wait_event(ev_c1)
+        ret1.record_stream(main)
         result[th:] = mxfp8_dequant_peer_sum(
             ret1, th, dim, world, out_dtype=x.dtype)
         return result
