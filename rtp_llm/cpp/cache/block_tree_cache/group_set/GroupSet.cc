@@ -45,9 +45,7 @@ void applyToResourcePools(const MultiNodeResource&               resource,
 GroupSet::GroupSet(std::vector<DeviceBlockPoolPtr> device_pools,
                    std::shared_ptr<HostBlockPool>  host_pool,
                    BlockTreeDiskBlockPoolPtr       disk_pool):
-    device_pools_(std::move(device_pools)),
-    host_pool_(std::move(host_pool)),
-    disk_pool_(std::move(disk_pool)) {}
+    device_pools_(std::move(device_pools)), host_pool_(std::move(host_pool)), disk_pool_(std::move(disk_pool)) {}
 
 void GroupSet::initialize(size_t                               group_set_id,
                           std::shared_ptr<const CacheTopology> topology,
@@ -111,6 +109,11 @@ void GroupSet::unreferenceBlocks(const MultiNodeResource& resource, BlockTreeRef
 }
 
 BlockIdxType GroupSet::allocateSingleBlock(Tier tier, BlockTreeRefType ref_type) {
+    auto blocks = allocateBlocks(1, tier, ref_type);
+    return blocks.has_value() ? blocks->front() : NULL_BLOCK_IDX;
+}
+
+std::optional<BlockIdList> GroupSet::allocateBlocks(size_t n, Tier tier, BlockTreeRefType ref_type) {
     IBlockPool* pool = nullptr;
     if (tier == Tier::HOST) {
         pool = host_pool_.get();
@@ -118,12 +121,22 @@ BlockIdxType GroupSet::allocateSingleBlock(Tier tier, BlockTreeRefType ref_type)
         pool = disk_pool_.get();
     }
     if (!pool)
-        return NULL_BLOCK_IDX;
-    auto b = pool->malloc();
-    if (!b.has_value())
-        return NULL_BLOCK_IDX;
-    pool->incTreeRef(*b, ref_type);
-    return *b;
+        return std::nullopt;
+    auto blocks = pool->malloc(n);
+    if (!blocks.has_value())
+        return std::nullopt;
+    pool->incTreeRef(*blocks, ref_type);
+    return blocks;
+}
+
+void GroupSet::releaseBlocks(Tier tier, const BlockIdList& blocks, BlockTreeRefType ref_type) const {
+    if (tier == Tier::HOST) {
+        if (host_pool_)
+            host_pool_->decTreeRef(blocks, ref_type);
+    } else if (tier == Tier::DISK) {
+        if (disk_pool_)
+            disk_pool_->decTreeRef(blocks, ref_type);
+    }
 }
 
 void GroupSet::releaseSingleBlock(Tier tier, BlockIdxType block, BlockTreeRefType ref_type) const {
