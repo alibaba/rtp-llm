@@ -1,4 +1,5 @@
 import unittest
+from typing import Optional
 
 import torch
 
@@ -22,7 +23,12 @@ class CacheStoreForwardModel:
         self.kv_cache = resources.kv_cache
         return True
 
-    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+    def prepare_fmha_impl(
+        self,
+        inputs: PyModelInputs,
+        is_cuda_graph: bool = False,
+        cuda_graph_selection_mode: Optional[str] = None,
+    ):
         return None
 
     def _forward_one(self, inputs: PyModelInputs) -> PyModelOutputs:

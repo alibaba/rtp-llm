@@ -82,6 +82,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--concurrency_test", type=str, default="False", help="concurrent request mode"
     )
+    parser.add_argument(
+        "--parallel_qr",
+        type=int,
+        default=1,
+        help="number of distinct fixture queries to dispatch concurrently",
+    )
     args, _ = parser.parse_known_args()
 
     logging.info(
@@ -125,6 +131,7 @@ if __name__ == "__main__":
         "sleep_time_qr": args.sleep_time_qr,
         "kill_remote": str_to_bool(args.kill_remote),
         "concurrency_test": str_to_bool(args.concurrency_test),
+        "parallel_qr": args.parallel_qr,
     }
     # prompt_batch queries are now routed to /batch_infer per-query in case_runner
     # (see CaseRunner._resolve_endpoint), no env-level switch needed.

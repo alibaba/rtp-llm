@@ -18,8 +18,50 @@ void CudaGraphRunner::capturePrefill() {
         // we will transfer a `batch size tensor(int)` for `copy kernel`.
         // Prepare common inputs using shared function
         prepareCaptureInputs(inputs, max_bs_, seq_len);
-        // Prefill-specific settings, one the first seq is valid, the post ones are all empty
-        if (isEmbeddingStylePrefillCudaGraph()) {
+        // Generative prefill uses Bmax real slots plus one fixed sentinel slot.
+        // Capture the conservative layout [0, ..., 0, Tg] so FMHA/RoPE fix
+        // batch size and max_q_len at their profile capacity while every KV
+        // write lands in runner-owned scratch blocks.
+        if (isGenerativePrefillCudaGraph()) {
+            RTP_LLM_CHECK_WITH_INFO(max_bs_ == static_cast<size_t>(prefill_cuda_graph_max_requests_ + 1),
+                                    "prefill CUDA graph backend capacity mismatch: max_bs=%zu Bmax=%d",
+                                    max_bs_,
+                                    prefill_cuda_graph_max_requests_);
+            inputs.attention_inputs.input_lengths.zero_();
+            inputs.attention_inputs.input_lengths[prefill_cuda_graph_max_requests_] = seq_len;
+            inputs.attention_inputs.prefix_lengths.zero_();
+            inputs.attention_inputs.cu_seqlens.zero_();
+            inputs.attention_inputs.cu_seqlens[max_bs_] = seq_len;
+            inputs.attention_inputs.padding_offset.fill_(prefill_cuda_graph_max_requests_ * seq_len);
+            inputs.attention_inputs.input_lengths_device.copy_(inputs.attention_inputs.input_lengths, false);
+            inputs.attention_inputs.prefix_lengths_device.zero_();
+            inputs.attention_inputs.cu_seqlens_device.copy_(inputs.attention_inputs.cu_seqlens, false);
+            inputs.attention_inputs.cu_kv_seqlens_device.copy_(inputs.attention_inputs.cu_seqlens, false);
+
+            auto install_scratch_row = [&](PyAttentionInputs& attn_inputs, size_t group_id) {
+                auto& host_ids   = prefill_scratch_kernel_block_ids_host_.at(group_id);
+                auto& device_ids = prefill_scratch_kernel_block_ids_device_.at(group_id);
+                RTP_LLM_CHECK_WITH_INFO(host_ids.numel() <= attn_inputs.kv_cache_kernel_block_id.size(1),
+                                        "prefill scratch block count exceeds captured table width");
+                attn_inputs.kv_cache_kernel_block_id.zero_();
+                attn_inputs.kv_cache_kernel_block_id_device.zero_();
+                attn_inputs.kv_cache_kernel_block_id[prefill_cuda_graph_max_requests_]
+                    .slice(0, 0, host_ids.numel())
+                    .copy_(host_ids);
+                attn_inputs.kv_cache_kernel_block_id_device[prefill_cuda_graph_max_requests_]
+                    .slice(0, 0, device_ids.numel())
+                    .copy_(device_ids);
+            };
+            if (inputs.attention_inputs_by_tag.empty()) {
+                install_scratch_row(inputs.attention_inputs, 0);
+            } else {
+                size_t group_id = 0;
+                for (const auto& tag : kv_cache_group_tags_) {
+                    install_scratch_row(inputs.attention_inputs_by_tag.at(tag), group_id++);
+                }
+            }
+            // Prefill-specific settings, one the first seq is valid, the post ones are all empty
+        } else if (isEmbeddingStylePrefillCudaGraph()) {
             // embedding model, without kv cache
             inputs.attention_inputs.prefix_lengths.fill_(0);
             inputs.attention_inputs.prefix_lengths_device.fill_(0);
@@ -79,9 +121,10 @@ void CudaGraphRunner::capturePrefill() {
         }
         // Prefill reshapes common metadata after prepareCaptureInputs synchronized the tag map.
         refreshTaggedAttentionInputs(inputs);
-        graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, max_bs_ * num_tokens_per_bs_);
+        const int output_capacity           = isGenerativePrefillCudaGraph() ? seq_len : max_bs_ * num_tokens_per_bs_;
+        graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, output_capacity);
         graph_instances_[seq_len].mem_hold_.attn_pyobj_ =
-            py_attn_pyobj_method_(graph_instances_[seq_len].mem_hold_.py_model_inputs_, true);
+            prepareFmhaImpl(graph_instances_[seq_len].mem_hold_.py_model_inputs_, true);
         // HC-shaped MTP draft prefill keeps its output at fixed graph capacity.
         // Other paths produce the real flattened seq_len and must keep their
         // metadata shapes aligned.
@@ -89,9 +132,28 @@ void CudaGraphRunner::capturePrefill() {
             graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_ =
                 graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_.slice(0, 0, seq_len);
         }
+        torch::Tensor eager_selfcheck_output;
+        if (isGenerativePrefillCudaGraph()) {
+            auto eager_outputs = py_forward_method_(graph_instances_[seq_len].mem_hold_.py_model_inputs_,
+                                                    graph_instances_[seq_len].mem_hold_.attn_pyobj_)
+                                     .cast<PyModelOutputs>();
+            eager_selfcheck_output = eager_outputs.hidden_states.clone();
+        }
         capturePrefillOneSeqLen(seq_len);
         cuda_graph::finish_capture_session();
         replayAndSyncCheck(seq_len, "seq len");
+        // A captured graph is not safe to destroy until its first launch has
+        // completed. Keep the dirty guard armed across replay/synchronization;
+        // the factory will fail closed and retain graph-owned storage if this
+        // phase throws. A numerical self-check failure happens after the stream
+        // is drained and remains recoverable.
+        capture_session_may_be_dirty_.store(false, std::memory_order_release);
+        if (isGenerativePrefillCudaGraph()) {
+            const auto& graph_output = graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_;
+            RTP_LLM_CHECK_WITH_INFO(torch::allclose(graph_output, eager_selfcheck_output, 1e-3, 1e-3),
+                                    "prefill CUDA graph startup self-check failed for bucket=%d",
+                                    seq_len);
+        }
         RTP_LLM_LOG_INFO("capture success for seq_len: %d", seq_len);
     }
     RTP_LLM_LOG_INFO("Capture Prefill End");
@@ -124,6 +186,18 @@ std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
     std::vector<int> result = prefill_capture_seq_lens_;
     std::sort(result.begin(), result.end());
     result.erase(std::unique(result.begin(), result.end()), result.end());
+    // A generative-prefill bucket is the total token capacity of one graph and
+    // is intentionally bounded by the model sequence limit. Embedding prefill
+    // predates that role and captures a flattened batch, so its legal capacity
+    // is max_bs * tokens_per_batch rather than one request's max_seq_len.
+    const int64_t capture_token_limit = isGenerativePrefillCudaGraph() ?
+                                            static_cast<int64_t>(max_seq_len_) :
+                                            static_cast<int64_t>(max_bs_) * num_tokens_per_bs_;
+    RTP_LLM_CHECK_WITH_INFO(result.front() > 0 && result.back() <= capture_token_limit,
+                            "prefill CUDA graph buckets must be in [1, capture_token_limit=%ld], got min=%d max=%d",
+                            capture_token_limit,
+                            result.front(),
+                            result.back());
 
     RTP_LLM_LOG_INFO(
         "Total sequence lengths to capture: %zu (min: %d, max: %d)", result.size(), result.front(), result.back());

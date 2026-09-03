@@ -63,6 +63,10 @@ class MlaImplBase(object):
         """Check if CUDA graph is supported."""
         return callable(getattr(self, "prepare_cuda_graph", None))
 
+    def supports_prefill_cuda_graph(self) -> bool:
+        """Whether this backend can be captured by the prefill CUDA graph."""
+        return False
+
     def prepare(self, attn_inputs: PyAttentionInputs):
         """Prepare for attention computation."""
         pass
@@ -169,6 +173,10 @@ class FMHAImplBase(ABC):
             如果想支持cuda graph需要子类支持prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):这个函数
         """
         return callable(getattr(self, "prepare_cuda_graph", None))
+
+    def supports_prefill_cuda_graph(self) -> bool:
+        """Whether this backend can be captured by the prefill CUDA graph."""
+        return False
 
     @classmethod
     def support_prefill_cp(cls) -> bool:

@@ -20,7 +20,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.trt import (
     FlashInferTRTLLMFMHAv2PrefillImpl,
     TRTLLMFMHAv2PrefillOp,
 )
-from rtp_llm.models_py.utils.arch import is_sm12x
+from rtp_llm.models_py.utils.arch import is_sm12x, is_sm90
 from rtp_llm.ops import KvCacheDataType, RopeStyle
 from rtp_llm.ops.compute_ops import get_typemeta
 
@@ -201,15 +201,14 @@ class TestTRTLLMFMHAv2PrefillOpBF16(TRTLLMFMHAv2TestBase):
 
     def test_cuda_graph(self):
         test_cases = [
-            ("aligned", [48, 32], [40, 40]),
-            ("compact", [32, 24], [24, 32]),
-            ("replay_smaller_batch", [32, 8, 8, 8], [24, 32, 0, 0]),
-            ("capture_empty_batch", [56, 0, 0, 0], [24, 32, 0, 0]),
+            ("packed_qkv", 8, [48, 32], [40, 40]),
+            ("contiguous_q_kv", 2, [32, 24], [24, 32]),
+            ("replay_smaller_batch", 2, [32, 8, 8, 8], [24, 32, 0, 0]),
+            ("capture_empty_batch", 2, [56, 0, 0, 0], [24, 32, 0, 0]),
         ]
-        for layout, capture_lengths, replay_lengths in test_cases:
+        for layout, head_num_kv, capture_lengths, replay_lengths in test_cases:
             with self.subTest(layout=layout):
                 head_num = 8
-                head_num_kv = 2
                 head_dim = 128
                 tokens_per_block = 64
 
@@ -267,6 +266,175 @@ class TestTRTLLMFMHAv2PrefillOpBF16(TRTLLMFMHAv2TestBase):
                 torch.cuda.synchronize()
 
                 torch.testing.assert_close(graph_output, expect_output, rtol=0, atol=0)
+
+    def test_prefill_cuda_graph_rope_kv_and_dynamic_batch(self):
+        """Gate GQA and packed-MHA prefill graphs on SM90 and SM12x."""
+        if self.kv_cache_dtype != KvCacheDataType.BASE:
+            self.skipTest("prefill CUDA graph requires BF16 KV cache")
+        if not (is_sm90() or is_sm12x()):
+            self.skipTest("prefill CUDA graph is allowlisted on SM90 and SM12x")
+
+        for head_num_kv in (2, 8):
+            with self.subTest(head_num_kv=head_num_kv):
+                self._run_prefill_cuda_graph_rope_kv_and_dynamic_batch(head_num_kv)
+
+    def _run_prefill_cuda_graph_rope_kv_and_dynamic_batch(self, head_num_kv: int):
+        """Capture five fixed slots and replay dynamic request layouts.
+
+        Capture five fixed sequence slots (four real slots plus one sentinel),
+        then replay two real requests with a padded sentinel. This covers real
+        RoPE, BF16 KV writes, dynamic zero-length slots, block-table refresh,
+        and scratch isolation in one graph.
+        """
+        max_requests = 4
+        token_capacity = 64
+        capture_lengths = [0] * max_requests + [token_capacity]
+        head_num = 8
+        head_dim = 64
+        tokens_per_block = 64
+        real_block_ids = [1, 2, 3, 4]
+        scratch_block_id = 6
+        total_blocks = 8
+
+        attn_configs = self._create_config(
+            head_num=head_num,
+            head_num_kv=head_num_kv,
+            size_per_head=head_dim,
+            seq_size_per_block=tokens_per_block,
+        )
+        attn_configs.rope_config.style = RopeStyle.Base
+        attn_configs.rope_config.dim = head_dim
+        attn_configs.rope_config.base = 10000
+        attn_configs.rope_config.max_pos = token_capacity
+        attn_configs.max_seq_len = token_capacity
+
+        capture_inputs = self._create_prefill_attention_inputs(
+            len(capture_lengths), capture_lengths, tokens_per_block
+        )
+        capture_inputs.is_cuda_graph = True
+        capture_inputs.kv_cache_kernel_block_id.zero_()
+        capture_inputs.kv_cache_kernel_block_id_device.zero_()
+        capture_inputs.kv_cache_kernel_block_id[-1, 0] = scratch_block_id
+        capture_inputs.kv_cache_kernel_block_id_device[-1, 0] = scratch_block_id
+
+        static_qkv = self._create_qkv_tensor(
+            token_capacity,
+            head_num,
+            head_num_kv,
+            head_dim,
+            dtype=attn_configs.dtype,
+        )
+        capture_inputs.dtype = get_typemeta(static_qkv)
+
+        graph_cache, _, _ = self._create_kv_cache(
+            total_blocks,
+            tokens_per_block,
+            head_num_kv,
+            head_dim,
+            dtype=attn_configs.dtype,
+        )
+        graph_impl = FlashInferTRTLLMFMHAv2PrefillImpl(attn_configs, capture_inputs)
+        self.assertTrue(graph_impl.supports_prefill_cuda_graph())
+
+        warmup_stream = torch.cuda.Stream()
+        warmup_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(warmup_stream):
+            graph_impl.forward(static_qkv, graph_cache)
+        torch.cuda.current_stream().wait_stream(warmup_stream)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            graph_output = graph_impl.forward(static_qkv, graph_cache)
+
+        replay_layouts = ([24, 32], [64], [32, 32], [16, 16, 16, 16])
+        for real_lengths in replay_layouts:
+            with self.subTest(real_lengths=real_lengths):
+                real_tokens = sum(real_lengths)
+                sentinel_length = token_capacity - real_tokens
+                replay_lengths = (
+                    real_lengths
+                    + [0] * (max_requests - len(real_lengths))
+                    + [sentinel_length]
+                )
+                replay_qkv = torch.randn_like(static_qkv)
+                static_qkv.copy_(replay_qkv)
+                capture_inputs.input_lengths.copy_(
+                    torch.tensor(replay_lengths, dtype=torch.int32, device=self.device)
+                )
+
+                cu_seqlens = [0]
+                padding_offsets = []
+                packed_offset = 0
+                for slot, length in enumerate(replay_lengths):
+                    padding_offsets.extend(
+                        [slot * token_capacity - packed_offset] * length
+                    )
+                    packed_offset += length
+                    cu_seqlens.append(packed_offset)
+                replay_cu_seqlens = torch.tensor(
+                    cu_seqlens, dtype=torch.int32, device=self.device
+                )
+                capture_inputs.cu_seqlens_device.copy_(replay_cu_seqlens)
+                capture_inputs.cu_kv_seqlens_device.copy_(replay_cu_seqlens)
+                capture_inputs.padding_offset.copy_(
+                    torch.tensor(padding_offsets, dtype=torch.int32, device=self.device)
+                )
+                capture_inputs.kv_cache_kernel_block_id.zero_()
+                capture_inputs.kv_cache_kernel_block_id_device.zero_()
+                for row, block_id in enumerate(real_block_ids[: len(real_lengths)]):
+                    capture_inputs.kv_cache_kernel_block_id[row, 0] = block_id
+                    capture_inputs.kv_cache_kernel_block_id_device[row, 0] = block_id
+                capture_inputs.kv_cache_kernel_block_id[-1, 0] = scratch_block_id
+                capture_inputs.kv_cache_kernel_block_id_device[-1, 0] = scratch_block_id
+                graph_impl.prepare_cuda_graph(capture_inputs)
+                graph_cache.kv_cache_base.zero_()
+
+                eager_inputs = self._create_prefill_attention_inputs(
+                    len(real_lengths), real_lengths, tokens_per_block
+                )
+                eager_inputs.dtype = get_typemeta(replay_qkv)
+                for row, block_id in enumerate(real_block_ids[: len(real_lengths)]):
+                    eager_inputs.kv_cache_kernel_block_id[row, 0] = block_id
+                    eager_inputs.kv_cache_kernel_block_id_device[row, 0] = block_id
+                eager_cache, _, _ = self._create_kv_cache(
+                    total_blocks,
+                    tokens_per_block,
+                    head_num_kv,
+                    head_dim,
+                    dtype=attn_configs.dtype,
+                )
+                eager_cache.kv_cache_base.zero_()
+                eager_impl = FlashInferTRTLLMFMHAv2PrefillImpl(
+                    attn_configs, eager_inputs
+                )
+                eager_output = eager_impl.forward(
+                    replay_qkv[:real_tokens], eager_cache
+                ).clone()
+
+                graph.replay()
+                torch.cuda.synchronize()
+
+                torch.testing.assert_close(
+                    graph_output[:real_tokens], eager_output, rtol=5e-3, atol=5e-3
+                )
+                for block_id, length in zip(real_block_ids, real_lengths):
+                    torch.testing.assert_close(
+                        graph_cache.kv_cache_base[block_id, :, :, :length, :],
+                        eager_cache.kv_cache_base[block_id, :, :, :length, :],
+                        rtol=5e-3,
+                        atol=5e-3,
+                    )
+                # Empty request rows are encoded with block id 0. They must
+                # never publish sentinel KV into the allocator's null block.
+                self.assertEqual(graph_cache.kv_cache_base[0].count_nonzero().item(), 0)
+                self.assertEqual(graph_cache.kv_cache_base[5].count_nonzero().item(), 0)
+                scratch_nonzero = (
+                    graph_cache.kv_cache_base[scratch_block_id].count_nonzero().item()
+                )
+                if sentinel_length:
+                    self.assertGreater(scratch_nonzero, 0)
+                else:
+                    self.assertEqual(scratch_nonzero, 0)
 
     def test_gqa(self):
         """Test prefill with grouped query attention"""

@@ -32,6 +32,7 @@ from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.telemetry import attributes as trace_attrs
 from rtp_llm.telemetry import start_client_span
 from rtp_llm.utils.base_model_datatypes import (
+    PREFILL_CUDA_GRAPH_STATUS_NOT_REQUESTED,
     AuxInfo,
     GenerateConfig,
     GenerateInput,
@@ -783,6 +784,10 @@ def trans_output(
                 speculative_draft_rounds=aux_info_pb.speculative_draft_rounds,
                 speculative_accepted_tokens_per_pos=list(
                     aux_info_pb.speculative_accepted_tokens_per_pos
+                ),
+                prefill_cuda_graph_status=(
+                    aux_info_pb.prefill_cuda_graph_status
+                    or PREFILL_CUDA_GRAPH_STATUS_NOT_REQUESTED
                 ),
                 aux_string=aux_info_pb.aux_string,
                 role_addrs=input_py.generate_config.role_addrs,

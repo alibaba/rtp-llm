@@ -144,7 +144,8 @@ def custom_smoke_test(name, main, smoke_args="", args=[], gpu_type=[], tags=[], 
     return name
 
 def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_args="",
-               kvcm_envs=[], sleep_time_qr=0, kill_remote=False, concurrency_test=False):
+               kvcm_envs=[], sleep_time_qr=0, kill_remote=False, concurrency_test=False,
+               parallel_qr=1):
     path = '/'.join(task_info.split('/')[:-1])
     data = data + native.glob([path + '/*.pt',
                                path + '/*.jpg',
@@ -225,6 +226,7 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
             "--sleep_time_qr", str(sleep_time_qr),
             "--kill_remote", str(kill_remote),
             "--concurrency_test", str(concurrency_test),
+            "--parallel_qr", str(parallel_qr),
         ],
         exec_properties = {
             'gpu':gpu_type[0],

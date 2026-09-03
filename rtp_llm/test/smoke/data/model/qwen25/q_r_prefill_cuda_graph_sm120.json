@@ -1,0 +1,97 @@
+{
+    "model_type": "qwen_2",
+    "model_path": "/mnt/nas1/hf/Qwen2.5-0.5B-Instruct",
+    "query_result": [
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "$prompt:s2"
+                    }
+                ],
+                "max_tokens": 10,
+                "temperature": 0.0,
+                "top_p": 1.0
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1705333930,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "当然可以！以下是几个英语听力方法的听力",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 37,
+                    "total_tokens": 47,
+                    "completion_tokens": 10
+                }
+            },
+            "compare_config": {
+                "required_aux_info": {
+                    "prefill_cuda_graph_status": "replayed"
+                }
+            }
+        },
+        {
+            "endpoint": "/v1/chat/completions",
+            "query": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "请推荐一部好看的电影。"
+                    },
+                    {
+                        "role": "assistant",
+                        "content": "推荐一部好看的电影，首先需要考虑电影的类型和主题。如果您喜欢科幻、动作、冒险等类型，那么《星际穿越》可能是一个不错的选择。这部电影由克里斯托弗·诺兰执导，讲述了人类在宇宙中寻找新的居住地的故事。影片融合了科幻元素和悬疑元素，展现了人类在面对未知和挑战时的勇气和决心。\n\n如果您更喜欢剧情片或者爱情片，那么《泰坦尼克号》可能是一个不错的选择。这部电影",
+                        "partial": false
+                    },
+                    {
+                        "role": "user",
+                        "content": "我喜欢喜剧类型的。"
+                    }
+                ],
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "max_tokens": 100
+            },
+            "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1705333930,
+                "model": "",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "推荐一部喜剧类型的电影，比如《疯狂原始人》。这部电影由克里斯托弗·诺兰执导，讲述了一个关于原始人的故事，其中充满了幽默和滑稽的元素。影片通过幽默的方式展现了人类对未知和挑战的勇气和决心，同时也展现了原始人的独特文化和性格。\n\n如果您喜欢动作、冒险或者科幻类型的电影，那么《速度与激情》系列可能是一个不错的选择。这部电影由汤姆·汉克斯主演，讲述了一群赛车手在不同",
+                            "partial": false
+                        },
+                        "finish_reason": "length"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 149,
+                    "total_tokens": 249,
+                    "completion_tokens": 100
+                }
+            },
+            "compare_config": {
+                "required_aux_info": {
+                    "prefill_cuda_graph_status": "replayed"
+                }
+            }
+        }
+    ]
+}

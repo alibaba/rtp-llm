@@ -30,6 +30,7 @@ public:
     bool                         hasOutput() override;
     ErrorResult<GenerateOutputs> nextOutput(int64_t wait_timeout_ms = 0) override;
     void                         updateOutput(const StreamUpdateInfo& update_info) override;
+    PrefillCudaGraphStatus       prefillCudaGraphStatus() const override;
 
 private:
     GenerateOutputs prepareGenerateOutput(const StreamUpdateInfo& update_info);
@@ -40,6 +41,7 @@ private:
 
     int64_t                     request_id_{0};
     bool                        finished_{false};
+    PrefillCudaGraphStatus      prefill_cuda_graph_status_{PrefillCudaGraphStatus::NOT_REQUESTED};
     std::deque<GenerateOutputs> generate_outputs_;
 };
 }  // namespace rtp_llm
