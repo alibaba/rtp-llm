@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import signal
 import socket
@@ -105,6 +106,13 @@ LOAD_CLIENT_ENV_VARS = [
     "TRACE_FILE",
     "TARGET_ADDR",
     "GRPC_TARGET",
+    # HA case-test multi-target contract (Tina): GRPC_TARGETS is a comma-
+    # separated address list; >= 2 addresses enable sticky-target selection
+    # + same-request transport-failure retry to the next target.  Exported
+    # explicitly (empty = unset) so no ambient value leaks in; the
+    # single-master legacy path never sets it and the pre-HA JavaLoadClient
+    # ignores it entirely (it only reads GRPC_TARGET).
+    "GRPC_TARGETS",
     "DURATION_S",
     "MAX_CONCURRENCY",
     "REPLAY_SPEED",
@@ -370,12 +378,80 @@ class ManagedProcess:
         except Exception:
             pass
 
+    # -- Mode 2 (freeze) primitives, per-master directed -------------------
+
+    def freeze(self) -> None:
+        """SIGSTOP this process (frozen: port up, state retained)."""
+        ProcessOps.sigstop(self.proc.pid)
+
+    def unfreeze(self) -> None:
+        """SIGCONT this process (hot recovery: state intact)."""
+        ProcessOps.sigcont(self.proc.pid)
+
     def tail_log(self, lines: int = 40) -> str:
         try:
             text = self.log_file.read_text(encoding="utf-8", errors="replace")
             return "\n".join(text.splitlines()[-lines:])
         except Exception:
             return "<no log>"
+
+
+# ---------------------------------------------------------------------------
+# HA dual-master port plan (ruling, verified against the v2 Java code — see
+# the MasterSpec docstring below for the full evidence chain)
+# ---------------------------------------------------------------------------
+
+# Tier-1 dual standalone (needConsistency stays OFF): each master gets its
+# OWN port group — A: HTTP 18080 / mgmt 18081 / gRPC 18082, B: HTTP 18083 /
+# mgmt 18084 / gRPC 18085.  With consistency disabled the three same-host
+# assumptions (ZK leader id, port stitching, SELF_TARGET) are all inert, so
+# distinct ports are the zero-risk layout and no FLEXLB_ADVERTISED_IP is
+# needed; the client separates the two masters by gRPC port.
+HA_TIER1_MASTER_A_HTTP_PORT = int(
+    os.environ.get("FLEXLB_FT_HA_MASTER_A_HTTP_PORT", "18080")
+)
+HA_TIER1_MASTER_B_HTTP_PORT = int(
+    os.environ.get("FLEXLB_FT_HA_MASTER_B_HTTP_PORT", "18083")
+)
+
+# Tier-2/3 ZK-activated layout: the SAME port group on DIFFERENT loopback
+# IPs (127.0.0.1:18080..18082 + 127.0.0.2:18080..18082 + FLEXLB_ADVERTISED_IP
+# injected per master).  Required because (verified in the Java code):
+#   * ZookeeperMasterElectService.initializeIpAndPort() sets the ZK
+#     LeaderSelector id to the BARE local IP (no port) — same-IP dual
+#     instances collide and mis-elect (isStillMaster compares bare IPs);
+#   * LBStatusConsistencyService.getMasterHostIpPort() stitches the LOCAL
+#     server.port onto the leader IP — a distinct-port layout would forward
+#     to the wrong port (A_IP:B_port is unreachable);
+#   * FlexlbGrpcForwarder.sameHost() compares bare IPs — same-IP instances
+#     would self-block every forward as SELF_TARGET.
+# Activation additionally needs the production-side prerequisites
+# (an FLEXLB_ADVERTISED_IP consumer in flexlb-sync + a per-address gRPC
+# bind instead of NettyServerBuilder.forPort) which are NOT yet in the
+# code; the harness injects the env/ports per this contract so the layout
+# lights up the moment those land.  Tier-2 forwarding itself is covered by
+# the JUnit layer (master_forward_matrix), not by this harness.
+#
+# RULING (2026-09-02): the same-host distinct-IP layout is DEAD.  The
+# election localIp comes ONLY from InetAddress.getLocalHost() hostname
+# resolution (ZookeeperMasterElectService L106-111 + LBStatusConsistency-
+# Service L52, two independent sites, no env override channel), the gRPC
+# wildcard bind (forPort) cannot start a second same-port instance, and
+# same-IP distinct-port makes SELF_TARGET permanently true, blocking all
+# forwarding; the production-side prerequisites (FLEXLB_ADVERTISED_IP
+# consumer / per-address bind) will NOT land.  Tier-3 moves to a
+# dual-container topology (each container gets its own network stack +
+# hostname -> naturally distinct IPs on the SAME port, faithfully
+# replicating production's one-IP-per-pod model) — phase 2.  The existing
+# 127.0.0.1/.2 wiring below is kept ONLY as the env-injection contract
+# reference (supersedes the "lights up the moment those land" expectation
+# above).
+HA_TIER3_MASTER_HTTP_PORT = int(
+    os.environ.get("FLEXLB_FT_HA_TIER3_MASTER_HTTP_PORT", "18080")
+)
+HA_TIER3_MASTER_B_BIND_IP = os.environ.get(
+    "FLEXLB_FT_HA_TIER3_MASTER_B_BIND_IP", "127.0.0.2"
+)
 
 
 class ProcessOps:
@@ -406,6 +482,24 @@ class ProcessOps:
         except (ProcessLookupError, PermissionError):
             pass
 
+    # ------------------------------------------------------------------
+    # Mode 2 fault primitives (HA case test, brief p3: "SIGSTOP / SIGCONT
+    # 原语（ProcessOps 一行级扩展）").  Directed at a specific master PID
+    # through the masters registry (ManagedProcess.freeze / unfreeze).
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def sigstop(pid: int) -> None:
+        """Mode 2 (freeze) injection: process frozen, port stays up,
+        application stops responding, in-memory state retained."""
+        os.kill(pid, signal.SIGSTOP)
+
+    @staticmethod
+    def sigcont(pid: int) -> None:
+        """Mode 2 recovery: thaw a SIGSTOP-frozen process (hot recovery —
+        memory state intact, as opposed to Mode 1 kill -9 cold start)."""
+        os.kill(pid, signal.SIGCONT)
+
     @staticmethod
     def restart(
         mp: ManagedProcess, new_log: Optional[Path] = None, timeout_s: float = 0.0
@@ -418,6 +512,242 @@ class ProcessOps:
 # ---------------------------------------------------------------------------
 # EnvManager
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class MasterSpec:
+    """One flexlb master entry in the (optional) dual-master registry.
+
+    Port-plan ruling (verified against the v2 Java code, 2026-09 HA case
+    test task):
+
+    * Tier-1 dual standalone — needConsistency stays OFF (the mock-line
+      default).  Each master gets its OWN port group (A: HTTP 18080 /
+      mgmt 18081 / gRPC 18082, B: HTTP 18083 / mgmt 18084 / gRPC 18085).
+      With consistency disabled the three same-host assumptions are inert:
+      ZookeeperMasterElectService.init() returns before touching ZK,
+      LBStatusConsistencyService.getMasterHostIpPort() returns null (no
+      forwarding, LOCAL_STANDALONE routing) and
+      FlexlbGrpcForwarder.sameHost(ip, null) is false (no SELF_TARGET), so
+      distinct ports are the zero-risk layout.  No FLEXLB_ADVERTISED_IP.
+
+    * Tier-2/3 ZK-activated — FLEXLB_SYNC_CONSISTENCY_CONFIG set by the
+      harness (EnvSpec.zk_consistency).  The layout MUST switch to
+      same-port / different-IP (bind_ip 127.0.0.1 vs 127.0.0.2 +
+      FLEXLB_ADVERTISED_IP): the ZK LeaderSelector id is the BARE local IP
+      (ZookeeperMasterElectService.initializeIpAndPort), the forwarded
+      master address stitches the LOCAL server.port onto the leader IP
+      (LBStatusConsistencyService.getMasterHostIpPort) and SELF_TARGET
+      compares bare IPs (FlexlbGrpcForwarder.sameHost) — a distinct-port
+      same-IP pair breaks on all three.  Both instances share ONE
+      HIPPO_ROLE: the ZK lock path is /master_lb_leader/{HIPPO_ROLE}, so
+      the same roleId is what makes them mutual master/follower.
+
+    RULING (2026-09-02): the same-host distinct-IP Tier-3 layout is
+    DEAD — the election localIp comes only from InetAddress.getLocalHost()
+    hostname resolution (ZookeeperMasterElectService L106-111 +
+    LBStatusConsistencyService L52, two independent sites, no env
+    override channel), the gRPC wildcard bind (forPort) cannot start a
+    second same-port instance, and same-IP distinct-port makes
+    SELF_TARGET permanently true, blocking all forwarding; the
+    production-side prerequisites (FLEXLB_ADVERTISED_IP consumer /
+    per-address bind) will NOT land.  Tier-3 moves to a dual-container
+    topology (one network stack + hostname per container -> naturally
+    distinct IPs on the same port, replicating production's
+    one-IP-per-pod) — phase 2.  The 127.0.0.1/.2 wiring is kept only as
+    the env-injection contract reference.
+
+    Tier-2 forwarding semantics (four-state matrix, 8511, ForwardGuard)
+    are covered by the JUnit layer (master_forward_matrix) — this harness
+    only orchestrates processes/env; Tier-3 is deferred to the phase-2
+    dual-container topology per the RULING above.
+    """
+
+    name: str  # registry key ("A" / "B" — brief p5/p6 scenario notation)
+    http_port: int
+    management_port: Optional[int] = None  # default http+1
+    # Spring --server.address; Tier-1 stays 127.0.0.1 (distinct ports),
+    # Tier-2/3 uses 127.0.0.1 vs 127.0.0.2 (same ports, distinct IPs).
+    bind_ip: str = "127.0.0.1"
+    # FLEXLB_ADVERTISED_IP (Tier-2/3): overrides the ZK-advertised localIp.
+    # Has NO consumer in the flexlb Java code and none will land (see the
+    # RULING in the docstring above) — kept as the env-injection contract
+    # reference for the phase-2 dual-container Tier-3.
+    advertised_ip: Optional[str] = None
+    # Default: BOTH instances share spec.label's role (mutual backup).
+    hippo_role: Optional[str] = None
+    log_dir_name: Optional[str] = None  # default logs_{name} under run_dir
+    extra_env: dict = field(default_factory=dict)  # per-master overrides
+    extra_args: list = field(default_factory=list)  # per-master CLI args
+
+    def grpc_port(self) -> int:
+        """gRPC port = HTTP + 2 (FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET)."""
+        return self.http_port + 2
+
+    def management(self) -> int:
+        return (
+            self.management_port
+            if self.management_port is not None
+            else self.http_port + 1
+        )
+
+    def fingerprint(self) -> dict:
+        return {
+            "name": self.name,
+            "http_port": self.http_port,
+            "management_port": self.management(),
+            "bind_ip": self.bind_ip,
+            "advertised_ip": self.advertised_ip,
+            "hippo_role": self.hippo_role,
+            "extra_env": self.extra_env,
+            "extra_args": self.extra_args,
+        }
+
+
+# ---------------------------------------------------------------------------
+# ZK helper (Tier-2/3) — cross-agent contract with flexlb-sync (Mark)
+# ---------------------------------------------------------------------------
+
+# Contract constants — the SINGLE definition point the harness and the
+# flexlb-sync test launcher are aligned on (org.flexlb.consistency.
+# ZkTestingServerLauncher on the flexlb-sync src/test classpath).
+# Field-tested contract (flexlb-sync owner, delivered 2026-09-02):
+#   * boot sequence (from the maven root):
+#       ./mvnw -q -pl flexlb-sync -am test-compile
+#       ./mvnw -q -pl flexlb-sync dependency:build-classpath \
+#               -Dmdep.outputFile=<ABS>/test-classpath.txt \
+#               -Dmdep.includeScope=test
+#       java -cp "flexlb-sync/target/test-classes:<deps>" \
+#            org.flexlb.consistency.ZkTestingServerLauncher --port 0
+#     -Dmdep.outputFile MUST be an absolute path (a relative one resolves
+#     against the module basedir and creates nested directories);
+#     build-classpath must NOT carry -am (every reactor module would write
+#     its own outputFile — the nested-directory trap).
+#   * readiness handshake: ONE stdout line "ZK_READY <connectString>" —
+#     do NOT probe with 4lw (ZK 3.6.3 whitelists only "srvr"; ruok is
+#     refused by default).  --port 0 auto-allocates; the ZK_READY line
+#     carries the actual port.
+#   * exit paths: SIGTERM (used by the harness) and stdin EOF — both
+#     print "ZK_STOPPED" and exit 0.
+#   * macOS caveat: 127.0.0.2 silently drops (SYN retransits 20s+) on
+#     macOS — the Tier-2/3 same-port/distinct-IP layout only works on
+#     Linux loopback (full 127/8 routed); run the ZK-tier cases remotely.
+ZK_LAUNCHER_CLASS = "org.flexlb.consistency.ZkTestingServerLauncher"
+ZK_READY_PREFIX = "ZK_READY"
+ZK_STOPPED_PREFIX = "ZK_STOPPED"
+# Full-argv escape hatch: when set, the harness shlex-splits it verbatim
+# and uses it as the ZK helper command line (the exact mvnw classpath
+# assembly stays swappable until the flexlb-sync owner's final report).
+ZK_LAUNCH_CMD_ENV = "FLEXLB_FT_ZK_LAUNCH_CMD"
+# How long the harness waits for the ZK_READY line before failing closed.
+ZK_READY_TIMEOUT_S = float(os.environ.get("FLEXLB_FT_ZK_READY_TIMEOUT_S", "120"))
+
+
+class ZkHelperOps:
+    """Lifecycle glue for the ZK helper JVM.
+
+    Default launch: resolve the flexlb-sync TEST classpath once per run-dir
+    via ``mvnw -pl flexlb-sync -am dependency:build-classpath`` (cached in
+    <run_dir>/zk_classpath.txt), then
+    ``java -cp test-classes:classes:<deps> org.flexlb.consistency.ZkTestingServerLauncher``.
+    Override the whole command through FLEXLB_FT_ZK_LAUNCH_CMD if the
+    flexlb-sync assembly differs.
+    """
+
+    @staticmethod
+    def find_ready_connect_string(log_file: Path) -> Optional[str]:
+        """Scan the redirected stdout for the 'ZK_READY <connectString>' line."""
+        try:
+            text = log_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        for line in text.splitlines():
+            parts = line.split()
+            if parts and parts[0] == ZK_READY_PREFIX and len(parts) >= 2:
+                return parts[1]
+        return None
+
+    @staticmethod
+    def _mvnw(args: list, env: dict, timeout_s: int = 900, what: str = "mvnw") -> None:
+        mvnw = FLEXLB_DIR / "mvnw"
+        if not mvnw.is_file():
+            raise RuntimeError(f"mvnw not found: {mvnw}")
+        cmd = [str(mvnw), "-q", *args]
+        # First run may compile reactor modules — allow a long window.
+        proc = subprocess.run(
+            cmd,
+            cwd=str(FLEXLB_DIR),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"{what} failed (rc={proc.returncode}):\n"
+                f"{(proc.stderr or proc.stdout)[-2000:]}"
+            )
+
+    @staticmethod
+    def _ensure_test_classpath(java_bin: str, run_dir: Path) -> str:
+        """flexlb-sync TEST-scope dependency classpath via mvnw (cached).
+
+        Field-tested two-step boot (flexlb-sync owner contract):
+          1. ``-pl flexlb-sync -am test-compile`` — compiles the launcher
+             itself (src/test) plus reactor deps;
+          2. ``-pl flexlb-sync dependency:build-classpath`` (NO -am:
+             with it every reactor module writes its own outputFile)
+             with an ABSOLUTE -Dmdep.outputFile and includeScope=test
+             (curator-test is test-scoped in flexlb-sync/pom.xml).
+        Cached per run-dir so repeated env builds reuse one resolution.
+        """
+        cp_file = run_dir / "zk_classpath.txt"
+        if cp_file.is_file() and cp_file.stat().st_size > 0:
+            return cp_file.read_text(encoding="utf-8").strip()
+        env = dict(os.environ)
+        # mvnw honours JAVA_HOME; derive it from the resolved java binary.
+        java_home = Path(java_bin).resolve().parents[1]
+        if (java_home / "bin" / "java").exists():
+            env.setdefault("JAVA_HOME", str(java_home))
+        ZkHelperOps._mvnw(
+            ["-pl", "flexlb-sync", "-am", "test-compile"],
+            env,
+            timeout_s=900,
+            what="mvnw test-compile (flexlb-sync)",
+        )
+        ZkHelperOps._mvnw(
+            [
+                "-pl",
+                "flexlb-sync",
+                "dependency:build-classpath",
+                f"-Dmdep.outputFile={cp_file}",  # absolute (run_dir is abs)
+                "-Dmdep.includeScope=test",
+            ],
+            env,
+            timeout_s=600,
+            what="mvnw dependency:build-classpath (flexlb-sync)",
+        )
+        if not cp_file.is_file() or cp_file.stat().st_size == 0:
+            raise RuntimeError(
+                f"mvnw build-classpath produced no classpath file: {cp_file}"
+            )
+        return cp_file.read_text(encoding="utf-8").strip()
+
+    @staticmethod
+    def default_launch_argv(java_bin: str, run_dir: Path) -> list[str]:
+        deps = ZkHelperOps._ensure_test_classpath(java_bin, run_dir)
+        sync_target = FLEXLB_DIR / "flexlb-sync" / "target"
+        cp = os.pathsep.join(
+            [
+                str(sync_target / "test-classes"),
+                str(sync_target / "classes"),
+                deps,
+            ]
+        )
+        # --port 0: ZK auto-allocates a free port; the ZK_READY line
+        # advertises the actual connectString (no port-collision risk
+        # against sibling harness processes).
+        return [java_bin, "-cp", cp, ZK_LAUNCHER_CLASS, "--port", "0"]
 
 
 @dataclass
@@ -452,6 +782,26 @@ class EnvSpec:
     # cold-start first-connect storm during which healthy engines can be
     # 3-strike-marked dead (CONNECT_TIMEOUT 20ms intake defect).
     master_stable_window_s: float = 3.0
+    # ------------------------------------------------------------------
+    # HA dual-master orchestration (HA case test).  EMPTY (default) keeps
+    # the single-master legacy path byte-identical: every new behaviour in
+    # EnvManager is gated on this list being non-empty, so the existing
+    # stress line and every pre-HA flexlb_ft case are untouched.
+    # ------------------------------------------------------------------
+    # Per-master registry (MasterSpec).  Non-empty => EnvManager starts one
+    # flexlb-api JVM per entry (start_master_instance) instead of the
+    # single shared master; both masters share the SAME mock cluster and
+    # discovery file and poll it independently (brief p1).
+    masters: list = field(default_factory=list)  # list[MasterSpec]
+    # Tier-2/3 only: non-None starts the ZK helper JVM (Mark's contract —
+    # org.flexlb.consistency.ZkTestingServerLauncher, "ZK_READY
+    # <connectString>" on stdout) BEFORE the masters and injects
+    # FLEXLB_SYNC_CONSISTENCY_CONFIG (needConsistency=true, zkHost=<helper
+    # connectString>, zkTimeoutMs from this dict) into every master env.
+    # Tier-1 dual-standalone specs leave this None: no ZK, no election, no
+    # forwarding (needConsistency=false → LOCAL_STANDALONE, the mock line's
+    # existing state).
+    zk_consistency: Optional[dict] = None  # e.g. {"zkTimeoutMs": 30000}
 
     def fingerprint(self) -> str:
         return json.dumps(
@@ -467,6 +817,12 @@ class EnvSpec:
                 "decode_cache_blocks": self.decode_cache_blocks,
                 "spring_profile": self.spring_profile,
                 "master_stable_window_s": self.master_stable_window_s,
+                # HA axes: absent-equivalent ([], None) for every legacy
+                # spec — the fingerprint VALUE changes (new keys) but stays
+                # stable within a process, so ensure() reuse semantics are
+                # unchanged and the legacy path never takes the new branch.
+                "masters": [m.fingerprint() for m in self.masters],
+                "zk_consistency": self.zk_consistency,
             },
             sort_keys=True,
         )
@@ -762,6 +1118,15 @@ class FlexEnv:
         self.victims: dict[str, ManagedProcess] = {}  # name -> process
         self.load_clients: list[ManagedProcess] = []
         self.master_start_count = 0
+        # HA dual-master registry (empty on the legacy single-master path —
+        # env.master stays the single source of truth there).  A value of
+        # None means "slot exists, process dead" (post-kill, pre-restart).
+        self.masters: dict[str, Optional[ManagedProcess]] = {}
+        self.master_specs: dict[str, MasterSpec] = {}
+        self.masters_start_count: dict[str, int] = {}
+        # ZK helper (Tier-2/3): ManagedProcess + advertised connectString.
+        self.zk_helper: Optional[ManagedProcess] = None
+        self.zk_connect_string: Optional[str] = None
 
     # -- addresses ---------------------------------------------------------
 
@@ -778,6 +1143,7 @@ class EnvManager:
         self.verbose = verbose
         self.current: Optional[FlexEnv] = None
         self._env_seq = 0
+        self._zk_ops_instance: Optional["ZkHelperOps"] = None
 
     # -- logging -----------------------------------------------------------
 
@@ -822,6 +1188,18 @@ class EnvManager:
         for vic in env.victims.values():
             vic.terminate()
         env.victims.clear()
+        # HA dual-master instances: SIGCONT first so a SIGSTOP-frozen JVM
+        # can drain on SIGTERM (terminate() would escalate to kill -9
+        # anyway — harmless, just noisier); then the ZK helper.
+        for name, mp in list(env.masters.items()):
+            if mp is not None:
+                try:
+                    mp.unfreeze()
+                except Exception:
+                    pass
+                mp.terminate()
+            env.masters[name] = None
+        self._stop_zk_helper(env)
         if env.master is not None:
             env.master.terminate()
             env.master = None
@@ -864,8 +1242,18 @@ class EnvManager:
         try:
             # mock cluster
             self._start_mock(env)
-            # master
-            if spec.master_profile != "none":
+            if spec.masters:
+                # HA dual-master path (gated on the registry being
+                # non-empty — the single-master legacy branch below is
+                # untouched).  Tier-2/3 boots the ZK helper first so the
+                # masters can grab the election lock at startup; Tier-1
+                # (zk_consistency=None) skips it entirely.
+                if spec.zk_consistency is not None:
+                    self.start_zk_helper(env)
+                for mspec in spec.masters:
+                    self.start_master_instance(env, mspec)
+            elif spec.master_profile != "none":
+                # master
                 self.start_master(env)
         except Exception:
             # Build failed before self.current was assigned: teardown()
@@ -910,6 +1298,12 @@ class EnvManager:
             str(env.perf_file),
             "--master-config",
             str(MASTER_CONFIG),
+            # stdout telemetry (java_mock_stats line every statsIntervalMs):
+            # lets the archived mock_engine.log answer "which RPC counters
+            # kept moving / stalled" for hang forensics (3c-class issues)
+            # without any behavioral change to the engine itself.
+            "--stats-stdout",
+            "true",
             "--prefill-cache-blocks",
             str(spec.prefill_cache_blocks),
             "--decode-cache-blocks",
@@ -953,7 +1347,16 @@ class EnvManager:
 
     # -- master ------------------------------------------------------------
 
-    def _master_env(self, env: FlexEnv) -> dict:
+    def _master_env(self, env: FlexEnv, mspec: Optional[MasterSpec] = None) -> dict:
+        """Master JVM env.
+
+        *mspec* is None on the single-master legacy path (byte-identical
+        behaviour).  A MasterSpec layers the per-instance keys on top of
+        the shared base: HIPPO_ROLE (default = the shared label role, the
+        mutual-backup pairing), FLEXLB_ADVERTISED_IP (Tier-2/3),
+        FLEXLB_SYNC_CONSISTENCY_CONFIG (Tier-2/3, built from the live ZK
+        helper connectString) and the per-instance extra_env.
+        """
         spec = env.spec
         menv = dict(BASE_MASTER_ENV)
         if spec.master_profile != "none":
@@ -1003,6 +1406,39 @@ class EnvManager:
                 "decode"
             ]
         menv.update(spec.master_env)  # spec overrides come last
+        if mspec is not None:
+            # Per-instance layer (HA dual-master path only — the legacy
+            # single-master path keeps mspec None and never reaches here).
+            if mspec.hippo_role:
+                menv["HIPPO_ROLE"] = mspec.hippo_role
+            if mspec.advertised_ip:
+                menv["FLEXLB_ADVERTISED_IP"] = mspec.advertised_ip
+            if spec.zk_consistency is not None:
+                if not env.zk_connect_string:
+                    # Fail-closed: a master must never boot with
+                    # needConsistency=true against a missing/dead ZK —
+                    # a dual-master pair without the election quorum
+                    # would split-brain.
+                    raise RuntimeError(
+                        "zk_consistency spec requires a live ZK helper "
+                        "(connectString missing) — fail-closed"
+                    )
+                menv["FLEXLB_SYNC_CONSISTENCY_CONFIG"] = json.dumps(
+                    {
+                        "needConsistency": True,
+                        "zookeeperConfig": {
+                            "zkHost": env.zk_connect_string,
+                            # Default 10s: session expiry inside the ≤60s
+                            # convergence window; widen via the
+                            # zk_consistency dict for slow-CI layouts.
+                            "zkTimeoutMs": int(
+                                spec.zk_consistency.get("zkTimeoutMs", 10000)
+                            ),
+                        },
+                    },
+                    separators=(",", ":"),
+                )
+            menv.update(mspec.extra_env)  # per-instance overrides come last
         return menv
 
     def _master_ports_in_use(self, env: FlexEnv) -> list[int]:
@@ -1153,6 +1589,287 @@ class EnvManager:
             self._log(f"kill -9 master (pid={env.master.pid})")
             env.master.kill9()
             env.master = None
+
+    # -- HA dual-master orchestration (gated on spec.masters) --------------
+
+    def _instance_ports_in_use(self, mspec: MasterSpec) -> list[int]:
+        """Instance's fixed ports (HTTP / management / gRPC = http+2),
+        probed on the instance's OWN bind ip.
+
+        On the Tier-2/3 same-port layout the probe against 127.0.0.2 must
+        not be confused by a sibling instance bound to 127.0.0.1 — distinct
+        addresses coexist, so only a wildcard squatter (e.g. the current
+        NettyServerBuilder.forPort gRPC bind, until the production-side
+        per-address prerequisite lands) reports the port busy on both.
+        """
+        ports = [mspec.http_port, mspec.management(), mspec.grpc_port()]
+        return [p for p in ports if port_in_use(p, mspec.bind_ip)]
+
+    def start_master_instance(
+        self, env: FlexEnv, mspec: MasterSpec, log_name: Optional[str] = None
+    ) -> ManagedProcess:
+        """Start ONE flexlb-api JVM per MasterSpec (HA dual-master path).
+
+        Mirrors start_master()'s readiness ladder (port → /master/info
+        ready → engine stable window) with every probe pointed at the
+        instance's own bind ip/port, plus the per-instance argv/env keys:
+        --server.address, --management.server.address, --flexlb.log.path
+        (per-instance log dir), FLEXLB_ADVERTISED_IP and
+        FLEXLB_SYNC_CONSISTENCY_CONFIG via _master_env(env, mspec).
+        """
+        spec = env.spec
+        if not API_JAR.is_file():
+            raise RuntimeError(f"flexlb-api jar not found: {API_JAR} (build it first)")
+        if env.masters.get(mspec.name) is not None:
+            raise RuntimeError(
+                f"master instance '{mspec.name}' already running; stop it first"
+            )
+        # Pre-flight on the instance's own addresses (mirrors the single
+        # master's sibling-instance wait; see _instance_ports_in_use).
+        port_wait_s = float(os.environ.get("FLEXLB_FT_MASTER_PORT_WAIT_S", "120"))
+        port_deadline = time.monotonic() + port_wait_s
+        while True:
+            busy = self._instance_ports_in_use(mspec)
+            if not busy:
+                break
+            if time.monotonic() >= port_deadline:
+                raise RuntimeError(
+                    f"master instance '{mspec.name}' ports still busy after "
+                    f"{port_wait_s:.0f}s on {mspec.bind_ip} (another master "
+                    f"running? the Tier-2/3 same-port layout additionally "
+                    f"needs the production-side per-address gRPC bind "
+                    f"prerequisite): {busy}"
+                )
+            self._log(
+                f"master '{mspec.name}' ports {busy} busy on {mspec.bind_ip}; "
+                f"waiting for release ..."
+            )
+            time.sleep(5.0)
+        java = resolve_java21()
+        env.masters_start_count[mspec.name] = (
+            env.masters_start_count.get(mspec.name, 0) + 1
+        )
+        n = env.masters_start_count[mspec.name]
+        log_name = log_name or (
+            f"flexlb_master_{mspec.name}.log"
+            if n == 1
+            else f"flexlb_master_{mspec.name}_restart{n}.log"
+        )
+        # Per-instance log dir — logback-spring.xml's springProperty
+        # flexlb.log.path: two instances must never interleave one file.
+        log_dir = env.run_dir / (mspec.log_dir_name or f"logs_{mspec.name}")
+        argv = [
+            java,
+            *JAVA_MODULE_OPTS,
+            "-jar",
+            str(API_JAR),
+            f"--server.port={mspec.http_port}",
+            f"--management.server.port={mspec.management()}",
+            f"--server.address={mspec.bind_ip}",
+            # Management port follows the main bind ip too: without it
+            # Spring binds 0.0.0.0 and the Tier-2/3 same-port pair would
+            # collide on the management port even though the main HTTP
+            # ports coexist on distinct addresses.
+            f"--management.server.address={mspec.bind_ip}",
+            f"--flexlb.log.path={log_dir}",
+            f"--spring.profiles.active={spec.spring_profile}",
+        ]
+        if spec.master_debug_log:
+            argv.append("--logging.level.org.flexlb=DEBUG")
+        argv.extend(spec.master_extra_args)
+        argv.extend(mspec.extra_args)
+        proc = ProcessOps.start(
+            argv, self._master_env(env, mspec), env.run_dir / log_name
+        )
+        env.masters[mspec.name] = proc
+        env.master_specs[mspec.name] = mspec
+
+        base_url = f"http://{mspec.bind_ip}:{mspec.http_port}"
+
+        def _master_info() -> Optional[dict]:
+            # /rtp_llm/master/info is a POST endpoint (GET returns 405).
+            status, data = http_post_json(f"{base_url}/rtp_llm/master/info", {})
+            return data if status == 200 else None
+
+        if not wait_for_port(mspec.bind_ip, mspec.http_port, 90):
+            raise RuntimeError(
+                f"master instance '{mspec.name}' failed to start:\n"
+                f"{proc.tail_log()}"
+            )
+        # Foreign-squatter guard (same rationale as start_master).
+        if not proc.alive():
+            raise RuntimeError(
+                f"master instance '{mspec.name}' exited during startup "
+                f"(port conflict?):\n{proc.tail_log()}"
+            )
+        if not wait_for(
+            lambda: (lambda d: bool(d and d.get("ready")))(_master_info()),
+            timeout_s=30,
+            interval_s=0.5,
+        ):
+            raise RuntimeError(
+                f"master instance '{mspec.name}' HTTP up but engine sync not "
+                f"ready after 30s (check {log_dir})"
+            )
+        # Stability window (same semantics as start_master).
+        window_s = spec.master_stable_window_s
+        if window_s > 0:
+
+            def _engines_stable() -> bool:
+                data = _master_info()
+                if not data or not data.get("ready"):
+                    return False
+                summary = data.get("worker_summary", {}) or {}
+                for role, expected in (
+                    ("PREFILL", spec.n_prefill),
+                    ("DECODE", spec.n_decode),
+                ):
+                    if expected <= 0:
+                        continue
+                    entry = summary.get(role) or {}
+                    try:
+                        discovered = int(entry.get("discovered", -1))
+                        alive = int(entry.get("alive", -1))
+                    except (TypeError, ValueError):
+                        return False
+                    if discovered != expected or alive != discovered:
+                        return False
+                return True
+
+            needed = max(1, int(round(window_s / 0.5)))
+            stable_ticks = 0
+            deadline = time.monotonic() + 90
+            while time.monotonic() < deadline:
+                if _engines_stable():
+                    stable_ticks += 1
+                    if stable_ticks >= needed:
+                        break
+                else:
+                    stable_ticks = 0
+                time.sleep(0.5)
+            if stable_ticks < needed:
+                if not proc.alive():
+                    raise RuntimeError(
+                        f"master instance '{mspec.name}' exited:\n" f"{proc.tail_log()}"
+                    )
+                raise RuntimeError(
+                    f"master instance '{mspec.name}' engines not stable "
+                    f"(alive == discovered for {window_s:.0f}s) within 90s "
+                    f"— check {log_dir}"
+                )
+        self._log(
+            f"master instance '{mspec.name}' up (pid={proc.pid}, "
+            f"http={base_url}, grpc={mspec.bind_ip}:{mspec.grpc_port()})"
+        )
+        return proc
+
+    def _live_instance(self, env: FlexEnv, name: str) -> ManagedProcess:
+        mp = env.masters.get(name)
+        if mp is None:
+            raise RuntimeError(f"master instance '{name}' is not running")
+        return mp
+
+    def master_instance_http(self, env: FlexEnv, name: str) -> str:
+        """HTTP base URL of one registered instance (probing + assertions)."""
+        mspec = env.master_specs[name]
+        return f"http://{mspec.bind_ip}:{mspec.http_port}"
+
+    def master_instance_target(self, env: FlexEnv, name: str) -> str:
+        """gRPC target (bind_ip:grpc_port) — the GRPC_TARGETS entry format."""
+        mspec = env.master_specs[name]
+        return f"{mspec.bind_ip}:{mspec.grpc_port()}"
+
+    def kill_master9_instance(self, env: FlexEnv, name: str) -> None:
+        """Mode 1 directed fault: kill -9 ONE instance (cold-restart semantics).
+
+        The registry slot flips to None ("dead, restartable") — the other
+        instance keeps running untouched.
+        """
+        mp = self._live_instance(env, name)
+        self._log(f"kill -9 master instance '{name}' (pid={mp.pid})")
+        mp.kill9()
+        env.masters[name] = None
+
+    def stop_master_instance(
+        self, env: FlexEnv, name: str, settle_s: float = 2.0
+    ) -> None:
+        """Graceful SIGTERM stop of ONE instance (orderly, drains on SIGTERM)."""
+        mp = self._live_instance(env, name)
+        self._log(f"stopping master instance '{name}' (pid={mp.pid})")
+        mp.terminate()
+        env.masters[name] = None
+        time.sleep(settle_s)
+
+    def restart_master_instance(self, env: FlexEnv, name: str) -> ManagedProcess:
+        """Mode 1 recovery: fresh JVM from the SAME MasterSpec (cold start —
+        in-memory state zeroed, converges from the zero-point)."""
+        mspec = env.master_specs[name]
+        return self.start_master_instance(env, mspec)
+
+    def freeze_master_instance(self, env: FlexEnv, name: str) -> None:
+        """Mode 2 directed fault: SIGSTOP ONE instance.
+
+        Port stays up, process is unresponsive, in-memory state retained
+        (hot-recovery semantics on SIGCONT — no cold restart).
+        """
+        mp = self._live_instance(env, name)
+        self._log(f"SIGSTOP master instance '{name}' (pid={mp.pid})")
+        mp.freeze()
+
+    def unfreeze_master_instance(self, env: FlexEnv, name: str) -> None:
+        """Mode 2 recovery: SIGCONT the frozen instance (hot recovery)."""
+        mp = self._live_instance(env, name)
+        self._log(f"SIGCONT master instance '{name}' (pid={mp.pid})")
+        mp.unfreeze()
+
+    # -- ZK helper (Tier-2/3, gated on spec.zk_consistency) ----------------
+
+    def start_zk_helper(self, env: FlexEnv) -> None:
+        """Boot the ZK helper JVM and wait for 'ZK_READY <connectString>'.
+
+        Fail-closed by design: ANY startup failure raises here, and the
+        _build() failure path then stops the partial env — the masters must
+        never start against a missing/quorum-less ZK (split-brain guard).
+        """
+        if env.zk_helper is not None:
+            raise RuntimeError("ZK helper already running")
+        java = resolve_java21()
+        override = os.environ.get(ZK_LAUNCH_CMD_ENV)
+        if override:
+            argv = shlex.split(override)
+        else:
+            argv = ZkHelperOps.default_launch_argv(java, env.run_dir)
+        log_file = env.run_dir / "zk_helper.log"
+        proc = ProcessOps.start(argv, dict(os.environ), log_file, cwd=FLEXLB_DIR)
+        env.zk_helper = proc
+        connect: Optional[str] = None
+        deadline = time.monotonic() + ZK_READY_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if not proc.alive():
+                raise RuntimeError(
+                    f"ZK helper exited during startup (fail-closed):\n"
+                    f"{proc.tail_log()}"
+                )
+            connect = ZkHelperOps.find_ready_connect_string(log_file)
+            if connect:
+                break
+            time.sleep(0.2)
+        if not connect:
+            raise RuntimeError(
+                f"ZK helper did not print '{ZK_READY_PREFIX} <connectString>' "
+                f"within {ZK_READY_TIMEOUT_S:.0f}s (fail-closed):\n"
+                f"{proc.tail_log()}"
+            )
+        env.zk_connect_string = connect
+        self._log(f"ZK helper up (pid={proc.pid}, connectString={connect})")
+
+    def _stop_zk_helper(self, env: FlexEnv) -> None:
+        if env.zk_helper is not None:
+            self._log(f"stopping ZK helper (pid={env.zk_helper.pid})")
+            # Contract exit path: SIGTERM (launcher also exits on stdin EOF).
+            env.zk_helper.terminate()
+            env.zk_helper = None
+        env.zk_connect_string = None
 
     # -- victims (engine-kill chaos) --------------------------------------
 
@@ -1311,6 +2028,46 @@ class ClientOps:
             proc.proc.wait(timeout=timeout_s)
         except subprocess.TimeoutExpired:
             proc.kill9()
+        rc = proc.proc.returncode if proc.proc.returncode is not None else -1
+        return LoadClientResult(output_dir, rc)
+
+    def run_async(
+        self,
+        overrides: dict,
+        output_dir: Path,
+        log_file: Path,
+        label: str = "load_client_async",
+    ) -> tuple[ManagedProcess, Path]:
+        """Start JavaLoadClient WITHOUT waiting for it (HA background flow).
+
+        HA cases keep a steady client running ACROSS fault injections
+        (that is the whole point — observe the in-flight behaviour).  The
+        process is registered on env.load_clients so a mid-case failure
+        still gets cleaned up by _stop_env_processes().
+        """
+        output_dir.mkdir(parents=True, exist_ok=True)
+        argv = self._argv()
+        menv = self._base_env({**overrides, "OUTPUT_DIR": str(output_dir)})
+        proc = ProcessOps.start(argv, menv, log_file)
+        env = self.env_manager.current
+        if env is not None:
+            env.load_clients.append(proc)
+        return proc, output_dir
+
+    def stop_async(
+        self,
+        proc: ManagedProcess,
+        output_dir: Path,
+        timeout_s: float = 15.0,
+    ) -> LoadClientResult:
+        """Terminate a run_async client and return its result handle.
+
+        SIGTERM lets the JVM run its shutdown path (jsonl writers flush);
+        rows still buffered at the exact kill instant may be lost, which is
+        why HA assertions compare pre/post-injection WINDOWS instead of
+        exact request totals.
+        """
+        proc.terminate(timeout_s=timeout_s)
         rc = proc.proc.returncode if proc.proc.returncode is not None else -1
         return LoadClientResult(output_dir, rc)
 

@@ -729,18 +729,19 @@ def cancel_engine_notfound_settle(ctx: CaseContext):
     terminal snapshot untouched (state is terminal → no second
     settlement, no engine cancel is forwarded); engine-side
     JavaMockEngineCluster.cancelRequest classifies the request as
-    alreadyFinished and answers CANCEL_STATUS_NOT_FOUND without
+    alreadyFinished and answers CANCEL_STATUS_TOMBSTONED without
     republishing any terminal.
 
     Expected (contract): the master Cancel RPC succeeds (idempotent);
-    the direct engine Cancel answers NOT_FOUND; the engine's recorded
+    the direct engine Cancel answers TOMBSTONED; the engine's recorded
     terminal stays a completion (no cancelled_rids entry / lifecycle
     rewrite); the master inflight ledger stays clean (nothing re-opened);
     a follow-up request completes normally.
 
     Prediction: passes (t4 already covers the master-idempotent half;
-    the engine NOT_FOUND branch is the mock's documented three-branch
-    cancel semantics).
+    the engine already-finished branch is the mock's documented
+    three-branch cancel semantics: NOT_FOUND (unknown) / TOMBSTONED
+    (already finished) / ACCEPTED (tracked)).
     """
     ops = ctx.ops()
     rid = ops.next_request_id(rid_base(ctx, "cancel"))
@@ -768,12 +769,13 @@ def cancel_engine_notfound_settle(ctx: CaseContext):
             master_cancel_ok, master_cancel_err = False, repr(exc)
 
         # Direct engine probe (bypass the master): the fence arriving at
-        # the engine AFTER the terminal must read NOT_FOUND.
+        # the engine AFTER the terminal must read TOMBSTONED (the
+        # already-finished branch of the three-branch cancel map).
         engine_status_ok, engine_status_detail = False, "no probe"
         try:
             stub = ops.pb2_grpc.RpcServiceStub(ops._channel(ops.prefill_addr(response)))
             ack = stub.Cancel(ops.pb2.CancelRequestPB(request_id=rid), timeout=10.0)
-            engine_status_ok = ack.status == ops.pb2.CANCEL_STATUS_NOT_FOUND
+            engine_status_ok = ack.status == ops.pb2.CANCEL_STATUS_TOMBSTONED
             engine_status_detail = f"status={ack.status}"
         except Exception as exc:
             engine_status_detail = repr(exc)

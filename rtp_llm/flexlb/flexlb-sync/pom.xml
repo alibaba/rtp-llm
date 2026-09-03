@@ -46,6 +46,22 @@
             <groupId>org.apache.zookeeper</groupId>
             <artifactId>zookeeper</artifactId>
         </dependency>
+        <!-- Tier-2 HA case test: embedded ZooKeeper for real leader-election
+             coverage (ZkLeaderElectionTest / ZkTestingServerLauncher).
+             zookeeper is excluded because this module already pins 3.6.3;
+             curator-test 5.4.0 is compatible with it. -->
+        <dependency>
+            <groupId>org.apache.curator</groupId>
+            <artifactId>curator-test</artifactId>
+            <version>${curator.version}</version>
+            <scope>test</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.apache.zookeeper</groupId>
+                    <artifactId>zookeeper</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
         <dependency>
             <groupId>io.projectreactor</groupId>
             <artifactId>reactor-core</artifactId>
