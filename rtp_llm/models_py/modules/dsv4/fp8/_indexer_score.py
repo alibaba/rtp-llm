@@ -30,6 +30,8 @@ from typing import Optional
 
 import torch
 
+_BAND_BOUNDS_CT = [0]  # S4 engagement proof (DSV4_DIAG, first 3 fires)
+
 # DeepGEMM JIT writes ``kernel.cu`` under ``$HOME/.deep_gemm/tmp/<id>/``
 # and shells out to NVCC; if ``HOME`` is unset (bazel test sandbox does
 # not propagate it by default) ``os.path.expanduser("~")`` returns ``~``
@@ -243,15 +245,55 @@ def fp8_mqa_indexer_score(
                 torch.bfloat16
             ).unsqueeze(0).contiguous()
             w_f32 = w_fold.float().unsqueeze(0).contiguous()
-            # ONE D2H sync per call: chunk bounds are computed host-side.
-            ke_host = cu_seqlen_ke.to(torch.int64).cpu()
-            ks_host = cu_seqlen_ks.to(torch.int64).cpu()
+            # ONE small DtoH per call (S4 fix, Sep 3): band bounds are
+            # reduced on-device per band, and only [nb, 2] int32 crosses to
+            # the host (~64 B). The previous form copied the FULL
+            # cu_seqlen_ke/ks arrays as int64 (2 x 64 KiB at 32K ISL — the
+            # per-layer 65536-B DtoH class in every trace since q2prof) plus
+            # the int64-widening elementwise kernels, only to take per-band
+            # max/min on the host. Values are identical (max/min over the
+            # same rows; the partial tail band is reduced on its real
+            # slice), so the scored region is unchanged.
+            n_bands = (M_rows + band_rows - 1) // band_rows
+            n_full = M_rows // band_rows
+            ke_parts, ks_parts = [], []
+            if n_full:
+                ke_parts.append(
+                    cu_seqlen_ke[: n_full * band_rows]
+                    .view(n_full, band_rows)
+                    .max(dim=1)
+                    .values
+                )
+                ks_parts.append(
+                    cu_seqlen_ks[: n_full * band_rows]
+                    .view(n_full, band_rows)
+                    .min(dim=1)
+                    .values
+                )
+            rem = M_rows - n_full * band_rows
+            if rem:
+                ke_parts.append(cu_seqlen_ke[n_full * band_rows :].max().view(1))
+                ks_parts.append(cu_seqlen_ks[n_full * band_rows :].min().view(1))
+            band_bounds = torch.stack(
+                [torch.cat(ke_parts), torch.cat(ks_parts)], dim=1
+            ).to("cpu", torch.int64)
+            ke_host_b = band_bounds[:, 0].tolist()
+            ks_host_b = band_bounds[:, 1].tolist()
+            if os.environ.get("DSV4_DIAG") and _BAND_BOUNDS_CT[0] < 3:
+                _BAND_BOUNDS_CT[0] += 1
+                import sys
+                print("[S4-BAND] rank=%d M=%d bands=%d packed_dtoh_bytes=%d" % (
+                    torch.distributed.get_rank()
+                    if torch.distributed.is_initialized() else -1,
+                    M_rows, n_bands,
+                    band_bounds.numel() * band_bounds.element_size()),
+                    file=sys.stderr, flush=True)
             out = torch.empty(
                 (M_rows, N_cols), dtype=torch.float32, device=q_fp8.device)
-            for r0 in range(0, M_rows, band_rows):
+            for b_i, r0 in enumerate(range(0, M_rows, band_rows)):
                 r1 = min(r0 + band_rows, M_rows)
-                ke_max = min(int(ke_host[r0:r1].max().item()), N_cols)
-                ks_min = max(int(ks_host[r0:r1].min().item()), 0)
+                ke_max = min(int(ke_host_b[b_i]), N_cols)
+                ks_min = max(int(ks_host_b[b_i]), 0)
                 if ke_max <= ks_min:
                     continue
                 sub = v4_indexer_score(
