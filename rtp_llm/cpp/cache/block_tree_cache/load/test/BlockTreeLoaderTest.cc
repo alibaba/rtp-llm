@@ -133,19 +133,31 @@ TEST(BlockTreeLoaderTest, HostLoadUsesReservedAdmissionWhenBackgroundQueueIsFull
     [[maybe_unused]] auto release_guard =
         std::shared_ptr<void>(nullptr, [release_workers](void*) { release_workers(); });
 
-    auto entered_count   = std::make_shared<std::atomic<size_t>>(0);
-    auto entered_promise = std::make_shared<std::promise<void>>();
-    auto entered_future  = entered_promise->get_future();
+    auto  entered_count   = std::make_shared<std::atomic<size_t>>(0);
+    auto  entered_promise = std::make_shared<std::promise<void>>();
+    auto  entered_future  = entered_promise->get_future();
+    auto* task_pool       = environment->cache->task_pool_.get();
     for (size_t worker = 0; worker < worker_count; ++worker) {
-        ASSERT_TRUE(environment->cache->task_pool_->submit(BlockTreeTaskClass::BACKGROUND,
-                                                           [release_future, entered_count, entered_promise]() {
-                                                               if (entered_count->fetch_add(1) + 1 == worker_count) {
-                                                                   entered_promise->set_value();
-                                                               }
-                                                               release_future.wait();
-                                                           }));
+        ASSERT_TRUE(task_pool->acquireWorkflowCredit(BlockTreeTaskClass::BACKGROUND));
+        if (!task_pool->submit(BlockTreeTaskClass::BACKGROUND,
+                               [task_pool, release_future, entered_count, entered_promise]() {
+                                   if (entered_count->fetch_add(1) + 1 == worker_count) {
+                                       entered_promise->set_value();
+                                   }
+                                   release_future.wait();
+                                   task_pool->releaseWorkflowCredit(BlockTreeTaskClass::BACKGROUND);
+                               })) {
+            task_pool->releaseWorkflowCredit(BlockTreeTaskClass::BACKGROUND);
+            FAIL() << "failed to submit background workflow";
+        }
     }
     ASSERT_EQ(entered_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(task_pool->background_workflow_credits_.load(), worker_count);
+    const bool extra_background_credit = task_pool->acquireWorkflowCredit(BlockTreeTaskClass::BACKGROUND);
+    EXPECT_FALSE(extra_background_credit);
+    if (extra_background_credit) {
+        task_pool->releaseWorkflowCredit(BlockTreeTaskClass::BACKGROUND);
+    }
 
     ASSERT_TRUE(environment->cache->task_pool_->submit(BlockTreeTaskClass::BACKGROUND, [] {}));
     ASSERT_TRUE(environment->cache->task_pool_->submit(BlockTreeTaskClass::BACKGROUND, [] {}));
@@ -195,6 +207,7 @@ TEST(BlockTreeLoaderTest, HostLoadUsesReservedAdmissionWhenBackgroundQueueIsFull
     environment->expectFullyReclaimed();
     EXPECT_EQ(environment->cache->task_pool_->pending_tasks_.load(), 0);
     EXPECT_EQ(environment->cache->task_pool_->workflow_credits_.load(), 0u);
+    EXPECT_EQ(environment->cache->task_pool_->background_workflow_credits_.load(), 0u);
 }
 
 TEST(BlockTreeLoaderTest, HostOnlyPolicyReadsHostCopyWhenDeviceCopyAlsoExists) {

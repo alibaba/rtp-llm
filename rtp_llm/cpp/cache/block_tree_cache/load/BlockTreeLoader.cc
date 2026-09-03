@@ -328,7 +328,7 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
     block_tree_cache_detail::ScopeRollback rollback_guard(
         [this, &load_descs, &joined_loads, &prepared_desc_count, &workflow_credit_acquired, context_id]() {
             if (workflow_credit_acquired) {
-                task_pool_->releaseWorkflowCredit();
+                task_pool_->releaseWorkflowCredit(BlockTreeTaskClass::LOAD);
             }
             abortLoadLocked(load_descs,
                             joined_loads,
@@ -362,7 +362,7 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
         scheduleContextSettlement(task, ready_context);
     });
     if (task) {
-        if (!task_pool_->acquireWorkflowCredit()) {
+        if (!task_pool_->acquireWorkflowCredit(BlockTreeTaskClass::LOAD)) {
             return false;
         }
         workflow_credit_acquired = true;
@@ -375,10 +375,13 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
                                                           currentTimeUs() - task->enqueue_time_us);
         };
         task->enqueue_time_us = currentTimeUs();
+        const bool uses_disk  = std::any_of(task->load_descs.begin(), task->load_descs.end(), [](const auto& desc) {
+            return desc.source_tier == Tier::DISK || desc.target_tier == Tier::DISK;
+        });
         if (!task_pool_->submit(
                 BlockTreeTaskClass::LOAD,
                 [this, task]() { runLoadTask(task); },
-                BlockTreeTaskPool::kDefaultQueueWaitTimeout,
+                std::chrono::milliseconds(uses_disk ? disk_timeout_ms_ : host_timeout_ms_),
                 std::move(on_timeout))) {
             return false;
         }
@@ -478,7 +481,8 @@ void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&  
         bool                                           settlement_success = context->aggregateSuccess();
         std::vector<std::shared_ptr<LoadAsyncContext>> joined_contexts;
         if (task) {
-            block_tree_cache_detail::ScopeRollback credit_guard([this]() { task_pool_->releaseWorkflowCredit(); });
+            block_tree_cache_detail::ScopeRollback credit_guard(
+                [this]() { task_pool_->releaseWorkflowCredit(BlockTreeTaskClass::LOAD); });
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 settlement_success = settleLoadLocked(*task, settlement_success, joined_contexts);
