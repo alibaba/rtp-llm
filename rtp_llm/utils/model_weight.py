@@ -424,24 +424,36 @@ def stack_0(ts: List[torch.Tensor]) -> torch.Tensor:
 
 
 def stack_moe_w1(ts: List[torch.Tensor]):
-    gate = ts[: len(ts) // 2]
-    up = ts[len(ts) // 2 :]
-    # Stack all gate and up weights first (2 big ops), then concat along dim=1 (1 op)
-    # Instead of 512x concat_0 + 1x stack_0
-    gate_stacked = stack_0(gate)  # [experts, intermediate, hidden]
+    up = ts[: len(ts) // 2]
+    gate = ts[len(ts) // 2 :]
+    # Model definitions pass up_proj weights first and gate_proj weights second.
+    # Stack each projection before concatenating into the [up; gate] layout.
     up_stacked = stack_0(up)  # [experts, intermediate, hidden]
-    x = concat_1([gate_stacked, up_stacked])  # [experts, 2*intermediate, hidden]
+    gate_stacked = stack_0(gate)  # [experts, intermediate, hidden]
+    x = concat_1([up_stacked, gate_stacked])  # [experts, 2*intermediate, hidden]
     return x
 
 
 def stack_moe_w1_s2(ts: List[torch.Tensor]):
-    gate = ts[: len(ts) // 2]
-    up = ts[len(ts) // 2 :]
+    up = ts[: len(ts) // 2]
+    gate = ts[len(ts) // 2 :]
     ws = []
-    for w1, w3 in zip(gate, up):
-        ws.append(max_scalar([w1, w3]))
+    for up_scale, gate_scale in zip(up, gate):
+        ws.append(max_scalar([up_scale, gate_scale]))
     x = stack_0(ws)
     return x
+
+
+def stack_moe_w1_s2_pair(ts: List[torch.Tensor]):
+    """Keep independent [up, gate] outer scales for B12X preparation."""
+    up = ts[: len(ts) // 2]
+    gate = ts[len(ts) // 2 :]
+    pairs = []
+    for up_scale, gate_scale in zip(up, gate):
+        if up_scale.numel() != 1 or gate_scale.numel() != 1:
+            raise ValueError("MoE weight_scale_2 must be scalar per projection")
+        pairs.append(torch.stack([up_scale.reshape(()), gate_scale.reshape(())]))
+    return stack_0(pairs)
 
 
 def get_sp_tensor(
@@ -1343,6 +1355,7 @@ class W:
     moe_z1 = "partial_moe_weights.intermediate_weight.zero"
     moe_s1 = "partial_moe_weights.intermediate_weight.weight_only_quant_scale"
     moe_w1_s2 = "partial_moe_weights.intermediate_weight.weight_scale_2"
+    moe_w1_s2_pair = "partial_moe_weights.intermediate_weight.weight_scale_2_up_gate"
     moe_w1_i_s = "partial_moe_weights.intermediate_weight.input_scale"
     moe_z2 = "partial_moe_weights.intermediate_weight2.zero"
     moe_s2 = "partial_moe_weights.intermediate_weight2.weight_only_quant_scale"
@@ -1572,6 +1585,7 @@ class W:
         moe_z1: sp_moe_w1,
         moe_s1: sp_moe_w1,
         moe_w1_s2: sp_id,
+        moe_w1_s2_pair: sp_id,
         moe_w1_i_s: sp_id,
         moe_b1: sp_moe_neg1,
         moe_w2: sp_moe_neg1,

@@ -62,6 +62,43 @@ moe = factory.create_fused_moe(config, weights)
 
 The interface is fully compatible with the old version, no need to modify existing code.
 
+### B12X FP4
+
+The `fp4_b12x` strategy and `b12x` FP4 operator require BF16 ModelOpt NVFP4
+weights, an SM120/SM121 GPU, and `ep_size=1`. The kernel uses global expert
+IDs and therefore does not support expert-sharded weights or DeepEP routing.
+The B12x wrapper requires a CUDA 13 toolchain. The local adapter checks for the
+FlashInfer B12x APIs it consumes instead of restricting the package version, so
+dependency updates must retain those APIs and include GPU test coverage.
+When CUDA Graph is enabled, the executor uses the configured decode capacity
+`ll_num_max_token` for captured calls and falls back to eager execution for
+larger prefill calls. The server derives this capacity from
+`--concurrency_limit`. The persistent MMA blockscale footprint per layer is
+`3 * expert_num * hidden_size * moe_intermediate_size / 16` bytes; model weight
+preprocessing replaces the source swizzled scales rather than retaining both
+layouts, and executor construction treats the prepared dictionary as read-only.
+
+The backend fixes activation global scales to 1 and does not consume the
+checkpoint `input_scale`, so compatible checkpoints must have activation
+dynamic ranges around O(1). SM120/SM121 has no alternative single-GPU FP4 MoE
+backend because the TRT-LLM FP4 cubins do not include these architectures. If
+the B12X path fails, rollback requires non-FP4 MoE weights; explicitly selecting
+`trtllm` fails during startup. By default, model loading rejects a checkpoint
+when folding `weight_scale_2` into e4m3 block scales loses more than 0.1% of
+scale energy. Operators may temporarily override that limit with
+`--b12x_zeroed_energy_limit` / `RTP_LLM_B12X_ZEROED_ENERGY_LIMIT` in the range
+`[0, 1]` while preparing replacement non-FP4 weights. This low-level emergency
+control is logged once with its effective setting at startup. Kernel JIT occurs
+on the first B12x execution; issue an end-to-end health request before
+registering the server for traffic so a toolchain failure is reported during
+deployment rather than user traffic.
+
+Explicit `fp4_moe_op` values now survive backend-process serialization. After
+upgrading, a stale explicit value can therefore produce a startup strategy
+selection error instead of being silently reset. Set `fp4_moe_op=auto` or
+choose an operator supported by the target GPU; this preserves the intended
+configuration rather than restoring the old serialization bug.
+
 ## Design Patterns
 
 ### 1. Strategy Pattern
@@ -122,7 +159,7 @@ Quantization configuration dataclass (`defs/quant_config.py`), provides:
 
 Type enums (`defs/type.py`) for priority calculation:
 - **RouterType**: `BATCHED_DATA` (0), `DEEPGEMM_CONTINUOUS` (1), `DEEPEP_NORMAL` (2), `DEEPEP_LOW_LATENCY` (4), `PURE_TP` (5)
-- **ExecutorType**: `BATCHED_TRITON` (0), `DEEPGEMM_CONTINUOUS` (1), `DEEPGEMM_MASKED` (2), `FUSED_MOE` (2), `CUTLASS_FP8` (3), `CUTLASS_BATCHED_FP8` (4)
+- **ExecutorType**: See the canonical ordered list in [Priority System](#priority-system).
 
 ### DeepEpInitializer
 
@@ -304,15 +341,16 @@ FusedMoeFactory.set_registry(registry)
 ### Priority System
 
 Priority is **automatically calculated** based on Router and Executor types:
-- **Formula**: `priority = router_type.value * 10 + executor_type.value`
-- **Router types**: `BATCHED_DATA` (0) < `DEEPGEMM_CONTINUOUS` (1) < `DEEPEP_NORMAL` (2) < `DEEPEP_LOW_LATENCY` (4) < `PURE_TP` (5)
-- **Executor types**: `BATCHED_TRITON` (0) < `DEEPGEMM_CONTINUOUS` (1) < `DEEPGEMM_MASKED`/`FUSED_MOE` (2) < `CUTLASS_FP8` (3) < `CUTLASS_BATCHED_FP8` (4)
+- **Formula**: `priority = router_type.value * EXECUTOR_PRIORITY_BASE + executor_type.value`
+- **Base**: `EXECUTOR_PRIORITY_BASE` (currently 100, in `defs/priority_attributes.py`) is the place value of the router digit. It must stay strictly greater than every `ExecutorType` value so that no two (router, executor) pairs encode to the same priority; `calculate_strategy_priority()` validates this. Raise the base when an executor value reaches it.
+- **Router types**: `BATCHED_DATA` (0) < `DEEPGEMM_CONTINUOUS` (1) < `DEEPEP_NORMAL` (2) < `DEEPEP_LOW_LATENCY` (4) < `PURE_TP` (5) < `MORI_EP_INTRANODE` (6) < `MORI_EP_INTERNODE` (7)
+- **Executor types**: `BATCHED_TRITON` (0) < `DEEPGEMM_CONTINUOUS` (1) < `DEEPGEMM_MASKED`/`FUSED_MOE` (2) < `CUTLASS_FP8` (3) < `CUTLASS_BATCHED_FP8` (4) < `CUTLASS_W4A8_INT4_PER_CHANNEL` (5) < `CUTLASS_BATCHED_W4A8_INT4_PER_CHANNEL` (6) < `TRTLLM_FP4` (7) < `CUTEDSL_FP4` (8) < `B12X_FP4` (10)
 
 **Examples**:
-- `BATCHED_DATA` + `BATCHED_TRITON` = 0×10 + 0 = **0** (lowest)
-- `DEEPEP_LOW_LATENCY` + `CUTLASS_BATCHED_FP8` = 4×10 + 4 = **44** (highest)
-- `DEEPEP_NORMAL` + `CUTLASS_FP8` = 2×10 + 3 = **23** (mid-high)
-- `PURE_TP` + `CUTLASS_BATCHED_FP8` = 5×10 + 4 = **54** (highest possible)
+- `BATCHED_DATA` + `BATCHED_TRITON` = 0×100 + 0 = **0** (lowest)
+- `DEEPEP_NORMAL` + `CUTLASS_FP8` = 2×100 + 3 = **203** (mid)
+- `DEEPEP_LOW_LATENCY` + `CUTLASS_BATCHED_FP8` = 4×100 + 4 = **404**
+- `PURE_TP` + `B12X_FP4` = 5×100 + 10 = **510**
 
 This means you **don't need to manually set numeric priorities**. Just declare what Router and Executor implementations your strategy uses (via `get_attributes()`), and the priority is calculated automatically based on their performance characteristics. Router and Executor classes must implement `router_type()` and `executor_type()` class methods that return the corresponding enum values.
 
