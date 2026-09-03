@@ -276,7 +276,7 @@ class UniConfigConfigSourceTest {
     private void initializeConfigService() {
         configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
         ArgumentCaptor<Runnable> pollCaptor = ArgumentCaptor.forClass(Runnable.class);
-        verify(executor).scheduleWithFixedDelay(pollCaptor.capture(), eq(60L), eq(60L), eq(TimeUnit.SECONDS));
+        verify(executor).scheduleWithFixedDelay(pollCaptor.capture(), eq(30L), eq(30L), eq(TimeUnit.SECONDS));
         poll = pollCaptor.getValue();
     }
 
