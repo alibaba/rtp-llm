@@ -1,7 +1,7 @@
 """eval_collectors G6 (master server_latency counter poller) unit tests.
 
-G6 was unified into the single --group secondary collector process (was: a
-standalone --group counter process). The wire contract that MUST NOT drift:
+G6 is one lane of the eval_collectors process run_online_eval.sh starts
+per run. The wire contract that MUST NOT drift:
 
   * output file master_counters_timeseries.txt, one kv line per round:
       ts_epoch_ms=<epoch_ms int> arrival_count=<int> completion_count=<int>
@@ -165,10 +165,10 @@ class G6CounterPollerTest(unittest.TestCase):
             )
         self.assertEqual(len(rows), len(lines))
 
-    def test_g6_only_secondary_group_cli_end_to_end(self):
-        # G6-only invocation of the unified process: no mock/prometheus/
-        # inflight/pid argv — exactly what run_online_eval.sh passes when
-        # FLEXLB_SECONDARY_POLLERS_ENABLED=0 && START_FLEXLB=1.
+    def test_g6_only_cli_end_to_end(self):
+        # G6-only invocation: no mock/prometheus/inflight/pid argv — exactly
+        # what run_online_eval.sh passes when FLEXLB_SECONDARY_POLLERS_ENABLED=0
+        # && START_FLEXLB=1.
         body = '{"arrival_count": 11, "completion_count": 9}'
         with tempfile.TemporaryDirectory() as tmp, _serving([(200, body)]) as (addr, _):
             out = Path(tmp) / "master_counters_timeseries.txt"
@@ -176,8 +176,6 @@ class G6CounterPollerTest(unittest.TestCase):
                 [
                     sys.executable,
                     str(COLLECTORS),
-                    "--group",
-                    "secondary",
                     "--counter-http-addr",
                     addr,
                     "--counter-out",
@@ -206,8 +204,6 @@ class G6CounterPollerTest(unittest.TestCase):
             [
                 sys.executable,
                 str(COLLECTORS),
-                "--group",
-                "secondary",
                 "--counter-http-addr",
                 "127.0.0.1:1",
             ],
@@ -220,16 +216,18 @@ class G6CounterPollerTest(unittest.TestCase):
             proc.stderr,
         )
 
-    def test_cli_rejects_legacy_counter_group(self):
-        # The standalone --group counter process is gone: G6 lives inside
-        # --group secondary now.
+    def test_cli_rejects_removed_group_flag(self):
+        # --group is gone from the CLI (single collector process, lanes are
+        # argv pairs). This also guards the shell call site: if a future edit
+        # reintroduced `--group secondary` into run_online_eval.sh, every
+        # run would die here at startup — rc 2 instead of a silent drift.
         proc = subprocess.run(
-            [sys.executable, str(COLLECTORS), "--group", "counter"],
+            [sys.executable, str(COLLECTORS), "--group", "secondary"],
             capture_output=True,
             text=True,
         )
         self.assertEqual(2, proc.returncode)
-        self.assertIn("invalid choice", proc.stderr)
+        self.assertIn("unrecognized arguments: --group", proc.stderr)
 
     def test_sigterm_burst_exits_cleanly(self):
         # Regression (SIGTERM re-entry deadlock): run_online_eval.sh's stop
@@ -250,8 +248,6 @@ class G6CounterPollerTest(unittest.TestCase):
                 [
                     sys.executable,
                     str(COLLECTORS),
-                    "--group",
-                    "secondary",
                     "--counter-http-addr",
                     addr,
                     "--counter-out",

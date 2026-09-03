@@ -1,37 +1,30 @@
 #!/usr/bin/env python3
-"""Background collectors extracted from run_online_eval.sh's heredoc pollers.
+"""Background collectors for run_online_eval.sh: threads of one
+stdlib-only process, one thread per enabled poller lane.
 
-The python3 heredoc pollers that run_online_eval.sh used to spawn as
-independent background processes live here as threads of one stdlib-only
-process; the master counter poller (G6) runs in that same process as the
-secondary collectors, so one invocation covers every 1s series.
-
---group secondary (the only group; run_online_eval.sh starts one process
-per run):
-  up to 5 threads —
+run_online_eval.sh starts one process per run and passes only the lanes
+whose guards are on —
                       G1 mock per-engine prometheus (mock control port),
                       G3 master business prometheus (management port),
                       G4 master inflight snapshot,
                       G5 process CPU/RSS sampling,
-                      G6 master arrival/completion counter poller
+                      G6 master server_latency counter poller
                       (GET {addr}/rtp_llm/server_latency ->
                        master_counters_timeseries.txt).
 
-Each thread is a line-by-line port of the original heredoc: same URL
-construction, same parsing/whitelisting, same output line format, same
-best-effort semantics (a failed round is skipped, never fatal), same
-interval arithmetic (sleep the remainder of the interval after each round).
-The output files are append-mode one-shot series consumed by
-consolidate_run_outputs.py / aggregate_canvas_run.py — byte-format
-compatibility is a hard requirement.
+Each thread is best-effort: a failed round is skipped, never fatal, and
+each round sleeps the remainder of the poll interval. The output files
+are append-mode one-shot series consumed by consolidate_run_outputs.py /
+aggregate_canvas_run.py — byte-format compatibility is a hard requirement.
 
 Configuration arrives via argv, shell-expanded by run_online_eval.sh (which
-stays the single source of truth for env defaults), mirroring the old
-heredoc argv convention. SIGTERM/SIGINT set a stop event: the in-flight
-round finishes, buffered output is flushed, then the process exits.
+stays the single source of truth for env defaults). SIGTERM/SIGINT set a
+stop event: the in-flight round finishes, buffered output is flushed, then
+the process exits.
 """
 
 import argparse
+import collections
 import json
 import os
 import signal
@@ -126,8 +119,7 @@ def _sleep_remaining(started, interval_s):
 
 
 def run_master_counter_poller(http_addr, out_path, interval_s):
-    """G6: master arrival/completion counter poller (was: the standalone
-    --group counter process, before that a heredoc).
+    """G6: master server_latency counter poller.
 
     GET http://{addr}/rtp_llm/server_latency -> cumulative arrival/completion
     counters, one kv line per round."""
@@ -301,139 +293,127 @@ def _supervise(threads):
                 os._exit(0)
 
 
+# Poller lane table — one entry per collector thread. A lane is enabled by
+# passing its (enable, out) argv pair together. A lane with an interval flag
+# controls its own cadence: a None default falls back to the shared
+# --secondary-interval, an explicit default stays independent of it (the
+# counter lane's 1.0: the counter series is the aggregate master_arrivals_ts
+# data source and is collected even when the observation lanes are switched
+# off, so its cadence must not follow SECONDARY_POLL_INTERVAL_S).
+_Lane = collections.namedtuple(
+    "_Lane",
+    "enable_flag out_flag interval_flag interval_default target name desc",
+)
+
+_LANES = (
+    _Lane(
+        "--mock-port",
+        "--mock-out",
+        "--mock-interval",
+        None,
+        run_mock_per_engine_poller,
+        "mock-per-engine-poller",
+        "G1 mock per-engine prometheus (mock control port)",
+    ),
+    _Lane(
+        "--prometheus-port",
+        "--prometheus-out",
+        None,
+        None,
+        run_master_prometheus_poller,
+        "master-prometheus-poller",
+        "G3 master business prometheus (management port)",
+    ),
+    _Lane(
+        "--inflight-http-addr",
+        "--inflight-out",
+        None,
+        None,
+        run_master_inflight_poller,
+        "master-inflight-poller",
+        "G4 master inflight snapshot",
+    ),
+    _Lane(
+        "--pid-file",
+        "--process-out",
+        None,
+        None,
+        run_process_usage_poller,
+        "process-usage-poller",
+        "G5 process CPU/RSS sampling",
+    ),
+    _Lane(
+        "--counter-http-addr",
+        "--counter-out",
+        "--counter-interval",
+        1.0,
+        run_master_counter_poller,
+        "master-counter-poller",
+        "G6 master server_latency counter poller",
+    ),
+)
+
+
+def _argv_name(flag):
+    """--counter-http-addr -> the args attribute name counter_http_addr."""
+    return flag.lstrip("-").replace("-", "_")
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Background collectors extracted from run_online_eval.sh "
-        "heredoc pollers (one process, one thread per poller)."
-    )
-    parser.add_argument(
-        "--group",
-        required=True,
-        choices=("secondary",),
-        help="the single unified collector group: up to 5 threads "
-        "(G1/G3/G4/G5 + G6 master counter poller)",
+        description="run_online_eval.sh secondary collectors: one process, "
+        "one thread per enabled poller lane (G1/G3/G4/G5/G6)."
     )
     parser.add_argument(
         "--secondary-interval",
         type=float,
         default=1.0,
-        help="SECONDARY_POLL_INTERVAL_S for G3/G4/G5 (default: 1)",
+        help="SECONDARY_POLL_INTERVAL_S — shared poll interval for lanes "
+        "without their own (default: 1)",
     )
-    parser.add_argument(
-        "--mock-port", help="mock control port (MOCK_BASE_GRPC_PORT-1) for G1"
-    )
-    parser.add_argument("--mock-out", help="mock_metrics_per_engine.prom output path")
-    parser.add_argument(
-        "--mock-interval",
-        type=float,
-        default=None,
-        help="MOCK_PER_ENGINE_POLL_INTERVAL_S (default: secondary interval)",
-    )
-    parser.add_argument("--prometheus-port", help="master management port for G3")
-    parser.add_argument(
-        "--prometheus-out", help="master_prometheus_timeseries.prom output path"
-    )
-    parser.add_argument(
-        "--inflight-http-addr", help="master HTTP addr (host:port) for G4"
-    )
-    parser.add_argument(
-        "--inflight-out", help="master_inflight_timeseries.jsonl output path"
-    )
-    parser.add_argument("--pid-file", help="process_poll_pids.txt path for G5")
-    parser.add_argument(
-        "--process-out", help="process_usage_timeseries.txt output path"
-    )
-    parser.add_argument(
-        "--counter-http-addr",
-        help="master HTTP addr (host:port) for G6 (server_latency counters)",
-    )
-    parser.add_argument(
-        "--counter-out", help="master_counters_timeseries.txt output path (G6)"
-    )
-    parser.add_argument(
-        "--counter-interval",
-        type=float,
-        default=1.0,
-        help="MASTER_COUNTER_POLL_INTERVAL_S for G6 (default: 1)",
-    )
+    for lane in _LANES:
+        parser.add_argument(lane.enable_flag, help=lane.desc)
+        parser.add_argument(lane.out_flag, help=f"{lane.desc} — output file")
+        if lane.interval_flag is not None:
+            fallback = (
+                "shared --secondary-interval"
+                if lane.interval_default is None
+                else lane.interval_default
+            )
+            parser.add_argument(
+                lane.interval_flag,
+                type=float,
+                default=lane.interval_default,
+                help=f"{lane.desc} — poll interval (default: {fallback})",
+            )
     args = parser.parse_args()
 
     threads = []
-    if bool(args.mock_port) != bool(args.mock_out):
-        parser.error("--mock-port and --mock-out must be passed together")
-    if bool(args.prometheus_port) != bool(args.prometheus_out):
-        parser.error("--prometheus-port and --prometheus-out must be passed together")
-    if bool(args.inflight_http_addr) != bool(args.inflight_out):
-        parser.error("--inflight-http-addr and --inflight-out must be passed together")
-    if bool(args.pid_file) != bool(args.process_out):
-        parser.error("--pid-file and --process-out must be passed together")
-    if bool(args.counter_http_addr) != bool(args.counter_out):
-        parser.error("--counter-http-addr and --counter-out must be passed together")
-    if args.mock_port:
-        mock_interval = (
-            args.mock_interval
-            if args.mock_interval is not None
-            else args.secondary_interval
-        )
-        threads.append(
-            threading.Thread(
-                target=run_mock_per_engine_poller,
-                args=(args.mock_port, args.mock_out, mock_interval),
-                name="mock-per-engine-poller",
-                daemon=True,
+    for lane in _LANES:
+        enable_value = getattr(args, _argv_name(lane.enable_flag))
+        out_value = getattr(args, _argv_name(lane.out_flag))
+        if bool(enable_value) != bool(out_value):
+            parser.error(
+                f"{lane.enable_flag} and {lane.out_flag} must be passed together"
             )
-        )
-    if args.prometheus_port:
+        if not enable_value:
+            continue
+        interval = args.secondary_interval
+        if lane.interval_flag is not None:
+            lane_interval = getattr(args, _argv_name(lane.interval_flag))
+            if lane_interval is not None:
+                interval = lane_interval
         threads.append(
             threading.Thread(
-                target=run_master_prometheus_poller,
-                args=(
-                    args.prometheus_port,
-                    args.prometheus_out,
-                    args.secondary_interval,
-                ),
-                name="master-prometheus-poller",
-                daemon=True,
-            )
-        )
-    if args.inflight_http_addr:
-        threads.append(
-            threading.Thread(
-                target=run_master_inflight_poller,
-                args=(
-                    args.inflight_http_addr,
-                    args.inflight_out,
-                    args.secondary_interval,
-                ),
-                name="master-inflight-poller",
-                daemon=True,
-            )
-        )
-    if args.pid_file:
-        threads.append(
-            threading.Thread(
-                target=run_process_usage_poller,
-                args=(args.pid_file, args.process_out, args.secondary_interval),
-                name="process-usage-poller",
-                daemon=True,
-            )
-        )
-    if args.counter_http_addr:
-        # G6: own interval knob so MASTER_COUNTER_POLL_INTERVAL_S keeps
-        # working independently of SECONDARY_POLL_INTERVAL_S (pre-G6: the
-        # standalone --group counter process took the same argv).
-        threads.append(
-            threading.Thread(
-                target=run_master_counter_poller,
-                args=(args.counter_http_addr, args.counter_out, args.counter_interval),
-                name="master-counter-poller",
+                target=lane.target,
+                args=(enable_value, out_value, interval),
+                name=lane.name,
                 daemon=True,
             )
         )
     if not threads:
         print(
-            "eval_collectors: no secondary collector enabled "
-            "(all START_* guards off)",
+            "eval_collectors: no collector lane enabled (all START_* guards off)",
             file=sys.stderr,
         )
         return 0
