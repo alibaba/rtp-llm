@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/BenchmarkFixture.h"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
 #include <cuda_runtime.h>
@@ -196,23 +197,24 @@ std::unique_ptr<BlockTreeCache> BenchmarkFixture::createCache(std::vector<GroupS
     // Event-driven eviction: insert commits trigger checkWatermark, which
     // demotes overflow down to the per-tier ratio watermark (0.0 = disabled).
     if (device_watermark_ratio > 0.0) {
-        config.watermark_device.ratio = device_watermark_ratio;
+        config.watermark_device = {device_watermark_ratio, std::nextafter(device_watermark_ratio, 1.0)};
     }
     if (host_watermark_ratio > 0.0) {
-        config.watermark_host.ratio = host_watermark_ratio;
+        config.watermark_host = {host_watermark_ratio, std::nextafter(host_watermark_ratio, 1.0)};
     }
 
-    auto engine = std::make_shared<PerRankBlockTransferEngine>(group_sets,
-                                                               DeviceHostCopyOptions{},
-                                                               config.device_disk_staging_block_count,
-                                                               config.max_descriptors_per_transfer_batch,
-                                                               config.transfer_worker_count,
-                                                               config.max_descriptors_per_non_device_host_transfer_batch);
-    auto dispatcher = std::make_unique<BlockTransferDispatcher>(
-        engine,
-        nullptr,
-        config.max_descriptors_per_transfer_batch,
-        config.max_descriptors_per_non_device_host_transfer_batch);
+    auto engine =
+        std::make_shared<PerRankBlockTransferEngine>(group_sets,
+                                                     DeviceHostCopyOptions{},
+                                                     config.device_disk_staging_block_count,
+                                                     config.max_descriptors_per_transfer_batch,
+                                                     config.transfer_worker_count,
+                                                     config.max_descriptors_per_non_device_host_transfer_batch);
+    auto dispatcher =
+        std::make_unique<BlockTransferDispatcher>(engine,
+                                                  nullptr,
+                                                  config.max_descriptors_per_transfer_batch,
+                                                  config.max_descriptors_per_non_device_host_transfer_batch);
     auto task_pool =
         std::make_unique<BlockTreeTaskPool>(config.task_pool_size, 1000, "BlockTreeCacheBenchmarkTaskPool");
     auto tree = std::make_unique<BlockTree>(group_sets);

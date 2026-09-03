@@ -274,10 +274,10 @@ void BlockTreeLoader::shutdown() {
 
 bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& context) {
     std::lock_guard<std::mutex>            lock(mutex_);
-    const std::vector<TransferDescriptor>& load_descs               = context->loadDescs();
-    const std::vector<bool>&               joined_loads             = context->joinedLoads();
-    const uint64_t                         context_id               = context->contextId();
-    size_t                                 prepared_desc_count      = 0;
+    const std::vector<TransferDescriptor>& load_descs          = context->loadDescs();
+    const std::vector<bool>&               joined_loads        = context->joinedLoads();
+    const uint64_t                         context_id          = context->contextId();
+    size_t                                 prepared_desc_count = 0;
     block_tree_cache_detail::ScopeRollback rollback_guard(
         [this, &load_descs, &joined_loads, &prepared_desc_count, context_id]() {
             abortLoadLocked(load_descs,
@@ -373,7 +373,7 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
         }
         tree_->groupSets()[desc.group_set_id]->unreferenceBlocks(resource, BlockTreeRefType::LOAD);
         if (desc.node->group_set_resources[desc.group_set_id].transfer_detached) {
-            evictor_.discardDetachedTransfer(desc);
+            evictor_.discardDetachedTransfer({desc});
             tree_data_mutated = true;
             continue;
         }
@@ -466,7 +466,7 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&                    
 
         GroupSetResource& resource = desc.node->group_set_resources[desc.group_set_id];
         if (resource.transfer_detached) {
-            evictor_.discardDetachedTransfer(desc);
+            evictor_.discardDetachedTransfer({desc});
             tree_data_mutated = true;
             state_settled     = true;
             continue;

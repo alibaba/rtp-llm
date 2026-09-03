@@ -848,10 +848,11 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastD2DiskFailureRollsBackDeviceSo
     }
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionFailureRollsBackTask) {
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastBatchEvictionFailureOnOneRankRollsBackEveryDescriptor) {
+    auto                                               state   = std::make_shared<MultiRankBlockTransferRpcState>();
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
-        {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
-        {true, MemoryOperationResponsePB::FAILED, grpc::Status::OK},
+        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state},
+        {true, MemoryOperationResponsePB::FAILED, grpc::Status::OK, state},
     };
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
@@ -859,10 +860,14 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionFailureRollsBackTask) 
 
     std::shared_ptr<HostBlockPool>          host_pool = makeHostPool(256, 8);
     std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
-    std::shared_ptr<FullGroupSet> full = makeBroadcastGroup("broadcast_eviction_failure", host_pool, disk_pool);
+    std::shared_ptr<FullGroupSet> full = makeBroadcastGroup("broadcast_batch_eviction_failure", host_pool, disk_pool);
     initializeBroadcastGroups({full});
-    const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
-    ASSERT_NE(host_block, NULL_BLOCK_IDX);
+    std::vector<BlockIdxType> host_blocks;
+    for (size_t index = 0; index < 2; ++index) {
+        const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+        ASSERT_NE(host_block, NULL_BLOCK_IDX);
+        host_blocks.push_back(host_block);
+    }
 
     BlockTreeCacheConfig config;
     config.enable_device_cache             = false;
@@ -874,29 +879,40 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionFailureRollsBackTask) 
                                                                       /*storage_backend=*/nullptr,
                                                                       broadcast_manager);
 
-    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
-    resources[0][0].host_block = host_block;
-    ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
-    auto before = cache->tree()->findNode({100});
-    ASSERT_FALSE(before.empty());
-    ASSERT_EQ(cache->getStats().host_heap_total_size, 1u);
+    for (size_t index = 0; index < host_blocks.size(); ++index) {
+        std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+        resources[0][0].host_block = host_blocks[index];
+        ASSERT_TRUE(insertGroupSetResources(*cache, {100 + static_cast<int64_t>(index)}, resources));
+    }
+    ASSERT_EQ(cache->getStats().host_heap_total_size, 2u);
 
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.01);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
     waitForEvictionSettlement(*cache);
 
-    auto after = cache->tree()->findNode({100});
-    ASSERT_FALSE(after.empty());
-    const GroupSetResource& resource = after.back()->group_set_resources[0];
-    EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
-    EXPECT_TRUE(resource.hasTier(Tier::HOST));
-    EXPECT_FALSE(resource.hasTier(Tier::DISK));
-    EXPECT_EQ(resource.host_block, host_block);
-    EXPECT_EQ(host_pool->freeBlocksNum(), 7u);
+    for (size_t index = 0; index < host_blocks.size(); ++index) {
+        auto after = cache->tree()->findNode({100 + static_cast<int64_t>(index)});
+        ASSERT_FALSE(after.empty());
+        const GroupSetResource& resource = after.back()->group_set_resources[0];
+        EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+        EXPECT_TRUE(resource.hasTier(Tier::HOST));
+        EXPECT_FALSE(resource.hasTier(Tier::DISK));
+        EXPECT_EQ(resource.host_block, host_blocks[index]);
+        EXPECT_TRUE(host_pool->isAllocated(host_blocks[index]));
+    }
+    EXPECT_EQ(BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(*cache), 0u);
+    EXPECT_EQ(host_pool->freeBlocksNum(), 6u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 8u);
-    EXPECT_EQ(cache->getStats().host_heap_total_size, 1u);
+    EXPECT_EQ(cache->getStats().host_heap_total_size, 2u);
     EXPECT_EQ(cache->getStats().disk_heap_total_size, 0u);
+
+    std::lock_guard<std::mutex> lock(state->mutex);
+    ASSERT_EQ(state->requests.size(), 2u);
+    for (const MemoryOperationRequestPB& request : state->requests) {
+        EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::H2DISK);
+        EXPECT_EQ(request.copy_items_size(), 2);
+    }
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, EncodeTransferRequestIncludesMultipleDescriptors) {

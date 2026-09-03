@@ -418,6 +418,25 @@ TEST_F(BlockTreeCacheTest, EvictionTriggerQpsPublishesOnlyExistingGroupTypes) {
     EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_trigger_qps_metric, force_drop_tags), 1);
 }
 
+TEST_F(BlockTreeCacheTest, WatermarkRequiredBlocksReportsRequiredLogicalCount) {
+    kmonitor::MetricsTags                      tags;
+    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
+        std::make_shared<kmonitor::MetricsReporter>("", "", tags);
+    BlockTreeCacheMetricsReporter reporter;
+    reporter.setMetricsReporter(metrics_reporter);
+
+    reporter.reportWatermarkRequired(Tier::HOST, CacheGroupType::FULL, 12);
+
+    RtpLLMCacheEvictionMetrics* eviction_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
+    ASSERT_NE(eviction_metrics, nullptr);
+    ASSERT_NE(eviction_metrics->watermark_required_blocks_metric, nullptr);
+    EXPECT_EQ(metricSeriesCount(eviction_metrics->watermark_required_blocks_metric), 1u);
+
+    kmonitor::MetricsTags watermark_tags("tier", tierName(Tier::HOST));
+    watermark_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->watermark_required_blocks_metric, watermark_tags), 12);
+}
+
 TEST_F(BlockTreeCacheTest, ForceDropTriggerQpsCountsOneSuccessfulRequest) {
     kmonitor::MetricsTags                      tags;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
@@ -474,11 +493,13 @@ TEST_F(BlockTreeCacheTest, EvictionMetricsReportSettledTransferTarget) {
     reporter.setMetricsReporter(metrics_reporter);
 
     EvictionTransferTask task;
-    task.desc.group_set_id = 0;
-    task.desc.source_tier  = Tier::DEVICE;
-    task.desc.target_tier  = Tier::HOST;
+    task.descs.emplace_back();
+    task.descs.front().group_set_id = 0;
+    task.descs.front().source_tier  = Tier::DEVICE;
+    task.descs.front().target_tier  = Tier::NONE;
+    task.timings.emplace_back();
 
-    reporter.reportEvictionFinished(task, Tier::NONE, cache_->groupSets());
+    reporter.reportEvictionFinished(task, cache_->groupSets());
 
     RtpLLMCacheEvictionMetrics* eviction_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
     ASSERT_NE(eviction_metrics, nullptr);

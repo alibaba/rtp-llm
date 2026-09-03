@@ -301,10 +301,8 @@ bool RtpLLMSchedulerMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(loading_cache_stream_size_metric, "rtp_llm_loading_cache_stream_size");
     REGISTER_GAUGE_MUTABLE_METRIC(pending_decode_stream_size_metric, "rtp_llm_pending_decode_stream_size");
     REGISTER_GAUGE_MUTABLE_METRIC(decode_since_prefill_metric, "rtp_llm_decode_since_prefill");
-    REGISTER_GAUGE_MUTABLE_METRIC(admitted_context_batch_size_metric,
-                                  "rtp_llm_scheduler_admitted_context_batch_size");
-    REGISTER_GAUGE_MUTABLE_METRIC(admitted_context_token_size_metric,
-                                  "rtp_llm_scheduler_admitted_context_token_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(admitted_context_batch_size_metric, "rtp_llm_scheduler_admitted_context_batch_size");
+    REGISTER_GAUGE_MUTABLE_METRIC(admitted_context_token_size_metric, "rtp_llm_scheduler_admitted_context_token_size");
     REGISTER_GAUGE_MUTABLE_METRIC(waiting_oldest_age_us_metric, "rtp_llm_scheduler_waiting_oldest_age_us");
     REGISTER_MUTABLE_METRIC_BASE(
         group_fallback_acc_metric, "rtp_llm_scheduler_group_fallback_acc", kmonitor::COUNTER, kmonitor::NORMAL);
@@ -574,6 +572,7 @@ void RtpLLMCacheTransferMetrics::report(const kmonitor::MetricsTags*         tag
 
 bool RtpLLMCacheEvictionMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(evictable_candidate_count_metric, "rtp_llm_kv_cache_evictable_candidate_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(watermark_required_blocks_metric, "rtp_llm_kv_cache_watermark_required_blocks");
     REGISTER_QPS_MUTABLE_METRIC(eviction_trigger_qps_metric, "rtp_llm_kv_cache_eviction_trigger_qps");
     REGISTER_QPS_MUTABLE_METRIC(eviction_qps_metric, "rtp_llm_kv_cache_eviction_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(evicted_block_tier_residence_time_ms_metric,
@@ -590,6 +589,11 @@ void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*         tag
         kmonitor::MetricsTags evictable_tags("tier", collector->source_tier);
         evictable_tags.AddTag("group_type", collector->group_type);
         evictable_candidate_count_metric->Report(&evictable_tags, collector->evictable_candidate_count);
+    }
+    if (collector->report_watermark_required) {
+        kmonitor::MetricsTags watermark_tags("tier", collector->source_tier);
+        watermark_tags.AddTag("group_type", collector->group_type);
+        watermark_required_blocks_metric->Report(&watermark_tags, collector->watermark_required_blocks);
     }
     if (collector->report_eviction_trigger) {
         kmonitor::MetricsTags trigger_tags("trigger_type", collector->trigger_type);
@@ -939,7 +943,6 @@ void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*              t
     REPORT_NON_ZERO_MUTABLE_METRIC(transfer_total_block_size_metric, collector->total_block_size);
     REPORT_NON_ZERO_MUTABLE_METRIC(transfer_latency_us_metric, collector->latency_us);
 }
-
 
 #undef REPORT_NON_ZERO_MUTABLE_METRIC
 #undef REPORT_QPS

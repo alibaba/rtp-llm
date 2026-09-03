@@ -52,12 +52,8 @@ GroupSetPtr makeHostDiskGroup(size_t                                  group_set_
     policy.enable_prefix_reuse = true;
     auto topology              = makeTestTopology({makeTestGroupBase(policy, {0}, payload_bytes)});
     auto device_pool = makeTestDevicePool({{payload_bytes, 0}}, 2, "host_disk_group_" + std::to_string(group_set_id));
-    auto group = makeTestGroupSet(group_set_id,
-                                  std::move(topology),
-                                  {0},
-                                  {std::move(device_pool)},
-                                  std::move(host_pool),
-                                  std::move(disk_pool));
+    auto group       = makeTestGroupSet(
+        group_set_id, std::move(topology), {0}, {std::move(device_pool)}, std::move(host_pool), std::move(disk_pool));
     return group;
 }
 
@@ -79,7 +75,10 @@ public:
 
 class BlockingBatchDiskBlockIO: public StatusDiskBlockIO {
 public:
-    enum class Operation { READ, WRITE };
+    enum class Operation {
+        READ,
+        WRITE
+    };
 
     explicit BlockingBatchDiskBlockIO(Operation operation):
         StatusDiskBlockIO(DiskBlockIOStatus::OK), operation_(operation) {}
@@ -168,17 +167,17 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskRoundTrip) {
 }
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, MaxBatchSizeSplitsOneLogicalBatch) {
-    auto owned_io = std::make_unique<RecordingBatchDiskBlockIO>();
-    auto* io = owned_io.get();
-    auto host_pool = makeHostPool(host_block_size_, 8, false);
-    auto disk_pool = makeDiskPool(host_block_size_, 8, temp_dir_.path, std::move(owned_io), "split_batch");
-    auto group = makeHostDiskGroup(0, host_pool, disk_pool, host_block_size_);
-    auto engine = std::make_shared<PerRankBlockTransferEngine>(
+    auto  owned_io  = std::make_unique<RecordingBatchDiskBlockIO>();
+    auto* io        = owned_io.get();
+    auto  host_pool = makeHostPool(host_block_size_, 8, false);
+    auto  disk_pool = makeDiskPool(host_block_size_, 8, temp_dir_.path, std::move(owned_io), "split_batch");
+    auto  group     = makeHostDiskGroup(0, host_pool, disk_pool, host_block_size_);
+    auto  engine    = std::make_shared<PerRankBlockTransferEngine>(
         std::vector<GroupSetPtr>{group}, DeviceHostCopyOptions{}, 4, 2, 4, 2);
     std::vector<TransferDescriptor> descriptors;
     for (size_t index = 0; index < 5; ++index) {
-        descriptors.push_back(makeDescriptor(
-            Tier::HOST, Tier::DISK, {}, poolMalloc(*host_pool), poolMalloc(*disk_pool)));
+        descriptors.push_back(
+            makeDescriptor(Tier::HOST, Tier::DISK, {}, poolMalloc(*host_pool), poolMalloc(*disk_pool)));
     }
 
     auto context = engine->submit(descriptors);
@@ -188,19 +187,39 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, MaxBatchSizeSplitsOneLogicalBatch
     EXPECT_EQ(io->batch_sizes, (std::vector<size_t>{2, 2, 1}));
 }
 
+TEST_F(PerRankBlockTransferEngineHostDiskTest, DefaultBatchSizeSupportsSixteenDescriptors) {
+    auto  owned_io  = std::make_unique<RecordingBatchDiskBlockIO>();
+    auto* io        = owned_io.get();
+    auto  host_pool = makeHostPool(host_block_size_, 17, false);
+    auto  disk_pool = makeDiskPool(host_block_size_, 17, temp_dir_.path, std::move(owned_io), "default_batch");
+    auto  group     = makeHostDiskGroup(0, host_pool, disk_pool, host_block_size_);
+    auto  engine    = makeEngine({group});
+    std::vector<TransferDescriptor> descriptors;
+    for (size_t index = 0; index < 17; ++index) {
+        descriptors.push_back(
+            makeDescriptor(Tier::HOST, Tier::DISK, {}, poolMalloc(*host_pool), poolMalloc(*disk_pool)));
+    }
+
+    auto context = engine->submit(descriptors);
+    context->waitDone();
+
+    ASSERT_TRUE(context->success());
+    EXPECT_EQ(io->batch_sizes, (std::vector<size_t>{16, 1}));
+}
+
 TEST_F(PerRankBlockTransferEngineHostDiskTest, SameDirectionHostToDiskTasksMayUseSharedWorkers) {
-    auto owned_io = std::make_unique<BlockingBatchDiskBlockIO>(BlockingBatchDiskBlockIO::Operation::WRITE);
-    auto* io = owned_io.get();
-    auto host_pool = makeHostPool(host_block_size_, 3, false);
-    auto disk_pool = makeDiskPool(host_block_size_, 2, temp_dir_.path, std::move(owned_io), "serialized_write");
-    auto group = makeHostDiskGroup(0, host_pool, disk_pool, host_block_size_);
-    auto engine = makeEngine({group});
-    const auto first = makeDescriptor(Tier::HOST, Tier::DISK, {}, poolMalloc(*host_pool), poolMalloc(*disk_pool));
-    const auto second = makeDescriptor(Tier::HOST, Tier::DISK, {}, poolMalloc(*host_pool), poolMalloc(*disk_pool));
+    auto       owned_io  = std::make_unique<BlockingBatchDiskBlockIO>(BlockingBatchDiskBlockIO::Operation::WRITE);
+    auto*      io        = owned_io.get();
+    auto       host_pool = makeHostPool(host_block_size_, 3, false);
+    auto       disk_pool = makeDiskPool(host_block_size_, 2, temp_dir_.path, std::move(owned_io), "serialized_write");
+    auto       group     = makeHostDiskGroup(0, host_pool, disk_pool, host_block_size_);
+    auto       engine    = makeEngine({group});
+    const auto first     = makeDescriptor(Tier::HOST, Tier::DISK, {}, poolMalloc(*host_pool), poolMalloc(*disk_pool));
+    const auto second    = makeDescriptor(Tier::HOST, Tier::DISK, {}, poolMalloc(*host_pool), poolMalloc(*disk_pool));
 
     auto first_context = engine->submit({first});
     ASSERT_TRUE(io->waitForBlockedCalls(1, std::chrono::seconds(5)));
-    auto second_context = engine->submit({second});
+    auto       second_context                = engine->submit({second});
     const bool second_started_before_release = io->waitForBlockedCalls(2, std::chrono::milliseconds(200));
 
     io->release();
@@ -212,19 +231,19 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SameDirectionHostToDiskTasksMayUs
 }
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, SameDirectionDiskToHostTasksMayUseSharedWorkers) {
-    auto owned_io = std::make_unique<BlockingBatchDiskBlockIO>(BlockingBatchDiskBlockIO::Operation::READ);
-    auto* io = owned_io.get();
-    auto host_pool = makeHostPool(host_block_size_, 3, false);
-    auto disk_pool = makeDiskPool(host_block_size_, 2, temp_dir_.path, std::move(owned_io), "shared_read");
-    auto group = makeHostDiskGroup(0, host_pool, disk_pool, host_block_size_);
-    auto engine = makeEngine({group});
+    auto       owned_io   = std::make_unique<BlockingBatchDiskBlockIO>(BlockingBatchDiskBlockIO::Operation::READ);
+    auto*      io         = owned_io.get();
+    auto       host_pool  = makeHostPool(host_block_size_, 3, false);
+    auto       disk_pool  = makeDiskPool(host_block_size_, 2, temp_dir_.path, std::move(owned_io), "shared_read");
+    auto       group      = makeHostDiskGroup(0, host_pool, disk_pool, host_block_size_);
+    auto       engine     = makeEngine({group});
     const auto disk_block = poolMalloc(*disk_pool);
-    const auto first = makeDescriptor(Tier::DISK, Tier::HOST, {}, poolMalloc(*host_pool), disk_block);
-    const auto second = makeDescriptor(Tier::DISK, Tier::HOST, {}, poolMalloc(*host_pool), disk_block);
+    const auto first      = makeDescriptor(Tier::DISK, Tier::HOST, {}, poolMalloc(*host_pool), disk_block);
+    const auto second     = makeDescriptor(Tier::DISK, Tier::HOST, {}, poolMalloc(*host_pool), disk_block);
 
     auto first_context = engine->submit({first});
     ASSERT_TRUE(io->waitForBlockedCalls(1, std::chrono::seconds(5)));
-    auto second_context = engine->submit({second});
+    auto       second_context                = engine->submit({second});
     const bool second_started_before_release = io->waitForBlockedCalls(2, std::chrono::milliseconds(200));
 
     io->release();
@@ -242,7 +261,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskDirectIoWritesAlignedStri
         makeDiskPool(host_block_size_, 4, temp_dir_.path, std::move(owned_io), "host_disk_direct", false);
     auto                     group = makeHostDiskGroup(0, host_pool_, direct_disk, host_block_size_);
     HostDiskTransferExecutor executor;
-    const size_t stride = direct_disk->strideBytes();
+    const size_t             stride = direct_disk->strideBytes();
     ASSERT_GT(stride, host_block_size_);
     EXPECT_FALSE(direct_io->bufferedIo());
 

@@ -23,8 +23,8 @@ struct EvictionTimingSnapshot {
 };
 
 struct EvictionTransferTask {
-    TransferDescriptor     desc;
-    EvictionTimingSnapshot timing;
+    std::vector<TransferDescriptor>     descs;
+    std::vector<EvictionTimingSnapshot> timings;
 };
 
 struct EvictionDropTask {

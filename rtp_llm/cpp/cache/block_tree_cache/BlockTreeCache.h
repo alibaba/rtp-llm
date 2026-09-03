@@ -39,9 +39,7 @@ struct BlockTreeCacheConfig {
     bool enable_remote_cache{false};
 
     // ---- Per-tier watermark ----
-    struct TierWatermark {
-        double ratio{0.0};  // watermark ratio (0.0 = disabled)
-    };
+    using TierWatermark = rtp_llm::TierWatermark;
     TierWatermark watermark_device;
     TierWatermark watermark_host;
     TierWatermark watermark_disk;
@@ -63,9 +61,9 @@ struct BlockTreeCacheConfig {
 
     // Total Device<->Disk staging blocks per rank, split evenly across two pools.
     size_t device_disk_staging_block_count{4};
-    // Device<->Host uses descriptor batching; all other directions default to singleton batches.
+    // Direction-specific descriptor batching limits shared by watermark planning and transfer dispatch.
     size_t max_descriptors_per_transfer_batch{8};
-    size_t max_descriptors_per_non_device_host_transfer_batch{1};
+    size_t max_descriptors_per_non_device_host_transfer_batch{16};
 
     // ---- FULL prefix invariant scanner (diagnostic only) ----
     // The factory zeroes this on ranks that do not own a mutable BlockTree.

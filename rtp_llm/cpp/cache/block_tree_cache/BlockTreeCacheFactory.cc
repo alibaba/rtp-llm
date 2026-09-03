@@ -506,13 +506,29 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     config.host_eviction_policy   = *host_eviction_policy;
     config.disk_eviction_policy   = *disk_eviction_policy;
     if (config.enable_device_cache) {
-        config.watermark_device.ratio = kDefaultDeviceWatermarkRatio;
+        config.watermark_device = {kDefaultDeviceLowWatermarkRatio, kDefaultDeviceHighWatermarkRatio};
     }
     if (host_enabled) {
-        config.watermark_host.ratio = kDefaultHostWatermarkRatio;
+        config.watermark_host = {kDefaultHostLowWatermarkRatio, kDefaultHostHighWatermarkRatio};
     }
     if (disk_enabled) {
-        config.watermark_disk.ratio = kDefaultDiskWatermarkRatio;
+        config.watermark_disk = {kDefaultDiskLowWatermarkRatio, kDefaultDiskHighWatermarkRatio};
+    }
+    const auto valid_watermark = [](const TierWatermark& watermark) {
+        return (watermark.low_ratio == 0.0 && watermark.high_ratio == 0.0)
+               || (watermark.low_ratio > 0.0 && watermark.low_ratio < watermark.high_ratio
+                   && watermark.high_ratio <= 1.0);
+    };
+    for (const auto& tier_watermark : {std::pair<Tier, TierWatermark>{Tier::DEVICE, config.watermark_device},
+                                       std::pair<Tier, TierWatermark>{Tier::HOST, config.watermark_host},
+                                       std::pair<Tier, TierWatermark>{Tier::DISK, config.watermark_disk}}) {
+        if (!valid_watermark(tier_watermark.second)) {
+            RTP_LLM_LOG_ERROR("invalid cache watermark: tier=%s low_ratio=%f high_ratio=%f",
+                              tierName(tier_watermark.first),
+                              tier_watermark.second.low_ratio,
+                              tier_watermark.second.high_ratio);
+            return nullptr;
+        }
     }
     config.host_cache_sync_timeout_ms =
         checkedTimeout(kv_cache_config.host_cache_sync_timeout_ms, "host_cache_sync_timeout_ms");
@@ -552,25 +568,24 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         parallelism_config.tp_rank == 0 && !parallelism_config.ffn_disaggregate_config.is_ffn_service();
     config.full_prefix_scan_interval_ms = owns_mutable_block_tree ? configured_scan_interval_ms : 0;
 
-    auto per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(group_sets,
-                                                                        DeviceHostCopyOptions{},
-                                                                        config.device_disk_staging_block_count,
-                                                                        config.max_descriptors_per_transfer_batch,
-                                                                        config.transfer_worker_count,
-                                                                        config.max_descriptors_per_non_device_host_transfer_batch);
+    auto per_rank_engine =
+        std::make_shared<PerRankBlockTransferEngine>(group_sets,
+                                                     DeviceHostCopyOptions{},
+                                                     config.device_disk_staging_block_count,
+                                                     config.max_descriptors_per_transfer_batch,
+                                                     config.transfer_worker_count,
+                                                     config.max_descriptors_per_non_device_host_transfer_batch);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(group_sets, std::move(broadcast_manager));
     }
-    auto transfer_dispatcher = std::make_unique<BlockTransferDispatcher>(
-        std::move(per_rank_engine),
-        std::move(multi_rank_engine),
-        config.max_descriptors_per_transfer_batch,
-        config.max_descriptors_per_non_device_host_transfer_batch);
-    auto task_pool =
-        std::make_unique<BlockTreeTaskPool>(static_cast<size_t>(config.task_pool_size),
-                                            BlockTreeTaskPool::kDefaultQueueSize,
-                                            "BlockTreeCacheTaskPool");
+    auto transfer_dispatcher =
+        std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine),
+                                                  std::move(multi_rank_engine),
+                                                  config.max_descriptors_per_transfer_batch,
+                                                  config.max_descriptors_per_non_device_host_transfer_batch);
+    auto task_pool = std::make_unique<BlockTreeTaskPool>(
+        static_cast<size_t>(config.task_pool_size), BlockTreeTaskPool::kDefaultQueueSize, "BlockTreeCacheTaskPool");
 
     auto tree = std::make_unique<BlockTree>(std::move(group_sets));
 

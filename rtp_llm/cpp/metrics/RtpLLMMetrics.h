@@ -304,12 +304,12 @@ private:
 
 class RtpLLMSchedulerMetricsCollector final {
 public:
-    int64_t wait_stream_size           = 0;
-    int64_t running_stream_size        = 0;
-    int64_t remote_running_stream_size = 0;
-    int64_t loading_cache_stream_size  = 0;
-    int64_t pending_decode_stream_size = 0;
-    int64_t decode_since_prefill       = 0;
+    int64_t wait_stream_size            = 0;
+    int64_t running_stream_size         = 0;
+    int64_t remote_running_stream_size  = 0;
+    int64_t loading_cache_stream_size   = 0;
+    int64_t pending_decode_stream_size  = 0;
+    int64_t decode_since_prefill        = 0;
     int64_t admitted_context_batch_size = 0;
     int64_t admitted_context_token_size = 0;
     int64_t waiting_oldest_age_us       = 0;
@@ -322,12 +322,12 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMSchedulerMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* wait_stream_size_metric           = nullptr;
-    kmonitor::MutableMetric* running_stream_size_metric        = nullptr;
-    kmonitor::MutableMetric* remote_running_stream_size_metric = nullptr;
-    kmonitor::MutableMetric* loading_cache_stream_size_metric  = nullptr;
-    kmonitor::MutableMetric* pending_decode_stream_size_metric = nullptr;
-    kmonitor::MutableMetric* decode_since_prefill_metric       = nullptr;
+    kmonitor::MutableMetric* wait_stream_size_metric            = nullptr;
+    kmonitor::MutableMetric* running_stream_size_metric         = nullptr;
+    kmonitor::MutableMetric* remote_running_stream_size_metric  = nullptr;
+    kmonitor::MutableMetric* loading_cache_stream_size_metric   = nullptr;
+    kmonitor::MutableMetric* pending_decode_stream_size_metric  = nullptr;
+    kmonitor::MutableMetric* decode_since_prefill_metric        = nullptr;
     kmonitor::MutableMetric* admitted_context_batch_size_metric = nullptr;
     kmonitor::MutableMetric* admitted_context_token_size_metric = nullptr;
     kmonitor::MutableMetric* waiting_oldest_age_us_metric       = nullptr;
@@ -986,11 +986,13 @@ public:
     std::string group_type;
     std::string trigger_type;
     int64_t     evictable_candidate_count  = 0;
+    int64_t     watermark_required_blocks  = 0;
     int64_t     eviction_trigger_count     = 0;
     int64_t     tier_residence_time_ms     = 0;
     int64_t     candidate_idle_time_ms     = 0;
     int64_t     candidate_age_ms           = 0;
     bool        report_evictable           = false;
+    bool        report_watermark_required  = false;
     bool        report_eviction_trigger    = false;
     bool        report_eviction            = false;
     bool        report_tier_residence_time = false;
@@ -1005,6 +1007,7 @@ public:
 
 public:
     kmonitor::MutableMetric* evictable_candidate_count_metric            = nullptr;
+    kmonitor::MutableMetric* watermark_required_blocks_metric            = nullptr;
     kmonitor::MutableMetric* eviction_trigger_qps_metric                 = nullptr;
     kmonitor::MutableMetric* eviction_qps_metric                         = nullptr;
     kmonitor::MutableMetric* evicted_block_tier_residence_time_ms_metric = nullptr;
@@ -1042,10 +1045,10 @@ public:
     int64_t host_reuse_length          = 0;
     int64_t disk_reuse_length          = 0;
     int64_t remote_reuse_length        = 0;
-    float   kv_cache_hit_rate           = 0;
-    float   device_hit_rate             = 0;
-    float   host_hit_rate               = 0;
-    float   disk_hit_rate               = 0;
+    float   kv_cache_hit_rate          = 0;
+    float   device_hit_rate            = 0;
+    float   host_hit_rate              = 0;
+    float   disk_hit_rate              = 0;
 
     int64_t reuse_interval_avg_ms = 0;
     int64_t reuse_interval_max_ms = 0;

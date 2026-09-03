@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -22,6 +23,15 @@ class BlockTransferDispatcher;
 class BlockTreeCacheMetricsReporter;
 class BlockTreeTaskPool;
 class EvictionTaskRunner;
+
+struct TierWatermark {
+    double low_ratio{0.0};
+    double high_ratio{0.0};
+
+    bool enabled() const {
+        return high_ratio > 0.0;
+    }
+};
 
 // Aggregated candidate counts across all group sets, one number per tier.
 struct CandidateStats {
@@ -48,6 +58,8 @@ public:
                      std::mutex&                    mutex,
                      int                            memory_timeout_ms,
                      int                            disk_timeout_ms,
+                     size_t                         max_device_host_batch,
+                     size_t                         max_non_device_host_batch,
                      IsTierEnabledFn                is_tier_enabled,
                      SettledFn                      settled);
     ~BlockTreeEvictor();
@@ -63,10 +75,12 @@ public:
     // ---- Eviction selection & migration (caller owns synchronization) ----
     // Selection, task preparation, settlement, and abort mutate tree/group-set/pool/heap
     // state and must run under BlockTreeCache's mutex. Task execution is lock-free.
-    bool evictLocked(size_t group_set_id, Tier source_tier, bool force_drop);
-    void scheduleWatermarkEvictionsLocked(Tier tier, double watermark_ratio);
+    bool   dropLocked(size_t group_set_id, Tier source_tier, bool notify_settled);
+    bool   batchEvictLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count);
+    void   scheduleWatermarkEvictionsLocked(Tier tier, const TierWatermark& watermark);
+    size_t computeWatermarkEvictCount(const GroupSet& group_set, Tier tier, const TierWatermark& watermark);
     // Discard a detached operation's source without publishing its target.
-    void discardDetachedTransfer(const TransferDescriptor& transfer_desc);
+    void discardDetachedTransfer(const std::vector<TransferDescriptor>& transfer_descs);
 
     // Exact candidate updates for callers that already know the affected tier.
     void suspendCandidate(TreeNode* node, size_t group_set_id, Tier source_tier);
@@ -79,34 +93,41 @@ private:
         std::unique_ptr<EvictionHeap> device;
         std::unique_ptr<EvictionHeap> host;
         std::unique_ptr<EvictionHeap> disk;
+        std::array<bool, 3>           watermark_triggered{};
     };
 
-    EvictionHeap*                       heapFor(size_t group_set_id, Tier tier) const;
-    bool                                isEvictable(TreeNode* node, size_t group_set_id, Tier source_tier) const;
-    std::optional<TransferDescriptor>   chooseVictim(size_t group_set_id, Tier tier, bool force_drop = false);
-    EvictionDropTask                    createDropTask(TransferDescriptor eviction_desc);
-    std::optional<EvictionTransferTask> createEvictionTask(TransferDescriptor eviction_desc);
-    void                                runEvictionTask(std::shared_ptr<const EvictionTransferTask> task) noexcept;
+    EvictionHeap*                     heapFor(size_t group_set_id, Tier tier) const;
+    bool                              isEvictable(TreeNode* node, size_t group_set_id, Tier source_tier) const;
+    std::optional<TransferDescriptor> chooseVictim(size_t group_set_id, Tier tier, bool force_drop = false);
+    EvictionDropTask                  createDropTask(TransferDescriptor eviction_desc);
+    bool                              batchDropLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count);
+    bool                              submitEvictionTask(EvictionTransferTask task);
+    Tier                              watermarkTargetTier(Tier source_tier) const;
+    size_t                            watermarkLogicalBatchLimit(Tier source_tier, Tier target_tier) const;
+    void                              runEvictionTask(std::shared_ptr<const EvictionTransferTask> task) noexcept;
     void scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task, bool success) noexcept;
-    void runDropTask(const EvictionDropTask& task);
-    void rollbackTransferLocked(const TransferDescriptor& desc);
+    void runDropTask(TransferDescriptor eviction_desc, bool notify_settled = true);
+    void rollbackTransferLocked(const std::vector<TransferDescriptor>& descs);
     void updateFullCandidate(TreeNode* node, size_t group_set_id);
     void updateFullCandidate(TreeNode* parent);
 
-    void   selectUpwardCascades(EvictionDropTask& task);
-    void   collectFullPrune(const TransferDescriptor&                  eviction_desc,
-                            EvictionDropTask&                          task,
-                            std::vector<std::pair<TreeNode*, size_t>>& detached_resources) const;
-    void   reserveSource(const TransferDescriptor& eviction_desc);
-    void   restoreSource(const TransferDescriptor& eviction_desc);
-    void   releaseTargetBlocks(const TransferDescriptor& eviction_desc);
-    void   completeDrop(const TransferDescriptor& desc);
-    void   completeEvict(const TransferDescriptor& desc);
-    void   settleSingleEviction(TreeNode* node);
-    void   eraseNodeFromAllHeaps(TreeNode* node);
-    void   updatePendingRelease(const TransferDescriptor& desc, bool reserve);
-    size_t poolWatermarkExcess(IBlockPool* pool, double ratio) const;
-    size_t computeGroupSetExcess(const GroupSet& group_set, Tier tier, double ratio) const;
+    void                            selectUpwardCascades(EvictionDropTask& task);
+    void                            collectFullPrune(const TransferDescriptor&                  eviction_desc,
+                                                     EvictionDropTask&                          task,
+                                                     std::vector<std::pair<TreeNode*, size_t>>& detached_resources) const;
+    void                            reserveSource(const std::vector<TransferDescriptor>& eviction_descs);
+    std::vector<TransferDescriptor> restoreSource(const std::vector<TransferDescriptor>& eviction_descs);
+    void                            releaseTargetBlocks(const std::vector<TransferDescriptor>& descs);
+    void                            completeDrop(const TransferDescriptor& desc);
+    void                            completeEvict(const std::vector<TransferDescriptor>& descs);
+    void                            settleEviction(const std::vector<TransferDescriptor>& descs);
+    void                            settleSingleEviction(TreeNode* node);
+    void                            eraseNodeFromAllHeaps(TreeNode* node);
+    void                            updatePendingRelease(const std::vector<TransferDescriptor>& descs, bool reserve);
+    size_t                          computePoolWatermarkRequired(IBlockPool*          pool,
+                                                                 size_t               pending_count,
+                                                                 const TierWatermark& watermark,
+                                                                 bool&                high_reached) const;
 
     BlockTree*                          tree_;
     BlockTreeTaskPool*                  task_pool_{nullptr};
@@ -116,6 +137,8 @@ private:
     SettledFn                           settled_;
     std::unique_ptr<EvictionTaskRunner> task_runner_;
     int                                 disk_timeout_ms_{0};
+    size_t                              max_device_host_batch_{8};
+    size_t                              max_non_device_host_batch_{16};
 
     // Heap ownership: vector index is the declared group_set_id.
     std::vector<GroupSetTierHeaps>          heaps_;
