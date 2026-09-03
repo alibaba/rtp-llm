@@ -13,7 +13,6 @@ cc_test(
         "main.cc",
     ],
     copts = test_copts,
-    exec_properties = {'gpu':'H20'},
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
@@ -29,7 +28,6 @@ cc_test(
         "main.cc",
     ],
     copts = test_copts,
-    exec_properties = {'gpu':'H20'},
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",

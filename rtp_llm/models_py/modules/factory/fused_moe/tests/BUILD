@@ -4,7 +4,6 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'H20'},
 )
 
 py_test(
@@ -14,5 +13,4 @@ py_test(
         "//rtp_llm:testlib",
     ],
     tags = ["open_skip"],
-    exec_properties = {'gpu':'H20'},
 )

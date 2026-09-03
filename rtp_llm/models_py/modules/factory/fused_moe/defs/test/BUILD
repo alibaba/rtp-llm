@@ -5,7 +5,8 @@ py_test_deps = [
 # The test uses CPU tensors and mocked collectives, but importing
 # models_py.modules reaches the compiled librtp_compute_ops module.  Run it on
 # accelerator images that provide that dependency instead of claiming that a
-# default CPU runner can import it safely.
+# default CPU runner can import it safely.  Any CUDA worker satisfies that —
+# no H20 pin, so it stays on the default gpu_cuda12 pool / ut-sm8x job.
 py_test(
     name = "fused_moe_allreduce_contract_test",
     srcs = ["fused_moe_allreduce_contract_test.py"],
@@ -14,8 +15,7 @@ py_test(
         "//rtp_llm:config",
     ],
     env = {"GPU_COUNT": "1"},
-    tags = ["H20"],
-    exec_properties = {'gpu':'H20', 'gpu_count':'1'},
+    exec_properties = {'gpu_count':'1'},
 )
 
 py_test(

@@ -7,5 +7,4 @@ py_test(
         "//rtp_llm:config_ops",
         "//rtp_llm:utils",
     ],
-    exec_properties = {'gpu':'H20'},
 )
