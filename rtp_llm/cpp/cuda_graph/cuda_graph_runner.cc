@@ -1074,14 +1074,22 @@ void CudaGraphRunner::initCapture() {
         capture_mem_hold_ = CaptureMemoryHold(output, inputs, is_prefill_cuda_graph_mode_);
         initKernelInternalMemory();
 
-        // get real output data type (params already prepared in attn impl __init__/create_params)
-        auto attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
-        RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
-        {
-            ScopedCudaGraphForwardFlag cuda_graph_warmup(ScopedCudaGraphForwardFlag::Type::Warmup);
-            py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
+        if (is_prefill_cuda_graph_mode_) {
+            // Prefill keeps the existing probe because its follow-up check
+            // depends on the initialized sparse/dense attention plan.
+            auto attn_pyobj = py_attn_pyobj_method_(capture_mem_hold_.py_model_inputs_, true);
+            RTP_LLM_LOG_INFO("initCapture forward for output datatype start");
+            {
+                ScopedCudaGraphForwardFlag cuda_graph_warmup(ScopedCudaGraphForwardFlag::Type::Warmup);
+                py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj);
+            }
+            RTP_LLM_LOG_INFO("initCapture forward for output datatype end");
+        } else {
+            // Decode graph instances create their own attention object and run
+            // two warmups before capture. The standalone forward returned no
+            // data used here, so it only duplicated a full-model execution.
+            RTP_LLM_LOG_INFO("initCapture skips standalone output datatype forward for decode");
         }
-        RTP_LLM_LOG_INFO("initCapture forward for output datatype end");
         output = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
         capture_mem_hold_.setHiddenStates(output);
         initCaptureAttentionInputsPost();
@@ -1166,7 +1174,7 @@ void CudaGraphRunner::replayGraph(int key) {
     graph_instances_[key].graph_.replay();
 }
 
-void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
+void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type, bool needs_distributed_warmup) {
     c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
     auto             inputs = graph_instances_[key].mem_hold_.py_model_inputs_;
 
@@ -1176,9 +1184,19 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
     try {
-        ScopedCudaGraphForwardFlag cuda_graph_capture_forward(ScopedCudaGraphForwardFlag::Type::Capture);
-        py_forward_method_(inputs, attn_pyobj);
-        py_forward_method_(inputs, attn_pyobj);
+        if (needs_distributed_warmup) {
+            RTP_LLM_LOG_INFO("Distributed WarmUp for %s %d start.", key_type, key);
+            ScopedCudaGraphForwardFlag cuda_graph_warmup(ScopedCudaGraphForwardFlag::Type::Warmup);
+            py_forward_method_(inputs, attn_pyobj);
+            RTP_LLM_LOG_INFO("Distributed WarmUp for %s %d successfully.", key_type, key);
+        } else {
+            ScopedCudaGraphForwardFlag cuda_graph_capture_forward(ScopedCudaGraphForwardFlag::Type::Capture);
+            py_forward_method_(inputs, attn_pyobj);
+        }
+        {
+            ScopedCudaGraphForwardFlag cuda_graph_capture_forward(ScopedCudaGraphForwardFlag::Type::Capture);
+            py_forward_method_(inputs, attn_pyobj);
+        }
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("WarmUp forward failed for %s %d: %s", key_type, key, e.what());
         throw;

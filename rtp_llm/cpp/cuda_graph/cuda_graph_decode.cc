@@ -37,8 +37,8 @@ std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
     return capture_bs;
 }
 
-void CudaGraphRunner::captureDecodeOneBatchSize(int bs) {
-    captureOneGraphInstance(bs, "batch size");
+void CudaGraphRunner::captureDecodeOneBatchSize(int bs, bool needs_distributed_warmup) {
+    captureOneGraphInstance(bs, "batch size", needs_distributed_warmup);
 }
 
 void CudaGraphRunner::captureDecode() {
@@ -66,7 +66,11 @@ void CudaGraphRunner::captureDecode() {
         graph_instances_[bs].mem_hold_.attn_pyobj_ =
             py_attn_pyobj_method_(graph_instances_[bs].mem_hold_.py_model_inputs_, true);
         try {
-            captureDecodeOneBatchSize(bs);
+            // The largest graph is captured first. Fold the one distributed
+            // Warmup forward into its first existing warmup execution so
+            // multi-rank MegaMoE still synchronizes before its first JIT/
+            // kernel launch without restoring a standalone full forward.
+            captureDecodeOneBatchSize(bs, i == capture_range_size - 1);
             replayAndSyncCheck(bs, "batch size");
             RTP_LLM_LOG_INFO("capture success for batch size: %d", bs);
         } catch (const std::exception& e) {
