@@ -67,6 +67,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     _CP_ROLE_MAIN,
     CPContext,
     cp_all_gather_full_async,
+    cp_all_gather_full_async_compressor,
     cp_should_gather,
     cp_wait_gather_full,
 )
@@ -1066,9 +1067,10 @@ class CompressorFP8(PoolBackedModule):
                     f"dsv4.fp8.compressor.prefill.{profile_label}.cp_gather_kv_score"
                 )
             with record_function_range(gather_range):
-                fused_gather_handle = cp_all_gather_full_async(
+                fused_gather_handle = cp_all_gather_full_async_compressor(
                     fused_flat,
                     cp_ctx,
+                    kv_cols=out_dim,
                     stream=gather_stream,
                     profile_name=profile_name,
                     workspace=workspace,
@@ -1218,9 +1220,10 @@ class CompressorFP8(PoolBackedModule):
             with record_function_range(
                 "dsv4.fp8.compressor.prefill.cp_gather_kv_score"
             ):
-                fused_gather_handle = cp_all_gather_full_async(
+                fused_gather_handle = cp_all_gather_full_async_compressor(
                     fused_flat,
                     cp_ctx,
+                    kv_cols=out_dim,
                     stream=gather_stream,
                     profile_name=self._cp_profile_name(None),
                     workspace=workspace,

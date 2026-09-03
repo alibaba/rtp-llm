@@ -690,6 +690,8 @@ def cp_wait_gather_full(handle: Any) -> torch.Tensor:
         return SyncCPGatherImpl().wait(handle)
     if isinstance(handle, CPCudaAsyncGatherHandle):
         return CudaAsyncCPGatherImpl().wait(handle)
+    if isinstance(handle, _CompressorFp8AsyncGatherHandle):
+        return handle.wait()
     raise TypeError(f"unsupported CP gather handle type: {type(handle)!r}")
 
 
@@ -856,6 +858,155 @@ def cp_all_gather_full_varlen_fp8(
     with record_function_range(f"{tag}.dequant"):
         _fp8_row_dequant_kernel[(full_rows,)](qf, sf, y, F, BLOCK=1024)
     return y.view((cp_ctx.seq_len_full,) + trailing)
+
+
+class _CompressorFp8AsyncGatherHandle:
+    """Deferred hybrid-transport compressor gather (Q3, Sep 2).
+
+    Payload row layout (uint8, world-gathered):
+      mode "1" (safe):   [q_kv (D e4m3 = D B) | s_kv (4) | score bf16 (2D B)]
+      mode "2" (int8):   [q_kv (D B) | q_sc (D B) | s_kv (4) | s_sc (4)]
+    where D = kv_cols (the fused row's kv block; the score block is the rest).
+
+    wait() dequantizes/reassembles to bf16 ``[rows, 2D]`` on the gather stream
+    and runs the standard restore. The kv block rides e4m3 (phase-1 risk
+    class); the score block stays exact (safe) or int8-symmetric (oracle:
+    0.993 top-2048 agreement) so the indexer top-k consumer is protected.
+    """
+
+    def __init__(self, inner, kv_cols, mode, cp_ctx, workspace, cp_role, profile_name):
+        self._inner = inner
+        self._kv_cols = kv_cols
+        self._mode = mode
+        self._cp_ctx = cp_ctx
+        self._workspace = workspace
+        self._cp_role = cp_role
+        self._profile_name = profile_name
+
+    def wait(self) -> torch.Tensor:
+        import os  # noqa: F401  (kept for parity with the gate helper)
+        inner = self._inner
+        D = self._kv_cols
+        current_stream = torch.cuda.current_stream(inner.gathered.device)
+        current_stream.wait_event(inner.completion_event)
+        inner.work.wait()
+        gathered = inner.gathered
+        rows = gathered.size(0)
+        gs = inner.stream
+        with torch.cuda.stream(gs):
+            with record_function_range(f"{self._profile_name}.fp8_rebuild"):
+                if self._mode == "2":
+                    qkv = gathered[:, :D].contiguous().view(torch.float8_e4m3fn)
+                    qsc = gathered[:, D:2 * D].contiguous().view(torch.int8)
+                    skv = gathered[:, 2 * D:2 * D + 4].contiguous().view(
+                        torch.float32).reshape(rows)
+                    ssc = gathered[:, 2 * D + 4:].contiguous().view(
+                        torch.float32).reshape(rows)
+                    rebuilt = torch.empty((rows, 2 * D), dtype=torch.bfloat16,
+                                          device=gathered.device)
+                    kv_deq = torch.empty((rows, D), dtype=torch.bfloat16,
+                                         device=gathered.device)
+                    _fp8_row_dequant_kernel[(rows,)](qkv, skv, kv_deq, D, BLOCK=1024)
+                    rebuilt[:, :D] = kv_deq
+                    rebuilt[:, D:] = (qsc.float() * ssc.reshape(rows, 1)).to(
+                        torch.bfloat16)
+                else:
+                    qkv = gathered[:, :D].contiguous().view(torch.float8_e4m3fn)
+                    skv = gathered[:, D:D + 4].contiguous().view(
+                        torch.float32).reshape(rows)
+                    score_bf = gathered[:, D + 4:].contiguous().view(torch.bfloat16)
+                    rebuilt = torch.empty((rows, 2 * D), dtype=torch.bfloat16,
+                                          device=gathered.device)
+                    kv_deq = torch.empty((rows, D), dtype=torch.bfloat16,
+                                         device=gathered.device)
+                    _fp8_row_dequant_kernel[(rows,)](qkv, skv, kv_deq, D, BLOCK=1024)
+                    rebuilt[:, :D] = kv_deq
+                    rebuilt[:, D:] = score_bf
+            done = torch.cuda.Event()
+            done.record(gs)
+        current_stream.wait_event(done)
+        out_buf = None
+        if not self._cp_ctx.unpad_restore_is_prefix:
+            assert self._workspace is not None
+            if self._cp_role == _CP_ROLE_MAIN:
+                out_buf = self._workspace.cp_restore_main(
+                    self._cp_ctx.seq_len_full, 2 * D, torch.bfloat16)
+            else:
+                out_buf = self._workspace.cp_restore_idx(
+                    self._cp_ctx.seq_len_full, 2 * D, torch.bfloat16)
+        with record_function_range(f"{self._profile_name}.restore"):
+            full = _cp_restore_gathered_full_2d(rebuilt, self._cp_ctx, out=out_buf)
+        return full
+
+
+def cp_all_gather_full_async_compressor(
+    local_flat: torch.Tensor,
+    cp_ctx: CPContext,
+    *,
+    kv_cols: int,
+    stream: Optional[Any] = None,
+    profile_name: Optional[str] = None,
+    workspace: "PrefillWorkspace",
+    cp_role: str,
+) -> Any:
+    """Hybrid-transport variant of :func:`cp_all_gather_full_async` for the
+    fused ``[kv | score]`` compressor payload (Q3).
+
+    kv block rides per-row-amax e4m3; the score block is transport-exact
+    (mode "1", bf16) or int8-symmetric (mode "2") so the indexer top-k
+    consumer is protected. Transport saving: -25% (safe) / -50% (int8) vs the
+    bf16 gather. Falls through to the plain bf16 async gather when the lever
+    is off, the dtype/shape contract breaks, or rows are degenerate — call
+    sites swap unconditionally.
+    """
+    import os
+    # DEFAULT OFF (Sep 2 boot pair): both transport modes measured TTFT-neutral
+    # — the compressor AG pool is arrival-skew-bound, not bytes-bound (see
+    # bench/results_20260902_q3_compressor/VERDICT.md). Mode "1" = kv-e4m3 +
+    # score-bf16 (-25% bytes, exact top-k); mode "2" = kv-e4m3 + score-int8
+    # (-50% bytes, oracle top-2048 agreement 0.993). Code banked behind this flag.
+    raw = os.environ.get("DSV4_FP8_GATHER_COMPRESSOR", "0")
+    if (os.environ.get("DSV4_FP8_GATHER", "0") != "1"
+            or raw == "0"
+            or local_flat.dtype != torch.bfloat16
+            or local_flat.dim() != 2
+            or local_flat.size(0) == 0
+            or local_flat.size(1) != 2 * kv_cols):
+        return cp_all_gather_full_async(
+            local_flat, cp_ctx, stream=stream, profile_name=profile_name,
+            workspace=workspace, cp_role=cp_role)
+    mode = "2" if raw == "2" else "1"
+    tag = profile_name or f"{_DEFAULT_CP_PROFILE_NAME}.async.compressor"
+    local_2d = _cp_gather_2d(local_flat, cp_ctx)
+    R, C = local_2d.shape
+    D = kv_cols
+    assert C == 2 * D, f"fused cols {C} != 2*kv_cols {2 * D}"
+    with record_function_range(f"{tag}.quant"):
+        qkv = torch.empty((R, D), dtype=torch.float8_e4m3fn,
+                          device=local_2d.device)
+        skv = torch.empty((R,), dtype=torch.float32, device=local_2d.device)
+        _fp8_row_quant_kernel[(R,)](local_2d[:, :D].contiguous(), qkv, skv, D,
+                                    BLOCK=1024)
+        if mode == "2":
+            sc_blk = local_2d[:, D:].float()
+            amax = sc_blk.abs().amax(dim=1).clamp_min(1e-8)
+            ssc = amax / 127.0
+            qsc = (sc_blk / ssc.reshape(R, 1)).round().clamp_(-127, 127).to(
+                torch.int8)
+            payload = torch.cat((qkv.view(torch.uint8), qsc.view(torch.uint8),
+                                 skv.view(torch.uint8).reshape(R, 4),
+                                 ssc.view(torch.uint8).reshape(R, 4)),
+                                dim=1).contiguous()
+        else:
+            payload = torch.cat(
+                (qkv.view(torch.uint8), skv.view(torch.uint8).reshape(R, 4),
+                 local_2d[:, D:].contiguous().view(torch.uint8)),
+                dim=1).contiguous()
+    inner = CudaAsyncCPGatherImpl().start(
+        payload, cp_ctx, stream=stream, profile_name=f"{tag}.fp8",
+        workspace=workspace, cp_role=cp_role)
+    return _CompressorFp8AsyncGatherHandle(inner, D, mode, cp_ctx, workspace,
+                                           cp_role, tag)
 
 
 def cp_gather_last_by_request(
