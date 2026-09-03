@@ -22,7 +22,7 @@ This module provides:
     dev boxes without CUDA / without the compute_ops shared library.
 
 The ``slot_mapping`` is the same flat-slot tensor produced by the
-metadata builder (``DSv4DecodeAttnMetadata.slot_mapping_swa`` etc.),
+metadata builder (``DSv4DecodeAttnMetadataFP8.slot_mapping_swa`` etc.),
 with -1 sentinels skipped (mirrors Phase 1 ``write_swa_k_decode``).
 
 Output cache shape: ``[num_blocks, block_size, 584]`` uint8. For V4

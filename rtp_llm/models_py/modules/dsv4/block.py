@@ -72,14 +72,11 @@ class Block(nn.Module):
         ep_rank: int = 0,
         max_tokens_per_rank: int = 8192,
         is_decode_role: bool = False,
-        fp8_kv_cache: bool = False,
     ):
         super().__init__()
         self.layer_id = layer_id
-        self.fp8_kv_cache = fp8_kv_cache
 
-        attn_cls = AttentionFP8
-        self.attn = attn_cls(
+        self.attn = AttentionFP8(
             layer_id=layer_id,
             dim=dim,
             n_heads=n_heads,
@@ -282,7 +279,7 @@ class Block(nn.Module):
     def forward_decode(
         self,
         x: torch.Tensor,  # [B, 1, hc, dim]
-        attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
+        attn_metadata: "DSv4DecodeAttnMetadataFP8",  # type: ignore[name-defined]
         input_ids: torch.Tensor,  # [B, 1]
         kv_cache=None,
         attn_fn=None,
