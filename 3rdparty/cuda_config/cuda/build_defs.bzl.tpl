@@ -117,7 +117,11 @@ def cuda_header_library(
 
     native.cc_library(
         name = name,
-        textual_hdrs = hdrs,
+        # Keep the generated CUDA SDK headers as regular public headers.  When
+        # they are only textual headers Bazel does not attribute transitive
+        # includes (for example nvtx3/nvtx3.hpp) to this target, so every CUDA
+        # consumer fails undeclared-inclusion validation independently.
+        hdrs = hdrs,
         deps = deps + [":%s_virtual" % name],
         tags = ["no-remote"],
         **kwargs
