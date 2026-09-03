@@ -34,14 +34,24 @@ BeamSearchOutput sampleBeamSearch(BeamSearchParams params) {
     const int vocab_size     = params.logits.size(2);
     const int max_seq_len    = params.token_ids.size(2);
     // TODO(zhangjianning.zjn): check the shape of params
-    RTP_LLM_CHECK_WITH_INFO((vocab_size > 2 * beam_width_in),
-                            "cuda beam search op need vocab_size[%d] > beam_width_in[%d] * 2",
-                            vocab_size,
-                            beam_width_in);
-    RTP_LLM_CHECK_WITH_INFO((vocab_size > 2 * beam_width_out),
-                            "cuda beam search op need vocab_size[%d] > beam_width_out[%d] * 2",
-                            vocab_size,
-                            beam_width_out);
+    const bool use_v2 =
+        beam_width_in != beam_width_out || beam_width_in > static_cast<int>(tensorrt_llm::kernels::kMaxBeamWidthForV1);
+    if (use_v2) {
+        // V2 selects beam_width_out candidates from each input beam.
+        RTP_LLM_CHECK_WITH_INFO((vocab_size >= beam_width_out),
+                                "cuda beam search V2 needs vocab_size[%d] >= beam_width_out[%d]",
+                                vocab_size,
+                                beam_width_out);
+    } else {
+        RTP_LLM_CHECK_WITH_INFO((vocab_size > 2 * beam_width_in),
+                                "cuda beam search op need vocab_size[%d] > beam_width_in[%d] * 2",
+                                vocab_size,
+                                beam_width_in);
+        RTP_LLM_CHECK_WITH_INFO((vocab_size > 2 * beam_width_out),
+                                "cuda beam search op need vocab_size[%d] > beam_width_out[%d] * 2",
+                                vocab_size,
+                                beam_width_out);
+    }
 
 #define DISPATCH_TYPE(T, T_EXPR, ...)                                                                                  \
     do {                                                                                                               \

@@ -784,6 +784,60 @@ TEST_F(NormalBatchStreamProcessorTest, testOutputVocabRejectsEachUnsupportedConf
     }
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testOutputVocabValidatesReachableBeamSteps) {
+    ResourceContext resource_context;
+    RuntimeConfig   runtime_config;
+    struct BeamCase {
+        int              vocab_size;
+        int              num_beams;
+        std::vector<int> variable_num_beams;
+        int              max_new_tokens;
+        bool             accepted;
+    };
+    const std::vector<BeamCase> cases = {
+        {9, 1, {9, 8}, 2, true},    // Stop before the repeated tail enters V1.
+        {9, 1, {9, 8}, 3, false},   // V2 -> V1: 1->9, 9->8, 8->8.
+        {16, 1, {9, 8}, 3, false},  // V1 requires strictly more than twice the width.
+        {17, 1, {9, 8}, 3, true},
+        {9, 1, {8, 8, 9}, 2, false},  // A repeated small beam before the end also uses V1.
+        {9, 1, {9, 4}, 3, true},      // A valid V2 -> V1 transition.
+        {9, 1, {9, 9}, 4, true},      // Equal large beams remain V2.
+        {9, 1, {9, 10}, 1, true},     // An unreachable wider beam does not constrain the request.
+        {9, 1, {9, 10}, 2, false},
+        {8, 1, {9, 8}, 1, false},  // Insufficient vocabulary for the first V2 step.
+        {8, 8, {}, 1, true},       // Fixed small beam: the first step expands through V2.
+        {8, 8, {}, 2, false},
+        {16, 8, {}, 2, false},
+        {17, 8, {}, 2, true},
+        {9, 9, {}, 4, true},  // Fixed large beam, vocab == beam.
+        {8, 9, {}, 1, false},
+        {1, 1, {}, 4, true},      // Greedy sampling does not use the V1 beam kernel.
+        {1, 1, {1, 9}, 1, true},  // Only a greedy step is reachable.
+    };
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(::testing::Message()
+                     << "vocab=" << test_case.vocab_size << ", num_beams=" << test_case.num_beams
+                     << ", variable_num_beams=" << ::testing::PrintToString(test_case.variable_num_beams)
+                     << ", max_new_tokens=" << test_case.max_new_tokens);
+        std::vector<int64_t> output_vocab_ids(test_case.vocab_size);
+        std::iota(output_vocab_ids.begin(), output_vocab_ids.end(), 0);
+        auto model_config                          = makeOutputVocabModelConfig(output_vocab_ids);
+        model_config.vocab_size                    = std::max(10, test_case.vocab_size);
+        auto query                                 = make_shared<GenerateInput>();
+        query->input_ids                           = hostIntBuffer({2});
+        query->generate_config                     = make_shared<GenerateConfig>();
+        query->generate_config->num_beams          = test_case.num_beams;
+        query->generate_config->variable_num_beams = test_case.variable_num_beams;
+        query->generate_config->max_new_tokens     = test_case.max_new_tokens;
+        auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        EXPECT_EQ(!stream->hasError(), test_case.accepted) << stream->statusInfo().ToString();
+        if (!test_case.accepted) {
+            EXPECT_EQ(stream->statusInfo().code(), ErrorCode::INVALID_PARAMS);
+            EXPECT_NE(stream->statusInfo().ToString().find("beam width"), std::string::npos);
+        }
+    }
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testOutputVocabRejectsMissingPrimaryEos) {
     ResourceContext resource_context;
     // Default special_tokens.eos_token_id is 0; this vocabulary does not contain it.

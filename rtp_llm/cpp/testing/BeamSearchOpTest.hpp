@@ -165,4 +165,18 @@ public:
             }
         }
     }
+
+    void runPrunedVocabV2Tests() {
+        const int beam_width  = 1500;
+        const int max_seq_len = 16;
+
+        for (int batch_size : {1, 2}) {
+            for (int vocab_size : {1500, 2048}) {
+                variableBeamWidthTest(batch_size, 1, beam_width, vocab_size, max_seq_len);
+                simpleTest(batch_size, beam_width, vocab_size, max_seq_len);
+            }
+        }
+        // V2 can shrink the beam width even when vocab_size is smaller than beam_width_in.
+        variableBeamWidthTest(2, 70, 9, 17, max_seq_len);
+    }
 };

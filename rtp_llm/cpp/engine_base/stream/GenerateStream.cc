@@ -25,6 +25,8 @@ namespace rtp_llm {
 
 namespace {
 
+constexpr int kSmallBeamSearchV1MaxBeamWidth = 8;  // Keep in sync with trt_beam_search kMaxBeamWidthForV1.
+
 std::optional<std::string> validateOutputVocabRequest(GenerateConfig& config, size_t output_vocab_size) {
     if (config.repetition_penalty != 1.0f || config.presence_penalty != 0.0f || config.frequency_penalty != 0.0f) {
         return "output vocabulary pruning does not support active repetition, presence, or frequency penalties";
@@ -39,8 +41,28 @@ std::optional<std::string> validateOutputVocabRequest(GenerateConfig& config, si
         || config.calculate_loss != 0 || !config.select_tokens_id.empty() || !config.select_tokens_str.empty()) {
         return "output vocabulary pruning does not support full-vocabulary logits, probabilities, labels, or loss";
     }
-    if (config.hasNumBeams() && output_vocab_size <= 2 * static_cast<size_t>(config.maxNumBeams())) {
-        return "output vocabulary size must be greater than twice the maximum beam width";
+    if (config.hasNumBeams()) {
+        // Match numBeams(): start from one beam, then repeat the last configured width.
+        // One repeated step is enough to validate the entire constant-width tail.
+        const auto& beam_widths      = config.variable_num_beams;
+        const int   configured_steps = beam_widths.empty() ? 1 : static_cast<int>(beam_widths.size());
+        const int   steps            = std::min(config.max_new_tokens, configured_steps + 1);
+        int         beam_width_in    = 1;
+        for (int step = 0; step < steps; ++step) {
+            const int beam_width_out = beam_widths.empty() ?
+                                           config.num_beams :
+                                           beam_widths[std::min(static_cast<size_t>(step), beam_widths.size() - 1)];
+            if (beam_width_in > 1 || beam_width_out > 1) {
+                if (beam_width_in == beam_width_out && beam_width_out <= kSmallBeamSearchV1MaxBeamWidth) {
+                    if (output_vocab_size <= 2 * static_cast<size_t>(beam_width_out)) {
+                        return "output vocabulary size must be greater than twice the beam width for small-beam search";
+                    }
+                } else if (output_vocab_size < static_cast<size_t>(beam_width_out)) {
+                    return "output vocabulary size must be at least the output beam width";
+                }
+            }
+            beam_width_in = beam_width_out;
+        }
     }
     return std::nullopt;
 }
