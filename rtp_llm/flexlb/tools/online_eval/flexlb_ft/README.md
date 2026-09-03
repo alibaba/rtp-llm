@@ -27,11 +27,11 @@ python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbat
 | `--list` | — | 列出当前过滤条件下的用例并退出 |
 | `--keep` | — | 跑完保留环境不 teardown |
 
-全集 **81 例**；`--list` 按当前 profile 过滤，默认 profile 下显示 80 例（1 例仅 NON_BATCH 投递形态适用）。用例间环境按需复用 / 重建。
+全集 **86 例**；`--list` 按当前 profile 过滤，默认 profile 下显示 85 例（1 例仅 NON_BATCH 投递形态适用）。用例间环境按需复用 / 重建。
 
-## 测试分类（81 例）
+## 测试分类（86 例）
 
-断言一律写**正确契约**而非当前实现——跑挂即 finding；少数当前实现预期不满足的用例在表内标注「预期 FINDING」，其失败是问题本身而非测试缺陷。表内「期望」为一句话摘要，完整断言与构造细节以各用例 docstring 为准。
+断言一律写**正确契约**而非当前实现——跑挂即 finding。表内「期望」为一句话摘要，完整断言与构造细节以各用例 docstring 为准。
 
 ### cancel（13 例 · 全 profile）
 
@@ -49,18 +49,18 @@ python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbat
 | `cancel_deadline_exempt_inflight` | queueTimeout 到期落在请求已被引擎认领之后 | 不取消：完整输出、无引擎侧取消记录、走普通完成路径 |
 | `cancel_schedule_drop_delivered` | 批已认领后客户端取消 Schedule RPC 本身（仅 BATCH 投递） | master 仍向原 prefill 发真引擎 Cancel；账目经 CANCELLED reconcile 结算 |
 | `cancel_engine_notfound_settle` | 迟到的 Cancel 到达时引擎已无该请求 | master 幂等处理；引擎 NOT_FOUND 不报错；已有终态不被复写 |
-| `cancel_preemption_victim` | PRIORITY 排序下高优请求（P70）驱逐正在运行的低优受害者（P30） | 受害者以抢占错误码 8429 终态结算；系统继续运行 |
-| `cancel_stream_break_prefill_autonomous` | 客户端直接断流（不发 Cancel），prefill 引擎侧自主清理（仅 BATCH 投递；预期 FINDING） | 引擎感知断流并清理自身状态；账目无残渣 |
-| `cancel_stream_break_decode_autonomous` | 客户端直接断流，decode 侧自主提前终态（仅 NON_BATCH 投递；预期 FINDING） | decode 不等 stale-inflight TTL、主动上报终态；账目无残渣 |
+| `cancel_preemption_victim` | PRIORITY 排序下高优先级（priority=70）请求驱逐正在运行的低优先级（priority=30）请求 | 受害者以抢占错误码 8429 终态结算；系统继续运行 |
+| `cancel_stream_break_prefill_autonomous` | 客户端直接断流（不发 Cancel），prefill 引擎侧自主清理（仅 BATCH 投递） | 引擎感知断流并清理自身状态；账目无残渣 |
+| `cancel_stream_break_decode_autonomous` | 客户端直接断流，decode 侧自主提前终态（仅 NON_BATCH 投递） | decode 不等 stale-inflight TTL、主动上报终态；账目无残渣 |
 
-### status（19 例 · 固定 batch-window）
+### status（24 例 · 固定 batch-window）
 
 engine→master 状态上报通道的故障注入：ack 丢失 / 部分失败 / 错误码、终态抑制、伪造任务、重放、版本 / 游标回退、僵尸 RUNNING——master 账目在每种畸变下都必须收敛到正确终态。
 
 | 用例 | 场景 | 期望 |
 | --- | --- | --- |
 | `status_inflight_ttl_cleanup` | 引擎侧请求卡死、终态永不到达 | stale-inflight TTL 到期清理账目；后续请求不受污染 |
-| `status_ack_partial_fail` | 一批 4 个请求的 enqueue ack 中 1 个失败 | 失败请求表面化；其余请求不被毒化、照常完成 |
+| `status_ack_partial_fail` | 一批 4 个请求的 enqueue ack 中 1 个失败（瞬时码 13 / 永久码 8431 两档矩阵） | 失败请求表面化、其余照常完成；失败成员及时清出账目；瞬时码应重试至成功或 SLO 终态，永久码快速终态不重试 |
 | `status_ack_multi_error` | ack 携带两种不同错误码（8431 / 8510） | 错误码按请求逐个透传，各自正确 |
 | `status_ack_empty_no_crash` | ack 整体丢失（空 ack，投递结果不确定） | master 不崩溃；不确定栅栏有界且最终可清空 |
 | `status_prefill_suppress_all` | 所有 prefill 状态消息全静默 | TTL 兜底清账；master 存活；恢复 |
@@ -69,14 +69,19 @@ engine→master 状态上报通道的故障注入：ack 丢失 / 部分失败 / 
 | `status_unknown_rid_finished` | 上报 master 未见过的 rid 的终态 | 被忽略；账目指纹逐位不变 |
 | `status_version_regress` | 状态消息版本号回退（陈旧代） | 3-strike 机制退役陈旧代际 |
 | `status_decode_suppress_finished` | decode 侧终态被抑制 | 请求仍经兜底路径拿到终态 |
-| `status_decode_before_prefill` | decode 侧先于 prefill 上报完成 | D 侧终态足以结算请求 |
+| `status_decode_before_prefill` | decode 侧先于 prefill 上报完成（prefill 事实全程被抑制） | D 终态足以结算请求，并事件驱动（≤10s）释放 prefill 账目——不死等 TTL |
+| `status_decode_running_before_prefill` | decode 只报 RUNNING 不报终态，prefill 事实被抑制 | D 中间态零驱动：prefill 账目不被提前清理、请求不被结算；释放后 TTL 收敛 |
+| `status_decode_waiting_before_prefill` | decode 只报早期 RECEIVED 相位（合成事实），prefill 事实被抑制 | D 中间态零驱动：RECEIVED 不结算请求、不提前清 prefill 账目；释放后 TTL 收敛 |
 | `status_unknown_rid_running` | 一次性幽灵 RUNNING 条目（未知 rid） | 不驻留账目：TTL 内归零 |
 | `status_unknown_batchid` | 伪造 batchId 搭配真实 rid 上报终态 | 错配不得结算真实请求 |
+| `status_special_ids` | 边界 id：负值 rid 幽灵、batch_id=0 哨兵 / batch_id=-1 搭配真实请求 | 负 rid 幽灵终态被忽略（账目指纹不变）；哨兵 / 负 batchId 不得结算真实请求（batch_id=0 语义歧义单独标注） |
+| `status_unbatched_single_request` | 无批上下文的孤立状态上报（batch_id 缺省 / 0 × RUNNING / finished 四组合） | 每种组合对账目零推进：不登记幽灵、不产生幻影结算 |
+| `status_foreign_batchid` | 超范围 batchId（模拟另一 master 派发空间）+ 并发真实流量 | 外来事实被整体忽略；真实请求不被跨空间别名误结算 |
 | `status_duplicate_finished` | 同一终态上报两次 | 重放幂等；无二次结算 |
 | `status_cursor_regress` | 完成游标回退 3 步 | 幂等；已结算的不回退 |
 | `status_finished_then_running` | 已终态请求随后又上报 RUNNING | 终态不可复活 |
 | `status_zombie_completed_running` | 已完成任务的僵尸 RUNNING 持续上报 | tombstone 吸收；账目不回退 |
-| `status_zombie_fake_running` | 永久驻留的假 RUNNING 探针（预期 FINDING） | 契约要求假 inflight 最终清零；当前实现预期 FAIL——失败即 finding |
+| `status_zombie_fake_running` | 永久驻留的假 RUNNING 探针 | 假 inflight 最终清零（不得永久驻留） |
 | `status_fetch_error` | 批量 FetchResponse 流中途故障 | 故障表面化到客户端；账目收敛；恢复 |
 
 ### kv（15 例 · 全 profile）
@@ -85,15 +90,15 @@ KV 前缀缓存生命周期契约：per-engine 账本隔离、全局共享块的
 
 | 用例 | 场景 | 期望 |
 | --- | --- | --- |
-| `kv_pe_admit_isolation` | 前缀族分别钉在 A、B 两引擎；零命中的族因 B 减速全部落到 A | 只有 A 的缓存 key 集增长（B 保持原样）；后续同前缀请求粘 A |
-| `kv_pe_evict_zero_match` | 前缀族在引擎 X 上 prime 后被 /cache_evict 整族强制逐出 | 逐出同步进 master 索引：同前缀批次不再粘 X，按零命中平摊 |
-| `kv_pe_prefix_continuity` | 共享族在 e1 挖出缺口、e2 保留前 8 块连续 | 命中按连续前缀计算（缺口截断）：批次落在 e2 而非块数更多的 e1 |
-| `kv_g_shared_block_both_match` | 同一前缀族被双投共享给 e1/e2（全局索引 key→持有者集合） | 双持有者等命中 → 平局平摊：不钉单引擎，两引擎都接流量 |
-| `kv_g_partial_release_redirect` | 共享族只从 e1 逐出 | 收敛后 e2 成为唯一持有者；同前缀请求全部重定向到 e2 |
+| `kv_pe_admit_isolation` | 前缀族分别钉在引擎A、引擎B；零命中的族因引擎B减速全部落到引擎A | 只有引擎A的缓存 key 集增长（引擎B保持原样）；后续同前缀请求粘引擎A |
+| `kv_pe_evict_zero_match` | 前缀族在引擎A上 prime 后被 /cache_evict 整族强制逐出 | 逐出同步进 master 索引：同前缀批次不再粘引擎A，按零命中平摊 |
+| `kv_pe_prefix_continuity` | 共享族在引擎A挖出缺口、引擎B保留前 8 块连续 | 命中按连续前缀计算（缺口截断）：批次落在引擎B而非块数更多的引擎A |
+| `kv_g_shared_block_both_match` | 同一前缀族被双投共享给两个引擎（全局索引 key→持有者集合） | 双持有者等命中 → 平局平摊：不钉单引擎，两引擎都接流量 |
+| `kv_g_partial_release_redirect` | 共享族只从引擎A逐出 | 收敛后引擎B成为唯一持有者；同前缀请求全部重定向到引擎B |
 | `kv_g_full_release_no_ghost` | 共享族从两个持有者全部逐出 | 索引无残渣：同前缀请求按零命中平摊，无引擎被钉死 |
 | `kv_g_sync_convergence` | 交错 admit/evict 事件流后静默 ≥3.5s | 静默后路由与引擎快照一致：无持有者族平摊、唯一持有者族粘住 |
-| `kv_g_engine_down_cleanup` | 共享族双投 h1/h2 后永久下线 h1 | 只清 h1 的条目：幸存者 h2 保留该族并继续接同前缀流量 |
-| `kv_storm_hot_churn` | 4 个热前缀族轮换（50 请求）vs 每引擎 24 块的小 LRU（预期 FINDING） | 复制因子与持有者翻转有界、命中率不崩塌；无复制抑制时预期 FAIL——崩塌即 finding |
+| `kv_g_engine_down_cleanup` | 共享族双投两个引擎后永久下线其一 | 只清下线引擎的条目：幸存引擎保留该族并继续接同前缀流量 |
+| `kv_storm_hot_churn` | 4 个热前缀族轮换（50 请求）vs 每引擎 24 块的小 LRU | 复制因子与持有者翻转有界、命中率不崩塌 |
 | `kv_capacity_conflict_overflow` | 持有者引擎账本已满（全命中但预测 TTFT 高）时同前缀波次到达 | 亲和让位：波次溢出到非匹配引擎；短请求不受拖累；无排队超时 |
 | `kv_prefix_stickiness` | 多前缀族复用流量 + 自由流量混合 | family 续连粘住持有引擎；自由流量多引擎散布；全部完成 |
 | `kv_hot_prefix_tension` | 70% 流量集中于单一热前缀族 | 粘性保持且持有者总份额有上限；另一引擎仍接自由流量 |
@@ -116,13 +121,13 @@ KV 前缀缓存生命周期契约：per-engine 账本隔离、全局共享块的
 
 ### elastic（8 例 · 固定 batch-window）
 
-文件发现链路（discovery file → master 同步 → 路由）的动态扩缩容契约：拓扑收敛、切换期流量存活、缩容请求保护。
+文件发现链路（discovery file → master 同步 → 路由）的动态扩缩容契约：拓扑收敛、切换期流量存活、计划内缩容零失败（优雅摘除：先摘路由、等在途排空再下线）。
 
 | 用例 | 场景 | 期望 |
 | --- | --- | --- |
 | `elastic_add_flow` | 负载流运行中新增一个 prefill 引擎 | 收敛窗口内 master 收编新引擎并开始接流；背景流成功率 ≥90% |
-| `elastic_remove_flow` | 负载流运行中移除一个引擎 | 其余引擎持续服务；被删引擎从快照与发现文件消失；inflight 排空 |
-| `elastic_add_remove_cycle` | 3 轮 新增→验证→移除→验证 循环 | 每轮发现文件 / 拓扑 / 流量全过且文件始终可解析；拓扑还原 |
+| `elastic_remove_flow` | 负载流运行中移除一个引擎 | 计划内缩容零失败：背景流无一失败、无一悬挂（每请求到达终态）；其余引擎持续服务；被删引擎从快照与发现文件消失；inflight 排空 |
+| `elastic_add_remove_cycle` | 3 轮 新增→验证→移除→验证 循环 | 每轮发现文件 / 拓扑 / 流量全过且文件始终可解析；每轮移除时背景流零失败；拓扑还原 |
 | `elastic_rebalance` | 扩容后持续投放流量 | 新引擎分到份额（>0）且不超过 60%（成本再均衡） |
 | `elastic_stop_after_add` | 新增引擎→接流→/stop_engine→/start_engine | 3-strike 健康逐出下线；重启后重新被发现并恢复服务 |
 | `elastic_concurrent_ops` | 10 秒双线程并发加 / 删风暴 | master 全程健康；操作计数一致；无拓扑残渣 |
