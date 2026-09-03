@@ -313,12 +313,16 @@ void BlockTreeLoader::shutdown() {
 
 bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& context) {
     std::lock_guard<std::mutex>            lock(mutex_);
-    const std::vector<TransferDescriptor>& load_descs          = context->loadDescs();
-    const std::vector<bool>&               joined_loads        = context->joinedLoads();
-    const uint64_t                         context_id          = context->contextId();
-    size_t                                 prepared_desc_count = 0;
+    const std::vector<TransferDescriptor>& load_descs               = context->loadDescs();
+    const std::vector<bool>&               joined_loads             = context->joinedLoads();
+    const uint64_t                         context_id               = context->contextId();
+    size_t                                 prepared_desc_count      = 0;
+    bool                                   workflow_credit_acquired = false;
     block_tree_cache_detail::ScopeRollback rollback_guard(
-        [this, &load_descs, &joined_loads, &prepared_desc_count, context_id]() {
+        [this, &load_descs, &joined_loads, &prepared_desc_count, &workflow_credit_acquired, context_id]() {
+            if (workflow_credit_acquired) {
+                task_pool_->releaseWorkflowCredit();
+            }
             abortLoadLocked(load_descs,
                             joined_loads,
                             prepared_desc_count,
@@ -351,7 +355,11 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
         scheduleContextSettlement(task, ready_context);
     });
     if (task) {
-        auto on_timeout = [task]() {
+        if (!task_pool_->acquireWorkflowCredit()) {
+            return false;
+        }
+        workflow_credit_acquired = true;
+        auto on_timeout          = [task]() {
             RTP_LLM_LOG_WARNING("load expired in business queue, descriptor_count=%zu", task->load_descs.size());
             if (!task->context->completeTransfers(task->load_descs.size(), false)) {
                 RTP_LLM_LOG_WARNING("failed to record expired load, descriptor_count=%zu", task->load_descs.size());
@@ -456,6 +464,7 @@ void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&  
         bool                                           settlement_success = context->aggregateSuccess();
         std::vector<std::shared_ptr<LoadAsyncContext>> joined_contexts;
         if (task) {
+            block_tree_cache_detail::ScopeRollback credit_guard([this]() { task_pool_->releaseWorkflowCredit(); });
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 settlement_success = settleLoadLocked(*task, settlement_success, joined_contexts);
@@ -471,7 +480,8 @@ void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&  
         }
     };
     if (!task_pool_->submitCompletion(settle)) {
-        RTP_LLM_LOG_WARNING("load completion queue is closed; dropping settlement during shutdown");
+        RTP_LLM_LOG_WARNING("load completion queue is closed; settling context inline");
+        settle();
     }
 }
 

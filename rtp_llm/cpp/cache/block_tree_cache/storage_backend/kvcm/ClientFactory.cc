@@ -1,10 +1,10 @@
-#include "rtp_llm/cpp/cache/connector/remote_connector/ClientFactory.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientFactory.h"
 
-#include "rtp_llm/cpp/cache/connector/remote_connector/DirectSubscriber.h"
-#include "rtp_llm/cpp/cache/connector/remote_connector/VIPServerSubscriber.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DirectSubscriber.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/VIPServerSubscriber.h"
 
 namespace rtp_llm {
-namespace remote_connector {
+namespace kvcm {
 
 std::unique_ptr<kv_cache_manager::MetaClient>
 ClientFactory::createMetaClient(const std::string& config, const kv_cache_manager::InitParams& init_params) const {
@@ -23,5 +23,5 @@ std::unique_ptr<Subscriber> ClientFactory::createSubscriber(bool enable_vipserve
     return std::make_unique<DirectSubscriber>();
 }
 
-}  // namespace remote_connector
+}  // namespace kvcm
 }  // namespace rtp_llm

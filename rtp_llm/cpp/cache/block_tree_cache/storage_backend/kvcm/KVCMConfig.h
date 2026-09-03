@@ -1,10 +1,14 @@
 #pragma once
 
-#include <vector>
+#include <map>
+#include <memory>
 #include <string>
+#include <vector>
+
 #include "autil/legacy/jsonizable.h"
 
 namespace rtp_llm {
+namespace kvcm {
 
 enum class DataStorageType : uint8_t {
     DATA_STORAGE_TYPE_UNKNOWN      = 0,
@@ -154,7 +158,7 @@ private:
     uint32_t call_timeout_       = 100;   // ms
 };
 
-class RemoteConnectorConfig: public autil::legacy::Jsonizable {
+class KVCMConfig: public autil::legacy::Jsonizable {
 public:
     using LocationSpecInfoMap = std::map<std::string, int64_t>;
     using LocationSpecGroups  = std::map<std::string, std::vector<std::string>>;
@@ -165,18 +169,18 @@ public:
         HYBRID    = 0b00000011,
     };
 
-    RemoteConnectorConfig() = default;
-    RemoteConnectorConfig(bool                                        enable_vipserver,
-                          const std::string&                          vipserver_domain,
-                          int32_t                                     block_size,
-                          const std::string&                          instance_group,
-                          const std::string&                          instance_id,
-                          const std::vector<std::string>&             addresses,
-                          const std::shared_ptr<LocationSpecInfoMap>& location_spec_info_map,
-                          const std::shared_ptr<MetaChannelConfig>&   meta_channel_config,
-                          const std::shared_ptr<SdkWrapperConfig>&    sdk_wrapper_config,
-                          const std::shared_ptr<LocationSpecGroups>&  location_spec_groups,
-                          const ModelDeployment&                      model_deployment):
+    KVCMConfig() = default;
+    KVCMConfig(bool                                        enable_vipserver,
+               const std::string&                          vipserver_domain,
+               int32_t                                     block_size,
+               const std::string&                          instance_group,
+               const std::string&                          instance_id,
+               const std::vector<std::string>&             addresses,
+               const std::shared_ptr<LocationSpecInfoMap>& location_spec_info_map,
+               const std::shared_ptr<MetaChannelConfig>&   meta_channel_config,
+               const std::shared_ptr<SdkWrapperConfig>&    sdk_wrapper_config,
+               const std::shared_ptr<LocationSpecGroups>&  location_spec_groups,
+               const ModelDeployment&                      model_deployment):
         enable_vipserver_(enable_vipserver),
         vipserver_domain_(vipserver_domain),
         block_size_(block_size),
@@ -220,6 +224,7 @@ private:
     ModelDeployment                      model_deployment_;
 };
 
-using RemoteConnectorConfigPtr = std::shared_ptr<RemoteConnectorConfig>;
+using KVCMConfigPtr = std::shared_ptr<KVCMConfig>;
 
+}  // namespace kvcm
 }  // namespace rtp_llm

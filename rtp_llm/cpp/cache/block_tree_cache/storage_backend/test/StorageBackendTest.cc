@@ -44,6 +44,7 @@ TEST(StorageBackendExecutorTest, HonorsConfiguredWorkerAndQueueCapacity) {
             cv.wait(lock, [&] { return release; });
         }
         completed.fetch_add(1);
+        cv.notify_all();
     };
 
     const bool first_submitted = executor->submit(blocking_task);
@@ -58,13 +59,21 @@ TEST(StorageBackendExecutorTest, HonorsConfiguredWorkerAndQueueCapacity) {
         std::unique_lock<std::mutex> lock(mutex);
         both_started = cv.wait_for(lock, std::chrono::seconds(5), [&] { return started == 2; });
     }
-    const bool queued_submitted  = both_started && executor->submit([&] { completed.fetch_add(1); });
+    const bool queued_submitted  = both_started && executor->submit([&] {
+        completed.fetch_add(1);
+        cv.notify_all();
+    });
     const bool overflow_rejected = both_started && !executor->submit([] {});
     {
         std::lock_guard<std::mutex> lock(mutex);
         release = true;
     }
     cv.notify_all();
+    bool all_completed = false;
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        all_completed = cv.wait_for(lock, std::chrono::seconds(5), [&] { return completed.load() == 3; });
+    }
     executor->shutdown();
     EXPECT_TRUE(first_submitted);
     EXPECT_TRUE(first_started);
@@ -72,6 +81,7 @@ TEST(StorageBackendExecutorTest, HonorsConfiguredWorkerAndQueueCapacity) {
     EXPECT_TRUE(both_started);
     EXPECT_TRUE(queued_submitted);
     EXPECT_TRUE(overflow_rejected);
+    EXPECT_TRUE(all_completed);
     EXPECT_EQ(completed.load(), 3u);
 }
 

@@ -4,9 +4,10 @@
 #include <string>
 
 #include "autil/legacy/jsonizable.h"
-#include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnectorConfig.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/KVCMConfig.h"
 
 namespace rtp_llm {
+namespace kvcm {
 namespace {
 
 void expectInvalidSdkConfig(const std::string& value) {
@@ -14,24 +15,24 @@ void expectInvalidSdkConfig(const std::string& value) {
     EXPECT_THROW(autil::legacy::FromJsonString(config, value), autil::legacy::ExceptionBase);
 }
 
-TEST(RemoteConnectorConfigTest, RejectsNonObjectSdkBackend) {
+TEST(KVCMConfigTest, RejectsNonObjectSdkBackend) {
     expectInvalidSdkConfig(R"({"sdk_backend_configs":[1]})");
 }
 
-TEST(RemoteConnectorConfigTest, RejectsSdkBackendWithoutType) {
+TEST(KVCMConfigTest, RejectsSdkBackendWithoutType) {
     expectInvalidSdkConfig(R"({"sdk_backend_configs":[{}]})");
 }
 
-TEST(RemoteConnectorConfigTest, RejectsSdkBackendWithNonStringType) {
+TEST(KVCMConfigTest, RejectsSdkBackendWithNonStringType) {
     expectInvalidSdkConfig(R"({"sdk_backend_configs":[{"type":1}]})");
 }
 
-TEST(RemoteConnectorConfigTest, AcceptsValidSdkBackend) {
+TEST(KVCMConfigTest, AcceptsValidSdkBackend) {
     SdkWrapperConfig config;
     EXPECT_NO_THROW(autil::legacy::FromJsonString(config, R"({"sdk_backend_configs":[{"type":"local"}]})"));
 }
 
-TEST(RemoteConnectorConfigTest, FailedSdkBackendReplacementPreservesPreviousValidState) {
+TEST(KVCMConfigTest, FailedSdkBackendReplacementPreservesPreviousValidState) {
     SdkWrapperConfig config;
     ASSERT_NO_THROW(autil::legacy::FromJsonString(config, R"({"sdk_backend_configs":[{"type":"file"}]})"));
     ASSERT_EQ(config.sdk_backend_configs().size(), 1u);
@@ -47,4 +48,5 @@ TEST(RemoteConnectorConfigTest, FailedSdkBackendReplacementPreservesPreviousVali
 }
 
 }  // namespace
+}  // namespace kvcm
 }  // namespace rtp_llm

@@ -342,7 +342,9 @@ TEST(BlockTreeCacheMetricsTest, FailedQpsMetricsPublishZeroForSuccessfulOperatio
     transfer_tags.AddTag("target_tier", "device");
     EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_failed_qps_metric), 1u);
     EXPECT_EQ(metricSeriesCount(transfer_metrics->descriptors_per_transfer_metric), 1u);
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_descriptor_count_compat_metric), 1u);
     EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->descriptors_per_transfer_metric, transfer_tags), 3);
+    EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->transfer_descriptor_count_compat_metric, transfer_tags), 3);
     EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->transfer_failed_qps_metric, transfer_tags), 0);
     transfer_collector.success = false;
     ASSERT_TRUE((metrics_reporter->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(
@@ -381,6 +383,22 @@ TEST(BlockTreeCacheMetricsTest, FailedQpsMetricsPublishZeroForSuccessfulOperatio
         metrics_reporter->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(nullptr, &load_collector)));
     EXPECT_DOUBLE_EQ(snapshotQps(reuse_metrics->load_qps_metric, tags), 1);
     EXPECT_DOUBLE_EQ(snapshotQps(reuse_metrics->load_fail_qps_metric, tags), 1);
+}
+
+TEST(BlockTreeCacheMetricsTest, EvictionReferenceMetricKeepsLegacyAlias) {
+    kmonitor::MetricsTags tags("pool", "host");
+    auto metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    RtpLLMCachePoolMetricsCollector collector;
+    collector.eviction_target_ref_blocks        = 7;
+    collector.report_eviction_target_ref_blocks = true;
+    ASSERT_TRUE((metrics_reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&tags, &collector)));
+
+    RtpLLMCachePoolMetrics* metrics = metrics_reporter->getMetricsGroup<RtpLLMCachePoolMetrics>();
+    ASSERT_NE(metrics, nullptr);
+    EXPECT_EQ(metricSeriesCount(metrics->eviction_target_ref_blocks_metric), 1u);
+    EXPECT_EQ(metricSeriesCount(metrics->eviction_ref_blocks_compat_metric), 1u);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_target_ref_blocks_metric, tags), 7);
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->eviction_ref_blocks_compat_metric, tags), 7);
 }
 
 TEST_F(BlockTreeCacheTest, EvictionTriggerQpsPublishesOnlyExistingGroupTypes) {
@@ -531,7 +549,7 @@ TEST_F(BlockTreeCacheTest, EvictionMetricsReportEveryCompletedDropDescriptor) {
 
 TEST_F(BlockTreeCacheTest, KeySnapshotTracksMutationVersionAndLimit) {
     const auto empty = cache_->getKeySnapshot(/*limit=*/10);
-    EXPECT_EQ(empty.version, 0u);
+    EXPECT_EQ(empty.version, -1);
     EXPECT_TRUE(empty.keys.empty());
 
     std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(1));
@@ -1248,7 +1266,7 @@ TEST(BlockTreeCacheFinalizationTest, CopyExceptionSettlesPendingReleasesBeforeTa
     barrier->waitUntilEntered();
 
     EXPECT_GT(BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(*environment->cache), 0u);
-    const size_t submit_count  = per_rank_transfer_engine->submittedBatchCount();
+    const size_t submit_count = per_rank_transfer_engine->submittedBatchCount();
     BlockTreeCacheTestPeer::runMaintenanceForTest(*environment->cache);
     EXPECT_EQ(per_rank_transfer_engine->submittedBatchCount(), submit_count);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment->cache, Tier::DEVICE, 0.0);

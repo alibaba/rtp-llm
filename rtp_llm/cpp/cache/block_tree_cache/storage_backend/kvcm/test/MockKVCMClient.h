@@ -4,8 +4,8 @@
 
 #include <memory>
 
-#include "rtp_llm/cpp/cache/connector/remote_connector/ClientFactory.h"
-#include "rtp_llm/cpp/cache/connector/remote_connector/Subscriber.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientFactory.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/Subscriber.h"
 
 namespace kv_cache_manager {
 
@@ -78,7 +78,7 @@ private:
 }  // namespace kv_cache_manager
 
 namespace rtp_llm {
-namespace remote_connector {
+namespace kvcm {
 
 class MockSubscriber: public Subscriber {
 public:
@@ -99,5 +99,5 @@ public:
     MOCK_METHOD(std::unique_ptr<Subscriber>, createSubscriber, (bool), (const, override));
 };
 
-}  // namespace remote_connector
+}  // namespace kvcm
 }  // namespace rtp_llm
