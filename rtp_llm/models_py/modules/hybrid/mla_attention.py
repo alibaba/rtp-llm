@@ -18,6 +18,7 @@ from rtp_llm.utils.model_weight import W
 # per-token-group fp8 quant launch. ROCm path falls back to the unfused chain.
 _DEVICE_TYPE = get_device_type()
 if _DEVICE_TYPE == DeviceType.Cuda:
+    from rtp_llm.models_py.kernels.cuda.mxfp8_ops import mxfp8_quant_act_packed
     from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
         CudaFp8GEMMLinear,
     )
@@ -29,13 +30,16 @@ if _DEVICE_TYPE == DeviceType.Cuda:
     )
     from rtp_llm.models_py.triton_kernels.common.fused_strided_rmsnorm import (
         fused_strided_rmsnorm,
+        fused_strided_rmsnorm_per_token_fp8_quant,
         fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output,
     )
 else:
     CudaFp8GEMMLinear = None  # type: ignore
     CudaMxfp8Linear = None  # type: ignore
+    mxfp8_quant_act_packed = None  # type: ignore
     sigmoid_mul_fp8_quant_fwd = None  # type: ignore
     fused_strided_rmsnorm = None  # type: ignore
+    fused_strided_rmsnorm_per_token_fp8_quant = None  # type: ignore
     fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output = None  # type: ignore
 
 
@@ -237,6 +241,49 @@ class MlaAttention(nn.Module):
             elif fused_strided_rmsnorm is not None:
                 self._fuse_q_a_norm_mode = "bf16"
 
+        # MXFP8 projections use the same deterministic per-(row, 32-column)
+        # activation quantization.  When the sparse Indexer consumes the same
+        # hidden/q_c tensor as MLA, quantize once and pass the exact same FP8
+        # bytes and packed scales to both GEMMs.
+        main_input_proj = (
+            self.fused_qkv_a_proj
+            if self.q_lora_rank > 0
+            else self.fused_qkv_proj
+        )
+        self.accepts_mxfp8_input = bool(
+            CudaMxfp8Linear is not None
+            and isinstance(main_input_proj, CudaMxfp8Linear)
+        )
+        self._reuse_mxfp8_hidden_quant = bool(
+            mxfp8_quant_act_packed is not None
+            and CudaMxfp8Linear is not None
+            and self.indexer is not None
+            and self.accepts_mxfp8_input
+            and isinstance(self.indexer.wk, CudaMxfp8Linear)
+        )
+        self._reuse_mxfp8_q_c_quant = bool(
+            mxfp8_quant_act_packed is not None
+            and CudaMxfp8Linear is not None
+            and self.q_lora_rank > 0
+            and self.indexer is not None
+            and isinstance(self.q_b_proj, CudaMxfp8Linear)
+            and isinstance(self.indexer.wq_b, CudaMxfp8Linear)
+        )
+        if (
+            _fuse_on
+            and CudaMxfp8Linear is not None
+            and fused_strided_rmsnorm_per_token_fp8_quant is not None
+            and isinstance(getattr(self, "q_b_proj", None), CudaMxfp8Linear)
+        ):
+            if self.indexer is None:
+                self._fuse_q_a_norm_mode = "mxfp8"
+            elif (
+                self._reuse_mxfp8_q_c_quant
+                and fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output
+                is not None
+            ):
+                self._fuse_q_a_norm_mode = "mxfp8_dual"
+
         # HY4 Gated MLA epilogue: fuse elementwise sigmoid, multiply, and the
         # activation quantization consumed by the quantized output projection.
         self._fuse_gated_mla_quant = False
@@ -325,6 +372,14 @@ class MlaAttention(nn.Module):
         return_topk: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
         input_shape = hidden_states.shape[:-1]
+        if (
+            x_fp8 is None
+            and x_scale is None
+            and self._reuse_mxfp8_hidden_quant
+            and hidden_states.dim() == 2
+            and hidden_states.is_contiguous()
+        ):
+            x_fp8, x_scale = mxfp8_quant_act_packed(hidden_states)
         q_c = None
         q_c_fp8 = None
         q_c_scale = None
@@ -345,7 +400,29 @@ class MlaAttention(nn.Module):
             # F1a/F1b: fused strided RMSNorm (skip .contiguous() copy). When
             # q_b_proj is fp8 we additionally emit fp8+scale (F1b dual output)
             # so q_b_proj can use input_scales= and skip its internal quant.
-            if self._fuse_q_a_norm_mode == "fp8_dual":
+            if self._fuse_q_a_norm_mode == "mxfp8_dual":
+                q_c, q_c_fp8, q_c_scale = (
+                    fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
+                        q,
+                        self.q_a_layernorm.weight.data,
+                        self.q_a_layernorm.variance_epsilon,
+                        group_size=32,
+                        scale_ue8m0=True,
+                        mxfp8_semantics=True,
+                    )
+                )
+                q = self.q_b_proj(q_c_fp8, input_scales=q_c_scale)
+            elif self._fuse_q_a_norm_mode == "mxfp8":
+                q_fp8, q_scale = fused_strided_rmsnorm_per_token_fp8_quant(
+                    q,
+                    self.q_a_layernorm.weight.data,
+                    self.q_a_layernorm.variance_epsilon,
+                    group_size=32,
+                    scale_ue8m0=True,
+                    mxfp8_semantics=True,
+                )
+                q = self.q_b_proj(q_fp8, input_scales=q_scale)
+            elif self._fuse_q_a_norm_mode == "fp8_dual":
                 q_c, q_c_fp8, q_c_scale = (
                     fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
                         q,
@@ -402,8 +479,8 @@ class MlaAttention(nn.Module):
             q_view,
             kv_cache,
             fmha_impl,
-            x_fp8,
-            x_scale,
+            x_fp8 if self._reuse_mxfp8_hidden_quant else None,
+            x_scale if self._reuse_mxfp8_hidden_quant else None,
             q_c_fp8,
             q_c_scale,
             prev_topk_indices,
