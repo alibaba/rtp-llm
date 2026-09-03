@@ -1,6 +1,7 @@
 package org.flexlb.httpserver;
 
 import io.grpc.ManagedChannel;
+import io.grpc.Metadata;
 import io.grpc.Server;
 import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
@@ -10,6 +11,7 @@ import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.NettyServerBuilder;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
@@ -20,6 +22,7 @@ import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
+import org.flexlb.service.optimizer.OptimizerClient;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -58,7 +61,7 @@ class FlexlbForwardHopGuardNettyTest {
             try (Client client = Client.connect(node.grpcPort())) {
                 long started = System.nanoTime();
                 for (int i = 0; i < 8; i++) {
-                    responses.add(client.stub.schedule(request(71_000L + i)));
+                    responses.add(client.stub.schedule(request(String.valueOf(71_000L + i))));
                 }
                 assertTrue(Duration.ofNanos(System.nanoTime() - started)
                                 .compareTo(Duration.ofSeconds(2)) < 0,
@@ -87,7 +90,7 @@ class FlexlbForwardHopGuardNettyTest {
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB response;
             long started = System.nanoTime();
             try (Client client = Client.connect(first.grpcPort())) {
-                response = client.stub.schedule(request(72_001L));
+                response = client.stub.schedule(request("72001"));
             }
 
             assertTrue(Duration.ofNanos(System.nanoTime() - started)
@@ -108,7 +111,7 @@ class FlexlbForwardHopGuardNettyTest {
         }
     }
 
-    private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(long requestId) {
+    private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(String requestId) {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(requestId)
                 .setSeqLen(1024)
@@ -182,8 +185,8 @@ class FlexlbForwardHopGuardNettyTest {
                     mock(BatchSchedulerReporter.class),
                     mock(ServerScheduleLatencyRecorder.class),
                     mock(PrioritySchedulerReporter.class),
-                    mock(org.flexlb.cache.match.CacheAwareService.class),
-                    mock(org.flexlb.service.optimizer.OptimizerClient.class));
+                    mock(CacheAwareService.class),
+                    mock(OptimizerClient.class));
 
             serverExecutor = new ThreadPoolExecutor(
                     4, 4, 0L, TimeUnit.MILLISECONDS,
@@ -198,7 +201,7 @@ class FlexlbForwardHopGuardNettyTest {
                 @Override
                 public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
                         ServerCall<ReqT, RespT> call,
-                        io.grpc.Metadata headers,
+                        Metadata headers,
                         ServerCallHandler<ReqT, RespT> next) {
                     inboundCalls.incrementAndGet();
                     return next.startCall(call, headers);

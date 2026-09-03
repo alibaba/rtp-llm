@@ -9,6 +9,7 @@ import org.flexlb.util.PriorityNormalizer;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -32,7 +33,7 @@ public final class EvictionPlanner {
     static final Comparator<QueuedRequestSnapshot> CANDIDATE_ORDER = Comparator
             .comparingInt(QueuedRequestSnapshot::priority)
             .thenComparing(QueuedRequestSnapshot::arrivalTimeMs, Comparator.reverseOrder())
-            .thenComparingLong(QueuedRequestSnapshot::requestId);
+            .thenComparing(QueuedRequestSnapshot::requestId);
 
     private EvictionPlanner() {
     }
@@ -107,14 +108,14 @@ public final class EvictionPlanner {
         // harm is the absolute comparison dimension.
         long rawCost = 0;
         int minVictimPriority = Integer.MAX_VALUE;
-        long tieBreak = Long.MAX_VALUE;
+        String tieBreak = null;
         PriorityHarmProfile.Builder harmProfile = PriorityHarmProfile.builder();
         for (QueuedRequestSnapshot victim : victims) {
             rawCost = PriorityCostFunction.saturatedAdd(
                     rawCost, PriorityCostFunction.f(victim.priority()));
             harmProfile.add(victim.priority(), 1);
             minVictimPriority = Math.min(minVictimPriority, victim.priority());
-            tieBreak = Math.min(tieBreak, victim.requestId());
+            tieBreak = tieBreak == null || victim.requestId().compareTo(tieBreak) < 0 ? victim.requestId() : tieBreak;
         }
         PlanCost cost = new PlanCost(harmProfile.build(), minVictimPriority,
                 rawCost, victims.size(), tieBreak);
@@ -132,7 +133,7 @@ public final class EvictionPlanner {
     static final Comparator<DecodeRequestSnapshot> DECODE_SLOT_ORDER = Comparator
             .comparingInt(DecodeRequestSnapshot::priority)
             .thenComparingInt(v -> v.phase().ordinal())
-            .thenComparingLong(DecodeRequestSnapshot::requestId);
+            .thenComparing(DecodeRequestSnapshot::requestId);
 
     /**
      * Candidate preference for KV eviction (design doc 12.4): priority asc →
@@ -143,7 +144,7 @@ public final class EvictionPlanner {
             .comparingInt(DecodeRequestSnapshot::priority)
             .thenComparingInt(v -> v.phase().ordinal())
             .thenComparing(v -> PriorityCostFunction.kvBucket(v.kvTokens()), Comparator.reverseOrder())
-            .thenComparingLong(DecodeRequestSnapshot::requestId);
+            .thenComparing(DecodeRequestSnapshot::requestId);
 
     /**
      * Reserved-only decode planning (Phase 4 signature): equivalent to
@@ -386,7 +387,7 @@ public final class EvictionPlanner {
     private static DecodeVictimSet selectSlotVictims(PriorityRequestEnvelope envelope,
                                                      DecodeEndpointSnapshot ep,
                                                      long deficit,
-                                                     Set<Long> excludedVictimIds,
+                                                     Set<String> excludedVictimIds,
                                                      VictimOwnership ownership) {
         List<DecodeRequestSnapshot> candidates =
                 lowerPriorityCandidates(envelope, ep, excludedVictimIds, false, ownership, true);
@@ -422,7 +423,7 @@ public final class EvictionPlanner {
     private static DecodeVictimSet selectKvVictims(PriorityRequestEnvelope envelope,
                                                    DecodeEndpointSnapshot ep,
                                                    long kvDeficit,
-                                                   Set<Long> excludedVictimIds,
+                                                   Set<String> excludedVictimIds,
                                                    VictimOwnership ownership) {
         List<DecodeRequestSnapshot> candidates =
                 lowerPriorityCandidates(envelope, ep, excludedVictimIds, true, ownership, false);
@@ -471,7 +472,7 @@ public final class EvictionPlanner {
      */
     private static List<DecodeRequestSnapshot> lowerPriorityCandidates(PriorityRequestEnvelope envelope,
                                                                        DecodeEndpointSnapshot ep,
-                                                                       Set<Long> excludedVictimIds,
+                                                                       Set<String> excludedVictimIds,
                                                                        boolean releasableKvOnly,
                                                                        VictimOwnership ownership,
                                                                        boolean excludeQueued) {
@@ -502,7 +503,7 @@ public final class EvictionPlanner {
     private static void addConfirmedCandidates(List<DecodeRequestSnapshot> candidates,
                                                List<DecodeRequestSnapshot> entries,
                                                PriorityRequestEnvelope envelope,
-                                               Set<Long> excludedVictimIds,
+                                               Set<String> excludedVictimIds,
                                                boolean releasableKvOnly) {
         for (DecodeRequestSnapshot entry : entries) {
             if (entry.phase().isEngineConfirmed()
@@ -516,8 +517,8 @@ public final class EvictionPlanner {
         }
     }
 
-    private static Set<Long> victimIds(List<DecodeRequestSnapshot> victims) {
-        Set<Long> ids = new java.util.HashSet<>(victims.size());
+    private static Set<String> victimIds(List<DecodeRequestSnapshot> victims) {
+        Set<String> ids = new HashSet<>(victims.size());
         for (DecodeRequestSnapshot victim : victims) {
             ids.add(victim.requestId());
         }
@@ -542,10 +543,10 @@ public final class EvictionPlanner {
                                                               long totalCost,
                                                               long freedKvTokens) {
         int minVictimPriority = Integer.MAX_VALUE;
-        long tieBreak = Long.MAX_VALUE;
+        String tieBreak = null;
         for (DecodeRequestSnapshot victim : victims) {
             minVictimPriority = Math.min(minVictimPriority, victim.priority());
-            tieBreak = Math.min(tieBreak, victim.requestId());
+            tieBreak = tieBreak == null || victim.requestId().compareTo(tieBreak) < 0 ? victim.requestId() : tieBreak;
         }
         PlanCost cost = new PlanCost(harmProfile, minVictimPriority,
                 totalCost, victims.size(), tieBreak);

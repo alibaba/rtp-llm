@@ -15,7 +15,7 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
     private final long predictTimeMs;
     private final List<BatchItem> requests;
     private final long originalPredictTimeMs;
-    private final Set<Long> originalRequestIds;
+    private final Set<String> originalRequestIds;
     private final PrefillBatchFeatures originalFeatures;
     private final long createdAtMs;
     private final AtomicLong progressBaseMs;
@@ -40,7 +40,7 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
     private BatchInflight(long predictTimeMs,
                           List<BatchItem> requests,
                           long originalPredictTimeMs,
-                          Set<Long> originalRequestIds,
+                          Set<String> originalRequestIds,
                           PrefillBatchFeatures originalFeatures,
                           long createdAtMs,
                           long progressBaseMs,
@@ -116,7 +116,7 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
         return originalPredictTimeMs;
     }
 
-    Set<Long> originalRequestIds() {
+    Set<String> originalRequestIds() {
         return originalRequestIds;
     }
 

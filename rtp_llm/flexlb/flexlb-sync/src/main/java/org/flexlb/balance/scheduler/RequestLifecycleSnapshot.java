@@ -3,7 +3,7 @@ package org.flexlb.balance.scheduler;
 import java.util.Objects;
 
 /** Immutable lifecycle view returned by request-state and reconciliation APIs. */
-public record RequestLifecycleSnapshot(long requestId,
+public record RequestLifecycleSnapshot(String requestId,
                                        RequestLifecycleState state,
                                        DeliveryClaimKind deliveryClaimKind,
                                        long batchId,

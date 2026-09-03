@@ -27,6 +27,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -62,7 +63,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     }
 
     @Override
-    public void rollBack(WorkerEndpoint ep, long requestId) {
+    public void rollBack(WorkerEndpoint ep, String requestId) {
         // Release non-batch prefill inflight reservation on routing failure.
         // Batch path inflight is managed by PriorityScheduler — no-op here.
         if (ep instanceof PrefillEndpoint pe) {
@@ -71,7 +72,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     }
 
     private ServerStatus doSelect(BalanceContext balanceContext, RoleType roleType, String group) {
-        long requestId = balanceContext.getRequestId();
+        String requestId = balanceContext.getRequestId();
         long seqLen = balanceContext.getRequest().getSeqLen();
         FlexlbConfig config = balanceContext.getConfig();
 
@@ -102,7 +103,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                 survivors, minScore, balanceContext, roleType, group, seqLen, config);
 
         if (selectedIndex < 0) {
-            Map<String, Integer> merged = new java.util.HashMap<>(filterResult.rejections());
+            Map<String, Integer> merged = new HashMap<>(filterResult.rejections());
             hardFilterResult.rejections().forEach((k, v) -> merged.merge(k, v, Integer::sum));
             Logger.debug("Prefill select failed: all filtered out, request_id={}, rejections={}",
                     requestId, merged);
@@ -342,7 +343,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
 
         int eligibleSize = eligible.size();
         CandidateSet feasible = eligible;
-        Map<String, Integer> rejections = new java.util.HashMap<>();
+        Map<String, Integer> rejections = new HashMap<>();
         FormulaEstimateMemo formulaEstimateMemo = new FormulaEstimateMemo(seqLen);
         long sumWaitMs = 0;
         long sumPendingCount = 0;
@@ -463,7 +464,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         if (measure == null) {
             return new EndpointFilterResult(result, Map.of("NO_REGISTERED", 1));
         }
-        Map<String, Integer> rejections = new java.util.HashMap<>();
+        Map<String, Integer> rejections = new HashMap<>();
 
         PrefillEndpoint[] excludedEligible = new PrefillEndpoint[1];
         int registered = engineWorkerStatus.forEachModelWorkerEndpoint(roleType, group, (ipPort, ep) -> {
@@ -612,7 +613,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
 
     private ServerStatus buildServerStatus(PrefillEndpoint ep,
                                            RoleType roleType,
-                                           long requestId,
+                                           String requestId,
                                            long score,
                                            long selectedPrefillMs,
                                            BalanceContext balanceContext,

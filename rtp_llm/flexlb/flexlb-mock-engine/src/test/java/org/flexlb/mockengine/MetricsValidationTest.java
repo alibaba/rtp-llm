@@ -112,7 +112,7 @@ class MetricsValidationTest {
                 for (int j = 0; j < count; j++) {
                     int decodePort = decodeServices.get(
                             (i * count + j) % nDecode).getGrpcPort();
-                    inputs[j] = inputWithDecode(startRequestId + j, 10, decodePort);
+                    inputs[j] = inputWithDecode(String.valueOf(startRequestId + j), 10, decodePort);
                 }
                 EngineRpcService.EnqueueBatchResponsePB response = enqueue(
                         prefillServices.get(i), batch(1000 + i, slot(0, inputs)));
@@ -338,9 +338,8 @@ class MetricsValidationTest {
     // ──────────── Protobuf builders ────────────
 
     private static EngineRpcService.GenerateInputPB inputWithDecode(
-            long requestId, int inputTokens, int decodePort) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+            String requestId, int inputTokens, int decodePort) {
+        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(1)
                         .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()

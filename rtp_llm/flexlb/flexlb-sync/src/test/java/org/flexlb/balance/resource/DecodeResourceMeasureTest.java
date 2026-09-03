@@ -52,8 +52,8 @@ class DecodeResourceMeasureTest {
                 .setMaxEngineRequests(2L);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
         DecodeEndpoint endpoint = createAliveDecodeEndpoint();
-        endpoint.reserve(1L, 0, 0);
-        endpoint.reserve(2L, 0, 0);
+        endpoint.reserve("1", 0, 0);
+        endpoint.reserve("2", 0, 0);
         // getEngineLoad() = confirmedRunningCount(0) + inflightRequests.size(2) = 2, limit = 2, 2 >= 2 → unavailable
         assertFalse(measure.isResourceAvailable(endpoint));
     }
@@ -64,7 +64,7 @@ class DecodeResourceMeasureTest {
                 .setMaxEngineRequests(3L);
         DecodeResourceMeasure measure = new DecodeResourceMeasure(configService);
         DecodeEndpoint endpoint = createAliveDecodeEndpoint();
-        endpoint.reserve(1L, 0, 0);
+        endpoint.reserve("1", 0, 0);
         // getEngineLoad() = confirmedRunningCount(0) + inflightRequests.size(1) = 1, limit = 3, 1 < 3 → available
         assertTrue(measure.isResourceAvailable(endpoint));
     }
@@ -108,10 +108,10 @@ class DecodeResourceMeasureTest {
 
     private Map<String, TaskInfo> taskMap(Long... requestIds) {
         return Arrays.stream(requestIds)
-                .collect(Collectors.toMap(String::valueOf, this::taskInfo));
+                .collect(Collectors.toMap(String::valueOf, id -> taskInfo(String.valueOf(id))));
     }
 
-    private TaskInfo taskInfo(long requestId) {
+    private TaskInfo taskInfo(String requestId) {
         TaskInfo taskInfo = new TaskInfo();
         taskInfo.setRequestId(requestId);
         return taskInfo;

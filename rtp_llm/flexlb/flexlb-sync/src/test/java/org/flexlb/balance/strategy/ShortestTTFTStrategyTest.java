@@ -17,6 +17,8 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.NonBatchDispatcherConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.cache.HostCacheMatch;
+import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
@@ -87,7 +89,7 @@ class ShortestTTFTStrategyTest {
         // Worker 2: TTFT = estimateMs(1000,0)=1000 + wait 50 = 1050  (lower)
         prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 50));
 
-        ServerStatus result = strategy.select(buildContext(1000, 1L), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(1000, "1"), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
@@ -106,7 +108,7 @@ class ShortestTTFTStrategyTest {
         endpointRegistry.getPrefillEndpoints().put("10.0.0.1:8080", first);
 
         ServerStatus mixed = strategy.select(
-                buildContext(1_000, 8_001L), RoleType.PREFILL, null);
+                buildContext(1000, "8001"), RoleType.PREFILL, null);
 
         assertTrue(mixed.isSuccess());
         assertEquals("10.0.0.2", mixed.getServerIp(),
@@ -118,7 +120,7 @@ class ShortestTTFTStrategyTest {
         endpointRegistry.getPrefillEndpoints().put("10.0.0.2:8080", second);
 
         ServerStatus allUnavailable = strategy.select(
-                buildContext(1_000, 8_002L), RoleType.PREFILL, null);
+                buildContext(1000, "8002"), RoleType.PREFILL, null);
 
         assertFalse(allUnavailable.isSuccess(),
                 "selection must retry elsewhere when no coherent wait snapshot exists");
@@ -136,7 +138,7 @@ class ShortestTTFTStrategyTest {
         prefillMap.put("10.0.0.3:8080", createWorker("10.0.0.3", 200));
 
         // candidateCount = min(1, 3) = 1 → only lowest-TTFT worker in pool, short-circuit
-        ServerStatus result = strategy.select(buildContext(500, 1L, config), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(500, "1", config), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
@@ -159,7 +161,7 @@ class ShortestTTFTStrategyTest {
         PrefillEndpoint ep2 = endpointRegistry.getPrefill("10.0.0.2:8080");
         ep2.getLastSelectedTime().set(2000);  // later  → more recently used
 
-        ServerStatus result = strategy.select(buildContext(500, 1L, config), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(500, "1", config), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         // CAS fairness selects the worker with the earlier lastSelectedTime
@@ -180,7 +182,7 @@ class ShortestTTFTStrategyTest {
         Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class)))
                 .thenReturn(localMatches(cacheResults, 256L));
 
-        ServerStatus result = strategy.select(buildContext(1000, 1L), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(1000, "1"), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
@@ -193,9 +195,9 @@ class ShortestTTFTStrategyTest {
         Mockito.when(mockEp.getStatus()).thenReturn(workerStatus);
         long requestId = 42L;
 
-        strategy.rollBack(mockEp, requestId);
+        strategy.rollBack(mockEp, String.valueOf(requestId));
 
-        Mockito.verify(mockEp).releaseBatch(requestId);
+        Mockito.verify(mockEp).releaseBatch(String.valueOf(requestId));
         Mockito.verify(workerStatus).removeLocalTask(String.valueOf(requestId));
     }
 
@@ -224,12 +226,13 @@ class ShortestTTFTStrategyTest {
                 EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 1000));
         PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
-        BalanceContext context = buildContext(500, 43L, config);
+        BalanceContext context = buildContext(500, "43", config);
 
         ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals(2, endpoint.getInflightBatchCount());
+        assertEquals(0, endpoint.getInflightRouteRequestCount());
         assertTrue(endpoint.realWaitTimeMs() < 2000L);
     }
 
@@ -237,7 +240,7 @@ class ShortestTTFTStrategyTest {
     void noAvailableWorkersReturnsError() {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
 
-        ServerStatus result = strategy.select(buildContext(500, 1L), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(500, "1"), RoleType.PREFILL, null);
 
         assertFalse(result.isSuccess());
     }
@@ -252,7 +255,7 @@ class ShortestTTFTStrategyTest {
         Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
 
-        ServerStatus result = strategy.select(buildContext(500, 1L, config), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(500, "1", config), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.1", result.getServerIp());
@@ -276,7 +279,7 @@ class ShortestTTFTStrategyTest {
         // Make the 2nd-lowest (10.0.0.2) least recently selected
         endpointRegistry.getPrefill("10.0.0.2:8080").getLastSelectedTime().set(0L);
 
-        ServerStatus result1 = strategy.select(buildContext(500, 1L, config), RoleType.PREFILL, null);
+        ServerStatus result1 = strategy.select(buildContext(500, "1", config), RoleType.PREFILL, null);
         assertTrue(result1.isSuccess());
         // candidateCount=1 → only 10.0.0.1 in pool → short-circuit selects it
         // despite being recently selected (if pool were larger, CAS would pick 10.0.0.2)
@@ -296,7 +299,7 @@ class ShortestTTFTStrategyTest {
         // Worker 3 (3rd lowest): least recently selected (oldest)
         endpointRegistry.getPrefill("10.0.1.3:8080").getLastSelectedTime().set(0L);
 
-        ServerStatus result2 = strategy.select(buildContext(500, 2L, config), RoleType.PREFILL, null);
+        ServerStatus result2 = strategy.select(buildContext(500, "2", config), RoleType.PREFILL, null);
         assertTrue(result2.isSuccess());
         // candidateCount=3 → workers 1, 2, 3 are in the pool
         // CAS fairness picks worker 3 (oldest lastSelectedTime=0)
@@ -317,7 +320,7 @@ class ShortestTTFTStrategyTest {
                         "10.0.0.1:8080", 4,
                         "10.0.0.2:8080", 1), 1024L));
 
-        BalanceContext context = buildContext(4096, 1L);
+        BalanceContext context = buildContext(4096, "1");
         context.getRequest().setCacheKeyBlockSize(1024L);
 
         ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
@@ -350,7 +353,7 @@ class ShortestTTFTStrategyTest {
                 RoleType.PREFILL, ipPort, w);
         if (estimatedWaitMs > 0) {
             ep.commitBatch(900000L + ip.hashCode(), estimatedWaitMs,
-                    List.of(batchItem(900000L + ip.hashCode(), estimatedWaitMs, 0)));
+                    List.of(batchItem(String.valueOf(900000L + ip.hashCode()), estimatedWaitMs, 0)));
         }
         return w;
     }
@@ -358,13 +361,13 @@ class ShortestTTFTStrategyTest {
     private static CacheMatchResult localMatches(
             Map<String, Integer> matches, long blockSize) {
         return new CacheMatchResult(
-                org.flexlb.dao.cache.HostCacheMatch.fromLocalMatches(matches),
+                HostCacheMatch.fromLocalMatches(matches),
                 CacheMatchSource.LOCAL_SYNC,
                 0L,
                 blockSize);
     }
 
-    private BatchItem batchItem(long requestId, long seqLen, long hitCache) {
+    private BatchItem batchItem(String requestId, long seqLen, long hitCache) {
         Request req = new Request();
         req.setRequestId(requestId);
         req.setSeqLen(seqLen);
@@ -372,20 +375,20 @@ class ShortestTTFTStrategyTest {
         ctx.setRequest(req);
         ctx.setConfig(SchedulingTestConfig.batchConfig());
         if (hitCache > 0) {
-            org.flexlb.dao.loadbalance.DebugInfo di = new org.flexlb.dao.loadbalance.DebugInfo();
+            DebugInfo di = new DebugInfo();
             di.setHitCacheLen(hitCache);
-            org.flexlb.dao.loadbalance.ServerStatus ss = new org.flexlb.dao.loadbalance.ServerStatus();
+            ServerStatus ss = new ServerStatus();
             ss.setDebugInfo(di);
             return new BatchItem(ctx, null, null, ss, null, null, null, 0);
         }
         return new BatchItem(ctx, null, null, null, null, null, null, 0);
     }
 
-    private BalanceContext buildContext(long seqLen, long requestId) {
+    private BalanceContext buildContext(long seqLen, String requestId) {
         return buildContext(seqLen, requestId, new FlexlbConfig());
     }
 
-    private BalanceContext buildContext(long seqLen, long requestId, FlexlbConfig config) {
+    private BalanceContext buildContext(long seqLen, String requestId, FlexlbConfig config) {
         Request req = new Request();
         req.setSeqLen(seqLen);
         req.setRequestId(requestId);

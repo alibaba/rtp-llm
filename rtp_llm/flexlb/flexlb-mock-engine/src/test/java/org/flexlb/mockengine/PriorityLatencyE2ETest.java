@@ -53,7 +53,7 @@ class PriorityLatencyE2ETest {
                     long requestId = rid++;
                     submitNanos.put(requestId, System.nanoTime());
                     priorityByRid.put(requestId, priority);
-                    futures.add(h.scheduler.submit(h.context(requestId, priority)));
+                    futures.add(h.scheduler.submit(h.context(String.valueOf(requestId), priority)));
                 }
             }
             int total = PER_PRIORITY * PRIORITIES.length;

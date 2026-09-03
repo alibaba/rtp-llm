@@ -46,15 +46,15 @@ class PrefillRequestLedgerApiTest {
         PrefillRequestLedger ledger = new PrefillRequestLedger(
                 notifications::incrementAndGet, clock::get, ignored -> {});
 
-        assertTrue(ledger.tryAcquire(1L, 100, 1));
-        assertTrue(ledger.release(1L));
-        assertFalse(ledger.release(1L));
+        assertTrue(ledger.tryAcquire("1", 100, 1));
+        assertTrue(ledger.release("1"));
+        assertFalse(ledger.release("1"));
 
-        assertTrue(ledger.tryAcquire(2L, 100, 1));
-        assertTrue(ledger.settle(2L));
-        assertFalse(ledger.settle(2L));
+        assertTrue(ledger.tryAcquire("2", 100, 1));
+        assertTrue(ledger.settle("2"));
+        assertFalse(ledger.settle("2"));
 
-        assertTrue(ledger.tryAcquire(3L, 100, 1));
+        assertTrue(ledger.tryAcquire("3", 100, 1));
         clock.incrementAndGet();
         assertEquals(1, ledger.evict(0));
         assertEquals(0, ledger.evict(0));

@@ -14,6 +14,7 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -21,7 +22,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 
 /**
  * Decode-side endpoint with Auto-TPM shadow admission accounting.
@@ -44,12 +45,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
-    private final ConcurrentHashMap<Long, RequestInflight> inflightRequests = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, RequestInflight> inflightRequests = new ConcurrentHashMap<>();
     private final AtomicLong inflightKvReservedTotal = new AtomicLong(0);
     private final AtomicLong inflightExpectedKvReservedTotal = new AtomicLong(0);
     private final AtomicLong reportedKvAvailable = new AtomicLong();
     private volatile int confirmedRunningCount;
-    private final InflightEvictor<Long, RequestInflight> requestEvictor;
+    private final InflightEvictor<String, RequestInflight> requestEvictor;
 
     /**
      * Layered registry of engine-confirmed requests (Phase 5): requestId →
@@ -58,7 +59,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * slot count stays in {@code confirmedRunningCount}, so this registry is
      * pure metadata for eviction planning, cancel dedup and layered gauges.
      */
-    private final ConcurrentHashMap<Long, ConfirmedTask> trackedConfirmed = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ConfirmedTask> trackedConfirmed = new ConcurrentHashMap<>();
 
     /**
      * Token-fenced priority-preemption ownership.  Victim accounting remains
@@ -66,7 +67,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * is settled; an ACCEPTED Cancel response only advances the claim state.
      * All access is under {@link #admissionLock}.
      */
-    private final Map<Long, PreemptionClaim> preemptionClaims = new HashMap<>();
+    private final Map<String, PreemptionClaim> preemptionClaims = new HashMap<>();
     private final Map<Long, EndpointPreemptionAttempt> preemptionAttempts = new HashMap<>();
 
     /** KV that Decode has reported free but the Prefill CANCELED fence has not settled yet. */
@@ -82,7 +83,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * clears or an ordinary authoritative terminal arrives. The two atomic KV
      * totals are read lock-free by routing; they do not own entry lifecycle.
      */
-    private final Map<Long, EngineFenceProtection> engineFenceProtections = new HashMap<>();
+    private final Map<String, EngineFenceProtection> engineFenceProtections = new HashMap<>();
     private final AtomicLong engineFenceHeldKv = new AtomicLong();
     private final AtomicLong engineFenceHeldExpectedKv = new AtomicLong();
     /** Number of generic synthetic slots; guarded by {@link #admissionLock}. */
@@ -101,7 +102,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * request ids must not be reused inside that reconciliation window because
      * WorkerStatus does not carry a dispatch generation.
      */
-    private final Map<Long, Long> settledTombstones = new HashMap<>();
+    private final Map<String, Long> settledTombstones = new HashMap<>();
 
     /**
      * Reserved entries whose request is still sitting in a prefill queue —
@@ -115,7 +116,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * it alongside {@code inflightRequests}. Legacy/DIRECT paths never mark,
      * so their accounting is unchanged.
      */
-    private final java.util.Set<Long> queuedPhase = ConcurrentHashMap.newKeySet();
+    private final Set<String> queuedPhase = ConcurrentHashMap.newKeySet();
 
     /**
      * O(1) mirror of {@code |queuedPhase ∩ inflightRequests|} (PR-C):
@@ -150,7 +151,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         });
     }
 
-    public void reserve(long requestId, long kvTokens, long expectedKvTokens) {
+    public void reserve(String requestId, long kvTokens, long expectedKvTokens) {
         reserve(requestId, kvTokens, expectedKvTokens,
                 RequestInflight.DEFAULT_PRIORITY);
     }
@@ -160,7 +161,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * priority so the reservation can later be ranked as a decode eviction
      * candidate (design doc 10.1).
      */
-    public void reserve(long requestId, long kvTokens, long expectedKvTokens,
+    public void reserve(String requestId, long kvTokens, long expectedKvTokens,
                         int priority) {
         admissionLock.lock();
         try {
@@ -185,7 +186,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    public void release(long requestId) {
+    public void release(String requestId) {
         admissionLock.lock();
         try {
             boolean protectionRemoved = clearEngineFenceProtectionLocked(requestId);
@@ -218,7 +219,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * @return {@code true} only when the observed reservation was removed
      */
     public boolean releaseReservationIfCurrent(
-            long requestId, RequestInflight expectedReservation) {
+            String requestId, RequestInflight expectedReservation) {
         if (expectedReservation == null) {
             return false;
         }
@@ -257,7 +258,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * @return {@code true} when live Decode accounting was protected (including
      *         an already-protected request), otherwise {@code false}
      */
-    public boolean beginEngineFenceProtection(long requestId) {
+    public boolean beginEngineFenceProtection(String requestId) {
         admissionLock.lock();
         try {
             if (engineFenceProtections.containsKey(requestId)) {
@@ -297,7 +298,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      *
      * @return {@code true} only when a live generic protection was removed
      */
-    public boolean endEngineFenceProtection(long requestId) {
+    public boolean endEngineFenceProtection(String requestId) {
         admissionLock.lock();
         try {
             if (!clearEngineFenceProtectionLocked(requestId)) {
@@ -327,7 +328,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * @return {@code true} when this call removed accounting or installed the
      *         tombstone for the first time, otherwise {@code false}
      */
-    public boolean settleTombstonedRequest(long requestId) {
+    public boolean settleTombstonedRequest(String requestId) {
         admissionLock.lock();
         try {
             boolean changed = settleRequestAccountingLocked(
@@ -367,8 +368,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * a harmless no-op afterwards ({@link #release} is idempotent).
      */
     public ReleaseReserveResult tryReleaseVictimsAndReserveIncoming(
-            List<Long> victimIds,
-            long incomingRequestId, long kvTokens, long expectedKvTokens,
+            List<String> victimIds,
+            String incomingRequestId, long kvTokens, long expectedKvTokens,
             int priority,
             long expectedAdmissionVersion) {
         admissionLock.lock();
@@ -376,7 +377,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             if (admissionVersion.get() != expectedAdmissionVersion) {
                 return ReleaseReserveResult.VERSION_MISMATCH;
             }
-            for (Long victimId : victimIds) {
+            for (String victimId : victimIds) {
                 RequestInflight victim = inflightRequests.get(victimId);
                 if (victim == null || !queuedPhase.contains(victimId)
                         || preemptionClaims.containsKey(victimId)
@@ -384,7 +385,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     return ReleaseReserveResult.VICTIM_GONE;
                 }
             }
-            for (Long victimId : victimIds) {
+            for (String victimId : victimIds) {
                 release(victimId);
             }
             reserve(incomingRequestId, kvTokens, expectedKvTokens, priority);
@@ -402,7 +403,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * has been folded into the confirmed layer (the engine owns the request;
      * contract 5.3 forbids terminal operations on dispatched requests).
      */
-    public boolean releaseIfHeld(long requestId) {
+    public boolean releaseIfHeld(String requestId) {
         admissionLock.lock();
         try {
             RequestInflight held = inflightRequests.get(requestId);
@@ -419,7 +420,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /** Result of {@link #tryReleaseVictimsIfHeldAndReserveIncoming}. */
-    public record PresenceEvictionOutcome(boolean success, List<Long> freedVictimIds) {
+    public record PresenceEvictionOutcome(boolean success, List<String> freedVictimIds) {
     }
 
     /**
@@ -434,13 +435,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * calibrate activity no longer aborts the commit.
      */
     public PresenceEvictionOutcome tryReleaseVictimsIfHeldAndReserveIncoming(
-            List<Long> victimIds,
-            long incomingRequestId, long kvTokens, long expectedKvTokens,
+            List<String> victimIds,
+            String incomingRequestId, long kvTokens, long expectedKvTokens,
             int priority) {
         admissionLock.lock();
         try {
-            List<Long> freed = new ArrayList<>(victimIds.size());
-            for (Long victimId : victimIds) {
+            List<String> freed = new ArrayList<>(victimIds.size());
+            for (String victimId : victimIds) {
                 if (releaseIfHeld(victimId)) {
                     freed.add(victimId);
                 }
@@ -463,7 +464,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * <p>Taken under {@link #admissionLock} so the returned map is a consistent
      * point w.r.t. concurrent mutations.
      */
-    public Map<Long, RequestInflight> reservedView() {
+    public Map<String, RequestInflight> reservedView() {
         admissionLock.lock();
         try {
             return Map.copyOf(inflightRequests);
@@ -477,7 +478,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * endpoint-wide reservation map. The immutable value identity is used by
      * conditional handoff/cleanup operations to fence request-id reuse.
      */
-    public RequestInflight reservationFor(long requestId) {
+    public RequestInflight reservationFor(String requestId) {
         return inflightRequests.get(requestId);
     }
 
@@ -490,21 +491,21 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public LayeredAdmissionView layeredAdmissionView() {
         admissionLock.lock();
         try {
-            List<ConfirmedTaskView> confirmed = new java.util.ArrayList<>(trackedConfirmed.size());
+            List<ConfirmedTaskView> confirmed = new ArrayList<>(trackedConfirmed.size());
             trackedConfirmed.forEach((requestId, task) ->
                     confirmed.add(new ConfirmedTaskView(requestId, task.priority(),
                             task.kvTokens(), task.phase(), task.priorityKnown(),
                             preemptionClaims.containsKey(requestId)
                                     || engineFenceProtections.containsKey(requestId))));
-            Set<Long> claimed = Set.copyOf(preemptionClaims.keySet());
+            Set<String> claimed = Set.copyOf(preemptionClaims.keySet());
             if (!engineFenceProtections.isEmpty()) {
-                Set<Long> combined = new HashSet<>(claimed);
+                Set<String> combined = new HashSet<>(claimed);
                 combined.addAll(engineFenceProtections.keySet());
                 claimed = Set.copyOf(combined);
             }
             return new LayeredAdmissionView(admissionVersion.get(),
                     Map.copyOf(inflightRequests), List.copyOf(confirmed),
-                    java.util.Set.copyOf(queuedPhase),
+                    Set.copyOf(queuedPhase),
                     claimed);
         } finally {
             admissionLock.unlock();
@@ -513,14 +514,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /** Atomic (admissionVersion, reserved, confirmed, queued) tuple — see {@link #layeredAdmissionView()}. */
     public record LayeredAdmissionView(long admissionVersion,
-                                       Map<Long, RequestInflight> reserved,
+                                       Map<String, RequestInflight> reserved,
                                        List<ConfirmedTaskView> confirmed,
-                                       java.util.Set<Long> queued,
-                                       Set<Long> claimed) {
+                                       Set<String> queued,
+                                       Set<String> claimed) {
     }
 
     /** Immutable point-in-time view of one layered-registry entry. */
-    public record ConfirmedTaskView(long requestId,
+    public record ConfirmedTaskView(String requestId,
                                     int priority,
                                     long kvTokens,
                                     DecodeTaskPhase phase,
@@ -546,8 +547,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     public PreemptionBeginResult beginPriorityPreemption(
             long attemptToken,
-            List<Long> victimIds,
-            long incomingRequestId,
+            List<String> victimIds,
+            String incomingRequestId,
             long incomingKvTokens,
             long incomingExpectedKvTokens,
             int incomingPriority,
@@ -567,8 +568,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 return PreemptionBeginResult.INCOMING_ALREADY_RESERVED;
             }
 
-            Map<Long, ClaimOwner> owners = new HashMap<>();
-            for (Long victimId : victimIds) {
+            Map<String, ClaimOwner> owners = new HashMap<>();
+            for (String victimId : victimIds) {
                 if (preemptionClaims.containsKey(victimId)
                         || engineFenceProtections.containsKey(victimId)) {
                     return PreemptionBeginResult.VICTIM_ALREADY_CLAIMED;
@@ -594,7 +595,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             // Cancel runs.  It is not visible to the prefill queue yet.
             reserve(incomingRequestId, incomingKvTokens, incomingExpectedKvTokens,
                     incomingPriority);
-            for (Map.Entry<Long, ClaimOwner> entry : owners.entrySet()) {
+            for (Map.Entry<String, ClaimOwner> entry : owners.entrySet()) {
                 RequestInflight shadow = inflightRequests.get(entry.getKey());
                 ConfirmedTask confirmed = trackedConfirmed.get(entry.getKey());
                 long hardKv = shadow != null ? shadow.kvTokens()
@@ -620,14 +621,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
             if (attempt == null) {
                 return false;
             }
-            for (Long victimId : attempt.victimIds) {
+            for (String victimId : attempt.victimIds) {
                 PreemptionClaim claim = preemptionClaims.get(victimId);
                 if (claim == null || claim.attemptToken != attemptToken
                         || claim.state != ClaimState.CLAIMED) {
                     return false;
                 }
             }
-            for (Long victimId : attempt.victimIds) {
+            for (String victimId : attempt.victimIds) {
                 preemptionClaims.get(victimId).state = ClaimState.CANCEL_IN_FLIGHT;
             }
             admissionVersion.incrementAndGet();
@@ -638,17 +639,17 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /** Cancel ACCEPTED: retain every byte/slot and only advance control state. */
-    public boolean markPriorityCancelAccepted(long attemptToken, long requestId) {
+    public boolean markPriorityCancelAccepted(long attemptToken, String requestId) {
         return transitionClaim(attemptToken, requestId,
                 ClaimState.CANCEL_IN_FLIGHT, ClaimState.CANCEL_REQUESTED);
     }
 
-    public boolean markPriorityCancelNotFound(long attemptToken, long requestId) {
+    public boolean markPriorityCancelNotFound(long attemptToken, String requestId) {
         return transitionClaim(attemptToken, requestId,
                 ClaimState.CANCEL_IN_FLIGHT, ClaimState.NOT_FOUND_STALE);
     }
 
-    public boolean markPriorityCancelUnknown(long attemptToken, long requestId) {
+    public boolean markPriorityCancelUnknown(long attemptToken, String requestId) {
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaims.get(requestId);
@@ -670,7 +671,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * deletes victim accounting after an accepted or transport-unknown
      * Cancel; duplicate observations are a token-fenced no-op.
      */
-    public boolean settlePriorityCanceled(long attemptToken, long requestId) {
+    public boolean settlePriorityCanceled(long attemptToken, String requestId) {
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaims.get(requestId);
@@ -693,7 +694,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * therefore an authoritative terminal proof and may release the same
      * accounting as typed CANCELED without waiting for WorkerStatus.</p>
      */
-    public boolean settlePriorityTombstoned(long attemptToken, long requestId) {
+    public boolean settlePriorityTombstoned(long attemptToken, String requestId) {
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaims.get(requestId);
@@ -721,7 +722,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     public boolean transferPriorityNotFoundClaimToEngineFence(
             long attemptToken,
-            long requestId) {
+            String requestId) {
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaims.get(requestId);
@@ -738,7 +739,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /** Authoritative terminal settlement for an exact transferred fence generation. */
-    public boolean settleEngineFenceClaim(long attemptToken, long requestId) {
+    public boolean settleEngineFenceClaim(long attemptToken, String requestId) {
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaims.get(requestId);
@@ -757,7 +758,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * Cancel proves ordinary ownership. Drop only the control/synthetic hold;
      * the live confirmed or shadow accounting remains in its original layer.
      */
-    public boolean releaseEngineFenceClaimActive(long attemptToken, long requestId) {
+    public boolean releaseEngineFenceClaimActive(long attemptToken, String requestId) {
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaims.get(requestId);
@@ -776,7 +777,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /** Called with {@link #admissionLock} held. */
     private boolean settlePriorityClaimLocked(long attemptToken,
-                                              long requestId,
+                                              String requestId,
                                               PreemptionClaim claim) {
         boolean genericFenceRetainsAccounting =
                 transferPriorityAccountingToEngineFenceLocked(requestId, claim);
@@ -816,14 +817,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
             if (attempt == null || !inflightRequests.containsKey(attempt.incomingRequestId)) {
                 return false;
             }
-            for (Long victimId : attempt.victimIds) {
+            for (String victimId : attempt.victimIds) {
                 PreemptionClaim claim = preemptionClaims.get(victimId);
                 if (claim == null || claim.attemptToken != attemptToken
                         || claim.state != ClaimState.CANCELED_SETTLED) {
                     return false;
                 }
             }
-            for (Long victimId : attempt.victimIds) {
+            for (String victimId : attempt.victimIds) {
                 preemptionClaims.remove(victimId);
             }
             preemptionAttempts.remove(attemptToken);
@@ -848,7 +849,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 return;
             }
             release(attempt.incomingRequestId);
-            for (Long victimId : attempt.victimIds) {
+            for (String victimId : attempt.victimIds) {
                 PreemptionClaim claim = preemptionClaims.get(victimId);
                 if (claim == null || claim.attemptToken != attemptToken) {
                     continue;
@@ -866,7 +867,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /** Fresh active status is the only path that reopens a NOT_FOUND_STALE victim. */
-    public boolean reconcilePriorityVictimActive(long requestId) {
+    public boolean reconcilePriorityVictimActive(String requestId) {
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaims.get(requestId);
@@ -887,7 +888,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * a transport-unknown ACK. Neither outcome is typed priority completion,
      * so the ordinary terminal resumes the pre-existing completion path.
      */
-    public boolean reconcilePriorityVictimFinished(long requestId) {
+    public boolean reconcilePriorityVictimFinished(String requestId) {
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaims.get(requestId);
@@ -908,7 +909,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    private boolean transitionClaim(long attemptToken, long requestId,
+    private boolean transitionClaim(long attemptToken, String requestId,
                                     ClaimState expected, ClaimState next) {
         admissionLock.lock();
         try {
@@ -976,13 +977,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
         // Build one authoritative Decode view.  Claimed victims that disappear
         // are held synthetically until the original Prefill publishes typed
         // CANCELED; generic Decode absence/finished must not release them.
-        Set<Long> confirmedNow = new HashSet<>();
+        Set<String> confirmedNow = new HashSet<>();
         int actualConfirmed = 0;
         long now = System.currentTimeMillis();
         if (runningTaskInfo != null) {
             for (TaskInfo task : runningTaskInfo.values()) {
                 TaskPhase phase = task.getPhase();
-                long requestId = task.getRequestId();
+                String requestId = task.getRequestId();
                 if ((phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING)
                         && !settledTombstones.containsKey(requestId)) {
                     actualConfirmed++;
@@ -1011,7 +1012,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
 
         int syntheticallyHeldSlots = 0;
-        for (Map.Entry<Long, PreemptionClaim> entry : preemptionClaims.entrySet()) {
+        for (Map.Entry<String, PreemptionClaim> entry : preemptionClaims.entrySet()) {
             PreemptionClaim claim = entry.getValue();
             if (claim.owner == ClaimOwner.ENGINE_CONFIRMED
                     && claim.state != ClaimState.CANCELED_SETTLED
@@ -1026,11 +1027,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
         // the generic fence takes over only when no priority owner exists.
         // This replaces the prior removeIf traversal, so the generic protection
         // adds no extra per-status collection or wrapper allocation.
-        java.util.Iterator<Map.Entry<Long, ConfirmedTask>> confirmedIt =
+        Iterator<Map.Entry<String, ConfirmedTask>> confirmedIt =
                 trackedConfirmed.entrySet().iterator();
         while (confirmedIt.hasNext()) {
-            Map.Entry<Long, ConfirmedTask> entry = confirmedIt.next();
-            long requestId = entry.getKey();
+            Map.Entry<String, ConfirmedTask> entry = confirmedIt.next();
+            String requestId = entry.getKey();
             if (confirmedNow.contains(requestId)) {
                 continue;
             }
@@ -1054,7 +1055,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
         if (finishedTaskInfo != null) {
             for (TaskInfo task : finishedTaskInfo.values()) {
-                long requestId = task.getRequestId();
+                String requestId = task.getRequestId();
                 if (settledTombstones.containsKey(requestId)
                         || preemptionClaims.containsKey(requestId)) {
                     continue;
@@ -1068,9 +1069,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         // (calibrate removes confirmed/finished entries directly, bypassing
         // release()). Drop stale queued ids one-by-one so the O(1) counter
         // stays in sync (PR-C).
-        java.util.Iterator<Long> queuedIt = queuedPhase.iterator();
+        Iterator<String> queuedIt = queuedPhase.iterator();
         while (queuedIt.hasNext()) {
-            Long requestId = queuedIt.next();
+            String requestId = queuedIt.next();
             if (!inflightRequests.containsKey(requestId)) {
                 queuedIt.remove();
                 queuedPhaseCount.decrementAndGet();
@@ -1112,7 +1113,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * therefore decrements {@link #confirmedRunningCount} exactly once: via
      * the synthetic release when present, otherwise via the confirmed entry.
      */
-    private boolean settleRequestAccountingLocked(long requestId,
+    private boolean settleRequestAccountingLocked(String requestId,
                                                    long settledAtMs,
                                                    boolean explicitTombstoneProof) {
         boolean changed = false;
@@ -1154,7 +1155,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /** Publish one non-refreshing terminal fence while admissionLock is held. */
-    private boolean rememberSettledLocked(long requestId, long settledAtMs) {
+    private boolean rememberSettledLocked(String requestId, long settledAtMs) {
         return settledTombstones.putIfAbsent(requestId, settledAtMs) == null;
     }
 
@@ -1169,7 +1170,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /** Called with {@link #admissionLock} held after a fresh active observation. */
-    private void observeEngineFenceConfirmedLocked(long requestId, RequestInflight removed) {
+    private void observeEngineFenceConfirmedLocked(String requestId, RequestInflight removed) {
         EngineFenceProtection protection = engineFenceProtections.get(requestId);
         if (protection == null) {
             return;
@@ -1254,7 +1255,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /** Called with {@link #admissionLock} held. */
-    private boolean clearEngineFenceProtectionLocked(long requestId) {
+    private boolean clearEngineFenceProtectionLocked(String requestId) {
         EngineFenceProtection protection = engineFenceProtections.remove(requestId);
         if (protection == null) {
             return false;
@@ -1269,7 +1270,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * exactly one slot/KV hold after this admission-lock critical section.
      */
     private boolean transferPriorityAccountingToEngineFenceLocked(
-            long requestId,
+            String requestId,
             PreemptionClaim claim) {
         EngineFenceProtection protection = engineFenceProtections.get(requestId);
         if (protection == null) {
@@ -1403,7 +1404,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /** Evict only endpoint orphans which have no live scheduler generation. */
     public int evictExpiredRequests(long ttlMs,
-                                    LongPredicate schedulerOwnsRequest) {
+                                    Predicate<String> schedulerOwnsRequest) {
         admissionLock.lock();
         try {
             // A priority claim or generic EngineFence is a stronger accounting
@@ -1415,9 +1416,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
                             && !engineFenceProtections.containsKey(requestId));
             // Drop stale queued ids one-by-one so the O(1) counter stays in
             // sync (PR-C) — evictExpired may have removed inflight entries.
-            java.util.Iterator<Long> queuedEvictIt = queuedPhase.iterator();
+            Iterator<String> queuedEvictIt = queuedPhase.iterator();
             while (queuedEvictIt.hasNext()) {
-                Long requestId = queuedEvictIt.next();
+                String requestId = queuedEvictIt.next();
                 if (!inflightRequests.containsKey(requestId)) {
                     queuedEvictIt.remove();
                     queuedPhaseCount.decrementAndGet();
@@ -1425,10 +1426,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
             }
             long cutoff = System.currentTimeMillis() - ttlMs;
             int trackedPurged = 0;
-            java.util.Iterator<Map.Entry<Long, ConfirmedTask>> trackedEvictIt =
+            Iterator<Map.Entry<String, ConfirmedTask>> trackedEvictIt =
                     trackedConfirmed.entrySet().iterator();
             while (trackedEvictIt.hasNext()) {
-                Map.Entry<Long, ConfirmedTask> entry = trackedEvictIt.next();
+                Map.Entry<String, ConfirmedTask> entry = trackedEvictIt.next();
                 if (entry.getValue().lastSeenMs() < cutoff
                         && !schedulerOwnsRequest.test(entry.getKey())
                         && !preemptionClaims.containsKey(entry.getKey())
@@ -1494,7 +1495,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * by the priority scheduler at plan-commit time; no-op when the id holds
      * no reservation (legacy paths never call this).
      */
-    public void markQueuedPhase(long requestId) {
+    public void markQueuedPhase(String requestId) {
         admissionLock.lock();
         try {
             if (inflightRequests.containsKey(requestId)) {
@@ -1534,7 +1535,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * second slot, preserving the existing legacy path and making retries
      * idempotent.
      */
-    public DispatchClaimResult tryClaimEngineDispatch(long requestId,
+    public DispatchClaimResult tryClaimEngineDispatch(String requestId,
                                                        long concurrencyLimit) {
         admissionLock.lock();
         try {
@@ -1572,7 +1573,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * phase and remains dispatchable. Missing, released, or preemption-claimed
      * reservations return {@code false} and must not be sent.
      */
-    public boolean tryMarkEngineMayHaveSeen(long requestId) {
+    public boolean tryMarkEngineMayHaveSeen(String requestId) {
         return tryClaimEngineDispatch(requestId, 0) == DispatchClaimResult.CLAIMED;
     }
 
@@ -1587,7 +1588,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /** Whether the latest Decode WorkerStatus still owns this request. */
-    public boolean isConfirmedTracked(long requestId) {
+    public boolean isConfirmedTracked(String requestId) {
         return trackedConfirmed.containsKey(requestId);
     }
 
@@ -1693,10 +1694,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     private static final class EndpointPreemptionAttempt {
-        private final long incomingRequestId;
-        private final Set<Long> victimIds;
+        private final String incomingRequestId;
+        private final Set<String> victimIds;
 
-        private EndpointPreemptionAttempt(long incomingRequestId, Set<Long> victimIds) {
+        private EndpointPreemptionAttempt(String incomingRequestId, Set<String> victimIds) {
             this.incomingRequestId = incomingRequestId;
             this.victimIds = victimIds;
         }

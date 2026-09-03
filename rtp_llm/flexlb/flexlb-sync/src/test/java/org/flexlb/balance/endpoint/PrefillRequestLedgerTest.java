@@ -78,7 +78,7 @@ class PrefillRequestLedgerTest {
 
     @Test
     void requestCommitAndReleaseAreIdempotentAndDoNotAffectBatchCount() {
-        BatchItem request = batchItem(101L);
+        BatchItem request = batchItem("101");
 
         assertTrue(endpoint.tryCommitRequest(request.requestId(), 700, 4));
         assertTrue(endpoint.tryCommitRequest(request.requestId(), 9_999, 4));
@@ -87,42 +87,42 @@ class PrefillRequestLedgerTest {
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(1, endpoint.realPendingCount());
 
-        assertTrue(endpoint.releaseRequest(101L));
-        assertFalse(endpoint.releaseRequest(101L));
+        assertTrue(endpoint.releaseRequest("101"));
+        assertFalse(endpoint.releaseRequest("101"));
         assertEquals(0, endpoint.getInflightRequestCount());
         assertEquals(0, endpoint.getInflightRouteRequestCount());
     }
 
     @Test
     void routeRequestCapRemainsIndependentFromRealBatchMembers() {
-        endpoint.commitBatch(900L, 1_000, List.of(batchItem(1L), batchItem(2L)));
+        endpoint.commitBatch(900L, 1_000, List.of(batchItem("1"), batchItem("2")));
 
         assertEquals(2, endpoint.availableRequestSlots(2));
-        assertTrue(endpoint.tryCommitRequest(3L, 500, 2));
-        assertTrue(endpoint.tryCommitRequest(4L, 500, 2));
-        assertFalse(endpoint.tryCommitRequest(5L, 500, 2));
+        assertTrue(endpoint.tryCommitRequest("3", 500, 2));
+        assertTrue(endpoint.tryCommitRequest("4", 500, 2));
+        assertFalse(endpoint.tryCommitRequest("5", 500, 2));
         assertEquals(4, endpoint.getInflightRequestCount());
         assertEquals(1, endpoint.getInflightBatchCount());
         assertEquals(2, endpoint.getInflightRouteRequestCount());
 
-        endpoint.releaseRequest(3L);
-        endpoint.releaseRequest(4L);
+        endpoint.releaseRequest("3");
+        endpoint.releaseRequest("4");
         endpoint.releaseBatch(900L);
         assertEquals(0, endpoint.getInflightRequestCount());
     }
 
     @Test
     void laterBatchCommitCannotBreakRouteRequestHardCap() {
-        assertTrue(endpoint.tryCommitRequest(11L, 500, 2));
-        assertTrue(endpoint.tryCommitRequest(12L, 500, 2));
+        assertTrue(endpoint.tryCommitRequest("11", 500, 2));
+        assertTrue(endpoint.tryCommitRequest("12", 500, 2));
 
         endpoint.commitBatch(901L, 1_000,
-                List.of(batchItem(21L), batchItem(22L), batchItem(23L)));
+                List.of(batchItem("21"), batchItem("22"), batchItem("23")));
 
         assertEquals(2, endpoint.getInflightRouteRequestCount());
         assertEquals(5, endpoint.getInflightRequestCount());
         assertEquals(0, endpoint.availableRequestSlots(2));
-        assertFalse(endpoint.tryCommitRequest(13L, 500, 2));
+        assertFalse(endpoint.tryCommitRequest("13", 500, 2));
     }
 
     @Test
@@ -138,7 +138,7 @@ class PrefillRequestLedgerTest {
                 long requestId = 10_000L + i;
                 executor.execute(() -> {
                     await(start);
-                    if (endpoint.tryCommitRequest(requestId, 100, cap)) {
+                    if (endpoint.tryCommitRequest(String.valueOf(requestId), 100, cap)) {
                         admitted.incrementAndGet();
                     }
                     done.countDown();
@@ -162,8 +162,8 @@ class PrefillRequestLedgerTest {
     @Test
     void repeatedCommitReleaseCyclesLeaveNoAccountingBehind() {
         for (long requestId = 1; requestId <= 5_000; requestId++) {
-            assertTrue(endpoint.tryCommitRequest(requestId, 10, 1));
-            assertTrue(endpoint.releaseRequest(requestId));
+            assertTrue(endpoint.tryCommitRequest(String.valueOf(requestId), 10, 1));
+            assertTrue(endpoint.releaseRequest(String.valueOf(requestId)));
         }
 
         assertEquals(0, endpoint.getInflightRequestCount());
@@ -173,9 +173,9 @@ class PrefillRequestLedgerTest {
 
     @Test
     void workerStatusSettlesRequestByRequestIdRegardlessOfBatchId() {
-        assertTrue(endpoint.tryCommitRequest(77L, 1_000, 4));
+        assertTrue(endpoint.tryCommitRequest("77", 1_000, 4));
 
-        TaskInfo finished = taskInfo(77L, 123_456L, null);
+        TaskInfo finished = taskInfo("77", 123_456L, null);
         updateWorkerStatus(Map.of("77", finished), Map.of());
         updateWorkerStatus(Map.of("77", finished), Map.of());
 
@@ -185,10 +185,10 @@ class PrefillRequestLedgerTest {
 
     @Test
     void runningObservationRefreshesRequestInactivityTtl() throws Exception {
-        assertTrue(endpoint.tryCommitRequest(88L, 1_000, 4));
+        assertTrue(endpoint.tryCommitRequest("88", 1_000, 4));
         Thread.sleep(25);
 
-        TaskInfo running = taskInfo(88L, -1L, TaskPhase.RUNNING);
+        TaskInfo running = taskInfo("88", -1L, TaskPhase.RUNNING);
         updateWorkerStatus(Map.of(), Map.of("88", running));
 
         assertEquals(0, endpoint.evictExpiredRequests(10));
@@ -197,59 +197,59 @@ class PrefillRequestLedgerTest {
 
     @Test
     void requestTtlEvictionReleasesCapacityExactlyOnce() throws Exception {
-        assertTrue(endpoint.tryCommitRequest(99L, 1_000, 1));
+        assertTrue(endpoint.tryCommitRequest("99", 1_000, 1));
         Thread.sleep(20);
 
         assertEquals(1, endpoint.evictExpiredInflight(1));
         assertEquals(0, endpoint.evictExpiredInflight(1));
         assertEquals(0, endpoint.getInflightRequestCount());
         assertEquals(0, endpoint.getInflightRouteRequestCount());
-        assertTrue(endpoint.tryCommitRequest(100L, 1_000, 1));
+        assertTrue(endpoint.tryCommitRequest("100", 1_000, 1));
     }
 
     @Test
     void engineFenceProtectionPinsExpiredRequestUntilExplicitEnd() {
-        assertTrue(endpoint.tryCommitRequest(109L, 1_000, 1));
-        assertTrue(endpoint.beginEngineFenceProtection(109L));
-        assertTrue(endpoint.beginEngineFenceProtection(109L),
+        assertTrue(endpoint.tryCommitRequest("109", 1_000, 1));
+        assertTrue(endpoint.beginEngineFenceProtection("109"));
+        assertTrue(endpoint.beginEngineFenceProtection("109"),
                 "begin is idempotent for the same live request");
 
         assertEquals(0, endpoint.evictExpiredRequests(-1),
                 "even an immediately-expired entry remains owned by the fence");
         assertEquals(1, endpoint.getInflightRouteRequestCount());
 
-        assertTrue(endpoint.endEngineFenceProtection(109L));
-        assertFalse(endpoint.endEngineFenceProtection(109L));
+        assertTrue(endpoint.endEngineFenceProtection("109"));
+        assertFalse(endpoint.endEngineFenceProtection("109"));
         assertEquals(1, endpoint.evictExpiredRequests(-1));
         assertEquals(0, endpoint.getInflightRequestCount());
     }
 
     @Test
     void releaseAndWorkerTerminalClearEngineFenceProtectionExactlyOnce() {
-        assertTrue(endpoint.tryCommitRequest(110L, 1_000, 2));
-        assertTrue(endpoint.beginEngineFenceProtection(110L));
-        assertTrue(endpoint.releaseRequest(110L));
-        assertFalse(endpoint.endEngineFenceProtection(110L));
+        assertTrue(endpoint.tryCommitRequest("110", 1_000, 2));
+        assertTrue(endpoint.beginEngineFenceProtection("110"));
+        assertTrue(endpoint.releaseRequest("110"));
+        assertFalse(endpoint.endEngineFenceProtection("110"));
 
-        assertTrue(endpoint.tryCommitRequest(111L, 1_000, 2));
-        assertTrue(endpoint.beginEngineFenceProtection(111L));
+        assertTrue(endpoint.tryCommitRequest("111", 1_000, 2));
+        assertTrue(endpoint.beginEngineFenceProtection("111"));
         updateWorkerStatus(Map.of(
-                "111", taskInfo(111L, -1L, TaskPhase.RUNNING)), Map.of());
+                "111", taskInfo("111", -1L, TaskPhase.RUNNING)), Map.of());
 
-        assertFalse(endpoint.endEngineFenceProtection(111L));
+        assertFalse(endpoint.endEngineFenceProtection("111"));
         assertEquals(0, endpoint.getInflightRequestCount());
         assertEquals(0, endpoint.getInflightRouteRequestCount());
     }
 
     @Test
     void pendingCountDoesNotDoubleCountTrackedEngineRequest() {
-        assertTrue(endpoint.tryCommitRequest(301L, 1_000, 4));
+        assertTrue(endpoint.tryCommitRequest("301", 1_000, 4));
 
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setFinishedTaskInfo(Map.of());
         response.setRunningTaskInfo(Map.of(
-                "301", taskInfo(301L, -1L, TaskPhase.RUNNING),
-                "302", taskInfo(302L, -1L, TaskPhase.RUNNING)));
+                "301", taskInfo("301", -1L, TaskPhase.RUNNING),
+                "302", taskInfo("302", -1L, TaskPhase.RUNNING)));
         endpoint.onWorkerStatusUpdate(endpoint.getStatus(), response);
 
         assertEquals(2, endpoint.realPendingCount(),
@@ -258,7 +258,7 @@ class PrefillRequestLedgerTest {
 
     @Test
     void waitEstimateAndMetricsIncludeRequestLedger() throws Exception {
-        assertTrue(endpoint.tryCommitRequest(401L, 2_000, 4));
+        assertTrue(endpoint.tryCommitRequest("401", 2_000, 4));
         assertEquals(2_000, endpoint.realWaitTimeMs());
         Thread.sleep(20);
 
@@ -271,15 +271,15 @@ class PrefillRequestLedgerTest {
 
     @Test
     void requestWaitAggregateUpdatesWithoutScanningEntryState() throws Exception {
-        assertTrue(endpoint.tryCommitRequest(501L, 1_000, 4));
-        assertTrue(endpoint.tryCommitRequest(502L, 2_000, 4));
+        assertTrue(endpoint.tryCommitRequest("501", 1_000, 4));
+        assertTrue(endpoint.tryCommitRequest("502", 2_000, 4));
         assertEquals(3_000, endpoint.realWaitTimeMs());
 
-        assertTrue(endpoint.releaseRequest(501L));
+        assertTrue(endpoint.releaseRequest("501"));
         assertEquals(2_000, endpoint.realWaitTimeMs());
 
         updateWorkerStatus(Map.of(), Map.of(
-                "502", taskInfo(502L, -1L, TaskPhase.RUNNING)));
+                "502", taskInfo("502", -1L, TaskPhase.RUNNING)));
         Thread.sleep(20);
         assertTrue(endpoint.realWaitTimeMs() < 2_000,
                 "observed execution progress should reduce the aggregate wait estimate");
@@ -287,9 +287,9 @@ class PrefillRequestLedgerTest {
 
     @Test
     void waitSnapshotRetriesAcrossRunningToQueuedTransfer() throws Exception {
-        assertTrue(endpoint.tryCommitRequest(503L, 1_000, 4));
+        assertTrue(endpoint.tryCommitRequest("503", 1_000, 4));
         updateWorkerStatus(Map.of(), Map.of(
-                "503", taskInfo(503L, -1L, TaskPhase.RUNNING)));
+                "503", taskInfo("503", -1L, TaskPhase.RUNNING)));
 
         CountDownLatch queuedContributionRead = new CountDownLatch(1);
         CountDownLatch resumeReader = new CountDownLatch(1);
@@ -310,7 +310,7 @@ class PrefillRequestLedgerTest {
             // The reader has observed queued=0. Move the same request from the
             // running aggregate back to its stripe before it reads running=0.
             updateWorkerStatus(Map.of(), Map.of(
-                    "503", taskInfo(503L, -1L, TaskPhase.PENDING)));
+                    "503", taskInfo("503", -1L, TaskPhase.PENDING)));
             resumeReader.countDown();
 
             assertTrue(waitRead.get(5, TimeUnit.SECONDS) > 0,
@@ -341,7 +341,7 @@ class PrefillRequestLedgerTest {
             Future<Long> staleRead = executor.submit(endpoint::realWaitTimeMs);
             assertTrue(validatedEmptySnapshot.await(5, TimeUnit.SECONDS));
 
-            assertTrue(endpoint.tryCommitRequest(504L, 1_000, 4));
+            assertTrue(endpoint.tryCommitRequest("504", 1_000, 4));
             resumePublisher.countDown();
             assertTrue(staleRead.get(5, TimeUnit.SECONDS) > 0,
                     "the combined snapshot must reject a late stale cache publication");
@@ -358,9 +358,9 @@ class PrefillRequestLedgerTest {
 
     @Test
     void runningWaitDoesNotDependOnRequestIdStripe() throws Exception {
-        // 801 and 833 share the low five hash bits; 901 and 902 do not.
-        long sameStripeWaitMs = observeRunningPairWait(801L, 833L);
-        long differentStripeWaitMs = observeRunningPairWait(901L, 902L);
+        // Aa and BB share the same String hash; 901 and 902 do not.
+        long sameStripeWaitMs = observeRunningPairWait("Aa", "BB");
+        long differentStripeWaitMs = observeRunningPairWait("901", "902");
 
         assertTrue(Math.abs(sameStripeWaitMs - differentStripeWaitMs) < 100,
                 "equivalent running work must not age once per occupied hash stripe: same="
@@ -371,13 +371,13 @@ class PrefillRequestLedgerTest {
     void runningServiceCreditStaysWithOldestRequestWhenItFinishesFirst() {
         AtomicLong clock = new AtomicLong();
         PrefillRequestLedger ledger = requestLedger(clock);
-        assertTrue(ledger.tryAcquire(1L, 1_000, 0));
-        assertTrue(ledger.observe(1L, true, 0));
+        assertTrue(ledger.tryAcquire("1", 1_000, 0));
+        assertTrue(ledger.observe("1", true, 0));
         clock.set(900);
-        assertTrue(ledger.tryAcquire(2L, 1_000, 0));
-        assertTrue(ledger.observe(2L, true, 900));
+        assertTrue(ledger.tryAcquire("2", 1_000, 0));
+        assertTrue(ledger.observe("2", true, 900));
         clock.set(950);
-        assertTrue(ledger.settle(1L));
+        assertTrue(ledger.settle("1"));
 
         assertEquals(1_000, ledger.estimate(950),
                 "the old request's 950ms service credit must not consume newer work");
@@ -387,13 +387,13 @@ class PrefillRequestLedgerTest {
     void removingNewerRunningRequestPreservesOldestRemainder() {
         AtomicLong clock = new AtomicLong();
         PrefillRequestLedger ledger = requestLedger(clock);
-        assertTrue(ledger.tryAcquire(1L, 1_000, 0));
-        assertTrue(ledger.observe(1L, true, 0));
+        assertTrue(ledger.tryAcquire("1", 1_000, 0));
+        assertTrue(ledger.observe("1", true, 0));
         clock.set(900);
-        assertTrue(ledger.tryAcquire(2L, 1_000, 0));
-        assertTrue(ledger.observe(2L, true, 900));
+        assertTrue(ledger.tryAcquire("2", 1_000, 0));
+        assertTrue(ledger.observe("2", true, 900));
         clock.set(950);
-        assertTrue(ledger.settle(2L));
+        assertTrue(ledger.settle("2"));
 
         assertEquals(50, ledger.estimate(950),
                 "removing non-head work must leave the serviced head remainder");
@@ -403,14 +403,14 @@ class PrefillRequestLedgerTest {
     void runningServiceCreditCanCrossMultipleEntries() {
         AtomicLong clock = new AtomicLong();
         PrefillRequestLedger ledger = requestLedger(clock);
-        assertTrue(ledger.tryAcquire(1L, 100, 0));
-        assertTrue(ledger.tryAcquire(2L, 200, 0));
-        assertTrue(ledger.tryAcquire(3L, 300, 0));
-        assertTrue(ledger.observe(1L, true, 0));
-        assertTrue(ledger.observe(2L, true, 0));
-        assertTrue(ledger.observe(3L, true, 0));
+        assertTrue(ledger.tryAcquire("1", 100, 0));
+        assertTrue(ledger.tryAcquire("2", 200, 0));
+        assertTrue(ledger.tryAcquire("3", 300, 0));
+        assertTrue(ledger.observe("1", true, 0));
+        assertTrue(ledger.observe("2", true, 0));
+        assertTrue(ledger.observe("3", true, 0));
         clock.set(250);
-        assertTrue(ledger.settle(3L));
+        assertTrue(ledger.settle("3"));
 
         assertEquals(50, ledger.estimate(250),
                 "250ms of service must exhaust the first and consume 150ms of the second");
@@ -420,17 +420,17 @@ class PrefillRequestLedgerTest {
     void exhaustedRunningEntryCanBeRemovedIdempotently() {
         AtomicLong clock = new AtomicLong();
         PrefillRequestLedger ledger = requestLedger(clock);
-        assertTrue(ledger.tryAcquire(1L, 100, 0));
-        assertTrue(ledger.tryAcquire(2L, 200, 0));
-        assertTrue(ledger.observe(1L, true, 0));
-        assertTrue(ledger.observe(2L, true, 0));
+        assertTrue(ledger.tryAcquire("1", 100, 0));
+        assertTrue(ledger.tryAcquire("2", 200, 0));
+        assertTrue(ledger.observe("1", true, 0));
+        assertTrue(ledger.observe("2", true, 0));
         clock.set(150);
-        assertTrue(ledger.tryAcquire(3L, 100, 0));
-        assertTrue(ledger.observe(3L, true, 150));
+        assertTrue(ledger.tryAcquire("3", 100, 0));
+        assertTrue(ledger.observe("3", true, 150));
         assertEquals(250, ledger.estimate(150));
 
-        assertTrue(ledger.settle(1L));
-        assertFalse(ledger.settle(1L));
+        assertTrue(ledger.settle("1"));
+        assertFalse(ledger.settle("1"));
 
         assertEquals(250, ledger.estimate(150),
                 "removing an already-exhausted entry must not unlink another request");
@@ -444,14 +444,14 @@ class PrefillRequestLedgerTest {
         for (int i = 0; i < 10_000; i++) {
             long requestId = i + 1L;
             requests.add(requestId);
-            assertTrue(ledger.tryAcquire(requestId, 1_000_000, 0));
-            assertTrue(ledger.observe(requestId, true, 0));
+            assertTrue(ledger.tryAcquire(String.valueOf(requestId), 1_000_000, 0));
+            assertTrue(ledger.observe(String.valueOf(requestId), true, 0));
         }
         Collections.shuffle(requests, new Random(0x5eedL));
 
         for (long requestId : requests) {
-            assertTrue(ledger.settle(requestId));
-            assertFalse(ledger.settle(requestId));
+            assertTrue(ledger.settle(String.valueOf(requestId)));
+            assertFalse(ledger.settle(String.valueOf(requestId)));
         }
 
         assertEquals(0, ledger.estimate(0));
@@ -463,7 +463,7 @@ class PrefillRequestLedgerTest {
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
             for (long requestId = 20_000; requestId < 20_050; requestId++) {
-                assertTrue(endpoint.tryCommitRequest(requestId, 1_000, 1));
+                assertTrue(endpoint.tryCommitRequest(String.valueOf(requestId), 1_000, 1));
                 Thread.sleep(2);
 
                 CountDownLatch start = new CountDownLatch(1);
@@ -472,7 +472,7 @@ class PrefillRequestLedgerTest {
                 executor.execute(() -> {
                     await(start);
                     updateWorkerStatus(Map.of(), Map.of(
-                            Long.toString(id), taskInfo(id, -1L, TaskPhase.RUNNING)));
+                            Long.toString(id), taskInfo(String.valueOf(id), -1L, TaskPhase.RUNNING)));
                     done.countDown();
                 });
                 executor.execute(() -> {
@@ -487,7 +487,7 @@ class PrefillRequestLedgerTest {
                 assertTrue(live == 0 || live == 1);
                 assertEquals(live, endpoint.getInflightRequestCount());
                 if (live == 1) {
-                    assertTrue(endpoint.releaseRequest(id));
+                    assertTrue(endpoint.releaseRequest(String.valueOf(id)));
                 }
                 assertEquals(0, endpoint.getInflightRouteRequestCount());
                 assertEquals(0, endpoint.getInflightRequestCount());
@@ -509,12 +509,12 @@ class PrefillRequestLedgerTest {
 
     @Test
     void oldRunningWorkDoesNotConsumeNewQueuedRequestPrediction() throws Exception {
-        assertTrue(endpoint.tryCommitRequest(601L, 20, 4));
+        assertTrue(endpoint.tryCommitRequest("601", 20, 4));
         updateWorkerStatus(Map.of(), Map.of(
-                "601", taskInfo(601L, -1L, TaskPhase.RUNNING)));
+                "601", taskInfo("601", -1L, TaskPhase.RUNNING)));
         Thread.sleep(40);
 
-        assertTrue(endpoint.tryCommitRequest(602L, 5_000, 4));
+        assertTrue(endpoint.tryCommitRequest("602", 5_000, 4));
         assertTrue(endpoint.realWaitTimeMs() >= 4_900,
                 "elapsed time before a queued request arrived must not be charged to it");
     }
@@ -524,7 +524,7 @@ class PrefillRequestLedgerTest {
         endpoint.commitBatch(800L, 20, List.of());
         Thread.sleep(40);
 
-        assertTrue(endpoint.tryCommitRequest(701L, 5_000, 4));
+        assertTrue(endpoint.tryCommitRequest("701", 5_000, 4));
         assertTrue(endpoint.realWaitTimeMs() >= 4_900,
                 "batch and request progress anchors must remain independent");
     }
@@ -537,14 +537,14 @@ class PrefillRequestLedgerTest {
         endpoint.onWorkerStatusUpdate(endpoint.getStatus(), response);
     }
 
-    private long observeRunningPairWait(long firstRequestId,
-                                        long secondRequestId) throws Exception {
+    private long observeRunningPairWait(String firstRequestId,
+                                        String secondRequestId) throws Exception {
         assertTrue(endpoint.tryCommitRequest(firstRequestId, 10_000, 4));
         assertTrue(endpoint.tryCommitRequest(secondRequestId, 10_000, 4));
         updateWorkerStatus(Map.of(), Map.of(
-                Long.toString(firstRequestId),
+                String.valueOf(firstRequestId),
                 taskInfo(firstRequestId, -1L, TaskPhase.RUNNING),
-                Long.toString(secondRequestId),
+                String.valueOf(secondRequestId),
                 taskInfo(secondRequestId, -1L, TaskPhase.RUNNING)));
         Thread.sleep(200);
         long waitMs = endpoint.realWaitTimeMs();
@@ -553,7 +553,7 @@ class PrefillRequestLedgerTest {
         return waitMs;
     }
 
-    private BatchItem batchItem(long requestId) {
+    private BatchItem batchItem(String requestId) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(512);
@@ -575,7 +575,7 @@ class PrefillRequestLedgerTest {
                 endpoint, null, System.currentTimeMillis());
     }
 
-    private static TaskInfo taskInfo(long requestId, long batchId, TaskPhase phase) {
+    private static TaskInfo taskInfo(String requestId, long batchId, TaskPhase phase) {
         TaskInfo task = new TaskInfo();
         task.setRequestId(requestId);
         task.setBatchId(batchId);

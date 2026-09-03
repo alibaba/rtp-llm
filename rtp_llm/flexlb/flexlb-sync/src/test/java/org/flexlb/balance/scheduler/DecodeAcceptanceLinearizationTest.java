@@ -22,6 +22,7 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
 
 import java.lang.reflect.Method;
 import java.util.List;
@@ -103,10 +104,10 @@ class DecodeAcceptanceLinearizationTest {
                 0, null, null);
         assertTrue(scheduler.attachAdmissionLease(item, lease));
         lease.bindTo(item.future());
-        decodeEndpoint.reserve(REQUEST_ID, 128, 136, 50);
-        decodeEndpoint.markQueuedPhase(REQUEST_ID);
+        decodeEndpoint.reserve(String.valueOf(REQUEST_ID), 128, 136, 50);
+        decodeEndpoint.markQueuedPhase(String.valueOf(REQUEST_ID));
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
-        RequestLifecycleSnapshot dispatched = scheduler.getRequestState(REQUEST_ID, 0);
+        RequestLifecycleSnapshot dispatched = scheduler.getRequestState(String.valueOf(REQUEST_ID), 0);
         assertEquals(RequestLifecycleState.DISPATCHING, dispatched.state());
         batchId = dispatched.batchId();
     }
@@ -141,7 +142,7 @@ class DecodeAcceptanceLinearizationTest {
         scheduler.onUncertain(item, new TimeoutException("lost Enqueue ACK"));
 
         assertEngineOwnedScheduleSucceeded();
-        verify(cancelChannel, never()).cancel(any(), anyLong(), anyLong());
+        verify(cancelChannel, never()).cancel(any(), ArgumentMatchers.anyString(), anyLong());
     }
 
     @Test
@@ -149,10 +150,10 @@ class DecodeAcceptanceLinearizationTest {
             throws Exception {
         CompletableFuture<EngineCancelChannel.CancelOutcome> cancelResult =
                 new CompletableFuture<>();
-        when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenReturn(cancelResult);
+        when(cancelChannel.cancel(any(), ArgumentMatchers.anyString(), anyLong())).thenReturn(cancelResult);
 
         scheduler.onUncertain(item, new TimeoutException("lost Enqueue ACK"));
-        verify(cancelChannel, times(1)).cancel(any(), anyLong(), anyLong());
+        verify(cancelChannel, times(1)).cancel(any(), ArgumentMatchers.anyString(), anyLong());
         assertFalse(item.future().isDone());
 
         reportDecode(TaskPhase.KV_ALLOCATED);
@@ -162,15 +163,15 @@ class DecodeAcceptanceLinearizationTest {
         // cannot prove that Prefill did not already install a cancel intent.
         // Keep both the public result and accounting behind the Engine fence.
         assertFalse(item.future().isDone());
-        assertTrue(decodeEndpoint.isConfirmedTracked(REQUEST_ID));
+        assertTrue(decodeEndpoint.isConfirmedTracked(String.valueOf(REQUEST_ID)));
 
         cancelResult.complete(EngineCancelChannel.CancelOutcome.tombstoned());
 
         Response terminal = item.future().get(5, TimeUnit.SECONDS);
         assertFalse(terminal.isSuccess());
         assertEquals(RequestLifecycleState.TIMED_OUT,
-                scheduler.getRequestState(REQUEST_ID, batchId).state());
-        verify(cancelChannel, times(1)).cancel(any(), anyLong(), anyLong());
+                scheduler.getRequestState(String.valueOf(REQUEST_ID), batchId).state());
+        verify(cancelChannel, times(1)).cancel(any(), ArgumentMatchers.anyString(), anyLong());
     }
 
     @Test
@@ -178,15 +179,15 @@ class DecodeAcceptanceLinearizationTest {
         scheduler.onFailure(item, new RuntimeException("failed Enqueue ACK"));
 
         assertFalse(awaitTerminal().isSuccess());
-        assertFalse(decodeEndpoint.reservedView().containsKey(REQUEST_ID));
+        assertFalse(decodeEndpoint.reservedView().containsKey(String.valueOf(REQUEST_ID)));
         assertEquals(RequestLifecycleState.FAILED,
-                scheduler.getRequestState(REQUEST_ID, 0).state());
+                scheduler.getRequestState(String.valueOf(REQUEST_ID), 0).state());
 
         reportDecode(TaskPhase.KV_ALLOCATED);
 
         assertFalse(awaitTerminal().isSuccess());
         assertEquals(RequestLifecycleState.FAILED,
-                scheduler.getRequestState(REQUEST_ID, 0).state());
+                scheduler.getRequestState(String.valueOf(REQUEST_ID), 0).state());
     }
 
     @Test
@@ -194,15 +195,15 @@ class DecodeAcceptanceLinearizationTest {
         scheduler.onTimeout(item, new TimeoutException("Enqueue ACK timeout"));
 
         assertFalse(awaitTerminal().isSuccess());
-        assertFalse(decodeEndpoint.reservedView().containsKey(REQUEST_ID));
+        assertFalse(decodeEndpoint.reservedView().containsKey(String.valueOf(REQUEST_ID)));
         assertEquals(RequestLifecycleState.TIMED_OUT,
-                scheduler.getRequestState(REQUEST_ID, 0).state());
+                scheduler.getRequestState(String.valueOf(REQUEST_ID), 0).state());
 
         reportDecode(TaskPhase.RUNNING);
 
         assertFalse(awaitTerminal().isSuccess());
         assertEquals(RequestLifecycleState.TIMED_OUT,
-                scheduler.getRequestState(REQUEST_ID, 0).state());
+                scheduler.getRequestState(String.valueOf(REQUEST_ID), 0).state());
     }
 
     @Test
@@ -210,9 +211,9 @@ class DecodeAcceptanceLinearizationTest {
         reportDecode(TaskPhase.KV_ALLOCATED);
 
         Method deadline = PriorityScheduler.class.getDeclaredMethod(
-                "onRequestExpired", long.class, CompletableFuture.class);
+                "onRequestExpired", String.class, CompletableFuture.class);
         deadline.setAccessible(true);
-        deadline.invoke(scheduler, REQUEST_ID, item.future());
+        deadline.invoke(scheduler, String.valueOf(REQUEST_ID), item.future());
 
         assertEngineOwnedScheduleSucceeded();
     }
@@ -224,9 +225,9 @@ class DecodeAcceptanceLinearizationTest {
         scheduler.onFailure(item, new RuntimeException("failed Enqueue ACK"));
 
         assertFalse(awaitTerminal().isSuccess());
-        assertFalse(decodeEndpoint.reservedView().containsKey(REQUEST_ID));
+        assertFalse(decodeEndpoint.reservedView().containsKey(String.valueOf(REQUEST_ID)));
         assertEquals(RequestLifecycleState.FAILED,
-                scheduler.getRequestState(REQUEST_ID, 0).state());
+                scheduler.getRequestState(String.valueOf(REQUEST_ID), 0).state());
     }
 
     @Test
@@ -246,9 +247,9 @@ class DecodeAcceptanceLinearizationTest {
 
         Response terminal = awaitTerminal();
         assertFalse(terminal.isSuccess());
-        assertFalse(decodeEndpoint.reservedView().containsKey(REQUEST_ID));
+        assertFalse(decodeEndpoint.reservedView().containsKey(String.valueOf(REQUEST_ID)));
         assertEquals(RequestLifecycleState.FAILED,
-                scheduler.getRequestState(REQUEST_ID, 0).state());
+                scheduler.getRequestState(String.valueOf(REQUEST_ID), 0).state());
     }
 
     @Test
@@ -278,9 +279,9 @@ class DecodeAcceptanceLinearizationTest {
         }
 
         assertFalse(awaitTerminal().isSuccess());
-        assertFalse(decodeEndpoint.reservedView().containsKey(REQUEST_ID));
+        assertFalse(decodeEndpoint.reservedView().containsKey(String.valueOf(REQUEST_ID)));
         assertEquals(RequestLifecycleState.FAILED,
-                scheduler.getRequestState(REQUEST_ID, 0).state());
+                scheduler.getRequestState(String.valueOf(REQUEST_ID), 0).state());
     }
 
     private void reportDecodeFinishedError() {
@@ -292,7 +293,7 @@ class DecodeAcceptanceLinearizationTest {
 
     private WorkerStatusResponse decodeFinishedError() {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(REQUEST_ID);
+        task.setRequestId(String.valueOf(REQUEST_ID));
         task.setPhase(TaskPhase.RUNNING);
         task.setErrorCode(1234);
         WorkerStatusResponse response = new WorkerStatusResponse();
@@ -306,18 +307,18 @@ class DecodeAcceptanceLinearizationTest {
         assertFalse(terminal.isSuccess());
         assertEquals(StrategyErrorType.WORKER_EXECUTION_FAILED.getErrorCode(),
                 terminal.getCode());
-        assertFalse(decodeEndpoint.reservedView().containsKey(REQUEST_ID));
+        assertFalse(decodeEndpoint.reservedView().containsKey(String.valueOf(REQUEST_ID)));
         assertEquals(RequestLifecycleState.FAILED,
-                scheduler.getRequestState(REQUEST_ID, 0).state());
+                scheduler.getRequestState(String.valueOf(REQUEST_ID), 0).state());
     }
 
     private void assertEngineOwnedScheduleSucceeded() {
         Response response = awaitTerminal();
         assertTrue(response.isSuccess(), response.getErrorMessage());
         assertTrue(response.isEnqueuedByMaster());
-        assertTrue(decodeEndpoint.isConfirmedTracked(REQUEST_ID));
+        assertTrue(decodeEndpoint.isConfirmedTracked(String.valueOf(REQUEST_ID)));
         assertEquals(RequestLifecycleState.ACKNOWLEDGED,
-                scheduler.getRequestState(REQUEST_ID, batchId).state());
+                scheduler.getRequestState(String.valueOf(REQUEST_ID), batchId).state());
     }
 
     private void reportDecode(TaskPhase phase) {
@@ -326,7 +327,7 @@ class DecodeAcceptanceLinearizationTest {
 
     private void reportRunning(RoleType role, TaskPhase phase) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(REQUEST_ID);
+        task.setRequestId(String.valueOf(REQUEST_ID));
         task.setPhase(phase);
         task.setInputLength(128);
         WorkerStatusResponse response = new WorkerStatusResponse();
@@ -341,7 +342,7 @@ class DecodeAcceptanceLinearizationTest {
 
     private BatchItem item(FlexlbConfig config) {
         Request request = new Request();
-        request.setRequestId(REQUEST_ID);
+        request.setRequestId(String.valueOf(REQUEST_ID));
         request.setPriority(50);
         request.setSeqLen(128);
         request.setMaxNewTokens(8);
@@ -368,7 +369,7 @@ class DecodeAcceptanceLinearizationTest {
         status.setServerIp(ip);
         status.setHttpPort(httpPort);
         status.setGrpcPort(grpcPort);
-        status.setRequestId(REQUEST_ID);
+        status.setRequestId(String.valueOf(REQUEST_ID));
         return status;
     }
 

@@ -9,6 +9,7 @@ import org.flexlb.enums.DecodeTaskPhase;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
@@ -47,7 +48,7 @@ class AcceptedEvictionPlannerTest {
     void gateOff_acceptedNeverConsidered_andChannelNeverQueried() {
         // Default config: accepted-evict switch off.
         DecodeEndpointSnapshot ep = endpoint("d1", 1, 100_000, 200_000, 1, 1,
-                List.of(), List.of(accepted(1, 30, 256)), List.of());
+                List.of(), List.of(accepted("1", 30, 256)), List.of());
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
@@ -64,7 +65,7 @@ class AcceptedEvictionPlannerTest {
         enableEngineOwnedPlanning();
         when(channel.isSupported(any())).thenReturn(false);
         DecodeEndpointSnapshot ep = endpoint("d1", 1, 100_000, 200_000, 1, 1,
-                List.of(), List.of(accepted(1, 30, 256)), List.of());
+                List.of(), List.of(accepted("1", 30, 256)), List.of());
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
@@ -79,7 +80,7 @@ class AcceptedEvictionPlannerTest {
         enableEngineOwnedPlanning();
         when(channel.isSupported(any())).thenReturn(true);
         DecodeEndpointSnapshot ep = endpoint("d1", 5, 100_000, 200_000, 1, 1,
-                List.of(), List.of(accepted(1, 30, 256)), List.of());
+                List.of(), List.of(accepted("1", 30, 256)), List.of());
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
@@ -87,7 +88,7 @@ class AcceptedEvictionPlannerTest {
 
         assertNotNull(proposal);
         assertEquals(DecodeEvictionProposal.CASE_SLOT, proposal.evictionCase());
-        assertEquals(List.of(1L), ids(proposal.victims()));
+        assertEquals(List.of("1"), ids(proposal.victims()));
         assertEquals(DecodeTaskPhase.ACCEPTED_NOT_RUNNING, proposal.victims().get(0).phase());
         // h(DECODE_SLOT_FULL)=4 x f(30)=1 x g(ACCEPTED_NOT_RUNNING)=16.
         assertEquals(64, proposal.totalCost());
@@ -99,16 +100,16 @@ class AcceptedEvictionPlannerTest {
         allowStages(VictimStage.DECODE_ENGINE_OWNED);
         when(channel.isSupported(any())).thenReturn(true);
         DecodeEndpointSnapshot ep = endpoint("d1", 1, 0, 10_000, 2, 0,
-                List.of(reserved(1, 10, 2_048)),
+                List.of(reserved("1", 10, 2_048)),
                 List.of(),
-                List.of(new DecodeRequestSnapshot(2, 30, DecodeTaskPhase.RUNNING,
+                List.of(new DecodeRequestSnapshot("2", 30, DecodeTaskPhase.RUNNING,
                         2_048, 2_048, true, false)));
 
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
                 incoming(70, 2_000), List.of(ep), config, channel, new HashMap<>());
 
         assertNotNull(proposal);
-        assertEquals(List.of(2L), ids(proposal.victims()));
+        assertEquals(List.of("2"), ids(proposal.victims()));
         assertEquals(DecodeTaskPhase.RUNNING, proposal.victims().getFirst().phase());
     }
 
@@ -119,7 +120,7 @@ class AcceptedEvictionPlannerTest {
         enableEngineOwnedPlanning();
         when(channel.isSupported(any())).thenReturn(true);
         DecodeEndpointSnapshot ep = endpoint("d1", 1, 100_000, 200_000, 1, 1,
-                List.of(), List.of(accepted(1, 50, 256)), List.of());
+                List.of(), List.of(accepted("1", 50, 256)), List.of());
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
@@ -136,15 +137,15 @@ class AcceptedEvictionPlannerTest {
         enableEngineOwnedPlanning();
         when(channel.isSupported(any())).thenReturn(true);
         DecodeEndpointSnapshot ep = endpoint("d1", 1, 100_000, 200_000, 2, 2,
-                List.of(reserved(1, 30, 128)),
-                List.of(accepted(2, 30, 256)), List.of());
+                List.of(reserved("1", 30, 128)),
+                List.of(accepted("2", 30, 256)), List.of());
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
                 incoming(70, 128), List.of(ep), config, channel, failures);
 
         assertNotNull(proposal);
-        assertEquals(List.of(2L), ids(proposal.victims()));
+        assertEquals(List.of("2"), ids(proposal.victims()));
         assertEquals(DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
                 proposal.victims().get(0).phase());
         assertEquals(64, proposal.totalCost());
@@ -158,8 +159,8 @@ class AcceptedEvictionPlannerTest {
         // order (2048 > 512) but stage asc ranks the reserved entry first,
         // and 512 already covers the deficit.
         DecodeEndpointSnapshot ep = endpoint("d1", 1, 100, 10_000, 1, 0,
-                List.of(reserved(1, 30, 512)),
-                List.of(accepted(2, 30, 2_048)), List.of());
+                List.of(reserved("1", 30, 512)),
+                List.of(accepted("2", 30, 2_048)), List.of());
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
@@ -167,7 +168,7 @@ class AcceptedEvictionPlannerTest {
 
         assertNotNull(proposal);
         assertEquals(DecodeEvictionProposal.CASE_KV, proposal.evictionCase());
-        assertEquals(List.of(1L), ids(proposal.victims()));
+        assertEquals(List.of("1"), ids(proposal.victims()));
         // h(DECODE_KV_FULL)=8 x f(30)=1 x g(RESERVED)=1 x lengthWasteCost(512)=1.
         assertEquals(8, proposal.totalCost());
     }
@@ -179,8 +180,8 @@ class AcceptedEvictionPlannerTest {
         // kvDeficit = 1900: reserved 512 alone is short, the greedy pass
         // extends into the accepted layer.
         DecodeEndpointSnapshot ep = endpoint("d1", 1, 100, 10_000, 2, 0,
-                List.of(reserved(1, 30, 512)),
-                List.of(accepted(2, 30, 2_048)), List.of());
+                List.of(reserved("1", 30, 512)),
+                List.of(accepted("2", 30, 2_048)), List.of());
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
@@ -189,7 +190,7 @@ class AcceptedEvictionPlannerTest {
         assertNotNull(proposal);
         // A plan is ownership-homogeneous: it never combines a Master-local
         // removal with an Engine Cancel transaction.
-        assertEquals(List.of(2L), ids(proposal.victims()));
+        assertEquals(List.of("2"), ids(proposal.victims()));
         assertEquals(2_048, proposal.freedKvTokens());
         assertEquals(128, proposal.totalCost());
     }
@@ -202,7 +203,7 @@ class AcceptedEvictionPlannerTest {
         when(channel.isSupported(any())).thenReturn(true);
         DecodeEndpointSnapshot ep = endpoint("d1", 1, 100_000, 200_000, 1, 1,
                 List.of(), List.of(),
-                List.of(new DecodeRequestSnapshot(1, 30, DecodeTaskPhase.RUNNING,
+                List.of(new DecodeRequestSnapshot("1", 30, DecodeTaskPhase.RUNNING,
                         256, 256, true, false)));
 
         Map<String, String> failures = new HashMap<>();
@@ -210,7 +211,7 @@ class AcceptedEvictionPlannerTest {
                 incoming(70, 128), List.of(ep), config, channel, failures);
 
         assertNotNull(proposal);
-        assertEquals(List.of(1L), ids(proposal.victims()));
+        assertEquals(List.of("1"), ids(proposal.victims()));
         assertEquals(DecodeTaskPhase.RUNNING, proposal.victims().get(0).phase());
         // h(DECODE_SLOT_FULL)=4 x f(30)=1 x g(RUNNING)=64.
         assertEquals(256, proposal.totalCost());
@@ -221,15 +222,15 @@ class AcceptedEvictionPlannerTest {
         enableEngineOwnedPlanning();
         when(channel.isSupported(any())).thenReturn(true);
         DecodeEndpointSnapshot ep = endpoint("d1", 1, 100_000, 200_000, 2, 2,
-                List.of(), List.of(accepted(1, 30, 256)),
-                List.of(new DecodeRequestSnapshot(2, 30, DecodeTaskPhase.RUNNING,
+                List.of(), List.of(accepted("1", 30, 256)),
+                List.of(new DecodeRequestSnapshot("2", 30, DecodeTaskPhase.RUNNING,
                         256, 256, true, false)));
 
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
                 incoming(70, 128), List.of(ep), config, channel, new HashMap<>());
 
         assertNotNull(proposal);
-        assertEquals(List.of(1L), ids(proposal.victims()));
+        assertEquals(List.of("1"), ids(proposal.victims()));
         assertEquals(DecodeTaskPhase.ACCEPTED_NOT_RUNNING, proposal.victims().get(0).phase());
     }
 
@@ -239,7 +240,7 @@ class AcceptedEvictionPlannerTest {
     void legacyOverload_withoutChannel_neverUsesAcceptedLayer() {
         enableEngineOwnedPlanning();
         DecodeEndpointSnapshot ep = endpoint("d1", 1, 100_000, 200_000, 1, 1,
-                List.of(), List.of(accepted(1, 30, 256)), List.of());
+                List.of(), List.of(accepted("1", 30, 256)), List.of());
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
@@ -251,7 +252,7 @@ class AcceptedEvictionPlannerTest {
 
     // ==================== helpers ====================
 
-    private static List<Long> ids(List<DecodeRequestSnapshot> victims) {
+    private static List<String> ids(List<DecodeRequestSnapshot> victims) {
         return victims.stream().map(DecodeRequestSnapshot::requestId).toList();
     }
 
@@ -264,7 +265,7 @@ class AcceptedEvictionPlannerTest {
         PriorityOrderingConfig ordering = new PriorityOrderingConfig();
         PreemptionConfig preemption = new PreemptionConfig();
         EnumSet<VictimStage> allowed = EnumSet.noneOf(VictimStage.class);
-        java.util.Collections.addAll(allowed, stages);
+        Collections.addAll(allowed, stages);
         preemption.setAllowedVictimStages(allowed);
         ordering.setPreemption(preemption);
         scheduler.setOrdering(ordering);
@@ -284,21 +285,21 @@ class AcceptedEvictionPlannerTest {
                 reserved, accepted, running);
     }
 
-    private static DecodeRequestSnapshot reserved(long requestId, int priority,
+    private static DecodeRequestSnapshot reserved(String requestId, int priority,
                                                   long kvTokens) {
         return new DecodeRequestSnapshot(requestId, priority,
                 DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED,
                 kvTokens, kvTokens + 8, true, true);
     }
 
-    private static DecodeRequestSnapshot accepted(long requestId, int priority,
+    private static DecodeRequestSnapshot accepted(String requestId, int priority,
                                                   long kvTokens) {
         return new DecodeRequestSnapshot(requestId, priority,
                 DecodeTaskPhase.ACCEPTED_NOT_RUNNING, kvTokens, kvTokens, true, false);
     }
 
     private static PriorityRequestEnvelope incoming(int priority, long seqLen) {
-        return new PriorityRequestEnvelope(999, priority, seqLen, 8,
+        return new PriorityRequestEnvelope("999", priority, seqLen, 8,
                 System.currentTimeMillis(), seqLen, seqLen + 8);
     }
 }

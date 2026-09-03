@@ -154,7 +154,7 @@ class CostBasedPrefillRoutingPerformanceTest {
         for (int threadIndex = 0; threadIndex < threadCount; threadIndex++) {
             final long requestId = threadIndex + 1L;
             futures.add(executor.submit(() -> {
-                BalanceContext context = context(requestId);
+                BalanceContext context = context(String.valueOf(requestId));
                 for (int operation = 0; operation < WARMUP_OPERATIONS_PER_THREAD; operation++) {
                     strategy.select(context, RoleType.PREFILL, null);
                 }
@@ -216,7 +216,7 @@ class CostBasedPrefillRoutingPerformanceTest {
         return status;
     }
 
-    private static BalanceContext context(long requestId) {
+    private static BalanceContext context(String requestId) {
         FlexlbConfig config = new FlexlbConfig();
         Request request = new Request();
         request.setRequestId(requestId);

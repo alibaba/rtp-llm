@@ -37,8 +37,8 @@ public class ShardedRecentCacheKeyWindow {
         }
     }
 
-    public RecentCacheKeyWindow.Snapshot record(long requestId, List<Long> cacheKeys) {
-        int idx = (int) ((requestId & Long.MAX_VALUE) % shardCount);
+    public RecentCacheKeyWindow.Snapshot record(String requestId, List<Long> cacheKeys) {
+        int idx = Math.floorMod(requestId.hashCode(), shardCount);
         return shards[idx].record(cacheKeys);
     }
 

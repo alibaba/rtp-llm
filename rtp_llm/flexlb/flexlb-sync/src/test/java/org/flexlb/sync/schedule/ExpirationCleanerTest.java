@@ -86,7 +86,7 @@ class ExpirationCleanerTest {
         WorkerStatus workerStatus = status(RoleType.PREFILL, 8080);
         workerStatus.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
         TaskInfo task = new TaskInfo();
-        task.setRequestId(123L);
+        task.setRequestId("123");
         task.setInputLength(1_000);
         task.setPrefixLength(200);
         task.setPredictedPrefixLength(200);
@@ -117,7 +117,7 @@ class ExpirationCleanerTest {
         assertEquals(1, pvEvents.list.size());
         String event = pvEvents.list.getFirst().getFormattedMessage();
         assertTrue(event.contains("\"eventType\":\"task_confirmation_timeout\""));
-        assertTrue(event.contains("\"requestId\":123"));
+        assertTrue(event.contains("\"requestId\":\"123\""));
         assertTrue(event.contains("\"confirmationTimeoutMs\":10000"));
     }
 

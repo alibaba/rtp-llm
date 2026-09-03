@@ -137,7 +137,7 @@ class ConcurrentDoubleSchedulingTest {
                 try {
                     startGate.await();
                     EngineRpcService.GenerateInputPB input =
-                            inputWithDecode(requestId, 10, decodePort);
+                            inputWithDecode(String.valueOf(requestId), 10, decodePort);
                     enqueue(prefill, batch(batchId, slot(0, input)));
                 } catch (Throwable t) {
                     errors.incrementAndGet();
@@ -159,7 +159,7 @@ class ConcurrentDoubleSchedulingTest {
             workerPool.submit(() -> {
                 try {
                     startGate.await();
-                    EngineRpcService.GenerateInputPB input = input(requestId, 10);
+                    EngineRpcService.GenerateInputPB input = input(String.valueOf(requestId), 10);
                     decode.generateStreamCall(input, new StreamObserver<>() {
                         @Override
                         public void onNext(EngineRpcService.GenerateOutputsPB value) { }
@@ -229,7 +229,7 @@ class ConcurrentDoubleSchedulingTest {
                 try {
                     startGate.await();
                     EngineRpcService.GenerateInputPB input =
-                            inputWithDecode(requestId, 10, decodePort);
+                            inputWithDecode(String.valueOf(requestId), 10, decodePort);
                     enqueue(prefill, batch(batchId, slot(0, input)));
                 } catch (Throwable t) {
                     errors.incrementAndGet();
@@ -331,9 +331,8 @@ class ConcurrentDoubleSchedulingTest {
 
     // ──────────── Protobuf builders ────────────
 
-    private static EngineRpcService.GenerateInputPB input(long requestId, int inputTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+    private static EngineRpcService.GenerateInputPB input(String requestId, int inputTokens) {
+        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(1)
                         .build());
@@ -344,9 +343,8 @@ class ConcurrentDoubleSchedulingTest {
     }
 
     private static EngineRpcService.GenerateInputPB inputWithDecode(
-            long requestId, int inputTokens, int decodePort) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+            String requestId, int inputTokens, int decodePort) {
+        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(1)
                         .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()

@@ -11,6 +11,7 @@ import io.grpc.netty.NettyChannelBuilder;
 import io.netty.channel.EventLoopGroup;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.engine.grpc.core.GrpcChannelFactory;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
@@ -55,7 +56,7 @@ public class FlexlbGrpcForwarder {
     public CompletionStage<MasterForwardResult> forwardScheduleToMaster(
             FlexlbScheduleProtocol.FlexlbScheduleRequestPB request) {
         ForwardGuard guard = applyForwardGuard(
-                request.getRequestId(), request.getForwardHop(),
+                RequestId.parse(request), request.getForwardHop(),
                 ForwardOperation.SCHEDULE);
         if (guard.blocked()) {
             return CompletableFuture.completedFuture(MasterForwardResult.failed(
@@ -81,7 +82,7 @@ public class FlexlbGrpcForwarder {
                     .schedule(forwardedRequest);
         } catch (RuntimeException error) {
             return CompletableFuture.completedFuture(forwardFailure(
-                    request.getRequestId(), guard, error));
+                    RequestId.parse(request), guard, error));
         }
 
         CompletableFuture<MasterForwardResult> result = new CompletableFuture<>();
@@ -104,14 +105,14 @@ public class FlexlbGrpcForwarder {
                         @Override
                         public void onFailure(Throwable error) {
                             result.complete(forwardFailure(
-                                    request.getRequestId(), guard, error));
+                                    RequestId.parse(request), guard, error));
                         }
                     },
                     Runnable::run);
         } catch (RuntimeException callbackRegistrationError) {
             rpcFuture.cancel(true);
             result.complete(forwardFailure(
-                    request.getRequestId(), guard, callbackRegistrationError));
+                    RequestId.parse(request), guard, callbackRegistrationError));
         }
 
         // gRPC already propagates the inbound Context deadline/cancellation to
@@ -137,7 +138,7 @@ public class FlexlbGrpcForwarder {
     public CompletionStage<CancelForwardResult> forwardCancelToMaster(
             FlexlbScheduleProtocol.FlexlbCancelRequestPB request) {
         ForwardGuard guard = applyForwardGuard(
-                request.getRequestId(), request.getForwardHop(), ForwardOperation.CANCEL);
+                RequestId.parse(request), request.getForwardHop(), ForwardOperation.CANCEL);
         if (guard.blocked()) {
             return CompletableFuture.completedFuture(CancelForwardResult.failed(
                     guard.blockReason().failureCode(),
@@ -162,7 +163,7 @@ public class FlexlbGrpcForwarder {
                     .cancel(forwardedRequest);
         } catch (RuntimeException error) {
             return CompletableFuture.completedFuture(cancelForwardFailure(
-                    request.getRequestId(), guard, error));
+                    RequestId.parse(request), guard, error));
         }
 
         CompletableFuture<CancelForwardResult> result = new CompletableFuture<>();
@@ -188,14 +189,14 @@ public class FlexlbGrpcForwarder {
                         @Override
                         public void onFailure(Throwable error) {
                             result.complete(cancelForwardFailure(
-                                    request.getRequestId(), guard, error));
+                                    RequestId.parse(request), guard, error));
                         }
                     },
                     Runnable::run);
         } catch (RuntimeException callbackRegistrationError) {
             rpcFuture.cancel(true);
             result.complete(cancelForwardFailure(
-                    request.getRequestId(), guard, callbackRegistrationError));
+                    RequestId.parse(request), guard, callbackRegistrationError));
         }
 
         result.whenComplete((ignored, error) -> {
@@ -207,7 +208,7 @@ public class FlexlbGrpcForwarder {
     }
 
     private MasterForwardResult forwardFailure(
-            long requestId,
+            String requestId,
             ForwardGuard guard,
             Throwable error) {
         return MasterForwardResult.failed(
@@ -216,7 +217,7 @@ public class FlexlbGrpcForwarder {
     }
 
     private CancelForwardResult cancelForwardFailure(
-            long requestId,
+            String requestId,
             ForwardGuard guard,
             Throwable error) {
         return CancelForwardResult.failed(
@@ -225,7 +226,7 @@ public class FlexlbGrpcForwarder {
     }
 
     private String recordForwardFailure(
-            long requestId,
+            String requestId,
             ForwardGuard guard,
             Throwable error) {
         Status status = Status.fromThrowable(error);
@@ -308,7 +309,7 @@ public class FlexlbGrpcForwarder {
     public FlexlbScheduleProtocol.GetRequestStateResponsePB forwardGetRequestStateToMaster(
             FlexlbScheduleProtocol.GetRequestStateRequestPB request) {
         ForwardGuard guard = applyForwardGuard(
-                request.getRequestId(), request.getForwardHop(),
+                RequestId.parse(request), request.getForwardHop(),
                 ForwardOperation.STATE_QUERY);
         if (guard.blocked()) {
             return null;
@@ -324,7 +325,7 @@ public class FlexlbGrpcForwarder {
             return stub.getRequestState(forwardedRequest);
         } catch (RuntimeException e) {
             Logger.debug("Failed to forward FlexLB state query to master, request_id={}",
-                    request.getRequestId(), e);
+                    RequestId.parse(request), e);
             return null;
         }
     }
@@ -369,7 +370,7 @@ public class FlexlbGrpcForwarder {
     }
 
     private ForwardGuard applyForwardGuard(
-            long requestId,
+            String requestId,
             int encodedHop,
             ForwardOperation operation) {
         long incomingHop = Integer.toUnsignedLong(encodedHop);

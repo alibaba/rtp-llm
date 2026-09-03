@@ -89,7 +89,7 @@ class RealisticTimingTest {
             EngineRpcService.GenerateInputPB[] inputs = new EngineRpcService.GenerateInputPB[nRequests];
             for (int i = 0; i < nRequests; i++) {
                 int decodePort = decodeServices.get(i % nDecode).getGrpcPort();
-                inputs[i] = inputWithDecode(i + 1, 10, decodePort, 10);
+                inputs[i] = inputWithDecode(String.valueOf(i + 1), 10, decodePort, 10);
             }
             EngineRpcService.EnqueueBatchResponsePB response = enqueue(
                     prefillServices.get(0), batch(1000, slot(0, inputs)));
@@ -203,9 +203,8 @@ class RealisticTimingTest {
     // ──────────── Protobuf builders ────────────
 
     private static EngineRpcService.GenerateInputPB inputWithDecode(
-            long requestId, int inputTokens, int decodePort, int outputLen) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+            String requestId, int inputTokens, int decodePort, int outputLen) {
+        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(outputLen)
                         .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()

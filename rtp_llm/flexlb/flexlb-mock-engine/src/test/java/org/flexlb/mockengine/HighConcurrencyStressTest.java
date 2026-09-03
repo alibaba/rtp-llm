@@ -113,7 +113,7 @@ class HighConcurrencyStressTest {
                         int decodePort = decodeServices
                                 .get((decodeStart + i) % decodeServices.size())
                                 .getGrpcPort();
-                        inputs[i] = inputWithDecode(startRequestId + i, 10, decodePort);
+                        inputs[i] = inputWithDecode(String.valueOf(startRequestId + i), 10, decodePort);
                     }
                     EngineRpcService.EnqueueBatchResponsePB response =
                             enqueue(prefill, batch(batchId, slot(0, inputs)));
@@ -294,9 +294,8 @@ class HighConcurrencyStressTest {
     // ──────────── Protobuf builders ────────────
 
     private static EngineRpcService.GenerateInputPB inputWithDecode(
-            long requestId, int inputTokens, int decodePort) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+            String requestId, int inputTokens, int decodePort) {
+        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(1)
                         .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()

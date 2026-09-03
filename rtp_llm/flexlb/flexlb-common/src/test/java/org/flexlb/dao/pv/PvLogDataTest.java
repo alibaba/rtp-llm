@@ -20,7 +20,7 @@ class PvLogDataTest {
     @Test
     void omitsShortestTtftDecisionWhenSnapshotIsAbsent() {
         Request request = new Request();
-        request.setRequestId(1001L);
+        request.setRequestId("1001");
 
         BalanceContext context = new BalanceContext();
         context.setRequest(request);
@@ -45,7 +45,7 @@ class PvLogDataTest {
     @Test
     void includesBlockHashAndKvcmTimings() {
         Request request = new Request();
-        request.setRequestId(1L);
+        request.setRequestId("1");
         request.setSeqLen(128);
         request.setRequestTimeMs(1000);
 
@@ -167,7 +167,7 @@ class PvLogDataTest {
     @Test
     void includesActualInputIdsCountAndRequestBodyBytes() {
         Request request = new Request();
-        request.setRequestId(2L);
+        request.setRequestId("2");
         request.setSeqLen(999);
         request.setInputIds(new int[]{1, 2, 3});
 

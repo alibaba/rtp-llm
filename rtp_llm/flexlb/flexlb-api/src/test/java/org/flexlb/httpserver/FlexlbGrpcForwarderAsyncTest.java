@@ -60,7 +60,7 @@ class FlexlbGrpcForwarderAsyncTest {
             FlexlbGrpcForwarder forwarder = forwarder(fixture.channel, reporter);
 
             FlexlbGrpcForwarder.MasterForwardResult result = await(
-                    forwarder.forwardScheduleToMaster(request(101L)));
+                    forwarder.forwardScheduleToMaster(request("101")));
 
             assertNotNull(result.response());
             assertTrue(result.response().getSuccess());
@@ -82,7 +82,7 @@ class FlexlbGrpcForwarderAsyncTest {
             FlexlbGrpcForwarder forwarder = forwarder(fixture.channel, reporter);
 
             FlexlbGrpcForwarder.MasterForwardResult result = await(
-                    forwarder.forwardScheduleToMaster(request(102L)));
+                    forwarder.forwardScheduleToMaster(request("102")));
 
             assertTrue(result.masterFound());
             assertEquals("UNAVAILABLE", result.failure());
@@ -105,7 +105,7 @@ class FlexlbGrpcForwarderAsyncTest {
             Context.CancellableContext inbound = Context.current().withCancellation();
 
             CompletionStage<FlexlbGrpcForwarder.MasterForwardResult> pending =
-                    inbound.call(() -> forwarder.forwardScheduleToMaster(request(103L)));
+                    inbound.call(() -> forwarder.forwardScheduleToMaster(request("103")));
             assertTrue(masterReceivedRequest.await(2, TimeUnit.SECONDS));
             assertFalse(pending.toCompletableFuture().isDone());
 
@@ -132,7 +132,7 @@ class FlexlbGrpcForwarderAsyncTest {
                     .withDeadlineAfter(500, TimeUnit.MILLISECONDS, deadlineTimer);
 
             CompletionStage<FlexlbGrpcForwarder.MasterForwardResult> pending =
-                    inbound.call(() -> forwarder.forwardScheduleToMaster(request(104L)));
+                    inbound.call(() -> forwarder.forwardScheduleToMaster(request("104")));
             assertTrue(masterReceivedRequest.await(2, TimeUnit.SECONDS));
             FlexlbGrpcForwarder.MasterForwardResult result = await(pending);
 
@@ -163,7 +163,7 @@ class FlexlbGrpcForwarderAsyncTest {
             FlexlbGrpcForwarder forwarder = forwarder(fixture.channel, reporter);
 
             FlexlbGrpcForwarder.MasterForwardResult result = await(
-                    forwarder.forwardScheduleToMaster(request(105L)));
+                    forwarder.forwardScheduleToMaster(request("105")));
 
             assertNotNull(result.response());
             assertTrue(result.response().getSuccess());
@@ -194,7 +194,7 @@ class FlexlbGrpcForwarderAsyncTest {
             assertTimeoutPreemptively(Duration.ofSeconds(1), () ->
                     pending.set(forwarder.forwardCancelToMaster(
                             FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                                    .setRequestId(106L)
+                                    .setRequestId(String.valueOf(106L))
                                     .build())));
             assertTrue(masterReceivedRequest.await(2, TimeUnit.SECONDS));
             assertFalse(pending.get().toCompletableFuture().isDone());
@@ -233,7 +233,7 @@ class FlexlbGrpcForwarderAsyncTest {
         return forwarder;
     }
 
-    private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(long requestId) {
+    private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(String requestId) {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(requestId)
                 .build();

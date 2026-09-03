@@ -31,12 +31,14 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
 import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.mock.MockPrefillWorker;
 import org.flexlb.mock.MockWorkerBehavior;
+import org.flexlb.mock.RequestIdFixtures;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
@@ -45,6 +47,7 @@ import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
+import org.flexlb.service.optimizer.OptimizerClient;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -56,6 +59,7 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.mockito.ArgumentMatchers;
 import org.slf4j.LoggerFactory;
 import org.springframework.mock.env.MockEnvironment;
 
@@ -242,10 +246,10 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         when(consistencyService.isNeedConsistency()).thenReturn(false);
         activeRequestCounter = new ActiveRequestCounter();
         latencyRecorder = new ServerScheduleLatencyRecorder();
-        org.flexlb.cache.match.CacheAwareService cacheAwareService =
-                mock(org.flexlb.cache.match.CacheAwareService.class, withSettings().stubOnly());
+        CacheAwareService cacheAwareService =
+                mock(CacheAwareService.class, withSettings().stubOnly());
         when(cacheAwareService.prepareBlockCacheKeys(
-                org.mockito.ArgumentMatchers.any(BalanceContext.class)))
+                ArgumentMatchers.any(BalanceContext.class)))
                 .thenReturn(CompletableFuture.completedFuture(null));
         FlexlbServiceImpl service = new FlexlbServiceImpl(
                 routeService,
@@ -258,7 +262,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 latencyRecorder,
                 mock(PrioritySchedulerReporter.class, withSettings().stubOnly()),
                 cacheAwareService,
-                mock(org.flexlb.service.optimizer.OptimizerClient.class, withSettings().stubOnly()));
+                mock(OptimizerClient.class, withSettings().stubOnly()));
 
         int grpcPort;
         try (ServerSocket socket = new ServerSocket(0)) {
@@ -307,7 +311,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     @Test
     @Timeout(value = 45, unit = TimeUnit.SECONDS)
     void batchScheduleRemainsFastAcrossRealGrpcBoundaries() throws Exception {
-        TrafficResult warmup = runTraffic(WARMUP_REQUESTS, 1L);
+        TrafficResult warmup = runTraffic(WARMUP_REQUESTS, 1);
         assertSuccessful(warmup);
         awaitCompletionCount(WARMUP_REQUESTS);
         latencyRecorder.reset();
@@ -535,7 +539,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             long requestId = firstRequestId + index;
             long requestStartNanos = System.nanoTime();
             CompletableFuture<TimedResponse> future = new CompletableFuture<>();
-            masterStub.schedule(scheduleRequest(requestId, index), new StreamObserver<>() {
+            masterStub.schedule(scheduleRequest(String.valueOf(requestId), index), new StreamObserver<>() {
                 @Override
                 public void onNext(FlexlbScheduleProtocol.FlexlbScheduleResponsePB response) {
                     future.complete(new TimedResponse(
@@ -581,15 +585,14 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         }
     }
 
-    private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB scheduleRequest(long requestId,
+    private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB scheduleRequest(String requestId,
                                                                                   int requestIndex) {
         RealRequestTemplate template = realRequestTemplates.get(
                 Math.floorMod(requestIndex, realRequestTemplates.size()));
-        EngineRpcService.GenerateInputPB generateInput = template.generateInput().toBuilder()
-                .setRequestId(requestId)
+        EngineRpcService.GenerateInputPB generateInput = RequestIdFixtures.write(template.generateInput().toBuilder(), requestId)
                 .setStartTime(System.currentTimeMillis())
                 .setRequestInfo(template.generateInput().getRequestInfo().toBuilder()
-                        .setRequestId(Long.toString(requestId))
+                        .setRequestId(String.valueOf(requestId))
                         .build())
                 .build();
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
@@ -659,7 +662,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
     private BatchSummary summarizeEngineBatches(long firstRequestId,
                                                 List<MockPrefillWorker> workers) {
-        Set<Long> requestIds = new HashSet<>();
+        Set<String> requestIds = new HashSet<>();
         Set<Integer> inputLengths = new HashSet<>();
         int maxBatchSize = 0;
         int totalRequests = 0;
@@ -680,11 +683,11 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                             : slot.getRequestsList()) {
                         batchSize++;
                         totalRequests++;
-                        long requestId = request.getInput().getRequestId();
+                        String requestId = RequestId.parse(request.getInput());
                         assertTrue(requestIds.add(requestId),
                                 "mock engine received a duplicate request_id");
                         int inputLength = request.getInput().getTokenIdsCount();
-                        int requestIndex = Math.toIntExact(requestId - firstRequestId);
+                        int requestIndex = Math.toIntExact(Long.parseLong(requestId) - firstRequestId);
                         RealRequestTemplate template = realRequestTemplates.get(
                                 Math.floorMod(requestIndex, realRequestTemplates.size()));
                         assertEquals(template.seqLen(), inputLength,
@@ -894,10 +897,10 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         return List.copyOf(templates);
     }
 
-    private static Set<Long> expectedRequestIds(long firstRequestId, int requestCount) {
-        Set<Long> expected = new HashSet<>(requestCount);
+    private static Set<String> expectedRequestIds(long firstRequestId, int requestCount) {
+        Set<String> expected = new HashSet<>(requestCount);
         for (int index = 0; index < requestCount; index++) {
-            expected.add(firstRequestId + index);
+            expected.add(Long.toString(firstRequestId + index));
         }
         return expected;
     }
@@ -973,7 +976,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
     private record BatchSummary(int batchCount, int maxBatchSize, double averageBatchSize,
                                 double averageInputTokens, int distinctInputLengths,
-                                int activeWorkerCount, Set<Long> requestIds) {
+                                int activeWorkerCount, Set<String> requestIds) {
     }
 
     private record TraceShape(int inputLength, int outputLength,

@@ -13,7 +13,7 @@ package org.flexlb.balance.scheduler.priority;
  *                       {@link #PREFILL_QUEUED}
  */
 public record QueuedRequestSnapshot(
-        long requestId,
+        String requestId,
         int priority,
         long arrivalTimeMs,
         long seqLen,

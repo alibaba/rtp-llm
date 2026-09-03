@@ -114,7 +114,7 @@ class DecodeCancelRaceTest {
         int iterations = 300;
         for (int i = 0; i < iterations; i++) {
             long requestId = 1_000L + i;
-            MockPerformanceModel.RequestShape shape = shapeOf(model, requestId, 16);
+            MockPerformanceModel.RequestShape shape = shapeOf(model, String.valueOf(requestId), 16);
             CyclicBarrier barrier = new CyclicBarrier(2);
             Future<?> scheduleFuture = workerPool.submit(() -> {
                 barrier.await();
@@ -179,7 +179,7 @@ class DecodeCancelRaceTest {
         CountDownLatch allDone = new CountDownLatch(nRequests + nRequests / 2);
         for (int i = 0; i < nRequests; i++) {
             long requestId = 5_000L + i;
-            MockPerformanceModel.RequestShape shape = shapeOf(model, requestId, 8);
+            MockPerformanceModel.RequestShape shape = shapeOf(model, String.valueOf(requestId), 8);
             workerPool.submit(() -> {
                 try {
                     startGate.await();
@@ -267,9 +267,8 @@ class DecodeCancelRaceTest {
     }
 
     private static MockPerformanceModel.RequestShape shapeOf(
-            MockPerformanceModel model, long requestId, int inputTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+            MockPerformanceModel model, String requestId, int inputTokens) {
+        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(1)
                         .build());

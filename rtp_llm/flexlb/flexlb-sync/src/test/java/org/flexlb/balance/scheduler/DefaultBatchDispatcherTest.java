@@ -65,7 +65,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void dispatchSendsItemsToGrpcAndReceivesAck() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        BatchItem item = createBatchItem("1", 500, 200, prefillEp);
 
         EngineRpcService.EnqueueBatchResponsePB response = ackResponse(1L, List.of(1L));
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
@@ -81,7 +81,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void dispatchHandlesGrpcError() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        BatchItem item = createBatchItem("1", 500, 200, prefillEp);
 
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenReturn(CompletableFuture.failedFuture(new RuntimeException("gRPC connection refused")));
@@ -98,7 +98,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void dispatchHandlesNullGrpcResponse() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        BatchItem item = createBatchItem("1", 500, 200, prefillEp);
 
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenReturn(CompletableFuture.completedFuture(null));
@@ -112,7 +112,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void dispatchHandlesNullGrpcFutureAsUncertain() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        BatchItem item = createBatchItem("1", 500, 200, prefillEp);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
                 .thenReturn(null);
 
@@ -126,7 +126,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void dispatchRejectsAckWithDifferentBatchId() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(8L, 500, 200, prefillEp);
+        BatchItem item = createBatchItem("8", 500, 200, prefillEp);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong())).thenReturn(
                 CompletableFuture.completedFuture(EngineRpcService.EnqueueBatchResponsePB.newBuilder()
                         .setBatchId(87L)
@@ -146,7 +146,7 @@ class DefaultBatchDispatcherTest {
         dispatcher.shutdown();
 
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        BatchItem item = createBatchItem("1", 500, 200, prefillEp);
 
         dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback);
 
@@ -158,8 +158,8 @@ class DefaultBatchDispatcherTest {
     void executorRejectionIsolatesFailureCallbacksForEveryItem() {
         dispatcher.shutdown();
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem first = createBatchItem(1L, 500, 200, prefillEp);
-        BatchItem second = createBatchItem(2L, 500, 200, prefillEp);
+        BatchItem first = createBatchItem("1", 500, 200, prefillEp);
+        BatchItem second = createBatchItem("2", 500, 200, prefillEp);
         AtomicInteger attempts = new AtomicInteger();
         DispatchCallback throwingCallback = new DispatchCallback() {
             @Override
@@ -184,8 +184,8 @@ class DefaultBatchDispatcherTest {
     @Test
     void unexpectedPreSendFailureIsDefiniteAndIsolatesCallbacks() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem first = createBatchItem(1L, 500, 200, prefillEp);
-        BatchItem second = createBatchItem(2L, 500, 200, prefillEp);
+        BatchItem first = createBatchItem("1", 500, 200, prefillEp);
+        BatchItem second = createBatchItem("2", 500, 200, prefillEp);
         when(configService.loadBalanceConfig())
                 .thenThrow(new IllegalStateException("config unavailable before send"));
         CountDownLatch attempted = new CountDownLatch(2);
@@ -200,7 +200,7 @@ class DefaultBatchDispatcherTest {
             public void onFailure(BatchItem item, Throwable error) {
                 failures.incrementAndGet();
                 attempted.countDown();
-                if (item.requestId() == 1L) {
+                if (item.requestId().equals(String.valueOf(1L))) {
                     throw new IllegalStateException("first callback failed");
                 }
             }
@@ -224,8 +224,8 @@ class DefaultBatchDispatcherTest {
     @Test
     void synchronousRpcInvocationFailureIsUncertainAndIsolatesCallbacks() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem first = createBatchItem(1L, 500, 200, prefillEp);
-        BatchItem second = createBatchItem(2L, 500, 200, prefillEp);
+        BatchItem first = createBatchItem("1", 500, 200, prefillEp);
+        BatchItem second = createBatchItem("2", 500, 200, prefillEp);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
                 .thenThrow(new IllegalStateException("client threw after invocation began"));
         CountDownLatch attempted = new CountDownLatch(2);
@@ -245,7 +245,7 @@ class DefaultBatchDispatcherTest {
             public void onDispatchUncertain(BatchItem item, long batchId, Throwable error) {
                 uncertain.incrementAndGet();
                 attempted.countDown();
-                if (item.requestId() == 1L) {
+                if (item.requestId().equals(String.valueOf(1L))) {
                     throw new IllegalStateException("first callback failed");
                 }
             }
@@ -263,7 +263,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void completionExecutorRejectionAfterRpcInvocationIsUncertain() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        BatchItem item = createBatchItem("1", 500, 200, prefillEp);
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture = new CompletableFuture<>();
         CountDownLatch invoked = new CountDownLatch(1);
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
@@ -288,7 +288,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void dispatchHandlesResponseWithErrors() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        BatchItem item = createBatchItem("1", 500, 200, prefillEp);
 
         EngineRpcService.EnqueueBatchResponsePB response =
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
@@ -316,7 +316,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void dispatchHandlesMissingAck() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        BatchItem item = createBatchItem("1", 500, 200, prefillEp);
 
         EngineRpcService.EnqueueBatchResponsePB response =
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
@@ -335,8 +335,8 @@ class DefaultBatchDispatcherTest {
     void responseCallbackFailureIsIsolatedAndNeverReclassifiesOtherItemsAsUncertain()
             throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem succeeded = createBatchItem(11L, 500, 200, prefillEp);
-        BatchItem rejected = createBatchItem(12L, 500, 200, prefillEp);
+        BatchItem succeeded = createBatchItem("11", 500, 200, prefillEp);
+        BatchItem rejected = createBatchItem("12", 500, 200, prefillEp);
         EngineRpcService.EnqueueBatchResponsePB response =
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
                         .setBatchId(91L)
@@ -399,7 +399,7 @@ class DefaultBatchDispatcherTest {
                     return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
                 });
 
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        BatchItem item = createBatchItem("1", 500, 200, prefillEp);
         dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback);
 
         // Wait for at least one task to start, then shutdown
@@ -408,7 +408,7 @@ class DefaultBatchDispatcherTest {
 
         // Post-shutdown dispatch should be rejected immediately
         int failuresBefore = callback.failureCount.get();
-        BatchItem extra = createBatchItem(99L, 500, 200, prefillEp);
+        BatchItem extra = createBatchItem("99", 500, 200, prefillEp);
         dispatcher.dispatch(List.of(extra), prefillEp, 99L, 100, "test", callback);
         assertEquals(failuresBefore + 1, callback.failureCount.get(), "Post-shutdown dispatch should add exactly 1 failure");
     }
@@ -418,7 +418,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void dispatchForwardsCarriedPriorityIntoGenerateInput() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        BatchItem item = createBatchItem("1", 500, 200, prefillEp);
         item.ctx().getRequest().setPriority(60);
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
@@ -437,7 +437,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void dispatchLeavesPriorityUnsetForNoPriorityRequests() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        BatchItem item = createBatchItem("1", 500, 200, prefillEp);
         // default Request priority is the no-priority sentinel (0)
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
@@ -456,7 +456,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void dispatchDualWritesCompatibleRoleAddress() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
-        BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
+        BatchItem item = createBatchItem("1", 500, 200, prefillEp);
 
         List<EngineRpcService.EnqueueBatchRequestPB> sent = new CopyOnWriteArrayList<>();
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
@@ -489,7 +489,7 @@ class DefaultBatchDispatcherTest {
         return endpoint;
     }
 
-    private BatchItem createBatchItem(long requestId, long seqLen, long hitCacheLen, PrefillEndpoint prefillEp) {
+    private BatchItem createBatchItem(String requestId, long seqLen, long hitCacheLen, PrefillEndpoint prefillEp) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
@@ -499,8 +499,7 @@ class DefaultBatchDispatcherTest {
         ctx.setRequest(request);
 
         // Provide a valid GenerateInputPB bytes (minimum: requestId + empty config)
-        EngineRpcService.GenerateInputPB input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+        EngineRpcService.GenerateInputPB input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().build())
                 .build();
         ctx.setGenerateInputPbBytes(input.toByteArray());

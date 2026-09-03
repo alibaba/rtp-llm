@@ -90,7 +90,7 @@ class ShortestTtftCacheAffinityTest {
         addWorker("10.0.0.2", 650);
         stubCacheMatches(Map.of("10.0.0.2:8080", 3));
 
-        ServerStatus result = strategy.select(buildContext(1000, 1L, config), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(1000, "1", config), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
@@ -110,7 +110,7 @@ class ShortestTtftCacheAffinityTest {
         endpointRegistry.getPrefill("10.0.0.1:8080").getLastSelectedTime().set(2000L);
         endpointRegistry.getPrefill("10.0.0.2:8080").getLastSelectedTime().set(1000L);
 
-        ServerStatus result = strategy.select(buildContext(1000, 11L, config), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(1000, "11", config), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.1", result.getServerIp());
@@ -125,7 +125,7 @@ class ShortestTtftCacheAffinityTest {
         addWorker("10.0.0.2", 650);
         stubCacheMatches(Map.of("10.0.0.2:8080", 3));
 
-        ServerStatus result = strategy.select(buildContext(1000, 2L, config), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(1000, "2", config), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.1", result.getServerIp());
@@ -138,7 +138,7 @@ class ShortestTtftCacheAffinityTest {
         addWorker("10.0.0.2", 250);
         stubCacheMatches(Map.of("10.0.0.2:8080", 1));
 
-        ServerStatus result = strategy.select(buildContext(1000, 3L, config), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(1000, "3", config), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.1", result.getServerIp());
@@ -150,7 +150,7 @@ class ShortestTtftCacheAffinityTest {
         addWorker("10.0.0.1", 200);
         addWorker("10.0.0.2", 0);
 
-        ServerStatus result = strategy.select(buildContext(1000, 4L, config), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(1000, "4", config), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
@@ -166,7 +166,7 @@ class ShortestTtftCacheAffinityTest {
         endpointRegistry.getPrefill("10.0.0.1:8080").getLastSelectedTime().set(2000L);
         endpointRegistry.getPrefill("10.0.0.2:8080").getLastSelectedTime().set(1000L);
 
-        ServerStatus result = strategy.select(buildContext(1000, 42L, config), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(1000, "42", config), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
@@ -177,7 +177,7 @@ class ShortestTtftCacheAffinityTest {
         PrefillEndpoint endpoint = Mockito.mock(PrefillEndpoint.class);
         Mockito.when(endpoint.realWaitTimeMs()).thenReturn(100L);
         Mockito.when(endpoint.batcherWaitMs()).thenReturn(200L);
-        BalanceContext context = buildContext(1000, 41L, new FlexlbConfig());
+        BalanceContext context = buildContext(1000, "41", new FlexlbConfig());
 
         assertEquals(300L, strategy.estimatedQueueWaitMs(endpoint, context));
     }
@@ -190,7 +190,7 @@ class ShortestTtftCacheAffinityTest {
         FlexlbConfig config = new FlexlbConfig();
         config.setScheduler(new DirectSchedulerConfig());
         config.setDispatcher(new NonBatchDispatcherConfig());
-        BalanceContext context = buildContext(1000, 44L, config);
+        BalanceContext context = buildContext(1000, "44", config);
 
         assertEquals(100L, strategy.estimatedQueueWaitMs(endpoint, context));
     }
@@ -201,7 +201,7 @@ class ShortestTtftCacheAffinityTest {
         addWorker("10.0.0.1", 0);
         addWorker("10.0.0.2", 0);
         stubCacheMatches(Map.of("10.0.0.2:8080", 3));
-        BalanceContext context = buildContext(1000, 5L, config);
+        BalanceContext context = buildContext(1000, "5", config);
         context.setExcludedPrefillIpPort("10.0.0.2:8080");
 
         ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
@@ -214,7 +214,7 @@ class ShortestTtftCacheAffinityTest {
     void retryRetainsExcludedWorkerWhenItIsTheOnlyEligibleWorker() {
         FlexlbConfig config = cacheAffinityConfig(1000, 0);
         addWorker("10.0.0.1", 0);
-        BalanceContext context = buildContext(1000, 6L, config);
+        BalanceContext context = buildContext(1000, "6", config);
         context.setExcludedPrefillIpPort("10.0.0.1:8080");
 
         ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
@@ -229,7 +229,7 @@ class ShortestTtftCacheAffinityTest {
         addWorker("10.0.0.1", 0);
         addWorker("10.0.0.2", 800);
         stubCacheMatches(Map.of("10.0.0.2:8080", 1));
-        BalanceContext context = buildContext(4096, 7L, config);
+        BalanceContext context = buildContext(4096, "7", config);
         context.getRequest().setCacheKeyBlockSize(1024L);
 
         ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
@@ -253,7 +253,7 @@ class ShortestTtftCacheAffinityTest {
                         25L,
                         256L));
 
-        BalanceContext context = buildContext(1000, 71L, config);
+        BalanceContext context = buildContext(1000, "71", config);
         ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
@@ -283,13 +283,13 @@ class ShortestTtftCacheAffinityTest {
         WorkerStatus cacheLeader = addWorker("10.0.0.1", 0);
         WorkerStatus eligibleWorker = addWorker("10.0.0.2", 0);
         TaskInfo existing = new TaskInfo();
-        existing.setRequestId(700L);
+        existing.setRequestId("700");
         existing.setInputLength(800L);
         existing.setPrefixLength(0L);
         cacheLeader.putLocalTask("700", existing);
         stubCacheMatches(Map.of(cacheLeader.getIpPort(), 3));
 
-        BalanceContext context = buildContext(1000, 72L, config);
+        BalanceContext context = buildContext(1000, "72", config);
         ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
@@ -339,7 +339,7 @@ class ShortestTtftCacheAffinityTest {
             }
         };
 
-        ServerStatus result = strategy.select(buildContext(1000, 8L, config), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(1000, "8", config), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.3", result.getServerIp());
@@ -383,7 +383,7 @@ class ShortestTtftCacheAffinityTest {
             }
         };
 
-        ServerStatus result = strategy.select(buildContext(1000, 9L, config), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(1000, "9", config), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.3", result.getServerIp());
@@ -423,7 +423,7 @@ class ShortestTtftCacheAffinityTest {
             }
         };
 
-        ServerStatus result = strategy.select(buildContext(1000, 10L, config), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(1000, "10", config), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
@@ -447,7 +447,7 @@ class ShortestTtftCacheAffinityTest {
                     CacheMatchQuery query = invocation.getArgument(0);
                     long blockSize = query.blockSize() > 0L ? query.blockSize() : 256L;
                     return new CacheMatchResult(
-                            org.flexlb.dao.cache.HostCacheMatch.fromLocalMatches(matches),
+                            HostCacheMatch.fromLocalMatches(matches),
                             CacheMatchSource.LOCAL_SYNC,
                             0L,
                             blockSize);
@@ -482,12 +482,12 @@ class ShortestTtftCacheAffinityTest {
             endpoint.commitBatch(
                     batchId,
                     estimatedWaitMs,
-                    List.of(batchItem(batchId, estimatedWaitMs)));
+                    List.of(batchItem(String.valueOf(batchId), estimatedWaitMs)));
         }
         return worker;
     }
 
-    private BatchItem batchItem(long requestId, long seqLen) {
+    private BatchItem batchItem(String requestId, long seqLen) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
@@ -497,7 +497,7 @@ class ShortestTtftCacheAffinityTest {
         return new BatchItem(context, null, null, null, null, null, null, 0);
     }
 
-    private BalanceContext buildContext(long seqLen, long requestId, FlexlbConfig config) {
+    private BalanceContext buildContext(long seqLen, String requestId, FlexlbConfig config) {
         Request request = new Request();
         request.setSeqLen(seqLen);
         request.setRequestId(requestId);

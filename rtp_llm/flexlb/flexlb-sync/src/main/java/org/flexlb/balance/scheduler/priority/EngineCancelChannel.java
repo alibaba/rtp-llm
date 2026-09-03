@@ -29,7 +29,7 @@ public interface EngineCancelChannel {
      * the WorkerStatus report).
      */
     CompletableFuture<CancelOutcome> cancel(CancelTarget target,
-                                            long requestId,
+                                            String requestId,
                                             long timeoutMs);
 
     /**

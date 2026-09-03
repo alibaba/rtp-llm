@@ -11,6 +11,8 @@ import org.flexlb.util.PriorityOrdering;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.IdentityHashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -304,14 +306,14 @@ public class BatcherContext {
         return candidates;
     }
 
-    BatchItem findQueued(long requestId) {
+    BatchItem findQueued(String requestId) {
         for (BatchItem item : queue) {
-            if (item.requestId() == requestId) {
+            if (Objects.equals(item.requestId(), requestId)) {
                 return item;
             }
         }
         for (BatchItem item : readyDeliveryQueue) {
-            if (item.requestId() == requestId) {
+            if (Objects.equals(item.requestId(), requestId)) {
                 return item;
             }
         }
@@ -501,7 +503,7 @@ public class BatcherContext {
                     stagedResolved = restore != PendingRestoreResult.NOT_PENDING;
                     if (restore == PendingRestoreResult.STOPPED) {
                         if (failedItems == null) {
-                            failedItems = new java.util.LinkedHashMap<>();
+                            failedItems = new LinkedHashMap<>();
                         }
                         failedItems.put(item,
                                 new CancellationException(
@@ -514,7 +516,7 @@ public class BatcherContext {
                     // is no longer safe to requeue (Decode may be visible), so
                     // hand it to the terminal failure callback exactly once.
                     if (failedItems == null) {
-                        failedItems = new java.util.LinkedHashMap<>();
+                        failedItems = new LinkedHashMap<>();
                     }
                     failedItems.put(item, callbackFailure != null
                             ? callbackFailure
@@ -836,7 +838,7 @@ public class BatcherContext {
                 queueDepth.addAndGet(-drained);
             }
             boolean stagedDrained = false;
-            java.util.Iterator<Map.Entry<BatchItem, PendingDelivery>> iterator =
+            Iterator<Map.Entry<BatchItem, PendingDelivery>> iterator =
                     pendingDeliveries.entrySet().iterator();
             while (iterator.hasNext()) {
                 Map.Entry<BatchItem, PendingDelivery> entry = iterator.next();

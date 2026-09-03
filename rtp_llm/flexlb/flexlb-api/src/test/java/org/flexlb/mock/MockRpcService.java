@@ -2,6 +2,7 @@ package org.flexlb.mock;
 
 import io.grpc.stub.StreamObserver;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.slf4j.Logger;
@@ -115,9 +116,8 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         if (beh.isFailOnEnqueue()) {
             for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
                 for (EngineRpcService.EnqueueBatchExternalInputPB ext : slot.getRequestsList()) {
-                    long reqId = ext.getInput().getRequestId();
-                    responseBuilder.addErrors(EngineRpcService.EnqueueBatchErrorPB.newBuilder()
-                            .setRequestId(reqId)
+                    String reqId = RequestId.parse(ext.getInput());
+                    responseBuilder.addErrors(RequestIdFixtures.write(EngineRpcService.EnqueueBatchErrorPB.newBuilder(), reqId)
                             .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
                                     .setErrorCode(beh.getEnqueueErrorCode())
                                     .setErrorMessage(beh.getEnqueueErrorMessage())
@@ -128,9 +128,8 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         } else {
             for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
                 for (EngineRpcService.EnqueueBatchExternalInputPB ext : slot.getRequestsList()) {
-                    long reqId = ext.getInput().getRequestId();
-                    responseBuilder.addSuccesses(EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
-                            .setRequestId(reqId)
+                    String reqId = RequestId.parse(ext.getInput());
+                    responseBuilder.addSuccesses(RequestIdFixtures.write(EngineRpcService.EnqueueBatchSuccessPB.newBuilder(), reqId)
                             .build());
                 }
             }

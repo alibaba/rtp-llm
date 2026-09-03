@@ -15,5 +15,5 @@ public interface LoadBalanceStrategy {
      * @param ep        the endpoint to rollback (non-null)
      * @param requestId the request identifier
      */
-    void rollBack(WorkerEndpoint ep, long requestId);
+    void rollBack(WorkerEndpoint ep, String requestId);
 }

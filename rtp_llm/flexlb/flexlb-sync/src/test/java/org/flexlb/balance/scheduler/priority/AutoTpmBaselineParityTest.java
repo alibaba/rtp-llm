@@ -6,12 +6,14 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.PriorityScheduler;
+import org.flexlb.balance.scheduler.RequestIdFixtures;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.scheduler.RequestLifecycleState;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
@@ -25,10 +27,12 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -77,20 +81,20 @@ class AutoTpmBaselineParityTest {
             cfg.queueScheduler().getLifecycle().setDeliveredNotAcceptedTimeoutMs(60_000);
         });
         try {
-            Response first = h.submit(1, 50).get(2, TimeUnit.SECONDS);
+            Response first = h.submit("1", 50).get(2, TimeUnit.SECONDS);
             assertTrue(first.isSuccess());
             assertEquals(1, h.activeAdmissionCount());
 
-            h.reportDecodePhase(1, TaskPhase.RECEIVED);
+            h.reportDecodePhase("1", TaskPhase.RECEIVED);
             assertEquals(1, h.activeAdmissionCount(),
                     "Decode RECEIVED is not Decode ownership");
 
-            h.reportDecodePhase(1, TaskPhase.KV_ALLOCATED);
+            h.reportDecodePhase("1", TaskPhase.KV_ALLOCATED);
             assertEquals(0, h.activeAdmissionCount());
             // Duplicate/later acceptance observations are idempotent.
-            h.reportDecodePhase(1, TaskPhase.RUNNING);
+            h.reportDecodePhase("1", TaskPhase.RUNNING);
 
-            Response second = h.submit(2, 50).get(2, TimeUnit.SECONDS);
+            Response second = h.submit("2", 50).get(2, TimeUnit.SECONDS);
             assertTrue(second.isSuccess(), second.getErrorMessage());
         } finally {
             h.close();
@@ -107,23 +111,23 @@ class AutoTpmBaselineParityTest {
             cfg.queueScheduler().getLifecycle().setDeliveredNotAcceptedTimeoutMs(60_000);
         });
         try {
-            Response delivered = h.submit(3, 50).get(2, TimeUnit.SECONDS);
+            Response delivered = h.submit("3", 50).get(2, TimeUnit.SECONDS);
             assertTrue(delivered.isSuccess());
             await(() -> h.activeAdmissionCount() == 1
                     && h.pendingSoftTimeoutCount() == 1);
             assertEquals(1, h.activeAdmissionCount());
             assertEquals(1, h.pendingSoftTimeoutCount());
 
-            RequestLifecycleSnapshot pending = h.cancel(3);
+            RequestLifecycleSnapshot pending = h.cancel("3");
             assertEquals(RequestLifecycleState.CANCEL_REQUESTED, pending.state());
-            h.reportDecodeTerminal(3, 2);
+            h.reportDecodeTerminal("3", 2);
 
             await(() -> h.activeAdmissionCount() == 0
                     && h.pendingSoftTimeoutCount() == 0
                     && h.softTimeoutQueueSize() == 0);
             assertEquals(RequestLifecycleState.CANCELLED,
-                    h.cancel(3).state());
-            h.reportDecodeTerminal(3, 2);
+                    h.cancel("3").state());
+            h.reportDecodeTerminal("3", 2);
             assertEquals(0, h.activeAdmissionCount());
             assertEquals(0, h.pendingSoftTimeoutCount());
         } finally {
@@ -139,10 +143,10 @@ class AutoTpmBaselineParityTest {
         try {
             // 交错优先级提交（p70 最后到达）——关闭态队列必须保持 arrival FIFO
             h.submitSpaced(List.of(
-                    req(1, 30), req(2, 70), req(3, 50), req(4, 40), req(5, 70)));
+                    req(1L, 30), req(2L, 70), req(3L, 50), req(4L, 40), req(5L, 70)));
 
             PrefillQueueSnapshot snapshot = h.prefillQueueSnapshot();
-            assertEquals(List.of(1L, 2L, 3L, 4L, 5L), requestIds(snapshot),
+            assertEquals(List.of("1", "2", "3", "4", "5"), requestIds(snapshot),
                     "switches-off queue must stay arrival FIFO regardless of priority");
             // priority 调度器/上报完全零交互
             verifyNoInteractions(h.priorityReporter);
@@ -159,15 +163,15 @@ class AutoTpmBaselineParityTest {
         Harness on = new Harness(Harness::enableAll);
         try {
             List<long[]> requests = List.of(
-                    req(11, 50), req(12, 50), req(13, 50), req(14, 50), req(15, 50));
+                    req(11L, 50), req(12L, 50), req(13L, 50), req(14L, 50), req(15L, 50));
             off.submitSpaced(requests);
             on.submitSpaced(requests);
 
             // 全同优先级 + 同 seqLen（deadline = arrival + 同一 SLO）→ 排序退化
             // 为 arrival 序，与关闭态逐项一致
-            List<Long> offOrder = requestIds(off.prefillQueueSnapshot());
-            List<Long> onOrder = requestIds(on.prefillQueueSnapshot());
-            assertEquals(List.of(11L, 12L, 13L, 14L, 15L), offOrder);
+            List<String> offOrder = requestIds(off.prefillQueueSnapshot());
+            List<String> onOrder = requestIds(on.prefillQueueSnapshot());
+            assertEquals(List.of("11", "12", "13", "14", "15"), offOrder);
             assertEquals(offOrder, onOrder,
                     "uniform-priority auto-tpm queue order must equal switches-off order");
         } finally {
@@ -188,8 +192,8 @@ class AutoTpmBaselineParityTest {
             // 2 个 decode 槽位、5 个全同优先级请求顺序提交：
             // 两种形态 admitted/rejected 集合必须一致
             for (long id = 21; id <= 25; id++) {
-                off.submitAndSettle(id, 50);
-                on.submitAndSettle(id, 50);
+                off.submitAndSettle(String.valueOf(id), 50);
+                on.submitAndSettle(String.valueOf(id), 50);
             }
 
             assertEquals(off.admittedIds(), on.admittedIds(),
@@ -221,9 +225,9 @@ class AutoTpmBaselineParityTest {
         });
         try {
             DecodeEndpoint decodeEp = on.endpointRegistry.getDecode(DECODE_IP_PORT);
-            CompletableFuture<Response> holder = on.submit(31, 50);
-            await(() -> decodeEp.reservedView().containsKey(31L));
-            await(() -> requestIds(on.prefillQueueSnapshot()).contains(31L));
+            CompletableFuture<Response> holder = on.submit("31", 50);
+            await(() -> decodeEp.reservedView().containsKey("31"));
+            await(() -> requestIds(on.prefillQueueSnapshot()).contains("31"));
             PrefillQueueSnapshot fullQueue = on.prefillQueueSnapshot();
             assertEquals(1, fullQueue.queueCapacity());
             assertEquals(1, fullQueue.items().size());
@@ -232,21 +236,21 @@ class AutoTpmBaselineParityTest {
                     fullQueue.items().get(0).state());
             assertEquals(AdmissionRejectReason.SAME_PRIORITY_AHEAD,
                     AdmissionFailureClassifier.classifyPrefill(
-                            new PriorityRequestEnvelope(32, 50, 128, 8,
+                            new PriorityRequestEnvelope("32", 50, 128, 8,
                                     System.currentTimeMillis(), 128, 136),
                             fullQueue).reason());
 
             // Prefill 队列已被先到的同优先级请求占满：Master 必须从
             // 这一份队列快照判定 SAME_PRIORITY_AHEAD，不能按 QoS 阈值猜原因。
             for (long id = 32; id <= 34; id++) {
-                Response r = on.submit(id, 50).get(2, TimeUnit.SECONDS);
+                Response r = on.submit(String.valueOf(id), 50).get(2, TimeUnit.SECONDS);
                 assertFalse(r.isSuccess());
                 assertEquals(StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode(),
                         r.getCode(), r.getErrorMessage());
                 assertEquals(AdmissionRejectReason.SAME_PRIORITY_AHEAD,
                         r.getAdmissionRejectReason());
             }
-            assertTrue(decodeEp.reservedView().containsKey(31L), "victim reservation untouched");
+            assertTrue(decodeEp.reservedView().containsKey("31"), "victim reservation untouched");
             assertFalse(holder.isCompletedExceptionally());
             on.verifyNoEvictionEverCommitted();
         } finally {
@@ -260,12 +264,12 @@ class AutoTpmBaselineParityTest {
     void mixed_switch_matrix_uniform_priority_stays_equivalent() throws Exception {
         List<Consumer<FlexlbConfig>> matrix = List.of(
                 cfg -> SchedulingTestConfig.allowVictim(
-                        cfg, org.flexlb.config.VictimStage.PREFILL_QUEUED),
+                        cfg, VictimStage.PREFILL_QUEUED),
                 cfg -> SchedulingTestConfig.allowVictim(
-                        cfg, org.flexlb.config.VictimStage.DECODE_RESERVED),
+                        cfg, VictimStage.DECODE_RESERVED),
                 cfg -> {
-                    SchedulingTestConfig.allowVictim(cfg, org.flexlb.config.VictimStage.PREFILL_QUEUED);
-                    SchedulingTestConfig.allowVictim(cfg, org.flexlb.config.VictimStage.DECODE_RESERVED);
+                    SchedulingTestConfig.allowVictim(cfg, VictimStage.PREFILL_QUEUED);
+                    SchedulingTestConfig.allowVictim(cfg, VictimStage.DECODE_RESERVED);
                 });
         for (Consumer<FlexlbConfig> combo : matrix) {
             Harness h = new Harness(cfg -> {
@@ -275,14 +279,14 @@ class AutoTpmBaselineParityTest {
             });
             try {
                 DecodeEndpoint decodeEp = h.endpointRegistry.getDecode(DECODE_IP_PORT);
-                h.submit(41, 50);
-                await(() -> decodeEp.reservedView().containsKey(41L));
+                h.submit("41", 50);
+                await(() -> decodeEp.reservedView().containsKey("41"));
 
-                Response r = h.submit(42, 50).get(2, TimeUnit.SECONDS);
+                Response r = h.submit("42", 50).get(2, TimeUnit.SECONDS);
 
                 // 任一子开关组合：同优先级下无驱逐、无让位、失败明确
                 assertFalse(r.isSuccess(), "incoming must fail explicitly");
-                assertTrue(decodeEp.reservedView().containsKey(41L),
+                assertTrue(decodeEp.reservedView().containsKey("41"),
                         "equal-priority reservation must never yield under any switch combo");
                 h.verifyNoEvictionEverCommitted();
             } finally {
@@ -302,7 +306,7 @@ class AutoTpmBaselineParityTest {
         final PriorityScheduler scheduler;
         final DefaultBatchDispatcher dispatcher;
         final PriorityAdmissionScheduler priorityScheduler;
-        private final List<Long> submittedIds = new ArrayList<>();
+        private final List<String> submittedIds = new ArrayList<>();
         private final List<CompletableFuture<Response>> submittedFutures = new ArrayList<>();
 
         Harness(Consumer<FlexlbConfig> customize) {
@@ -328,8 +332,7 @@ class AutoTpmBaselineParityTest {
                                         .setBatchId(request.getBatchId());
                         for (EngineRpcService.GenerateInputPB input : batchInputs(request)) {
                             response.addSuccesses(
-                                    EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
-                                            .setRequestId(input.getRequestId()));
+                                    RequestIdFixtures.write(EngineRpcService.EnqueueBatchSuccessPB.newBuilder(), RequestId.parse(input)));
                         }
                         return CompletableFuture.completedFuture(response.build());
                     });
@@ -362,8 +365,8 @@ class AutoTpmBaselineParityTest {
 
         static void enableAll(FlexlbConfig cfg) {
             SchedulingTestConfig.usePriorityQueue(cfg);
-            SchedulingTestConfig.allowVictim(cfg, org.flexlb.config.VictimStage.PREFILL_QUEUED);
-            SchedulingTestConfig.allowVictim(cfg, org.flexlb.config.VictimStage.DECODE_RESERVED);
+            SchedulingTestConfig.allowVictim(cfg, VictimStage.PREFILL_QUEUED);
+            SchedulingTestConfig.allowVictim(cfg, VictimStage.DECODE_RESERVED);
             // PR-D: rescue removed — orTimeout + AdmissionLease handle stuck/deadline requests
         }
 
@@ -385,26 +388,26 @@ class AutoTpmBaselineParityTest {
             PrefillEndpoint prefillEp = endpointRegistry.getPrefill(PREFILL_IP_PORT);
             for (long[] r : requests) {
                 int before = prefillEp.getBatcher().queueSize();
-                submitAndTrack(r[0], (int) r[1]);
+                submitAndTrack(String.valueOf(r[0]), (int) r[1]);
                 await(() -> prefillEp.getBatcher().queueSize() == before + 1);
                 TimeUnit.MILLISECONDS.sleep(3);
             }
         }
 
-        void submitAndSettle(long requestId, int priority) throws Exception {
+        void submitAndSettle(String requestId, int priority) throws Exception {
             CompletableFuture<Response> future = submitAndTrack(requestId, priority);
             DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
-            await(() -> future.isDone() || decodeEp.reservedView().containsKey(requestId));
+            await(() -> future.isDone() || decodeEp.reservedView().containsKey(String.valueOf(requestId)));
         }
 
-        private CompletableFuture<Response> submitAndTrack(long requestId, int priority) {
+        private CompletableFuture<Response> submitAndTrack(String requestId, int priority) {
             CompletableFuture<Response> future = submit(requestId, priority);
             submittedIds.add(requestId);
             submittedFutures.add(future);
             return future;
         }
 
-        private CompletableFuture<Response> submit(long requestId, int priority) {
+        private CompletableFuture<Response> submit(String requestId, int priority) {
             BalanceContext ctx = context(requestId, priority, 128);
             if (config.isPriorityOrdering()) {
                 long now = System.currentTimeMillis();
@@ -413,11 +416,11 @@ class AutoTpmBaselineParityTest {
             return scheduler.submit(ctx);
         }
 
-        void reportDecodePhase(long requestId, TaskPhase phase) {
+        void reportDecodePhase(String requestId, TaskPhase phase) {
             reportPhase(RoleType.DECODE, requestId, phase);
         }
 
-        void reportPhase(RoleType role, long requestId, TaskPhase phase) {
+        void reportPhase(RoleType role, String requestId, TaskPhase phase) {
             TaskInfo task = new TaskInfo();
             task.setRequestId(requestId);
             task.setPhase(phase);
@@ -447,12 +450,12 @@ class AutoTpmBaselineParityTest {
             return priorityScheduler.softTimeoutQueueSize();
         }
 
-        RequestLifecycleSnapshot cancel(long requestId) {
+        RequestLifecycleSnapshot cancel(String requestId) {
             return scheduler.cancelRequest(
                     requestId, 0, CancelReason.CLIENT_CANCELLED);
         }
 
-        void reportDecodeTerminal(long requestId, long errorCode) {
+        void reportDecodeTerminal(String requestId, long errorCode) {
             TaskInfo task = new TaskInfo();
             task.setRequestId(requestId);
             task.setErrorCode(errorCode);
@@ -465,8 +468,8 @@ class AutoTpmBaselineParityTest {
         }
 
         /** admitted = 拿到 decode 占位（future 未失败）。 */
-        List<Long> admittedIds() {
-            List<Long> ids = new ArrayList<>();
+        List<String> admittedIds() {
+            List<String> ids = new ArrayList<>();
             for (int i = 0; i < submittedIds.size(); i++) {
                 if (!isRejected(submittedFutures.get(i))) {
                     ids.add(submittedIds.get(i));
@@ -475,8 +478,8 @@ class AutoTpmBaselineParityTest {
             return ids;
         }
 
-        List<Long> rejectedIds() {
-            List<Long> ids = new ArrayList<>();
+        List<String> rejectedIds() {
+            List<String> ids = new ArrayList<>();
             for (int i = 0; i < submittedIds.size(); i++) {
                 if (isRejected(submittedFutures.get(i))) {
                     ids.add(submittedIds.get(i));
@@ -509,7 +512,7 @@ class AutoTpmBaselineParityTest {
             verify(priorityReporter, never())
                     .reportVictim(anyInt(), anyInt(), anyString(), anyString());
             verify(priorityReporter, never())
-                    .reportEvictionCommit(anyInt(), anyString(), org.mockito.ArgumentMatchers.eq("success"));
+                    .reportEvictionCommit(anyInt(), anyString(), ArgumentMatchers.eq("success"));
         }
 
         void close() {
@@ -525,7 +528,7 @@ class AutoTpmBaselineParityTest {
         return new long[]{requestId, priority};
     }
 
-    private static List<Long> requestIds(PrefillQueueSnapshot snapshot) {
+    private static List<String> requestIds(PrefillQueueSnapshot snapshot) {
         return snapshot.items().stream().map(QueuedRequestSnapshot::requestId).toList();
     }
 
@@ -539,7 +542,7 @@ class AutoTpmBaselineParityTest {
         }
     }
 
-    private static BalanceContext context(long requestId, int priority, long seqLen) {
+    private static BalanceContext context(String requestId, int priority, long seqLen) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
@@ -555,9 +558,8 @@ class AutoTpmBaselineParityTest {
         return ctx;
     }
 
-    private static byte[] generateInputBytes(long requestId) {
-        EngineRpcService.GenerateInputPB input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+    private static byte[] generateInputBytes(String requestId) {
+        EngineRpcService.GenerateInputPB input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .addTokenIds(101)
                 .addTokenIds(102)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
@@ -578,7 +580,7 @@ class AutoTpmBaselineParityTest {
         return inputs;
     }
 
-    private static Response successRoute(long requestId) {
+    private static Response successRoute(String requestId) {
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(List.of(
@@ -589,7 +591,7 @@ class AutoTpmBaselineParityTest {
     }
 
     private static ServerStatus server(RoleType role, String ip, int httpPort, int grpcPort,
-                                       long requestId) {
+                                       String requestId) {
         ServerStatus status = new ServerStatus();
         status.setSuccess(true);
         status.setRole(role);

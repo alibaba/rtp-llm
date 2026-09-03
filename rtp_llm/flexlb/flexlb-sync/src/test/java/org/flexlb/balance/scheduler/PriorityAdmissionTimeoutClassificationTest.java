@@ -97,8 +97,8 @@ class PriorityAdmissionTimeoutClassificationTest {
     @Test
     void queuedTimeoutReportsHigherPriorityAhead() {
         long now = System.currentTimeMillis();
-        BatchItem blocker = priorityItem(1L, 70, now);
-        BatchItem victim = priorityItem(2L, 50, now + 1);
+        BatchItem blocker = priorityItem("1", 70, now);
+        BatchItem victim = priorityItem("2", 50, now + 1);
         enqueue(blocker);
         enqueue(victim);
 
@@ -106,14 +106,14 @@ class PriorityAdmissionTimeoutClassificationTest {
 
         assertAdmissionFailure(victim, StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
                 AdmissionRejectReason.HIGHER_PRIORITY_AHEAD);
-        assertEquals(List.of(1L), queuedRequestIds());
+        assertEquals(List.of("1"), queuedRequestIds());
     }
 
     @Test
     void queuedTimeoutReportsEarlierSamePriorityAhead() {
         long now = System.currentTimeMillis();
-        BatchItem blocker = priorityItem(11L, 50, now);
-        BatchItem victim = priorityItem(12L, 50, now + 1);
+        BatchItem blocker = priorityItem("11", 50, now);
+        BatchItem victim = priorityItem("12", 50, now + 1);
         enqueue(blocker);
         enqueue(victim);
 
@@ -121,14 +121,14 @@ class PriorityAdmissionTimeoutClassificationTest {
 
         assertAdmissionFailure(victim, StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
                 AdmissionRejectReason.SAME_PRIORITY_AHEAD);
-        assertEquals(List.of(11L), queuedRequestIds());
+        assertEquals(List.of("11"), queuedRequestIds());
     }
 
     @Test
     void queuedHeadTimeoutReportsResourceExhausted() {
         long now = System.currentTimeMillis();
-        BatchItem victim = priorityItem(21L, 70, now);
-        BatchItem lowerBehind = priorityItem(22L, 30, now + 1);
+        BatchItem victim = priorityItem("21", 70, now);
+        BatchItem lowerBehind = priorityItem("22", 30, now + 1);
         enqueue(victim);
         enqueue(lowerBehind);
 
@@ -136,12 +136,12 @@ class PriorityAdmissionTimeoutClassificationTest {
 
         assertAdmissionFailure(victim, StrategyErrorType.RESOURCE_EXHAUSTED,
                 AdmissionRejectReason.RESOURCE_EXHAUSTED);
-        assertEquals(List.of(22L), queuedRequestIds());
+        assertEquals(List.of("22"), queuedRequestIds());
     }
 
     @Test
     void enqueueBatchTimeoutWithoutQueueEvidenceReportsResourceExhausted() {
-        BatchItem victim = priorityItem(31L, 50, System.currentTimeMillis());
+        BatchItem victim = priorityItem("31", 50, System.currentTimeMillis());
         assertTrue(scheduler.registerInflight(victim));
 
         scheduler.onTimeout(victim, new TimeoutException("EnqueueBatch deadline"));
@@ -153,7 +153,7 @@ class PriorityAdmissionTimeoutClassificationTest {
 
     @Test
     void inflightTtlWithoutQueueEvidenceReportsResourceExhausted() {
-        BatchItem victim = priorityItem(41L, 50, System.currentTimeMillis());
+        BatchItem victim = priorityItem("41", 50, System.currentTimeMillis());
         assertTrue(scheduler.registerInflight(victim));
         config.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(-1);
 
@@ -167,7 +167,7 @@ class PriorityAdmissionTimeoutClassificationTest {
     @Test
     void fifoRegistrationKeepsBatchSloExpired() {
         SchedulingTestConfig.useFifoQueue(config);
-        BalanceContext context = context(51L, 50);
+        BalanceContext context = context("51", 50);
         long now = System.currentTimeMillis();
         context.setSchedulingMetadata(SchedulingMetadata.explicit(50, now + 3_600_000));
         CompletableFuture<Response> future = scheduler.submit(context);
@@ -185,8 +185,8 @@ class PriorityAdmissionTimeoutClassificationTest {
     @Timeout(5)
     void fifoNonBatchQueuedDeadlineUsesSharedSchedulingTimeoutCode() throws Exception {
         restartFifoNonBatchWithOneInflight();
-        assertTrue(prefillEndpoint.tryCommitRequest(9_999L, 1_000L, 1));
-        BalanceContext context = context(52L, 50);
+        assertTrue(prefillEndpoint.tryCommitRequest("9999", 1_000L, 1));
+        BalanceContext context = context("52", 50);
         context.setConfig(config);
         long now = System.currentTimeMillis();
         context.setSchedulingMetadata(SchedulingMetadata.explicit(50, now + 3_600_000));
@@ -198,7 +198,7 @@ class PriorityAdmissionTimeoutClassificationTest {
         }
         assertEquals(1, prefillEndpoint.getBatcher().queueSize());
 
-        scheduler.onRequestExpired(52L, future);
+        scheduler.onRequestExpired("52", future);
 
         Response response = future.get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
@@ -211,19 +211,19 @@ class PriorityAdmissionTimeoutClassificationTest {
     void fifoNonBatchCapacityReleaseWakesReadyRequestWithoutDeadlineOrNewRequest()
             throws Exception {
         restartFifoNonBatchWithOneInflight();
-        assertTrue(prefillEndpoint.tryCommitRequest(9_997L, 1_000L, 1));
+        assertTrue(prefillEndpoint.tryCommitRequest("9997", 1_000L, 1));
         WorkerBatcher batcher = prefillEndpoint.getBatcher();
         long beforeSubmitVersion = batcher.queueVersion();
 
-        CompletableFuture<Response> future = scheduler.submit(expiringContext(57L));
+        CompletableFuture<Response> future = scheduler.submit(expiringContext("57"));
         awaitCapacityBlockedReadyState(batcher, beforeSubmitVersion);
         assertFalse(future.isDone());
 
-        assertTrue(prefillEndpoint.releaseRequest(9_997L));
+        assertTrue(prefillEndpoint.releaseRequest("9997"));
 
         assertTrue(future.get(1, TimeUnit.SECONDS).isSuccess());
         assertEquals(RequestLifecycleState.ACKNOWLEDGED,
-                scheduler.getRequestState(57L, 0).state());
+                scheduler.getRequestState("57", 0).state());
         awaitQueueSize(0);
     }
 
@@ -231,8 +231,8 @@ class PriorityAdmissionTimeoutClassificationTest {
     @Timeout(5)
     void fifoNonBatchQueuedClientCancelCompletesOwnedPublication() throws Exception {
         restartFifoNonBatchWithOneInflight();
-        assertTrue(prefillEndpoint.tryCommitRequest(9_998L, 1_000L, 1));
-        BalanceContext context = context(53L, 50);
+        assertTrue(prefillEndpoint.tryCommitRequest("9998", 1_000L, 1));
+        BalanceContext context = context("53", 50);
         context.setConfig(config);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(
                 50, System.currentTimeMillis() + 3_600_000));
@@ -240,7 +240,7 @@ class PriorityAdmissionTimeoutClassificationTest {
         awaitQueueSize(1);
 
         RequestLifecycleSnapshot cancelled = scheduler.cancelRequest(
-                53L, 0, CancelReason.CLIENT_CANCELLED);
+                "53", 0, CancelReason.CLIENT_CANCELLED);
 
         assertEquals(RequestLifecycleState.CANCELLED, cancelled.state());
         Response response = future.get(1, TimeUnit.SECONDS);
@@ -260,7 +260,7 @@ class PriorityAdmissionTimeoutClassificationTest {
         startScheduler(delivery, new PriorityScheduler.CompletionExecutorPolicy(1, 2));
 
         CompletableFuture<Response> blockerFuture = scheduler.submit(
-                expiringContext(54L));
+                expiringContext("54"));
         PendingRoute blocker = delivery.awaitNext();
         CountDownLatch completionWorkerBlocked = new CountDownLatch(1);
         CountDownLatch releaseCompletionWorker = new CountDownLatch(1);
@@ -272,16 +272,16 @@ class PriorityAdmissionTimeoutClassificationTest {
         assertTrue(completionWorkerBlocked.await(1, TimeUnit.SECONDS));
 
         CompletableFuture<Response> successFuture = scheduler.submit(
-                expiringContext(55L));
+                expiringContext("55"));
         PendingRoute success = delivery.awaitNext();
         try {
             success.succeed();
             awaitCompletionQueueSize(1);
             assertFalse(successFuture.isDone());
 
-            scheduler.onRequestExpired(55L, successFuture);
+            scheduler.onRequestExpired("55", successFuture);
             assertEquals(RequestLifecycleState.ACKNOWLEDGED,
-                    scheduler.getRequestState(55L, 0).state());
+                    scheduler.getRequestState("55", 0).state());
         } finally {
             releaseCompletionWorker.countDown();
         }
@@ -297,7 +297,7 @@ class PriorityAdmissionTimeoutClassificationTest {
         startScheduler();
     }
 
-    private BalanceContext expiringContext(long requestId) {
+    private BalanceContext expiringContext(String requestId) {
         BalanceContext context = context(requestId, 50);
         context.setConfig(config);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(
@@ -353,7 +353,7 @@ class PriorityAdmissionTimeoutClassificationTest {
         assertTrue(prefillEndpoint.getBatcher().tryOffer(item));
     }
 
-    private List<Long> queuedRequestIds() {
+    private List<String> queuedRequestIds() {
         return prefillEndpoint.getBatcher().queueManager().snapshot().items().stream()
                 .map(snapshot -> snapshot.requestId())
                 .toList();
@@ -368,7 +368,7 @@ class PriorityAdmissionTimeoutClassificationTest {
         assertEquals(reason, response.getAdmissionRejectReason());
     }
 
-    private BatchItem priorityItem(long requestId, int priority, long enqueuedAtMs) {
+    private BatchItem priorityItem(String requestId, int priority, long enqueuedAtMs) {
         BalanceContext context = context(requestId, priority);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(
                 priority, enqueuedAtMs + 3_600_000));
@@ -382,7 +382,7 @@ class PriorityAdmissionTimeoutClassificationTest {
                 prefillEndpoint, null, enqueuedAtMs);
     }
 
-    private static BalanceContext context(long requestId, int priority) {
+    private static BalanceContext context(String requestId, int priority) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(128);
@@ -396,7 +396,7 @@ class PriorityAdmissionTimeoutClassificationTest {
         return context;
     }
 
-    private static Response route(long requestId) {
+    private static Response route(String requestId) {
         ServerStatus prefill = new ServerStatus();
         prefill.setSuccess(true);
         prefill.setRole(RoleType.PREFILL);

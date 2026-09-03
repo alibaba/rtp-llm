@@ -96,7 +96,7 @@ class DecodePendingCapOptInTest {
         int nRequests = 10;
         for (int i = 0; i < nRequests; i++) {
             assertTrue(invokeScheduleDecodeCompletion(
-                            decode, shapeOf(model, 100L + i, 8), -1, null),
+                            decode, shapeOf(model, String.valueOf(100L + i), 8), -1, null),
                     "legacy mode must never reject a decode request");
         }
 
@@ -130,15 +130,15 @@ class DecodePendingCapOptInTest {
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 2);
 
         // First 2 fill the concurrency slots.
-        assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, 1L, 8), -1, null));
-        assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, 2L, 8), -1, null));
+        assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, "1", 8), -1, null));
+        assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, "2", 8), -1, null));
         assertEquals(2, getActiveDecodeRequests(decode),
                 "gated mode: activeDecodeRequests capped at decodeMaxConcurrency");
         assertEquals(0, decodePendingQueueSize(decode));
 
         // Next 3 are parked in the pending queue (accepted, not running).
         for (long rid = 3; rid <= 5; rid++) {
-            assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, rid, 8), -1, null),
+            assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, String.valueOf(rid), 8), -1, null),
                     "request " + rid + " must be accepted into the pending queue");
         }
         assertEquals(2, getActiveDecodeRequests(decode),
@@ -151,7 +151,7 @@ class DecodePendingCapOptInTest {
                 "queued requests keep their runningTasks claim (dedup guard)");
 
         // 6th overflows the queue cap → rejected, nothing claimed.
-        assertFalse(invokeScheduleDecodeCompletion(decode, shapeOf(model, 6L, 8), -1, null),
+        assertFalse(invokeScheduleDecodeCompletion(decode, shapeOf(model, "6", 8), -1, null),
                 "overflow beyond decode.max_pending_requests must be rejected");
         assertEquals(2, getActiveDecodeRequests(decode));
         assertEquals(3, decodePendingQueueSize(decode));
@@ -211,9 +211,8 @@ class DecodePendingCapOptInTest {
     }
 
     private static MockPerformanceModel.RequestShape shapeOf(
-            MockPerformanceModel model, long requestId, int inputTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+            MockPerformanceModel model, String requestId, int inputTokens) {
+        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(1)
                         .build());
