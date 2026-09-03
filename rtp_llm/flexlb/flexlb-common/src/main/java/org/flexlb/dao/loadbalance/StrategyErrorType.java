@@ -18,6 +18,7 @@ public enum StrategyErrorType {
     NO_PDFUSION_WORKER(8404, true),
     NO_VIT_WORKER(8405, true),
     INVALID_REQUEST(8406, false),
+    VIT_ROUTE_STALE(8407, false),
 
     // queue error
     QUEUE_FULL(8502, false),

@@ -171,6 +171,14 @@ private:
 
         MultimodalOutput mm_output;
         mm_output.mm_features = mm_embedding.split(split_sizes, 0);
+        if (output_pb->has_multimodal_feature_hash()) {
+            auto hashes = QueryConverter::transTensor(output_pb->multimodal_feature_hash());
+            if (output_pb->feature_hash_version() != 1 || hashes.dim() != 1 || hashes.scalar_type() != torch::kInt32
+                || hashes.numel() != split_total) {
+                return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid multimodal feature hash metadata");
+            }
+            mm_output.mm_feature_hashes = hashes.split(split_sizes, 0);
+        }
 
         if (has_pos_id) {
             RTP_LLM_CHECK_WITH_INFO(split_total == mm_position_id.size(0),

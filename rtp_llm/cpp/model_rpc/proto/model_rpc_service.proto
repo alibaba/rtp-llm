@@ -207,6 +207,9 @@ message MultimodalOutputPB {
     // per-role tensors (see MMRdmaTensorPB.Role) before applying split_size. Exactly one of
     // output_rdma / output_rdma_chunks is set on the RDMA path; both empty => inline bytes.
     repeated MMRdmaDescPB output_rdma_chunks = 6;
+    // Compact CPU row hashes stay inline on both bytes and RDMA paths.
+    TensorPB multimodal_feature_hash = 7;
+    uint32 feature_hash_version = 8;
 }
 
 message ReleaseEmbeddingPB {

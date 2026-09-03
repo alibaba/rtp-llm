@@ -40,7 +40,7 @@ from rtp_llm.multimodal.multimodal_util import (
     url_data_cache_,
     vit_emb_cache_,
 )
-from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+from rtp_llm.ops import MMPreprocessConfig, MultimodalInput, get_multimodal_feature_hash
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.time_util import Timer, timer_wrapper
 
@@ -453,11 +453,13 @@ class MMEmbeddingRes:
         embeddings: List[torch.Tensor],
         position_ids: Optional[List[torch.Tensor]] = None,
         extra_input: Optional[List[torch.Tensor]] = None,
+        feature_hashes: Optional[List[torch.Tensor]] = None,
     ):
         self.embeddings = embeddings
         self.position_ids = position_ids if position_ids is not None else []
         # Model-specific extra input, one opaque flat 1-D tensor per image (e.g. deepstack).
         self.extra_input = extra_input if extra_input is not None else []
+        self.feature_hashes = feature_hashes
 
     def __str__(self) -> str:
         return f"MMEmbeddingRes(length={len(self.embeddings)}, embeddings_shape={[e.shape for e in self.embeddings]}, position_ids_shape={[p.shape for p in self.position_ids] if self.position_ids is not None else []}, extra_input_shape={[d.shape for d in self.extra_input] if self.extra_input is not None else []})"
@@ -535,6 +537,7 @@ class MMWorkItem:
 
         self.preprocess_result: Optional[Any] = None
         self.embedding_result: Optional[Any] = None
+        self.feature_hashes: Optional[List[torch.Tensor]] = None
         self.work_estimate: Optional[MMWorkEstimate] = None
 
         self.need_check_cache = len(mm_inputs) == 1 and mm_inputs[0].url != ""
@@ -570,6 +573,11 @@ class MMWorkItem:
         return self.embedding_result is None and not self.waiting_for_cache
 
     def complete_cache(self, result: Any, force: bool = False) -> None:
+        if self.feature_hashes is None:
+            self.feature_hashes = [
+                get_multimodal_feature_hash(emb)
+                for emb in maybe_tensor_to_list(result[0], ndim_threshold=2)
+            ]
         if (
             (self.defer_cache_complete and not force)
             or self.embedding_cache is None
@@ -577,7 +585,9 @@ class MMWorkItem:
             or self.cache_entry is None
         ):
             return
-        self.embedding_cache.complete(self.cache_key, self.cache_entry, result)
+        self.embedding_cache.complete(
+            self.cache_key, self.cache_entry, result, self.feature_hashes
+        )
 
     def fail_cache(self, error: Exception) -> None:
         if (
@@ -992,7 +1002,7 @@ class MMProcessEngine:
                 raw_result = work_items[0].embedding_result
                 if raw_result is None:
                     raise RuntimeError("sync embedding did not produce a cache value")
-                self._embedding_cache.complete(cache_key, entry, raw_result)
+                work_items[0].complete_cache(raw_result, force=True)
             elif self._greennet_enabled():
                 verdict = entry.wait_greennet(timeout=self._greennet_timeout_s)
                 if verdict is None:
@@ -1155,7 +1165,12 @@ class MMProcessEngine:
                             )
 
                     with torch.profiler.record_function("postprocess"):
-                        result = MMEmbeddingRes(emb_res, pos_res, extra_input_res)
+                        hashes = [
+                            h for wi in work_items for h in wi.feature_hashes or []
+                        ]
+                        result = MMEmbeddingRes(
+                            emb_res, pos_res, extra_input_res, hashes
+                        )
 
                     if not self.vit_config.disable_access_log:
                         self._access_logger.log_success_access(
@@ -1255,6 +1270,10 @@ class MMProcessEngine:
             # for every pending item or raises, so it is never None here.
             if result is None:
                 raise RuntimeError(f"embedding_result not set for work item {wi}")
+            if wi.feature_hashes is None and wi.cache_entry is not None:
+                wi.feature_hashes = wi.cache_entry.feature_hashes
+            if wi.feature_hashes is None:
+                wi.complete_cache(result)
             emb_res.extend(maybe_tensor_to_list(result[0], ndim_threshold=2))
             pos_res.extend(maybe_tensor_to_list(result[1], ndim_threshold=2))
             if len(result) > 2:
@@ -1262,13 +1281,15 @@ class MMProcessEngine:
         return emb_res, pos_res, tensor_res
 
     @staticmethod
-    def _work_item_result_to_response(result: Any) -> MMEmbeddingRes:
+    def _work_item_result_to_response(
+        result: Any, feature_hashes: Optional[List[torch.Tensor]] = None
+    ) -> MMEmbeddingRes:
         emb_res = maybe_tensor_to_list(result[0], ndim_threshold=2)
         pos_res = maybe_tensor_to_list(result[1], ndim_threshold=2)
         extra_res = (
             maybe_tensor_to_list(result[2], ndim_threshold=1) if len(result) > 2 else []
         )
-        return MMEmbeddingRes(emb_res, pos_res, extra_res)
+        return MMEmbeddingRes(emb_res, pos_res, extra_res, feature_hashes)
 
     def async_submit(
         self, mm_inputs: List[MultimodalInput], request_id: int = 0
@@ -1317,7 +1338,9 @@ class MMProcessEngine:
                 current_entry = entry
                 remaining = max(0.0, deadline - time.monotonic())
                 raw_result = entry.wait(timeout=remaining)
-                results.append(self._work_item_result_to_response(raw_result))
+                results.append(
+                    self._work_item_result_to_response(raw_result, entry.feature_hashes)
+                )
 
             kmonitor.report(
                 GaugeMetrics.VIT_EMBEDDING_LENGTH_METRIC,
@@ -1669,7 +1692,7 @@ class MMProcessEngine:
             raw_result = work_items[0].embedding_result
             if raw_result is None:
                 raise RuntimeError("async embedding did not produce a cache value")
-            self._embedding_cache.complete(cache_key, entry, raw_result)
+            work_items[0].complete_cache(raw_result, force=True)
         except Exception as e:
             # If greennet never decided (preprocess crash etc.), surface a
             # process-error verdict so WaitGreenNetVerdict doesn't hang.

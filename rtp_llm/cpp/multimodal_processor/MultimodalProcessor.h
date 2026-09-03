@@ -53,10 +53,12 @@ private:
                                                               int64_t              request_id                     = 0,
                                                               grpc::ServerContext* server_context = nullptr) = 0;
 
-    ErrorResult<ExpandedOutput> expandTokenIds(const std::vector<torch::Tensor>&           mm_embedding,
-                                               const torch::Tensor&                        token_ids,
-                                               const std::vector<rtp_llm::MultimodalInput> mm_inputs,
-                                               torch::Tensor                               token_type_ids = {});
+    ErrorResult<ExpandedOutput>
+    expandTokenIds(const std::vector<torch::Tensor>&                mm_embedding,
+                   const torch::Tensor&                             token_ids,
+                   const std::vector<rtp_llm::MultimodalInput>      mm_inputs,
+                   torch::Tensor                                    token_type_ids = {},
+                   const std::optional<std::vector<torch::Tensor>>& feature_hashes = std::nullopt);
 
     ErrorResult<std::vector<std::pair<int32_t, int32_t>>> getMultimodalTags(const torch::Tensor& token_ids);
 

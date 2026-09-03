@@ -485,6 +485,7 @@ def build_multimodal_output_pb(
     embeddings: Optional[List[torch.Tensor]],
     position_ids: Optional[List[torch.Tensor]],
     extra_input: Optional[List[torch.Tensor]],
+    feature_hashes: Optional[List[torch.Tensor]] = None,
 ) -> MultimodalOutputPB:
     """Serialize embedding tensors into a MultimodalOutputPB."""
     embeddings = embeddings or []
@@ -496,6 +497,7 @@ def build_multimodal_output_pb(
         multimodal_embedding=trans_from_tensor(torch.concat(embeddings)),
         split_size=[e.shape[0] for e in embeddings],
     )
+    add_multimodal_feature_hashes(output_pb, embeddings, feature_hashes)
     if position_ids:
         output_pb.multimodal_pos_id.CopyFrom(
             trans_from_tensor(torch.concat(position_ids))
@@ -503,3 +505,21 @@ def build_multimodal_output_pb(
     for extra in extra_input:
         output_pb.multimodal_extra_input.append(trans_from_tensor(extra))
     return output_pb
+
+
+def add_multimodal_feature_hashes(output_pb, embeddings, feature_hashes):
+    if feature_hashes is None:
+        return
+    if len(feature_hashes) != len(embeddings) or any(
+        h.device.type != "cpu"
+        or h.dtype != torch.int32
+        or h.ndim != 1
+        or h.numel() != e.shape[0]
+        for e, h in zip(embeddings, feature_hashes)
+    ):
+        raise ValueError("invalid multimodal feature hashes")
+    if feature_hashes:
+        output_pb.multimodal_feature_hash.CopyFrom(
+            trans_from_tensor(torch.cat(feature_hashes))
+        )
+        output_pb.feature_hash_version = 1

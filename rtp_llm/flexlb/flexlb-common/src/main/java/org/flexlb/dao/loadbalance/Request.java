@@ -18,6 +18,16 @@ public class Request {
     @JsonProperty("block_cache_keys")
     private List<Long> blockCacheKeys;
 
+    @ToString.Exclude
+    @JsonProperty("media_keys")
+    private List<String> mediaKeys;
+
+    @JsonProperty("selected_vit")
+    private ServerStatus selectedVit;
+
+    @JsonProperty("vit_route_only")
+    private boolean vitRouteOnly;
+
     @JsonProperty("seq_len")
     private long seqLen;
 

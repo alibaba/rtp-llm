@@ -41,7 +41,8 @@ public class RouteService {
         balanceContext.setConfig(flexlbConfig);
 
         Mono<Response> resultMono;
-        if (flexlbConfig.isEnableQueueing()) {
+        boolean vitOnly = balanceContext.getRequest() != null && balanceContext.getRequest().isVitRouteOnly();
+        if (flexlbConfig.isEnableQueueing() && !vitOnly) {
             resultMono = queueManager.tryRouteAsync(balanceContext);  // Use async queuing mechanism
         } else {
             resultMono = Mono.fromCallable(() -> router.route(balanceContext));  // Direct routing without queuing
@@ -49,7 +50,7 @@ public class RouteService {
 
         return resultMono.doOnSuccess(result -> {
             balanceContext.setResponse(result);
-            if (result != null && result.isSuccess()) {
+            if (!vitOnly && result != null && result.isSuccess()) {
                 recentCacheKeyTraceReporter.report(balanceContext);
             }
         });

@@ -31,6 +31,7 @@ from rtp_llm.distribute.distributed_server import get_world_info
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes, MMProcessEngine
 from rtp_llm.multimodal.multimodal_util import (
+    add_multimodal_feature_hashes,
     build_multimodal_output_pb,
     trans_mm_input,
 )
@@ -40,18 +41,23 @@ from rtp_llm.server.vit_rpc_constants import VIT_ERROR_REPORTED_METADATA_KEY
 
 
 def trans_output(res: MMEmbeddingRes):
-    return build_multimodal_output_pb(res.embeddings, res.position_ids, res.extra_input)
+    return build_multimodal_output_pb(
+        res.embeddings, res.position_ids, res.extra_input, res.feature_hashes
+    )
 
 
 def merge_embedding_results(results: list[MMEmbeddingRes]) -> MMEmbeddingRes:
     embeddings, position_ids, extra_input = [], [], []
+    hashes = [] if all(res.feature_hashes is not None for res in results) else None
     for res in results:
         embeddings.extend(res.embeddings)
         if res.position_ids:
             position_ids.extend(res.position_ids)
         if res.extra_input:
             extra_input.extend(res.extra_input)
-    return MMEmbeddingRes(embeddings, position_ids or None, extra_input or None)
+        if hashes is not None:
+            hashes.extend(res.feature_hashes)
+    return MMEmbeddingRes(embeddings, position_ids or None, extra_input or None, hashes)
 
 
 def _mark_vit_error_reported(context, status_details=None) -> None:
@@ -168,6 +174,7 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             descs.append(desc)
 
         output_pb = MultimodalOutputPB(split_size=[e.shape[0] for e in res.embeddings])
+        add_multimodal_feature_hashes(output_pb, res.embeddings, res.feature_hashes)
         if len(descs) == 1:
             output_pb.output_rdma.CopyFrom(descs[0])
         else:

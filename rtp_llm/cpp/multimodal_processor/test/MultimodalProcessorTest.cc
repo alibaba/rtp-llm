@@ -9,6 +9,23 @@ namespace rtp_llm {
 
 class MultimodalProcessorTest: public DeviceTestBase {};
 
+TEST_F(MultimodalProcessorTest, testPrecomputedFeatureHashes) {
+    auto                       processor  = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 100);
+    auto                       tokens     = torch::tensor({0, 1, 2, 1, 3}, torch::kInt32);
+    std::vector<torch::Tensor> embeddings = {torch::zeros({2, 4}), torch::ones({1, 4})};
+    std::vector<torch::Tensor> hashes = {torch::tensor({-10, 11}, torch::kInt32), torch::tensor({12}, torch::kInt32)};
+    auto                       result = processor.expandTokenIds(embeddings, tokens, {}, {}, hashes);
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(torch::equal(result.value().expanded_ids, torch::tensor({0, -10, 11, 2, 12, 3}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(result.value().text_tokens_mask, torch::tensor({1, 0, 0, 1, 0, 1}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(result.value().locs, torch::tensor({1, 4}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(tokens, torch::tensor({0, 1, 2, 1, 3}, torch::kInt32)));
+    hashes[0] = torch::tensor({-10}, torch::kInt32);
+    EXPECT_FALSE(processor.expandTokenIds(embeddings, tokens, {}, {}, hashes).ok());
+    hashes.pop_back();
+    EXPECT_FALSE(processor.expandTokenIds(embeddings, tokens, {}, {}, hashes).ok());
+}
+
 TEST_F(MultimodalProcessorTest, testSimple) {
     FakeMultimodalProcessor        processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 10);
     std::shared_ptr<GenerateInput> input     = std::make_shared<GenerateInput>();

@@ -69,7 +69,7 @@ class FakeMultiModalEmbeddingInterface(Qwen2_VLImageEmbedding):
 
     @torch.inference_mode()
     def embedding(self, data, **kwargs):
-        return torch.tensor(0), None
+        return torch.tensor([[0]]), None
 
     @staticmethod
     def preprocess_input(
@@ -119,7 +119,7 @@ class FakeMultiModalEmbeddingInterfaceSlowEmbedding(FakeMultiModalEmbeddingInter
     @torch.inference_mode()
     def batched_embedding(self, data_list, mm_types, **kwargs):
         time.sleep(5)
-        return [(torch.tensor(0), None) for _ in data_list]
+        return [(torch.tensor([[0]]), None) for _ in data_list]
 
 
 class FakeMultiModalEmbeddingInterfaceProcessCrash(FakeMultiModalEmbeddingInterface):
@@ -141,7 +141,7 @@ class FakeMultiModalEmbeddingInterfaceBadCount(FakeMultiModalEmbeddingInterface)
     @torch.inference_mode()
     def batched_embedding(self, data_list, mm_types, **kwargs):
         # One fewer than requested, to trip the count guard.
-        return [(torch.tensor(0), None) for _ in range(len(data_list) - 1)]
+        return [(torch.tensor([[0]]), None) for _ in range(len(data_list) - 1)]
 
 
 class FakeEmbeddingLengthInterface(FakeMultiModalEmbeddingInterface):
@@ -570,7 +570,7 @@ class FakeSlowEmbeddingInterface(FakeMultiModalEmbeddingInterface):
     @torch.inference_mode()
     def embedding(self, data, **kwargs):
         time.sleep(self.delay)
-        return torch.tensor(1), None
+        return torch.tensor([[1]]), None
 
 
 class MMEmbeddingCacheEntryTest(TestCase):
@@ -607,6 +607,42 @@ class MMEmbeddingCacheEntryTest(TestCase):
 
 
 class MMEmbeddingAsyncCacheTest(TestCase):
+    def test_metadata_is_read_only_and_tracks_eviction(self):
+        cache = MMEmbeddingAsyncCache(max_size=2)
+        _, first = cache.try_acquire("a")
+        _, second = cache.try_acquire("b")
+        self.assertEqual(cache.metadata_keys(), [])
+        self.assertFalse(cache.metadata(["a", "absent"])["entries"][0]["hit"])
+        hashes = [torch.tensor([-1, 2147483647], dtype=torch.int32)]
+        first.complete((torch.ones(2, 4), None), hashes)
+        second.complete(
+            (torch.ones(1, 4), None), [torch.tensor([7], dtype=torch.int32)]
+        )
+        before = cache.stats()
+        metadata = cache.metadata(["a", "a", "absent"])
+        self.assertEqual(metadata["entries"][0]["feature_hashes"], [-1, 2147483647])
+        self.assertEqual(metadata["entries"][0]["split_size"], [2])
+        self.assertEqual(metadata["entries"][0], metadata["entries"][1])
+        self.assertFalse(metadata["entries"][2]["hit"])
+        self.assertEqual(before, cache.stats())
+        self.assertEqual(before["resident_bytes"], 2 * 4 * 4 + 8 + 1 * 4 * 4 + 4)
+        cache.try_acquire("c")
+        self.assertIsNone(cache.peek("a"))
+        self.assertEqual(cache.metadata_keys(), ["b"])
+        cache.clear()
+        self.assertEqual(cache.metadata_keys(), [])
+
+    def test_failed_and_legacy_results_have_no_metadata(self):
+        cache = MMEmbeddingAsyncCache(max_size=4)
+        _, error = cache.try_acquire("error")
+        error.fail(ValueError("failed"))
+        _, legacy = cache.try_acquire("legacy")
+        legacy.complete((torch.ones(1, 4), None))
+        self.assertEqual(cache.metadata_keys(), [])
+        self.assertTrue(
+            all(not e["hit"] for e in cache.metadata(["error", "legacy"])["entries"])
+        )
+
     def test_miss_then_complete_then_hit(self):
         cache = MMEmbeddingAsyncCache(max_size=10)
         state, entry = cache.try_acquire("key1")
@@ -1538,6 +1574,47 @@ class MMProcessEngineGpuBatchTest(TestCase):
         self.assertEqual(r1.embeddings[0].item(), 7)
         self.assertEqual(r2.embeddings[0].item(), 7)
         self.assertEqual(part.embedding_calls, 1)
+        self.assertIs(r1.feature_hashes[0], r2.feature_hashes[0])
+        from rtp_llm.ops import get_multimodal_feature_hash
+
+        self.assertTrue(
+            torch.equal(
+                r1.feature_hashes[0], get_multimodal_feature_hash(r1.embeddings[0])
+            )
+        )
+        metadata = engine._embedding_cache.metadata(
+            engine._embedding_cache.metadata_keys()
+        )
+        self.assertEqual(len(metadata["entries"]), 1)
+        self.assertEqual(
+            metadata["entries"][0]["feature_hashes"], r1.feature_hashes[0].tolist()
+        )
+
+    def test_cached_hashes_survive_async_and_rpc_serialization(self):
+        from rtp_llm.server.vit_rpc_server import merge_embedding_results, trans_output
+        from rtp_llm.utils.grpc_util import trans_tensor
+
+        engine, part = self._make_engine(mm_cache_item_num=10)
+        urls = ["fake://7", "fake://9"]
+        self._embed(engine, urls)
+        inputs = [
+            MultimodalInput(
+                url,
+                MMUrlType.IMAGE,
+                torch.empty(0),
+                MMPreprocessConfig(*_DEFAULT_CONFIG),
+            )
+            for url in urls
+        ]
+        results = engine.get_embedding_result(inputs)
+        self.assertEqual(part.embedding_calls, 2)
+        response = trans_output(merge_embedding_results(results))
+        self.assertEqual(response.feature_hash_version, 1)
+        self.assertEqual(list(response.split_size), [1, 1])
+        expected = torch.cat([r.feature_hashes[0] for r in results])
+        self.assertTrue(
+            torch.equal(trans_tensor(response.multimodal_feature_hash), expected)
+        )
 
 
 class MiniMaxM3VLPreprocessTest(TestCase):
@@ -1637,6 +1714,7 @@ class MiniMaxM3VLPreprocessTest(TestCase):
 
     def test_max_total_pixels_is_the_default_max_pixels(self):
         from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.image_processor import (
+            IMAGE_MAX_TOTAL_PIXELS,
             smart_resize,
         )
 

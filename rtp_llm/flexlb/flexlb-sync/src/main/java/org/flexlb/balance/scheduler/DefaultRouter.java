@@ -17,6 +17,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
+import org.flexlb.service.VitCacheDirectory;
 import org.flexlb.util.Logger;
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Component;
@@ -34,9 +35,12 @@ public class DefaultRouter implements Router {
 
     private final Map<RoleType, LoadBalancer> loadBalancerMap;
     private final GroupRoutingPolicy groupRoutingPolicy;
+    private final VitCacheDirectory vitCacheDirectory;
 
-    public DefaultRouter(ConfigService configService, GroupRoutingPolicy groupRoutingPolicy) {
+    public DefaultRouter(ConfigService configService, GroupRoutingPolicy groupRoutingPolicy,
+                          VitCacheDirectory vitCacheDirectory) {
         this.groupRoutingPolicy = groupRoutingPolicy;
+        this.vitCacheDirectory = vitCacheDirectory;
         FlexlbConfig config = configService.loadBalanceConfig();
         this.loadBalancerMap = new EnumMap<>(RoleType.class);
 
@@ -63,6 +67,17 @@ public class DefaultRouter implements Router {
         if (validationResponse != null) {
             return validationResponse;
         }
+        if (balanceContext.getRequest().isVitRouteOnly()) {
+            ServerStatus vit = vitCacheDirectory.select(balanceContext, groupRoutingPolicy.route(balanceContext).group());
+            if (vit.isSuccess()) {
+                return buildSuccessResponse(balanceContext.getRequestId(), List.of(vit));
+            }
+            Response error = new Response();
+            error.setSuccess(false);
+            error.setCode(vit.getCode());
+            error.setErrorMessage(vit.getMessage());
+            return error;
+        }
 
         // 2. Get routing configuration
         long requestId = balanceContext.getRequestId();
@@ -81,7 +96,12 @@ public class DefaultRouter implements Router {
             response = buildSuccessResponse(requestId, routingResult.serverStatusList());
         } else {
             rollBackRoutingFailure(balanceContext, routingResult);
-            response = buildFailureResponse(requestId, routingResult);
+            // An invalid pinned ViT cannot recover by waiting in this queue.
+            // Let the frontend discard its metadata and perform fresh routing.
+            response = routingResult.failedRoleType() == RoleType.VIT
+                    && balanceContext.getRequest().getSelectedVit() != null
+                    ? Response.error(StrategyErrorType.VIT_ROUTE_STALE)
+                    : buildFailureResponse(requestId, routingResult);
         }
 
         return response;
@@ -119,12 +139,28 @@ public class DefaultRouter implements Router {
         GroupRoutingDecision groupRoutingDecision = groupRoutingPolicy.route(balanceContext);
         String policyGroup = groupRoutingDecision.group();
         String group = policyGroup;
+        ServerStatus selectedVit = balanceContext.getRequest().getSelectedVit();
+        if (selectedVit != null) {
+            ServerStatus validated = vitCacheDirectory.validate(balanceContext, policyGroup);
+            if (!validated.isSuccess()) {
+                return RoutingResult.failure(serverStatusList, RoleType.VIT, validated.getMessage());
+            }
+            group = validated.getGroup();
+        }
         if (groupRoutingDecision.hasGroup()) {
             Logger.info("Group routing policy selected group, requestId: {}, policy: {}, group: {}",
                     balanceContext.getRequestId(), groupRoutingDecision.policyName(), group);
         }
 
         for (RoleType roleType : roleTypeList) {
+            if (roleType == RoleType.VIT && selectedVit != null) {
+                ServerStatus vit = vitCacheDirectory.validate(balanceContext, group);
+                if (!vit.isSuccess()) {
+                    return RoutingResult.failure(serverStatusList, RoleType.VIT, vit.getMessage());
+                }
+                serverStatusList.add(vit);
+                continue;
+            }
             LoadBalancer loadBalancer = getLoadBalancer(roleType);
             ServerStatus serverStatus = loadBalancer.select(balanceContext, roleType, group);
 
@@ -164,6 +200,9 @@ public class DefaultRouter implements Router {
 
         List<ServerStatus> partialResults = routingResult.serverStatusList();
         for (ServerStatus serverStatus : partialResults) {
+            if (serverStatus.getRole() == RoleType.VIT && balanceContext.getRequest().getSelectedVit() != null) {
+                continue;
+            }
             String serverIpPort = serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
             long requestId = balanceContext.getRequestId();
 

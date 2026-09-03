@@ -9,9 +9,10 @@
 
 namespace rtp_llm {
 struct MultimodalOutput {
-    std::vector<torch::Tensor>                mm_features     = {};
-    std::optional<std::vector<torch::Tensor>> mm_position_ids = std::nullopt;
-    std::optional<std::vector<torch::Tensor>> mm_extra_input  = std::nullopt;
+    std::vector<torch::Tensor>                mm_features       = {};
+    std::optional<std::vector<torch::Tensor>> mm_position_ids   = std::nullopt;
+    std::optional<std::vector<torch::Tensor>> mm_extra_input    = std::nullopt;
+    std::optional<std::vector<torch::Tensor>> mm_feature_hashes = std::nullopt;
 };
 
 class MultimodalFeature {

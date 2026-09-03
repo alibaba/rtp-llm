@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -24,6 +25,7 @@ SUCCESS_CODE = 200
 DEFAULT_REQUEST_PRIORITY = 100
 CONNECTOR_LIMIT_PER_HOST = 30
 CONNECTOR_KEEPALIVE_TIMEOUT_SEC = 30
+VIT_ROUTE_STALE_CODE = 8407
 
 
 @dataclass
@@ -157,13 +159,14 @@ class MasterClient:
         generate_timeout_ms: int,
         request_id: int,
         request_headers: Optional[Dict[str, str]] = None,
+        path: str = SCHEDULE_PATH,
     ) -> FlexlbResponse:
         """
         Send one schedule request to the given host (master or slave).
         Returns FlexlbResponse: ok_with_result on HTTP success, error_response on
         non-200 body, connection_failed_response when no response received.
         """
-        url = f"http://{addr}{SCHEDULE_PATH}"
+        url = f"http://{addr}{path}"
         headers = {"Content-Type": "application/json"}
         headers.update(normalize_request_headers(request_headers))
         # generate_timeout_ms <= 0 -> ClientTimeout(total=None); aiohttp treats as unlimited.
@@ -184,6 +187,10 @@ class MasterClient:
                 timeout=request_timeout,
             ) as response:
                 if response.status != SUCCESS_CODE:
+                    if path != SCHEDULE_PATH and response.status in (404, 405, 501):
+                        return FlexlbResponse.error_response(
+                            response.status, "ViT route unsupported"
+                        )
                     error_code = int(ExceptionType.MASTER_NO_AVAILABLE_WORKER)
                     error_message = None
                     try:
@@ -235,6 +242,11 @@ class MasterClient:
         cache_key_block_size: int,
         input: GenerateInput,
         request_id: int,
+        *,
+        media_keys: Optional[List[str]] = None,
+        selected_vit: Optional[Dict[str, Any]] = None,
+        seq_len: Optional[int] = None,
+        vit_only: bool = False,
     ) -> FlexlbResponse:
         """
         Resolve backend role addrs from FlexLB scheduler (master, then slave on connection failure).
@@ -257,6 +269,9 @@ class MasterClient:
             # per-request not provided -> use args default (master_default_timeout_ms).
             # When that default is <= 0, _send_schedule_request builds ClientTimeout(total=None).
             ttft_timeout_ms = self.master_config.master_default_timeout_ms
+        route_timeout_ms = ttft_timeout_ms
+        if vit_only:
+            route_timeout_ms = min(ttft_timeout_ms, 500) if ttft_timeout_ms > 0 else 500
         request_priority = getattr(
             input.generate_config,
             "traffic_reject_priority",
@@ -268,17 +283,27 @@ class MasterClient:
             "model": "engine_service",
             "block_cache_keys": block_cache_keys,
             "cache_key_block_size": cache_key_block_size,
-            "seq_len": input.prompt_length,
+            "seq_len": input.prompt_length if seq_len is None else seq_len,
             "debug": False,
             "request_priority": request_priority,
             "generate_timeout": ttft_timeout_ms,
             "request_id": request_id,
             "request_time_ms": int(start * 1000),
         }
+        if media_keys is not None:
+            payload["media_keys"] = media_keys
+        if selected_vit is not None:
+            payload["selected_vit"] = selected_vit
+        path_args = {"path": "/rtp_llm/vit/route"} if vit_only else {}
 
         request_headers = getattr(input, "headers", None)
         resp = await self._send_schedule_request(
-            master_addr, payload, ttft_timeout_ms, request_id, request_headers
+            master_addr,
+            payload,
+            route_timeout_ms,
+            request_id,
+            request_headers,
+            **path_args,
         )
 
         if resp.connection_failed and slave_addr:
@@ -288,7 +313,12 @@ class MasterClient:
                 request_id,
             )
             resp = await self._send_schedule_request(
-                slave_addr, payload, ttft_timeout_ms, request_id, request_headers
+                slave_addr,
+                payload,
+                route_timeout_ms,
+                request_id,
+                request_headers,
+                **path_args,
             )
 
         if resp.result is None:
@@ -311,6 +341,8 @@ class MasterClient:
             except ValueError:
                 exception_type = ExceptionType.MASTER_NO_AVAILABLE_WORKER
             message = resp.result.get("error_message") or "master schedule error"
+            if selected_vit is not None and code == VIT_ROUTE_STALE_CODE:
+                return FlexlbResponse.error_response(code, message)
             route_logger.error(
                 "Master schedule error, request_id=%s, error_code=%s, error_message=%s",
                 request_id,
@@ -329,4 +361,42 @@ class MasterClient:
             )
             for s in schedule_meta.server_status
         ]
-        return FlexlbResponse.ok(role_addrs)
+        return FlexlbResponse(role_addrs=role_addrs, result=resp.result)
+
+    async def get_vit_cache_metadata(self, address: RoleAddr, keys: List[str]):
+        import aiohttp
+
+        started = time.monotonic()
+        try:
+            session = await self._get_session()
+            async with session.post(
+                f"http://{address.ip}:{address.http_port}/mm_cache/metadata",
+                json={"keys": list(dict.fromkeys(keys))},
+                timeout=aiohttp.ClientTimeout(total=DEFAULT_REQUEST_TIMEOUT_SEC),
+            ) as response:
+                if response.status != SUCCESS_CODE:
+                    return None
+                # Limit the optional optimization's response before JSON decoding.
+                chunks, size = [], 0
+                async for chunk in response.content.iter_chunked(65536):
+                    size += len(chunk)
+                    if size > 16 * 1024 * 1024:
+                        return None
+                    chunks.append(chunk)
+                return json.loads(b"".join(chunks))
+        except (
+            aiohttp.ClientError,
+            asyncio.TimeoutError,
+            TimeoutError,
+            OSError,
+            ValueError,
+        ):
+            route_logger.warning(
+                "ViT metadata unavailable, address=%s:%s", address.ip, address.http_port
+            )
+            return None
+        finally:
+            route_logger.debug(
+                "ViT metadata query elapsed_ms=%.3f",
+                (time.monotonic() - started) * 1000,
+            )

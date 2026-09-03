@@ -56,7 +56,14 @@ private:
                 for (auto& emb : mm_embedding_vec) {
                     mm_features.emplace_back(convertPyObjectToTensor(emb));
                 }
-                mm_embedding_res.mm_features               = mm_features;
+                mm_embedding_res.mm_features = mm_features;
+                if (py::hasattr(res, "feature_hashes") && !res.attr("feature_hashes").is_none()) {
+                    std::vector<torch::Tensor> hashes;
+                    for (auto& value : convertPyObjectToVec(res.attr("feature_hashes"))) {
+                        hashes.emplace_back(convertPyObjectToTensor(value));
+                    }
+                    mm_embedding_res.mm_feature_hashes = std::move(hashes);
+                }
                 auto                       position_id_vec = res.attr("position_ids");
                 std::vector<torch::Tensor> position_ids;
                 if (!position_id_vec.is_none()) {

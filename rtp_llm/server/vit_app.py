@@ -10,6 +10,7 @@ from fastapi import status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse
+from pydantic import BaseModel, Field
 from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
@@ -26,6 +27,38 @@ from rtp_llm.model_factory import ModelFactory
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.ops import RoleType
 from rtp_llm.server.vit_rpc_server import MultimodalRpcServer, create_rpc_server
+
+
+class MMCacheMetadataRequest(BaseModel):
+    keys: List[str] = Field(max_length=256)
+
+
+def register_mm_cache_routes(app: FastAPI, engine: MMProcessEngine) -> None:
+    @app.get("/mm_cache/keys")
+    @app.post("/mm_cache/keys")
+    def cache_keys():
+        if engine is None or engine.is_proxy_mode:
+            raise HTTPException(status_code=501, detail="worker-local cache required")
+        cache = engine._embedding_cache
+        keys = cache.metadata_keys()
+        if len(keys) > 100000:
+            raise HTTPException(status_code=413, detail="cache key snapshot too large")
+        return {
+            "worker_instance": cache.instance_id,
+            "feature_hash_version": 1,
+            "keys": keys,
+        }
+
+    @app.post("/mm_cache/metadata")
+    def cache_metadata(request: MMCacheMetadataRequest):
+        if engine is None or engine.is_proxy_mode:
+            raise HTTPException(status_code=501, detail="worker-local cache required")
+        if any(not key or len(key) > 4096 for key in request.keys):
+            raise HTTPException(status_code=400, detail="invalid multimodal cache key")
+        try:
+            return engine._embedding_cache.metadata(request.keys)
+        except ValueError as error:
+            raise HTTPException(status_code=413, detail=str(error)) from error
 
 
 class GracefulShutdownServer(Server):
@@ -135,6 +168,7 @@ class VitEndpointApp:
             )
         ]
         app = FastAPI(middleware=middleware)
+        register_mm_cache_routes(app, self.vit_endpoint_server.mm_process_engine)
 
         @app.get("/health")
         @app.post("/health")

@@ -13,6 +13,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
+import org.flexlb.service.VitCacheDirectory;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -36,6 +37,7 @@ import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.isNull;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -58,6 +60,9 @@ class DefaultRouterTest {
 
     @Mock
     private LoadBalancer vitLoadBalancer;
+
+    @Mock
+    private VitCacheDirectory vitCacheDirectory;
 
     @Mock
     private LoadBalancer fusionLoadBalancer;
@@ -107,7 +112,7 @@ class DefaultRouterTest {
 
         // Create scheduler instance
         lenient().when(groupRoutingPolicy.route(any(BalanceContext.class))).thenReturn(GroupRoutingDecision.none());
-        defaultRouter = new DefaultRouter(configService, groupRoutingPolicy);
+        defaultRouter = new DefaultRouter(configService, groupRoutingPolicy, vitCacheDirectory);
 
         // Mock LoadBalanceStrategyFactory to return our mock load balancers
         mockStaticLoadBalanceStrategyFactory();
@@ -124,6 +129,56 @@ class DefaultRouterTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
+    }
+
+    @Test
+    void selectedVitIsRetainedWhilePdIsScheduled() {
+        ServerStatus vit = new ServerStatus();
+        vit.setRole(RoleType.VIT);
+        vit.setSuccess(true);
+        vit.setGroup("group1");
+        when(request.getSelectedVit()).thenReturn(vit);
+        when(vitCacheDirectory.validate(eq(balanceContext), any())).thenReturn(vit);
+        ServerStatus prefill = new ServerStatus();
+        prefill.setRole(RoleType.PREFILL);
+        prefill.setGroup("group1");
+        prefill.setSuccess(true);
+        ServerStatus decode = new ServerStatus();
+        decode.setRole(RoleType.DECODE);
+        decode.setGroup("group1");
+        decode.setSuccess(true);
+        when(prefillLoadBalancer.select(balanceContext, RoleType.PREFILL, "group1")).thenReturn(prefill);
+        when(decodeLoadBalancer.select(balanceContext, RoleType.DECODE, "group1")).thenReturn(decode);
+
+        var result = defaultRouter.routeByRoleType(balanceContext, List.of(RoleType.PREFILL, RoleType.DECODE, RoleType.VIT));
+
+        assertTrue(result.success());
+        assertEquals(List.of(prefill, decode, vit), result.serverStatusList());
+        verifyNoInteractions(vitLoadBalancer);
+    }
+
+    @Test
+    void vitOnlyRouteDoesNotAllocatePdAndPreservesValidationError() {
+        when(request.isVitRouteOnly()).thenReturn(true);
+        when(vitCacheDirectory.select(eq(balanceContext), any()))
+                .thenReturn(ServerStatus.code(StrategyErrorType.INVALID_REQUEST));
+        var response = defaultRouter.route(balanceContext);
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getCode());
+        verifyNoInteractions(prefillLoadBalancer, decodeLoadBalancer, vitLoadBalancer);
+    }
+
+    @Test
+    void invalidSelectedVitReturnsNonQueuedReselectionSignal() {
+        var worker = new org.flexlb.dao.master.WorkerStatus();
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("old:8000", worker);
+        when(request.getSelectedVit()).thenReturn(new ServerStatus());
+        when(vitCacheDirectory.validate(eq(balanceContext), any()))
+                .thenReturn(ServerStatus.code(StrategyErrorType.NO_VIT_WORKER));
+        var response = defaultRouter.route(balanceContext);
+        assertEquals(StrategyErrorType.VIT_ROUTE_STALE.getErrorCode(), response.getCode());
+        assertFalse(StrategyErrorType.fromErrorCode(response.getCode()).isCanRetry());
+        verifyNoInteractions(prefillLoadBalancer, decodeLoadBalancer, vitLoadBalancer);
     }
 
     // Helper method to mock the static LoadBalanceStrategyFactory

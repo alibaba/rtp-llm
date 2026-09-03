@@ -310,6 +310,38 @@ def trans_multimodal_input(
         input_pb.multimodal_inputs.append(mm_input_pb)
 
 
+def multimodal_cache_keys(input_py: GenerateInput) -> list[str]:
+    from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
+
+    inputs = GenerateInputPB()
+    trans_multimodal_input(input_py, inputs, input_py.generate_config)
+    keys = []
+    for original, item in zip(input_py.mm_inputs, inputs.multimodal_inputs):
+        if not item.multimodal_url or (
+            original.tensor is not None and original.tensor.numel() > 0
+        ):
+            return []
+        cfg = item.mm_preprocess_config
+        resolved = MMPreprocessConfig(
+            cfg.width,
+            cfg.height,
+            cfg.min_pixels,
+            cfg.max_pixels,
+            cfg.fps,
+            cfg.min_frames,
+            cfg.max_frames,
+            list(cfg.crop_positions),
+            cfg.mm_timeout_ms,
+            cfg.max_long_side_pixel,
+        )
+        keys.append(
+            MultimodalInput(
+                item.multimodal_url, item.multimodal_type, original.tensor, resolved
+            ).cache_key()
+        )
+    return keys
+
+
 # 假设 trans_tensor 函数将 Protobuf 的 TensorPB 转换为 numpy array
 # from .utils import trans_tensor
 

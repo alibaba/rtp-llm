@@ -15,6 +15,31 @@ namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
 
+TEST_F(QueryConverterTest, testMultimodalFeatureHashRoundTripAndLegacyFallback) {
+    MultimodalOutputPB output;
+    QueryConverter::transTensorPB(output.mutable_multimodal_embedding(), torch::ones({3, 4}, torch::kFloat32));
+    output.add_split_size(2);
+    output.add_split_size(1);
+    auto hashes = torch::tensor({-123, 456, -789}, torch::kInt32);
+    QueryConverter::transTensorPB(output.mutable_multimodal_feature_hash(), hashes);
+    output.set_feature_hash_version(1);
+
+    auto decoded = QueryConverter::transMMOutput(&output);
+    ASSERT_TRUE(decoded.mm_feature_hashes.has_value());
+    ASSERT_EQ(decoded.mm_feature_hashes->size(), 2);
+    EXPECT_TRUE(torch::equal(torch::cat(*decoded.mm_feature_hashes), hashes));
+    EXPECT_EQ(decoded.mm_features[0].size(0), 2);
+    EXPECT_EQ(decoded.mm_features[1].size(0), 1);
+
+    output.set_feature_hash_version(2);
+    EXPECT_THROW(QueryConverter::transMMOutput(&output), std::exception);
+    output.set_feature_hash_version(1);
+    QueryConverter::transTensorPB(output.mutable_multimodal_feature_hash(), torch::ones({2}, torch::kInt32));
+    EXPECT_THROW(QueryConverter::transMMOutput(&output), std::exception);
+    output.clear_multimodal_feature_hash();
+    EXPECT_FALSE(QueryConverter::transMMOutput(&output).mm_feature_hashes.has_value());
+}
+
 TEST_F(QueryConverterTest, testTransInput) {
     GenerateInputPB input;
     input.mutable_request_info()->set_frontend_ip("10.0.0.1");

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import threading
+import uuid
 from collections import OrderedDict
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 
@@ -68,6 +69,8 @@ class MMEmbeddingCacheEntry:
         self._on_fail = on_fail
         self.result: Optional[Any] = None
         self.error: Optional[Exception] = None
+        self.feature_hashes: Optional[List[torch.Tensor]] = None
+        self.generation = uuid.uuid4().hex
         # Error telemetry may be observed from several places (the producer
         # callback, a cache waiter, and an RPC handler). Keep one atomic claim
         # on the entry so a failed result contributes one error-QPS sample.
@@ -92,12 +95,15 @@ class MMEmbeddingCacheEntry:
             raise self.error
         return self.result
 
-    def complete(self, result: Any) -> bool:
+    def complete(
+        self, result: Any, feature_hashes: Optional[List[torch.Tensor]] = None
+    ) -> bool:
         with self._state_lock:
             if self._terminal:
                 return False
             self._terminal = True
             self.result = result
+            self.feature_hashes = feature_hashes
         try:
             if self._on_complete is not None:
                 self._on_complete(self, result)
@@ -121,6 +127,12 @@ class MMEmbeddingCacheEntry:
     @property
     def is_done(self) -> bool:
         return self._terminal
+
+    def ready_metadata(self) -> Optional[List[torch.Tensor]]:
+        with self._state_lock:
+            if not self._event.is_set() or self.error is not None:
+                return None
+            return self.feature_hashes
 
     def set_greennet_verdict(self, verdict: GreenNetVerdict) -> None:
         self._greennet_verdict = verdict
@@ -159,6 +171,7 @@ class MMEmbeddingCache:
         self._report_metrics_enabled = report_metrics
         self._resident_tokens = 0
         self._resident_bytes = 0
+        self.instance_id = uuid.uuid4().hex
         self._stats: Dict[str, int] = {
             "hit": 0,
             "miss": 0,
@@ -211,6 +224,9 @@ class MMEmbeddingCache:
         self, cache_key: str, entry: MMEmbeddingCacheEntry, result: Any
     ) -> None:
         charge_tokens, charge_bytes = _embedding_result_cost(result)
+        charge_bytes += sum(
+            t.numel() * t.element_size() for t in entry.feature_hashes or []
+        )
         with self._lock:
             if self._entries.get(cache_key) is not entry:
                 return
@@ -268,9 +284,13 @@ class MMEmbeddingCache:
         return True
 
     def complete(
-        self, cache_key: str, entry: MMEmbeddingCacheEntry, result: Any
+        self,
+        cache_key: str,
+        entry: MMEmbeddingCacheEntry,
+        result: Any,
+        feature_hashes: Optional[List[torch.Tensor]] = None,
     ) -> bool:
-        return entry.complete(result)
+        return entry.complete(result, feature_hashes)
 
     def fail(
         self, cache_key: str, entry: MMEmbeddingCacheEntry, error: Exception
@@ -286,6 +306,39 @@ class MMEmbeddingCache:
     def peek(self, cache_key: str) -> Optional[MMEmbeddingCacheEntry]:
         with self._lock:
             return self._entries.get(cache_key)
+
+    def metadata_keys(self) -> List[str]:
+        with self._lock:
+            entries = list(self._entries.items())
+        return [key for key, entry in entries if entry.ready_metadata() is not None]
+
+    def metadata(self, keys: List[str]) -> Dict[str, Any]:
+        results = []
+        total_rows = 0
+        for key in keys:
+            entry = self.peek(key)
+            hashes = entry.ready_metadata() if entry is not None else None
+            if hashes is None:
+                results.append({"key": key, "hit": False})
+                continue
+            split_size = [h.numel() for h in hashes]
+            total_rows += sum(split_size)
+            if total_rows > 1048576:
+                raise ValueError("multimodal metadata response exceeds row limit")
+            results.append(
+                {
+                    "key": key,
+                    "hit": True,
+                    "split_size": split_size,
+                    "feature_hashes": [v for h in hashes for v in h.tolist()],
+                    "entry_generation": entry.generation,
+                }
+            )
+        return {
+            "worker_instance": self.instance_id,
+            "feature_hash_version": 1,
+            "entries": results,
+        }
 
     def resize(self, max_size: int, max_bytes: Optional[int] = None) -> None:
         with self._lock:

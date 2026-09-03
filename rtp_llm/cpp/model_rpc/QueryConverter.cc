@@ -276,6 +276,13 @@ MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputPB* output_
                             split_total,
                             mm_embedding.size(0));
     mm_output.mm_features = mm_embedding.split(split_sizes, 0);
+    if (output_pb->has_multimodal_feature_hash()) {
+        auto hashes = transTensor(output_pb->multimodal_feature_hash());
+        RTP_LLM_CHECK_WITH_INFO(output_pb->feature_hash_version() == 1 && hashes.dim() == 1
+                                    && hashes.scalar_type() == torch::kInt32 && hashes.numel() == split_total,
+                                "invalid multimodal feature hash metadata");
+        mm_output.mm_feature_hashes = hashes.split(split_sizes, 0);
+    }
     if (contain_pos) {
         RTP_LLM_CHECK_WITH_INFO(split_total == mm_position_id.size(0),
                                 "split_sizes sum=%ld does not match mm_position_id.size(0)=%ld",
