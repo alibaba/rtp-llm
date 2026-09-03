@@ -34,6 +34,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -96,6 +97,53 @@ class ShortestTtftCacheAffinityTest {
     }
 
     @Test
+    void establishedSessionWithoutPlacementUsesBaseline() {
+        FlexlbConfig config = sessionAffinityConfig(100);
+        useFixedCandidatePool(config, 1);
+        addWorker("10.0.0.1", 0);
+        addWorker("10.0.0.2", 50);
+        BalanceContext context = buildContext(1000, 106L, config);
+        markEstablished(context, "kimi-k3", "session-1");
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.1", result.getServerIp());
+    }
+
+    @Test
+    void unavailableSessionPlacementUsesBaseline() {
+        FlexlbConfig config = sessionAffinityConfig(100);
+        useFixedCandidatePool(config, 1);
+        addWorker("10.0.0.1", 0);
+        addWorker("10.0.0.2", 50);
+        record("10.0.0.9:8080");
+        BalanceContext context = buildContext(1000, 107L, config);
+        markEstablished(context, "kimi-k3", "session-1");
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.1", result.getServerIp());
+    }
+
+    @Test
+    void sessionPlacementOverTtftCapUsesBaseline() {
+        FlexlbConfig config = sessionAffinityConfig(10);
+        useFixedCandidatePool(config, 1);
+        addWorker("10.0.0.1", 0);
+        addWorker("10.0.0.2", 500);
+        record("10.0.0.2:8080");
+        BalanceContext context = buildContext(1000, 108L, config);
+        markEstablished(context, "kimi-k3", "session-1");
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.1", result.getServerIp());
+    }
+
+    @Test
     void exactCacheEvidenceOutranksSessionPlacement() {
         FlexlbConfig config = sessionAffinityConfig(1_000);
         RoutingConfig.CacheAffinityConfig cacheAffinity = new RoutingConfig.CacheAffinityConfig();
@@ -133,6 +181,26 @@ class ShortestTtftCacheAffinityTest {
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.1", result.getServerIp());
+        assertTrue(sessionPlacementStore.find("kimi-k3", "session-1", 1_000).isEmpty());
+    }
+
+    @Test
+    void newSessionInvalidatesPlacementEvenWhenNoWorkerIsAvailable() {
+        FlexlbConfig config = sessionAffinityConfig(1_000);
+        long oldEpoch = sessionPlacementStore.currentEpoch("kimi-k3", "session-1");
+        sessionPlacementStore.record(
+                "kimi-k3", "session-1", "10.0.0.2:8080", oldEpoch);
+        BalanceContext context = buildContext(1000, 105L, config);
+        Request request = context.getRequest();
+        request.setModel("kimi-k3");
+        request.setSessionSchemaVersion(1);
+        request.setInferenceSessionId("session-1");
+        request.setInferenceSessionState(Request.SessionState.NEW);
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertFalse(result.isSuccess());
+        assertTrue(request.getSessionPlacementEpoch() > oldEpoch);
         assertTrue(sessionPlacementStore.find("kimi-k3", "session-1", 1_000).isEmpty());
     }
 

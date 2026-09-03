@@ -57,6 +57,7 @@ from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.metrics import AccMetrics
 from rtp_llm.ops import RoleType
 from rtp_llm.server.master_client import MasterClient
+from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import ESTABLISHED
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateInput,
@@ -3174,6 +3175,8 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                 "x-ds-request-priority": "10",
                 "user_id": "u1",
                 "x-dashscope-apikeyid": "ak1",
+                "x-ds-inference-session-id": "isess_v1_grpc",
+                "x-ds-inference-session-state": "established",
             }
         )
         request.parameters["enable_thinking"].bool_param = False
@@ -3191,8 +3194,17 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(generate_config.traffic_reject_priority, 10)
         self.assertEqual(
             visitor.last_generate_input.headers,
-            {"user_id": "u1", "x-dashscope-apikeyid": "ak1"},
+            {
+                "user_id": "u1",
+                "x-dashscope-apikeyid": "ak1",
+                "x-ds-inference-session-id": "isess_v1_grpc",
+                "x-ds-inference-session-state": "established",
+            },
         )
+        hint = MasterClient._extract_session_routing_hint(visitor.last_generate_input)
+        self.assertIsNotNone(hint)
+        self.assertEqual(hint.session_id, "isess_v1_grpc")
+        self.assertEqual(hint.state, ESTABLISHED)
         # qos_priority must NOT be set when x-dashscope-inner-qos-level
         # is absent from the request.
         self.assertIsNone(generate_config.qos_priority)

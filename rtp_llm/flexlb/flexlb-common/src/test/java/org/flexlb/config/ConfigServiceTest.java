@@ -223,6 +223,16 @@ class ConfigServiceTest {
                 """));
         assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
                 {
+                  "router":{"roles":{"prefill":{
+                    "selector":{"type":"RANDOM"},
+                    "sessionAffinity":{"ttlMs":1800000,"maxExtraTtftMs":10}
+                  }}},
+                  "scheduler":{"type":"DIRECT"},
+                  "dispatcher":{"type":"NON_BATCH"}
+                }
+                """));
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {
                   "router":{"roles":{"prefill":{"sessionAffinity":{
                     "ttlMs":0,"maxExtraTtftMs":10
                   }}}}

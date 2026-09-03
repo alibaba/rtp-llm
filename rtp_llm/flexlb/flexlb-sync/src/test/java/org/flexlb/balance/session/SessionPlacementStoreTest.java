@@ -42,6 +42,17 @@ class SessionPlacementStoreTest {
     }
 
     @Test
+    void rejectsSessionIdsOutsideTheAsciiWireContract() {
+        SessionPlacementStore store = new SessionPlacementStore();
+
+        record(store, "model", "contains space", "10.0.0.1:9000");
+        record(store, "model", "emoji_😀", "10.0.0.2:9000");
+
+        assertTrue(store.find("model", "contains space", 500L).isEmpty());
+        assertTrue(store.find("model", "emoji_😀", 500L).isEmpty());
+    }
+
+    @Test
     void expiresIdleSessionMetadata() {
         AtomicLong now = new AtomicLong(1_000L);
         SessionPlacementStore store = new SessionPlacementStore(10, now::get);

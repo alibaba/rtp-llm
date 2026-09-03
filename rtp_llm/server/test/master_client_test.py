@@ -231,6 +231,25 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
         request_pb = client.calls[0]["request_pb"]
         self.assertFalse(request_pb.HasField("session_routing_hint"))
 
+    async def test_non_ascii_session_routing_hint_is_omitted(self):
+        client = _CaptureMasterClient()
+        await client.get_backend_role_addrs(
+            block_cache_keys=[1],
+            cache_key_block_size=1024,
+            input=_FakeInput(
+                headers={
+                    "x-ds-inference-session-id": "isess_v1_😀",
+                    "x-ds-inference-session-state": "established",
+                }
+            ),
+            request_id=108,
+            input_pb=_FakeInputPB(),
+        )
+
+        self.assertFalse(
+            client.calls[0]["request_pb"].HasField("session_routing_hint")
+        )
+
     async def test_schedule_payload_priority_defaults_when_header_missing(self):
         client = _CaptureMasterClient()
 

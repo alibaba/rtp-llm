@@ -141,6 +141,31 @@ class CostBasedPrefillStrategyTest {
     }
 
     @Test
+    void newSessionInvalidatesPlacementEvenWhenNoWorkerIsAvailable() {
+        FlexlbConfig config = new FlexlbConfig();
+        useBestOnly(config);
+        RoutingConfig.SessionAffinityConfig affinity = new RoutingConfig.SessionAffinityConfig();
+        affinity.setTtlMs(1_800_000L);
+        affinity.setMaxExtraTtftMs(100L);
+        config.getRouter().getRoles().getPrefill().setSessionAffinity(affinity);
+        long oldEpoch = sessionPlacementStore.currentEpoch("kimi-k3", "session-1");
+        sessionPlacementStore.record(
+                "kimi-k3", "session-1", "10.0.0.2:8080", oldEpoch);
+        BalanceContext context = buildContext(1000, 102L, config);
+        Request request = context.getRequest();
+        request.setModel("kimi-k3");
+        request.setSessionSchemaVersion(1);
+        request.setInferenceSessionId("session-1");
+        request.setInferenceSessionState(Request.SessionState.NEW);
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertFalse(result.isSuccess());
+        assertTrue(request.getSessionPlacementEpoch() > oldEpoch);
+        assertTrue(sessionPlacementStore.find("kimi-k3", "session-1", 1_000).isEmpty());
+    }
+
+    @Test
     void reportsSelectedEstimatesWithNonBatchDeliveryMode() {
         setFormula(endpointConfig, "sum(computeTokens)");
         endpointConfig.setDispatcher(new NonBatchDispatcherConfig());
