@@ -5,6 +5,7 @@ import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.session.SessionPlacementStore;
+import org.flexlb.balance.session.SessionPlacementLifecycle;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
@@ -206,7 +207,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             AtomicBoolean completionClaimed,
             ScheduleOrigin origin) {
         try {
-            initializeSessionPlacementSafely(context.getRequest(), context.getConfig());
+            SessionPlacementLifecycle.initialize(
+                    context.getRequest(),
+                    context.getConfig().getRouter().getRoles().getPrefill().getSessionAffinity(),
+                    sessionPlacementStore);
             routeLocally(context).whenComplete((response, routeError) -> {
                 if (routeError != null) {
                     Logger.warn("FlexlbService.schedule async error, request_id={}",
@@ -232,17 +236,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     origin,
                     token,
                     completionClaimed);
-        }
-    }
-
-    private void initializeSessionPlacementSafely(Request request, FlexlbConfig config) {
-        try {
-            initializeSessionPlacement(request, config);
-        } catch (RuntimeException exception) {
-            request.setSessionPlacementEpoch(-1L);
-            request.setInferenceSessionState(Request.SessionState.UNSPECIFIED);
-            Logger.warn("Failed to initialize session placement, request_id={}",
-                    request.getRequestId(), exception);
         }
     }
 
@@ -786,28 +779,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
 
         return ctx;
-    }
-
-    private void initializeSessionPlacement(Request request, FlexlbConfig config) {
-        if (request.getSessionSchemaVersion() != Request.SESSION_SCHEMA_VERSION
-                || request.getInferenceSessionId() == null
-                || request.getInferenceSessionId().isBlank()) {
-            return;
-        }
-        var affinity = config.getRouter().getRoles().getPrefill().getSessionAffinity();
-        long epoch = -1L;
-        if (request.getInferenceSessionState() == Request.SessionState.NEW) {
-            epoch = affinity == null
-                    ? sessionPlacementStore.resetIfPresent(
-                            request.getModel(), request.getInferenceSessionId())
-                    : sessionPlacementStore.reset(
-                            request.getModel(), request.getInferenceSessionId());
-        } else if (affinity != null
-                && request.getInferenceSessionState() == Request.SessionState.ESTABLISHED) {
-            epoch = sessionPlacementStore.currentEpoch(
-                    request.getModel(), request.getInferenceSessionId());
-        }
-        request.setSessionPlacementEpoch(epoch);
     }
 
     private FlexlbScheduleProtocol.FlexlbScheduleResponsePB toProtoResponse(Response response) {
