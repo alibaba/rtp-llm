@@ -63,7 +63,8 @@ def _apply_mega_moe_fp4_wrappers(
       - ``MoeAtomicWeight`` (BF16 ckpt): wrap with
         :class:`OnlineMegaMoeFp4Weight` (BF16 → FP4).
       - ``PerBlockFp8Weight`` for moe_w1/moe_w2 (FP8 ckpt under
-        ``Fp8BlockWiseQuantConfig``): replace with
+        ``Fp8BlockWiseQuantConfig``), including ``Mxfp8Weight`` with its
+        1x32 UE8M0 exponent scale: replace with
         :class:`OnlineMegaMoeFp4FromFp8Weight` (FP8 → FP4).
     """
     from rtp_llm.model_loader.offline_modelopt_fp4_quant_weight import (
