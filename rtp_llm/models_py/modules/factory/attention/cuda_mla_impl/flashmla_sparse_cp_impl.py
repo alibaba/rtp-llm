@@ -380,6 +380,14 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         self.cp_info = None
         self.prefill_cp_rank = int(getattr(parallelism_config, "tp_rank", 0))
         self.prefill_cp_size = int(getattr(parallelism_config, "tp_size", 1))
+        get_attn_tp_size = getattr(parallelism_config, "get_attn_tp_size", None)
+        get_attn_tp_rank = getattr(parallelism_config, "get_attn_tp_rank", None)
+        self.attn_tp_size = int(
+            get_attn_tp_size() if callable(get_attn_tp_size) else self.prefill_cp_size
+        )
+        self.attn_tp_rank = int(
+            get_attn_tp_rank() if callable(get_attn_tp_rank) else self.prefill_cp_rank
+        )
         self.device = torch.cuda.current_device()
         # Default to kernel granularity (bpk == 1). SparseMlaCpImpl overrides
         # this with attn_configs.tokens_per_block right after construction so
@@ -1096,9 +1104,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             raw_global.masked_fill(padding_mask, -1).unsqueeze(1),
             self.kernel_top_k,
         )
-        return self._forward_sparse_prefill(
-            q0, fused_kv.unsqueeze(1), global_indices
-        )
+        return self._forward_sparse_prefill(q0, fused_kv.unsqueeze(1), global_indices)
 
     def _forward_sparse_prefill(
         self,
@@ -1271,9 +1277,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
             cp_info = attn_inputs.context_parallel_info
             assert cp_info is not None
             attn_for_prepare = copy.copy(attn_inputs)
-            attn_for_prepare.input_lengths = (
-                cp_info.prefill_actual_input_lengths_cpu
-            )
+            attn_for_prepare.input_lengths = cp_info.prefill_actual_input_lengths_cpu
         if self._kv_cache_sharded:
             safe_attn_for_fill = _safe_expand_cp_sharded_block_table(
                 attn_for_prepare,
