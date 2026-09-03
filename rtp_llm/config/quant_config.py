@@ -264,9 +264,7 @@ class QuantizationConfig(ABC):
                 group_size = weight_block[0]
                 quant_method = Fp8BlockWiseQuantConfig.get_method()
         if quant_method == "compressed-tensors":
-            group_name, group_config = _pick_config_group(
-                quant_config["config_groups"]
-            )
+            group_name, group_config = _pick_config_group(quant_config["config_groups"])
             weights_config = group_config["weights"]
             # Absent or explicitly null when the checkpoint quantizes weights
             # only. Legacy FP8 per-channel checkpoints accept that shape, while
@@ -276,11 +274,7 @@ class QuantizationConfig(ABC):
             weight_type = weights_config.get("type")
             weight_strategy = weights_config.get("strategy")
             weight_dynamic = weights_config.get("dynamic", False)
-            if (
-                weight_type == "float"
-                and bits == 8
-                and weight_strategy == "channel"
-            ):
+            if weight_type == "float" and bits == 8 and weight_strategy == "channel":
                 if activation_config is None:
                     logging.getLogger(__name__).warning(
                         "compressed-tensors group %s has no input_activations; "
@@ -330,7 +324,6 @@ class QuantizationConfig(ABC):
                         f"compressed-tensors group {group_name} uses asymmetric INT8, "
                         "but only symmetric W8A8 is supported"
                     )
-                ignore_patterns = quant_config.get("ignore") or []
                 quant_method = CompressedW8A8Int8PerChannelQuantConfig.get_method()
                 return CompressedW8A8Int8PerChannelQuantConfig.from_config(
                     {
@@ -338,14 +331,11 @@ class QuantizationConfig(ABC):
                         "method": quant_method,
                         "group_size": 0,
                         "is_quanted": True,
-                        "ignore_patterns": ignore_patterns,
+                        "ignored_layers": ignored_layers,
+                        "exclude_modules": exclude_modules,
                     }
                 )
-            elif (
-                weight_type == "int"
-                and bits == 4
-                and weight_strategy == "group"
-            ):
+            elif weight_type == "int" and bits == 4 and weight_strategy == "group":
                 # Kimi-K2.5 routed-expert MoE: int4 g32 symmetric, dyn fp8 act.
                 group_size = int(weights_config.get("group_size", 32))
                 quant_method = CompressedW4A8Int4PerChannelQuantConfig.get_method()
@@ -1074,21 +1064,34 @@ class CompressedW8A8Int8PerChannelQuantConfig(QuantizationConfig):
         group_size: int = 0,
         is_quanted: bool = True,
         ignore_patterns: Optional[Sequence[str]] = None,
+        ignored_layers: Optional[Sequence[str]] = None,
+        exclude_modules: Optional[Sequence[str]] = None,
     ):
         assert (
             bits == 8 and group_size == 0
         ), f"invalid params {bits} != 8 or {group_size} != 0"
-        super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
+        ignored = _merge_module_patterns(
+            "ignored_layers", ignored_layers, ignore_patterns
+        )
+        excluded = _merge_module_patterns("exclude_modules", exclude_modules, ignored)
+        super().__init__(
+            bits=bits,
+            group_size=group_size,
+            is_quanted=is_quanted,
+            ignored_layers=ignored,
+            exclude_modules=excluded,
+        )
         # Every parameter is named and there is no kwargs sink, so a misspelled
         # key raises instead of silently leaving the exclude set empty.
-        self._ignore_patterns: List[str] = list(ignore_patterns or [])
+        self._ignore_patterns: List[str] = _merge_module_patterns(
+            "ignore_patterns", ignored, excluded
+        )
         # WeightModule support checks use exclude_modules for checkpoint paths and
         # {i}-templated model weight definitions. Concrete layer entries are
         # allowed here because compressed-tensors checkpoints also list ignored
         # non-quantized parameters. Regex entries are interpreted against the
         # template by the loader; a concrete partial-layer entry still fails
         # fast when it intersects a quantizable template.
-        self.exclude_modules = set(self._ignore_patterns)
 
     @classmethod
     def get_method(cls) -> str:
@@ -1124,6 +1127,8 @@ class CompressedW8A8Int8PerChannelQuantConfig(QuantizationConfig):
             "group_size",
             "is_quanted",
             "ignore_patterns",
+            "ignored_layers",
+            "exclude_modules",
         }
         unknown_keys = set(config) - allowed_keys
         if unknown_keys:
@@ -1135,6 +1140,8 @@ class CompressedW8A8Int8PerChannelQuantConfig(QuantizationConfig):
             group_size=config.get("group_size", 0),
             is_quanted=config.get("is_quanted", True),
             ignore_patterns=config.get("ignore_patterns"),
+            ignored_layers=config.get("ignored_layers"),
+            exclude_modules=config.get("exclude_modules"),
         )
 
 

@@ -35,5 +35,5 @@ class SelectTopk(nn.Module):
             topk_ids,
             self._scratch(topk_ids.shape[0], topk_ids.device),
             router_logits,
-            True,
+            self.config.has_moe_norm,
         )
