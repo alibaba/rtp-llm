@@ -130,6 +130,11 @@ BlockTreeCache::~BlockTreeCache() {
     RTP_LLM_LOG_INFO("destroyed");
 }
 
+void BlockTreeCache::setMetricsReporter(const std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter) {
+    metrics_reporter_.setMetricsReporter(metrics_reporter);
+    transfer_dispatcher_->setMetricsReporter(&metrics_reporter_);
+}
+
 bool BlockTreeCache::executeTransfer(const std::vector<TransferDescriptor>& descriptors) {
     auto context = transfer_dispatcher_->executePerRank(descriptors);
     context->waitDone();

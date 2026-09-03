@@ -100,18 +100,25 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
     if (!store_task_runner_.prepareTask(*task, resources)) {
         return;
     }
+    task->enqueue_time_us =
+        metrics_reporter_.reportBusinessQueueWaitStarted(CacheTransferOperation::STORE, false);
     auto on_timeout = [this, task]() {
+        metrics_reporter_.reportBusinessQueueWaitFinished(
+            CacheTransferOperation::STORE, false, task->enqueue_time_us);
         RTP_LLM_LOG_WARNING("store expired in business queue, target=%s blocks=%zu",
                             tierName(task->target_tier),
                             task->descriptors.size());
         scheduleStoreSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store business queue timeout"));
-        metrics_reporter_.reportTransferTaskQueueWait(CacheTransferOperation::STORE,
-                                                      currentTimeUs() - task->enqueue_time_us);
     };
-    task->enqueue_time_us = currentTimeUs();
-    if (!task_pool_->submit([this, task]() { runStoreTask(task); },
+    if (!task_pool_->submit([this, task]() {
+                                metrics_reporter_.reportBusinessQueueWaitFinished(
+                                    CacheTransferOperation::STORE, false, task->enqueue_time_us);
+                                runStoreTask(task);
+                            },
                             std::chrono::milliseconds(target_tier == Tier::DISK ? disk_timeout_ms_ : host_timeout_ms_),
                             std::move(on_timeout))) {
+        metrics_reporter_.reportBusinessQueueWaitFinished(
+            CacheTransferOperation::STORE, false, task->enqueue_time_us, false);
         RTP_LLM_LOG_WARNING("store aborted: business task submission rejected, target=%s blocks=%zu",
                             tierName(target_tier),
                             task->descriptors.size());
@@ -124,14 +131,10 @@ void BlockTreeStorer::runStoreTask(const StoreTaskPtr& task) {
     if (stopping_.load()) {
         scheduleStoreSettlement(
             task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store stopped before transfer"));
-        metrics_reporter_.reportTransferTaskQueueWait(CacheTransferOperation::STORE,
-                                                      currentTimeUs() - task->enqueue_time_us);
         return;
     }
 
     try {
-        metrics_reporter_.reportTransferTaskQueueWait(
-            CacheTransferOperation::STORE, currentTimeUs() - task->enqueue_time_us);
         store_task_runner_.runTransfer(task,
                                        *transfer_dispatcher_,
                                        metrics_reporter_,
@@ -151,7 +154,14 @@ void BlockTreeStorer::runStoreTask(const StoreTaskPtr& task) {
 
 void BlockTreeStorer::scheduleStoreSettlement(const StoreTaskPtr& task, ErrorInfo error) {
     auto settle = [this, task, error = std::move(error)]() mutable { settleTask(*task, error.ok()); };
-    if (!task_pool_->submitCompletion(settle)) {
+    const int64_t queue_begin =
+        metrics_reporter_.reportBusinessQueueWaitStarted(CacheTransferOperation::STORE, true);
+    if (!task_pool_->submitCompletion([this, settle = std::move(settle), queue_begin]() mutable {
+            metrics_reporter_.reportBusinessQueueWaitFinished(CacheTransferOperation::STORE, true, queue_begin);
+            settle();
+        })) {
+        metrics_reporter_.reportBusinessQueueWaitFinished(
+            CacheTransferOperation::STORE, true, queue_begin, false);
         RTP_LLM_LOG_WARNING("store completion queue is closed; dropping settlement during shutdown");
     }
 }

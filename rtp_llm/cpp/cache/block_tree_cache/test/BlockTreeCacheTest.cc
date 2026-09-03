@@ -308,20 +308,31 @@ TEST_F(BlockTreeCacheTest, ReportTransferFinishedAcceptsSuccessfulDescriptors) {
     EXPECT_EQ(reporter.transfer_in_flight_[operation_index][direction_index].load(), 0);
 }
 
-TEST(BlockTreeCacheMetricsTest, TransferTaskQueueWaitReportsOnlyOperation) {
+TEST(BlockTreeCacheMetricsTest, BusinessQueueWaitReportsQpsLatencyOperationAndPool) {
     kmonitor::MetricsTags                      tags;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
         std::make_shared<kmonitor::MetricsReporter>("", "", tags);
     BlockTreeCacheMetricsReporter reporter;
     reporter.setMetricsReporter(metrics_reporter);
 
-    reporter.reportTransferTaskQueueWait(CacheTransferOperation::LOAD, 123);
+    const int64_t begin_time_us = reporter.reportBusinessQueueWaitStarted(CacheTransferOperation::LOAD, false);
+    const int64_t callback_begin_time_us =
+        reporter.reportBusinessQueueWaitStarted(CacheTransferOperation::LOAD, true);
+    reporter.reportBusinessQueueWaitFinished(CacheTransferOperation::LOAD, false, begin_time_us);
+    reporter.reportBusinessQueueWaitFinished(CacheTransferOperation::LOAD, true, callback_begin_time_us);
 
     RtpLLMCacheTransferMetrics* transfer_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>();
     ASSERT_NE(transfer_metrics, nullptr);
-    kmonitor::MetricsTags queue_wait_tags("operation", "load");
+    kmonitor::MetricsTags queue_wait_tags("pool_type", "business");
+    queue_wait_tags.AddTag("operation", "load");
     EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_task_queue_wait_latency_us_metric), 1u);
-    EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->transfer_task_queue_wait_latency_us_metric, queue_wait_tags), 123);
+    EXPECT_GE(snapshotQps(transfer_metrics->transfer_task_queue_wait_latency_us_metric, queue_wait_tags), 0);
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->callback_queue_wait_latency_us_metric), 1u);
+    EXPECT_GE(snapshotQps(transfer_metrics->callback_queue_wait_latency_us_metric, queue_wait_tags), 0);
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->task_queue_waiting_tasks_metric), 1u);
+    EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->task_queue_waiting_tasks_metric, queue_wait_tags), 1);
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->callback_queue_waiting_tasks_metric), 1u);
+    EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->callback_queue_waiting_tasks_metric, queue_wait_tags), 1);
     EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_qps_metric), 0u);
     EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_in_flight_metric), 0u);
 }

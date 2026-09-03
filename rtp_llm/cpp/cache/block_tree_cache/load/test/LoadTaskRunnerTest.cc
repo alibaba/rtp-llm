@@ -270,7 +270,9 @@ TEST(LoadTaskRunnerTest, HundredPendingTransfersAreNotCappedByFourOuterWorkers) 
     auto engine = std::make_shared<PendingPerRankEngine>();
     BlockTransferDispatcher dispatcher(engine);
     BlockTreeCacheMetricsReporter metrics_reporter;
-    BlockTreeTaskPool outer_pool(/*thread_count=*/4, /*queue_size=*/128, "AsyncLoadOuter");
+    BlockTreeTaskPool outer_pool(/*thread_count=*/4,
+                                 /*queue_size=*/kBusinessCount + BlockTreeTaskPool::kLoadReservedSlots,
+                                 "AsyncLoadOuter");
     ASSERT_TRUE(outer_pool.start());
 
     std::atomic<size_t> started{0};

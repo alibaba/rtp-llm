@@ -13,6 +13,7 @@
 namespace rtp_llm {
 
 class BlockTreeTaskPool;
+class BlockTreeCacheMetricsReporter;
 class DeviceHostTransferExecutor;
 class HostDiskTransferExecutor;
 
@@ -36,6 +37,9 @@ public:
                                                       const GroupSet&           group_set);
 
     void cancelPendingTransfers();
+    void setMetricsReporter(BlockTreeCacheMetricsReporter* metrics_reporter) {
+        metrics_reporter_ = metrics_reporter;
+    }
 
 private:
     HostStagingBlockPool* stagingPool(CacheGroupType group_type) const;
@@ -49,6 +53,7 @@ private:
     size_t                                full_batch_capacity_{0};
     size_t                                swa_batch_capacity_{0};
     std::chrono::milliseconds             queue_wait_timeout_;
+    BlockTreeCacheMetricsReporter*        metrics_reporter_{nullptr};
 };
 
 }  // namespace rtp_llm

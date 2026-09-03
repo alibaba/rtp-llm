@@ -125,4 +125,8 @@ void BlockTransferDispatcher::shutdown() const {
     per_rank_engine_->shutdown();
 }
 
+void BlockTransferDispatcher::setMetricsReporter(BlockTreeCacheMetricsReporter* metrics_reporter) const {
+    per_rank_engine_->setMetricsReporter(metrics_reporter);
+}
+
 }  // namespace rtp_llm
