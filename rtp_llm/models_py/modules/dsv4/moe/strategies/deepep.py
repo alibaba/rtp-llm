@@ -55,6 +55,12 @@ _A2_HALVES = int(os.environ.get("DSV4_MOE_HALVES", "0"))
 # the main stream idling on ev_c1. Pure reordering (same ops, same order per
 # stream) → bit-exact; requires DSV4_MOE_HALVES=2.
 _XLAYER_C1 = int(os.environ.get("DSV4_XLAYER_C1", "0"))
+# X1' qxl2c A/B finding: relocating the count-AG onto the comm stream made
+# EVERY a2a kernel ~23% slower (SR avg 2.26 -> 2.77 ms, comm 335 -> 441 ms/
+# forward) — the relocation tax (~+96 ms) swamps the c1-cover ceiling
+# (~70 ms). X1" keeps the AG on the main stream (stock concurrency) and
+# tests the deferral alone; DSV4_X1_AG_COMM=1 restores the relocation.
+_X1_AG_COMM = int(os.environ.get("DSV4_X1_AG_COMM", "1"))
 _X1_AG_CT = [0]  # X1' engagement proof: relocated count-AG completions
 # Halves pay a fixed per-layer pipeline overhead (~0.26 ms: extra rounds,
 # event waits) that wins big at 32K-class T but regressed 8K by +11 ms — so
@@ -878,6 +884,7 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         # finish() wait's stream position.
         _x1_arm = (
             _XLAYER_C1
+            and _X1_AG_COMM
             and _A2_HALVES >= 2
             and world >= 2
             and int(x.size(0)) >= _A2_MIN_TOKENS
