@@ -6,6 +6,7 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.config.moe_config import MoeStrategyName
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.model_factory_register import ModelDict
 from rtp_llm.ops import (
@@ -85,13 +86,13 @@ def auto_configure_deepep(
     # will never be satisfied. Topology is validated here to keep the auto path
     # falling back to DeepEP when --moe_strategy and shape disagree.
     explicit_pure_dp = (
-        moe_config.moe_strategy == "fp8_per_block_pure_dp"
+        moe_config.moe_strategy == MoeStrategyName.FP8_PER_BLOCK_PURE_DP.value
         and tp_size == 1
         and dp_size > 1
         and ep_size == dp_size
     )
     explicit_pure_cp = (
-        moe_config.moe_strategy == "fp8_per_block_pure_cp"
+        moe_config.moe_strategy == MoeStrategyName.FP8_PER_BLOCK_PURE_CP.value
         and tp_size > 1
         and dp_size == 1
         and ep_size == tp_size
