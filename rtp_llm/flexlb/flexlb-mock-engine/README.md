@@ -56,7 +56,7 @@ bash run_online_eval.sh
 | /start_engine | POST | Restart stopped engine (auto-clears faults) |
 | /cancel_request | POST | Cancel an in-flight request by request id |
 | /add_engine | POST | Dynamically add an engine to the running cluster |
-| /remove_engine | POST | Dynamically remove an engine (graceful drain) |
+| /remove_engine | POST | Dynamically remove an engine (graceful drain by default; `mode=abrupt` keeps the legacy immediate teardown) |
 | /requests | GET | List recent request/task records |
 
 The control server listens on `baseGrpcPort - 1` of the mock cluster.
@@ -65,7 +65,14 @@ The control server listens on `baseGrpcPort - 1` of the mock cluster.
 `/remove_engine` — a running cluster can be scaled up/down over HTTP without a
 restart. New engines register on the next port, write into the endpoints/
 discovery files, and are picked up by the master's file-discovery watcher;
-removal drains gracefully so in-flight requests finish first.
+removal defaults to a graceful drain matching production rolling scale-in:
+the discovery entry is stripped first (the master stops routing new requests),
+the engine keeps serving everything already accepted, and the gRPC server is
+torn down only after all in-flight work finishes (bounded by
+`drain_timeout_ms`, default 60000 — on expiry the removal falls back to the
+abrupt teardown and reports `drained=false`). Optional body fields:
+`mode` (`graceful`|`abrupt`) and `drain_timeout_ms`; the response reports
+`running_at_removal`/`waiting_at_removal` plus `drained`/`drain_ms`.
 
 **Prefill waiting-queue cap**: `prefill.max_waiting_batches` bounds the
 number of QUEUED prefill batches per engine — running batches never count toward the
@@ -541,12 +548,13 @@ now drive JavaMockEngineCluster / JavaLoadClient through the shared
 - `master_recovery_ttft_test.sh`
 - `engine_disconnect_ttft_test.sh`
 
-The Python **smoke client family** is retained on purpose (it is tooling, not
-the mock engine): `flexlb_smoke_base.py`, `priority_preemption_smoke.py`
-and the analysis tooling talk to the Java cluster over
-its gRPC + HTTP control plane. `encode_unique_key` now lives in
-`online_eval/proto_utils.py`, so the smoke base no longer depends on the
-deleted mock engine module.
+The Python **smoke client family** has been retired and removed (it was
+tooling, not the mock engine): `flexlb_smoke_base.py`,
+`priority_preemption_smoke.py` and their tests are gone — their coverage
+lives in the `tools/online_eval/flexlb_ft/` functional-test framework,
+which talks to the Java cluster over its gRPC + HTTP control plane.
+`encode_unique_key` now lives in
+`online_eval/proto_utils.py`, used by the remaining analysis tooling.
 
 Cancel transport surface: since the Java-only intake the Java mock cluster
 also implements the gRPC `RpcService/Cancel` method, so the cancel intent can

@@ -15,6 +15,18 @@ Elastic scaling is a normal functional requirement (user ruling
 2026-08), NOT a fault scenario — the cases pin the discovery/routing
 contract, not any injected failure.  Convergence bounds assert at
 second-scale timeouts (10-15s) to stay robust against slow CI machines.
+
+User ruling 2026-09 tightens the scale-in contract: a PLANNED engine
+removal under load must not lose or fail any request ("不能丢，不能有
+失败的请求") — every background request reaches a terminal state with
+zero errors and zero hangs.  The mock's /remove_engine therefore defaults
+to GRACEFUL drain (strip discovery first, wait bounded for in-flight
+work, then tear down — production rolling scale-in order); the
+zero-failure assertion below pins that contract, and the mock's
+``mode="abrupt"`` parameter keeps the legacy hard teardown available
+for chaos-style cases.  elastic_concurrent_ops stays exempt (see its
+docstring: concurrent add/remove crossfire is a robustness extreme,
+chaos-adjacent, not a planned scale-in).
 """
 
 from __future__ import annotations
@@ -176,10 +188,14 @@ def elastic_remove_flow(ctx: CaseContext):
             return False, "new engine did not accept any request before removal"
 
         accepted_at_removal = _accepted(ops, new_name)
+        # Graceful scale-in (mock default): the call strips the discovery
+        # entry first, waits bounded for the in-flight set to finish, and
+        # only then tears the engine down — the production rolling order.
         status, rm_body = ops.remove_engine(engine_name=new_name)
         if status != 200:
             flow.stop()
             return False, f"remove_engine failed: {status} {rm_body}"
+        rm_body = rm_body or {}
 
         # Removal window: other engines keep serving; removed one must be gone
         # from the mock services map AND the discovery file.
@@ -201,10 +217,19 @@ def elastic_remove_flow(ctx: CaseContext):
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
             _master_http(ops), TTL_DRAIN_TIMEOUT_S
         )
-        passed = rate >= 0.90 and gone_from_snapshot and gone_from_file and inflight_ok
+        # CONTRACT (user ruling 2026-09): a planned scale-in under load is
+        # ZERO-FAILURE — no lost request (every fired request returned), no
+        # failed request (no stream error), no hang (the flow consumes each
+        # stream to its terminal state with a 10s cap; a hang surfaces as an
+        # error).  The legacy >=90% tolerance described the mock's old hard
+        # teardown (shutdownNow cutting in-flight streams); with the graceful
+        # drain in place the correct behaviour is the one asserted here.
+        zero_fail = total > 0 and ok == total
+        passed = zero_fail and gone_from_snapshot and gone_from_file and inflight_ok
         return passed, (
-            f"removed={new_name}(grpc={new_port}, accepted_at_removal={accepted_at_removal}), "
-            f"flow_success={ok}/{total}({rate:.1%}), "
+            f"removed={new_name}(grpc={new_port}, accepted_at_removal={accepted_at_removal}, "
+            f"drained={rm_body.get('drained')}, drain_ms={rm_body.get('drain_ms')}), "
+            f"flow_success={ok}/{total}({rate:.1%}, zero-failure contract), "
             f"gone_from_snapshot={gone_from_snapshot}, "
             f"gone_from_discovery_file={gone_from_file}, "
             f"inflight_clean={inflight_ok}({inflight_detail})"
@@ -223,11 +248,22 @@ def elastic_remove_flow(ctx: CaseContext):
 @case(
     "elastic_add_remove_cycle",
     profiles=["batch-window"],  # elastic_spec pins the legacy fault axes
-    source="elastic acceptance: 3x add→verify→remove→verify cycle",
+    source="elastic acceptance: 3x add→verify→remove under load→verify cycle",
 )
 def elastic_add_remove_cycle(ctx: CaseContext):
+    """Planned add/remove cycle under a background flow — every round's
+    removal must be ZERO-FAILURE (user ruling 2026-09: "负载流运行中移除
+    一个引擎，要确保请求不能丢，不能有失败的请求").
+
+    Each round runs a background flow across the removal (the mock's
+    graceful drain strips discovery first and waits out the in-flight
+    set), then asserts the flow returned every request successfully —
+    no error, no hang — on top of the original file/topology/traffic
+    checks.
+    """
     env, ops = _elastic_env(ctx)
     base = rid_base(ctx, "elastic")
+    flow: Optional[_BackgroundFlow] = None
     try:
         _cleanup_dynamic(ops, env)
         p_prefill, p_decode = _discovery_entry_count(env)
@@ -253,7 +289,16 @@ def elastic_add_remove_cycle(ctx: CaseContext):
             alive_ok = _wait_master_alive(ops, "PREFILL", 3, MASTER_EVICT_S)
             traffic_ok = _pump_until_accepted(ops, name, base, 15.0)
 
+            # Background flow across the removal — the planned-scale-in
+            # zero-failure contract (same caliber as elastic_remove_flow).
+            flow = _BackgroundFlow(ops, base, interval_s=0.2)
+            flow.start()
+            time.sleep(0.5)  # some in-flight traffic before the mutation
             status_rm, _ = ops.remove_engine(engine_name=name)
+            f_total, f_ok = flow.stop()
+            flow = None  # stopped; nothing for the finally to reap
+            flow_zero_fail = status_rm == 200 and f_total > 0 and f_ok == f_total
+
             file_rm_ok = wait_for(
                 lambda: not _discovery_has_http_port(env, port - 1),
                 REMOVE_CONVERGENCE_S,
@@ -266,15 +311,16 @@ def elastic_add_remove_cycle(ctx: CaseContext):
                 file_ok
                 and alive_ok
                 and traffic_ok
-                and status_rm == 200
+                and flow_zero_fail
                 and file_rm_ok
                 and parsable
             )
             all_ok = all_ok and round_ok
             round_details.append(
                 f"r{round_no}[{name}]: file={file_ok} alive={alive_ok} "
-                f"traffic={traffic_ok} rm={status_rm} file_rm={file_rm_ok} "
-                f"parsable={parsable}"
+                f"traffic={traffic_ok} rm={status_rm} "
+                f"flow={f_ok}/{f_total}(zero-fail={f_ok == f_total and f_total > 0}) "
+                f"file_rm={file_rm_ok} parsable={parsable}"
             )
             if not round_ok:
                 break
@@ -292,6 +338,8 @@ def elastic_add_remove_cycle(ctx: CaseContext):
     except Exception as exc:
         return False, f"exception: {exc!r}"
     finally:
+        if flow is not None:
+            flow.stop()
         try:
             _cleanup_dynamic(ops, env)
         except Exception:
@@ -488,6 +536,20 @@ def elastic_stop_after_add(ctx: CaseContext):
     source="elastic acceptance: concurrent add/remove storm, master stays healthy",
 )
 def elastic_concurrent_ops(ctx: CaseContext):
+    """Concurrent add/remove storm — robustness extreme, deliberately EXEMPT
+    from the zero-failure contract.
+
+    Unlike elastic_remove_flow / elastic_add_remove_cycle (a PLANNED
+    scale-in under a steady flow, where the user ruling 2026-09 demands
+    zero failures), this crossfire is chaos-adjacent: four threads
+    add/remove engines every few hundred ms while the victim set keeps
+    changing, discovery and routing race each other, and an engine may be
+    removed while it is the only healthy candidate — availability below
+    100% is a legitimate outcome of that stress shape.  The case keeps the
+    hard assertions on what must NEVER break (master HTTP 200, discovery
+    file parses and equals the services map, no residue) plus a
+    conservative >=50% health floor so a total blackout still fails.
+    """
     env, ops = _elastic_env(ctx)
     base = rid_base(ctx, "elastic")
     try:
@@ -737,21 +799,26 @@ def elastic_remove_pending_drain(ctx: CaseContext):
       4. Topology convergence: victim gone from the mock services map and
          the discovery file, master prefill alive count drops to 1.
 
-    Prediction (current master, from the code walk): remove_engine stops
-    the engine immediately (setStopped + drainAndShutdown + server
-    shutdownNow), so the parked FetchResponse streams break within ~1s
-    with a transport error — a fast explicit failure.  The master-side
-    cleanup is NOT immediate: the dead engine stops reporting
-    WorkerStatus, and after statusStaleAfterMs (10s in this config)
-    EngineSyncRunner / ExpirationCleaner retire the generation,
-    PrefillEndpoint.closeEndpoint runs WorkerBatcher.stopAndDrain which
-    fail-closes every queued item to BATCH_DISPATCH_FAILED ("Worker
-    scheduling queue rejected request").  No re-routing exists on that
-    path.  Expected observed shape: client-visible terminal ~0-2s (engine
-    death), master accounting clean ~10-15s — the case passes in the
-    fast-fail shape.  If the retirement chain fails to drain the queue,
-    the stranded items wait out queueTimeout (1h) -> inflight_clean(50s)
-    FAILS -> finding.
+    Prediction (current master + graceful mock remove, from the code
+    walk): /remove_engine (graceful default since 2026-09) strips the
+    discovery entry first, then WAITS for the engine's in-flight set —
+    the two 8s batch leases run to completion (~8s) before the teardown.
+    The master, however, drops the endpoint's route as soon as the file
+    changes (~1s): PrefillEndpoint.closeEndpoint runs WorkerBatcher.
+    stopAndDrain which fail-closes every MASTER-side queued item to
+    BATCH_DISPATCH_FAILED within seconds (the stranded set — fast visible
+    terminal).  The already-dispatched batches finish on the engine, but
+    after the route drop no master status poll ever pulls their
+    completion records back — the client stream then parks until the
+    stale-inflight TTL (30s) fails it (slow but bounded, <=40s cap).
+    Expected observed shape: stranded = fast fail (~1-3s), dispatched =
+    slow fail near the 30s TTL, master accounting clean ~30-45s — the
+    case passes in that mixed shape.  If the retirement chain fails to
+    drain the queue, the stranded items wait out queueTimeout (1h) ->
+    inflight_clean(50s) FAILS -> finding.  (The dispatched-request
+    slow-fail leg is itself the master-side scale-in drain gap — no
+    completion-pull protocol survives route removal; related to the F7
+    finding family.)
     """
     env = ctx.env_manager.ensure(_pending_drain_spec(ctx))
     ops = ctx.engine_ops(env)

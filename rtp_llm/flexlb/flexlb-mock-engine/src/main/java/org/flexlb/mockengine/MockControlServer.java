@@ -46,6 +46,9 @@ import java.util.concurrent.TimeUnit;
 final class MockControlServer {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    /** Default bound for the graceful /remove_engine drain (in-flight work must
+     * finish within this window or the removal falls back to abrupt teardown). */
+    private static final long DEFAULT_DRAIN_TIMEOUT_MS = 60_000L;
 
     private final HttpServer httpServer;
     private final Map<Integer, JavaMockEngineCluster.FastRpcService> services;
@@ -608,10 +611,20 @@ final class MockControlServer {
 
     /**
      * POST /remove_engine {"port": <grpcPort>} or {"engine": "<name>"} —
-     * PERMANENTLY detach an engine: stop_engine semantics (stopped flag +
-     * shutdownNow cutting in-flight RPC streams) plus removal from the services
-     * map and the discovery file. Unlike /stop_engine, the engine never comes
-     * back on this port within this process.
+     * PERMANENTLY detach an engine. Optional body fields:
+     * <ul>
+     *   <li>{@code mode}: "graceful" (default) — strip the discovery entry
+     *       first, wait bounded for in-flight work to finish, then tear down
+     *       (production rolling scale-in; user ruling 2026-09: a planned
+     *       scale-in must not lose or fail requests) — or "abrupt": legacy
+     *       immediate teardown (stop semantics + shutdownNow cutting
+     *       in-flight RPC streams) for chaos-style fault cases.</li>
+     *   <li>{@code drain_timeout_ms}: graceful drain bound (default 60000);
+     *       on expiry the removal falls back to the abrupt teardown and
+     *       reports {@code drained=false}.</li>
+     * </ul>
+     * Unlike /stop_engine, the engine never comes back on this port within
+     * this process.
      */
     private void handleRemoveEngine(HttpExchange exchange) throws IOException {
         if (!"POST".equals(exchange.getRequestMethod())) {
@@ -626,7 +639,19 @@ final class MockControlServer {
             }
             JsonNode body = MAPPER.readTree(exchange.getRequestBody());
             JavaMockEngineCluster.FastRpcService service = resolveService(body);
-            DynamicEngineManager.RemovedEngine removed = engineManager.removeEngine(service);
+            String mode = body.path("mode").asText("graceful");
+            if (!"graceful".equalsIgnoreCase(mode) && !"abrupt".equalsIgnoreCase(mode)) {
+                sendJson(exchange, 400, Map.of("error",
+                        "mode must be 'graceful' or 'abrupt', got: " + mode));
+                return;
+            }
+            long drainTimeoutMs = body.path("drain_timeout_ms").asLong(DEFAULT_DRAIN_TIMEOUT_MS);
+            if (drainTimeoutMs < 0 || drainTimeoutMs > 600_000L) {
+                sendJson(exchange, 400, Map.of("error",
+                        "drain_timeout_ms must be in [0, 600000]: " + drainTimeoutMs));
+                return;
+            }
+            DynamicEngineManager.RemovedEngine removed = engineManager.removeEngine(service, mode, drainTimeoutMs);
             Map<String, Object> response = new LinkedHashMap<>();
             response.put("status", "ok");
             response.put("engine", removed.engineName());
@@ -634,6 +659,9 @@ final class MockControlServer {
             response.put("action", "removed");
             response.put("running_at_removal", removed.runningAtRemoval());
             response.put("waiting_at_removal", removed.waitingAtRemoval());
+            response.put("mode", removed.mode());
+            response.put("drained", removed.drained());
+            response.put("drain_ms", removed.drainMs());
             sendJson(exchange, 200, response);
         } catch (DynamicEngineManager.EngineOperationException e) {
             sendJson(exchange, e.status, Map.of("error", e.getMessage()));

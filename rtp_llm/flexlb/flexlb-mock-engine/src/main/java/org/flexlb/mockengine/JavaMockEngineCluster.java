@@ -2824,7 +2824,7 @@ public final class JavaMockEngineCluster {
             // schedule-only full-e2e metric (client send → decode end); without
             // this row the engine side has no per-rid persisted terminal time
             // (completions queue / requestLifecycles are in-memory only).
-            writeDecodeDoneEvent(stream, executionMs,
+            writeDecodeDoneEvent(stream,
                     cancelledRequests.containsKey(requestId));
             // Per-engine decode busy: one executionMs per completed request.
             busyMs.addAndGet(executionMs);
@@ -3504,6 +3504,42 @@ public final class JavaMockEngineCluster {
         int getActivePrefillBatchCount() { return activePrefillBatches.get(); }
         int getDecodePendingQueueDepth() { return decodePendingQueueSize(); }
         int getPrefillPendingQueueDepth() { return prefillPendingQueueSize(); }
+
+        /**
+         * Whether this engine still has ANY work that must finish before a
+         * GRACEFUL removal may tear the gRPC server down: running tasks, both
+         * prefill wait queues (master-composed batches + direct-path parks),
+         * the decode pending queue, running batch/decode counters, and
+         * cross-engine P→D ownership in BOTH directions (a prefill victim must
+         * outlive requests it already handed to a decode engine; a decode
+         * victim must outlive streams an upstream prefill parked on it).
+         *
+         * <p>Deliberately NOT included: the un-acked completion backlog
+         * ({@code completions}) — its consumer is the master's status poll, and
+         * once the master has dropped the endpoint's route it will never come;
+         * waiting on it would only stretch every graceful drain to its deadline.
+         * Post-completion visibility is the master's scale-in contract, not the
+         * engine's.
+         */
+        boolean hasInflightWork() {
+            return !runningTasks.isEmpty()
+                    || waitingPrefillRequests.get() != 0
+                    || activePrefillBatches.get() != 0
+                    || activePrefillRequests.get() != 0
+                    || activeDecodeRequests.get() != 0
+                    || prefillPendingQueueSize() != 0
+                    || decodePendingQueueSize() != 0
+                    || directPrefillQueueSize() != 0
+                    || !downstreamDecodeOwners.isEmpty()
+                    || !upstreamPrefillOwners.isEmpty();
+        }
+
+        /** Snapshot size of the direct (NON_BATCH) prefill park queue. */
+        private int directPrefillQueueSize() {
+            synchronized (prefillQueueLock) {
+                return directPrefillQueue.size();
+            }
+        }
         Map<Long, String> getRequestStates() { return requestStates; }
 
         /**
@@ -3707,13 +3743,17 @@ public final class JavaMockEngineCluster {
         /**
          * engine_events.jsonl terminal row for one decode stream — the
          * structured replacement of the former mock_decode_done stdout line.
-         * exec_ms is the summed booked step durations (per-step continuous
-         * batching caliber); batch_size is the terminal-step running batch
+         * exec_ms is the decode_done_ms − decode_start_ms WALL-SPAN (20260903
+         * caliber change, symmetric with the prefill batch's done−start
+         * semantics — the former summed-booked-step-durations stream caliber
+         * retired; under the step-boundary admission model wall-span ≈ Σstep
+         * durations, the only error being the ≤1-step admission quantization
+         * plus scheduler jitter). batch_size is the terminal-step running batch
          * (claimed under decodeQueueLock, includes this stream); kv_used_tokens
          * reads the still-live block lease (the lease hands over to the LRU
          * only AFTER this row, on the normal path).
          */
-        private void writeDecodeDoneEvent(DecodeStream stream, long executionMs, boolean cancelled) {
+        private void writeDecodeDoneEvent(DecodeStream stream, boolean cancelled) {
             MockPerformanceModel.RequestShape shape = stream.shape;
             long requestId = shape.input().getRequestId();
             EngineEventLog log = engineEventLog;
@@ -3722,6 +3762,7 @@ public final class JavaMockEngineCluster {
             if (log == null) {
                 return;
             }
+            long doneMs = System.currentTimeMillis();
             ObjectNode row = OBJECT_MAPPER.createObjectNode();
             row.put("event", "decode_done");
             row.put("rid", requestId);
@@ -3729,8 +3770,10 @@ public final class JavaMockEngineCluster {
             row.put("batch_id", stream.batchId);
             row.put("engine_arrival_ms", arrivalMs);
             row.put("decode_start_ms", startMs);
-            row.put("decode_done_ms", System.currentTimeMillis());
-            row.put("exec_ms", executionMs);
+            row.put("decode_done_ms", doneMs);
+            // Missing start stamps (log injected mid-run) serialize as 0,
+            // mirroring the prefill ttft_ms guard — never a fabricated span.
+            row.put("exec_ms", startMs > 0 ? Math.max(0L, doneMs - startMs) : 0L);
             row.put("batch_size", stream.terminalBatchSize);
             row.put("output_len", shape.outputLen());
             MockLruBlockCache.BlockLease lease = activeBlockLeases.get(requestId);

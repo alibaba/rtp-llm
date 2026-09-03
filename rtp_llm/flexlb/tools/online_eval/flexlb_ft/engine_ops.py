@@ -547,14 +547,28 @@ class EngineOps:
         )
 
     def remove_engine(
-        self, engine_name: Optional[str] = None, port: Optional[int] = None
+        self,
+        engine_name: Optional[str] = None,
+        port: Optional[int] = None,
+        mode: str = "graceful",
+        drain_timeout_ms: Optional[int] = None,
     ) -> tuple[int, Optional[dict]]:
         """POST /remove_engine {"engine": name} or {"port": grpcPort}.
 
-        Permanently detaches the engine (stop semantics + removal from the
-        services map and the discovery file).  Returns (status, body) without
-        raising — 404 (unknown engine) is an expected outcome under concurrent
-        add/remove racing.
+        Default mode is the mock's GRACEFUL scale-in (strip the discovery
+        entry first so the master stops routing, then wait bounded for all
+        in-flight work to finish, then tear down) — the production rolling
+        scale-in order (user ruling 2026-09: a planned scale-in under load
+        must not lose or fail any request).  ``mode="abrupt"`` keeps the
+        legacy immediate teardown (in-flight streams cut) for chaos-style
+        fault cases.
+
+        The graceful call BLOCKS until the drain settles (mock drain cap
+        60s by default), so the HTTP timeout sits well above the bound;
+        the response carries ``drained`` / ``drain_ms`` alongside the
+        ``running_at_removal`` / ``waiting_at_removal`` counters.  Returns
+        (status, body) without raising — 404 (unknown engine) is an
+        expected outcome under concurrent add/remove racing.
         """
         body: dict = {}
         if engine_name:
@@ -563,8 +577,16 @@ class EngineOps:
             body["port"] = port
         if not body:
             raise ValueError("remove_engine needs engine_name or port")
+        body["mode"] = mode
+        if drain_timeout_ms is not None:
+            body["drain_timeout_ms"] = drain_timeout_ms
+        # Graceful cap is 60s + teardown margin on the Java side; keep the
+        # client out of the way of a legitimately slow drain.
+        timeout = 5.0 if mode == "abrupt" else 95.0
         return http_post_json(
-            f"http://127.0.0.1:{self.mock_http_port}/remove_engine", body
+            f"http://127.0.0.1:{self.mock_http_port}/remove_engine",
+            body,
+            timeout=timeout,
         )
 
     def master_info(self) -> Optional[dict]:

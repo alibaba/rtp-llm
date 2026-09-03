@@ -55,13 +55,21 @@ import static org.junit.jupiter.api.Assertions.fail;
  * control endpoints backed by {@link DynamicEngineManager}, with the discovery
  * file ({@link DiscoveryFileStore}) kept in sync for a file-discovery master.
  *
- * <p>Covers the four required behaviours:
+ * <p>Covers the required behaviours:
  * <ol>
  *   <li>add → new gRPC port reachable, engine visible in /snapshot, entry
  *       present in the discovery file (HTTP port = grpc − 1);</li>
  *   <li>remove → port refuses connections, discovery entry gone, services map
  *       free of residue, and the response reports the engine's in-flight
- *       counters at removal time;</li>
+ *       counters at removal time — in GRACEFUL mode (default) the call also
+ *       waits bounded for in-flight work to finish without failing any
+ *       request (user ruling 2026-09: planned scale-in = zero failures),
+ *       while mode=abrupt keeps the legacy immediate teardown for chaos
+ *       cases;</li>
+ *   <li>graceful specifics → in-flight request completes normally, drain
+ *       deadline expiry falls back to teardown (drained=false), concurrent
+ *       removes of one engine are idempotent, and a mid-drain engine stays
+ *       out of the discovery file even under a concurrent add_engine;</li>
  *   <li>concurrent add×N + remove×M crossfire → the discovery file always
  *       parses completely and its entry set equals the services map;</li>
  *   <li>a dynamically added engine serves the full request pipeline
@@ -172,6 +180,9 @@ class DynamicEngineScaleTest {
         assertEquals(victimPort, removed.path("port").asInt());
         assertTrue(removed.has("running_at_removal"), "response must report running_at_removal");
         assertTrue(removed.has("waiting_at_removal"), "response must report waiting_at_removal");
+        // Default mode is graceful: an idle engine drains instantly.
+        assertEquals("graceful", removed.path("mode").asText(), "remove must default to graceful drain");
+        assertTrue(removed.path("drained").asBoolean(), "an idle engine must drain cleanly");
 
         // Port no longer accepts connections (server listener closed).
         awaitPortRefused(victimPort);
@@ -194,7 +205,7 @@ class DynamicEngineScaleTest {
     }
 
     @Test
-    void removeEngineReportsInflightCountersForBusyEngine() throws Exception {
+    void gracefulRemoveAwaitsInflightCompletionWithoutFailingTheRequest() throws Exception {
         // 2000 ms decode steps keep the request in-flight across the remove call.
         int basePort = startCluster(model("10", 2000.0), 0, 1);
         int port = basePort;
@@ -205,11 +216,190 @@ class DynamicEngineScaleTest {
         awaitCondition(() -> services.get(port).getRunningCount() >= 1, 2_000,
                 "decode request should be running before remove");
 
+        long t0 = System.nanoTime();
         JsonNode removed = postOk("/remove_engine", "{\"port\":" + port + "}");
+        long blockedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
+
         assertTrue(removed.path("running_at_removal").asInt() >= 1,
                 "running_at_removal should report the in-flight request, got "
                         + removed.path("running_at_removal"));
+        // CONTRACT (user ruling 2026-09): a planned scale-in must not fail any
+        // in-flight request — the graceful call BLOCKS until the request
+        // finishes (~2s here) instead of cutting its stream, and the stream
+        // itself completes normally (no transport error).
+        assertEquals("graceful", removed.path("mode").asText());
+        assertTrue(removed.path("drained").asBoolean(),
+                "a 2s request must drain within the 60s default bound");
+        assertTrue(blockedMs >= 1_500,
+                "graceful remove must await the in-flight request, blocked only "
+                        + blockedMs + "ms");
+        assertTrue(collector.done.await(5, TimeUnit.SECONDS),
+                "in-flight stream did not reach its terminal state");
+        assertNull(collector.error,
+                "graceful removal must not fail the in-flight request: " + collector.error);
         awaitPortRefused(port);
+    }
+
+    @Test
+    void abruptModeKeepsLegacyImmediateTeardown() throws Exception {
+        // Same busy-engine shape as the graceful test, but mode=abrupt: the
+        // legacy behaviour — immediate teardown, in-flight stream cut.
+        int basePort = startCluster(model("10", 2000.0), 0, 1);
+        int port = basePort;
+
+        StreamCollector<EngineRpcService.GenerateOutputsPB> collector = new StreamCollector<>();
+        services.get(port).generateStreamCall(input(6002, 10), collector);
+
+        awaitCondition(() -> services.get(port).getRunningCount() >= 1, 2_000,
+                "decode request should be running before remove");
+
+        long t0 = System.nanoTime();
+        JsonNode removed = postOk("/remove_engine",
+                "{\"port\":" + port + ", \"mode\":\"abrupt\"}");
+        long blockedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
+
+        assertEquals("abrupt", removed.path("mode").asText());
+        assertFalse(removed.path("drained").asBoolean(), "abrupt mode never reports drained");
+        assertTrue(blockedMs < 1_000,
+                "abrupt removal must not wait for the in-flight request, blocked "
+                        + blockedMs + "ms");
+        assertTrue(removed.path("running_at_removal").asInt() >= 1,
+                "abrupt removal still reports the in-flight counters");
+        // The victim stream dies (transport error) — the documented abrupt
+        // fallout the master-side failure machinery is exercised with.
+        assertTrue(collector.done.await(5, TimeUnit.SECONDS),
+                "abrupt teardown must terminate the in-flight stream");
+        awaitPortRefused(port);
+        assertFalse(services.containsKey(port), "services map still holds removed port");
+    }
+
+    @Test
+    void gracefulRemoveFallsBackToTeardownWhenDrainDeadlineExpires() throws Exception {
+        // A 30s decode step outlives the 300ms drain bound: the removal must
+        // fall back to the abrupt teardown (drained=false) instead of hanging.
+        int basePort = startCluster(model("10", 30_000.0), 0, 1);
+        int port = basePort;
+
+        StreamCollector<EngineRpcService.GenerateOutputsPB> collector = new StreamCollector<>();
+        services.get(port).generateStreamCall(input(6003, 10), collector);
+
+        awaitCondition(() -> services.get(port).getRunningCount() >= 1, 2_000,
+                "decode request should be running before remove");
+
+        JsonNode removed = postOk("/remove_engine",
+                "{\"port\":" + port + ", \"drain_timeout_ms\": 300}");
+        assertEquals("graceful", removed.path("mode").asText());
+        assertFalse(removed.path("drained").asBoolean(),
+                "a request outliving the bound must not report drained");
+        assertTrue(removed.path("drain_ms").asLong() >= 250,
+                "drain_ms should reflect the bounded wait, got "
+                        + removed.path("drain_ms").asLong());
+        awaitPortRefused(port);
+        assertFalse(services.containsKey(port), "services map still holds removed port");
+        assertEquals(List.of(), hostList(readDiscoveryFile(), "mock.decode.hosts.address"));
+    }
+
+    @Test
+    void concurrentRemoveOfSameEngineIsIdempotent() throws Exception {
+        startCluster(model("10", 1.0), 1, 1);
+        JsonNode added = postOk("/add_engine", "{\"role\":\"decode\"}");
+        int victimPort = added.path("port").asInt();
+
+        CountDownLatch startGate = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        List<Future<JsonNode>> outcomes = new ArrayList<>();
+        try {
+            for (int i = 0; i < 2; i++) {
+                outcomes.add(pool.submit(() -> {
+                    startGate.await();
+                    return postOk("/remove_engine", "{\"port\":" + victimPort + "}");
+                }));
+            }
+            startGate.countDown();
+            for (Future<JsonNode> outcome : outcomes) {
+                // Both callers observe the SAME teardown outcome — one drives
+                // the drain, the other awaits its future; neither sees an
+                // error and neither resurrects the engine.
+                JsonNode removed = outcome.get(30, TimeUnit.SECONDS);
+                assertEquals("ok", removed.path("status").asText());
+                assertEquals(victimPort, removed.path("port").asInt());
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+        assertFalse(services.containsKey(victimPort), "services map still holds removed port");
+        assertFalse(serversByPort.containsKey(victimPort), "serversByPort still holds removed port");
+        // The bootstrap decode-0 is STILL hosted — only the dynamic victim is
+        // gone.  The file must equal the live services map, role by role
+        // (covers "no victim residue" without hard-coding the bootstrap set).
+        JsonNode root = readDiscoveryFile();
+        assertEquals(expectedAddresses("PREFILL"), hostList(root, "mock.prefill.hosts.address"));
+        assertEquals(expectedAddresses("DECODE"), hostList(root, "mock.decode.hosts.address"));
+    }
+
+    @Test
+    void drainingEngineStaysOutOfDiscoveryFileWhileConcurrentAddLands() throws Exception {
+        // Mid-drain consistency: while a graceful removal is waiting out an
+        // in-flight request, a concurrent add_engine rewrites the discovery
+        // file — the draining engine must stay ABSENT (no resurrection) and
+        // the new engine must be PRESENT; once the drain finishes, the file
+        // equals the services map.
+        int basePort = startCluster(model("10", 1500.0), 1, 1);
+        int victimPort = basePort + 1; // decode-0
+        int victimHttpPort = victimPort - 1;
+
+        StreamCollector<EngineRpcService.GenerateOutputsPB> collector = new StreamCollector<>();
+        services.get(victimPort).generateStreamCall(input(6004, 10), collector);
+        awaitCondition(() -> services.get(victimPort).getRunningCount() >= 1, 2_000,
+                "decode request should be running before remove");
+
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        Future<JsonNode> removal;
+        try {
+            removal = pool.submit(() ->
+                    postOk("/remove_engine", "{\"port\":" + victimPort + "}"));
+            // Wait until the drain is provably in progress: the discovery file
+            // loses the victim immediately (phase 1) while the request (~1.5s)
+            // is still running.  (The lambda body wraps readDiscoveryFile's
+            // checked IOException — a transiently unreadable file just keeps
+            // the poll going.)
+            awaitCondition(
+                    () -> {
+                        try {
+                            return !hostList(readDiscoveryFile(),
+                                            "mock.decode.hosts.address")
+                                    .contains("127.0.0.1:" + victimHttpPort);
+                        } catch (IOException e) {
+                            return false;
+                        }
+                    },
+                    2_000, "victim must leave the discovery file when the drain starts");
+            assertTrue(services.containsKey(victimPort),
+                    "a draining engine stays hosted until the teardown");
+
+            // Concurrent add mid-drain: its file rewrite must not resurrect
+            // the victim, and must include the new engine.
+            JsonNode added = postOk("/add_engine", "{\"role\":\"prefill\"}");
+            int addedHttpPort = added.path("port").asInt() - 1;
+            List<String> prefillHosts = hostList(readDiscoveryFile(), "mock.prefill.hosts.address");
+            assertTrue(prefillHosts.contains("127.0.0.1:" + addedHttpPort),
+                    "concurrent add must appear in the discovery file mid-drain: " + prefillHosts);
+            assertFalse(hostList(readDiscoveryFile(), "mock.decode.hosts.address")
+                            .contains("127.0.0.1:" + victimHttpPort),
+                    "concurrent add must not resurrect the draining engine");
+
+            JsonNode removed = removal.get(30, TimeUnit.SECONDS);
+            assertTrue(removed.path("drained").asBoolean(),
+                    "the 1.5s request must finish inside the drain bound");
+        } finally {
+            pool.shutdownNow();
+        }
+
+        // Post-teardown: file equals the services map, role by role.
+        JsonNode root = readDiscoveryFile();
+        assertEquals(expectedAddresses("PREFILL"), hostList(root, "mock.prefill.hosts.address"));
+        assertEquals(expectedAddresses("DECODE"), hostList(root, "mock.decode.hosts.address"));
+        assertFalse(services.containsKey(victimPort), "services map still holds removed port");
     }
 
     @Test
