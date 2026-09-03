@@ -41,6 +41,27 @@ pressure).  One gate per case (admission wave-2, 2026-09):
                                   fast-rejected typed 8431
                                   ("temporarily exhausted"); the lower-
                                   priority occupants finish unmolested.
+  admission_batcher_queue_capacity_park
+                                  master batcher-queue capacity gate
+                                  (scheduler.capacity
+                                  maxWaitingRequestsPerPrefillWorker=2):
+                                  overflow past the dispatcher lease window
+                                  fills the queue, then parks in
+                                  placementWaiters — waitable, never a fast
+                                  reject; FIFO drain once seats release.
+  admission_batcher_queue_deadline
+                                  the same batcher-queue gate under
+                                  scheduler.queueTimeoutMs=1500: parked
+                                  requests expire with the typed 8511
+                                  BATCH_SLO_EXPIRED deadline — the same
+                                  code, different trigger source than
+                                  admission_slo_queue_deadline's KV gate.
+  admission_placement_pool_wait
+                                  prefill placement pool gate (router
+                                  availability maxPendingRequests=1): the
+                                  second arrival parks until the pool
+                                  occupant terminates, then retries
+                                  successfully — strictly after it.
 """
 
 from __future__ import annotations
@@ -57,7 +78,14 @@ from ..engine_ops import (
     inject_type,
     inject_type_all,
 )
-from ..harness import AssertUtils, EnvSpec, admission_config, default_perf, wait_for
+from ..harness import (
+    AssertUtils,
+    EnvSpec,
+    admission_config,
+    default_perf,
+    http_get_json,
+    wait_for,
+)
 
 ADMISSION_CASES: list[CaseDef] = []
 
@@ -981,3 +1009,556 @@ def admission_priority_incomer_reject(ctx: CaseContext):
     finally:
         if victim_handle is not None:
             victim_handle.cancel()
+
+
+# ===========================================================================
+# Master batcher-queue capacity gate (admission wave-2 A5)
+# ===========================================================================
+
+
+BQ_PARK_REQUESTS = 7  # > lease window (4) + queue capacity (2): the 7th parks
+BQ_DEADLINE_REQUESTS = 8  # 4 leases + 2 queue seats + 2 placementWaiters
+BQ_DEADLINE_MS = 1500
+
+
+def _master_side_parked(ops, prefill_names, decode_names) -> tuple:
+    """Requests live on the master ledger but absent from every engine.
+
+    The A5-vs-W1 discriminator: a request parked on the ENGINE shows up
+    in the engine snapshot's waiting/running, while a request parked on
+    the MASTER (batcher queue depth / placementWaiters) only inflates
+    the scheduler ledger — nothing else can see it.
+    """
+    data = http_get_json(f"{_master_http(ops)}/rtp_llm/inflight_status", timeout=5)
+    if data is None:
+        return -1, "inflight_status unavailable"
+    sched = int(data.get("scheduler_inflight", 0))
+    snap = ops.snapshot_by_name()
+
+    def live(n: str) -> int:
+        info = snap.get(n, {})
+        return int(info.get("waiting", 0)) + int(info.get("running", 0))
+
+    engine_live = sum(live(n) for n in prefill_names)
+    engine_live += sum(live(n) for n in decode_names)
+    return sched - engine_live, f"sched={sched}, engine_live={engine_live}"
+
+
+def _fire_tracked(ops, rid: int, fired: list, **kwargs) -> Optional[str]:
+    """Schedule AND immediately open the response stream, recording the
+    fire instant so per-request terminal timing (completion order,
+    deadline expiry) is measurable — the W3 victim-handle pattern,
+    batched.  Fire errors are reported like _fire_request's."""
+    try:
+        resp = ops.schedule(rid, **kwargs)
+    except Exception as exc:
+        return repr(exc)
+    if resp.code != 200 or not resp.success:
+        return f"schedule failed ({resp.code}): {resp.error_message}"
+    try:
+        handle = ops.start_stream(resp, rid)
+    except Exception as exc:
+        return repr(exc)
+    fired.append((rid, handle, time.monotonic()))
+    return None
+
+
+def _await_tracked(fired: list, wait_s: float = 45.0) -> list:
+    """Concurrently await every tracked stream.
+
+    Returns [(rid, fire_t, end_t, completed, err)] in fire order, with
+    fire/end as monotonic instants so callers can assert per-request
+    timing.  Unfinished streams are cancelled (drain hygiene)."""
+
+    def _one(item):
+        rid, handle, t0 = item
+        try:
+            ended = handle.wait_end(wait_s)
+            completed = ended and handle.snap.completed and not handle.snap.error
+            err = (
+                None if completed else (handle.snap.error or "stream did not complete")
+            )
+        except Exception as exc:
+            completed, err = False, repr(exc)
+        if not completed:
+            try:
+                handle.cancel()
+            except Exception:
+                pass
+        return (rid, t0, time.monotonic(), completed, err)
+
+    if not fired:
+        return []
+    with ThreadPoolExecutor(max_workers=len(fired)) as pool:
+        return list(pool.map(_one, fired))
+
+
+def _batcher_queue_spec(ctx: CaseContext, queue_timeout_ms: int) -> EnvSpec:
+    """A5 env: 1 prefill (a single batcher queue), the legacy fault axes
+    (PRIORITY + FIXED_WINDOW + BATCH), with the batcher waiting-queue
+    capacity tightened to TWO (scheduler.capacity
+    maxWaitingRequestsPerPrefillWorker=2 — the Java default is 1024).
+
+    The dispatcher lease window stays at the template default
+    (maxInflightBatchesPerPrefillWorker=4), so under slow prefills the
+    first four fires occupy engine-side batch leases, the next two fill
+    the master batcher queue to its capacity ceiling and every later
+    fire meets the capacity gate (Blocked -> placementWaiters)."""
+    suffix = "deadline" if queue_timeout_ms < 60_000 else "park"
+    return EnvSpec(
+        label=f"admit_bq_{suffix}_{ctx.profile}",
+        n_prefill=1,
+        n_decode=2,
+        perf=default_perf(),
+        master_profile=ctx.profile,
+        master_env={
+            "FLEXLB_CONFIG": admission_config(
+                queue_timeout_ms=queue_timeout_ms,
+                max_waiting_requests_per_prefill_worker=2,
+            )
+        },
+    )
+
+
+@case(
+    "admission_batcher_queue_capacity_park",
+    profiles=["batch-window"],
+    requires=["enqueue_batch"],
+    source=(
+        "admission wave-2 A5: master batcher-queue capacity gate "
+        "(maxWaitingRequestsPerPrefillWorker park — waitable, no fast reject)"
+    ),
+)
+def admission_batcher_queue_capacity_park(ctx: CaseContext):
+    """Master batcher-queue capacity gate: the gate is a WAIT condition.
+
+    Scenario: dedicated 1P+2D env with the batcher waiting-queue capacity
+    tightened to 2 (scheduler.capacity.maxWaitingRequestsPerPrefillWorker
+    — the Java default is 1024); prefill_fixed_ms=3000 stretches each
+    batch.  Seven requests are fired 0.4s apart (each its own batch, 40x
+    the 10ms collection window): the dispatcher lease window
+    (maxInflightBatchesPerPrefillWorker=4) carries fires 1-4 onto the
+    engine (1 running + 3 engine-side pending), fires 5-6 fill the master
+    batcher queue to its capacity-2 ceiling, and fire 7 finds the queue
+    full.
+
+    Behaviour: WorkerBatcher.offer reports FULL at queue depth >= 2, so
+    QueueRouteAdmission.tryPublish returns Blocked and RequestScheduler
+    parks the request in PlacementWaitRegistry — a WAIT, never a
+    rejection.  Each engine-side batch terminal releases a lease seat;
+    the committed queue-head delivery then fires
+    signalPlacementCapacityChanged, which wakes the parked waiter to
+    retry successfully.  The queue drains FIFO.
+
+    Expected (contract): all seven schedules succeed (zero fast
+    rejects); during the pressure window the master-side parked count
+    (scheduler ledger minus engine-live requests) is >= 1 — the A5
+    discriminator: the park lives on the MASTER side while W1's
+    engine_prefill_concurrency_gate_park observes it in the ENGINE's
+    prefillPendingQueue; every request reaches its terminal as a
+    COMPLETED stream, in fire order with end times strictly increasing
+    and >= 1.2s apart (serialized 3s batches, not concurrent); after the
+    drain the engine park is empty, the master inflight ledger is clean
+    and a fresh request succeeds (recovery).
+
+    Prediction: expected to pass — the FULL branch of enqueueUnderLock
+    and the PlacementWaitRegistry retry loop are the same wait-
+    condition machinery the KV gate already exercises, and the 7x3s FIFO
+    drain (~19s worst) stays well under the 60s default queueTimeoutMs.
+    Risk: FIXED_WINDOW coalescing — mitigated by the 0.4s inter-fire gap
+    (40x the collection window).
+    """
+    env = ctx.env_manager.ensure(_batcher_queue_spec(ctx, queue_timeout_ms=60_000))
+    ops = ctx.engine_ops(env)
+    base = rid_base(ctx, "admission")
+    names = _prefill_names(ops)
+    decode_names = _decode_names(ops)
+    if not names:
+        return False, "no prefill engines found"
+    fired: list = []
+    try:
+        for n in names:
+            ops.set_perf(n, prefill_fixed_ms=3000.0)
+
+        fire_errors = []
+        for _ in range(BQ_PARK_REQUESTS):
+            rid = ops.next_request_id(base)
+            err = _fire_tracked(ops, rid, fired, input_len=512, output_len=2)
+            if err is not None:
+                fire_errors.append((rid, err))
+            time.sleep(0.4)  # >> maxCollectionWaitMs: one batch per fire
+
+        # Observe the master-side park while the pressure holds: ledger
+        # entries beyond the engine-live set are parked on the master
+        # (batcher queue / placementWaiters), never on the engine.
+        parked_max = -1
+        parked_detail = "not observed"
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            parked, detail = _master_side_parked(ops, names, decode_names)
+            if parked > parked_max:
+                parked_max, parked_detail = parked, detail
+            if parked_max >= 1:
+                break
+            time.sleep(0.2)
+
+        outcomes = _await_tracked(fired, wait_s=45.0)
+        completed = [rid for rid, _, _, ok, _ in outcomes if ok]
+        failures = [(rid, err) for rid, _, _, ok, err in outcomes if not ok]
+        ends = [end for _, _, end, _, _ in outcomes]
+        fifo_ordered = all(ends[i] < ends[i + 1] for i in range(len(ends) - 1))
+        fifo_spaced = all(ends[i + 1] - ends[i] >= 1.2 for i in range(len(ends) - 1))
+
+        def engine_park_empty() -> bool:
+            snap = ops.snapshot_by_name()
+            return all(
+                int(snap.get(n, {}).get("prefill_waiting_batches", 0)) == 0
+                and int(snap.get(n, {}).get("waiting", 0)) == 0
+                for n in names
+            )
+
+        settled = wait_for(engine_park_empty, 10.0, 0.2)
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 30.0
+        )
+        recovery_ok, recovery_msg = ops.verify_recovery()
+
+        passed = (
+            not fire_errors
+            and parked_max >= 1
+            and len(completed) == BQ_PARK_REQUESTS
+            and not failures
+            and fifo_ordered
+            and fifo_spaced
+            and settled
+            and inflight_ok
+            and recovery_ok
+        )
+        return passed, (
+            f"fired={BQ_PARK_REQUESTS} (fire_errors={fire_errors[:1]}), "
+            f"master_side_parked_max={parked_max} ({parked_detail}), "
+            f"completed={len(completed)}/{BQ_PARK_REQUESTS} "
+            f"(failures={failures[:1]}), "
+            f"fifo_ordered={fifo_ordered}, fifo_spaced={fifo_spaced} "
+            f"(min_gap={min((ends[i + 1] - ends[i] for i in range(len(ends) - 1)), default=0.0):.2f}s), "
+            f"engine_park_settled_empty={settled}, "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        try:
+            for n in names:
+                ops.set_perf(n, prefill_fixed_ms=100.0)
+        except Exception:
+            pass
+
+
+@case(
+    "admission_batcher_queue_deadline",
+    profiles=["batch-window"],
+    requires=["enqueue_batch"],
+    source=(
+        "admission wave-2 A5: batcher-queue gate deadline — the same "
+        "BATCH_SLO_EXPIRED (8511) terminal as admission_slo_queue_deadline, "
+        "with the trigger source moved from the KV gate to the batcher "
+        "queue capacity gate (same code, different source — the deadline "
+        "classification must stay uniform)"
+    ),
+)
+def admission_batcher_queue_deadline(ctx: CaseContext):
+    """Batcher-queue gate under an SLO deadline: park, then typed 8511.
+
+    Scenario: the A5 env (batcher queue capacity 2, dispatcher lease
+    window 4, prefill_fixed_ms=3000) with
+    scheduler.queueTimeoutMs=1500.  Eight requests are fired 0.15s apart
+    — fires 1-4 reach the engine and are delivery-confirmed before their
+    deadline could fire (the request deadline detaches at
+    markDeliveryConfirmed); fires 5-6 sit in the batcher queue, fires
+    7-8 park in placementWaiters behind the capacity gate.
+
+    Behaviour: every parked/queued request's absolute expiration
+    (admissionTimeMs + queueTimeoutMs) fires while it still waits,
+    completing its future with the typed BATCH_SLO_EXPIRED error (8511)
+    via RequestSlot.cancelForDeadline — the same producer
+    admission_slo_queue_deadline exercises from the KV gate.  Expired
+    requests are removed from the batcher queue / placementWaiters and
+    the scheduler ledger synchronously, so nothing dangles; the four
+    delivered requests finish their 3s batches unmolested.
+
+    Expected (contract): all eight schedules succeed (the deadline is a
+    terminal outcome, not a submit-time reject); during the pre-expiry
+    window the master-side parked count is >= 1 (the overflow wave is
+    parked, not rejected); fires 1-4 complete their streams normally;
+    every one of fires 5-8 terminates with the deadline error family
+    ("deadline"/"expired"/"exhaust"/"8400"/"8511"/"8431" — the same
+    assertion family as the KV-gate deadline case, asserting the
+    classification uniformity) within 1.0-5.0s of its fire; after the
+    wave the master inflight ledger is clean and a fresh request on the
+    relieved gate succeeds (recovery).
+
+    Prediction: expected to pass — the deadline path is deadline-error
+    type BATCH_SLO_EXPIRED installed at register and only detached by
+    delivery confirmation, and the 0.15s fire cadence parks the whole
+    overflow wave ~0.9s before the earliest expiry (fire 5 dies at
+    2.10s, the first engine terminal is 3.0s — no wake-up race).  Risk:
+    a late delivery acknowledgement could rescue a queued request —
+    the 4-seat lease window plus 3s prefills make that a 0.9s-margin
+    impossibility.
+    """
+    env = ctx.env_manager.ensure(
+        _batcher_queue_spec(ctx, queue_timeout_ms=BQ_DEADLINE_MS)
+    )
+    ops = ctx.engine_ops(env)
+    base = rid_base(ctx, "admission")
+    names = _prefill_names(ops)
+    decode_names = _decode_names(ops)
+    if not names:
+        return False, "no prefill engines found"
+    fired: list = []
+    try:
+        for n in names:
+            ops.set_perf(n, prefill_fixed_ms=3000.0)
+
+        fire_errors = []
+        for _ in range(BQ_DEADLINE_REQUESTS):
+            rid = ops.next_request_id(base)
+            err = _fire_tracked(ops, rid, fired, input_len=512, output_len=2)
+            if err is not None:
+                fire_errors.append((rid, err))
+            time.sleep(0.15)  # parks the whole wave before any expiry
+
+        # Pre-expiry observation: the overflow wave (fires 5-8) is parked
+        # on the MASTER — ledger-live but engine-absent — and NOT rejected.
+        parked_max = -1
+        parked_detail = "not observed"
+        deadline = time.monotonic() + 0.8
+        while time.monotonic() < deadline:
+            parked, detail = _master_side_parked(ops, names, decode_names)
+            if parked > parked_max:
+                parked_max, parked_detail = parked, detail
+            if parked_max >= 1:
+                break
+            time.sleep(0.2)
+
+        outcomes = _await_tracked(fired, wait_s=30.0)
+        delivered = outcomes[:4]
+        parked_wave = outcomes[4:]
+        delivered_ok = len(delivered) == 4 and all(
+            ok and err is None for _, _, _, ok, err in delivered
+        )
+        deadline_typed = []
+        for rid, t0, end, ok, err in parked_wave:
+            text = str(err or "")
+            typed = any(
+                kw in text.lower()
+                for kw in (
+                    "deadline",
+                    "expired",
+                    "exhaust",
+                    "8400",
+                    "8511",
+                    "8431",
+                )
+            )
+            in_window = 1.0 <= (end - t0) <= 5.0
+            deadline_typed.append((typed and in_window and not ok, text[:60]))
+        all_typed = len(deadline_typed) == 4 and all(ok for ok, _ in deadline_typed)
+
+        # Deadline death removes the queue/waiter/ledger entries; the
+        # four delivered batches drain normally.  Relieve the gate and
+        # verify a fresh request succeeds.
+        for n in names:
+            ops.set_perf(n, prefill_fixed_ms=100.0)
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 30.0
+        )
+        recovery_ok, recovery_msg = ops.verify_recovery()
+
+        passed = (
+            not fire_errors
+            and parked_max >= 1
+            and delivered_ok
+            and all_typed
+            and inflight_ok
+            and recovery_ok
+        )
+        return passed, (
+            f"fired={BQ_DEADLINE_REQUESTS} (fire_errors={fire_errors[:1]}), "
+            f"master_side_parked_max={parked_max} ({parked_detail}), "
+            f"delivered_completed={delivered_ok}, "
+            f"deadline_typed={all_typed} "
+            f"(details={[(ok, t) for ok, t in deadline_typed]}), "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        try:
+            for n in names:
+                ops.set_perf(n, prefill_fixed_ms=100.0)
+        except Exception:
+            pass
+
+
+# ===========================================================================
+# Master placement pool gate (admission wave-2 A4)
+# ===========================================================================
+
+
+def _pool_wait_spec(ctx: CaseContext) -> EnvSpec:
+    """A4 env: 1 prefill, the placement pool tightened to ONE seat
+    (router.roles.prefill.availability.maxPendingRequests=1 — the Java
+    default is 64; the harness template default of 100000 is overridden
+    here explicitly).
+
+    The batcher queue capacity stays at the Java default (1024) and the
+    dispatcher lease window at the template default (4): the placement
+    pool is the ONLY admission edge in play, so a second arrival while
+    the single seat is owned parks in placementWaiters instead of
+    stacking anywhere else."""
+    return EnvSpec(
+        label=f"admit_pool_{ctx.profile}",
+        n_prefill=1,
+        n_decode=2,
+        perf=default_perf(),
+        master_profile=ctx.profile,
+        master_env={"FLEXLB_CONFIG": admission_config(prefill_max_pending_requests=1)},
+    )
+
+
+@case(
+    "admission_placement_pool_wait",
+    profiles=["batch-window"],
+    requires=["enqueue_batch"],
+    source=(
+        "admission wave-2 A4: prefill placement pool gate "
+        "(router availability maxPendingRequests park — waitable, "
+        "pool-release wakeup)"
+    ),
+)
+def admission_placement_pool_wait(ctx: CaseContext):
+    """Prefill placement pool gate: wait for the pool, never fast-reject.
+
+    Scenario: dedicated 1P+2D env with the prefill placement pool
+    capped at a single seat (router.roles.prefill.availability
+    maxPendingRequests=1) and prefill_fixed_ms=3000.  Request A is fired
+    first and takes the only pool seat (pending=1, running); once A is
+    observably RUNNING, request B arrives — WorkerBatcher
+    .offerForPlacement refuses (pending >= maxPendingRequests), the
+    routing returns PlacementFailure->Blocked and B parks in
+    placementWaiters.
+
+    Behaviour: a pool-full condition is a WAIT.  When A terminates, its
+    PrefillState entry retires (pending 1 -> 0) and the next
+    capacity-changed publication (PlacementAvailability event) wakes
+    the parked waiter, which retries the placement successfully and
+    runs to completion.
+
+    Expected (contract): both schedules succeed (zero fast rejects);
+    while A holds the pool the master-side parked count is >= 1 — B is
+    ledger-live but absent from every engine (the A4 discriminator:
+    neither the batcher queue nor the engine holds B); both requests
+    complete; B terminates strictly AFTER A (>= 1.0s later — the
+    time-order proof that B parked and retried on pool release rather
+    than running concurrently) and B's end-to-end latency reflects the
+    park (>= 4.0s vs the 3s batch); no leakage (master + engine ledgers
+    clean) and a fresh request succeeds (recovery).
+
+    Prediction: expected to pass — the pool gate is the same
+    offerForPlacement refusal the queue-capacity case exercises one
+    layer up, and the wakeup rides the periodic worker-status
+    publication (status_rpc_ms=1000), so B's retry lands within ~1-2s
+    of A's terminal.  Risk: a slow status poll only stretches B's park,
+    never breaks it — the 60s default queueTimeoutMs dwarfs the window.
+    """
+    env = ctx.env_manager.ensure(_pool_wait_spec(ctx))
+    ops = ctx.engine_ops(env)
+    base = rid_base(ctx, "admission")
+    names = _prefill_names(ops)
+    decode_names = _decode_names(ops)
+    if not names:
+        return False, "no prefill engines found"
+    fired: list = []
+    try:
+        for n in names:
+            ops.set_perf(n, prefill_fixed_ms=3000.0)
+
+        # A takes the single placement-pool seat and runs.
+        rid_a = ops.next_request_id(base)
+        fire_err_a = _fire_tracked(ops, rid_a, fired, input_len=512, output_len=2)
+        if fire_err_a is not None:
+            return False, f"request A fire failed: {fire_err_a}"
+
+        def a_running() -> bool:
+            snap = ops.snapshot_by_name()
+            return any(int(snap.get(n, {}).get("running", 0)) >= 1 for n in names)
+
+        if not wait_for(a_running, 10.0, 0.1):
+            return False, "request A never reached RUNNING on prefill"
+
+        # B arrives while A owns the pool: placement blocked -> park.
+        rid_b = ops.next_request_id(base)
+        fire_err_b = _fire_tracked(ops, rid_b, fired, input_len=512, output_len=2)
+
+        # B is parked on the MASTER: ledger-live, engine-absent.
+        parked_max = -1
+        parked_detail = "not observed"
+        deadline = time.monotonic() + 2.5
+        while time.monotonic() < deadline:
+            parked, detail = _master_side_parked(ops, names, decode_names)
+            if parked > parked_max:
+                parked_max, parked_detail = parked, detail
+            if parked_max >= 1:
+                break
+            time.sleep(0.2)
+
+        outcomes = _await_tracked(fired, wait_s=30.0)
+        if len(outcomes) != 2:
+            return False, f"expected 2 tracked outcomes, got {len(outcomes)}"
+        (_, t0a, end_a, ok_a, err_a) = outcomes[0]
+        (_, t0b, end_b, ok_b, err_b) = outcomes[1]
+        both_completed = ok_a and err_a is None and ok_b and err_b is None
+        b_after_a = (end_b - end_a) >= 1.0
+        b_parked_long = (end_b - t0b) >= 4.0
+
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 30.0
+        )
+        engine_clean, engine_detail = engine_inflight_clean(
+            ops, names + decode_names, 15.0
+        )
+        recovery_ok, recovery_msg = ops.verify_recovery()
+
+        passed = (
+            fire_err_b is None
+            and parked_max >= 1
+            and both_completed
+            and b_after_a
+            and b_parked_long
+            and inflight_ok
+            and engine_clean
+            and recovery_ok
+        )
+        return passed, (
+            f"a_completed={ok_a and err_a is None} "
+            f"(e2e={end_a - t0a:.2f}s), "
+            f"b_completed={ok_b and err_b is None} "
+            f"(e2e={end_b - t0b:.2f}s, fire_err={fire_err_b}), "
+            f"b_after_a={b_after_a} (gap={end_b - end_a:.2f}s), "
+            f"b_parked_long={b_parked_long}, "
+            f"master_side_parked_max={parked_max} ({parked_detail}), "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"engine_clean={engine_clean}({engine_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        try:
+            for n in names:
+                ops.set_perf(n, prefill_fixed_ms=100.0)
+        except Exception:
+            pass
