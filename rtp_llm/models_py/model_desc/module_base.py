@@ -98,6 +98,10 @@ class GptModelBase(nn.Module):
             stage_layer_range(self.layer_num, self.pp_size, self.pp_rank, counts)
         )
 
+    def make_empty_intermediate_tensors(self, hidden_template: Any) -> dict[str, Any]:
+        """Build this model's stage-boundary inputs for stage-local PP warmup."""
+        return {"hidden_states": hidden_template}
+
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         self.kv_cache = init_resource.kv_cache
         if self.kv_cache is not None:

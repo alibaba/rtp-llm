@@ -1,7 +1,7 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
-#include <optional>
 
 #include <torch/torch.h>
 
@@ -31,7 +31,7 @@ public:
 
 class NcclPPTransport final: public PPTransport {
 public:
-    NcclPPTransport(std::optional<int> previous_rank, std::optional<int> next_rank);
+    NcclPPTransport(int64_t previous_rank, int64_t next_rank);
 
     NcclPPTransport(const NcclPPTransport&)            = delete;
     NcclPPTransport& operator=(const NcclPPTransport&) = delete;
@@ -40,8 +40,8 @@ public:
     std::unique_ptr<PPCommTicket> asyncReceive(torch::Tensor& tensor) override;
 
 private:
-    std::optional<int> previous_rank_;
-    std::optional<int> next_rank_;
+    int64_t previous_rank_;
+    int64_t next_rank_;
 };
 
 }  // namespace rtp_llm

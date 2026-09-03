@@ -688,7 +688,7 @@ private:
 };
 
 std::unique_ptr<P2PWork>
-runP2PCallback(const torch::Tensor& tensor, int global_peer, py::function** callback, const char* callback_name) {
+runP2PCallback(const torch::Tensor& tensor, int64_t global_peer, py::function** callback, const char* callback_name) {
     py::gil_scoped_acquire gil;
     py::function           fn;
     {
@@ -790,11 +790,11 @@ void execAllGather(const AllGatherParams& params) {
     fn(recv_list, static_cast<int>(params.mode), send_list, params.inplace);
 }
 
-std::unique_ptr<P2PWork> execISend(const torch::Tensor& tensor, int global_peer) {
+std::unique_ptr<P2PWork> execISend(const torch::Tensor& tensor, int64_t global_peer) {
     return runP2PCallback(tensor, global_peer, &g_isend_fn, "execISend");
 }
 
-std::unique_ptr<P2PWork> execIRecv(torch::Tensor& tensor, int global_peer) {
+std::unique_ptr<P2PWork> execIRecv(torch::Tensor& tensor, int64_t global_peer) {
     return runP2PCallback(tensor, global_peer, &g_irecv_fn, "execIRecv");
 }
 

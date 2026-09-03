@@ -1149,6 +1149,29 @@ GptModelOutputs PyWrappedModel::forwardPP(const GptModelInputs&        inputs,
     return outputs;
 }
 
+PPIntermediateTensors PyWrappedModel::makePPWarmUpInputTensors(const GptModelInputs& inputs) {
+    const auto token_num = inputs.combo_tokens.numel();
+    auto       hidden_template =
+        torch::zeros({token_num, hidden_size_},
+                     torch::TensorOptions().dtype(dataTypeToTorchType(description_.data_type)).device(torch::kCUDA));
+
+    py::gil_scoped_acquire gil;
+    try {
+        auto tensors = py_model_.attr("make_empty_intermediate_tensors")(hidden_template)
+                           .cast<std::map<std::string, torch::Tensor>>();
+        RTP_LLM_CHECK_WITH_INFO(!tensors.empty(), "Python model returned no PP warmup intermediate tensors");
+        for (const auto& [name, tensor] : tensors) {
+            RTP_LLM_CHECK_WITH_INFO(tensor.defined(), "PP warmup intermediate tensor [%s] is undefined", name.c_str());
+            RTP_LLM_CHECK_WITH_INFO(
+                tensor.is_cuda(), "PP warmup intermediate tensor [%s] must be on CUDA", name.c_str());
+        }
+        return PPIntermediateTensors{std::move(tensors)};
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_ERROR("Python model failed to construct PP warmup intermediate tensors:\n%s", e.what());
+        throw;
+    }
+}
+
 MicroBatchPlan PyWrappedModel::planMicroBatches(const GptModelInputs& inputs) {
     if (!int(device_props_.enable_layer_micro_batch)) {
         RTP_LLM_LOG_DEBUG("micro batch disable when enable_layer_micro_batch is false");

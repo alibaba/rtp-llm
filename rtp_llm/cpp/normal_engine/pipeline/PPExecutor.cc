@@ -116,17 +116,19 @@ absl::Status PPExecutor::processExecutionResult(InflightBatch& batch) {
 
 PPExecutor::PPExecutor(const EngineInitParams&                params,
                        const std::shared_ptr<KVCacheManager>& cache_manager,
+                       bool                                   warm_up,
                        MlaOpsType                             mla_ops_type,
                        std::function<void()>                  profile_step_start,
                        std::function<void()>                  profile_step_finish):
     Executor(),
     cache_manager_(cache_manager),
     processor_eos_token_id_(getProcessorEosTokenId(params.model_config_)),
+    warm_up_(warm_up),
     metrics_reporter_(params.metrics_reporter),
     tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
-        params.parallelism_config.world_rank == 0 ? metrics_reporter_ : nullptr)),
+        params.parallelism_config.world_rank == 0 && !warm_up_ ? metrics_reporter_ : nullptr)),
     wall_tps_reporter_(WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
-        params.parallelism_config.world_rank == 0 ? metrics_reporter_ : nullptr)),
+        params.parallelism_config.world_rank == 0 && !warm_up_ ? metrics_reporter_ : nullptr)),
     parallelism_config_(params.parallelism_config),
     // Stage-role flags and materialized partition, shared with cache creation and the Python side.
     pp_layout_(PPLayout::fromParallelismConfig(parallelism_config_, params.model_config_.num_layers)),
@@ -134,9 +136,9 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
     profile_step_finish_(std::move(profile_step_finish)),
     slots_(parallelism_config_.pp_size + 1) {
 
-    // Ring channels: send to next, receive from prev (both wrap around).
-    transport_ = std::make_unique<NcclPPTransport>(static_cast<int>(pp_layout_.prevRank()),
-                                                   static_cast<int>(pp_layout_.nextRank()));
+    if (!warm_up_) {
+        transport_ = std::make_unique<NcclPPTransport>(pp_layout_.prevRank(), pp_layout_.nextRank());
+    }
 
     enable_detail_log_ = params.profiling_debug_logging_config.enable_detail_log;
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d, tp_rank_ = %d", enable_detail_log_, parallelism_config_.tp_rank);
@@ -170,7 +172,7 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
                                              params.eplb_config);
     }
 
-    if (isLastStage() && isStageRoot()) {
+    if (!warm_up_ && isLastStage() && isStageRoot()) {
         const auto initial_sampler_batch_size =
             static_cast<size_t>(std::max<int64_t>(1, params.runtime_config.max_generate_batch_size));
         sampler_ = std::make_unique<Sampler>(SamplerInitParams{initial_sampler_batch_size, false});
@@ -215,7 +217,7 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
 
     const auto& cache_config = cache_manager_ ? cache_manager_->cacheConfig() : CacheConfig();
     batch_stream_processor_  = std::make_unique<PPBatchStreamProcessor>(
-        params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, false);
+        params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_);
     LogitsProcessorFactory::init(params.model_config_, params.grammar_config, params.sp_config.tree_decode_config);
     cudaProfilerBegin();
 }
@@ -227,6 +229,43 @@ PPExecutor::~PPExecutor() {
         waitAll(slot.execution_result_sends);
     }
     cudaProfilerEnd();
+}
+
+absl::Status PPExecutor::warmUp(const ScheduleOutput& schedule_output) {
+    RTP_LLM_CHECK_WITH_INFO(model_ != nullptr, "model is not initialized for PP warmup");
+
+    StreamGroups stream_groups(schedule_output.streams);
+    auto         model_input_status = batch_stream_processor_->gatherModelInput(stream_groups, buffer_holder_);
+    RETURN_IF_STATUS_OR_ERROR(model_input_status);
+    auto model_input = std::move(model_input_status.value());
+
+    /* Each stage warms up the same fake request locally and only requires TP synchronization. */
+    tpSyncModelInputs(model_input, parallelism_config_);
+
+    buffer_holder_.release();
+    model_->releaseBuffers();
+    if (cache_manager_ && model_input.kv_cache_update_mapping.defined()) {
+        cache_manager_->blockBatchCopy(model_input.kv_cache_update_mapping);
+    }
+
+    PPIntermediateTensors input_tensors;
+    PPIntermediateTensors output_tensors;
+    if (!isFirstStage()) {
+        input_tensors = model_->makePPWarmUpInputTensors(model_input);
+    }
+
+    auto model_output = model_->forwardPP(
+        model_input, isFirstStage() ? nullptr : &input_tensors, isLastStage() ? nullptr : &output_tensors);
+    if (expert_balancer_) {
+        RtpLLMExecutorMetricsCollector collector;
+        expert_balancer_->stepForward(*model_, collector);
+    }
+
+    /* Keep model tensors alive until lazy initialization kernels finish. */
+    cudaSyncAndCheck();
+    (void)model_output;
+    model_->releaseBuffers();
+    return absl::OkStatus();
 }
 
 absl::StatusOr<PPExecutionPlan> PPExecutor::buildPlan(const StreamGroups&         stream_groups,
@@ -403,9 +442,12 @@ void PPExecutor::advanceSamplingStates(const PPSamplingPlan& sampling_plan,
 }
 
 absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t schedule_time_us) {
-    if (schedule_time_us <= 0) {
-        schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    if (warm_up_) {
+        return warmUp(schedule_output);
     }
+
+    schedule_time_us = (schedule_time_us <= 0) ? autil::TimeUtility::currentTimeInMicroSeconds() : schedule_time_us;
+
     auto tps_active_guard      = tps_reporter_.makeActiveGuard(metrics_reporter_ && isFirstStage() && isStageRoot()
                                                           && !schedule_output.streams.empty());
     auto wall_tps_active_guard = wall_tps_reporter_.makeActiveGuard(metrics_reporter_ && isFirstStage() && isStageRoot()

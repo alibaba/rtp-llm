@@ -1104,6 +1104,14 @@ class Qwen3NextModel(GptModelBase):
             else None
         )
 
+    def make_empty_intermediate_tensors(
+        self, hidden_template: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        return {
+            "hidden_states": hidden_template,
+            "residual": torch.zeros_like(hidden_template),
+        }
+
     def _get_fmha_group_tags(self) -> Optional[list[str]]:
         if self.kv_cache is None:
             return None

@@ -187,7 +187,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
 #if USING_CUDA
-    if (runtime_config.warm_up && parallelism_config.pp_size == 1 && (!model_config_.mm_model_config.is_multimodal)
+    if (runtime_config.warm_up && (!model_config_.mm_model_config.is_multimodal)
         && !ffn_disaggregate_config.enable_ffn_disaggregate) {
         // warm up
         RTP_LLM_LOG_INFO("warm up (max_context_batch_size %d, max_seq_len %d calculate_loss %d) query begin",
@@ -232,6 +232,7 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
         executor_.reset(new PPExecutor(
             params,
             resource_context_.cache_manager,
+            false,
             mla_ops_type_,
             [this]() { step_profiler_.startStep(); },
             [this]() { step_profiler_.finishStep(); }));
@@ -394,7 +395,11 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->num_return_sequences = runtime_config.fifo_scheduler_config.max_context_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
-    executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_));
+    if (parallelism_config.pp_size > 1) {
+        executor_.reset(new PPExecutor(params, nullptr, true, mla_ops_type_));
+    } else {
+        executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_));
+    }
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);
@@ -441,7 +446,11 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     if (!cache_manager->init()) {
         RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
     }
-    executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, mla_ops_type_));
+    if (parallelism_config.pp_size > 1) {
+        executor_.reset(new PPExecutor(params, cache_manager, true, mla_ops_type_));
+    } else {
+        executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, mla_ops_type_));
+    }
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
     rtp_llm::setTraceMemory(false);

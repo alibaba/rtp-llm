@@ -146,8 +146,10 @@ public:
     virtual GptModelOutputs forwardPP(const GptModelInputs&        inputs,
                                       const PPIntermediateTensors* input_tensors,
                                       PPIntermediateTensors*       output_tensors);
-    virtual void            releaseBuffers() {}
-    virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
+    /* Builds model-defined inputs for stage-local PP warmup without upstream activations. */
+    virtual PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& inputs);
+    virtual void                  releaseBuffers() {}
+    virtual void                  prepareAttentionInputs(const GptModelInputs& inputs) {}
 
     // Refresh only kv_cache_kernel_block_id-dependent state on a previously-
     // prepared attention_inputs_ (e.g., after an MTP propose+verify re-gather).
