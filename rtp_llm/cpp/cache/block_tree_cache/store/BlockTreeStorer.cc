@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 BlockTreeStorer::BlockTreeStorer(BlockTree*                      tree,
@@ -123,7 +124,10 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
                             tierName(task->target_tier),
                             task->descriptors.size());
         scheduleStoreSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store business queue timeout"));
+        metrics_reporter_.reportTransferTaskQueueWait(CacheTransferOperation::STORE,
+                                                      currentTimeUs() - task->enqueue_time_us);
     };
+    task->enqueue_time_us = currentTimeUs();
     if (!task_pool_->submit([this, task]() { runStoreTask(task); },
                             BlockTreeTaskPool::kDefaultQueueWaitTimeout,
                             std::move(on_timeout))) {
@@ -138,10 +142,14 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
 void BlockTreeStorer::runStoreTask(const StoreTaskPtr& task) {
     if (stopping_.load()) {
         scheduleStoreSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store stopped before transfer"));
+        metrics_reporter_.reportTransferTaskQueueWait(CacheTransferOperation::STORE,
+                                                      currentTimeUs() - task->enqueue_time_us);
         return;
     }
 
     try {
+        metrics_reporter_.reportTransferTaskQueueWait(CacheTransferOperation::STORE,
+                                                      currentTimeUs() - task->enqueue_time_us);
         store_task_runner_.runTransfer(
             task,
             *transfer_dispatcher_,

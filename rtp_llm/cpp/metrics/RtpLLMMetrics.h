@@ -959,9 +959,11 @@ public:
     std::vector<TransferBytesEntry> transfer_bytes;
     int64_t                         descriptors_per_transfer = 0;
     int64_t                         latency_us               = 0;
+    int64_t                         queue_wait_latency_us    = 0;
     int64_t                         in_flight                = 0;
     bool                            success                  = true;
     bool                            transfer_completed       = true;
+    bool                            report_queue_wait        = false;
 };
 
 class RtpLLMCacheTransferMetrics: public kmonitor::MetricsGroup {
@@ -974,10 +976,11 @@ private:
     kmonitor::MutableMetric* transfer_failed_qps_metric      = nullptr;
     kmonitor::MutableMetric* descriptors_per_transfer_metric = nullptr;
     // Compatibility alias retained while dashboards migrate to the clarified name.
-    kmonitor::MutableMetric* transfer_descriptor_count_compat_metric = nullptr;
-    kmonitor::MutableMetric* transfer_latency_us_metric              = nullptr;
-    kmonitor::MutableMetric* transfer_in_flight_metric               = nullptr;
-    kmonitor::MutableMetric* transfer_bytes_metric                   = nullptr;
+    kmonitor::MutableMetric* transfer_descriptor_count_compat_metric    = nullptr;
+    kmonitor::MutableMetric* transfer_latency_us_metric                 = nullptr;
+    kmonitor::MutableMetric* transfer_task_queue_wait_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* transfer_in_flight_metric                  = nullptr;
+    kmonitor::MutableMetric* transfer_bytes_metric                      = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -990,14 +993,15 @@ public:
     std::string group_type;
     std::string trigger_type;
     int64_t     evictable_candidate_count  = 0;
-    int64_t     watermark_required_blocks  = 0;
     int64_t     eviction_trigger_count     = 0;
+    int64_t     eviction_required_blocks   = 0;
+    int64_t     eviction_scheduled_blocks  = 0;
     int64_t     tier_residence_time_ms     = 0;
     int64_t     candidate_idle_time_ms     = 0;
     int64_t     candidate_age_ms           = 0;
     bool        report_evictable           = false;
-    bool        report_watermark_required  = false;
     bool        report_eviction_trigger    = false;
+    bool        report_eviction_blocks     = false;
     bool        report_eviction            = false;
     bool        report_tier_residence_time = false;
     bool        report_candidate_idle_time = false;
@@ -1011,8 +1015,8 @@ public:
 
 public:
     kmonitor::MutableMetric* evictable_candidate_count_metric            = nullptr;
-    kmonitor::MutableMetric* watermark_required_blocks_metric            = nullptr;
     kmonitor::MutableMetric* eviction_trigger_qps_metric                 = nullptr;
+    kmonitor::MutableMetric* eviction_blocks_qps_metric                  = nullptr;
     kmonitor::MutableMetric* eviction_qps_metric                         = nullptr;
     kmonitor::MutableMetric* evicted_block_tier_residence_time_ms_metric = nullptr;
     kmonitor::MutableMetric* evicted_candidate_idle_time_ms_metric       = nullptr;
@@ -1063,6 +1067,8 @@ public:
     int64_t load_prepare_latency_us       = 0;
     int64_t load_wait_latency_us          = 0;
     int64_t match_to_ready_latency_us     = 0;
+    int64_t join_dependency_count         = 0;
+    int64_t join_wait_latency_us          = 0;
     bool    load_attempted                = false;
     bool    load_success                  = false;
     bool    report_reuse_metrics          = false;
@@ -1071,6 +1077,8 @@ public:
     bool    report_match_to_ready_latency = false;
     bool    report_load_metrics           = false;
     bool    report_load_wait_latency      = false;
+    bool    report_load_join              = false;
+    bool    report_load_join_wait         = false;
 };
 
 class RtpLLMRemoteCacheMatchMetricsCollector final {
@@ -1197,6 +1205,9 @@ public:
     kmonitor::MutableMetric* load_prepare_latency_us_metric    = nullptr;
     kmonitor::MutableMetric* load_wait_latency_us_metric       = nullptr;
     kmonitor::MutableMetric* match_to_ready_latency_us_metric  = nullptr;
+    kmonitor::MutableMetric* load_joined_request_qps_metric    = nullptr;
+    kmonitor::MutableMetric* load_join_dependency_count_metric = nullptr;
+    kmonitor::MutableMetric* load_join_wait_latency_us_metric  = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

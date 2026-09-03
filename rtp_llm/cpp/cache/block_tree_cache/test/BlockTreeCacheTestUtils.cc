@@ -579,8 +579,11 @@ bool BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(BlockTreeCache& cache,
     if (!cache.config_.isTierEnabled(tier)) {
         return false;
     }
-    return force_drop ? cache.evictor_.dropLocked(group_set_id, tier, /*notify_settled=*/true) :
-                        cache.evictor_.batchEvictLocked(group_set_id, tier, /*max_victim_count=*/1);
+    if (force_drop) {
+        return cache.evictor_.dropLocked(group_set_id, tier, /*notify_settled=*/true);
+    }
+    size_t scheduled_count = 0;
+    return cache.evictor_.batchEvictLocked(group_set_id, tier, /*max_victim_count=*/1, scheduled_count);
 }
 
 int BlockTreeCacheTestPeer::reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier) {
