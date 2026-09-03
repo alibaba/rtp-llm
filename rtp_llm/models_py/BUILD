@@ -5,6 +5,7 @@ py_library(
     srcs = glob([
         "utils/*.py",
     ]),
+    deps = ["//rtp_llm:config"],
     visibility = ["//visibility:public"],
 )
 
@@ -58,6 +59,7 @@ py_library(
     deps = [
         ":utils",
         ":tile_kernels_mhc",
+        "//rtp_llm:device",
         "//rtp_llm:warmup",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
@@ -65,8 +67,8 @@ py_library(
         "//rtp_llm/models_py/distributed:collective_torch",
         "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
-        # cuda13 locks ship flashinfer-python; deep-ep only in the x86 lock.
-        "@//:using_cuda13_x86": flashinfer + deep,
+        # CUDA 13 DeepEP rebuild is pending; the existing wheel links CUDA 12.
+        "@//:using_cuda13_x86": flashinfer + ["deep_gemm"],
         "@//:using_cuda13_arm": flashinfer + ["deep_gemm"],
         "@//:using_cuda12": flashinfer + deep,
         "@//:using_ppu": deep,
@@ -76,9 +78,9 @@ py_library(
         ],
         "//conditions:default": [],
     }) + select({
-        # cuda13 locks currently ship flash-mla (+tilelang on arm; no fast-hadamard).
+        # cuda13 locks ship flash-mla + tilelang, but no fast-hadamard.
         # cuda12_arm (kept from main) has no branch here: its lock ships none of these.
-        "@//:using_cuda13_x86": ["flash-mla"],
+        "@//:using_cuda13_x86": ["flash-mla", "tilelang"],
         "@//:using_cuda13_arm": ["flash-mla", "tilelang"],
         "@//:using_cuda12_9_x86": flashmla,
         "//conditions:default": [],
