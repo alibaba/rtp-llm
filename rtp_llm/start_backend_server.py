@@ -24,6 +24,7 @@ from rtp_llm.config.server_config_setup import (
     setup_cuda_device_and_accl_env,
 )
 from rtp_llm.ops import VitSeparation
+from rtp_llm.utils.expandable_segments import prepare_expandable_segments
 from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
@@ -137,6 +138,10 @@ def local_rank_start(
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     _install_hot_hook_runtime(f"backend_rank_{world_rank}")
+    # Keep startup-resident allocations non-expandable.  This must run before
+    # set_parallelism_config/setup_cuda_device_and_accl_env, either of which may
+    # touch CUDA; the helper is a no-op unless the user requested the option.
+    prepare_expandable_segments()
     backend_manager = None
     jit_cache_manager = None
     shutdown_requested = False
@@ -631,6 +636,12 @@ def start_backend_server(
         from rtp_llm.server.vit_rpc_server import vit_start_server
 
         return vit_start_server()
+
+    # Normalize the allocator before the backend parent probes CUDA.  The
+    # helper leaves a private request marker in the environment so spawned rank
+    # processes can repeat the normalization after inheriting the stripped
+    # config.  The separate ViT role has its own startup path and is left alone.
+    prepare_expandable_segments()
 
     py_env_configs.server_config.shutdown_timeout = (
         ProcessManager.sync_shutdown_timeout_env(
