@@ -385,10 +385,12 @@ def start_backend_server(
     os.makedirs("logs", exist_ok=True)
     load_gpu_nic_affinity()
 
-    if not torch.cuda.is_available():
-        return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)
-
     pc = py_env_configs.parallelism_config
+    if not torch.cuda.is_available():
+        return local_rank_start(
+            global_controller, py_env_configs, pc.world_rank, pipe_writer
+        )
+
     if (
         pc.world_size % torch.cuda.device_count() != 0
         and pc.world_size > torch.cuda.device_count()
@@ -413,7 +415,9 @@ def start_backend_server(
                 pipe_writer,
                 cleanup=manager.stop if manager else None,
             )
-        return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)
+        return local_rank_start(
+            global_controller, py_env_configs, pc.world_rank, pipe_writer
+        )
     finally:
         if manager:
             manager.stop()
