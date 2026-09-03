@@ -52,7 +52,10 @@ cc_test(
     srcs = ["PerRankBlockTransferEngineDeviceHostTest.cc"],
     copts = test_copts,
     tags = ["exclusive-if-local"],
-    deps = test_deps + [":block_transfer_engine_test_utils"],
+    deps = test_deps + [
+        ":block_transfer_engine_test_utils",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
+    ],
     env = {},
 )
 
