@@ -288,6 +288,7 @@ const CacheConfig& KVCacheManager::getMTPModuleCacheConfig(int mtp_module_id) co
 
 MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     RTP_LLM_PROFILE_FUNCTION();
+    RTP_LLM_CHECK_WITH_INFO(allocator_ != nullptr, "KVCacheManager::malloc called before KVCacheManager::init");
     RTP_LLM_CHECK(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids);
 
     const int  seq_size_per_block = config_.seq_size_per_block;
@@ -310,12 +311,19 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     } else {
         updateCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
     }
-    reportPrefillCacheHitMetrics(malloc_info, keys_initialized_now);
+    if (malloc_info.report_prefill_cache_hit_metrics) {
+        reportPrefillCacheHitMetrics(malloc_info, keys_initialized_now);
+    }
 
     // MallocResult carries MallocStatus out by value. Do not flatten it to a bare bool on the way
     // up: StreamCacheResource distinguishes RETRYABLE_RESOURCE_EXHAUSTED (keep the stream WAITING)
     // from PERMANENT_RESOURCE_EXHAUSTED / INTERNAL_ERROR (fail the request).
-    return allocator_->malloc(malloc_info);
+    MallocInfo allocator_malloc_info = malloc_info;
+    if (is_first_malloc) {
+        std::lock_guard<std::mutex> lock(permanent_token_reservations_mutex_);
+        allocator_malloc_info.permanent_reserved_blocks_by_group = permanent_reserved_blocks_by_group_;
+    }
+    return allocator_->malloc(allocator_malloc_info);
 }
 
 // is_first_malloc is passed as "this call is the one that initialised the cache keys", which is the
@@ -520,7 +528,93 @@ size_t KVCacheManager::totalBlocksNum() const {
 }
 
 size_t KVCacheManager::maxAvailableTokensNum() const {
-    return allocator_->maxAvailableTokensNum();
+    const size_t                total_tokens = allocator_->maxAvailableTokensNum();
+    std::lock_guard<std::mutex> lock(permanent_token_reservations_mutex_);
+    return total_tokens > permanent_reserved_tokens_ ? total_tokens - permanent_reserved_tokens_ : 0;
+}
+
+bool KVCacheManager::registerPermanentTokenReservation(int64_t                    reservation_id,
+                                                       size_t                     token_count,
+                                                       const std::vector<size_t>& physical_blocks_by_group) {
+    RTP_LLM_CHECK_WITH_INFO(allocator_ != nullptr,
+                            "registerPermanentTokenReservation called before KVCacheManager initialized");
+    if (token_count == 0) {
+        return false;
+    }
+    const size_t        total_tokens      = allocator_->maxAvailableTokensNum();
+    std::vector<size_t> normalized_blocks = physical_blocks_by_group;
+    const size_t        group_count       = static_cast<size_t>(config_.groupNums());
+    if (normalized_blocks.empty()) {
+        normalized_blocks.reserve(group_count);
+        for (size_t gid = 0; gid < group_count; ++gid) {
+            const size_t tokens_per_block = config_.seqSizePerBlockForGroup(gid);
+            RTP_LLM_CHECK_WITH_INFO(
+                tokens_per_block > 0, "permanent KV reservation requires positive group block size: group=%zu", gid);
+            normalized_blocks.push_back((token_count + tokens_per_block - 1) / tokens_per_block);
+        }
+    }
+    if (normalized_blocks.size() != group_count) {
+        RTP_LLM_LOG_WARNING("reject permanent KV reservation: reservation_id=%ld tokens=%zu "
+                            "block_groups=%zu expected_groups=%zu",
+                            reservation_id,
+                            token_count,
+                            normalized_blocks.size(),
+                            group_count);
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(permanent_token_reservations_mutex_);
+    const bool   duplicate = permanent_token_reservations_.find(reservation_id) != permanent_token_reservations_.end();
+    const size_t remaining_tokens =
+        permanent_reserved_tokens_ < total_tokens ? total_tokens - permanent_reserved_tokens_ : 0;
+    // A permanent internal allocation must never consume the entire
+    // request-serving capacity. Keeping at least one token available makes a
+    // misconfigured capture fail during startup instead of starting a service
+    // that can never admit a request.
+    if (duplicate || token_count >= remaining_tokens) {
+        RTP_LLM_LOG_WARNING("reject permanent KV reservation: reservation_id=%ld tokens=%zu "
+                            "reserved_tokens=%zu service_capacity_tokens=%zu duplicate=%d",
+                            reservation_id,
+                            token_count,
+                            permanent_reserved_tokens_,
+                            total_tokens,
+                            static_cast<int>(duplicate));
+        return false;
+    }
+    if (permanent_reserved_blocks_by_group_.empty()) {
+        permanent_reserved_blocks_by_group_.resize(group_count, 0);
+    }
+    permanent_token_reservations_.emplace(reservation_id, PermanentTokenReservation{token_count, normalized_blocks});
+    permanent_reserved_tokens_ += token_count;
+    for (size_t gid = 0; gid < group_count; ++gid) {
+        permanent_reserved_blocks_by_group_[gid] += normalized_blocks[gid];
+    }
+    RTP_LLM_LOG_INFO("registered permanent KV reservation: reservation_id=%ld tokens=%zu reserved_tokens=%zu "
+                     "remaining_service_tokens=%zu",
+                     reservation_id,
+                     token_count,
+                     permanent_reserved_tokens_,
+                     total_tokens - permanent_reserved_tokens_);
+    return true;
+}
+
+void KVCacheManager::releasePermanentTokenReservation(int64_t reservation_id) {
+    std::lock_guard<std::mutex> lock(permanent_token_reservations_mutex_);
+    const auto                  it = permanent_token_reservations_.find(reservation_id);
+    if (it == permanent_token_reservations_.end()) {
+        return;
+    }
+    permanent_reserved_tokens_ -= it->second.token_count;
+    RTP_LLM_CHECK(it->second.physical_blocks_by_group.size() == permanent_reserved_blocks_by_group_.size());
+    for (size_t gid = 0; gid < permanent_reserved_blocks_by_group_.size(); ++gid) {
+        RTP_LLM_CHECK(permanent_reserved_blocks_by_group_[gid] >= it->second.physical_blocks_by_group[gid]);
+        permanent_reserved_blocks_by_group_[gid] -= it->second.physical_blocks_by_group[gid];
+    }
+    permanent_token_reservations_.erase(it);
+}
+
+size_t KVCacheManager::permanentReservedTokensNum() const {
+    std::lock_guard<std::mutex> lock(permanent_token_reservations_mutex_);
+    return permanent_reserved_tokens_;
 }
 
 KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {

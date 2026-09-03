@@ -46,6 +46,7 @@ struct StreamUpdateInfo {
     // prompt scoring
     std::optional<PromptLogitsOutput> prompt_logits;
     std::optional<ErrorInfo>          error_info;
+    PrefillCudaGraphStatus            prefill_cuda_graph_status{PrefillCudaGraphStatus::NOT_REQUESTED};
 };
 
 struct StreamSpecUpdateInfo {
@@ -157,10 +158,13 @@ public:
         return false;
     }
 
-    virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
-    void         update(const StreamUpdateInfo& update_info);
-    void         specUpdate(const StreamSpecUpdateInfo& update_info);
-    bool         updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
+    virtual void                   updateOutput(const StreamUpdateInfo& update_info) = 0;
+    virtual PrefillCudaGraphStatus prefillCudaGraphStatus() const {
+        return PrefillCudaGraphStatus::NOT_REQUESTED;
+    }
+    void update(const StreamUpdateInfo& update_info);
+    void specUpdate(const StreamSpecUpdateInfo& update_info);
+    bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
     virtual size_t scoreLen() const {
         return score_len_ == 0 ? 1 : score_len_;

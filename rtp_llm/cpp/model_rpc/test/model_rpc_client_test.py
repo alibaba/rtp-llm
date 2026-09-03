@@ -374,6 +374,30 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(actual.speculative_draft_rounds, 7)
         self.assertEqual(actual.speculative_accepted_tokens_per_pos, [6, 4, 2])
 
+    def test_trans_output_prefill_cuda_graph_status_compatibility(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2], dtype=torch.int32),
+            generate_config=GenerateConfig(aux_info=True),
+            request_id=1,
+            mm_inputs=[],
+        )
+        for wire_status, expected_status in (
+            ("replayed", "replayed"),
+            ("", "not_requested"),
+        ):
+            with self.subTest(wire_status=wire_status):
+                outputs_pb = GenerateOutputsPB()
+                output_pb = outputs_pb.flatten_output
+                output_pb.finished.append(False)
+                output_pb.aux_info.add().prefill_cuda_graph_status = wire_status
+
+                outputs = trans_output(input_py, outputs_pb, StreamState())
+
+                self.assertEqual(
+                    outputs.generate_outputs[0].aux_info.prefill_cuda_graph_status,
+                    expected_status,
+                )
+
     @unittest.skip("need fix")
     def test_generate_stream(self):
         client = FakeModelRpcClient()

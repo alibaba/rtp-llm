@@ -572,6 +572,10 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     // prefill-side media usage metadata when forwarding their responses.
     const auto multimodal_lengths =
         prefill_context.generate_input ? prefill_context.generate_input->multimodalLengths() : std::map<int, int>{};
+    // Decode-side updates use NOT_REQUESTED, so the prefill worker is the
+    // authoritative source for this request-level status in PD separation.
+    const std::string prefill_cuda_graph_status =
+        prefillCudaGraphStatusString(prefill_context.getStream()->prefillCudaGraphStatus());
 
     auto first_token_rt_us = prefill_context.getStream()->getTimeInfo().first_token_rt_us;
     while (prefill_context.client_stream->Read(&response)) {
@@ -603,6 +607,8 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             response.mutable_flatten_output()->mutable_aux_info(i)->set_local_reuse_len(prefill_local_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_remote_reuse_len(prefill_remote_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_memory_reuse_len(prefill_memory_reuse_len);
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_cuda_graph_status(
+                prefill_cuda_graph_status);
 
             response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_total_reuse_len(
                 prefill_total_reuse_len);

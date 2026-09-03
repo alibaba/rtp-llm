@@ -56,8 +56,12 @@ from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
 )
 from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
-from rtp_llm.utils.warmup import model_warm_up_enabled
+from rtp_llm.models_py.modules.factory.attention.attn_factory import (
+    CudaGraphSelectionMode,
+    PrefillCudaGraphUnsupportedBackend,
+)
 from rtp_llm.ops import RoleType
+from rtp_llm.utils.warmup import model_warm_up_enabled
 
 
 def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
@@ -1060,13 +1064,20 @@ class DeepSeekV4Model(GptModelBase):
         return h.unsqueeze(-2).repeat(1, self.v4.hc_mult, 1)
 
     def prepare_fmha_impl(
-        self, inputs: PyModelInputs, is_cuda_graph: bool = False
+        self,
+        inputs: PyModelInputs,
+        is_cuda_graph: bool = False,
+        cuda_graph_selection_mode: Optional[str] = None,
     ) -> Any:
         """Return a ``DSv4DecodeFmhaImpl`` for decode CUDA-graph capture; None otherwise.
 
         Prefill runs eagerly (no graph). Decode uses its own sparse/compressed
         attention; the impl owns persistent metadata buffers updated in place
         by ``prepare_cuda_graph`` between replays."""
+        if cuda_graph_selection_mode == CudaGraphSelectionMode.PREFILL_GRAPH:
+            raise PrefillCudaGraphUnsupportedBackend(
+                "DeepSeek-V4 attention does not support prefill CUDA Graph"
+            )
         if not is_cuda_graph:
             return None
 

@@ -135,14 +135,19 @@ class AttentionInputRoutingTest(unittest.TestCase):
 
         with patch(
             "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
-            side_effect=lambda _config, _parallelism_config, _weight, group_inputs, _fmha_config, _is_cuda_graph: (
-                group_inputs
-            ),
+            side_effect=lambda **kwargs: kwargs["attn_inputs"],
         ) as factory:
-            fmha_impl = model.prepare_fmha_impl(inputs, is_cuda_graph=True)
+            fmha_impl = model.prepare_fmha_impl(
+                inputs,
+                is_cuda_graph=True,
+                cuda_graph_selection_mode="prefill_graph",
+            )
 
         self.assertEqual(fmha_impl, {"full": inputs_by_tag["full"]})
         factory.assert_called_once()
+        self.assertEqual(
+            factory.call_args.kwargs["cuda_graph_selection_mode"], "prefill_graph"
+        )
 
     def test_default_model_prepares_every_tag(self):
         inputs_by_tag = {"group0": object(), "group1": object()}
@@ -151,9 +156,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
 
         with patch(
             "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
-            side_effect=lambda _config, _parallelism_config, _weight, group_inputs, _fmha_config, _is_cuda_graph: (
-                group_inputs
-            ),
+            side_effect=lambda **kwargs: kwargs["attn_inputs"],
         ) as factory:
             fmha_impl = model.prepare_fmha_impl(inputs)
 

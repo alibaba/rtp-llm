@@ -74,6 +74,16 @@ struct MallocInfo {
     // Override for incrMalloc's seqLength read; -1 = fall back to complete_token_ids->seqLength().
     // Lets the state machine feed the publish-time value instead of racing with the async worker.
     int incr_seq_len_override = -1;
+    // Internal reservations (for example CUDA Graph scratch blocks) must not
+    // appear as user-request prefill cache hits. Keep this at the end so legacy
+    // positional aggregate initializers retain their field mapping.
+    bool report_prefill_cache_hit_metrics = true;
+    // Process-lifetime allocations (for example prefill CUDA Graph scratch KV)
+    // are already absent from availableBlocksNum(), but they must also be
+    // removed from the TOTAL_ONLY capacity snapshot. Otherwise an oversized
+    // fresh batch is misclassified as RETRYABLE forever. Entries are physical
+    // block counts in CacheTopology group order.
+    std::vector<size_t> permanent_reserved_blocks_by_group;
 
     int incrSeqLen() const;
 };

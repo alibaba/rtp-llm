@@ -26,17 +26,22 @@ namespace nostd           = opentelemetry::nostd;
 
 class RejectingWriter: public grpc::internal::WriterInterface<GenerateOutputsPB> {
 public:
-    bool Write(const GenerateOutputsPB&, grpc::WriteOptions) override {
+    bool Write(const GenerateOutputsPB& response, grpc::WriteOptions) override {
         ++write_calls;
+        last_response.CopyFrom(response);
         return false;
     }
 
-    int write_calls = 0;
+    int               write_calls = 0;
+    GenerateOutputsPB last_response;
 };
 
 class SingleOutputStream: public GenerateStream {
 public:
-    SingleOutputStream(): GenerateStream(makeInput(), makeModelConfig(), RuntimeConfig{}, ResourceContext{}, nullptr) {}
+    explicit SingleOutputStream(
+        PrefillCudaGraphStatus prefill_cuda_graph_status = PrefillCudaGraphStatus::NOT_REQUESTED):
+        GenerateStream(makeInput(), makeModelConfig(), RuntimeConfig{}, ResourceContext{}, nullptr),
+        prefill_cuda_graph_status_(prefill_cuda_graph_status) {}
 
     ErrorResult<GenerateOutputs> nextOutput(int64_t /*wait_timeout_ms*/ = 0) override {
         GenerateOutputs outputs;
@@ -49,7 +54,13 @@ public:
 
     void updateOutput(const StreamUpdateInfo&) override {}
 
+    PrefillCudaGraphStatus prefillCudaGraphStatus() const override {
+        return prefill_cuda_graph_status_;
+    }
+
 private:
+    PrefillCudaGraphStatus prefill_cuda_graph_status_;
+
     static std::shared_ptr<GenerateInput> makeInput() {
         auto input             = std::make_shared<GenerateInput>();
         input->request_id      = 41;
@@ -247,7 +258,7 @@ TEST(RpcWriterCancellationTest, RemoteWriteFailureCancelsGrpcStreamClosure) {
     kmonitor::MetricsReporterPtr metrics_reporter;
     auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
     PrefillGenerateContext       context(&resource, rpc_context, 0, nullptr, metrics_reporter, meta);
-    context.stream_        = std::make_shared<SingleOutputStream>();
+    context.stream_        = std::make_shared<SingleOutputStream>(PrefillCudaGraphStatus::REPLAYED);
     context.client_context = std::make_shared<grpc::ClientContext>();
     auto client_stream     = std::make_shared<SingleResponseClientStream>();
     context.client_stream  = client_stream;
@@ -256,6 +267,8 @@ TEST(RpcWriterCancellationTest, RemoteWriteFailureCancelsGrpcStreamClosure) {
 
     EXPECT_EQ(client_stream->read_calls, 1);
     EXPECT_EQ(writer.write_calls, 1);
+    ASSERT_EQ(writer.last_response.flatten_output().aux_info_size(), 1);
+    EXPECT_EQ(writer.last_response.flatten_output().aux_info(0).prefill_cuda_graph_status(), "replayed");
     EXPECT_TRUE(context.cancelled());
     EXPECT_EQ(context.error_status.error_code(), grpc::StatusCode::CANCELLED);
     const auto close_status = context.closeGrpcStream();
