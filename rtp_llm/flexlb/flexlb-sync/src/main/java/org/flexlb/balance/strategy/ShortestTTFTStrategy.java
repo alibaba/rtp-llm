@@ -7,7 +7,6 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.session.SessionPlacementStore;
-import org.flexlb.balance.session.SessionPlacementLifecycle;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
@@ -108,10 +107,6 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         long requestId = balanceContext.getRequestId();
         long seqLen = balanceContext.getRequest().getSeqLen();
         FlexlbConfig config = balanceContext.getConfig();
-        SessionPlacementLifecycle.initialize(
-                balanceContext.getRequest(),
-                config.getRouter().getRoles().getPrefill().getSessionAffinity(),
-                sessionPlacementStore);
 
         List<PrefillEndpoint> eligible = getAvailableEndpoints(
                 roleType,
