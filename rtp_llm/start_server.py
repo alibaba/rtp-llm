@@ -120,7 +120,7 @@ def start_backend_server_impl(
     try:
         backend_process = torch.multiprocessing.Process(
             target=start_backend_server,
-            args=(global_controller, py_env_configs, pipe_writer),
+            args=(global_controller, py_env_configs, pipe_writer, os.getpid()),
             name="backend_manager",
         )
         backend_process.start()

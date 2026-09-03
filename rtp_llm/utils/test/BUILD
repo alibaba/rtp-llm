@@ -175,6 +175,12 @@ py_test(
 )
 
 py_test(
+    name = "parent_death_signal_test",
+    srcs = ["parent_death_signal_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
+py_test(
     name = "grpc_host_channel_pool_test",
     srcs = [
         "grpc_host_channel_pool_test.py",
