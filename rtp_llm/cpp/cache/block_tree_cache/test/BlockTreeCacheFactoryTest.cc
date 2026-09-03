@@ -1665,6 +1665,45 @@ TEST_F(BlockTreeCacheFactoryTest, TransferBatchLimitPropagatesAndValidates) {
     }
 }
 
+TEST_F(BlockTreeCacheFactoryTest, TierWatermarksPropagateAndInvalidCombinationsAreRejected) {
+    const auto                               config    = makeSingleConfig();
+    auto                                     allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_watermarks");
+    KVCacheConfig                            kv_cache_config;
+    kv_cache_config.enable_host_cache                            = true;
+    kv_cache_config.host_cache_size_mb                           = 1;
+    kv_cache_config.enable_disk_cache                            = true;
+    kv_cache_config.disk_cache_size_mb                           = 1;
+    kv_cache_config.disk_cache_paths                             = disk_dir.path;
+    kv_cache_config.block_tree_device_evict_low_watermark_ratio  = 0.61;
+    kv_cache_config.block_tree_device_evict_high_watermark_ratio = 0.71;
+    kv_cache_config.block_tree_host_evict_low_watermark_ratio    = 0.62;
+    kv_cache_config.block_tree_host_evict_high_watermark_ratio   = 0.72;
+    kv_cache_config.block_tree_disk_evict_low_watermark_ratio    = 0.63;
+    kv_cache_config.block_tree_disk_evict_high_watermark_ratio   = 0.73;
+
+    auto cache = createBlockTreeCache(config, kv_cache_config, allocator);
+    ASSERT_NE(cache, nullptr);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_device.low_ratio, 0.61);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_device.high_ratio, 0.71);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_host.low_ratio, 0.62);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_host.high_ratio, 0.72);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_disk.low_ratio, 0.63);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_disk.high_ratio, 0.73);
+
+    for (const auto& [low_ratio, high_ratio] : {std::pair<double, double>{0.8, 0.8},
+                                                std::pair<double, double>{0.9, 0.8},
+                                                std::pair<double, double>{-0.1, 0.8},
+                                                std::pair<double, double>{0.1, 1.1},
+                                                std::pair<double, double>{0.0, 0.8}}) {
+        auto          invalid_allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        KVCacheConfig invalid_config;
+        invalid_config.block_tree_device_evict_low_watermark_ratio  = low_ratio;
+        invalid_config.block_tree_device_evict_high_watermark_ratio = high_ratio;
+        expectFactoryRejects(config, invalid_allocator, invalid_config);
+    }
+}
+
 TEST_F(BlockTreeCacheFactoryTest, FullPrefixScanConfigPropagatesAndValidates) {
     const auto config = makeSingleConfig();
     {

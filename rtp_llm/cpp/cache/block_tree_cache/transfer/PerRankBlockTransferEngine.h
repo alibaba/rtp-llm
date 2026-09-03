@@ -25,7 +25,10 @@ public:
                                         size_t                   device_disk_staging_block_count           = 4,
                                         size_t                   max_device_host_descriptors_per_batch     = 8,
                                         size_t                   transfer_worker_count                     = 4,
-                                        size_t                   max_non_device_host_descriptors_per_batch = 16);
+                                        size_t                   max_non_device_host_descriptors_per_batch = 16,
+                                        size_t                   transfer_queue_max_size                   = 10000,
+                                        int                      host_queue_wait_timeout_ms                = 10000,
+                                        int                      disk_queue_wait_timeout_ms                = 30000);
     PerRankBlockTransferEngine() = delete;
     virtual ~PerRankBlockTransferEngine();
 
@@ -55,6 +58,8 @@ private:
     size_t                                      max_device_host_descriptors_per_batch_{8};
     size_t                                      max_non_device_host_descriptors_per_batch_{16};
     size_t                                      transfer_worker_count_{4};
+    int                                         host_queue_wait_timeout_ms_{10000};
+    int                                         disk_queue_wait_timeout_ms_{30000};
 };
 
 using PerRankBlockTransferEnginePtr = std::shared_ptr<PerRankBlockTransferEngine>;
