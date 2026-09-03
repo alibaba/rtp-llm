@@ -7,7 +7,7 @@
 #include "kvcm_client/transfer_client.h"
 
 namespace rtp_llm {
-namespace remote_connector {
+namespace kvcm {
 
 class Subscriber;
 
@@ -22,5 +22,5 @@ public:
     virtual std::unique_ptr<Subscriber> createSubscriber(bool enable_vipserver) const;
 };
 
-}  // namespace remote_connector
+}  // namespace kvcm
 }  // namespace rtp_llm
