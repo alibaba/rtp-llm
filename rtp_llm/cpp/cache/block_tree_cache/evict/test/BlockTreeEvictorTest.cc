@@ -441,7 +441,9 @@ TEST(BlockTreeEvictorAsyncTest, PendingTransferDoesNotOccupyBusinessWorker) {
     unreferenceDeviceBlocksForTest(*group, device_blocks, BlockTreeRefType::CACHE);
     evictor.onInserted(inserted);
 
-    ASSERT_TRUE(evictor.batchEvictLocked(/*group_set_id=*/0, Tier::DEVICE, /*max_victim_count=*/1));
+    size_t scheduled_count = 0;
+    ASSERT_TRUE(evictor.batchEvictLocked(
+        /*group_set_id=*/0, Tier::DEVICE, /*max_victim_count=*/1, scheduled_count));
     ASSERT_TRUE(deferred_engine->waitForBatchCount(1, std::chrono::seconds(2)));
 
     std::mutex              marker_mutex;
@@ -628,8 +630,9 @@ TEST(BlockTreeEvictorAsyncTest, SameNodeGroupSetsSettleInReverseCompletionOrder)
     TreeNode* node = environment.insertDeviceNode();
     ASSERT_NE(node, nullptr);
 
-    ASSERT_TRUE(environment.evictor_->batchEvictLocked(0, Tier::DEVICE, /*max_victim_count=*/1));
-    ASSERT_TRUE(environment.evictor_->batchEvictLocked(1, Tier::DEVICE, /*max_victim_count=*/1));
+    size_t scheduled_count = 0;
+    ASSERT_TRUE(environment.evictor_->batchEvictLocked(0, Tier::DEVICE, /*max_victim_count=*/1, scheduled_count));
+    ASSERT_TRUE(environment.evictor_->batchEvictLocked(1, Tier::DEVICE, /*max_victim_count=*/1, scheduled_count));
     ASSERT_TRUE(environment.transfer_engine_->waitForBatchCount(2, std::chrono::seconds(2)));
     ASSERT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::DEMOTING);
     ASSERT_EQ(node->group_set_resources[1].transfer_state, GroupSetTransferState::DEMOTING);
@@ -657,8 +660,9 @@ TEST(BlockTreeEvictorAsyncTest, SameNodeGroupSetsSettleSuccessAndFailureIndepend
     TreeNode* node = environment.insertDeviceNode();
     ASSERT_NE(node, nullptr);
 
-    ASSERT_TRUE(environment.evictor_->batchEvictLocked(0, Tier::DEVICE, /*max_victim_count=*/1));
-    ASSERT_TRUE(environment.evictor_->batchEvictLocked(1, Tier::DEVICE, /*max_victim_count=*/1));
+    size_t scheduled_count = 0;
+    ASSERT_TRUE(environment.evictor_->batchEvictLocked(0, Tier::DEVICE, /*max_victim_count=*/1, scheduled_count));
+    ASSERT_TRUE(environment.evictor_->batchEvictLocked(1, Tier::DEVICE, /*max_victim_count=*/1, scheduled_count));
     ASSERT_TRUE(environment.transfer_engine_->waitForBatchCount(2, std::chrono::seconds(2)));
     const auto group_0_desc = environment.transfer_engine_->descriptorForGroupSet(0);
     const auto group_1_desc = environment.transfer_engine_->descriptorForGroupSet(1);
@@ -696,8 +700,9 @@ TEST(BlockTreeEvictorAsyncTest, ForceDropDetachesTwoGroupSetsBeforeLateCompletio
     TreeNode* const parent = path[0];
     TreeNode* const child  = path[1];
 
-    ASSERT_TRUE(environment.evictor_->batchEvictLocked(0, Tier::HOST, /*max_victim_count=*/1));
-    ASSERT_TRUE(environment.evictor_->batchEvictLocked(1, Tier::HOST, /*max_victim_count=*/1));
+    size_t scheduled_count = 0;
+    ASSERT_TRUE(environment.evictor_->batchEvictLocked(0, Tier::HOST, /*max_victim_count=*/1, scheduled_count));
+    ASSERT_TRUE(environment.evictor_->batchEvictLocked(1, Tier::HOST, /*max_victim_count=*/1, scheduled_count));
     ASSERT_TRUE(environment.transfer_engine_->waitForBatchCount(2, std::chrono::seconds(2)));
     const auto group_0_desc = environment.transfer_engine_->descriptorForGroupSet(0);
     const auto group_1_desc = environment.transfer_engine_->descriptorForGroupSet(1);
@@ -730,19 +735,6 @@ TEST(BlockTreeEvictorAsyncTest, ForceDropDetachesTwoGroupSetsBeforeLateCompletio
     EXPECT_EQ(environment.settledEvents(),
               (std::vector<std::pair<bool, bool>>{{true, false}, {true, false}, {true, false}}));
 
-    RtpLLMCacheEvictionMetrics* eviction_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
-    ASSERT_NE(eviction_metrics, nullptr);
-    for (CacheGroupType group_type : {CacheGroupType::FULL, CacheGroupType::LINEAR}) {
-        kmonitor::MetricsTags transfer_tags("source_tier", tierName(Tier::HOST));
-        transfer_tags.AddTag("target_tier", tierName(Tier::DISK));
-        transfer_tags.AddTag("group_type", metricCacheGroupTypeName(group_type));
-        EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_qps_metric, transfer_tags), 0);
-
-        kmonitor::MetricsTags drop_tags("source_tier", tierName(Tier::HOST));
-        drop_tags.AddTag("target_tier", tierName(Tier::NONE));
-        drop_tags.AddTag("group_type", metricCacheGroupTypeName(group_type));
-        EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_qps_metric, drop_tags), 1);
-    }
 }
 
 void verifyMixedDetachedBatchSettlement(bool transfer_success) {
@@ -812,7 +804,9 @@ void verifyMixedDetachedBatchSettlement(bool transfer_success) {
     TreeNode* const sibling = insertedNode(sibling_insert);
     ASSERT_NE(sibling, nullptr);
 
-    ASSERT_TRUE(evictor.batchEvictLocked(/*group_set_id=*/0, Tier::HOST, /*max_victim_count=*/2));
+    size_t scheduled_count = 0;
+    ASSERT_TRUE(evictor.batchEvictLocked(
+        /*group_set_id=*/0, Tier::HOST, /*max_victim_count=*/2, scheduled_count));
     ASSERT_TRUE(transfer_engine->waitForBatchCount(1, std::chrono::seconds(2)));
     const std::vector<TransferDescriptor> descriptors = transfer_engine->batchDescriptors(0);
     ASSERT_EQ(descriptors.size(), 2u);
@@ -1319,7 +1313,7 @@ TEST_F(BlockTreeEvictorTest, WatermarkRequiresHighAndRequestsDownToLowWithIntege
     device_pool_->decRef(*second);
 }
 
-TEST_F(BlockTreeEvictorTest, WatermarkRequiredGaugeClearsWhenNextCheckHasNoDeficit) {
+TEST_F(BlockTreeEvictorTest, WatermarkRequiredBlocksQpsClearsWhenNextCheckHasNoDeficit) {
     kmonitor::MetricsTags base_tags;
     auto                  metrics_reporter = std::make_shared<kmonitor::MetricsReporter>("", "", base_tags);
     evictor_runtime_.setMetricsReporter(metrics_reporter);
@@ -1333,13 +1327,20 @@ TEST_F(BlockTreeEvictorTest, WatermarkRequiredGaugeClearsWhenNextCheckHasNoDefic
 
     RtpLLMCacheEvictionMetrics* eviction_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
     ASSERT_NE(eviction_metrics, nullptr);
-    kmonitor::MetricsTags watermark_tags("tier", tierName(Tier::DEVICE));
-    watermark_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
-    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->watermark_required_blocks_metric, watermark_tags), 12);
+    kmonitor::MetricsTags required_tags("trigger_type", "watermark");
+    required_tags.AddTag("block_type", "required");
+    required_tags.AddTag("source_tier", tierName(Tier::DEVICE));
+    required_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+    kmonitor::MetricsTags scheduled_tags("trigger_type", "watermark");
+    scheduled_tags.AddTag("block_type", "scheduled");
+    scheduled_tags.AddTag("source_tier", tierName(Tier::DEVICE));
+    scheduled_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_qps_metric, required_tags), 12);
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_qps_metric, scheduled_tags), 0);
 
     device_pool_->decRef(*blocks);
     evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE, watermark);
-    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->watermark_required_blocks_metric, watermark_tags), 0);
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_qps_metric, required_tags), 0);
 }
 
 TEST_F(BlockTreeEvictorTest, DeviceHostWatermarkCapsBatchByRemainingRequiredCount) {
@@ -1421,9 +1422,16 @@ TEST_F(BlockTreeEvictorTest, DeviceHostWatermarkSubmitsOneLogicalBatchCappedByTr
     EXPECT_EQ(evictor_runtime_.transferEngine()->submittedDescriptorCount(), 2u);
     RtpLLMCacheEvictionMetrics* eviction_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
     ASSERT_NE(eviction_metrics, nullptr);
-    kmonitor::MetricsTags watermark_tags("tier", tierName(Tier::DEVICE));
-    watermark_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
-    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->watermark_required_blocks_metric, watermark_tags), 3);
+    kmonitor::MetricsTags required_tags("trigger_type", "watermark");
+    required_tags.AddTag("block_type", "required");
+    required_tags.AddTag("source_tier", tierName(Tier::DEVICE));
+    required_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+    kmonitor::MetricsTags scheduled_tags("trigger_type", "watermark");
+    scheduled_tags.AddTag("block_type", "scheduled");
+    scheduled_tags.AddTag("source_tier", tierName(Tier::DEVICE));
+    scheduled_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_qps_metric, required_tags), 3);
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_qps_metric, scheduled_tags), 2);
 
     while (evictor_->dropLocked(/*group_set_id=*/0, Tier::DEVICE, /*notify_settled=*/true)) {}
     task_pool.shutdown();
@@ -1599,7 +1607,9 @@ TEST_F(BlockTreeEvictorTest, DirectDropWatermarkBatchNotifiesSettlementOnce) {
         EXPECT_FALSE(check_watermark);
     };
 
-    EXPECT_TRUE(evictor_->batchEvictLocked(/*group_set_id=*/0, Tier::DISK, /*max_victim_count=*/3));
+    size_t scheduled_count = 0;
+    EXPECT_TRUE(evictor_->batchEvictLocked(
+        /*group_set_id=*/0, Tier::DISK, /*max_victim_count=*/3, scheduled_count));
 
     EXPECT_EQ(settled_count, 1u);
     EXPECT_EQ(tree_->size(), 0u);
@@ -1618,11 +1628,36 @@ TEST_F(BlockTreeEvictorTest, BatchDropLockedHonorsVictimLimit) {
         ASSERT_NE(insertedNode(result), nullptr);
     }
 
-    EXPECT_TRUE(evictor_->batchDropLocked(/*group_set_id=*/0, Tier::DISK, /*max_victim_count=*/1));
+    size_t scheduled_count = 0;
+    EXPECT_TRUE(evictor_->batchDropLocked(
+        /*group_set_id=*/0, Tier::DISK, /*max_victim_count=*/1, scheduled_count));
+    EXPECT_EQ(scheduled_count, 1u);
 
     EXPECT_EQ(tree_->size(), 1u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 1u);
     EXPECT_TRUE(evictor_->dropLocked(/*group_set_id=*/0, Tier::DISK, /*notify_settled=*/true));
+}
+
+TEST_F(BlockTreeEvictorTest, BatchDropReportsZeroScheduledBlocksWhenPhysicalBlockRemainsReferenced) {
+    std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = makeTestDiskPool(1, "batch_drop_referenced");
+    ASSERT_NE(disk_pool, nullptr);
+    resetGroup(nullptr, disk_pool);
+
+    const BlockIdxType source = group_->allocateSingleBlock(Tier::DISK, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(source));
+    disk_pool->incTreeRef(source, BlockTreeRefType::STORE);
+    BlockTreeInsertResult result = insert({100}, {{makeResource(Tier::DISK, source)}});
+    ASSERT_NE(insertedNode(result), nullptr);
+
+    size_t scheduled_count = 1;
+    EXPECT_TRUE(evictor_->batchDropLocked(
+        /*group_set_id=*/0, Tier::DISK, /*max_victim_count=*/1, scheduled_count));
+    EXPECT_EQ(scheduled_count, 0u);
+    EXPECT_EQ(tree_->size(), 0u);
+    EXPECT_EQ(disk_pool->freeBlocksNum(), 0u);
+
+    disk_pool->decTreeRef(source, BlockTreeRefType::STORE);
+    EXPECT_EQ(disk_pool->freeBlocksNum(), 1u);
 }
 
 TEST_F(BlockTreeEvictorTest, BatchAdmissionRejectionRollsBackEveryPlannedDescriptor) {
@@ -1647,7 +1682,9 @@ TEST_F(BlockTreeEvictorTest, BatchAdmissionRejectionRollsBackEveryPlannedDescrip
     evictor_->settled_   = [&](bool, bool) { ++settled_count; };
     task_pool.stopAdmission();
 
-    EXPECT_FALSE(evictor_->batchEvictLocked(/*group_set_id=*/0, Tier::DEVICE, /*max_victim_count=*/2));
+    size_t scheduled_count = 0;
+    EXPECT_FALSE(evictor_->batchEvictLocked(
+        /*group_set_id=*/0, Tier::DEVICE, /*max_victim_count=*/2, scheduled_count));
 
     EXPECT_EQ(evictor_runtime_.transferEngine()->submittedBatchCount(), 0u);
     EXPECT_EQ(evictor_->candidateCount(/*group_set_id=*/0, Tier::DEVICE), 2u);
@@ -1706,8 +1743,10 @@ TEST_F(BlockTreeEvictorTest, BatchQueueTimeoutRollsBackEveryPlannedDescriptorOnc
     evictor_->settled_ = [&](bool tree_data_mutated, bool check_watermark) {
         settled_events.emplace_back(tree_data_mutated, check_watermark);
     };
-    const bool submitted        = evictor_->batchEvictLocked(/*group_set_id=*/0, Tier::DEVICE, /*max_victim_count=*/2);
-    bool       deadline_rewound = false;
+    size_t     scheduled_count = 0;
+    const bool submitted       = evictor_->batchEvictLocked(
+        /*group_set_id=*/0, Tier::DEVICE, /*max_victim_count=*/2, scheduled_count);
+    bool deadline_rewound = false;
     {
         std::lock_guard<std::mutex> lock(task_pool.lifecycle_mutex_);
         if (task_pool.normal_queue_.size() == 1) {
@@ -1764,7 +1803,9 @@ TEST_F(BlockTreeEvictorTest, BatchTargetExhaustionLeavesEntirePlannedBatchUnchan
         settled_events.emplace_back(tree_data_mutated, check_watermark);
     };
     evictor_runtime_.transferEngine()->enqueue(false);
-    EXPECT_FALSE(evictor_->batchEvictLocked(/*group_set_id=*/0, Tier::DEVICE, /*max_victim_count=*/2));
+    size_t scheduled_count = 0;
+    EXPECT_FALSE(evictor_->batchEvictLocked(
+        /*group_set_id=*/0, Tier::DEVICE, /*max_victim_count=*/2, scheduled_count));
     task_pool.waitForIdle();
 
     EXPECT_EQ(evictor_runtime_.transferEngine()->submittedBatchCount(), 0u);
@@ -2774,7 +2815,9 @@ TEST_F(BlockTreeEvictorTest, PrimaryTargetExhaustionLeavesSourceAndCandidateUnch
     ASSERT_TRUE(victim.has_value());
     ASSERT_EQ(evictor_->candidateStats().device_candidates, 1u);
 
-    EXPECT_FALSE(evictor_->batchEvictLocked(/*group_set_id=*/0, Tier::DEVICE, /*max_victim_count=*/1));
+    size_t scheduled_count = 0;
+    EXPECT_FALSE(evictor_->batchEvictLocked(
+        /*group_set_id=*/0, Tier::DEVICE, /*max_victim_count=*/1, scheduled_count));
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
     EXPECT_EQ(resource.device_blocks, (std::vector<BlockIdxType>{source_block}));
     EXPECT_EQ(device_pool_->refCount(source_block), 1u);
@@ -2973,7 +3016,9 @@ TEST(BlockTreeEvictorPolicyTest, MatchDoesNotChangeFifoAdmissionOrder) {
 
     // No Host pool is configured, so target allocation fails before the source
     // is reserved. FIFO admission and relative victim order stay unchanged.
-    EXPECT_FALSE(evictor.batchEvictLocked(/*group_set_id=*/0, Tier::DEVICE, /*max_victim_count=*/1));
+    size_t scheduled_count = 0;
+    EXPECT_FALSE(evictor.batchEvictLocked(
+        /*group_set_id=*/0, Tier::DEVICE, /*max_victim_count=*/1, scheduled_count));
     EXPECT_EQ(insertedNode(first)->group_set_resources[0].candidate_meta.admission_seq, first_admission);
     auto retried_victim = evictor.chooseVictim(/*group_set_id=*/0, Tier::DEVICE);
     ASSERT_TRUE(retried_victim.has_value());

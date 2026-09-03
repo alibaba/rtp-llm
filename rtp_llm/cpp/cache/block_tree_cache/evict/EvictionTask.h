@@ -25,6 +25,7 @@ struct EvictionTimingSnapshot {
 struct EvictionTransferTask {
     std::vector<TransferDescriptor>     descs;
     std::vector<EvictionTimingSnapshot> timings;
+    int64_t                             enqueue_time_us{0};
 };
 
 struct EvictionDropTask {

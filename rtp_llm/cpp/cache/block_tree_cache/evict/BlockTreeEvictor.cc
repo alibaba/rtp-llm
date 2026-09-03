@@ -225,7 +225,10 @@ bool BlockTreeEvictor::dropLocked(size_t group_set_id, Tier source_tier, bool no
     return true;
 }
 
-bool BlockTreeEvictor::batchDropLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count) {
+bool BlockTreeEvictor::batchDropLocked(size_t  group_set_id,
+                                       Tier    source_tier,
+                                       size_t  max_victim_count,
+                                       size_t& scheduled_count) {
     std::vector<IBlockPool*> source_pools;
     const GroupSetPtr&       group_set = tree_->groupSets()[group_set_id];
     if (source_tier == Tier::DEVICE) {
@@ -238,6 +241,7 @@ bool BlockTreeEvictor::batchDropLocked(size_t group_set_id, Tier source_tier, si
         source_pools.push_back(group_set->diskPool().get());
     }
 
+    scheduled_count        = 0;
     bool   processed       = false;
     size_t remaining_count = max_victim_count;
     while (remaining_count > 0) {
@@ -249,16 +253,16 @@ bool BlockTreeEvictor::batchDropLocked(size_t group_set_id, Tier source_tier, si
         if (!dropLocked(group_set_id, source_tier, false)) {
             break;
         }
-        processed = true;
-
+        processed                  = true;
         size_t physically_released = std::numeric_limits<size_t>::max();
         for (size_t pool_index = 0; pool_index < source_pools.size(); ++pool_index) {
             const size_t used_after = source_pools[pool_index]->usedBlocksNum();
             physically_released =
                 std::min(physically_released, used_before[pool_index] - std::min(used_before[pool_index], used_after));
         }
-        const size_t progress = std::max<size_t>(1, physically_released);
-        remaining_count       = progress >= remaining_count ? 0 : remaining_count - progress;
+        scheduled_count += std::min(physically_released, remaining_count);
+        const size_t progress = std::min(std::max<size_t>(1, physically_released), remaining_count);
+        remaining_count -= progress;
     }
     if (processed) {
         settled_(true, false);
@@ -275,10 +279,13 @@ bool BlockTreeEvictor::submitEvictionTask(EvictionTransferTask task) {
                             tierName(task_ptr->descs.front().target_tier),
                             task_ptr->descs.size());
         scheduleEvictionSettlement(task_ptr, false);
+        metrics_reporter_->reportTransferTaskQueueWait(CacheTransferOperation::EVICT,
+                                                       currentTimeUs() - task_ptr->enqueue_time_us);
     };
-    const bool submitted = task_pool_->submit([this, task_ptr]() { runEvictionTask(task_ptr); },
-                                              BlockTreeTaskPool::kDefaultQueueWaitTimeout,
-                                              std::move(on_timeout));
+    task_ptr->enqueue_time_us = currentTimeUs();
+    const bool submitted      = task_pool_->submit([this, task_ptr]() { runEvictionTask(task_ptr); },
+                                                   BlockTreeTaskPool::kDefaultQueueWaitTimeout,
+                                                   std::move(on_timeout));
     if (!submitted) {
         updatePendingRelease(task_ptr->descs, false);
         rollbackTransferLocked(task_ptr->descs);
@@ -287,13 +294,17 @@ bool BlockTreeEvictor::submitEvictionTask(EvictionTransferTask task) {
     return true;
 }
 
-bool BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count) {
+bool BlockTreeEvictor::batchEvictLocked(size_t  group_set_id,
+                                        Tier    source_tier,
+                                        size_t  max_victim_count,
+                                        size_t& scheduled_count) {
+    scheduled_count = 0;
     if (max_victim_count == 0) {
         return false;
     }
     const Tier target_tier = watermarkTargetTier(source_tier);
     if (target_tier == Tier::NONE) {
-        return batchDropLocked(group_set_id, source_tier, max_victim_count);
+        return batchDropLocked(group_set_id, source_tier, max_victim_count, scheduled_count);
     }
 
     const GroupSetPtr&   group_set = tree_->groupSets()[group_set_id];
@@ -320,11 +331,18 @@ bool BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, s
     for (size_t desc_index = 0; desc_index < batch.descs.size(); ++desc_index) {
         batch.descs[desc_index].target_blocks = {(*target_blocks)[desc_index]};
     }
-    return submitEvictionTask(std::move(batch));
+    scheduled_count = batch.descs.size();
+    if (!submitEvictionTask(std::move(batch))) {
+        scheduled_count = 0;
+        return false;
+    }
+    return true;
 }
 
 void BlockTreeEvictor::runEvictionTask(std::shared_ptr<const EvictionTransferTask> task) noexcept {
     try {
+        metrics_reporter_->reportTransferTaskQueueWait(CacheTransferOperation::EVICT,
+                                                       currentTimeUs() - task->enqueue_time_us);
         task_runner_->runTransfer(
             task, *metrics_reporter_, [this, task](bool success) { scheduleEvictionSettlement(task, success); });
         return;
@@ -471,15 +489,20 @@ size_t BlockTreeEvictor::watermarkLogicalBatchLimit(Tier source_tier, Tier targe
 void BlockTreeEvictor::scheduleWatermarkEvictionsLocked(Tier tier, const TierWatermark& watermark) {
     for (const GroupSetPtr& group_set : tree_->groupSets()) {
         const size_t required_count = computeWatermarkEvictCount(*group_set, tier, watermark);
-        metrics_reporter_->reportWatermarkRequired(tier, group_set->groupType(), required_count);
         if (required_count == 0) {
             continue;
         }
-        const Tier   target_tier = watermarkTargetTier(tier);
-        const size_t batch_count = std::min(required_count, watermarkLogicalBatchLimit(tier, target_tier));
-        if (batchEvictLocked(group_set->groupSetId(), tier, batch_count)) {
+        const Tier   target_tier     = watermarkTargetTier(tier);
+        const size_t batch_count     = std::min(required_count, watermarkLogicalBatchLimit(tier, target_tier));
+        size_t       scheduled_count = 0;
+        if (batchEvictLocked(group_set->groupSetId(), tier, batch_count, scheduled_count)) {
             metrics_reporter_->reportEvictionTriggered(tier, group_set->groupType(), /*force_drop=*/false);
         }
+        metrics_reporter_->reportEvictionBlocks(tier,
+                                                group_set->groupType(),
+                                                /*force_drop=*/false,
+                                                required_count,
+                                                scheduled_count);
     }
 }
 

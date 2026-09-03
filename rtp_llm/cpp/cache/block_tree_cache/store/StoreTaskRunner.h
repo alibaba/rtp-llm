@@ -26,6 +26,7 @@ public:
         CacheKeysType                   cache_keys;
         std::vector<TransferDescriptor> descriptors;
         Phase                           phase{Phase::CREATED};
+        int64_t                         enqueue_time_us{0};
         int64_t                         transfer_begin_time_us{0};
     };
     using TaskPtr = std::shared_ptr<Task>;

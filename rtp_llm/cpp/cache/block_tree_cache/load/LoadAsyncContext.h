@@ -73,7 +73,8 @@ public:
     bool commit();
 
     bool         abortPending();
-    bool         completeOne(bool success);
+    void         startJoinWait(int64_t start_time_us);
+    bool         completeJoinedOne(bool success, bool& join_completed, int64_t& join_wait_latency_us);
     bool         completeTransfers(size_t count, bool success);
     bool         aggregateSuccess() const;
     bool         settle(bool success);
@@ -120,6 +121,8 @@ private:
     mutable std::mutex        mutex_;
     std::condition_variable   cv_;
     size_t                    remaining_transfer_count_{0};
+    std::atomic<size_t>       remaining_join_count_{0};
+    int64_t                   join_start_time_us_{0};
     bool                      has_failure_{false};
     bool                      settlement_ready_{false};
     SettlementReadyCallback   settlement_ready_callback_;

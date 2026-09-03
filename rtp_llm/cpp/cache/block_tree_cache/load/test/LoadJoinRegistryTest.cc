@@ -61,7 +61,7 @@ bool finishAndNotifyJoinedContexts(LoadJoinRegistry& registry, TreeNode* node, s
     }
     bool all_completed = true;
     for (const std::shared_ptr<LoadAsyncContext>& context : joined_contexts) {
-        all_completed = context->completeOne(success) && all_completed;
+        all_completed = context->completeTransfers(1, success) && all_completed;
     }
     return all_completed;
 }
@@ -92,7 +92,7 @@ TEST_F(LoadJoinRegistryTest, FinishNotifiesJoinedContext) {
     EXPECT_FALSE(first_context->done());
     EXPECT_TRUE(joined_context->success());
     EXPECT_FALSE(finishAndNotifyJoinedContexts(registry, &node, 0, true));
-    EXPECT_TRUE(first_context->completeOne(true));
+    EXPECT_TRUE(first_context->completeTransfers(1, true));
     EXPECT_TRUE(first_context->success());
     device_pool_->decRef(target_blocks[0]);
     device_pool_->decTreeRef(target_blocks[0], BlockTreeRefType::LOAD);
@@ -139,8 +139,8 @@ TEST_F(LoadJoinRegistryTest, ContextAggregatesMultipleRecords) {
     EXPECT_FALSE(context->done());
     EXPECT_TRUE(finishAndNotifyJoinedContexts(registry, &second_node, 0, false));
     EXPECT_FALSE(context->success());
-    EXPECT_TRUE(first_owner->completeOne(true));
-    EXPECT_TRUE(second_owner->completeOne(false));
+    EXPECT_TRUE(first_owner->completeTransfers(1, true));
+    EXPECT_TRUE(second_owner->completeTransfers(1, false));
     device_pool_->decRef(target_blocks_[1]);
     device_pool_->decRef(target_blocks_[2]);
 }
@@ -158,7 +158,7 @@ TEST_F(LoadJoinRegistryTest, EraseForContextPreservesOtherContexts) {
     EXPECT_TRUE(finishAndNotifyJoinedContexts(registry, &node, 0, true));
     EXPECT_FALSE(first_context->done());
     EXPECT_FALSE(second_context->done());
-    EXPECT_TRUE(first_context->completeOne(true));
+    EXPECT_TRUE(first_context->completeTransfers(1, true));
     EXPECT_TRUE(first_context->success());
 }
 
@@ -178,7 +178,7 @@ TEST_F(LoadJoinRegistryTest, ExpiredJoinedContextIsNotKeptAlive) {
     EXPECT_TRUE(weak_joined_context.expired());
     EXPECT_TRUE(finishAndNotifyJoinedContexts(registry, &node, 0, true));
     EXPECT_FALSE(first_context->done());
-    EXPECT_TRUE(first_context->completeOne(true));
+    EXPECT_TRUE(first_context->completeTransfers(1, true));
     EXPECT_TRUE(first_context->success());
 }
 

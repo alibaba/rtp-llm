@@ -29,6 +29,7 @@ public:
         // A submitted task owns the committed context until settlement completes.
         std::shared_ptr<LoadAsyncContext>  context;
         Phase                              phase{Phase::CREATED};
+        int64_t                            enqueue_time_us{0};
         int64_t                            host_transfer_begin_time_us{0};
         int64_t                            disk_transfer_begin_time_us{0};
     };

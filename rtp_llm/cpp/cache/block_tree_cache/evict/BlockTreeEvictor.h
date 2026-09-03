@@ -76,7 +76,6 @@ public:
     // Selection, task preparation, settlement, and abort mutate tree/group-set/pool/heap
     // state and must run under BlockTreeCache's mutex. Task execution is lock-free.
     bool   dropLocked(size_t group_set_id, Tier source_tier, bool notify_settled);
-    bool   batchEvictLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count);
     void   scheduleWatermarkEvictionsLocked(Tier tier, const TierWatermark& watermark);
     size_t computeWatermarkEvictCount(const GroupSet& group_set, Tier tier, const TierWatermark& watermark);
     // Discard a detached operation's source without publishing its target.
@@ -100,7 +99,14 @@ private:
     bool                              isEvictable(TreeNode* node, size_t group_set_id, Tier source_tier) const;
     std::optional<TransferDescriptor> chooseVictim(size_t group_set_id, Tier tier, bool force_drop = false);
     EvictionDropTask                  createDropTask(TransferDescriptor eviction_desc);
-    bool                              batchDropLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count);
+    bool                              batchEvictLocked(size_t  group_set_id,
+                                                       Tier    source_tier,
+                                                       size_t  max_victim_count,
+                                                       size_t& scheduled_count);
+    bool                              batchDropLocked(size_t  group_set_id,
+                                                      Tier    source_tier,
+                                                      size_t  max_victim_count,
+                                                      size_t& scheduled_count);
     bool                              submitEvictionTask(EvictionTransferTask task);
     Tier                              watermarkTargetTier(Tier source_tier) const;
     size_t                            watermarkLogicalBatchLimit(Tier source_tier, Tier target_tier) const;

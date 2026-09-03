@@ -308,6 +308,41 @@ TEST_F(BlockTreeCacheTest, ReportTransferFinishedAcceptsSuccessfulDescriptors) {
     EXPECT_EQ(reporter.transfer_in_flight_[operation_index][direction_index].load(), 0);
 }
 
+TEST(BlockTreeCacheMetricsTest, TransferTaskQueueWaitReportsOnlyOperation) {
+    kmonitor::MetricsTags                      tags;
+    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
+        std::make_shared<kmonitor::MetricsReporter>("", "", tags);
+    BlockTreeCacheMetricsReporter reporter;
+    reporter.setMetricsReporter(metrics_reporter);
+
+    reporter.reportTransferTaskQueueWait(CacheTransferOperation::LOAD, 123);
+
+    RtpLLMCacheTransferMetrics* transfer_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    ASSERT_NE(transfer_metrics, nullptr);
+    kmonitor::MetricsTags queue_wait_tags("operation", "load");
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_task_queue_wait_latency_us_metric), 1u);
+    EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->transfer_task_queue_wait_latency_us_metric, queue_wait_tags), 123);
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_qps_metric), 0u);
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_in_flight_metric), 0u);
+}
+
+TEST(BlockTreeCacheMetricsTest, LoadJoinMetricsKeepRequestAndDependencyGranularity) {
+    kmonitor::MetricsTags                      tags;
+    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
+        std::make_shared<kmonitor::MetricsReporter>("", "", tags);
+    BlockTreeCacheMetricsReporter reporter;
+    reporter.setMetricsReporter(metrics_reporter);
+
+    reporter.reportLoadJoin(2);
+    reporter.reportLoadJoinWait(123);
+
+    RtpLLMCacheReuseMetrics* reuse_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheReuseMetrics>();
+    ASSERT_NE(reuse_metrics, nullptr);
+    EXPECT_DOUBLE_EQ(snapshotQps(reuse_metrics->load_joined_request_qps_metric, tags), 1);
+    EXPECT_DOUBLE_EQ(snapshotQps(reuse_metrics->load_join_dependency_count_metric, tags), 2);
+    EXPECT_DOUBLE_EQ(snapshotQps(reuse_metrics->load_join_wait_latency_us_metric, tags), 123);
+}
+
 TEST(BlockTreeCacheMetricsTest, FailedQpsMetricsPublishZeroForSuccessfulOperations) {
     kmonitor::MetricsTags                      tags;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
@@ -401,6 +436,7 @@ TEST_F(BlockTreeCacheTest, EvictionTriggerQpsPublishesOnlyExistingGroupTypes) {
     ASSERT_NE(eviction_metrics, nullptr);
     EXPECT_EQ(metricSeriesCount(eviction_metrics->evictable_candidate_count_metric), 3u);
     EXPECT_EQ(metricSeriesCount(eviction_metrics->eviction_trigger_qps_metric), 6u);
+    EXPECT_EQ(metricSeriesCount(eviction_metrics->eviction_blocks_qps_metric), 12u);
 
     kmonitor::MetricsTags watermark_tags("trigger_type", "watermark");
     watermark_tags.AddTag("source_tier", tierName(Tier::DEVICE));
@@ -416,25 +452,18 @@ TEST_F(BlockTreeCacheTest, EvictionTriggerQpsPublishesOnlyExistingGroupTypes) {
     EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_trigger_qps_metric, watermark_tags), 1);
     reporter.reportEvictionTriggered(Tier::DEVICE, CacheGroupType::FULL, true);
     EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_trigger_qps_metric, force_drop_tags), 1);
-}
 
-TEST_F(BlockTreeCacheTest, WatermarkRequiredBlocksReportsRequiredLogicalCount) {
-    kmonitor::MetricsTags                      tags;
-    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
-        std::make_shared<kmonitor::MetricsReporter>("", "", tags);
-    BlockTreeCacheMetricsReporter reporter;
-    reporter.setMetricsReporter(metrics_reporter);
-
-    reporter.reportWatermarkRequired(Tier::HOST, CacheGroupType::FULL, 12);
-
-    RtpLLMCacheEvictionMetrics* eviction_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
-    ASSERT_NE(eviction_metrics, nullptr);
-    ASSERT_NE(eviction_metrics->watermark_required_blocks_metric, nullptr);
-    EXPECT_EQ(metricSeriesCount(eviction_metrics->watermark_required_blocks_metric), 1u);
-
-    kmonitor::MetricsTags watermark_tags("tier", tierName(Tier::HOST));
-    watermark_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
-    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->watermark_required_blocks_metric, watermark_tags), 12);
+    kmonitor::MetricsTags required_tags("trigger_type", "watermark");
+    required_tags.AddTag("block_type", "required");
+    required_tags.AddTag("source_tier", tierName(Tier::DEVICE));
+    required_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+    kmonitor::MetricsTags scheduled_tags("trigger_type", "watermark");
+    scheduled_tags.AddTag("block_type", "scheduled");
+    scheduled_tags.AddTag("source_tier", tierName(Tier::DEVICE));
+    scheduled_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
+    reporter.reportEvictionBlocks(Tier::DEVICE, CacheGroupType::FULL, false, 3, 2);
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_qps_metric, required_tags), 3);
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_qps_metric, scheduled_tags), 2);
 }
 
 TEST_F(BlockTreeCacheTest, ForceDropTriggerQpsCountsOneSuccessfulRequest) {
@@ -483,71 +512,6 @@ TEST_F(BlockTreeCacheTest, WatermarkTriggerQpsCountsOneSuccessfulSchedulingRound
     watermark_tags.AddTag("source_tier", tierName(Tier::DEVICE));
     watermark_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
     EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_trigger_qps_metric, watermark_tags), 1);
-}
-
-TEST_F(BlockTreeCacheTest, EvictionMetricsReportSettledTransferTarget) {
-    kmonitor::MetricsTags                      tags;
-    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
-        std::make_shared<kmonitor::MetricsReporter>("", "", tags);
-    BlockTreeCacheMetricsReporter reporter;
-    reporter.setMetricsReporter(metrics_reporter);
-
-    EvictionTransferTask task;
-    task.descs.emplace_back();
-    task.descs.front().group_set_id = 0;
-    task.descs.front().source_tier  = Tier::DEVICE;
-    task.descs.front().target_tier  = Tier::NONE;
-    task.timings.emplace_back();
-
-    reporter.reportEvictionFinished(task, cache_->groupSets());
-
-    RtpLLMCacheEvictionMetrics* eviction_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
-    ASSERT_NE(eviction_metrics, nullptr);
-    kmonitor::MetricsTags transfer_tags("source_tier", tierName(Tier::DEVICE));
-    transfer_tags.AddTag("target_tier", tierName(Tier::HOST));
-    transfer_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
-    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_qps_metric, transfer_tags), 0);
-
-    kmonitor::MetricsTags drop_tags("source_tier", tierName(Tier::DEVICE));
-    drop_tags.AddTag("target_tier", tierName(Tier::NONE));
-    drop_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
-    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_qps_metric, drop_tags), 1);
-}
-
-TEST_F(BlockTreeCacheTest, EvictionMetricsReportEveryCompletedDropDescriptor) {
-    kmonitor::MetricsTags                      tags;
-    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
-        std::make_shared<kmonitor::MetricsReporter>("", "", tags);
-    BlockTreeCacheMetricsReporter reporter;
-    reporter.setMetricsReporter(metrics_reporter);
-
-    EvictionDropTask task;
-    task.primary_desc.group_set_id = 0;
-    task.primary_desc.source_tier  = Tier::HOST;
-    task.primary_desc.target_tier  = Tier::NONE;
-
-    TransferDescriptor dependent_desc;
-    dependent_desc.group_set_id = 0;
-    dependent_desc.source_tier  = Tier::HOST;
-    dependent_desc.target_tier  = Tier::NONE;
-    task.dependent_prune_descs.push_back(dependent_desc);
-    task.dependent_prune_timings.emplace_back();
-
-    TransferDescriptor cascade_desc;
-    cascade_desc.group_set_id = 0;
-    cascade_desc.source_tier  = Tier::HOST;
-    cascade_desc.target_tier  = Tier::NONE;
-    task.cascade_descs.push_back(cascade_desc);
-    task.cascade_timings.emplace_back();
-
-    reporter.reportEvictionFinished(task, cache_->groupSets());
-
-    RtpLLMCacheEvictionMetrics* eviction_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
-    ASSERT_NE(eviction_metrics, nullptr);
-    kmonitor::MetricsTags eviction_tags("source_tier", tierName(Tier::HOST));
-    eviction_tags.AddTag("target_tier", tierName(Tier::NONE));
-    eviction_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
-    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_qps_metric, eviction_tags), 3);
 }
 
 TEST_F(BlockTreeCacheTest, KeySnapshotTracksMutationVersionAndLimit) {

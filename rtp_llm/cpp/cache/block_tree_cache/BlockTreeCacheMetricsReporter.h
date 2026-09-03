@@ -99,7 +99,15 @@ public:
     void reportEvictionFinished(const EvictionTransferTask& task, const std::vector<GroupSetPtr>& group_sets) const;
     void reportEvictionFinished(const EvictionDropTask& task, const std::vector<GroupSetPtr>& group_sets) const;
     void reportEvictionTriggered(Tier source_tier, CacheGroupType group_type, bool force_drop) const;
-    void reportWatermarkRequired(Tier tier, CacheGroupType group_type, size_t required_blocks) const;
+    void reportEvictionBlocks(Tier           source_tier,
+                              CacheGroupType group_type,
+                              bool           force_drop,
+                              size_t         required_blocks,
+                              size_t         scheduled_blocks) const;
+
+    void reportLoadJoin(size_t dependency_count) const;
+    void reportLoadJoinWait(int64_t join_wait_latency_us) const;
+    void reportTransferTaskQueueWait(CacheTransferOperation operation, int64_t queue_wait_latency_us) const;
 
     int64_t reportTransferStarted(CacheTransferOperation operation, Tier source_tier, Tier target_tier);
     void    reportTransferFinished(CacheTransferOperation                 operation,
