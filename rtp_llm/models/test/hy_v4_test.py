@@ -387,7 +387,7 @@ class Hy4Mxfp8WeightTest(unittest.TestCase):
             wrapped.scale.weights[0].merge_fun([scale]), expected_scale
         )
 
-    def test_indexer_wk_is_dequantized_to_bf16(self):
+    def test_indexer_wk_keeps_mxfp8_kernel_and_row_layout(self):
         prefix = "model.layers.{i}.self_attn.indexer.wk"
 
         def merge(ts):
@@ -404,24 +404,31 @@ class Hy4Mxfp8WeightTest(unittest.TestCase):
         self.assertTrue(Mxfp8Weight.support(self.quant_config, src))
         wrapped = src.create(src, self.quant_config)
         self.assertIsInstance(wrapped, Mxfp8Weight)
-        self.assertEqual(wrapped.kernel.data_type, torch.bfloat16)
-        self.assertIsNone(wrapped.scale)
+        self.assertEqual(wrapped.kernel.data_type, torch.float8_e4m3fn)
+        self.assertIsNotNone(wrapped.scale)
         self.assertEqual(
             self._ckpt_names(wrapped.kernel),
-            [f"{prefix}.weight", f"{prefix}.weight_scale"],
+            [f"{prefix}.weight"],
+        )
+        self.assertEqual(
+            self._ckpt_names(wrapped.scale), [f"{prefix}.weight_scale"]
         )
 
         weight = torch.arange(128 * 32, dtype=torch.float32).reshape(128, 32)
         weight = (weight.remainder(31) - 15).to(torch.float8_e4m3fn)
-        scale_exponents = torch.full((128, 1), 125.0)
-        dequantized = (weight.float() * 0.25).bfloat16()
-        # RTP stores Linear kernels as [in_features, out_features].  The
-        # checkpoint row permutation must therefore happen before the normal
-        # descriptor transpose, exactly as it does for non-quantized weights.
-        expected = transpose([merge([dequantized])])
-        actual = wrapped.kernel.process_fun([weight, scale_exponents])
-        torch.testing.assert_close(actual, expected)
-        self.assertEqual(tuple(actual.shape), (32, 128))
+        scale_exponents = torch.arange(128, dtype=torch.float32).reshape(128, 1)
+        expected_weight = merge([weight])
+        expected_scale = merge([scale_exponents])
+        actual_weight = wrapped.kernel.process_fun(
+            [wrapped.kernel.weights[0].merge_fun([weight])]
+        )
+        actual_scale = wrapped.scale.process_fun(
+            [wrapped.scale.weights[0].merge_fun([scale_exponents])]
+        )
+        torch.testing.assert_close(actual_weight, expected_weight)
+        torch.testing.assert_close(actual_scale, expected_scale)
+        self.assertEqual(tuple(actual_weight.shape), (128, 32))
+        self.assertEqual(tuple(actual_scale.shape), (128, 1))
 
     def test_mla_and_indexer_mappings(self):
         prefix = "model.layers.{i}.self_attn"
@@ -430,6 +437,7 @@ class Hy4Mxfp8WeightTest(unittest.TestCase):
             (W.mla_kv_b_w, [f"{prefix}.kv_b_proj.weight"]),
             (W.mla_q_b_w, [f"{prefix}.q_b_proj.weight"]),
             (W.mla_indexer_qb_w, [f"{prefix}.indexer.wq_b.weight"]),
+            (W.mla_indexer_k_w, [f"{prefix}.indexer.wk.weight"]),
         ]
         for internal_name, kernel_names in cases:
             with self.subTest(internal_name=internal_name):
