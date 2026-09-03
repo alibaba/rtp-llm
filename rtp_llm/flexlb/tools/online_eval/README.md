@@ -3,12 +3,13 @@
 This tool chain evaluates a running SpringBoot `flexlb-api` against a mock
 rtp-llm engine cluster. The mock engine cluster and the load client are
 Java-only (`flexlb-mock-engine`, JDK 21+); the Python mock engine / Python
-load client implementations have been removed. The retained Python tools —
-the smoke client family (`flexlb_smoke_base.py`,
-`priority_preemption_smoke.py`) and the
-`analyze_*.py` / `sanitize_*.mjs` tooling —
-run on the system `python3` and are intended for the `luoli_gpu` container,
-where `grpcio`, `grpcio-tools`, and `protobuf` are available.
+load client implementations have been removed. The smoke client family
+(`flexlb_smoke_base.py`, `priority_preemption_smoke.py`) has been removed
+as well: its coverage now lives in the `flexlb_ft/` functional-test
+framework. The retained Python tools (`analyze_*.py` and the
+`flexlb_ft/` framework itself) run on the system `python3` and are intended
+for the `luoli_gpu` container, where `grpcio`, `grpcio-tools`, and
+`protobuf` are available.
 
 The legacy standalone smoke/chaos scripts (`cancel_smoke.py`,
 `scheduling_smoke.py`, `anomaly_smoke.py`, `flexlb_behavior_test.sh`,
@@ -140,7 +141,6 @@ It also defaults to `MAVEN_PROFILES=opensource,!internal` so an adjacent `intern
 ## Data layout
 
 - `data/online_logs/trace_30min.jsonl`: sanitized replay shape derived from online logs.
-- `data/online_logs/pod1_arrivals.tsv`: sanitized relative-time arrival analysis source.
 - `data/online_logs/sample_access.json`: sanitized request-shape fixture with pseudonymous token IDs.
 - `data/performance/dsv4_flash_performance.sample.json`: mock latency model.
 - `data/config/master_fixed_window.json`: master process env config for the fixed-window baseline.
@@ -341,17 +341,11 @@ Outputs:
 python3 -m unittest discover -s rtp_llm/flexlb/tools/online_eval/tests
 ```
 
-Raw online logs must not be committed. Generate sanitized fixtures before adding data:
-
-```bash
-node rtp_llm/flexlb/tools/online_eval/sanitize_online_log_fixtures.mjs \
-  /path/to/raw/online_logs \
-  rtp_llm/flexlb/tools/online_eval/data/online_logs
-```
-
-The sanitizer drops request/header identity data, converts timestamps to relative
-time, pseudonymizes endpoints and block hashes, and remaps plus shuffles token IDs.
-The random mapping is not written to disk.
+Raw online logs must not be committed. The sanitized fixtures under
+`data/online_logs/` are already de-identified and checked in; the one-shot
+sanitizer (`sanitize_online_log_fixtures.mjs`) that produced them has been
+retired and removed — regenerate fixtures with an equivalent local script
+if new raw log batches ever need to land.
 
 ## Cache hit-rate calibers
 
