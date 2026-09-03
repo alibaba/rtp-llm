@@ -29,7 +29,7 @@ private:
 }  // namespace
 #endif
 
-NcclPPTransport::NcclPPTransport(std::optional<int> previous_rank, std::optional<int> next_rank):
+NcclPPTransport::NcclPPTransport(int64_t previous_rank, int64_t next_rank):
     previous_rank_(previous_rank), next_rank_(next_rank) {
 #if !USING_CUDA
     RTP_LLM_FAIL("NcclPPTransport requires a CUDA build");
@@ -38,8 +38,8 @@ NcclPPTransport::NcclPPTransport(std::optional<int> previous_rank, std::optional
 
 std::unique_ptr<PPCommTicket> NcclPPTransport::asyncSend(const torch::Tensor& tensor) {
 #if USING_CUDA
-    RTP_LLM_CHECK_WITH_INFO(next_rank_.has_value() && tensor.is_cuda(), "PP send is unavailable");
-    return std::make_unique<NcclPPCommTicket>(tensor, execISend(tensor, *next_rank_));
+    RTP_LLM_CHECK_WITH_INFO(tensor.is_cuda(), "PP send is unavailable");
+    return std::make_unique<NcclPPCommTicket>(tensor, execISend(tensor, next_rank_));
 #else
     (void)tensor;
     RTP_LLM_FAIL("NcclPPTransport requires a CUDA build");
@@ -48,8 +48,8 @@ std::unique_ptr<PPCommTicket> NcclPPTransport::asyncSend(const torch::Tensor& te
 
 std::unique_ptr<PPCommTicket> NcclPPTransport::asyncReceive(torch::Tensor& tensor) {
 #if USING_CUDA
-    RTP_LLM_CHECK_WITH_INFO(previous_rank_.has_value() && tensor.is_cuda(), "PP receive is unavailable");
-    return std::make_unique<NcclPPCommTicket>(tensor, execIRecv(tensor, *previous_rank_));
+    RTP_LLM_CHECK_WITH_INFO(tensor.is_cuda(), "PP receive is unavailable");
+    return std::make_unique<NcclPPCommTicket>(tensor, execIRecv(tensor, previous_rank_));
 #else
     (void)tensor;
     RTP_LLM_FAIL("NcclPPTransport requires a CUDA build");

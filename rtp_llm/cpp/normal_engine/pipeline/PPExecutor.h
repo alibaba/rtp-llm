@@ -39,6 +39,7 @@ class PPExecutor final: public Executor {
 public:
     PPExecutor(const EngineInitParams&                params,
                const std::shared_ptr<KVCacheManager>& cache_manager,
+               bool                                   warm_up             = false,
                MlaOpsType                             mla_ops_type        = MlaOpsType::AUTO,
                std::function<void()>                  profile_step_start  = nullptr,
                std::function<void()>                  profile_step_finish = nullptr);
@@ -61,6 +62,8 @@ public:
     static ModelFactory test_model_factory;
 
 private:
+    absl::Status warmUp(const ScheduleOutput& schedule_output);
+
     struct InflightBatch {
         bool         skip_run = true;
         StreamGroups stream_groups;
@@ -111,6 +114,7 @@ private:
     std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
     std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
     const int64_t                                                            processor_eos_token_id_;
+    const bool                                                               warm_up_;
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
     WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;

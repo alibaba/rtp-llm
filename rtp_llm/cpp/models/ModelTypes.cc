@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/normal_engine/pipeline/PPTypes.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
@@ -13,6 +14,10 @@ namespace rtp_llm {
 
 GptModelOutputs ModelBase::forwardPP(const GptModelInputs&, const PPIntermediateTensors*, PPIntermediateTensors*) {
     RTP_LLM_FAIL("PP forward is not implemented by this model");
+}
+
+PPIntermediateTensors ModelBase::makePPWarmUpInputTensors(const GptModelInputs&) {
+    RTP_LLM_FAIL("PP warmup input construction is not implemented by this model");
 }
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {

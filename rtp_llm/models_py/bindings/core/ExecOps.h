@@ -120,8 +120,8 @@ public:
     virtual void wait() = 0;
 };
 
-std::unique_ptr<P2PWork> execISend(const torch::Tensor& tensor, int global_peer);
-std::unique_ptr<P2PWork> execIRecv(torch::Tensor& tensor, int global_peer);
+std::unique_ptr<P2PWork> execISend(const torch::Tensor& tensor, int64_t global_peer);
+std::unique_ptr<P2PWork> execIRecv(torch::Tensor& tensor, int64_t global_peer);
 
 // Snapshot exchange over the PP process group; returns payloads in pp_rank order. Startup-only, pp_size > 1.
 std::vector<std::string> execPPSnapshotExchange(const std::string& local_snapshot);
