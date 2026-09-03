@@ -25,12 +25,8 @@ def even_split_counts(num_layers: int, pp_size: int) -> List[int]:
     return [base + (1 if rank < rem else 0) for rank in range(pp_size)]
 
 
-# ---------------------------------------------------------------------------
-# Model-level partitioner registry (extension point for shape-specialized
-# partitions of irregular models). A partitioner is Python-only; its output
-# travels through the materialized-counts channel, so C++ never needs to
-# understand the partitioning rule.
-# ---------------------------------------------------------------------------
+"""Model-level partitioner registry: extension point for shape-specialized partitions;
+output travels through the materialized-counts channel, so C++ never sees the rule."""
 
 # partition(num_layers, pp_size, model_config) -> per-stage layer counts
 PpPartitioner = Callable[[int, int, object], List[int]]

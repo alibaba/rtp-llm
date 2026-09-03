@@ -123,10 +123,7 @@ public:
 std::unique_ptr<P2PWork> execISend(const torch::Tensor& tensor, int global_peer);
 std::unique_ptr<P2PWork> execIRecv(torch::Tensor& tensor, int global_peer);
 
-// PP: exchanges the serialized stage cache snapshot with every PP stage
-// (all_gather_object over the PP process group) and returns all payloads in
-// stage (pp_rank) order. Startup-only; registered via register_pp_ops from
-// collective_torch. Requires pp_size > 1.
+// Snapshot exchange over the PP process group; returns payloads in pp_rank order. Startup-only, pp_size > 1.
 std::vector<std::string> execPPSnapshotExchange(const std::string& local_snapshot);
 
 // ===================================================================

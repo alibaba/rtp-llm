@@ -116,9 +116,7 @@ private:
     WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
     bool                    enable_detail_log_ = false;
     const ParallelismConfig parallelism_config_;
-    // Single source of stage-role truth (hasEmbedding/hasLmHead) and the
-    // materialized layer partition, shared with cache creation and the
-    // Python loader/model mirrors.
+    // Stage-role flags and materialized partition, shared with cache creation and the Python side.
     const PPLayout                             pp_layout_;
     std::unique_ptr<PPTransport>               transport_;
     std::function<void()>                      profile_step_start_;

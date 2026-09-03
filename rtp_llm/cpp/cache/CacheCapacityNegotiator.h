@@ -14,10 +14,9 @@ struct NegotiatedCapacity {
     PPBlockNumOverrides block_num_overrides;
 };
 
-// Capacity negotiation hook for CacheConfigCreator, consulted between local
-// measurement and sizing so the agreement enters the config as an input rather
-// than as a correction. Implementations abort startup on failure, so a returned
-// value is always usable.
+/* Capacity negotiation hook for CacheConfigCreator, consulted between local
+   measurement and sizing so the agreement enters the config as an input.
+   Implementations abort startup on failure, so a returned value is always usable. */
 class CacheCapacityNegotiator {
 public:
     virtual ~CacheCapacityNegotiator() = default;
@@ -27,7 +26,6 @@ public:
     virtual NegotiatedCapacity
     negotiate(const CacheConfig& topology, uint32_t local_block_num, const RuntimeConfig& runtime_config) = 0;
 
-    // Verifies the agreement actually landed in the composed config.
     virtual void validateComposed(const CacheConfig& composed, const NegotiatedCapacity& agreed) = 0;
 };
 

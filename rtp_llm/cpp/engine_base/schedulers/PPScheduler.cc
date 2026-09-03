@@ -94,10 +94,9 @@ void PPScheduler::admitWaitingStreams(list<GenerateStreamPtr>& scheduled_streams
             continue;
         }
 
-        /**
-         * CanRun is persistent and may have been set before this scheduling round. It is not proof of
-         * admission, so both the initialized-KV limit and current batch limits must be checked first.
-         * A stream that already owns KV may continue even when the initialized-stream limit is full.
+        /** CanRun is persistent and not proof of admission: the initialized-KV limit and
+         * current batch limits must both be checked; a stream already owning KV may
+         * continue even when the initialized-stream limit is full.
          */
         const bool already_inited_kv   = stream->curBlocksNum() > 0;
         const bool already_load_inited = stream->hasEvent(StreamEvents::LoadInitiated);

@@ -1,10 +1,3 @@
-# Unit tests for the PP layer filtering in the model loader
-# (LoadConfig.pp_layer_range / capability flags / _maybe_skip_weight).
-# These pin the layout decisions from config/pp_layout.py: the materialized
-# partition (pp_stage_layer_counts) consumed by lookup, the even-split
-# fallback, embedding on first stage, lm_head/final-layernorm on last
-# stage, and pp_size=1 degenerating to today's behavior (nothing filtered).
-
 import unittest
 from unittest.mock import MagicMock
 
@@ -30,8 +23,7 @@ def make_load_config(
     pp_rank: int = 0,
     pp_stage_layer_counts=None,
 ) -> LoadConfig:
-    # Production materializes the partition at startup; fixtures do the
-    # same for pp>1 (default even split) unless a case supplies its own.
+    # Fixtures materialize the even split for pp>1 unless a case supplies its own.
     if pp_size > 1 and pp_stage_layer_counts is None:
         pp_stage_layer_counts = even_split_counts(num_layers, pp_size)
     database = MagicMock(spec=BaseDatabase)
@@ -71,8 +63,7 @@ def make_load_config(
 def make_loader(
     load_config: LoadConfig, task_type=TaskType.LANGUAGE_MODEL
 ) -> ModelLoader:
-    # Bypass __init__ (needs full model config); only the fields used by
-    # _maybe_skip_weight are required here.
+    # Bypass __init__; only fields used by _maybe_skip_weight are needed.
     loader = object.__new__(ModelLoader)
     loader._task_type = task_type
     loader._load_config = load_config
@@ -92,8 +83,6 @@ class PPLayerRangeTest(unittest.TestCase):
         self.assertEqual(list(cfg.pp_layer_range()), list(range(8)))
 
     def test_ranges_tile_completely(self):
-        # Fixture defaults auto-materialize the even split, so this pins the
-        # tiling property of the production lookup path.
         for num_layers, pp_size in [(1, 1), (7, 3), (64, 4), (61, 5)]:
             covered = []
             for pp_rank in range(pp_size):
@@ -106,11 +95,9 @@ class PPLayerRangeTest(unittest.TestCase):
             )
 
     def test_capability_flags(self):
-        # pp=1: both capabilities true (degenerate).
         cfg = make_load_config(pp_size=1, pp_rank=0)
         self.assertTrue(cfg.has_pp_embedding)
         self.assertTrue(cfg.has_pp_lm_head)
-        # pp=3: first only embedding, last only lm_head, middle neither.
         flags = []
         for pp_rank in range(3):
             cfg = make_load_config(pp_size=3, pp_rank=pp_rank)
@@ -119,12 +106,10 @@ class PPLayerRangeTest(unittest.TestCase):
 
 
 class PPMaterializedPartitionTest(unittest.TestCase):
-    """The materialized partition (pp_stage_layer_counts) is consumed by
-    prefix-sum lookup; consumers never re-derive the partition."""
+    """The materialized partition is consumed by prefix-sum lookup."""
 
     def test_lookup_follows_materialized_data(self):
-        # counts disagree with the even split of 8/2 on purpose: the lookup
-        # must follow the data.
+        # counts disagree with the even split on purpose: lookup must follow the data.
         stage0 = make_load_config(
             num_layers=8, pp_size=2, pp_rank=0, pp_stage_layer_counts=[3, 5]
         )
@@ -135,8 +120,6 @@ class PPMaterializedPartitionTest(unittest.TestCase):
         self.assertEqual(list(stage1.pp_layer_range()), [3, 4, 5, 6, 7])
 
     def test_counts_materialized_even_split_matches_lookup(self):
-        # Production path: counts are the even split; the lookup reproduces
-        # the golden stage ranges.
         expected = {
             (65, 4): [(0, 17), (17, 33), (33, 49), (49, 65)],
             (9, 2): [(0, 5), (5, 9)],
@@ -176,8 +159,7 @@ class PPMaterializedPartitionTest(unittest.TestCase):
 
 
 class PPResolvePartitionTest(unittest.TestCase):
-    """resolve_pp_partition: default even split, validation, and the
-    model-level partitioner registry."""
+    """resolve_pp_partition: even split, validation, partitioner registry."""
 
     def test_default_even_split_golden_values(self):
         self.assertEqual(resolve_pp_partition(65, 4), [17, 16, 16, 16])
@@ -278,8 +260,6 @@ class PPSkipWeightTest(unittest.TestCase):
         )
 
     def test_non_lm_task_still_skips_lm_head(self):
-        # Existing behavior preserved: non-language-model tasks skip lm_head
-        # even on the last stage.
         skipped = self.skipped_names(
             pp_size=1, pp_rank=0, task_type=TaskType.DENSE_EMBEDDING
         )

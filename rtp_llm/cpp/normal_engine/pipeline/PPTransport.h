@@ -13,8 +13,7 @@ public:
 
     virtual ~PPCommTicket() = default;
 
-    // CUDA transports make the caller's current stream wait for communication
-    // completion. This need not block the CPU thread.
+    // CUDA transports make the caller's current stream wait for completion; the CPU thread need not block.
     virtual void wait() = 0;
 
 protected:
@@ -25,8 +24,7 @@ class PPTransport {
 public:
     virtual ~PPTransport() = default;
 
-    // CUDA transports observe the caller's current stream. A send depends on
-    // prior work on that stream; wait() orders subsequent work after completion.
+    // CUDA transports observe the caller's current stream: a send depends on prior work on it.
     virtual std::unique_ptr<PPCommTicket> asyncSend(const torch::Tensor& tensor) = 0;
     virtual std::unique_ptr<PPCommTicket> asyncReceive(torch::Tensor& tensor)    = 0;
 };

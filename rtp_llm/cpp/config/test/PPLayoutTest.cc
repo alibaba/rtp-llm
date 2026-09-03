@@ -1,8 +1,3 @@
-// Unit tests for PPLayout, the C++ consumer of the PP layer partition
-// (materialized as ParallelismConfig.pp_stage_layer_counts by the Python
-// decision point, rtp_llm/config/pp_layout.py). These tests pin the layout
-// decisions (capability flags, ring neighbors, materialized lookup and the
-// even-split fallback); they must stay in sync with test_pp_layer_filter.py.
 
 #include <cstdint>
 #include <utility>
@@ -28,8 +23,6 @@ PPLayout makeLayout(int64_t pp_size, int64_t pp_rank, int64_t total_layers) {
 
 }  // namespace
 
-// pp_size=1 degenerates to today's behavior: the single stage is both first
-// and last, and owns all layers.
 TEST(PPLayoutTest, SingleStageDegenerate) {
     auto layout = makeLayout(/*pp_size=*/1, /*pp_rank=*/0, /*total_layers=*/64);
     EXPECT_TRUE(layout.hasEmbedding());
@@ -37,8 +30,6 @@ TEST(PPLayoutTest, SingleStageDegenerate) {
     EXPECT_EQ(layout.myLayerRange(), (std::pair<int64_t, int64_t>{0, 64}));
 }
 
-// Capability flags across a 4-stage pipeline: only stage 0 has embedding,
-// only the last stage has the LM head, middles have neither.
 TEST(PPLayoutTest, CapabilityFlagsAcrossStages) {
     for (int64_t rank = 0; rank < 4; ++rank) {
         auto layout = makeLayout(4, rank, 64);
@@ -47,11 +38,8 @@ TEST(PPLayoutTest, CapabilityFlagsAcrossStages) {
     }
 }
 
-// Ring neighbors for PP transport construction: stages wrap around, and
-// rank derivation is dp-safe.
 TEST(PPLayoutTest, RingNeighborRanks) {
-    // pp=3, dp=1, tp=2, world=6: lane stride = 2.
-    // stage0 = ranks {0,1}, stage1 = {2,3}, stage2 = {4,5}.
+    // pp=3, dp=1, tp=2: stage0 = ranks {0,1}, stage1 = {2,3}, stage2 = {4,5}.
     auto make = [](int64_t pp_rank, int64_t tp_rank) {
         PPLayout layout;
         layout.pp_size = 3;
@@ -62,21 +50,16 @@ TEST(PPLayoutTest, RingNeighborRanks) {
         return layout;
     };
     EXPECT_EQ(make(0, 0).laneStride(), 2);
-    // Middle stage: prev/next are the adjacent stages.
     EXPECT_EQ(make(1, 0).prevRank(), 0);
     EXPECT_EQ(make(1, 0).nextRank(), 4);
     EXPECT_EQ(make(1, 1).prevRank(), 1);
     EXPECT_EQ(make(1, 1).nextRank(), 5);
-    // First stage: prev wraps to the last stage.
     EXPECT_EQ(make(0, 0).prevRank(), 4);
     EXPECT_EQ(make(0, 0).nextRank(), 2);
-    // Last stage: next wraps to the first stage (sample-result return path).
     EXPECT_EQ(make(2, 0).prevRank(), 2);
     EXPECT_EQ(make(2, 0).nextRank(), 0);
 
-    // dp>1: the lane offset (dp_rank*tp_size) must be included. pp=2,
-    // dp=2, tp=2, world=8; lane of rank 3 (dp_rank=1, tp_rank=1) is
-    // {3, 7}, NOT {3, 5}.
+    // dp>1: lane offset dp_rank*tp_size must be included; lane of rank 3 is {3, 7}, not {3, 5}.
     PPLayout dp_lane;
     dp_lane.pp_size = 2;
     dp_lane.pp_rank = 0;
@@ -90,15 +73,10 @@ TEST(PPLayoutTest, RingNeighborRanks) {
     EXPECT_EQ(dp_lane.prevRank(), 7);
     EXPECT_EQ(dp_lane.nextRank(), 7);
 
-    // pp=1 degenerate: both neighbors are the stage itself.
     PPLayout single = makeLayout(1, 0, 8);
     EXPECT_EQ(single.prevRank(), 0);
     EXPECT_EQ(single.nextRank(), 0);
 }
-
-// ---------------------------------------------------------------------------
-// Materialized partition: prefix-sum lookup over pp_stage_layer_counts
-// ---------------------------------------------------------------------------
 
 namespace {
 
@@ -115,33 +93,26 @@ PPLayout makeMaterializedLayout(std::vector<int64_t> counts, int64_t pp_rank) {
 
 }  // namespace
 
-// Shape-specialized counts (e.g. a model-level partitioner): the lookup
-// follows the data, not the even-split formula. (Even-split golden values
-// are covered one level up by PPStageCacheConfigTest.stageScopedMatchesLayerPartition.)
 TEST(PPLayoutTest, MaterializedShapeSpecializedCounts) {
     auto layout = makeMaterializedLayout({4, 12, 12}, 1);
     EXPECT_EQ(layout.myLayerRange(), (std::pair<int64_t, int64_t>{4, 16}));
     EXPECT_EQ(layout.layerRangeOf(2), (std::pair<int64_t, int64_t>{16, 28}));
 }
 
-// Single stage via the materialized channel.
 TEST(PPLayoutTest, MaterializedSingleStage) {
     auto layout = makeMaterializedLayout({64}, 0);
     EXPECT_EQ(layout.myLayerRange(), (std::pair<int64_t, int64_t>{0, 64}));
 }
 
-// Malformed materialized data fails fast.
 TEST(PPLayoutTest, MaterializedRejectsInconsistentCounts) {
     auto layout    = makeMaterializedLayout({8, 8}, 0);
     layout.pp_size = 3;  // size/pp_size mismatch
     EXPECT_THROW(layout.layerRangeOf(0), std::exception);
-    // Out-of-range stage.
     auto ok = makeMaterializedLayout({8, 8}, 0);
     EXPECT_THROW(ok.layerRangeOf(2), std::exception);
     EXPECT_THROW(ok.layerRangeOf(-1), std::exception);
 }
 
-// fromParallelismConfig carries every layout input over.
 TEST(PPLayoutTest, FromParallelismConfig) {
     ParallelismConfig pc;
     pc.pp_size               = 3;
@@ -160,7 +131,7 @@ TEST(PPLayoutTest, FromParallelismConfig) {
     EXPECT_EQ(layout.tp_rank, 3);
     EXPECT_EQ(layout.myLayerRange(), (std::pair<int64_t, int64_t>{9, 13}));
 
-    // Empty counts -> even-split fallback (golden values unchanged).
+    // Empty counts -> even-split fallback.
     ParallelismConfig bare;
     bare.pp_size           = 4;
     bare.pp_rank           = 0;

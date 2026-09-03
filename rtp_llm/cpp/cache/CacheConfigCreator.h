@@ -36,20 +36,14 @@ public:
                                             int                      module_index,
                                             uint32_t                 main_layer_num);
 
-    // Builds the unsized cache TOPOLOGY skeleton: groups, layers, per-group
-    // geometry and strides, with every block count left at 0 — a CPU-only
-    // descriptor, never a memory commitment. Under pp_size>1 the model config
-    // is stage-scoped first, so the skeleton covers this stage's layers only.
-    // Callers that need a usable config go through createConfig.
+    /* Unsized topology skeleton (all block counts 0); stage-scoped under pp_size>1. */
     static CacheConfig createBasicConfig(const ModelConfig&       model_config,
                                          const ParallelismConfig& parallelism_config,
                                          const KVCacheConfig&     kv_cache_config,
                                          int                      gen_num_per_cycle);
 
-    // Full construction pipeline: skeleton -> local capacity measurement ->
-    // (optional negotiation) -> sizing. The negotiator is consulted between
-    // measurement and sizing, so its result enters the config as an input;
-    // null sizes every group from the local measurement alone.
+    /* skeleton -> measure -> (negotiate) -> size; a non-null negotiator's result
+       enters sizing as an input, null sizes from the local measurement alone. */
     static CacheConfig createConfig(const ModelConfig&                               model_config,
                                     const ParallelismConfig&                         parallelism_config,
                                     const RuntimeConfig&                             runtime_config,
@@ -76,16 +70,13 @@ public:
                                                     const SpecBuildContext&      ctx,
                                                     int64_t                      expected_layer_num);
 
-    // PP: with pp_size>1 returns a copy of model_config whose layer-dimension
-    // fields (num_layers, kv_cache_spec_descs, hybrid_attention_types) are
-    // sliced to this rank's layer partition; with pp_size=1 the copy is
-    // identical to the input.
+    /* PP: slices layer-dimension fields (num_layers, kv_cache_spec_descs,
+       hybrid_attention_types) to this rank's partition; identity at pp_size=1. */
     static ModelConfig stageScopedModelConfig(const ModelConfig&       model_config,
                                               const ParallelismConfig& parallelism_config);
 
 private:
-    // Budget solve over per-block bytes: how many blocks this machine can
-    // afford for the given topology. Pure computation, no VRAM touched.
+    /* Budget solve over per-block bytes: pure computation, no VRAM touched. */
     static uint32_t measureLocalBlockCapacity(const CacheConfig&                               topology,
                                               const ModelConfig&                               model_config,
                                               const RuntimeConfig&                             runtime_config,
@@ -94,9 +85,9 @@ private:
                                               const std::optional<WarmUpResult>&               warm_up_result,
                                               const std::optional<SpeculativeExecutionConfig>& sp_config);
 
-    // The only place a CacheConfig becomes sized, and it runs before any pool
-    // exists. pp_overrides pins groups to negotiated per-tag counts; null
-    // derives every group from block_num.
+    /* The only place a CacheConfig becomes sized (before any pool exists).
+       pp_overrides pins groups to negotiated per-tag counts; null derives
+       every group from block_num. */
     static CacheConfig composeCacheConfig(CacheConfig                topology,
                                           uint32_t                   block_num,
                                           const RuntimeConfig&       runtime_config,

@@ -1,9 +1,7 @@
 load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
-# Header-only PP wire types so consumers outside normal_engine (e.g. the
-# models lib building the PyWrappedModel::forwardPP adapter) can depend on
-# them without dragging in the whole executor.
+# Header-only PP wire types so consumers outside normal_engine can depend on them without the whole executor.
 cc_library(
     name = "pipeline_types",
     hdrs = ["pipeline/PPTypes.h"],

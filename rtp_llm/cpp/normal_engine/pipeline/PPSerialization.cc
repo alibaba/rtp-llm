@@ -1,8 +1,5 @@
-// Binary serialization for the PP transport payloads: execution plans
-// (leading stage -> all stages), execution results (last stage -> leading
-// stage), and intermediate tensor metadata (adjacent stages). Sender and
-// receiver compile from the same source tree, so kVersion guards against
-// mixed builds and corrupted payloads rather than rolling upgrades.
+/* Binary serialization for PP transport payloads: execution plans, execution
+   results, and intermediate tensor metadata. kVersion guards mixed builds. */
 
 #include "rtp_llm/cpp/normal_engine/pipeline/PPSerialization.h"
 
@@ -14,14 +11,9 @@ namespace rtp_llm::pp_serialization {
 
 namespace {
 
-// Self-describing byte stream. Payload layout is versioned; readers bounds-
-// check every field. Tensor bytes are staged on CPU regardless of the source
-// device; the original device is recorded and restored on read.
-// v2: the tensor presence flag encodes definedness rather than non-emptiness,
-// so defined-but-empty tensors (e.g. sequence_lengths of a pure-prefill batch)
-// survive the round-trip instead of collapsing to undefined. Host tensors are
-// rebuilt as pinned memory to match the plan tensors produced by
-// gatherModelInput, which the fused H2D copy path requires.
+/* Versioned byte stream; readers bounds-check every field. The tensor
+   presence flag encodes definedness so defined-but-empty tensors survive;
+   host tensors are rebuilt pinned to match gatherModelInput plan tensors. */
 constexpr uint32_t kVersion = 2;
 
 struct ByteWriter {
@@ -132,8 +124,7 @@ struct ByteReader {
         const auto dtype   = static_cast<torch::ScalarType>(val<int32_t>());
         const bool is_cuda = flag();
         const auto nbytes  = val<uint64_t>();
-        // Host tensors come back pinned: downstream fused H2D copies assert
-        // pinned memory (the leading stage's gatherModelInput produces it).
+        // Host tensors come back pinned: downstream fused H2D copies assert pinned memory.
         auto out = torch::empty(
             sizes,
             torch::TensorOptions().dtype(dtype).device(is_cuda ? torch::kCUDA : torch::kCPU).pinned_memory(!is_cuda));

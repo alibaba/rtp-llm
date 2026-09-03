@@ -412,11 +412,7 @@ class ModelFactory:
         # Set model_name to engine_config.runtime_config.model_name (for backward compatibility)
         engine_config.runtime_config.model_name = model_config.model_name
 
-        # Materialize the PP layer partition once (model_config.num_layers is
-        # final here) and ship it as data on ParallelismConfig: every
-        # downstream consumer — weight loading, model construction, C++
-        # cache geometry — reads the counts instead of re-deriving the
-        # partition rule. pp_size=1 stays untouched (zero behavior change).
+        # Materialize the PP layer partition once; downstream consumers (loading, construction, cache) read the counts.
         parallelism_config = engine_config.parallelism_config
         if (
             parallelism_config.pp_size > 1

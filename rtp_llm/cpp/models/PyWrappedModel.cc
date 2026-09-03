@@ -453,10 +453,10 @@ std::vector<size_t> PyWrappedModel::resolveCacheGroupInputIndices(const GptModel
     }
     const auto input_col_count = static_cast<size_t>(inputs.kv_cache_kernel_block_id.size(0));
     RTP_LLM_CHECK_WITH_INFO(!kv_cache_group_tags_.empty(), "group KV block tables require non-empty model cache tags");
-    // The plan columns are the PRODUCING stage groups, so a downstream stage
-    // may legitimately see more columns than it has tags: the contract is that
-    // input tags cover local tags. tpSyncModelInputs broadcasts tensors but not
-    // std::string tags, so a non-root TP rank reconstructs order positionally.
+    // Plan columns follow the PRODUCING stage's groups, so a downstream stage
+    // may see more columns than it has tags: the contract is input tags cover
+    // local tags. tpSyncModelInputs broadcasts tensors but not std::string
+    // tags, so a non-root TP rank reconstructs order positionally.
     const bool reconstruct_non_root_tags = inputs.kv_cache_group_tags.empty() && device_props_.tp_rank > 0;
     RTP_LLM_CHECK_WITH_INFO(reconstruct_non_root_tags || input_col_count >= kv_cache_group_tags_.size(),
                             "kernel KV block-table has %zu columns but this model owns %zu cache groups",
