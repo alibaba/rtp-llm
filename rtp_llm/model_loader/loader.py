@@ -646,15 +646,15 @@ class ModelLoader:
             phy2log_path=phy2log_path,
         )
 
-        # dynamic expert balancer
-        from rtp_llm.eplb.ep_balancer import ExpertBalancer
-
-        model_path = self.model_config.ckpt_path
-        ep_lb_database = CkptDatabase(model_path)
-        compute_dtype = self.model_config.compute_dtype
-
         py_eplb = None
         if weights_info.enable_eplb_:
+            # ExpertBalancer owns mutable checkpoint state. Do not construct a
+            # second database at all when dynamic EPLB is disabled.
+            from rtp_llm.eplb.ep_balancer import ExpertBalancer
+
+            model_path = self.model_config.ckpt_path
+            ep_lb_database = CkptDatabase(model_path)
+            compute_dtype = self.model_config.compute_dtype
             py_eplb = ExpertBalancer(
                 weights_info=weights_info,
                 compute_dtype=compute_dtype,

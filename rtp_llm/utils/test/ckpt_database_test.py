@@ -1,5 +1,12 @@
+import json
 import os
+import re
+import tempfile
 import unittest
+from unittest.mock import patch
+
+import torch
+from safetensors.torch import save_file
 
 from rtp_llm.utils.database import CkptDatabase
 
@@ -168,6 +175,98 @@ class TensorIndexTest(unittest.TestCase):
         self.assertFalse(database.has_tensor(all_names[0]))
 
 
+class IndexedSafetensorManifestTest(unittest.TestCase):
+    def _make_indexed_checkpoint(self, path):
+        shards = {
+            "model-00002-of-00002.safetensors": {"layer.1.weight": torch.ones(2)},
+            "model-00001-of-00002.safetensors": {
+                "layer.0.weight": torch.zeros(2, dtype=torch.int32)
+            },
+        }
+        for shard_name, tensors in shards.items():
+            save_file(tensors, os.path.join(path, shard_name))
+        index = {
+            "metadata": {"total_size": 16},
+            "is_ft_style_weight": True,
+            "__env__params__": {"inter_size": 128},
+            "weight_map": {
+                "layer.1.weight": "model-00002-of-00002.safetensors",
+                "layer.0.weight": "model-00001-of-00002.safetensors",
+            },
+        }
+        with open(os.path.join(path, "model.safetensors.index.json"), "w") as writer:
+            json.dump(index, writer)
+
+    def test_indexed_init_does_not_read_shard_headers_and_preserves_order(self):
+        with tempfile.TemporaryDirectory() as path:
+            self._make_indexed_checkpoint(path)
+            with patch(
+                "rtp_llm.utils.ckpt_file_info.CkptFileInfo._load_meta",
+                autospec=True,
+            ) as load_meta:
+                database = CkptDatabase(path)
+
+            load_meta.assert_not_called()
+            self.assertEqual(
+                [
+                    os.path.basename(info.file_name)
+                    for info in database.pretrain_file_list
+                ],
+                [
+                    "model-00002-of-00002.safetensors",
+                    "model-00001-of-00002.safetensors",
+                ],
+            )
+            self.assertEqual(
+                database.get_pretrain_tensor_names(),
+                ["layer.1.weight", "layer.0.weight"],
+            )
+            self.assertTrue(database.has_tensor("layer.0.weight"))
+            self.assertTrue(database.is_ft_style)
+            self.assertEqual(database.ft_weight_params, {"inter_size": 128})
+            self.assertIsNone(database._hf_index_data)
+            self.assertEqual(database.get_tensor_type("layer.0.weight"), torch.int32)
+            with self.assertRaises(KeyError):
+                database.get_tensor_type("missing.weight")
+
+    def test_read_order_loads_only_requested_header_once(self):
+        with tempfile.TemporaryDirectory() as path:
+            self._make_indexed_checkpoint(path)
+            database = CkptDatabase(path)
+            shard = database._tensor_index["layer.0.weight"]
+            other_shard = database._tensor_index["layer.1.weight"]
+
+            self.assertFalse(shard._metadata_loaded)
+            self.assertFalse(other_shard._metadata_loaded)
+            self.assertEqual(database.get_tensor_order("layer.0.weight")[0][1], 0)
+            self.assertTrue(shard._metadata_loaded)
+            self.assertFalse(other_shard._metadata_loaded)
+            metadata = shard.metadata
+            self.assertEqual(database.get_tensor_order("layer.0.weight")[0][1], 0)
+            self.assertIs(shard.metadata, metadata)
+
+    def test_indexed_tensor_load_does_not_require_offset_metadata(self):
+        with tempfile.TemporaryDirectory() as path:
+            self._make_indexed_checkpoint(path)
+            database = CkptDatabase(path)
+
+            tensor = database.load_tensor("layer.1.weight", torch.float32)[0]
+            self.assertTrue(torch.equal(tensor, torch.ones(2)))
+            self.assertFalse(database._tensor_index["layer.1.weight"]._metadata_loaded)
+
+    def test_filter_limits_bulk_shards_but_preserves_targeted_fallback(self):
+        with tempfile.TemporaryDirectory() as path:
+            self._make_indexed_checkpoint(path)
+            database = CkptDatabase(path)
+
+            database.filter_by_tensor_name_regexes([re.compile(r"layer\.0\.weight")])
+
+            self.assertEqual(len(database.pretrain_file_list), 1)
+            self.assertTrue(database.has_tensor("layer.1.weight"))
+            tensor = database.load_tensor("layer.1.weight", torch.float32)[0]
+            self.assertTrue(torch.equal(tensor, torch.ones(2)))
+
+
 class SafetensorHandleCacheTest(unittest.TestCase):
     """Tests for CkptFileInfo safetensor handle caching."""
 
@@ -208,8 +307,6 @@ class SafetensorHandleCacheTest(unittest.TestCase):
         self.assertIsNotNone(h)
         info.close_safetensor_handle()
 
-
-import torch
 
 if __name__ == "__main__":
     unittest.main()
