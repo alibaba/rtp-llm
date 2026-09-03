@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -19,6 +20,24 @@ from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
 from rtp_llm.utils.model_weight import W
+
+
+_IHC_MXFP8_QUANT_ENV = "RTP_LLM_HY4_IHC_MXFP8_QUANT"
+
+
+def _ihc_mxfp8_quant_enabled(hw_kernel_config: Optional[HWKernelConfig]) -> bool:
+    from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
+
+    if not fuse_kernels_enabled(hw_kernel_config):
+        return False
+    requested = os.environ.get(_IHC_MXFP8_QUANT_ENV, "auto").strip().lower()
+    if requested in ("0", "false", "off", "no"):
+        return False
+    if requested not in ("", "auto", "1", "true", "on", "yes"):
+        raise ValueError(
+            f"invalid {_IHC_MXFP8_QUANT_ENV}={requested!r}; expected auto, 0, or 1"
+        )
+    return True
 
 
 @dataclass
@@ -102,6 +121,18 @@ class Hy4DecoderLayer(nn.Module):
         )
         self.attn_ihc = Hy4IHCUnit(weights, kind="attn", **ihc_args)
         self.mlp_ihc = Hy4IHCUnit(weights, kind="mlp", **ihc_args)
+        fuse_ihc_mxfp8 = _ihc_mxfp8_quant_enabled(hw_kernel_config)
+        self._fuse_attn_ihc_mxfp8 = bool(
+            fuse_ihc_mxfp8 and self.self_attn.accepts_mxfp8_input
+        )
+        mlp_mxfp8_consumer = self.mlp
+        if isinstance(self.mlp, GenericMoeLayer):
+            mlp_mxfp8_consumer = self.mlp.shared_expert
+        self._fuse_mlp_ihc_mxfp8 = bool(
+            fuse_ihc_mxfp8
+            and mlp_mxfp8_consumer is not None
+            and getattr(mlp_mxfp8_consumer, "accepts_mxfp8_input", False)
+        )
 
     def clone_for_cuda_graph(self) -> "Hy4DecoderLayer":
         clone = object.__new__(type(self))
@@ -117,6 +148,8 @@ class Hy4DecoderLayer(nn.Module):
         clone.post_attention_layernorm = self.post_attention_layernorm
         clone.attn_ihc = self.attn_ihc
         clone.mlp_ihc = self.mlp_ihc
+        clone._fuse_attn_ihc_mxfp8 = self._fuse_attn_ihc_mxfp8
+        clone._fuse_mlp_ihc_mxfp8 = self._fuse_mlp_ihc_mxfp8
         return clone
 
     def forward(
@@ -126,22 +159,56 @@ class Hy4DecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
     ) -> Hy4LayerOutput:
-        attn_input, attn_post_gate = self.attn_ihc.pre_normed(
-            channels, self.input_layernorm
-        )
+        attn_input_fp8 = None
+        attn_input_scale = None
+        if getattr(self, "_fuse_attn_ihc_mxfp8", False):
+            (
+                attn_input,
+                attn_post_gate,
+                attn_input_fp8,
+                attn_input_scale,
+            ) = self.attn_ihc.pre_normed_mxfp8(channels, self.input_layernorm)
+        else:
+            attn_input, attn_post_gate = self.attn_ihc.pre_normed(
+                channels, self.input_layernorm
+            )
+        attn_kwargs = {}
+        if attn_input_fp8 is not None and attn_input_scale is not None:
+            attn_kwargs = {
+                "x_fp8": attn_input_fp8,
+                "x_scale": attn_input_scale,
+            }
         attn_output, topk_indices = self.self_attn(
             hidden_states=attn_input,
             fmha_impl=fmha_impl,
             kv_cache=kv_cache,
             prev_topk_indices=prev_topk_indices,
             return_topk=True,
+            **attn_kwargs,
         )
         channels = self.attn_ihc.post(attn_output, channels, attn_post_gate)
 
-        mlp_input, mlp_post_gate = self.mlp_ihc.pre_normed(
-            channels, self.post_attention_layernorm
-        )
-        mlp_output = self.mlp(mlp_input)
+        mlp_input_fp8 = None
+        mlp_input_scale = None
+        if getattr(self, "_fuse_mlp_ihc_mxfp8", False):
+            (
+                mlp_input,
+                mlp_post_gate,
+                mlp_input_fp8,
+                mlp_input_scale,
+            ) = self.mlp_ihc.pre_normed_mxfp8(
+                channels, self.post_attention_layernorm
+            )
+        else:
+            mlp_input, mlp_post_gate = self.mlp_ihc.pre_normed(
+                channels, self.post_attention_layernorm
+            )
+        if mlp_input_fp8 is not None and mlp_input_scale is not None:
+            mlp_output = self.mlp(
+                mlp_input, x_fp8=mlp_input_fp8, x_scale=mlp_input_scale
+            )
+        else:
+            mlp_output = self.mlp(mlp_input)
         channels = self.mlp_ihc.post(mlp_output, channels, mlp_post_gate)
         return Hy4LayerOutput(channels, topk_indices)
 

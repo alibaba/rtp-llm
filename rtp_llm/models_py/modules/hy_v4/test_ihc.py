@@ -58,6 +58,8 @@ class _AttentionOracleStub(torch.nn.Module):
         super().__init__()
         self.topk_indices = topk_indices
         self.prev_topk_indices = None
+        self.x_fp8 = None
+        self.x_scale = None
 
     @staticmethod
     def block(hidden_states: torch.Tensor) -> torch.Tensor:
@@ -72,9 +74,13 @@ class _AttentionOracleStub(torch.nn.Module):
         kv_cache=None,
         prev_topk_indices=None,
         return_topk=False,
+        x_fp8=None,
+        x_scale=None,
     ):
         del fmha_impl, kv_cache
         self.prev_topk_indices = prev_topk_indices
+        self.x_fp8 = x_fp8
+        self.x_scale = x_scale
         output = self.block(hidden_states)
         if return_topk:
             return output, self.topk_indices
@@ -84,6 +90,11 @@ class _AttentionOracleStub(torch.nn.Module):
 class _MlpOracleStub(torch.nn.Module):
     """Deterministic MLP stand-in used to check decoder-layer wiring."""
 
+    def __init__(self):
+        super().__init__()
+        self.x_fp8 = None
+        self.x_scale = None
+
     @staticmethod
     def block(hidden_states: torch.Tensor) -> torch.Tensor:
         values = hidden_states.float()
@@ -91,8 +102,33 @@ class _MlpOracleStub(torch.nn.Module):
             hidden_states.dtype
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        x_fp8=None,
+        x_scale=None,
+    ) -> torch.Tensor:
+        self.x_fp8 = x_fp8
+        self.x_scale = x_scale
         return self.block(hidden_states)
+
+
+class _IhcMxfp8BoundaryStub(torch.nn.Module):
+    """Expose fixed BF16/MXFP8 pairs to verify decoder-layer plumbing."""
+
+    def __init__(self, read, post_gate, read_fp8, read_scale):
+        super().__init__()
+        self.read = read
+        self.post_gate = post_gate
+        self.read_fp8 = read_fp8
+        self.read_scale = read_scale
+
+    def pre_normed_mxfp8(self, channels, norm):
+        del channels, norm
+        return self.read, self.post_gate, self.read_fp8, self.read_scale
+
+    def post(self, block_output, channels, post_gate):
+        return channels + post_gate.unsqueeze(-1).to(channels.dtype) * block_output.unsqueeze(1)
 
 
 class Hy4IhcTest(unittest.TestCase):
@@ -273,6 +309,44 @@ class Hy4IhcTest(unittest.TestCase):
             )
         )
         torch.testing.assert_close(actual_hidden, expected_hidden, rtol=0, atol=0)
+
+    def test_decoder_layer_passes_exact_mxfp8_boundaries(self):
+        tokens, hidden, hc = 3, 8, 4
+        channels = torch.randn(tokens, hc, hidden, dtype=torch.bfloat16)
+        attn_read = torch.randn(tokens, hidden, dtype=torch.bfloat16)
+        mlp_read = torch.randn(tokens, hidden, dtype=torch.bfloat16)
+        attn_fp8 = torch.randn(tokens, hidden).to(torch.float8_e4m3fn)
+        mlp_fp8 = torch.randn(tokens, hidden).to(torch.float8_e4m3fn)
+        attn_scale = torch.randint(0, 255, (tokens, 1), dtype=torch.int32)
+        mlp_scale = torch.randint(0, 255, (tokens, 1), dtype=torch.int32)
+        attn_gate = torch.randn(tokens, hc)
+        mlp_gate = torch.randn(tokens, hc)
+
+        layer = object.__new__(Hy4DecoderLayer)
+        torch.nn.Module.__init__(layer)
+        layer.layer_idx = 0
+        layer.input_layernorm = torch.nn.Identity()
+        layer.post_attention_layernorm = torch.nn.Identity()
+        layer.attn_ihc = _IhcMxfp8BoundaryStub(
+            attn_read, attn_gate, attn_fp8, attn_scale
+        )
+        layer.mlp_ihc = _IhcMxfp8BoundaryStub(
+            mlp_read, mlp_gate, mlp_fp8, mlp_scale
+        )
+        layer.self_attn = _AttentionOracleStub(torch.arange(tokens))
+        layer.mlp = _MlpOracleStub()
+        layer._fuse_attn_ihc_mxfp8 = True
+        layer._fuse_mlp_ihc_mxfp8 = True
+
+        layer(channels, fmha_impl=object())
+        self.assertIs(layer.self_attn.x_fp8, attn_fp8)
+        self.assertIs(layer.self_attn.x_scale, attn_scale)
+        self.assertIs(layer.mlp.x_fp8, mlp_fp8)
+        self.assertIs(layer.mlp.x_scale, mlp_scale)
+
+        clone = layer.clone_for_cuda_graph()
+        self.assertTrue(clone._fuse_attn_ihc_mxfp8)
+        self.assertTrue(clone._fuse_mlp_ihc_mxfp8)
 
     def test_pre_post_match_fp32_reference(self):
         torch.manual_seed(7)
@@ -549,6 +623,107 @@ class Hy4IhcTest(unittest.TestCase):
             fused_normed, eager_normed, rtol=2e-2, atol=2e-2
         )
         torch.testing.assert_close(fused_gate, eager_gate, rtol=5e-4, atol=5e-5)
+
+    @unittest.skipUnless(
+        _deepgemm_prenorm_available(), "requires SM100 DeepGEMM prenorm"
+    )
+    def test_deepgemm_pre_rmsnorm_mxfp8_is_bitwise_equal(self):
+        from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
+            mxfp8_quant_act_packed,
+        )
+
+        torch.manual_seed(20260903)
+        device = torch.device("cuda")
+        hidden, hc, tokens = 6144, 4, 4
+        weights = {
+            key: value.to(device)
+            for key, value in self._unit_weights(hidden, hc).items()
+        }
+        unit = Hy4IHCUnit(
+            weights,
+            hidden_size=hidden,
+            hc_mult=hc,
+            magnitude=2.0,
+            hc_eps=1e-6,
+            norm_eps=1e-5,
+            kind="attn",
+        )
+        norm = _TorchRMSNorm(
+            torch.randn(hidden, dtype=torch.bfloat16, device=device), 1e-5
+        )
+        channels = torch.randn(
+            tokens, hc, hidden, dtype=torch.bfloat16, device=device
+        )
+        env = {
+            "RTP_LLM_HY4_IHC_TRITON": "1",
+            "RTP_LLM_HY4_IHC_PRE_BACKEND": "deepgemm",
+            # Keep the reference as the production FlashInfer + scale-pack
+            # chain, independent of the new one-launch quant kernel.
+            "RTP_LLM_MXFP8_FUSED_QUANT": "0",
+        }
+        with torch.no_grad(), mock.patch.dict(os.environ, env):
+            ref_read, ref_gate = unit.pre_normed(channels, norm)
+            ref_fp8, ref_scale = mxfp8_quant_act_packed(ref_read)
+            read, gate, fp8, scale = unit.pre_normed_mxfp8(channels, norm)
+
+        self.assertTrue(torch.equal(read, ref_read))
+        self.assertTrue(torch.equal(gate, ref_gate))
+        self.assertTrue(
+            torch.equal(fp8.view(torch.uint8), ref_fp8.view(torch.uint8))
+        )
+        self.assertEqual(scale.stride(), ref_scale.stride())
+        self.assertTrue(torch.equal(scale, ref_scale))
+
+    @unittest.skipUnless(
+        _deepgemm_prenorm_available(), "requires SM100 DeepGEMM prenorm"
+    )
+    def test_deepgemm_pre_rmsnorm_mxfp8_cuda_graph_replay(self):
+        torch.manual_seed(20260904)
+        device = torch.device("cuda")
+        hidden, hc, tokens = 6144, 4, 4
+        weights = {
+            key: value.to(device)
+            for key, value in self._unit_weights(hidden, hc).items()
+        }
+        unit = Hy4IHCUnit(
+            weights,
+            hidden_size=hidden,
+            hc_mult=hc,
+            magnitude=2.0,
+            hc_eps=1e-6,
+            norm_eps=1e-5,
+            kind="attn",
+        )
+        norm = _TorchRMSNorm(
+            torch.randn(hidden, dtype=torch.bfloat16, device=device), 1e-5
+        )
+        static_channels = torch.randn(
+            tokens, hc, hidden, dtype=torch.bfloat16, device=device
+        )
+        replay_channels = torch.randn_like(static_channels)
+        env = {
+            "RTP_LLM_HY4_IHC_TRITON": "1",
+            "RTP_LLM_HY4_IHC_PRE_BACKEND": "deepgemm",
+        }
+        with torch.no_grad(), mock.patch.dict(os.environ, env):
+            for _ in range(3):
+                unit.pre_normed_mxfp8(static_channels, norm)
+            expected = tuple(
+                value.clone()
+                for value in unit.pre_normed_mxfp8(replay_channels, norm)
+            )
+            torch.cuda.synchronize()
+
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = unit.pre_normed_mxfp8(static_channels, norm)
+
+            static_channels.copy_(replay_channels)
+            graph.replay()
+            torch.cuda.synchronize()
+
+        for actual, reference in zip(captured, expected):
+            self.assertTrue(torch.equal(actual, reference))
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA and Triton")
     def test_triton_head_matches_eager_path(self):

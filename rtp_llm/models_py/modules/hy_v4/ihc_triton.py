@@ -21,6 +21,13 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
+    MX_BLOCK,
+    _float_to_ue8m0,
+    _ue8m0_to_inv_scale,
+    create_mxfp8_packed_scale,
+)
+
 
 _IHC_TRITON_ENV = "RTP_LLM_HY4_IHC_TRITON"
 _IHC_PRE_BACKEND_ENV = "RTP_LLM_HY4_IHC_PRE_BACKEND"
@@ -396,7 +403,12 @@ def _ihc_deepgemm_pre_rmsnorm_kernel(
     norm_weight_ptr,
     read_ptr,
     post_gate_ptr,
+    mxfp8_ptr,
+    mxfp8_scale_ptr,
     M,
+    stride_mxfp8_m,
+    stride_mxfp8_scale_m,
+    stride_mxfp8_scale_k,
     HC: tl.constexpr,
     H: tl.constexpr,
     K: tl.constexpr,
@@ -407,6 +419,8 @@ def _ihc_deepgemm_pre_rmsnorm_kernel(
     HC_EPS: tl.constexpr,
     MAGNITUDE: tl.constexpr,
     BLOCK_H: tl.constexpr,
+    MX_GROUP_SIZE: tl.constexpr,
+    HAS_MXFP8_OUTPUT: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     split_offsets = tl.arange(0, BLOCK_SPLITS)
@@ -470,8 +484,55 @@ def _ihc_deepgemm_pre_rmsnorm_kernel(
         norm_weight_ptr + hidden_offsets, mask=hidden_mask, other=0.0
     ).to(tl.float32)
     normalized = rounded_read * read_inv_rms * norm_weight
-    tl.store(read_ptr + row * H + hidden_offsets, normalized, mask=hidden_mask)
+    # The downstream Linear sees a BF16 RMSNorm output.  Keep that rounding
+    # boundary explicit before deriving the optional MXFP8 representation.
+    normalized_bf16 = normalized.to(tl.bfloat16)
+    tl.store(
+        read_ptr + row * H + hidden_offsets, normalized_bf16, mask=hidden_mask
+    )
     tl.store(post_gate_ptr + row * HC + channel_offsets, post_gate)
+
+    if HAS_MXFP8_OUTPUT:
+        normalized_fp32 = normalized_bf16.to(tl.float32)
+        num_groups: tl.constexpr = BLOCK_H // MX_GROUP_SIZE
+        actual_num_groups: tl.constexpr = H // MX_GROUP_SIZE
+        values_2d = tl.reshape(normalized_fp32, (num_groups, MX_GROUP_SIZE))
+        absmax = tl.max(tl.abs(values_2d), axis=1)
+        normalized_max = absmax * tl.full(
+            absmax.shape, 1.0 / 448.0, tl.float32
+        )
+        scale_exponent = _float_to_ue8m0(normalized_max)
+        inv_scale = _ue8m0_to_inv_scale(scale_exponent)
+        scaled = values_2d * tl.broadcast_to(
+            tl.reshape(inv_scale, (num_groups, 1)),
+            (num_groups, MX_GROUP_SIZE),
+        )
+        quantized = tl.clamp(scaled, -448.0, 448.0).to(
+            mxfp8_ptr.dtype.element_ty
+        )
+        tl.store(
+            mxfp8_ptr + row * stride_mxfp8_m + hidden_offsets,
+            tl.reshape(quantized, (BLOCK_H,)),
+            mask=hidden_mask,
+        )
+
+        num_packed: tl.constexpr = num_groups // 4
+        actual_num_packed: tl.constexpr = actual_num_groups // 4
+        group_offsets = tl.arange(0, num_groups)
+        shifted = tl.where(
+            group_offsets < actual_num_groups,
+            scale_exponent << ((group_offsets % 4) * 8),
+            0,
+        )
+        packed = tl.sum(tl.reshape(shifted, (num_packed, 4)), axis=1)
+        packed_offsets = tl.arange(0, num_packed)
+        tl.store(
+            mxfp8_scale_ptr
+            + row * stride_mxfp8_scale_m
+            + packed_offsets * stride_mxfp8_scale_k,
+            packed,
+            mask=packed_offsets < actual_num_packed,
+        )
 
 
 @triton.jit(do_not_specialize=["M"])
@@ -627,6 +688,8 @@ def _maybe_deepgemm_ihc_pre(
     split_reference_m: int | None = None,
     read_out: torch.Tensor | None = None,
     post_gate_out: torch.Tensor | None = None,
+    mxfp8_out: torch.Tensor | None = None,
+    mxfp8_scale_out: torch.Tensor | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor] | None:
     if not _use_deepgemm_prenorm(channels):
         return None
@@ -661,6 +724,17 @@ def _maybe_deepgemm_ihc_pre(
         if post_gate_out is None
         else post_gate_out
     )
+    emit_mxfp8 = mxfp8_out is not None or mxfp8_scale_out is not None
+    if emit_mxfp8:
+        if mxfp8_out is None or mxfp8_scale_out is None:
+            raise ValueError("mxfp8_out and mxfp8_scale_out must be provided together")
+        if norm_weight is None:
+            raise ValueError("MXFP8 output requires the fused read RMSNorm path")
+        if hidden_size % (4 * MX_BLOCK) != 0:
+            raise ValueError(
+                f"MXFP8 packed output requires hidden_size divisible by "
+                f"{4 * MX_BLOCK}, got {hidden_size}"
+            )
 
     with torch.cuda.device(device_index):
         deep_gemm.tf32_hc_prenorm_gemm(
@@ -705,7 +779,16 @@ def _maybe_deepgemm_ihc_pre(
                 norm_weight,
                 read,
                 post_gate,
+                mxfp8_out if emit_mxfp8 else read,
+                mxfp8_scale_out if emit_mxfp8 else read,
                 M=m,
+                stride_mxfp8_m=(mxfp8_out.stride(0) if emit_mxfp8 else 0),
+                stride_mxfp8_scale_m=(
+                    mxfp8_scale_out.stride(0) if emit_mxfp8 else 0
+                ),
+                stride_mxfp8_scale_k=(
+                    mxfp8_scale_out.stride(1) if emit_mxfp8 else 0
+                ),
                 HC=_HC_MULT,
                 H=hidden_size,
                 K=flat_size,
@@ -716,6 +799,8 @@ def _maybe_deepgemm_ihc_pre(
                 HC_EPS=hc_eps,
                 MAGNITUDE=magnitude,
                 BLOCK_H=triton.next_power_of_2(hidden_size),
+                MX_GROUP_SIZE=MX_BLOCK,
+                HAS_MXFP8_OUTPUT=emit_mxfp8,
                 num_warps=8,
                 num_stages=2,
             )
@@ -734,7 +819,12 @@ def maybe_fused_ihc_pre_normed_grouped(
     ihc_norm_eps: float,
     read_norm_eps: float,
     chunk_size: int,
-) -> Tuple[torch.Tensor, torch.Tensor] | None:
+    emit_mxfp8: bool = False,
+) -> (
+    Tuple[torch.Tensor, torch.Tensor]
+    | Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+    | None
+):
     """Coalesce adjacent DeepGEMM chunks without changing split-K signatures.
 
     The historical path selected split-K independently for each ``chunk_size``
@@ -753,6 +843,7 @@ def maybe_fused_ihc_pre_normed_grouped(
         or norm_weight.device != channels.device
         or hidden_size > 8192
         or not _use_deepgemm_prenorm(channels)
+        or (emit_mxfp8 and hidden_size % (4 * MX_BLOCK) != 0)
     ):
         return None
 
@@ -760,6 +851,18 @@ def maybe_fused_ihc_pre_normed_grouped(
     chunk_size = max(int(chunk_size), 1)
     read = torch.empty((m, hidden_size), dtype=channels.dtype, device=channels.device)
     post_gate = torch.empty((m, _HC_MULT), dtype=torch.float32, device=channels.device)
+    mxfp8_out = (
+        torch.empty(
+            (m, hidden_size), dtype=torch.float8_e4m3fn, device=channels.device
+        )
+        if emit_mxfp8
+        else None
+    )
+    mxfp8_scale = (
+        create_mxfp8_packed_scale(m, hidden_size, channels.device)
+        if emit_mxfp8
+        else None
+    )
 
     full_chunk_tokens = (m // chunk_size) * chunk_size
     groups = []
@@ -782,9 +885,14 @@ def maybe_fused_ihc_pre_normed_grouped(
             split_reference_m=split_reference_m,
             read_out=read[start:end],
             post_gate_out=post_gate[start:end],
+            mxfp8_out=(mxfp8_out[start:end] if emit_mxfp8 else None),
+            mxfp8_scale_out=(mxfp8_scale[start:end] if emit_mxfp8 else None),
         )
         if result is None:
             return None
+    if emit_mxfp8:
+        assert mxfp8_out is not None and mxfp8_scale is not None
+        return read, post_gate, mxfp8_out, mxfp8_scale
     return read, post_gate
 
 

@@ -20,11 +20,15 @@ if _DEVICE_TYPE == DeviceType.Cuda:
     from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
         CudaFp8GEMMLinear,
     )
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.mxfp8_linear import (
+        CudaMxfp8Linear,
+    )
     from rtp_llm.models_py.triton_kernels.common.activation import (
         silu_and_mul_per_token_group_fp8_quant_dense_packed_fwd,
     )
 else:
     CudaFp8GEMMLinear = None  # type: ignore
+    CudaMxfp8Linear = None  # type: ignore
 
 _ACTIVATION_FUNC_MAP: Dict[ActivationType, Type[nn.Module]] = {
     ActivationType.Swiglu: FusedSiluAndMul,
@@ -121,8 +125,17 @@ class DenseMLP(nn.Module):
 
     @property
     def accepts_fp8_input(self) -> bool:
+        # This flag is consumed by generic group-128 FP8 producer fusions.
+        # MXFP8 has a different group size and scale layout, so keep the
+        # capability contracts separate.
         return CudaFp8GEMMLinear is not None and isinstance(
             self.up_proj, CudaFp8GEMMLinear
+        )
+
+    @property
+    def accepts_mxfp8_input(self) -> bool:
+        return CudaMxfp8Linear is not None and isinstance(
+            self.up_proj, CudaMxfp8Linear
         )
 
     def forward(
@@ -132,7 +145,11 @@ class DenseMLP(nn.Module):
         x_scale: "Optional[torch.Tensor]" = None,
         skip_allreduce: bool = False,
     ):
-        if x_fp8 is not None and x_scale is not None and self.accepts_fp8_input:
+        if (
+            x_fp8 is not None
+            and x_scale is not None
+            and (self.accepts_fp8_input or self.accepts_mxfp8_input)
+        ):
             up = self.up_proj(x_fp8, input_scales=x_scale)
         else:
             up = self.up_proj(x)

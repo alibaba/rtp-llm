@@ -8,6 +8,9 @@ import unittest
 
 import torch
 
+from rtp_llm.models_py.kernels.cuda.mxfp8_ops import (
+    mxfp8_quant_act_packed_fused,
+)
 from rtp_llm.models_py.triton_kernels.common.fused_strided_rmsnorm import (
     fused_strided_rmsnorm,
     fused_strided_rmsnorm_per_token_fp8_quant,
@@ -185,6 +188,76 @@ class TestFusedStridedRMSNormFp8QuantDualOutput(unittest.TestCase):
                 )
                 bf16_diff = (bf16_out.float() - ref_bf16.float()).abs().max().item()
                 self.assertLess(bf16_diff, 5e-3, f"bf16 mismatch: {bf16_diff}")
+
+
+class TestFusedStridedRMSNormMxfp8(unittest.TestCase):
+    """HY4 q_a RMSNorm must preserve the current MXFP8 contract exactly."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not torch.cuda.is_available():
+            raise unittest.SkipTest("CUDA not available")
+        torch.manual_seed(42)
+
+    def _make_inputs(self, tokens: int, hidden_size: int):
+        # Use a non-zero slice offset to exercise the production torch.split
+        # layout rather than accidentally testing only a contiguous tensor.
+        big = torch.randn(
+            tokens,
+            hidden_size + 640,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        x = big[:, 128 : 128 + hidden_size]
+        weight = torch.randn(hidden_size, dtype=torch.bfloat16, device="cuda")
+        return x, weight
+
+    def _reference(self, x: torch.Tensor, weight: torch.Tensor):
+        # The standalone MXFP8 test proves this quantizer is bitwise equal to
+        # FlashInfer.  Using it here isolates the RMSNorm+quant fusion without
+        # requiring FlashInfer's optional CuTe DSL package in this test target.
+        normed = fused_strided_rmsnorm(x, weight, 1e-6)
+        quantized, scale = mxfp8_quant_act_packed_fused(normed)
+        return normed, quantized, scale
+
+    def test_single_output_is_bitwise_equal(self):
+        for tokens in (1, 4, 16):
+            with self.subTest(tokens=tokens):
+                x, weight = self._make_inputs(tokens, 2048)
+                _, ref_fp8, ref_scale = self._reference(x, weight)
+                fp8, scale = fused_strided_rmsnorm_per_token_fp8_quant(
+                    x,
+                    weight,
+                    1e-6,
+                    group_size=32,
+                    scale_ue8m0=True,
+                    mxfp8_semantics=True,
+                )
+                self.assertTrue(
+                    torch.equal(fp8.view(torch.uint8), ref_fp8.view(torch.uint8))
+                )
+                self.assertTrue(torch.equal(scale, ref_scale))
+
+    def test_dual_output_is_bitwise_equal(self):
+        for tokens in (1, 4, 16):
+            with self.subTest(tokens=tokens):
+                x, weight = self._make_inputs(tokens, 2048)
+                ref_bf16, ref_fp8, ref_scale = self._reference(x, weight)
+                bf16, fp8, scale = (
+                    fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
+                        x,
+                        weight,
+                        1e-6,
+                        group_size=32,
+                        scale_ue8m0=True,
+                        mxfp8_semantics=True,
+                    )
+                )
+                self.assertTrue(torch.equal(bf16, ref_bf16))
+                self.assertTrue(
+                    torch.equal(fp8.view(torch.uint8), ref_fp8.view(torch.uint8))
+                )
+                self.assertTrue(torch.equal(scale, ref_scale))
 
 
 if __name__ == "__main__":

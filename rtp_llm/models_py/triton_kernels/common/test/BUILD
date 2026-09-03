@@ -65,6 +65,17 @@ py_test(
     exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
 )
 
+py_test(
+    name = "test_fused_strided_rmsnorm",
+    srcs = ["test_fused_strided_rmsnorm.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20"],
+    exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
+)
+
 # Perf target driven by skill rtp-kernel-benchmark.
 # Run via: scripts/run_kernel_benchmark.sh ... --target //rtp_llm/models_py/triton_kernels/common/test:bench_all_fuse_kernels_perf
 # Tagged "manual" so default `bazel test //...` will not pick it up.
