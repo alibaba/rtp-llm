@@ -169,6 +169,13 @@ def _a2_deferred_cls():
 
 
 _X1_DEF_CT = [0]  # X1 engagement proof (DSV4_DIAG, first 3 fires)
+_X1_LAY_CT = [0]  # X1' localization marker: per-layer forward entries
+# X1' flush rule: every MoeLayer registers its layer_id here at build time;
+# the max is the last layer that can defer. The draft (DSpark) layers reuse
+# target layer ids, so the max resolves to the target's last MoE layer on
+# every rank (registry complete before any forward — rank-invariant).
+_X1_MOE_LAYER_IDS: set = set()
+_XLAYER_C1_MOE = int(os.environ.get("DSV4_XLAYER_C1", "0"))
 
 
 class MoE(nn.Module):
@@ -220,6 +227,8 @@ class MoE(nn.Module):
         self.swiglu_limit = swiglu_limit
         self.max_tokens_per_rank = max_tokens_per_rank
         self._is_decode_role = bool(is_decode_role)
+        self._x1_flush: Optional[bool] = None  # resolved lazily post-build
+        _X1_MOE_LAYER_IDS.add(int(layer_id))
 
         assert (
             n_routed_experts % max(ep_size, 1) == 0
@@ -474,6 +483,15 @@ class MoE(nn.Module):
         self._run_chunk(x, input_ids_flat, out)
         return out.view(shape)
 
+    def _x1_last_layer(self) -> bool:
+        """X1' flush rule (results_20260903_x1_c1): True for the last layer
+        that can defer. The registry is complete once the model is built
+        (before any forward) and identical on every rank → rank-invariant.
+        """
+        if self._x1_flush is None:
+            self._x1_flush = int(self.layer_id) >= max(_X1_MOE_LAYER_IDS)
+        return self._x1_flush
+
     def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
         if os.environ.get("DSV4_MEMDUMP") and _MOE_MARK[0] == 0:
@@ -500,6 +518,19 @@ class MoE(nn.Module):
         dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
         dbg_pos_mask = None
         dbg_pos_name = None
+        if _XLAYER_C1_MOE and not self._is_decode_role and _X1_LAY_CT[0] < 8:
+            _X1_LAY_CT[0] += 1
+            import sys as _sys
+            print(
+                "[X1-LAY] rank=%d L=%d T=%d" % (
+                    torch.distributed.get_rank()
+                    if torch.distributed.is_initialized() else -1,
+                    self.layer_id,
+                    x.size(0),
+                ),
+                file=_sys.stderr,
+                flush=True,
+            )
         dbg_positions = getattr(self, "_dbg_positions", None)
         if _dbg and dbg_pos >= 0 and dbg_positions is not None:
             dbg_positions = dbg_positions.to(device=x.device, dtype=torch.long).view(-1)
@@ -667,7 +698,7 @@ class MoE(nn.Module):
                 x.dtype,
                 x.device,
             )
-            if isinstance(y, _a2_deferred_cls()):
+            if isinstance(y, _a2_deferred_cls()) and not self._x1_last_layer():
                 # X1 (DSV4_XLAYER_C1): half-0 rows are materialized — combine
                 # them NOW and defer half-1 behind the caller's half-0
                 # epilogue (the cover for c1's flight). The deferred carries
@@ -697,5 +728,11 @@ class MoE(nn.Module):
                     th=y.th,
                     out=out,
                 )
+            if isinstance(y, _a2_deferred_cls()):
+                # X1' flush rule (reviewer addendum, results_20260903_x1_c1):
+                # the LAST MoE layer must not defer — its outstanding c1
+                # would meet the MTP draft step's own a2a and the forward-
+                # exit collectives on the main stream. Materialize now.
+                y = y.finish()
             y = combine_routed_and_shared(y, shared_y, x.dtype, out=out[:T])
             return y.view(shape)

@@ -29,6 +29,9 @@ def _prefill_fast_norm(norm: nn.Module, x: torch.Tensor) -> torch.Tensor:
     return norm(x)
 
 
+_X1_FIN_CT = [0]  # X1' localization marker: deferred-finish enqueues
+
+
 def _ffn_epilogue_maybe_deferred(hc_post, ffn_out, residual, post, comb):
     """X1 (DSV4_XLAYER_C1): if the MoE returned a deferred (halves) output,
     run the HC writeback per half — half-0's writeback is enqueued while
@@ -42,6 +45,16 @@ def _ffn_epilogue_maybe_deferred(hc_post, ffn_out, residual, post, comb):
     th = ffn_out.th
     x_h0 = hc_post(ffn_out.y0, residual[:th], post[:th], comb[:th])
     y1 = ffn_out.finish()
+    if os.environ.get("DSV4_DIAG") and _X1_FIN_CT[0] < 3:
+        _X1_FIN_CT[0] += 1
+        import sys as _sys
+        import torch.distributed as _dist
+        print(
+            "[X1-FIN] rank=%d th=%d" % (
+                _dist.get_rank() if _dist.is_initialized() else -1, th),
+            file=_sys.stderr,
+            flush=True,
+        )
     x_h1 = hc_post(y1, residual[th:], post[th:], comb[th:])
     return torch.cat([x_h0, x_h1], dim=0)
 
