@@ -245,7 +245,40 @@ class FlexlbServiceImplTest {
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB resp = captor.getValue();
         assertTrue(resp.getSuccess());
         assertTrue(resp.getEnqueuedByMaster());
+        verifyNoInteractions(sessionPlacementStore);
         assertTrue(pvAppender.list.isEmpty());
+    }
+
+    @Test
+    void forwardedEstablishedSessionDoesNotCreateFollowerPlacementState() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        FlexlbScheduleProtocol.FlexlbScheduleResponsePB masterResponse =
+                FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                        .setSuccess(true)
+                        .setCode(200)
+                        .build();
+        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(
+                CompletableFuture.completedFuture(
+                        FlexlbGrpcForwarder.MasterForwardResult.forwarded(
+                                masterResponse, "10.0.0.2:7001")));
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(100_008L)
+                        .setModel("kimi-k3")
+                        .setSessionRoutingHint(FlexlbScheduleProtocol.SessionRoutingHintPB
+                                .newBuilder()
+                                .setSchemaVersion(1)
+                                .setSessionId("isess_v1_example")
+                                .setState(FlexlbScheduleProtocol.SessionStatePB
+                                        .SESSION_STATE_ESTABLISHED))
+                        .build();
+
+        service.schedule(request, mock(StreamObserver.class));
+
+        verify(grpcForwarder).forwardScheduleToMaster(request);
+        verifyNoInteractions(sessionPlacementStore);
+        verify(routeService, never()).route(any());
     }
 
     @Test
@@ -598,6 +631,42 @@ class FlexlbServiceImplTest {
 
         verify(sessionPlacementStore).resetIfPresent("kimi-k3", "isess_v1_example");
         assertEquals(7L, contextCaptor.getValue().getRequest().getSessionPlacementEpoch());
+    }
+
+    @Test
+    void sessionPlacementInitializationFailureFallsBackToNormalRouting() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        when(sessionPlacementStore.currentEpoch("kimi-k3", "isess_v1_example"))
+                .thenThrow(new IllegalStateException("store unavailable"));
+        ArgumentCaptor<BalanceContext> contextCaptor =
+                ArgumentCaptor.forClass(BalanceContext.class);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        when(routeService.route(contextCaptor.capture()))
+                .thenReturn(CompletableFuture.completedFuture(response));
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
+                mock(StreamObserver.class);
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(100_009L)
+                        .setModel("kimi-k3")
+                        .setSessionRoutingHint(FlexlbScheduleProtocol.SessionRoutingHintPB
+                                .newBuilder()
+                                .setSchemaVersion(1)
+                                .setSessionId("isess_v1_example")
+                                .setState(FlexlbScheduleProtocol.SessionStatePB
+                                        .SESSION_STATE_ESTABLISHED))
+                        .build();
+
+        service.schedule(request, observer);
+
+        verify(routeService).route(any(BalanceContext.class));
+        verify(observer).onNext(any(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class));
+        verify(observer).onCompleted();
+        Request routed = contextCaptor.getValue().getRequest();
+        assertEquals(-1L, routed.getSessionPlacementEpoch());
+        assertEquals(Request.SessionState.UNSPECIFIED, routed.getInferenceSessionState());
     }
 
     @Test
