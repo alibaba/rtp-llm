@@ -53,6 +53,16 @@ def _fp8_scale_suffix(scale_dtype: torch.dtype) -> str:
     return _FP8_S_SUFFIX_LEGACY
 
 
+def _fp4_scale_name(weight_name: str, scale_dtype: torch.dtype) -> str:
+    # ModelOpt DeepSeek-style fused MXFP4 tensors keep ``weight`` in the
+    # runtime-facing base name: w13_weight -> w13_weight_scale.
+    if weight_name.endswith((".w13_weight", ".w2_weight")):
+        return weight_name + "_scale"
+    if weight_name.endswith(_FP4_W_SUFFIX):
+        return weight_name[: -len(_FP4_W_SUFFIX)] + _fp4_scale_suffix(scale_dtype)
+    return weight_name + _fp4_scale_suffix(scale_dtype)
+
+
 def _mega_moe_scale_name(name: str) -> str:
     if name == W.moe_w1:
         return W.moe_s1
@@ -110,10 +120,17 @@ class OfflineMegaMoeFp4MoeWeight(CompositeWeight, QuantWeight):
             config=src_weight_info.config,
             stacked_ckpt_keys=getattr(src_weight_info, "stacked_ckpt_keys", False),
         )
-        s_suffix = _fp4_scale_suffix(scale_dtype)
+        direct_modelopt_mxfp4 = any(
+            w.name.endswith((".w13_weight", ".w2_weight"))
+            for w in src_weight_info.weights
+        )
+        if direct_modelopt_mxfp4 and scale_dtype != torch.float8_e8m0fnu:
+            raise ValueError(
+                "ModelOpt fused MXFP4 weights require raw UE8M0 scale loading"
+            )
         scale_weights = [
             CkptWeightInfo(
-                w.name[: -len(_FP4_W_SUFFIX)] + s_suffix,
+                _fp4_scale_name(w.name, scale_dtype),
                 w.merge_fun,
             )
             for w in src_weight_info.weights
@@ -122,8 +139,11 @@ class OfflineMegaMoeFp4MoeWeight(CompositeWeight, QuantWeight):
             name=_mega_moe_scale_name(src_weight_info.name),
             weights=scale_weights,
             process_fun=src_weight_info.process_fun,
-            data_type=scale_dtype,
+            # This checkpoint serializes exponent bits as U8. Reinterpret the
+            # bytes after split; a numeric U8->float8 cast changes the bits.
+            data_type=torch.uint8 if direct_modelopt_mxfp4 else scale_dtype,
             config=src_weight_info.config,
+            stacked_ckpt_keys=getattr(src_weight_info, "stacked_ckpt_keys", False),
         )
 
         sub_weights = {kernel.name: kernel, scale.name: scale}
@@ -135,6 +155,7 @@ class OfflineMegaMoeFp4MoeWeight(CompositeWeight, QuantWeight):
         )
         self.kernel = kernel
         self.scale = scale
+        self._direct_modelopt_mxfp4 = direct_modelopt_mxfp4
 
     def get_tensor_names(
         self, layer_id: Optional[int], load_config: LoadConfig
@@ -174,9 +195,17 @@ class OfflineMegaMoeFp4MoeWeight(CompositeWeight, QuantWeight):
         return out
 
     def _postprocess(self, tensor, device: str, load_config: LoadConfig):
+        scale = tensor[self.scale.name]
+        if self._direct_modelopt_mxfp4:
+            if scale.dtype != torch.uint8:
+                raise TypeError(
+                    "ModelOpt fused MXFP4 scale must remain uint8 until "
+                    f"reinterpretation, got {scale.dtype}"
+                )
+            scale = scale.view(torch.float8_e8m0fnu)
         return {
             self.kernel.name: tensor[self.kernel.name],
-            self.scale.name: tensor[self.scale.name],
+            self.scale.name: scale,
         }
 
 
@@ -303,7 +332,9 @@ import re as _re
 # FP4 MoE and FP8 linears — those must not be used for FP4 detection (all-FP8
 # ckpts share the same ``.scale`` suffix); rely on ``expert_dtype`` instead.
 _OFFLINE_FP4_SCALE_RE = _re.compile(
-    r"model\.layers\.\d+\.mlp\.experts\.\d+\." r"(gate|up|down)_proj\.weight_scale$"
+    r"model\.(?:layers|mtp_layers)\.\d+\.mlp\.experts\."
+    r"(?:\d+\.(?:gate|up|down)_proj\.weight_scale|"
+    r"(?:w13|w2)_weight_scale)$"
 )
 
 
@@ -329,6 +360,14 @@ def is_offline_mega_moe_fp4_ckpt(database: Optional[BaseDatabase]) -> bool:
                     cfg = _json.load(f)
                 qc = cfg.get("quantization_config") or {}
                 if qc.get("expert_dtype") == "fp4":
+                    return True
+                modelopt_quant = qc.get("quantization") or {}
+                quantized_layers = modelopt_quant.get("quantized_layers") or {}
+                if any(
+                    isinstance(info, dict)
+                    and str(info.get("quant_algo", "")).upper() == "MXFP4"
+                    for info in quantized_layers.values()
+                ):
                     return True
             except Exception:
                 pass  # fall through to tensor scan
@@ -374,7 +413,15 @@ def wrap_shared_expert_for_offline_fp4(
     through the unified ``deep_gemm.fp8_fp4_mega_moe`` optional-shared API.
     The legacy ``mega_moe_fused`` strategy uses the same checkpoint contract.
     """
+    from rtp_llm.model_loader.mxfp8_quant_weight import Mxfp8Weight
     from rtp_llm.model_loader.per_block_fp8_quant_weight import PerBlockFp8Weight
+
+    # ModelOpt mixed checkpoints already wrap shared experts with Mxfp8Weight.
+    # Keep that wrapper: it knows the checkpoint's ``.weight_scale`` name and
+    # converts raw UE8M0 exponent bytes into the corresponding fp32 powers of
+    # two. MegaMoE-SE performs only the final DeepGEMM layout transform.
+    if isinstance(weight, Mxfp8Weight):
+        return weight
 
     if (
         isinstance(weight, PerBlockFp8Weight)
