@@ -606,8 +606,8 @@ decord==0.6.0 ; platform_machine == "x86_64" \
 deep-ep @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/pkg%2Facclep%2Fdeep_ep-1.2.1.10%2Bd7d7b48-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:4854e041c6df768efac4e7ff7bbb7c474577b7d877c86bb1ea378b37b2b870fe
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
-deep-gemm @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_b200/deep_gemm-2.5.0%2B8a4dfba-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:5844fee49160525128ca49b0e8ae73aac1eb4db44da108ede222cc85e9aac50a
+deep-gemm @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_sm120/8bcfcab8757e7df2fcb0e4f65796da5cd5bdd6b4/deep_gemm-2.6.1%2B8bcfcab.cu132-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:10ad0f0a498b54b3cef3fdb5d0f607a4a77b55330ab4aabb29f9aef0beafb52f
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
 distro==1.9.0 \
     --hash=sha256:2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed \
@@ -645,10 +645,11 @@ filelock==3.20.0 \
 flash-mla @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:67bba01c854fe3b06397c297d49724e16029984a37124d05047a78ff48e7c44f
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
-flashinfer-python==0.6.9 \
-    --hash=sha256:044ed74698b5f6c1e719b32cf95189609166740076c11287e81a38450953de50 \
-    --hash=sha256:46d013119ecd039a5844c4847325b3571f99cdd8fd9e00839bf008c67b15811a
-    # via rtp-kernel
+flashinfer-python @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/flashinfer_260714/flashinfer_python-0.6.9-py3-none-any.whl \
+    --hash=sha256:449125202602aed5be37b5ed3af2d83c39c124cf4fe051a8260f81e52140b6f1
+    # via
+    #   -r deps/requirements_torch_gpu_cuda13.txt
+    #   rtp-kernel
 fonttools==4.58.4 \
     --hash=sha256:0c7a12fb6f769165547f00fcaa8d0df9517603ae7e04b625e5acb8639809b82d \
     --hash=sha256:0d3acc7f0d151da116e87a182aefb569cf0a3c8e0fd4c9cd0a7c1e7d3e7adb26 \
@@ -3029,8 +3030,8 @@ rpds-py==0.30.0 \
     # via
     #   jsonschema
     #   referencing
-rtp-kernel @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/rtp_kernel-0.1.0%2Bcu13.4a1a7e3-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:69992ef98016b1f176a092741841b79c9eba540c819fcaec663ad7550eb6aa52
+rtp-kernel @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/cu13/rtp_kernel_260902/rtp_kernel-0.1.0%2B3bc0ca45.cu13-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:722d87433086d9775248905e72e7fc357ef15daae15c390cbfda1bebe94bafbd
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
 safetensors==0.6.2 \
     --hash=sha256:1d2d2b3ce1e2509c68932ca03ab8f20570920cd9754b05063d4368ee52833ecd \
