@@ -10,7 +10,8 @@ deployments:
 
 2. Mega-MoE FP4 (UE8M0, block_size=32) for MoE w1/w2.
    ``OnlineMegaMoeFp4Weight`` — BF16 → packed int8 + fp32 scale.
-   ``OnlineMegaMoeFp4FromFp8Weight`` — FP8 per-block → BF16 → FP4.
+   ``OnlineMegaMoeFp4FromFp8Weight`` — FP8 per-block or MXFP8 1x32
+   → BF16 → FP4.
    Both run at load time so the BF16/FP8 tensor is released before
    ``MegaMoeWrapper.__init__``. Triggered by ``MOE_STRATEGY=mega_moe`` or
    ``MOE_STRATEGY=mega_moe_se`` / ``mega_moe_fused`` env var via
@@ -55,6 +56,7 @@ FLOAT8_E4M3_MAX = 448.0
 NVFP4_BLOCK_SIZE = 16
 MEGA_MOE_FP4_BLOCK = 32
 FP8_PER_BLOCK = 128
+MXFP8_BLOCK = 32
 
 _E2M1_BOUNDS = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0])
 _E2M1_ODD_BOUNDS = _E2M1_BOUNDS[[1, 3, 5]]  # banker-rounding ties
@@ -211,15 +213,22 @@ def convert_fp8_moe_to_fp4_ue8m0(
     weight_fp8: torch.Tensor,
     weight_scale: torch.Tensor,
     block_size: int = MEGA_MOE_FP4_BLOCK,
+    source_block_size: int = FP8_PER_BLOCK,
+    scale_is_ue8m0_exponent: bool = False,
 ):
     """Convert stacked FP8 MoE weights ``[E, N, K]`` to FP4 + UE8M0 scale.
 
     Dequantizes FP8 per-block → BF16, then requantizes to FP4 (int8 packed)
     with UE8M0 scale factors suitable for DeepGEMM mega_moe.
 
-    Handles two scale layouts:
-      - Per-row: [E, N, K//128] — one scale per 128 elements along K
-      - 2D-block: [E, N//128, K//128] — one scale per 128×128 block
+    Handles two source scale layouts:
+      - Per-row: [E, N, K//source_block_size]
+      - 2D-block: [E, ceil(N/source_block_size), K//source_block_size]
+
+    ``scale_is_ue8m0_exponent=True`` handles ModelOpt MXFP8 checkpoints.
+    Their 1x32 scales are stored as raw uint8 exponent bytes; the generic
+    loader casts the bytes to fp32 without changing their values, so the
+    actual scale is ``2 ** (value - 127)``.
 
     Returns:
         packed: int8 [E, N, K // 2]
@@ -232,6 +241,15 @@ def convert_fp8_moe_to_fp4_ue8m0(
     ), f"expected 3D weight_fp8, got {tuple(weight_fp8.shape)}"
     E, N, K = weight_fp8.shape
     assert K % block_size == 0, f"K={K} not divisible by block_size={block_size}"
+    if source_block_size not in (MXFP8_BLOCK, FP8_PER_BLOCK):
+        raise ValueError(
+            "FP8-to-FP4 MegaMoE conversion only supports source block sizes "
+            f"{MXFP8_BLOCK} and {FP8_PER_BLOCK}, got {source_block_size}"
+        )
+    if K % source_block_size != 0:
+        raise ValueError(
+            f"FP8 source K={K} is not divisible by block size {source_block_size}"
+        )
     device = weight_fp8.device
 
     weight_scale = (
@@ -240,51 +258,49 @@ def convert_fp8_moe_to_fp4_ue8m0(
     if weight_scale.dim() == 2:
         weight_scale = weight_scale.unsqueeze(1)
 
-    if weight_scale.shape == (E, N, K // FP8_PER_BLOCK):
-        w_float = weight_fp8.float()
-        scale_expanded = weight_scale.unsqueeze(-1).expand(
-            E, N, K // FP8_PER_BLOCK, FP8_PER_BLOCK
-        )
-        w_float = (
-            w_float.view(E, N, K // FP8_PER_BLOCK, FP8_PER_BLOCK) * scale_expanded
-        ).reshape(E, N, K)
-    elif weight_scale.shape == (E, N // FP8_PER_BLOCK, K // FP8_PER_BLOCK):
-        scale_per_row = weight_scale.repeat_interleave(FP8_PER_BLOCK, dim=1)[:, :N, :]
-        w_float = weight_fp8.float()
-        scale_expanded = scale_per_row.unsqueeze(-1).expand(
-            E, N, K // FP8_PER_BLOCK, FP8_PER_BLOCK
-        )
-        w_float = (
-            w_float.view(E, N, K // FP8_PER_BLOCK, FP8_PER_BLOCK) * scale_expanded
-        ).reshape(E, N, K)
-        del scale_per_row
+    n_blocks_k = K // source_block_size
+    n_blocks_n = (N + source_block_size - 1) // source_block_size
+    if weight_scale.shape == (E, N, n_blocks_k):
+        scale_per_row = weight_scale
+    elif weight_scale.shape == (E, n_blocks_n, n_blocks_k):
+        scale_per_row = weight_scale.repeat_interleave(source_block_size, dim=1)[
+            :, :N, :
+        ]
     else:
-        expected_elements = E * N * (K // FP8_PER_BLOCK)
-        if weight_scale.numel() == expected_elements:
-            weight_scale = weight_scale.reshape(E, N, K // FP8_PER_BLOCK)
-            w_float = weight_fp8.float()
-            scale_expanded = weight_scale.unsqueeze(-1).expand(
-                E, N, K // FP8_PER_BLOCK, FP8_PER_BLOCK
-            )
-            w_float = (
-                w_float.view(E, N, K // FP8_PER_BLOCK, FP8_PER_BLOCK) * scale_expanded
-            ).reshape(E, N, K)
+        per_row_elements = E * N * n_blocks_k
+        per_block_elements = E * n_blocks_n * n_blocks_k
+        if weight_scale.numel() == per_row_elements:
+            scale_per_row = weight_scale.reshape(E, N, n_blocks_k)
+        elif weight_scale.numel() == per_block_elements:
+            scale_per_block = weight_scale.reshape(E, n_blocks_n, n_blocks_k)
+            scale_per_row = scale_per_block.repeat_interleave(source_block_size, dim=1)[
+                :, :N, :
+            ]
         else:
             raise ValueError(
                 f"Cannot interpret scale shape {tuple(weight_scale.shape)} "
-                f"for weight shape [E={E}, N={N}, K={K}]"
+                f"for weight shape [E={E}, N={N}, K={K}] and "
+                f"source_block_size={source_block_size}"
             )
-
-    w_bf16 = w_float.to(torch.bfloat16)
-    del w_float, scale_expanded
 
     packed = torch.empty((E, N, K // 2), dtype=torch.int8, device=device)
     sf = torch.empty((E, N, K // block_size), dtype=torch.float32, device=device)
     for i in range(E):
-        packed[i], sf[i] = per_token_cast_to_fp4(
-            w_bf16[i], use_ue8m0=True, gran_k=block_size
+        scale_i = scale_per_row[i].to(device=device, dtype=torch.float32)
+        if scale_is_ue8m0_exponent:
+            scale_i = torch.exp2(scale_i - 127.0)
+        w_bf16 = (
+            weight_fp8[i]
+            .float()
+            .view(N, n_blocks_k, source_block_size)
+            .mul_(scale_i.unsqueeze(-1))
+            .reshape(N, K)
+            .to(torch.bfloat16)
         )
-    del w_bf16
+        packed[i], sf[i] = per_token_cast_to_fp4(
+            w_bf16, use_ue8m0=True, gran_k=block_size
+        )
+        del w_bf16, scale_i
     return packed, sf
 
 
@@ -560,6 +576,8 @@ class OnlineMegaMoeFp4FromFp8Weight(CompositeWeight, QuantWeight):
         src_kernel: MoeAtomicWeight,
         src_scale: MoeAtomicWeight,
         block_size: int = MEGA_MOE_FP4_BLOCK,
+        source_block_size: int = FP8_PER_BLOCK,
+        scale_is_ue8m0_exponent: bool = False,
         **kwargs: Any,
     ):
         if src_kernel.name not in _MEGA_MOE_KERNEL_NAMES:
@@ -613,6 +631,8 @@ class OnlineMegaMoeFp4FromFp8Weight(CompositeWeight, QuantWeight):
         self.fp8_scale = fp8_scale
         self.out_scale = out_scale
         self._block_size = block_size
+        self._source_block_size = source_block_size
+        self._scale_is_ue8m0_exponent = scale_is_ue8m0_exponent
 
     def get_tensor_names(
         self, layer_id: Optional[int], load_config: LoadConfig
@@ -638,7 +658,11 @@ class OnlineMegaMoeFp4FromFp8Weight(CompositeWeight, QuantWeight):
         weight_scale = scale_dict[self.fp8_scale.name]
 
         packed, sf = convert_fp8_moe_to_fp4_ue8m0(
-            weight_fp8, weight_scale, self._block_size
+            weight_fp8,
+            weight_scale,
+            self._block_size,
+            source_block_size=self._source_block_size,
+            scale_is_ue8m0_exponent=self._scale_is_ue8m0_exponent,
         )
         del weight_fp8, weight_scale
         return {
@@ -804,8 +828,20 @@ def wrap_moe_for_mega_moe(weight: WeightModule) -> WeightModule:
     This is the single entry point used by ``apply_mega_moe_fp4_wrappers`` in
     ``model_weight_info.py``.
     """
+    from rtp_llm.model_loader.mxfp8_quant_weight import Mxfp8Weight
     from rtp_llm.model_loader.per_block_fp8_quant_weight import PerBlockFp8Weight
 
+    if isinstance(weight, Mxfp8Weight) and weight.name in _MEGA_MOE_KERNEL_NAMES:
+        kernel = weight.kernel
+        scale = weight.scale
+        if kernel is None or scale is None:
+            return weight
+        return OnlineMegaMoeFp4FromFp8Weight(
+            src_kernel=kernel,
+            src_scale=scale,
+            source_block_size=MXFP8_BLOCK,
+            scale_is_ue8m0_exponent=True,
+        )
     if isinstance(weight, PerBlockFp8Weight) and weight.name in _MEGA_MOE_KERNEL_NAMES:
         kernel = weight.kernel
         scale = weight.scale
