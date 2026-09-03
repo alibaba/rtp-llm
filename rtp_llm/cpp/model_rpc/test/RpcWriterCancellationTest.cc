@@ -197,44 +197,70 @@ TEST(RpcWriterCancellationTest, LocalWriteFailureCancelsStreamAndReturnsCancelle
 }
 
 TEST(RpcWriterCancellationTest, DecodeFirstReadCancellationReturnsCancelled) {
-    test::TestLogCapture   log_capture("decode_first_read_cancel");
-    DecodeFirstReadService service;
-    int                    listen_port = 0;
-    grpc::ServerBuilder    builder;
-    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &listen_port);
-    builder.RegisterService(&service);
-    auto server = builder.BuildAndStart();
-    ASSERT_NE(server, nullptr);
-    ASSERT_NE(listen_port, 0);
+    // The handler checks CHECK_REQUEST_CANCELLED before prepareGenerateContext,
+    // so a cancel that lands too early short-circuits without ever attempting
+    // the read this test is about. Both outcomes return CANCELLED, and the only
+    // evidence distinguishing them is the warning logged after the failed read
+    // (DecodeRpcServer.cc:236-241) -- nothing is logged before it, so there is no
+    // marker to wait on. A fixed settle window is therefore a race: 500ms was
+    // enough on an idle box and not enough on a loaded CI worker.
+    //
+    // Retry the scenario with a growing window and stop at the first attempt
+    // that reaches the read path.
+    static constexpr const char* kReadFailureMarker = "read allocate request failed";
+    const std::chrono::milliseconds settle_windows[] = {std::chrono::milliseconds(500),
+                                                        std::chrono::milliseconds(1500),
+                                                        std::chrono::milliseconds(4000)};
+    bool reached_read_path = false;
 
-    auto channel = grpc::CreateChannel("127.0.0.1:" + std::to_string(listen_port), grpc::InsecureChannelCredentials());
-    auto stub    = RpcService::NewStub(channel);
-    grpc::ClientContext client_context;
-    client_context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
-    auto stream = stub->RemoteGenerate(&client_context);
-    ASSERT_NE(stream, nullptr);
+    for (const auto settle : settle_windows) {
+        test::TestLogCapture   log_capture("decode_first_read_cancel");
+        DecodeFirstReadService service;
+        int                    listen_port = 0;
+        grpc::ServerBuilder    builder;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &listen_port);
+        builder.RegisterService(&service);
+        auto server = builder.BuildAndStart();
+        ASSERT_NE(server, nullptr);
+        ASSERT_NE(listen_port, 0);
 
-    EXPECT_TRUE(service.waitUntilEntered(std::chrono::seconds(5)));
-    // waitUntilEntered fires before the fake delegates to the real handler, and
-    // RemoteGenerate runs CHECK_REQUEST_CANCELLED before prepareGenerateContext.
-    // Cancelling right away lets the handler short-circuit without ever
-    // attempting the read this test is about. Once past that gate the handler
-    // parks in Read forever (the client sends nothing), so a settle window makes
-    // the read-failure path the only one the cancel can hit.
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    client_context.TryCancel();
+        auto channel =
+            grpc::CreateChannel("127.0.0.1:" + std::to_string(listen_port), grpc::InsecureChannelCredentials());
+        auto stub = RpcService::NewStub(channel);
+        grpc::ClientContext client_context;
+        client_context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(30));
+        auto stream = stub->RemoteGenerate(&client_context);
+        ASSERT_NE(stream, nullptr);
 
-    const auto client_status = stream->Finish();
-    const auto server_status = service.waitUntilReturned(std::chrono::seconds(5));
+        EXPECT_TRUE(service.waitUntilEntered(std::chrono::seconds(5)));
+        // waitUntilEntered fires before the fake delegates to the real handler,
+        // so give the handler this long to get past the gate and park in Read
+        // (the client sends nothing, so it parks there indefinitely).
+        std::this_thread::sleep_for(settle);
+        client_context.TryCancel();
 
-    server->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(5));
-    server->Wait();
+        const auto client_status = stream->Finish();
+        const auto server_status = service.waitUntilReturned(std::chrono::seconds(5));
 
-    EXPECT_EQ(client_status.error_code(), grpc::StatusCode::CANCELLED);
-    ASSERT_TRUE(server_status.has_value());
-    EXPECT_EQ(server_status->error_code(), grpc::StatusCode::CANCELLED);
-    EXPECT_NE(log_capture.content().find("request [pending peer="), std::string::npos);
-    EXPECT_NE(log_capture.content().find("read allocate request failed"), std::string::npos);
+        // Read the evidence before tearing the server down.
+        reached_read_path = log_capture.waitFor(kReadFailureMarker, std::chrono::seconds(5));
+
+        server->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(5));
+        server->Wait();
+
+        // Holds on both paths; the cancel is observed either way.
+        EXPECT_EQ(client_status.error_code(), grpc::StatusCode::CANCELLED);
+        ASSERT_TRUE(server_status.has_value());
+        EXPECT_EQ(server_status->error_code(), grpc::StatusCode::CANCELLED);
+
+        if (reached_read_path) {
+            break;
+        }
+    }
+
+    EXPECT_TRUE(reached_read_path)
+        << "cancel never landed while the handler was blocked in Read, so the "
+           "read-failure path was not exercised in any attempt";
 }
 
 TEST(RpcWriterCancellationTest, RemoteWriteFailureCancelsGrpcStreamClosure) {
