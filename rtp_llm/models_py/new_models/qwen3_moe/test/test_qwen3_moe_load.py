@@ -6,8 +6,10 @@ import unittest
 from unittest import mock
 
 import torch
+from safetensors.torch import save_file
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.quant_config import Fp8PerTensorQuantConfig
 from rtp_llm.config.quant_config import QuantizationConfig as SourceQuantizationConfig
 from rtp_llm.models_py import weight_mapper
 from rtp_llm.models_py.layers.moe_experts import BaseMoEExperts
@@ -27,6 +29,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
 from rtp_llm.models_py.new_models.qwen3_moe.language import Qwen3MoeForCausalLM
 from rtp_llm.models_py.quant_methods import QuantizationConfig
 from rtp_llm.ops import EplbMode
+from rtp_llm.utils.model_weight import W
 
 _MODEL_QUANT_UNSET = object()
 
@@ -365,6 +368,90 @@ class MoEWeightDispatchTest(unittest.TestCase):
                 layer.w2[expert_id],
                 weights[f"{expert_id}.down_proj.weight"],
             )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires an accelerator")
+    def test_runtime_shuffle_rebinds_module_storage_and_bounds_peak(self):
+        class CloningRuntimeDevice:
+            def shuffle_moe_weight(self, tensor, data_type, name):
+                return tensor.clone()
+
+        layer = _make_experts(
+            num_experts=2,
+            hidden_size=1024,
+            moe_intermediate_size=1024,
+        ).to("cuda")
+        original_ptrs = {
+            W.moe_w1: layer.w13.data_ptr(),
+            W.moe_w2: layer.w2.data_ptr(),
+        }
+        weight_bytes = sum(
+            tensor.numel() * tensor.element_size() for tensor in (layer.w13, layer.w2)
+        )
+        layer._model_config.exported_device = CloningRuntimeDevice()
+        captured_weights = {}
+        executor = mock.sentinel.fused_moe_executor
+        factory = mock.MagicMock()
+
+        def create_fused_moe(adapter, weights):
+            captured_weights.update(weights)
+            return executor
+
+        factory.create_fused_moe.side_effect = create_fused_moe
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        baseline = torch.cuda.memory_allocated()
+        with mock.patch(
+            "rtp_llm.models_py.layers.moe_experts.FusedMoeFactory",
+            return_value=factory,
+        ):
+            layer._maybe_build_fused_moe()
+        torch.cuda.synchronize()
+        steady_state = torch.cuda.memory_allocated()
+        extra_peak = torch.cuda.max_memory_allocated() - baseline
+
+        self.assertIs(layer.fused_moe, executor)
+        self.assertNotEqual(layer.w13.data_ptr(), original_ptrs[W.moe_w1])
+        self.assertNotEqual(layer.w2.data_ptr(), original_ptrs[W.moe_w2])
+        self.assertEqual(layer.w13.data_ptr(), captured_weights[W.moe_w1].data_ptr())
+        self.assertEqual(layer.w2.data_ptr(), captured_weights[W.moe_w2].data_ptr())
+        self.assertLess(extra_peak, weight_bytes)
+        self.assertLess(abs(steady_state - baseline), 1024 * 1024)
+
+    def test_runtime_shuffle_rebinds_quantized_weight_and_scale_storage(self):
+        class CloningRuntimeDevice:
+            def shuffle_moe_weight(self, tensor, data_type, name):
+                return tensor.clone()
+
+        quant = QuantizationConfig(
+            "fp8_block",
+            source_config=types.SimpleNamespace(weight_block_size=[4, 4]),
+        )
+        layer = _make_experts(
+            num_experts=1,
+            hidden_size=8,
+            moe_intermediate_size=8,
+            quant_config=quant,
+        )
+        layer._model_config.exported_device = CloningRuntimeDevice()
+        attrs = {
+            W.moe_w1: "w13",
+            W.moe_w2: "w2",
+            W.moe_s1: "w13_scale",
+            W.moe_s2: "w2_scale",
+        }
+        original_ptrs = {
+            name: getattr(layer, attr).data_ptr() for name, attr in attrs.items()
+        }
+
+        runtime_weights = layer._build_weights_dict()
+
+        for name, attr in attrs.items():
+            with self.subTest(name=name):
+                module_tensor = getattr(layer, attr)
+                self.assertNotEqual(module_tensor.data_ptr(), original_ptrs[name])
+                self.assertEqual(
+                    module_tensor.data_ptr(), runtime_weights[name].data_ptr()
+                )
 
     def test_tp_slices_gate_up_rows_and_down_columns(self):
         weights = _expert_weights(1, 8, 8)
@@ -1047,16 +1134,25 @@ class Qwen3MoeModelTest(unittest.TestCase):
         config.activation_type = "SiGLU"
         return config
 
-    def _load_config(self, tp_size=1, tp_rank=0, ep_size=1, ep_rank=0):
+    def _load_config(
+        self,
+        tp_size=1,
+        tp_rank=0,
+        ep_size=1,
+        ep_rank=0,
+        compute_dtype=torch.float32,
+        device="cpu",
+        quant_config=None,
+    ):
         parallelism = _parallelism(tp_size, tp_rank, ep_size, ep_rank)
         return NewLoaderConfig(
             tp_size=tp_size,
             tp_rank=tp_rank,
             ep_size=ep_size,
             ep_rank=ep_rank,
-            compute_dtype=torch.float32,
-            device="cpu",
-            quant_config=QuantizationConfig("none"),
+            compute_dtype=compute_dtype,
+            device=device,
+            quant_config=quant_config or QuantizationConfig("none"),
             parallelism_config=parallelism,
             moe_config=_moe_config(),
         )
@@ -1300,6 +1396,75 @@ class Qwen3MoeModelTest(unittest.TestCase):
             "UnquantizedLinearMethod",
         )
         self.assertEqual(model.layers[0].mlp.experts._quant_family, "fp8_per_block")
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires an accelerator")
+    def test_new_model_loader_online_fp8_builds_fused_moe(self):
+        if torch.cuda.get_device_capability() < (8, 9):
+            self.skipTest("online FP8 MoE requires compute capability 8.9+")
+
+        torch.manual_seed(7)
+        source_quant = Fp8PerTensorQuantConfig(is_quanted=False)
+        config = self._config(tie_word_embeddings=False)
+        config.hidden_size = 128
+        config.inter_size = 0
+        config.moe_inter_size = 128
+        config.attn_config.head_num = 2
+        config.attn_config.kv_head_num = 1
+        config.attn_config.size_per_head = 64
+        config.data_type = "bf16"
+        config.quant_config = source_quant
+
+        def random_weight(*shape):
+            return torch.randn(*shape, dtype=torch.bfloat16)
+
+        weights = {
+            "model.embed_tokens.weight": random_weight(8, 128),
+            "model.layers.0.input_layernorm.weight": torch.ones(
+                128, dtype=torch.bfloat16
+            ),
+            "model.layers.0.self_attn.q_proj.weight": random_weight(128, 128),
+            "model.layers.0.self_attn.k_proj.weight": random_weight(64, 128),
+            "model.layers.0.self_attn.v_proj.weight": random_weight(64, 128),
+            "model.layers.0.self_attn.q_norm.weight": torch.ones(
+                64, dtype=torch.bfloat16
+            ),
+            "model.layers.0.self_attn.k_norm.weight": torch.ones(
+                64, dtype=torch.bfloat16
+            ),
+            "model.layers.0.self_attn.o_proj.weight": random_weight(128, 128),
+            "model.layers.0.post_attention_layernorm.weight": torch.ones(
+                128, dtype=torch.bfloat16
+            ),
+            "model.layers.0.mlp.gate.weight": random_weight(2, 128),
+            "model.norm.weight": torch.ones(128, dtype=torch.bfloat16),
+            "lm_head.weight": random_weight(8, 128),
+        }
+        for name, tensor in _expert_weights(2, 128, 128).items():
+            weights[f"model.layers.0.mlp.experts.{name}"] = tensor.to(torch.bfloat16)
+
+        runtime_quant = QuantizationConfig(
+            source_quant.get_runtime_method_key(), source_config=source_quant
+        )
+        load_config = self._load_config(
+            compute_dtype=torch.bfloat16,
+            device="cuda:0",
+            quant_config=runtime_quant,
+        )
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file(weights, os.path.join(model_path, "model.safetensors"))
+            model = NewModelLoader(config, load_config, model_path=model_path).load()
+
+        experts = model.layers[0].mlp.experts
+        self.assertEqual(experts._quant_family, "fp8_per_tensor_online")
+        self.assertIsNotNone(experts.fused_moe)
+        self.assertIn(
+            experts.w13.dtype,
+            {
+                torch.float8_e4m3fn,
+                getattr(torch, "float8_e4m3fnuz", torch.float8_e4m3fn),
+            },
+        )
+        self.assertEqual(experts.w13.device.type, "cuda")
 
     def test_checkpoint_modules_to_not_convert_reaches_runtime_dispatch(self):
         with tempfile.TemporaryDirectory() as model_path:
