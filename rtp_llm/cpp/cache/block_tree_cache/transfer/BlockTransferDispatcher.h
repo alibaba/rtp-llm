@@ -12,6 +12,7 @@ namespace rtp_llm {
 
 class MultiRankBlockTransferEngine;
 class PerRankBlockTransferEngine;
+class BlockTreeCacheMetricsReporter;
 
 namespace block_tree_cache_test {
 class BlockTreeCacheTestPeer;
@@ -40,6 +41,7 @@ public:
 
     void cancelPendingStagingTransfers() const;
     void shutdown() const;
+    void setMetricsReporter(BlockTreeCacheMetricsReporter* metrics_reporter) const;
 
 private:
     friend class block_tree_cache_test::BlockTreeCacheTestPeer;

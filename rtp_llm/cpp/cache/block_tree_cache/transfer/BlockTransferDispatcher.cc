@@ -17,8 +17,7 @@ namespace rtp_llm {
 namespace {
 
 bool isDeviceHostDirection(Tier source, Tier target) {
-    return (source == Tier::DEVICE && target == Tier::HOST)
-           || (source == Tier::HOST && target == Tier::DEVICE);
+    return (source == Tier::DEVICE && target == Tier::HOST) || (source == Tier::HOST && target == Tier::DEVICE);
 }
 
 }  // namespace
@@ -81,10 +80,8 @@ void BlockTransferDispatcher::runTransfer(const std::vector<TransferDescriptor>&
         if (group != groups.end()) {
             group->descriptors.push_back(descriptor);
         } else {
-            groups.push_back(DescriptorGroup{descriptor.source_tier,
-                                             descriptor.target_tier,
-                                             descriptor.group_set_id,
-                                             {descriptor}});
+            groups.push_back(
+                DescriptorGroup{descriptor.source_tier, descriptor.target_tier, descriptor.group_set_id, {descriptor}});
         }
     }
 
@@ -94,9 +91,8 @@ void BlockTransferDispatcher::runTransfer(const std::vector<TransferDescriptor>&
                                        max_device_host_descriptors_per_batch_ :
                                        max_non_device_host_descriptors_per_batch_;
         for (size_t begin = 0; begin < group.descriptors.size(); begin += batch_limit) {
-            const size_t end = std::min(begin + batch_limit, group.descriptors.size());
-            std::vector<TransferDescriptor> batch(group.descriptors.begin() + begin,
-                                                   group.descriptors.begin() + end);
+            const size_t                    end = std::min(begin + batch_limit, group.descriptors.size());
+            std::vector<TransferDescriptor> batch(group.descriptors.begin() + begin, group.descriptors.begin() + end);
             stage_state->addBatch();
             try {
                 auto context = executeMultiRank(batch, timeout_ms);
@@ -123,6 +119,10 @@ void BlockTransferDispatcher::cancelPendingStagingTransfers() const {
 
 void BlockTransferDispatcher::shutdown() const {
     per_rank_engine_->shutdown();
+}
+
+void BlockTransferDispatcher::setMetricsReporter(BlockTreeCacheMetricsReporter* metrics_reporter) const {
+    per_rank_engine_->setMetricsReporter(metrics_reporter);
 }
 
 }  // namespace rtp_llm

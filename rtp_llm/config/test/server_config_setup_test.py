@@ -82,6 +82,15 @@ class GenerateConfigTest(TestCase):
             "HOST_CACHE_SIZE_MB": "2048",
             "HOST_CACHE_SYNC_TIMEOUT_MS": "6789",
             "BLOCK_TREE_FULL_PREFIX_SCAN_INTERVAL_MS": "30000",
+            "BLOCK_TREE_TRANSFER_WORKER_COUNT": "7",
+            "BLOCK_TREE_BUSINESS_QUEUE_MAX_SIZE": "211",
+            "BLOCK_TREE_TRANSFER_QUEUE_MAX_SIZE": "307",
+            "BLOCK_TREE_DEVICE_EVICT_LOW_WATERMARK_RATIO": "0.71",
+            "BLOCK_TREE_DEVICE_EVICT_HIGH_WATERMARK_RATIO": "0.81",
+            "BLOCK_TREE_HOST_EVICT_LOW_WATERMARK_RATIO": "0.72",
+            "BLOCK_TREE_HOST_EVICT_HIGH_WATERMARK_RATIO": "0.82",
+            "BLOCK_TREE_DISK_EVICT_LOW_WATERMARK_RATIO": "0.73",
+            "BLOCK_TREE_DISK_EVICT_HIGH_WATERMARK_RATIO": "0.83",
         },
         clear=True,
     )
@@ -100,6 +109,15 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.host_cache_size_mb, 2048)
         self.assertEqual(config.host_cache_sync_timeout_ms, 6789)
         self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 30000)
+        self.assertEqual(config.block_tree_transfer_worker_count, 7)
+        self.assertEqual(config.block_tree_business_queue_max_size, 211)
+        self.assertEqual(config.block_tree_transfer_queue_max_size, 307)
+        self.assertEqual(config.block_tree_device_evict_low_watermark_ratio, 0.71)
+        self.assertEqual(config.block_tree_device_evict_high_watermark_ratio, 0.81)
+        self.assertEqual(config.block_tree_host_evict_low_watermark_ratio, 0.72)
+        self.assertEqual(config.block_tree_host_evict_high_watermark_ratio, 0.82)
+        self.assertEqual(config.block_tree_disk_evict_low_watermark_ratio, 0.73)
+        self.assertEqual(config.block_tree_disk_evict_high_watermark_ratio, 0.83)
 
     def test_kv_cache_strategy_defaults_are_rollback_safe(self):
         config = PyEnvConfigs().kv_cache_config

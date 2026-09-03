@@ -1,12 +1,14 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 
 #include <algorithm>
+#include <chrono>
 #include <exception>
 #include <memory>
 #include <string>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
@@ -95,6 +97,13 @@ void PerRankBlockTransferEngine::shutdown() {
     transfer_task_pool_->shutdown();
 }
 
+void PerRankBlockTransferEngine::setMetricsReporter(BlockTreeCacheMetricsReporter* metrics_reporter) {
+    metrics_reporter_ = metrics_reporter;
+    if (device_disk_executor_ != nullptr) {
+        device_disk_executor_->setMetricsReporter(metrics_reporter);
+    }
+}
+
 std::shared_ptr<AsyncContext> PerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descriptors) {
     if (descriptors.empty()) {
         return std::make_shared<CompletedAsyncContext>(transferStatusToErrorInfo(TransferStatus::INVALID_ARGS));
@@ -138,14 +147,22 @@ std::shared_ptr<AsyncContext> PerRankBlockTransferEngine::submit(const std::vect
         (source == Tier::DEVICE && target == Tier::HOST) || (source == Tier::HOST && target == Tier::DEVICE);
     const size_t batch_limit =
         device_host_direction ? max_device_host_descriptors_per_batch_ : max_non_device_host_descriptors_per_batch_;
-    auto context    = std::make_shared<TransferBatchAsyncContext>();
-    auto on_timeout = [context]() {
+    auto          context = std::make_shared<TransferBatchAsyncContext>();
+    const int64_t queue_begin =
+        metrics_reporter_ == nullptr ? 0 : metrics_reporter_->reportTransferQueueWaitStarted(source, target);
+    auto on_timeout = [this, context, source, target, queue_begin]() {
+        if (metrics_reporter_ != nullptr) {
+            metrics_reporter_->reportTransferQueueWaitFinished(source, target, queue_begin);
+        }
         context->complete(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer expired in TE worker queue"));
     };
     const auto task_class = target == Tier::DEVICE ? BlockTreeTaskClass::LOAD : BlockTreeTaskClass::BACKGROUND;
     const bool accepted   = transfer_task_pool_->submit(
         task_class,
-        [this, descriptors, group_sets, hosts, context, batch_limit] {
+        [this, descriptors, group_sets, hosts, context, batch_limit, source, target, queue_begin] {
+            if (metrics_reporter_ != nullptr) {
+                metrics_reporter_->reportTransferQueueWaitFinished(source, target, queue_begin);
+            }
             try {
                 for (size_t begin = 0; begin < descriptors.size(); begin += batch_limit) {
                     const size_t                          end = std::min(begin + batch_limit, descriptors.size());
@@ -179,6 +196,9 @@ std::shared_ptr<AsyncContext> PerRankBlockTransferEngine::submit(const std::vect
                                                                                  host_queue_wait_timeout_ms_),
         std::move(on_timeout));
     if (!accepted) {
+        if (metrics_reporter_ != nullptr) {
+            metrics_reporter_->reportTransferQueueWaitFinished(source, target, queue_begin, false);
+        }
         context->complete(
             ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "RESOURCE_EXHAUSTED: transfer queue is full or stopped"));
     }

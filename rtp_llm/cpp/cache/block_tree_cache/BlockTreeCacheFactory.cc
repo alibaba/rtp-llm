@@ -68,6 +68,11 @@ size_t checkedSize(int64_t value, const char* name) {
     return static_cast<size_t>(value);
 }
 
+size_t checkedQueueSize(int64_t value, const char* name) {
+    RTP_LLM_CHECK_WITH_INFO(value >= 0, "%s must be >= 0, got %ld", name, value);
+    return static_cast<size_t>(value);
+}
+
 int slidingWindowSize(const GroupBase& group, size_t group_id) {
     RTP_LLM_CHECK_WITH_INFO(
         group.policy.group_type == CacheGroupType::SWA, "sliding window requested for non-SWA group_id=%zu", group_id);
@@ -547,9 +552,9 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     config.transfer_worker_count =
         checkedSize(kv_cache_config.block_tree_transfer_worker_count, "block_tree_transfer_worker_count");
     config.business_queue_max_size =
-        checkedSize(kv_cache_config.block_tree_business_queue_max_size, "block_tree_business_queue_max_size");
+        checkedQueueSize(kv_cache_config.block_tree_business_queue_max_size, "block_tree_business_queue_max_size");
     config.transfer_queue_max_size =
-        checkedSize(kv_cache_config.block_tree_transfer_queue_max_size, "block_tree_transfer_queue_max_size");
+        checkedQueueSize(kv_cache_config.block_tree_transfer_queue_max_size, "block_tree_transfer_queue_max_size");
 
     if (disk_enabled) {
         const int64_t staging_block_count = kv_cache_config.disk_cache_staging_block_count;

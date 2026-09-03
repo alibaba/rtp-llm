@@ -957,13 +957,18 @@ public:
     std::string                     source_tier;
     std::string                     target_tier;
     std::vector<TransferBytesEntry> transfer_bytes;
-    int64_t                         descriptors_per_transfer = 0;
-    int64_t                         latency_us               = 0;
-    int64_t                         queue_wait_latency_us    = 0;
-    int64_t                         in_flight                = 0;
-    bool                            success                  = true;
-    bool                            transfer_completed       = true;
-    bool                            report_queue_wait        = false;
+    int64_t                         descriptors_per_transfer  = 0;
+    int64_t                         latency_us                = 0;
+    int64_t                         queue_wait_latency_us     = 0;
+    int64_t                         in_flight                 = 0;
+    int64_t                         queue_waiting_tasks       = 0;
+    bool                            success                   = true;
+    bool                            transfer_completed        = true;
+    bool                            report_transfer           = true;
+    bool                            report_task_queue         = false;
+    bool                            report_callback_queue     = false;
+    bool                            report_queue_wait_latency = false;
+    std::string                     pool_type;
 };
 
 class RtpLLMCacheTransferMetrics: public kmonitor::MetricsGroup {
@@ -979,6 +984,9 @@ private:
     kmonitor::MutableMetric* transfer_descriptor_count_compat_metric    = nullptr;
     kmonitor::MutableMetric* transfer_latency_us_metric                 = nullptr;
     kmonitor::MutableMetric* transfer_task_queue_wait_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* task_queue_waiting_tasks_metric            = nullptr;
+    kmonitor::MutableMetric* callback_queue_waiting_tasks_metric        = nullptr;
+    kmonitor::MutableMetric* callback_queue_wait_latency_us_metric      = nullptr;
     kmonitor::MutableMetric* transfer_in_flight_metric                  = nullptr;
     kmonitor::MutableMetric* transfer_bytes_metric                      = nullptr;
 
