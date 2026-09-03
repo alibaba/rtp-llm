@@ -16,6 +16,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 
 import java.io.IOException;
+import java.net.ConnectException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -33,7 +34,12 @@ import static org.flexlb.constant.DeploymentIdentityConstants.SPECTRUM_DEPLOYMEN
 import static org.flexlb.constant.DeploymentIdentityConstants.SPECTRUM_WORKSPACE_ID;
 import static org.flexlb.constant.NacosConfigConstants.NACOS_SERVER_ADDR;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
@@ -60,7 +66,11 @@ class UniConfigConfigSourceTest {
 
     @BeforeEach
     void startAgent() throws IOException {
-        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        startAgent(new InetSocketAddress("127.0.0.1", 0));
+    }
+
+    private void startAgent(InetSocketAddress address) throws IOException {
+        server = HttpServer.create(address, 0);
         server.createContext("/", exchange -> {
             requests.incrementAndGet();
             requestPath.set(exchange.getRequestURI().getRawPath());
@@ -202,6 +212,55 @@ class UniConfigConfigSourceTest {
     }
 
     @Test
+    void waitsForAgentToStartBeforeLoadingInitialConfiguration() throws Exception {
+        InetSocketAddress address = server.getAddress();
+        prepareUnavailableAgent();
+        doAnswer(invocation -> {
+            startAgent(address);
+            return null;
+        }).when(source).waitForStartupRetry();
+
+        source.initialize();
+        initializeConfigService();
+
+        assertThat(configService.loadBalanceConfig().getRouter().getAvailabilityHysteresisPercent()).isEqualTo(9);
+        assertThat(requests).hasValue(1);
+        verify(source).waitForStartupRetry();
+    }
+
+    @Test
+    void failsStartupAfterBoundedRetriesWhenAgentNeverStarts() throws Exception {
+        prepareUnavailableAgent();
+
+        assertThatThrownBy(source::initialize)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Failed to initialize UniConfig")
+                .hasRootCauseInstanceOf(ConnectException.class);
+
+        verify(source, times(29)).waitForStartupRetry();
+        verify(executor).shutdownNow();
+        assertThat(source.load()).isNull();
+    }
+
+    @Test
+    void interruptsStartupWaitWithoutContinuingRetries() throws Exception {
+        prepareUnavailableAgent();
+        doThrow(new InterruptedException("shutdown")).when(source).waitForStartupRetry();
+
+        try {
+            assertThatThrownBy(source::initialize)
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasRootCauseInstanceOf(InterruptedException.class);
+            assertThat(Thread.currentThread().isInterrupted()).isTrue();
+        } finally {
+            Thread.interrupted();
+        }
+
+        verify(source).waitForStartupRetry();
+        verify(executor).shutdownNow();
+    }
+
+    @Test
     void failsStartupAndStopsPollingWhenInitialDocumentIsInvalid() throws Exception {
         response.set(new Response(200, "{\"schemaVersion\":1,\"unknown\":true}"));
         initializeSource();
@@ -271,6 +330,12 @@ class UniConfigConfigSourceTest {
             prepareSource(new UniConfigConfigSource(new DeploymentIdentity()));
             source.initialize();
         });
+    }
+
+    private void prepareUnavailableAgent() throws Exception {
+        spectrumEnvironment().execute(() -> prepareSource(spy(new UniConfigConfigSource(new DeploymentIdentity()))));
+        server.stop(0);
+        doNothing().when(source).waitForStartupRetry();
     }
 
     private void initializeConfigService() {

@@ -10,6 +10,7 @@ import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.ConnectException;
 import java.net.HttpURLConnection;
 import java.net.Proxy;
 import java.net.URI;
@@ -26,6 +27,8 @@ import java.util.function.Consumer;
 final class UniConfigConfigSource implements ConfigSource {
 
     private static final int CONFIG_READ_TIMEOUT_MS = 3000;
+    private static final int STARTUP_MAX_ATTEMPTS = 30;
+    private static final int STARTUP_RETRY_INTERVAL_SECONDS = 1;
         private static final int POLL_INTERVAL_SECONDS = 30;
     private static final int PRIORITY = 3;
 
@@ -66,7 +69,7 @@ final class UniConfigConfigSource implements ConfigSource {
             return;
         }
         try {
-            configContent = fetchConfig();
+            configContent = fetchInitialConfig();
             if (pollExecutor == null) {
                 pollExecutor = Executors.newSingleThreadScheduledExecutor(task -> {
                     Thread thread = new Thread(task, "flexlb-uniconfig-poll");
@@ -104,6 +107,30 @@ final class UniConfigConfigSource implements ConfigSource {
         if (pollExecutor != null) {
             pollExecutor.shutdownNow();
         }
+    }
+
+    private String fetchInitialConfig() throws IOException {
+        for (int attempt = 1; ; attempt++) {
+            try {
+                return fetchConfig();
+            } catch (ConnectException error) {
+                if (attempt >= STARTUP_MAX_ATTEMPTS) {
+                    throw error;
+                }
+                log.warn("UniConfig agent is not accepting connections; retrying startup ({}/{}): {}",
+                        attempt, STARTUP_MAX_ATTEMPTS, error.toString());
+                try {
+                    waitForStartupRetry();
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while waiting for the UniConfig agent", interrupted);
+                }
+            }
+        }
+    }
+
+    void waitForStartupRetry() throws InterruptedException {
+        TimeUnit.SECONDS.sleep(STARTUP_RETRY_INTERVAL_SECONDS);
     }
 
     private String fetchConfig() throws IOException {
