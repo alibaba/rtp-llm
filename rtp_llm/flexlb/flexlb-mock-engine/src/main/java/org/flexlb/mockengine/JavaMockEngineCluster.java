@@ -569,6 +569,46 @@ public final class JavaMockEngineCluster {
          *  ack, not a connection reset); 200ms is far inside the master's
          *  3-strike retire scale. */
         static final long CRASH_PORT_KILL_DELAY_MS = 200L;
+        /**
+         * Default completion backlog retain window (records), overridable via
+         * env {@code MOCK_COMPLETION_RETAIN_WINDOW}. The window must
+         * comfortably exceed a 20ms poller's lag: with two masters polling
+         * independently (dual-flexlb HA) each only ever trails by its own
+         * poll cadence, orders of magnitude inside the window, so neither
+         * loses backlog. Memory stays bounded: engines × window ×
+         * per-record bytes.
+         */
+        static final int DEFAULT_COMPLETION_RETAIN_WINDOW = readCompletionRetainWindow();
+
+        /**
+         * Reads {@code MOCK_COMPLETION_RETAIN_WINDOW} (non-negative int); a
+         * malformed value falls back to 1024 — a load-test tool stays robust
+         * on config typos instead of failing the run (same discipline as
+         * JavaLoadClient's PRIORITY sanitization).
+         */
+        private static int readCompletionRetainWindow() {
+            String val = System.getenv("MOCK_COMPLETION_RETAIN_WINDOW");
+            if (val == null || val.isEmpty()) {
+                return 1024;
+            }
+            try {
+                int parsed = Integer.parseInt(val);
+                if (parsed < 0) {
+                    // Negative typos must NOT clamp to 0: a 0 window would
+                    // wipe the whole backlog at every cleanup, silently
+                    // starving every consumer — degrade to the default
+                    // instead, same as a malformed value.
+                    System.err.println("invalid MOCK_COMPLETION_RETAIN_WINDOW=" + val
+                            + " (must be a non-negative int); falling back to 1024");
+                    return 1024;
+                }
+                return parsed;
+            } catch (NumberFormatException e) {
+                System.err.println("invalid MOCK_COMPLETION_RETAIN_WINDOW=" + val
+                        + " (must be a non-negative int); falling back to 1024");
+                return 1024;
+            }
+        }
 
         private final String engineName;
         private final String host;
@@ -791,6 +831,15 @@ public final class JavaMockEngineCluster {
         // batching. waitingPrefillRequests counts members of BOTH queues.
         private final ArrayDeque<MockPerformanceModel.RequestShape> directPrefillQueue = new ArrayDeque<>();
         private final Object prefillQueueLock = new Object();
+        /**
+         * Finished-task backlog keyed by monotonically increasing completion
+         * version. Multi-consumer delivery protocol (dual-master HA polling):
+         * readers only FILTER by their own cursor (version > cursor) and never
+         * remove entries — each flexlb instance keeps an independent
+         * per-worker cursor, so the earliest poller must not destroy records
+         * a slower consumer has not read yet. Bounded by the retain window
+         * ({@link #completionRetainWindow}) trimmed in {@link #periodicCleanup()}.
+         */
         private final ConcurrentLinkedQueue<VersionedTask> completions = new ConcurrentLinkedQueue<>();
         /**
          * Publishes completion records and their cursor as one ordered operation.
@@ -878,6 +927,17 @@ public final class JavaMockEngineCluster {
          * time; tests inject short timeouts to exercise the timeout path).
          */
         private volatile long responsePollTimeoutMs = DEFAULT_RESPONSE_POLL_TIMEOUT_MS;
+        /**
+         * Completion backlog retain window: the number of most-recent
+         * completion records (by version) kept in {@link #completions} for
+         * multi-consumer cursor delivery. Trimmed (oldest first) only by
+         * {@link #periodicCleanup()} — reads never remove entries, so two
+         * masters with independent cursors can poll concurrently without one
+         * starving the other's backlog. Overridable via
+         * {@link #setCompletionRetainWindow(int)} (tests inject small windows
+         * to exercise the trim path).
+         */
+        private volatile int completionRetainWindow = DEFAULT_COMPLETION_RETAIN_WINDOW;
 
         /** Test/default constructor: derives engine name from role+port, default KV capacity. */
         FastRpcService(String roleName,
@@ -988,6 +1048,33 @@ public final class JavaMockEngineCluster {
             }
 
             Runnable process = () -> {
+                // ── Enqueue-ACK fault pre-admission split (enqueue_ack_partial_fail /
+                // enqueue_ack_error_code) ──
+                // Rejected members are diverted to the ack errors BEFORE any
+                // engine state is created: a production engine that rejects an
+                // enqueue never saw the request, so the mock must not register,
+                // execute or complete it either. The previous implementation
+                // rewrote the ack AFTER admission (requests kept executing and
+                // their late completions kept surfacing via getWorkerStatus);
+                // with the ack already settled as FAILED by the master, those
+                // ghost completions desynced its bookkeeping — the confirmed/
+                // total_load decode-inflight view was inflated forever while
+                // the 30s endpoint TTL eviction (which only sweeps inflight
+                // entries) never reclaimed it (run-1788360948: scheduler
+                // inflight stuck at 33 with a fully idle engine).
+                FaultInjectionConfig ackFaultSnapshot = faultConfig;
+                int ackFaultBudget = ackFaultSnapshot.getEnqueueAckPartialFail();
+                if (ackFaultBudget <= 0
+                        && ackFaultSnapshot.getEnqueueAckErrorCode() != 0) {
+                    ackFaultBudget = Integer.MAX_VALUE;
+                }
+                long ackFaultCode = ackFaultSnapshot.getEnqueueAckErrorCode() != 0
+                        ? ackFaultSnapshot.getEnqueueAckErrorCode() : 13L;
+                String ackFaultMessage =
+                        ackFaultSnapshot.getEnqueueAckPartialFail() > 0
+                                ? "injected enqueue_ack_partial_fail"
+                                : "injected enqueue_ack_error_code " + ackFaultCode;
+                final int[] ackFaultCursor = {0};
                 for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
                     List<MockPerformanceModel.RequestShape> shapes = new ArrayList<>(slot.getRequestsCount());
                     // Phase 1: register per-request state the completion callback
@@ -1010,6 +1097,17 @@ public final class JavaMockEngineCluster {
                         // invariant. First-arrival-wins (putIfAbsent) keeps a
                         // master retry on the same requestId from re-booking.
                         recordEventArrival(requestId);
+                        if (ackFaultBudget > 0
+                                && ackFaultCursor[0]++ < ackFaultBudget) {
+                            response.addErrorsBuilder()
+                                    .setRequestId(requestId)
+                                    .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                                            .setErrorCode(ackFaultCode)
+                                            .setErrorMessage(ackFaultMessage)
+                                            .build());
+                            requestStates.put(requestId, "rejected");
+                            continue;
+                        }
                         MockPerformanceModel.RequestShape shape = performance.shape(input.getInput(), cache);
                         // Key-level cache-hit accounting at the admission hit
                         // computation point (recorded whether or not the request
@@ -1109,10 +1207,19 @@ public final class JavaMockEngineCluster {
                         continue;
                     }
                     // Phase 3: success bookkeeping (only admitted requests count).
+                    // A member rejected pre-admission (ack-fault split or the
+                    // LACK_MEM gate above) must not ALSO be acked as a success:
+                    // it already carries an errors entry, and a production
+                    // engine that rejects a request never admits it — acking
+                    // it as success too would double-book the member and make
+                    // the master wait for a completion that never comes.
                     for (EngineRpcService.EnqueueBatchExternalInputPB input : slot.getRequestsList()) {
+                        long requestId = input.getInput().getRequestId();
+                        if ("rejected".equals(requestStates.get(requestId))) {
+                            continue;
+                        }
                         stats.enqueuedRequests.increment();
                         acceptedCount.incrementAndGet();
-                        long requestId = input.getInput().getRequestId();
                         response.addSuccessesBuilder().setRequestId(requestId);
                         recordLifecycleStart(requestId, request.getBatchId(), "enqueue_batch");
                         // Arrival was already stamped at the Phase-1 ingress
@@ -1120,10 +1227,13 @@ public final class JavaMockEngineCluster {
                         // can never trail the immediate-admission start stamp.
                     }
                 }
-                // ── EnqueueBatch ack fault injections: all phases above ran
-                // exactly as usual (the engine really admitted and will
-                // execute every member); only the ACK content is corrupted,
-                // so the master must tolerate an ack that lies. ──
+                // ── enqueue_ack_drop: all phases above ran exactly as
+                // usual (the engine really admitted and will execute every
+                // member); only the ACK content is dropped to empty, so the
+                // master must tolerate a dispatch-uncertain ack. The
+                // partial_fail / error_code rejections were already split
+                // pre-admission above (rejected members never execute — no
+                // ghost completions can desync master bookkeeping). ──
                 if (faultConfig.isEnqueueAckDrop()) {
                     // enqueue_ack_drop: empty ack — no successes, no errors,
                     // stopped stays false (unlike crash_after) so the engine
@@ -1134,7 +1244,6 @@ public final class JavaMockEngineCluster {
                     observer.onCompleted();
                     return;
                 }
-                applyEnqueueAckFaults(response);
                 observer.onNext(response.build());
                 observer.onCompleted();
             };
@@ -1157,40 +1266,6 @@ public final class JavaMockEngineCluster {
             }
         }
 
-        /**
-         * EnqueueBatch ack fault application (enqueue_ack_partial_fail +
-         * enqueue_ack_error_code): move the first k admitted members from
-         * successes to errors in the ACK only — the engine still executes all
-         * of them, so their completions surface later via getWorkerStatus.
-         * The error code defaults to 13 unless enqueue_ack_error_code
-         * overrides it (per-request: each moved member's error_info entry
-         * carries the code).
-         */
-        private void applyEnqueueAckFaults(EngineRpcService.EnqueueBatchResponsePB.Builder response) {
-            int k = faultConfig.getEnqueueAckPartialFail();
-            if (k <= 0 || response.getSuccessesCount() == 0) {
-                return;
-            }
-            long errorCode = faultConfig.getEnqueueAckErrorCode() != 0
-                    ? faultConfig.getEnqueueAckErrorCode() : 13L;
-            int moves = Math.min(k, response.getSuccessesCount());
-            List<Long> moved = new ArrayList<>(moves);
-            for (int i = 0; i < moves; i++) {
-                moved.add(response.getSuccesses(i).getRequestId());
-            }
-            for (int i = 0; i < moves; i++) {
-                response.removeSuccesses(0);
-            }
-            for (long requestId : moved) {
-                response.addErrorsBuilder()
-                        .setRequestId(requestId)
-                        .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
-                                .setErrorCode(errorCode)
-                                .setErrorMessage("injected enqueue_ack_partial_fail")
-                                .build());
-            }
-        }
-
         @Override
         public void getWorkerStatus(EngineRpcService.StatusVersionPB request,
                                     StreamObserver<EngineRpcService.WorkerStatusPB> observer) {
@@ -1203,12 +1278,23 @@ public final class JavaMockEngineCluster {
             long requestedVersion = request.getLatestFinishedVersion();
             long latestVersion;
             List<VersionedTask> visibleCompletions = new ArrayList<>();
+            // Read path is cursor-filter ONLY (no destructive head-trim): each
+            // caller receives exactly its own unconsumed increment (version >
+            // its cursor, <= latest) while the shared backlog survives for
+            // other consumers with independent cursors — dual-flexlb HA has
+            // two masters polling this engine at 20ms each, and the first
+            // poller's read must not consume the second poller's backlog.
+            // Bounding moved to the retain window in periodicCleanup().
+            //
+            // Slow-consumer semantics: a consumer that stayed disconnected far
+            // longer than the retain window (cursor behind the oldest retained
+            // version) will NOT receive its full backlog — records trimmed
+            // past the window are gone. Such a consumer must rebuild from the
+            // RUNNING snapshot below, which is always complete (every in-flight
+            // request, unaffected by completion trimming); its inflight
+            // bookkeeping converges from the running tasks plus whatever
+            // backlog slice remains inside the window.
             synchronized (completionLock) {
-                VersionedTask head;
-                while ((head = completions.peek()) != null
-                        && head.version <= requestedVersion) {
-                    completions.poll();
-                }
                 latestVersion = completionVersion.get();
                 for (VersionedTask completion : completions) {
                     if (completion.version > requestedVersion
@@ -1260,10 +1346,11 @@ public final class JavaMockEngineCluster {
                 status.addFinishedTaskList(withLegacyTaskState(completion.task));
             }
             // ── Status-report fault injections: pure output-layer filters on
-            // the assembled status. The completion queue, its head-trim and
-            // the version bookkeeping above are untouched — a completion
-            // suppressed here is permanently lost once the (real) cursor
-            // advances past it, which is exactly the fault under test. ──
+            // the assembled status. The completion backlog, its cursor
+            // filtering and the version bookkeeping above are untouched — a
+            // completion suppressed here is permanently lost once the (real)
+            // cursor advances past it, which is exactly the fault under
+            // test. ──
             applyStatusReportFaults(status);
             observer.onNext(status.build());
             observer.onCompleted();
@@ -1664,6 +1751,19 @@ public final class JavaMockEngineCluster {
                 throw new IllegalArgumentException("response poll timeout must be >= 1 ms");
             }
             this.responsePollTimeoutMs = responsePollTimeoutMs;
+        }
+
+        /**
+         * Override the completion backlog retain window (mainly for tests
+         * exercising the periodicCleanup trim path; production keeps the
+         * {@link #DEFAULT_COMPLETION_RETAIN_WINDOW} default, itself
+         * overridable via env {@code MOCK_COMPLETION_RETAIN_WINDOW}).
+         */
+        void setCompletionRetainWindow(int completionRetainWindow) {
+            if (completionRetainWindow < 0) {
+                throw new IllegalArgumentException("completion retain window must be >= 0");
+            }
+            this.completionRetainWindow = completionRetainWindow;
         }
 
         /** Wire the cluster-shared engine_events.jsonl writer (null disables). */
@@ -3565,27 +3665,45 @@ public final class JavaMockEngineCluster {
 
         /**
          * gRPC Cancel (proto {@code RpcService/Cancel}, the priority-preemption
-         * engine contract). Mirrors the in-process MockEngineCancelChannel and
-         * the HTTP control-plane {@code /cancel_request}: a live request and its
-         * accepted-cancel tombstone both return ACCEPTED (idempotent retry,
-         * matching the Python mock's {@code _cancelled} fast path), a request
-         * unknown to — or already finished on — this specifically addressed
-         * Prefill returns NOT_FOUND, and Decode rejects the RPC with
-         * UNIMPLEMENTED (production role contract). TOMBSTONED stays reserved
-         * for the production engine; every mock cancel channel (in-process,
-         * HTTP, and this gRPC handler) maps the three-branch CancelResult with
-         * found -> accepted so the Master-side settlement semantics stay
-         * identical across transports.
+         * engine contract). Mirrors the in-process MockEngineCancelChannel: a
+         * live request and its accepted-cancel tombstone both return ACCEPTED
+         * (idempotent retry, matching the Python mock's {@code _cancelled}
+         * fast path), a request already finished on this addressed Prefill
+         * returns TOMBSTONED — the authoritative terminal proof the master's
+         * engine fence consumes to settle the slot immediately; answering
+         * NOT_FOUND there installs a DELIVERY_UNCERTAIN fence whose
+         * reconciliation never arrives for storm-disconnected requests
+         * (run-1788363913: 40 census-finished cancels stuck scheduler
+         * inflight at 42) — a request unknown to this engine returns
+         * NOT_FOUND, and Decode rejects the RPC with UNIMPLEMENTED
+         * (production role contract). The HTTP control-plane
+         * {@code /cancel_request} (diagnostics surface, not the master's
+         * live path) keeps its own JSON shape with the
+         * {@code already_finished} flag.
          */
         @Override
         public void cancel(EngineRpcService.CancelRequestPB request,
                            StreamObserver<EngineRpcService.CancelResponsePB> observer) {
             try {
                 CancelResult result = cancelRequest(request.getRequestId());
+                EngineRpcService.CancelStatusPB status;
+                if (result.found()) {
+                    status = EngineRpcService.CancelStatusPB.CANCEL_STATUS_ACCEPTED;
+                } else if (result.alreadyFinished()) {
+                    // Already-finished carries an authoritative terminal
+                    // proof: TOMBSTONED, not NOT_FOUND. The master's engine
+                    // fence consumes TOMBSTONED (resumeTombstoned) as the
+                    // terminal proof that settles the slot and releases the
+                    // endpoint-inflight charge; a NOT_FOUND answer installs a
+                    // DELIVERY_UNCERTAIN fence whose reconciliation never
+                    // arrives for storm-disconnected requests (run-1788363913:
+                    // 40 census-finished cancels stuck scheduler inflight at 42).
+                    status = EngineRpcService.CancelStatusPB.CANCEL_STATUS_TOMBSTONED;
+                } else {
+                    status = EngineRpcService.CancelStatusPB.CANCEL_STATUS_NOT_FOUND;
+                }
                 observer.onNext(EngineRpcService.CancelResponsePB.newBuilder()
-                        .setStatus(result.found()
-                                ? EngineRpcService.CancelStatusPB.CANCEL_STATUS_ACCEPTED
-                                : EngineRpcService.CancelStatusPB.CANCEL_STATUS_NOT_FOUND)
+                        .setStatus(status)
                         .build());
                 observer.onCompleted();
             } catch (UnsupportedOperationException e) {
@@ -3652,6 +3770,19 @@ public final class JavaMockEngineCluster {
                     !runningTasks.containsKey(id) && !responseQueues.containsKey(id));
             eventStartMs.keySet().removeIf(id ->
                     !runningTasks.containsKey(id) && !responseQueues.containsKey(id));
+            // Completion backlog retain window: reads are non-destructive
+            // (multi-consumer cursor delivery, see getWorkerStatus), so the
+            // queue is bounded HERE instead — keep the most recent
+            // completionRetainWindow records by version and trim older ones
+            // off the head. Between 60s cleanups the transient backlog is
+            // bounded by the interval's completion volume; right after a trim
+            // it is exactly the window.
+            synchronized (completionLock) {
+                int excess = completions.size() - completionRetainWindow;
+                while (excess-- > 0) {
+                    completions.poll();
+                }
+            }
         }
 
         /**

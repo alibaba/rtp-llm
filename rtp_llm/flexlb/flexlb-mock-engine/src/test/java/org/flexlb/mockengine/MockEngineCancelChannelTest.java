@@ -146,7 +146,7 @@ class MockEngineCancelChannelTest {
     // ---- not found after natural completion / idempotent cancel tombstone ----
 
     @Test
-    void cancelAfterCompletionIsNotFound() throws Exception {
+    void cancelAfterCompletionIsTombstoned() throws Exception {
         startCluster(model("10"), 1, 1);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
@@ -158,7 +158,12 @@ class MockEngineCancelChannelTest {
         CancelOutcome outcome = channel
                 .cancel(target(prefill.getGrpcPort()), 11L, 2_000)
                 .get(2, TimeUnit.SECONDS);
-        assertEquals(CancelAck.NOT_FOUND, outcome.ack());
+        // Already-finished answers TOMBSTONED: the authoritative terminal
+        // proof the master's engine fence consumes to settle the slot and
+        // release the endpoint-inflight charge (NOT_FOUND installs a
+        // DELIVERY_UNCERTAIN fence that may never reconcile for
+        // storm-disconnected requests).
+        assertEquals(CancelAck.TOMBSTONED, outcome.ack());
         // Behavior: the request had already finished; nothing is re-inflight.
         assertEquals(0, prefill.getInflightCount());
         assertEquals(0, prefill.getDownstreamOwnershipCount());

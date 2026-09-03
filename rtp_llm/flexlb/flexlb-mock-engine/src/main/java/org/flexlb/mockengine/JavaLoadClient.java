@@ -89,6 +89,13 @@ public final class JavaLoadClient {
 
     private final Config config;
     private final EventLoopGroup eventLoopGroup;
+    /**
+     * HA multi-target router (GRPC_TARGETS with >= 2 addresses): per-target
+     * channel pools + sticky pointer + transport-failure same-request retry.
+     * Null in the legacy single-address mode and in dry-run mode — those
+     * paths keep the byte-identical legacy behavior.
+     */
+    private final MasterTargetRouter router;
     private final ManagedChannel[] scheduleChannels;
     private final FlexlbServiceGrpc.FlexlbServiceBlockingStub[] scheduleStubs;
     private final AtomicInteger scheduleStubRR = new AtomicInteger();
@@ -120,11 +127,25 @@ public final class JavaLoadClient {
         if (config.dryRun) {
             // Test-only mode: no gRPC channels are created.
             this.eventLoopGroup = null;
+            this.router = null;
             this.scheduleChannels = new ManagedChannel[0];
             this.scheduleStubs = new FlexlbServiceGrpc.FlexlbServiceBlockingStub[0];
             return;
         }
         this.eventLoopGroup = new NioEventLoopGroup(config.eventLoopThreads);
+        if (config.isMultiTarget()) {
+            // HA mode (GRPC_TARGETS >= 2): every target gets its own
+            // N_CHANNELS pool inside the router; the legacy arrays stay empty.
+            this.router = new MasterTargetRouter(
+                    config.grpcTargets, config.nChannels, eventLoopGroup);
+            this.scheduleChannels = new ManagedChannel[0];
+            this.scheduleStubs = new FlexlbServiceGrpc.FlexlbServiceBlockingStub[0];
+            System.out.println("HA multi-target mode: targets=" + config.grpcTargets
+                    + ", sticky=" + router.stickyTarget()
+                    + " (gRPC UNAVAILABLE retries same-request on the next target)");
+            return;
+        }
+        this.router = null;
         this.scheduleChannels = new ManagedChannel[config.nChannels];
         this.scheduleStubs = new FlexlbServiceGrpc.FlexlbServiceBlockingStub[config.nChannels];
         for (int i = 0; i < config.nChannels; i++) {
@@ -566,6 +587,9 @@ public final class JavaLoadClient {
         result.outputLen = record.outputLen;
         result.status = "unknown";
         result.routePath = "master";
+        // Single-target default; the HA router path overwrites this with the
+        // actually-served (or last-attempted) target from the ScheduleOutcome.
+        result.masterTarget = config.grpcTarget;
         result.sendDueEpochMs = sendDueEpochMs;
         result.priority = record.priority;
 
@@ -597,23 +621,63 @@ public final class JavaLoadClient {
             FlexlbScheduleProtocol.FlexlbScheduleRequestPB scheduleReq = buildScheduleRequest(record, inputPb);
 
             long scheduleStartNanos = System.nanoTime();
-            FlexlbServiceGrpc.FlexlbServiceBlockingStub stub = nextScheduleStub()
-                    .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
-            scheduleResponse = stub.schedule(scheduleReq);
+            if (router != null) {
+                // HA multi-target mode: one failover-aware Schedule call —
+                // sticky target first, same-request retry on the next target
+                // ONLY on gRPC UNAVAILABLE (see MasterTargetRouter).
+                // schedule_ms spans the whole attempt chain, so
+                // send_start_epoch_ms + schedule_ms stays one wall clock.
+                MasterTargetRouter.ScheduleOutcome outcome =
+                        router.schedule(scheduleReq, config.timeoutMs);
+                scheduleResponse = outcome.response;
+                result.masterTarget = outcome.lastTarget;
+                result.failover = outcome.failover;
+                result.errorKind = outcome.errorKind.label;
+                result.scheduleMs = (System.nanoTime() - scheduleStartNanos) / 1_000_000.0;
+                result.schedDoneEpochMs = sendStartEpochMs + result.scheduleMs;
+                if (scheduleResponse == null) {
+                    // No target produced a response: all-targets transport
+                    // failure, DEADLINE_EXCEEDED, or a gRPC-layer master
+                    // error. Route/fallback semantics are decided after the
+                    // try block (terminating-failure boundary lives there).
+                    scheduleExc = outcome.failure;
+                    result.status = "exception";
+                    result.error = outcome.failure == null
+                            ? "no master response" : outcome.failure.toString();
+                    result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
+                } else {
+                    result.enqueuedByMaster = scheduleResponse.getEnqueuedByMaster();
+                }
+            } else {
+                FlexlbServiceGrpc.FlexlbServiceBlockingStub stub = nextScheduleStub()
+                        .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
+                scheduleResponse = stub.schedule(scheduleReq);
 
-            result.scheduleMs = (System.nanoTime() - scheduleStartNanos) / 1_000_000.0;
-            // sched_done epoch-ms (client_events.jsonl): the absolute moment the
-            // schedule RPC returned — send_start_epoch_ms + scheduleMs keeps the
-            // same wall clock as the engine-side engine_arrival_ms stamps.
-            result.schedDoneEpochMs = sendStartEpochMs + result.scheduleMs;
-            result.enqueuedByMaster = scheduleResponse.getEnqueuedByMaster();
+                result.scheduleMs = (System.nanoTime() - scheduleStartNanos) / 1_000_000.0;
+                // sched_done epoch-ms (client_events.jsonl): the absolute moment the
+                // schedule RPC returned — send_start_epoch_ms + scheduleMs keeps the
+                // same wall clock as the engine-side engine_arrival_ms stamps.
+                result.schedDoneEpochMs = sendStartEpochMs + result.scheduleMs;
+                result.enqueuedByMaster = scheduleResponse.getEnqueuedByMaster();
+            }
 
-            if (scheduleResponse.getCode() != 200 || !scheduleResponse.getSuccess()) {
+            if (scheduleResponse == null) {
+                // HA mode only (the legacy path throws into the catch below):
+                // no target answered — status/error/total_ms were already
+                // stamped by the router branch above; the terminating-failure
+                // handling right after the try block takes it from here.
+            } else if (scheduleResponse.getCode() != 200 || !scheduleResponse.getSuccess()) {
                 result.status = "schedule_error";
                 result.error = scheduleResponse.getErrorMessage().isEmpty()
                         ? "code=" + scheduleResponse.getCode()
                         : scheduleResponse.getErrorMessage();
                 result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
+                // Master answered (8431 admission rejection, 8511 forwarding
+                // terminal code, ...): business-error boundary — never
+                // retried, never switched, never sent direct-to-engine.
+                // 8511 is additionally a no-retry terminal code; the harness
+                // asserts it via status=schedule_error + the code in error.
+                result.errorKind = "business";
             } else {
                 result.prefill = roleAddr(scheduleResponse, "PREFILL");
                 result.decode = roleAddr(scheduleResponse, "DECODE");
@@ -652,24 +716,62 @@ public final class JavaLoadClient {
             result.status = "exception";
             result.error = e.toString();
             result.totalMs = (System.nanoTime() - startedNanos) / 1_000_000.0;
+            // Same taxonomy as the HA router path (the legacy single-target
+            // mode also stamps error_kind; its routing/fallback behavior is
+            // untouched).
+            result.errorKind = MasterTargetRouter.classifyThrowable(e);
         } finally {
             inflightCount.decrementAndGet();
             semaphore.release();
         }
 
         // Escape hatch (default OFF — see enableFallback javadoc): on schedule
-        // failure (exception or schedule_error), try fallback direct to
-        // engines, outside the semaphore. Only reachable when the operator
-        // explicitly opted in; standard load tests keep it off so every
-        // failure surfaces as an error row instead of bypassing the master.
-        if (scheduleResponse == null
+        // failure, try fallback direct to engines, outside the semaphore. Only
+        // reachable when the operator explicitly opted in; standard load tests
+        // keep it off so every failure surfaces as an error row instead of
+        // bypassing the master.
+        //
+        // Trigger semantics are mode-dependent (HA case-test brief p7,
+        // defect-8 fix — scoped to the HA mode only):
+        //  - Legacy single-target mode: ANY schedule failure (exception or
+        //    schedule_error) may trigger the fallback attempt — byte-identical
+        //    to the historical behavior the existing pressure-test line
+        //    relies on.
+        //  - HA multi-target mode: ONLY the double-connection failure (every
+        //    GRPC_TARGETS target answered gRPC UNAVAILABLE, error_kind=
+        //    "transport") may bypass the master. Business error codes (8431 /
+        //    8511 — master answered) and DEADLINE_EXCEEDED never fall back
+        //    (production connection_failed contract).
+        boolean legacyScheduleFailure = scheduleResponse == null
                 || "schedule_error".equals(result.status)
-                || "exception".equals(result.status)) {
-            if (config.enableFallback && !fallbackPrefillAddrs.isEmpty()) {
+                || "exception".equals(result.status);
+        boolean terminating = router == null
+                ? legacyScheduleFailure
+                : (scheduleResponse == null || "schedule_error".equals(result.status));
+        if (terminating) {
+            // Fallback eligibility is mode-dependent (same contract as the
+            // trigger-semantics comment above): the legacy single-target
+            // mode restores the historical ANY-schedule-failure trigger
+            // (exception OR schedule_error); the HA mode only bypasses the
+            // master on the double-connection failure (error_kind=transport
+            // AND no master answer anywhere in the target chain).
+            boolean fallbackEligible = (router == null)
+                    ? legacyScheduleFailure
+                    : ("transport".equals(result.errorKind)
+                        && scheduleResponse == null);
+            if (fallbackEligible && config.enableFallback
+                    && !fallbackPrefillAddrs.isEmpty()) {
                 String prefix = scheduleExc != null
                         ? "master=" + scheduleExc
                         : "master=" + result.error;
                 attemptFallback(record, result, startedNanos, prefix);
+            } else if (router != null && scheduleResponse == null) {
+                // HA mode, no master answer, no (or disabled) direct fallback:
+                // nobody served this request — route_path="failed" separates
+                // these rows from master-answered rows (route_path="master",
+                // including schedule_error business failures) and from
+                // direct-to-engine rows (route_path="fallback").
+                result.routePath = "failed";
             }
             tallyResult(result);
             responseCount.incrementAndGet();
@@ -735,7 +837,12 @@ public final class JavaLoadClient {
                 // Escape hatch (default OFF): on fetch/stream failure, try
                 // fallback — only when the operator explicitly opted in;
                 // otherwise the failure is recorded as an error row.
-                if (config.enableFallback && !fallbackPrefillAddrs.isEmpty()) {
+                // HA mode: a stream-read failure is an ENGINE-side problem,
+                // not a master connection failure — never falls back (brief
+                // p7 defect-8: the legacy any-failure parity behavior is
+                // retired for the HA mode only).
+                if (router == null
+                        && config.enableFallback && !fallbackPrefillAddrs.isEmpty()) {
                     attemptFallback(record, result, startedNanos, "fetch=" + e);
                 } else {
                     result.status = "exception";
@@ -1310,6 +1417,17 @@ public final class JavaLoadClient {
         node.put("decode", result.decode);
         node.put("error", result.error);
         node.put("route_path", result.routePath);
+        // HA observability (additive — consumers keyed on the previous field
+        // set are unaffected): route_path gains the "failed" value in HA mode
+        // (no master answer, no direct fallback); master_target is the
+        // actually-served or last-attempted flexlb gRPC address; failover
+        // marks same-request retry switches; error_kind classifies the
+        // schedule-stage failure (transport|business|deadline|none — "none"
+        // also covers phase-2 stream failures, where the master leg itself
+        // succeeded).
+        node.put("master_target", result.masterTarget);
+        node.put("failover", result.failover);
+        node.put("error_kind", result.errorKind);
         node.put("wall_clock_ts", result.wallClockTs);
         node.put("send_due_epoch_ms", result.sendDueEpochMs);
         node.put("send_start_epoch_ms", result.sendStartEpochMs);
@@ -1605,6 +1723,9 @@ public final class JavaLoadClient {
     // ---- Cleanup ----
 
     private void close() {
+        if (router != null) {
+            router.shutdown();
+        }
         for (ManagedChannel channel : scheduleChannels) {
             channel.shutdown();
         }
@@ -1624,6 +1745,13 @@ public final class JavaLoadClient {
         final String traceFile;
         final String targetAddr;
         final String grpcTarget;
+        /**
+         * Parsed GRPC_TARGETS addresses (comma-separated host:port list).
+         * Empty in the legacy single-target mode. >= 2 addresses activate the
+         * HA sticky+failover mode (see MasterTargetRouter); exactly 1 address
+         * degenerates to the legacy mode with that address as grpcTarget.
+         */
+        final List<String> grpcTargets;
         final int durationS;
         final int maxConcurrency;
         final double replaySpeed;
@@ -1757,7 +1885,37 @@ public final class JavaLoadClient {
                     skipServerLatency, model, apiKey, gradient,
                     gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
                     pushgatewayUrl, enableFallback, endpointsFile, dryRun, priority,
-                    forcePriority, sendMode, sendModeQps, 0.0, replayUniquePrefix);
+                    forcePriority, sendMode, sendModeQps, 0.0, replayUniquePrefix,
+                    List.of());
+        }
+
+        /**
+         * Legacy full-signature bridge (pre-GRPC_TARGETS call sites, e.g. the
+         * uniform-mode tests): delegates with no multi-target list — the
+         * single-target behavior is unchanged.
+         */
+        Config(String traceFile, String targetAddr, String grpcTarget,
+               int durationS, int maxConcurrency, double replaySpeed,
+               int loadClientWorkers, String outputDir, int numShards,
+               int shardIndex, int limit, long timeoutMs, double slaTtftMs,
+               boolean fetchOutputStream, boolean loop,
+               int nChannels, int eventLoopThreads, long startAtEpochMs,
+               int responseTimeoutSeconds, boolean skipServerLatency,
+               String model, String apiKey, boolean gradient,
+               int gradientStartSpeed, int gradientMaxSpeed,
+               int maxInputLen, int maxOutputLen, String pushgatewayUrl,
+               boolean enableFallback, String endpointsFile, boolean dryRun,
+               int priority, int forcePriority, String sendMode, double sendModeQps,
+               double rampUpSeconds, boolean replayUniquePrefix) {
+            this(traceFile, targetAddr, grpcTarget, durationS, maxConcurrency, replaySpeed,
+                    loadClientWorkers, outputDir, numShards, shardIndex, limit, timeoutMs,
+                    slaTtftMs, fetchOutputStream, loop, nChannels,
+                    eventLoopThreads, startAtEpochMs, responseTimeoutSeconds,
+                    skipServerLatency, model, apiKey, gradient,
+                    gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
+                    pushgatewayUrl, enableFallback, endpointsFile, dryRun, priority,
+                    forcePriority, sendMode, sendModeQps, rampUpSeconds,
+                    replayUniquePrefix, List.of());
         }
 
         Config(String traceFile, String targetAddr, String grpcTarget,
@@ -1772,10 +1930,12 @@ public final class JavaLoadClient {
                int maxInputLen, int maxOutputLen, String pushgatewayUrl,
                boolean enableFallback, String endpointsFile, boolean dryRun,
                int priority, int forcePriority, String sendMode, double sendModeQps,
-               double rampUpSeconds, boolean replayUniquePrefix) {
+               double rampUpSeconds, boolean replayUniquePrefix,
+               List<String> grpcTargets) {
             this.traceFile = traceFile;
             this.targetAddr = targetAddr;
             this.grpcTarget = grpcTarget;
+            this.grpcTargets = grpcTargets;
             this.durationS = durationS;
             this.maxConcurrency = maxConcurrency;
             this.replaySpeed = replaySpeed;
@@ -1828,9 +1988,77 @@ public final class JavaLoadClient {
             return "uniform".equals(sendMode);
         }
 
+        /** True when GRPC_TARGETS carries >= 2 addresses (HA sticky+failover mode). */
+        boolean isMultiTarget() {
+            return grpcTargets.size() >= 2;
+        }
+
+        /**
+         * Parses GRPC_TARGETS (comma-separated host:port list): segments are
+         * trimmed, empty segments ignored, order-preserving dedup. Fail-fast
+         * on any malformed entry or on zero valid addresses — this is the
+         * core HA case-test wiring, and a silently-dropped target would let
+         * the whole suite pass without ever exercising failover.
+         */
+        // Package-visible for GRPC_TARGETS parsing assertions in tests.
+        static List<String> parseGrpcTargets(String raw) {
+            List<String> out = new ArrayList<>();
+            for (String part : raw.split(",")) {
+                String addr = part.trim();
+                if (addr.isEmpty()) {
+                    continue;
+                }
+                int colon = addr.lastIndexOf(':');
+                if (colon <= 0 || colon == addr.length() - 1) {
+                    throw new IllegalArgumentException(
+                            "invalid GRPC_TARGETS entry '" + addr + "' (expected host:port)");
+                }
+                try {
+                    int port = Integer.parseInt(addr.substring(colon + 1));
+                    if (port <= 0 || port > 65535) {
+                        throw new NumberFormatException("port out of range: " + port);
+                    }
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException(
+                            "invalid GRPC_TARGETS entry '" + addr + "' (non-numeric port)");
+                }
+                if (!out.contains(addr)) {
+                    out.add(addr);
+                }
+            }
+            if (out.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "GRPC_TARGETS is set but contains no valid host:port address: '"
+                                + raw + "'");
+            }
+            return out;
+        }
+
         static Config fromEnv() {
             String targetAddr = env("TARGET_ADDR", "127.0.0.1:7001");
             String grpcTarget = env("GRPC_TARGET", "");
+            // GRPC_TARGETS (HA case-test mode): comma-separated flexlb gRPC
+            // addresses, e.g. "127.0.0.1:18082,127.0.0.1:18085". Takes
+            // precedence over GRPC_TARGET when both are set (logged). >= 2
+            // addresses activate the sticky+failover router; exactly 1
+            // degenerates to the legacy single-target mode on that address.
+            String grpcTargetsRaw = env("GRPC_TARGETS", "");
+            List<String> grpcTargets = grpcTargetsRaw.isEmpty()
+                    ? List.of() : parseGrpcTargets(grpcTargetsRaw);
+            if (!grpcTargets.isEmpty()) {
+                if (!grpcTarget.isEmpty()) {
+                    System.out.println("GRPC_TARGETS=" + grpcTargetsRaw
+                            + " takes precedence over GRPC_TARGET=" + grpcTarget
+                            + " (both set)");
+                }
+                // Cosmetic anchor for logs / server-latency: the router owns
+                // the real per-target pools; grpcTarget points at the first.
+                grpcTarget = grpcTargets.get(0);
+                if (grpcTargets.size() == 1) {
+                    System.out.println("GRPC_TARGETS has a single address '"
+                            + grpcTarget + "': legacy single-target mode (no failover)");
+                }
+            }
             if (grpcTarget.isEmpty()) {
                 int colon = targetAddr.lastIndexOf(':');
                 String host = targetAddr.substring(0, colon);
@@ -1884,7 +2112,8 @@ public final class JavaLoadClient {
                     env("SEND_MODE", "replay"),
                     envDouble("SEND_MODE_QPS", 0.0),
                     envDouble("RAMP_UP_SECONDS", 0.0),
-                    envBool("REPLAY_UNIQUE_PREFIX", true)
+                    envBool("REPLAY_UNIQUE_PREFIX", true),
+                    grpcTargets
             );
         }
 
@@ -1893,6 +2122,9 @@ public final class JavaLoadClient {
             System.out.println("  TRACE_FILE=" + traceFile);
             System.out.println("  TARGET_ADDR=" + targetAddr);
             System.out.println("  GRPC_TARGET=" + grpcTarget);
+            System.out.println("  GRPC_TARGETS=" + (grpcTargets.isEmpty()
+                    ? "<unset>" : String.join(",", grpcTargets))
+                    + (isMultiTarget() ? " (HA sticky+failover mode)" : ""));
             System.out.println("  DURATION_S=" + durationS);
             System.out.println("  MAX_CONCURRENCY=" + maxConcurrency);
             System.out.println("  REPLAY_SPEED=" + replaySpeed);
@@ -2037,6 +2269,18 @@ public final class JavaLoadClient {
         String decode = "";
         String error = "";
         String routePath = "master";
+        /** Actually-served (or last-attempted) flexlb gRPC address; empty on
+         *  synthetic rows (collector timeout / dead-future fallbacks). */
+        String masterTarget = "";
+        /** True when the same request was retried on another GRPC_TARGETS
+         *  target (transport-failure failover). Always false in the legacy
+         *  single-target mode. */
+        boolean failover;
+        /** Schedule-stage failure taxonomy: transport|business|deadline|none.
+         *  Business error codes (8431/8511) and gRPC-layer master errors map
+         *  to "business"; "none" covers successes and phase-2 stream
+         *  failures (the master leg itself succeeded). */
+        String errorKind = "none";
         double wallClockTs;
         double sendDueEpochMs;
         double sendStartEpochMs;

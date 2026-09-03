@@ -107,14 +107,27 @@ class StatusFaultInjectionTest {
         assertEquals(2, suppressed.getLatestFinishedVersion(),
                 "latestFinishedVersion stays REAL under suppression");
 
-        // Master advances to the real cursor → the head-trim consumes the
-        // never-delivered completion. After clearing, it is gone forever.
+        // Master advances to the real cursor. Under the retain-window
+        // protocol the read no longer destroys the record — but for THIS
+        // master (cursor now at 2) the suppressed completion is permanently
+        // lost: no future poll at its advanced cursor ever returns it.
         workerStatus(prefill, 2);
         clearInject(basePort);
-        EngineRpcService.WorkerStatusPB afterClear = workerStatus(prefill, 1);
+        EngineRpcService.WorkerStatusPB afterClear = workerStatus(prefill, 2);
         assertEquals(0, afterClear.getFinishedTaskListCount(),
-                "suppressed completion must be permanently lost after the cursor advanced");
+                "suppressed completion stays lost for the master whose cursor advanced");
         assertEquals(2, afterClear.getLatestFinishedVersion());
+
+        // A consumer whose cursor has NOT advanced past the suppressed
+        // version (e.g. the standby master in dual-flexlb HA, polling the
+        // same engine with an independent cursor) still receives it — the
+        // shared backlog survives reads and is bounded only by the retain
+        // window trimmed in periodicCleanup.
+        EngineRpcService.WorkerStatusPB laggingConsumer = workerStatus(prefill, 1);
+        assertEquals(1, laggingConsumer.getFinishedTaskListCount(),
+                "an un-advanced cursor still sees the suppressed completion");
+        assertEquals(2, laggingConsumer.getFinishedTaskList(0).getRequestId());
+        assertEquals(2, laggingConsumer.getLatestFinishedVersion());
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -433,10 +446,13 @@ class StatusFaultInjectionTest {
                 "default error code is 13");
         assertEquals(13L, ack.getErrors(1).getErrorInfo().getErrorCode());
 
-        // The engine still EXECUTED all three (the ack lies).
-        EngineRpcService.WorkerStatusPB done = awaitFinished(prefill, 0, 3, 5_000);
-        assertEquals(3, done.getFinishedTaskListCount(),
-                "all members complete engine-side despite the lying ack");
+        // Pre-admission split (production-calibrated rejection): rejected
+        // members never enter the engine, so only the 1 admitted member
+        // completes engine-side — no ghost completions can desync the
+        // master's decode bookkeeping (run-1788360948 forensics).
+        EngineRpcService.WorkerStatusPB done = awaitFinished(prefill, 0, 1, 5_000);
+        assertEquals(1, done.getFinishedTaskListCount(),
+                "only the admitted member completes; rejected members never ran");
 
         // Custom error code replaces 13 per-request.
         inject(basePort, "enqueue_ack_error_code", "\"code\":77");
@@ -446,8 +462,9 @@ class StatusFaultInjectionTest {
         assertEquals(2, ack2.getErrorsCount());
         assertEquals(77L, ack2.getErrors(0).getErrorInfo().getErrorCode());
         assertEquals(77L, ack2.getErrors(1).getErrorInfo().getErrorCode());
-        EngineRpcService.WorkerStatusPB done2 = awaitFinished(prefill, 3, 3, 5_000);
-        assertEquals(3, done2.getFinishedTaskListCount());
+        EngineRpcService.WorkerStatusPB done2 = awaitFinished(prefill, 1, 1, 5_000);
+        assertEquals(1, done2.getFinishedTaskListCount(),
+                "only the admitted member completes under the injected code");
     }
 
     // ════════════════════════════════════════════════════════════════

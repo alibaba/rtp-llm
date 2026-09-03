@@ -49,8 +49,17 @@ public final class MockEngineCancelChannel implements EngineCancelChannel {
             // Deliberately inspect only the addressed Prefill. Scanning other
             // workers would hide an incorrect Prefill route in tests.
             JavaMockEngineCluster.CancelResult result = service.cancelRequest(requestId);
+            if (result.found()) {
+                return CompletableFuture.completedFuture(CancelOutcome.accepted());
+            }
+            // Already-finished answers TOMBSTONED: the authoritative terminal
+            // proof the master's engine fence consumes to settle the slot and
+            // release the endpoint-inflight charge (NOT_FOUND installs a
+            // DELIVERY_UNCERTAIN fence that may never reconcile).
             return CompletableFuture.completedFuture(
-                    result.found() ? CancelOutcome.accepted() : CancelOutcome.notFound());
+                    result.alreadyFinished()
+                            ? CancelOutcome.tombstoned()
+                            : CancelOutcome.notFound());
         } catch (UnsupportedOperationException e) {
             return CompletableFuture.completedFuture(CancelOutcome.failed());
         } catch (Exception e) {
