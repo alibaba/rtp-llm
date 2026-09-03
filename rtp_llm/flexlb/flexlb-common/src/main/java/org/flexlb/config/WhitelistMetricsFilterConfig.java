@@ -7,7 +7,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.flexlb.metric.MicrometerFlexMonitor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -20,14 +19,18 @@ import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * Opt-in metric whitelist mode: when {@code flexlb.monitor.mode=whitelist} is
- * active, only {@code flexlb.} prefixed metrics matching the comma-separated
+ * Metric whitelist — the single configurable {@code flexlb.} exposure
+ * filter: only {@code flexlb.} prefixed metrics matching the comma-separated
  * {@code flexlb.monitor.metric-whitelist} property (env
  * {@code FLEXLB_MONITOR_METRIC_WHITELIST} via relaxed binding) are
- * registered/reported. Unlike {@link CriticalMetricsFilterConfig}'s hardcoded
- * curated set, the whitelist is property-driven, so deployments (e.g. the
- * online_eval harness) can trim the exposition surface down to exactly the
- * series their collector consumes.
+ * registered/reported, so deployments (e.g. the online_eval harness) can
+ * trim the exposition surface down to exactly the series their collector
+ * consumes.
+ *
+ * <p>The property defaults to {@link #DEFAULT_METRIC_WHITELIST} — the six
+ * core link latency metrics, kept as a preset so the default exposition
+ * stays minimal. Set the whitelist to the bare {@code flexlb_} prefix to
+ * expose every {@code flexlb_*} series.
  *
  * <p>Matching semantics — entries are <b>prometheus-form prefixes or full
  * names</b> (dots as underscores, leading {@code flexlb_} kept), so the list
@@ -38,7 +41,7 @@ import java.util.stream.Collectors;
  * prometheus endpoint) is also tried, so a {@code ..._total} entry matches
  * the counter's micrometer name (which does not carry the suffix).
  *
- * <p>This config filters at the same two layers as critical-only:
+ * <p>This config filters at two layers:
  * <ol>
  *   <li><b>Early-return allowlist</b> — via {@link MicrometerFlexMonitor#setAllowedMetrics(Set)}
  *       with a prefix-aware {@link Set} view, non-matching metrics are skipped
@@ -48,30 +51,53 @@ import java.util.stream.Collectors;
  *       allowlist took effect).</li>
  * </ol>
  *
- * <p>Fail-safe: a missing/blank whitelist <b>denies every {@code flexlb.}
- * metric</b> (with a WARN log) rather than exposing everything — a mis-
- * configured whitelist should fail closed. Non-{@code flexlb.} metrics
- * (jvm.*, process.*, ...) are always allowed, same as critical-only.
+ * <p>Fail-safe: an explicitly empty/blank whitelist <b>denies every
+ * {@code flexlb.} metric</b> (with a WARN log) rather than exposing
+ * everything — a misconfigured whitelist should fail closed. Non-
+ * {@code flexlb.} metrics (jvm.*, process.*, ...) are always allowed.
  */
 @Slf4j
 @Configuration
 @ConditionalOnClass(name = "io.micrometer.core.instrument.MeterRegistry")
-@ConditionalOnProperty(name = "flexlb.monitor.mode", havingValue = "whitelist")
 public class WhitelistMetricsFilterConfig {
 
     private static final String METRIC_PREFIX = "flexlb.";
     private static final String PROM_PREFIX = "flexlb_";
     private static final String COUNTER_SUFFIX = "_total";
 
+    /**
+     * Default whitelist preset: the six core link latency metrics
+     * (prometheus form; the counter exposition {@code _total} suffix is
+     * matched as well). These are the metrics retained when no
+     * {@code flexlb.monitor.metric-whitelist} property is set, keeping the
+     * default exposition minimal:
+     * <ul>
+     *   <li>Client-to-gRPC-server: network delay (network transfer)</li>
+     *   <li>gRPC server processing: server entry to BalanceContext start</li>
+     *   <li>Master decision: route+submit time (decision start to batcher queue placement)</li>
+     *   <li>Queue wait: batcher queue wait time (enqueue to dispatch trigger)</li>
+     *   <li>Dispatch: dispatch-to-ACK time (gRPC dispatch to engine ACK)</li>
+     *   <li>Batch decision: exact dispatch count grouped by trigger reason</li>
+     * </ul>
+     */
+    public static final String DEFAULT_METRIC_WHITELIST =
+            "flexlb_app_request_network_delay_ms,"
+                    + "flexlb_app_grpc_server_process_ms,"
+                    + "flexlb_app_flexlb_route_submit_time_ms,"
+                    + "flexlb_app_routing_queue_wait_time_ms,"
+                    + "flexlb_app_flexlb_dispatch_ack_time_ms,"
+                    + "flexlb_app_engine_balancing_master_dispatch_reason";
+
     private final List<String> whitelist;
 
     public WhitelistMetricsFilterConfig(
-            @Value("${flexlb.monitor.metric-whitelist:}") String metricWhitelist) {
+            @Value("${flexlb.monitor.metric-whitelist:" + DEFAULT_METRIC_WHITELIST + "}")
+            String metricWhitelist) {
         this.whitelist = parseWhitelist(metricWhitelist);
         if (this.whitelist.isEmpty()) {
-            log.warn("flexlb.monitor.mode=whitelist but flexlb.monitor.metric-whitelist is "
-                    + "empty/blank: denying every flexlb.* metric (fail-safe; configure a "
-                    + "comma-separated prefix list, e.g. FLEXLB_MONITOR_METRIC_WHITELIST)");
+            log.warn("flexlb.monitor.metric-whitelist is empty/blank: denying every "
+                    + "flexlb.* metric (fail-safe; configure a comma-separated prefix "
+                    + "list, e.g. FLEXLB_MONITOR_METRIC_WHITELIST)");
         }
     }
 

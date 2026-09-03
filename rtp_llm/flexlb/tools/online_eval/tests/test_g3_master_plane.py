@@ -1,9 +1,10 @@
-"""G6/G4 collapse — G3 master-plane dual-source tests (aggregate side).
+"""G6/G4 collapse — G3 master-plane sole-source tests (aggregate side).
 
 Since the G6 counter poller and G4 inflight poller were collapsed into the
 G3 prometheus lane, aggregate_canvas_run derives master_arrivals_ts and
-inflight_ts from the G3 prometheus timeline when (and only when) the legacy
-master.json keys are absent:
+inflight_ts from the G3 prometheus timeline — the sole master-plane source
+(the legacy counters_timeseries / inflight_timeseries master.json keys are
+no longer read; old runs cannot be re-aggregated):
 
   * master_arrivals_ts — flexlb_auto_tpm_request_count_total{priority} and
     flexlb_app_engine_balancing_master_all_qps_total{code} label variants
@@ -14,8 +15,8 @@ master.json keys are absent:
   * inflight_ts — scheduler_inflight_size direct, per-engine prefill
     batch/request counts and per-endpoint decode reserved/running gauges
     summed per sample (2s SchedulerRuntime cadence rides along);
-  * legacy-first — a run dir that still carries counters_timeseries /
-    inflight_timeseries (old runs, re-aggregated) must keep using them.
+  * legacy keys ignored — a run dir that still carries counters_timeseries /
+    inflight_timeseries (old runs) rebuilds from the G3 timeline anyway.
 
 Output key names/structures are unchanged (downstream canvas/compare_twin
 consume them as-is).
@@ -211,7 +212,7 @@ def _prom_ts(master_json):
 
 
 class PromSourceArrivalsTest(unittest.TestCase):
-    """master_arrivals_ts from the G3 counter timeline (legacy key absent)."""
+    """master_arrivals_ts / inflight_ts from the G3 timeline."""
 
     @classmethod
     def setUpClass(cls):
@@ -264,8 +265,8 @@ class PromSourceArrivalsTest(unittest.TestCase):
         )
 
 
-class LegacyKeysWinTest(unittest.TestCase):
-    """counters_timeseries / inflight_timeseries take precedence (old runs)."""
+class LegacyKeysIgnoredTest(unittest.TestCase):
+    """Legacy counters_timeseries / inflight_timeseries keys are ignored."""
 
     @classmethod
     def setUpClass(cls):
@@ -305,28 +306,43 @@ class LegacyKeysWinTest(unittest.TestCase):
     def tearDownClass(cls):
         cls._tmp.cleanup()
 
-    def test_arrivals_use_legacy_counters_not_prometheus(self):
-        # The prometheus timeline carries 0 -> 15 -> 40 ... arrivals; the
-        # legacy rows (100 -> 250, one positive delta of 150, rate anchored
-        # at the right-end sample) must win.
+    def test_arrivals_rebuilt_from_prometheus_not_legacy_counters(self):
+        # The legacy rows (100 -> 250) must NOT win: the G3 prometheus
+        # timeline (0 -> 15 -> 40 ...) is the sole source, so the output
+        # matches the G3-derived expectations exactly.
         rows = self.agg["master_arrivals_ts"]
         self.assertEqual(
-            [{"t": 1.0, "arrivals": 150.0, "completions": 110.0, "cum_arrivals": 250}],
+            [
+                {"t": 0.0, "arrivals": 15.0, "completions": 8.0, "cum_arrivals": 15},
+                {"t": 1.0, "arrivals": 25.0, "completions": 28.0, "cum_arrivals": 40},
+                {"t": 3.0, "arrivals": 25.0, "completions": 24.0, "cum_arrivals": 50},
+            ],
             rows,
         )
 
-    def test_inflight_uses_legacy_snapshots_not_gauges(self):
+    def test_inflight_rebuilt_from_gauges_not_legacy_snapshots(self):
+        # The legacy snapshot (scheduler=9, prefill_batches=2, ...) must
+        # NOT win: the G3 gauge sums (identical to the sole-source test
+        # above) are the only series produced.
         rows = self.agg["inflight_ts"]
         self.assertEqual(
             [
                 {
                     "t": 0.0,
-                    "scheduler": 9,
-                    "prefill_batches": 2,
-                    "prefill_requests": 20,
-                    "decode_reserved": 3,
-                    "decode_confirmed_running": 2,
-                }
+                    "scheduler": 2,
+                    "prefill_batches": 7,
+                    "prefill_requests": 70,
+                    "decode_reserved": 11,
+                    "decode_confirmed_running": 9,
+                },
+                {
+                    "t": 2.0,
+                    "scheduler": 4,
+                    "prefill_batches": 4,
+                    "prefill_requests": 30,
+                    "decode_reserved": 2,
+                    "decode_confirmed_running": 1,
+                },
             ],
             rows,
         )

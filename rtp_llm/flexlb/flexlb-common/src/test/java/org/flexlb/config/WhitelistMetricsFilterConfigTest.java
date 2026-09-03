@@ -88,6 +88,36 @@ class WhitelistMetricsFilterConfigTest {
     }
 
     @Test
+    void defaultPresetKeepsCoreLinkLatencyMetrics() {
+        // Property default: the six core link latency meters stay exposed
+        // (the DEFAULT_METRIC_WHITELIST preset), everything else flexlb.* is
+        // denied, non-flexlb metrics unaffected.
+        WhitelistMetricsFilterConfig config = new WhitelistMetricsFilterConfig(
+                WhitelistMetricsFilterConfig.DEFAULT_METRIC_WHITELIST);
+        MeterFilter filter = config.whitelistMetricsFilter();
+        MeterRegistry registry = new SimpleMeterRegistry();
+        String[] criticalMeters = {
+                "app.request.network.delay.ms",
+                "app.grpc.server.process.ms",
+                "app.flexlb.route.submit.time.ms",
+                "app.routing.queue.wait.time.ms",
+                "app.flexlb.dispatch.ack.time.ms",
+                "app.engine.balancing.master.dispatch.reason",
+        };
+        for (String meter : criticalMeters) {
+            assertEquals(MeterFilterReply.NEUTRAL,
+                    filter.accept(registry.counter("flexlb." + meter).getId()), meter);
+        }
+        Meter.Id inflightBatch = registry
+                .counter("flexlb.app.flexlb.inflight.batch.count").getId();
+        Meter.Id jvm = registry.counter("jvm.test.metric").getId();
+        assertEquals(MeterFilterReply.DENY, filter.accept(inflightBatch));
+        assertEquals(MeterFilterReply.NEUTRAL, filter.accept(jvm));
+        assertEquals(6, WhitelistMetricsFilterConfig.parseWhitelist(
+                WhitelistMetricsFilterConfig.DEFAULT_METRIC_WHITELIST).size());
+    }
+
+    @Test
     void emptyWhitelistFailsSafeDenyingEveryFlexlbMetric() {
         // Missing property, blank entries, whitespace-only — all parse to an
         // empty whitelist which must deny everything flexlb.* (fail closed)

@@ -22,7 +22,7 @@ Reads (consolidated run-root layout, the only supported form):
   since the G6/G4 collapse: queue/KV/age gauges plus the arrival/
   completion counters and inflight gauges feeding master_arrivals_ts /
   inflight_ts; the legacy inflight_timeseries / counters_timeseries keys
-  from older runs still take precedence when present),
+  from older runs are no longer read — such runs cannot be re-aggregated),
   run_meta.json (process_usage G5).
 client_events rows are the sole per-request metrics source; the engine-side
 event rows are rid-joined onto them (the same join full_e2e always used).
@@ -34,7 +34,7 @@ dispatch-reason + prediction-gap analysis, merged 20260903 from the
 removed analyze_slo_batch.py)/per_second (schedule + e2e/ttft percentiles)/
 master_arrivals_ts (master-side per-second arrival/completion rates, the
 send-series source of record — differenced from the G3 request-count
-counter, or the legacy counters_timeseries key on old runs)
+counter)
 /queue_timeseries/engine_dist (requests / tokens / busy-time utilization,
 per-engine Gini/CV/Lorenz/window Gini) plus compact time series:
 stage_latency_ts (master 10s stage p95 rows), engine_exec_ts (mock
@@ -43,9 +43,8 @@ decode_exec_* (engine exec percentiles joined by request_id onto the
 request-BIRTH second — same axis as e2e/full_e2e, unlike the
 completion-window engine_exec_ts), process_ts (mock/master/client CPU+RSS),
 inflight_ts (scheduler/prefill batches+requests/decode reserved+
-confirmed_running — summed from the G3 prometheus gauges, or the legacy
-inflight_timeseries key on old runs), inflight_age_ts / kv_ts /
-batcher_ts / dispatch_reason_ts (G3 master prometheus; the reason series is
+confirmed_running — summed from the G3 prometheus gauges), inflight_age_ts /
+kv_ts / batcher_ts / dispatch_reason_ts (G3 master prometheus; the reason series is
 per-second dispatch rate derived from the dispatch_reason_total counters).
 cancel_qps_ts additionally carries master/prefill/decode cancel split rates
 (census unknown/finished/tombstone diff for the master side; per-engine
@@ -1894,66 +1893,30 @@ if proc_entries:
         if len(row) > 1:
             process_ts.append(row)
 
-# G4 inflight snapshots: scheduler in-flight plus per-endpoint batch/request
-# counts summed cluster-wide. Dual source since the G6/G4 collapse (G3 is
-# the sole master-plane collector): the legacy inflight_timeseries key
-# (old runs) takes precedence when present; when absent the same five
-# fields are rebuilt from the G3 prometheus gauges — scheduler_inflight_size
+# Inflight snapshots: scheduler in-flight plus per-engine prefill batch/
+# request counts and decode reserved/running counts summed cluster-wide.
+# G3 prometheus is the sole master-plane source since the G6/G4 collapse:
+# the five fields are rebuilt from the G3 gauges — scheduler_inflight_size
 # direct, per-engine prefill batch/request counts and per-endpoint decode
-# reserved/running counts summed across label variants. SchedulerRuntime
-# sets those gauges every 2s, so the rebuilt series naturally runs at the
-# 2s cadence the samples carry (vs the retired poller's 1s). Output keys
-# unchanged (canvas/compare_twin consume them as-is).
-# decode 侧 schema 已随 G4 分层准入改版（HttpLoadBalanceServer
-# .inflightStatus）：decode_endpoints 旧 inflight_requests 字段已不存在
-# （旧键读取恒 0 的 bug 根因），现读 reserved_total（master 预约未
-# 确认）与 confirmed_running（引擎确认运行中）；prefill_endpoints 补读
-# inflight_requests（master 账本请求数，与 inflight_batches 同源）。
-# no-backward-compat：旧 run（旧 schema 快照）不再产出 decode 线。
-inflight_pts = []
-for grp in master_json.get("inflight_timeseries") or []:
-    if not isinstance(grp, dict):
-        continue
-    try:
-        ts = int(float(grp.get("ts_epoch_ms", 0) or 0))
-    except (TypeError, ValueError):
-        continue
-    if not ts:
-        continue
-    infl = grp.get("inflight")
-    if not isinstance(infl, dict):
-        continue
-    try:
-        sched = int(infl.get("scheduler_inflight", 0) or 0)
-        p_endpoints = [
-            e for e in infl.get("prefill_endpoints") or [] if isinstance(e, dict)
-        ]
-        p_batches = sum(int(e.get("inflight_batches", 0) or 0) for e in p_endpoints)
-        p_reqs = sum(int(e.get("inflight_requests", 0) or 0) for e in p_endpoints)
-        d_endpoints = [
-            e for e in infl.get("decode_endpoints") or [] if isinstance(e, dict)
-        ]
-        d_reserved = sum(int(e.get("reserved_total", 0) or 0) for e in d_endpoints)
-        d_running = sum(int(e.get("confirmed_running", 0) or 0) for e in d_endpoints)
-    except (TypeError, ValueError):
-        continue
-    inflight_pts.append((ts, (sched, p_batches, p_reqs, d_reserved, d_running)))
-if not inflight_pts:
-    # G6/G4 collapse fallback: rebuild the same five fields from the G3
-    # prometheus timeline (label variants summed per sample; a series not
-    # yet present at a ts leaves that field 0).
-    _inflight_gauges = (
-        ("flexlb_app_flexlb_scheduler_inflight_size", 0),
-        ("flexlb_app_flexlb_inflight_batch_count", 1),
-        ("flexlb_app_flexlb_inflight_request_count", 2),
-        ("flexlb_auto_tpm_decode_reserved_count", 3),
-        ("flexlb_auto_tpm_decode_running_count", 4),
-    )
-    _inflight_by_ts = {}
-    for _base, _idx in _inflight_gauges:
-        for _ts, _v in prom_ts_extract(_base, agg="sum"):
-            _inflight_by_ts.setdefault(int(_ts), [0, 0, 0, 0, 0])[_idx] = int(round(_v))
-    inflight_pts = [(_ts, tuple(_row)) for _ts, _row in sorted(_inflight_by_ts.items())]
+# reserved/running counts summed across label variants (decode reserved =
+# master 预约未确认，running = 引擎确认运行中). SchedulerRuntime sets
+# those gauges every 2s, so the series naturally runs at the 2s cadence
+# the samples carry (vs the retired poller's 1s). Output keys unchanged
+# (canvas/compare_twin consume them as-is).
+# no-backward-compat: the retired inflight_timeseries snapshots (old runs)
+# are no longer read — those runs cannot be re-aggregated.
+_inflight_gauges = (
+    ("flexlb_app_flexlb_scheduler_inflight_size", 0),
+    ("flexlb_app_flexlb_inflight_batch_count", 1),
+    ("flexlb_app_flexlb_inflight_request_count", 2),
+    ("flexlb_auto_tpm_decode_reserved_count", 3),
+    ("flexlb_auto_tpm_decode_running_count", 4),
+)
+_inflight_by_ts = {}
+for _base, _idx in _inflight_gauges:
+    for _ts, _v in prom_ts_extract(_base, agg="sum"):
+        _inflight_by_ts.setdefault(int(_ts), [0, 0, 0, 0, 0])[_idx] = int(round(_v))
+inflight_pts = [(_ts, tuple(_row)) for _ts, _row in sorted(_inflight_by_ts.items())]
 inflight_ts = [
     {
         "t": t,
@@ -1966,14 +1929,15 @@ inflight_ts = [
     for t, (s, pb, pr, drv, drn) in rel_axis(inflight_pts)
 ]
 
-# master 每秒到达/完成速率（累计计数器差分）。双源（G6/G4 收缩后 G3
-# 是唯一 master 采集路）：旧 counters_timeseries 键（老 run）存在则优先
-# （老 run 重聚合不坏）；缺席时从 G3 prometheus counter 重建累计序列——
+# master 每秒到达/完成速率（累计计数器差分）。G6/G4 收缩后 G3
+# prometheus 是唯一 master 采集路：累计序列从 G3 counter 重建——
 # 每 ts 对 flexlb_auto_tpm_request_count 系列按 priority 标签求和、
 # flexlb_app_engine_balancing_master_all_qps 按 code 标签求和（跨标签
 # 求和 = cluster 累计值；系列首次 increment 前不出现，缺席即 0）。
 # master 每 run 重启，counter 天然从 0 起（对齐旧 server_latency/reset
 # 起点语义）。
+# no-backward-compat：退役的 counters_timeseries 键（老 run）不再读取，
+# 老 run 无法重聚合。
 # arrival_count / completion_count 是 master 侧单调累计计数器（1s 采样，
 # 间隔 ~1001ms）；相邻样本正差分 ÷ 间隔秒 = 每秒速率（计数器重置的
 # 负差分区间丢弃，不造峰）。这是 QPS 图表发送序列的权威数据源：
@@ -1983,42 +1947,25 @@ inflight_ts = [
 # rel_axis 重锚 epoch0；负 t 样本（首请求发送前的暖机零值）保留，
 # 报告端按需丢弃。rel_axis 的元组透传同时携带 completions 速率与
 # 到达累计值（cum_arrivals，冻结点取证用）。
+_arr_by_ts = {
+    int(_ts): _v
+    for _ts, _v in prom_ts_extract("flexlb_auto_tpm_request_count_total", agg="sum")
+}
+_cmp_by_ts = {
+    int(_ts): _v
+    for _ts, _v in prom_ts_extract(
+        "flexlb_app_engine_balancing_master_all_qps_total", agg="sum"
+    )
+}
 _counter_pts = []
-for _row in master_json.get("counters_timeseries") or []:
-    if not isinstance(_row, dict):
-        continue
-    try:
-        _ts = int(float(_row.get("ts_epoch_ms", 0) or 0))
-        _arr = int(float(_row.get("arrival_count", 0) or 0))
-        _cmp = int(float(_row.get("completion_count", 0) or 0))
-    except (TypeError, ValueError):
-        continue
-    if not _ts:
-        continue
-    _counter_pts.append((_ts, _arr, _cmp))
-if not _counter_pts:
-    # G6/G4 collapse fallback: derive the cumulative counters from the G3
-    # prometheus timeline. prom_ts_extract folds the label variants
-    # (priority / code) per sample; the _total suffix is the counter
-    # exposition form micrometer adds on the prometheus endpoint.
-    _arr_by_ts = {
-        int(_ts): _v
-        for _ts, _v in prom_ts_extract("flexlb_auto_tpm_request_count_total", agg="sum")
-    }
-    _cmp_by_ts = {
-        int(_ts): _v
-        for _ts, _v in prom_ts_extract(
-            "flexlb_app_engine_balancing_master_all_qps_total", agg="sum"
+for _ts in sorted(set(_arr_by_ts) | set(_cmp_by_ts)):
+    _counter_pts.append(
+        (
+            _ts,
+            int(round(_arr_by_ts.get(_ts, 0.0))),
+            int(round(_cmp_by_ts.get(_ts, 0.0))),
         )
-    }
-    for _ts in sorted(set(_arr_by_ts) | set(_cmp_by_ts)):
-        _counter_pts.append(
-            (
-                _ts,
-                int(round(_arr_by_ts.get(_ts, 0.0))),
-                int(round(_cmp_by_ts.get(_ts, 0.0))),
-            )
-        )
+    )
 _arrival_rate_pts = []
 for (_ts0, _a0, _c0), (_ts1, _a1, _c1) in zip(_counter_pts, _counter_pts[1:]):
     _dt_s = (_ts1 - _ts0) / 1000.0
@@ -2045,7 +1992,7 @@ master_arrivals_ts = [
 ]
 
 # master-side queue depth + inflight age from the G3 prometheus timeline
-# (needs FLEXLB_MONITOR_MODE=all; per-priority label variants summed).
+# (per-priority label variants summed).
 # ad2d6224+: INFLIGHT_MAX_AGE_MS carries {role, engineIp} tags —
 # role=SCHEDULER + engineIp="scheduler" marks the scheduler's own ledger,
 # PREFILL/DECODE + real engineIp the per-worker ledgers. Keep age_ms as the

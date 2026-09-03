@@ -167,19 +167,18 @@ FLEXLB_PV_LOG="${FLEXLB_PV_LOG:-off}"
 JFR_FILE="${JFR_FILE:-${RUN_DIR}/flexlb_profile.jfr}"
 JFR_DURATION="${JFR_DURATION:-300s}"
 FLEXLB_MONITOR_ENABLED="${FLEXLB_MONITOR_ENABLED:-true}"
-# Default "whitelist" (G6/G4 collapse): the master registers/reports only
-# the series the unified analyzer consumes — the master-side counterpart
-# of the G3 collector whitelist (the collector re-filters on top of this;
-# the whitelist trims at the source). Replaces the former "all" default,
-# which exposed ~100 unconsumed series; critical-only remains available
-# explicitly but filters the inflight/auto_tpm/all_qps families away
-# entirely.
-FLEXLB_MONITOR_MODE="${FLEXLB_MONITOR_MODE:-whitelist}"
-# MUST stay in sync with MASTER_PROMETHEUS_PREFIXES in
-# eval_collectors.py (bidirectional reference: the collector-side comment
-# points back here). Entries are prometheus-form prefixes or full names,
-# comma-separated; env -> flexlb.monitor.metric-whitelist via relaxed
-# binding (see WhitelistMetricsFilterConfig).
+# Metric exposure is controlled by a single configurable whitelist — there
+# is no mode switch. The master registers/reports only the series matching
+# the comma-separated prometheus-form prefixes below — the master-side
+# counterpart of the G3 collector whitelist (the collector re-filters on
+# top of this; the whitelist trims at the source, ~100 unconsumed series
+# down to the consumed set). MUST stay in sync with
+# MASTER_PROMETHEUS_PREFIXES in eval_collectors.py (bidirectional
+# reference: the collector-side comment points back here); env ->
+# flexlb.monitor.metric-whitelist via relaxed binding (see
+# WhitelistMetricsFilterConfig). An explicitly empty/blank value fails
+# closed (no flexlb_* series at all); use the bare "flexlb_" prefix to
+# expose everything flexlb_*.
 FLEXLB_MONITOR_METRIC_WHITELIST="${FLEXLB_MONITOR_METRIC_WHITELIST:-flexlb_app_cache_,flexlb_app_flexlb_batcher_queue_size,flexlb_app_flexlb_inflight_max_age_ms,flexlb_app_flexlb_inflight_ttl,flexlb_app_engine_balancing_master_dispatch_reason_total,flexlb_app_engine_balancing_master_batch_size,flexlb_auto_tpm_request_count,flexlb_app_engine_balancing_master_all_qps,flexlb_app_flexlb_scheduler_inflight_size,flexlb_app_flexlb_inflight_batch_count,flexlb_app_flexlb_inflight_request_count,flexlb_auto_tpm_decode_reserved_count,flexlb_auto_tpm_decode_running_count}"
 HIPPO_ROLE="${HIPPO_ROLE:-test}"
 
@@ -422,7 +421,6 @@ consolidate_run_outputs_now() {
     --param "decode_cache_blocks=${DECODE_CACHE_BLOCKS}" \
     --param "timeout_ms=${TIMEOUT_MS}" \
     --param "response_timeout=${RESPONSE_TIMEOUT:-}" \
-    --param "flexlb_monitor_mode=${FLEXLB_MONITOR_MODE}" \
     --param "java_mock_stats_interval_ms=${JAVA_MOCK_STATS_INTERVAL_MS}" \
     --param "java_mock_decode_max_concurrency=${JAVA_MOCK_DECODE_MAX_CONCURRENCY}" \
     --param "flexlb_pv_log=${FLEXLB_PV_LOG}" \
@@ -655,11 +653,10 @@ start_mock_per_engine_poller() {
 # analyzer consumes (C: flexlb_app_cache_* KV / hit-ratio family, the
 # batcher and routing queue gauges, inflight max age, dispatch reason
 # counters, the auto_tpm request-count / all_qps counters and the inflight
-# gauge quintet) before appending. FLEXLB_MONITOR_MODE=whitelist (the
-# default) is required upstream: critical-only trims the master's own
-# exposition to ~6 flexlb_* series and the whitelist below would match
-# almost nothing. The master-side whitelist (FLEXLB_MONITOR_METRIC_WHITELIST
-# above) and this collector-side whitelist stay in sync by convention.
+# gauge quintet) before appending. The master-side whitelist
+# (FLEXLB_MONITOR_METRIC_WHITELIST above) already trims the exposition at
+# the source down to the same set; this collector-side whitelist re-filters
+# and stays in sync by convention.
 # Same "# ts=" grouped layout as G1.
 start_master_prometheus_poller() {
   if [[ "${START_FLEXLB}" != "1" ]]; then
@@ -1000,7 +997,6 @@ OVERRIDE_ENV_KEYS=(
   FLEXLB_BATCH_DISPATCH_THREADS
   FLEXLB_BATCH_DISPATCH_QUEUE_CAPACITY
   FLEXLB_MONITOR_ENABLED
-  FLEXLB_MONITOR_MODE
   FLEXLB_MONITOR_METRIC_WHITELIST
 )
 for key in "${OVERRIDE_ENV_KEYS[@]}"; do
