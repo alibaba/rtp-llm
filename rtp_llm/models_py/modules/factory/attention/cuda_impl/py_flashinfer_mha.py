@@ -225,10 +225,20 @@ class PyFlashinferPrefillPagedAttnOp(object):
         # Store CUDA graph copy parameters
         # Define qo_indptr early for CUDA graph initialization
         if attn_inputs.prefill_cuda_graph_copy_params is not None:
-            # For CUDA graph mode, create a buffer that will be filled later
-            self.input_lengths = attn_inputs.input_lengths
-            self.cu_seq_lens = attn_inputs.cu_seqlens_device
-            qo_indptr = attn_inputs.cu_seqlens_device.clone()
+            # These become FlashInfer's persistent graph buffers and its kernel
+            # dereferences them on the device across replays, so they have to be
+            # device-resident. The caller legitimately hands over pinned *host*
+            # staging tensors here -- that is what the copy params exist for -- and
+            # aliasing or .clone()ing them preserves host residency, after which
+            # the kernel reads a host pointer and dies with an illegal memory
+            # access inside BatchPrefillWithPagedKVCacheKernel. Copying onto the
+            # device also makes the in-place updates below real H2D copies instead
+            # of assigning a tensor to itself.
+            self.input_lengths = attn_inputs.input_lengths.to(device="cuda", copy=True)
+            self.cu_seq_lens = attn_inputs.cu_seqlens_device.to(
+                device="cuda", copy=True
+            )
+            qo_indptr = self.cu_seq_lens.clone()
         else:
             qo_indptr = attn_inputs.cu_seqlens_device[
                 : attn_inputs.input_lengths.size(0) + 1
