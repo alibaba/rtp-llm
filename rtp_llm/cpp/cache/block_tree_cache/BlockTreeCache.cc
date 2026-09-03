@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/diagnostic/FullPrefixInvariantScanner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
@@ -131,6 +132,11 @@ BlockTreeCache::~BlockTreeCache() {
     RTP_LLM_LOG_INFO("destroyed");
 }
 
+void BlockTreeCache::setMetricsReporter(const std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter) {
+    metrics_reporter_.setMetricsReporter(metrics_reporter);
+    transfer_dispatcher_->setMetricsReporter(&metrics_reporter_);
+}
+
 bool BlockTreeCache::executeTransfer(const std::vector<TransferDescriptor>& descriptors) {
     auto context = transfer_dispatcher_->executePerRank(descriptors);
     context->waitDone();
@@ -241,6 +247,8 @@ void BlockTreeCache::reportMetrics() const {
         snapshots = metrics_reporter_.collectEvictableMetricsSnapshots(tree_->groupSets(), evictor_);
     }
     metrics_reporter_.reportEvictableCandidateCount(snapshots);
+    metrics_reporter_.reportQueueBacklog(*task_pool_, "business");
+    metrics_reporter_.reportQueueBacklog(*transfer_dispatcher_->per_rank_engine_->transfer_task_pool_, "transfer");
 }
 
 BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot(size_t limit) const {
