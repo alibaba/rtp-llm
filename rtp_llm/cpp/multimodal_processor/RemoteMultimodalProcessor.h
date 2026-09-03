@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <string>
@@ -84,9 +85,9 @@ private:
     // roles (the order the encoder packed: embedding chunk(s), optional pos_id, then per-image
     // extra_input). A large output is row-split across several slots, so there may be MORE THAN
     // ONE EMBEDDING tensor — they are concatenated back along dim 0 here.
-    MultimodalOutput assembleRdmaOutput(const std::vector<torch::Tensor>&        mm_tensors,
-                                        const std::vector<MMRdmaTensorPB::Role>& roles,
-                                        const MultimodalOutputPB*                output_pb) {
+    ErrorResult<MultimodalOutput> assembleRdmaOutput(const std::vector<torch::Tensor>&        mm_tensors,
+                                                     const std::vector<MMRdmaTensorPB::Role>& roles,
+                                                     const MultimodalOutputPB*                output_pb) {
         RTP_LLM_CHECK_WITH_INFO(mm_tensors.size() == roles.size(),
                                 "rdma read tensor count=%zu does not match manifest role count=%zu",
                                 mm_tensors.size(),
@@ -103,10 +104,8 @@ private:
                     break;
                 case MMRdmaTensorPB::POS_ID:
                     RTP_LLM_CHECK_WITH_INFO(!has_pos_id, "rdma manifest carries more than one pos_id");
-                    // PositionIdsGenerator reads pos_id on the host (data_ptr<int32_t>()), but the
-                    // RDMA read lands it in GPU memory. Bring it back to CPU so the host deref is
-                    // valid — matching the inline-bytes path (and the embedding/extra_input tensors
-                    // stay on GPU, where their consumers move them with .to(kCUDA) anyway).
+                    // PositionIdsGenerator reads pos_id on the host. The RDMA destination is
+                    // already pinned CPU memory, so this is a no-op that preserves that contract.
                     mm_position_id = mm_tensors[i].to(torch::kCPU);
                     has_pos_id     = true;
                     break;
@@ -120,8 +119,45 @@ private:
         RTP_LLM_CHECK_WITH_INFO(!embedding_chunks.empty(), "rdma manifest has no embedding tensor");
         // One chunk in the common case; concatenate the row-splits back into the full embedding
         // otherwise (chunk order is preserved by the caller, so the rows line up with split_size).
-        torch::Tensor mm_embedding =
-            embedding_chunks.size() == 1 ? embedding_chunks[0] : torch::cat(embedding_chunks, 0);
+        torch::Tensor mm_embedding;
+        if (embedding_chunks.size() == 1) {
+            mm_embedding = embedding_chunks[0];
+        } else {
+            std::vector<int64_t> shape(embedding_chunks[0].sizes().begin(), embedding_chunks[0].sizes().end());
+            int64_t              total_rows = 0;
+            for (const auto& chunk : embedding_chunks) {
+                RTP_LLM_CHECK_WITH_INFO(chunk.dim() == embedding_chunks[0].dim(),
+                                        "rdma embedding chunks have inconsistent rank");
+                for (int64_t dim = 1; dim < chunk.dim(); ++dim) {
+                    RTP_LLM_CHECK_WITH_INFO(chunk.size(dim) == embedding_chunks[0].size(dim),
+                                            "rdma embedding chunks have inconsistent shape");
+                }
+                total_rows += chunk.size(0);
+            }
+            shape[0]               = total_rows;
+            uint64_t merged_nbytes = 0;
+            for (const auto& chunk : embedding_chunks) {
+                const uint64_t chunk_nbytes = static_cast<uint64_t>(chunk.numel()) * chunk.element_size();
+                RTP_LLM_CHECK_WITH_INFO(merged_nbytes <= std::numeric_limits<uint64_t>::max() - chunk_nbytes,
+                                        "rdma embedding merged byte size overflows");
+                merged_nbytes += chunk_nbytes;
+            }
+            torch::Tensor merged_storage;
+            const auto    allocation_status = rdma_transport_->allocatePinnedBuffer(merged_nbytes, &merged_storage);
+            if (allocation_status != MMRdmaReadStatus::SUCCESS) {
+                const std::string message =
+                    allocation_status == MMRdmaReadStatus::POOL_EXHAUSTED ?
+                        "multimodal RDMA pinned receive pool exhausted during multi-slot assembly" :
+                        "multimodal RDMA pinned allocation failed during multi-slot assembly";
+                return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, message);
+            }
+            mm_embedding       = merged_storage.view(embedding_chunks[0].scalar_type()).reshape(shape);
+            int64_t row_offset = 0;
+            for (const auto& chunk : embedding_chunks) {
+                mm_embedding.narrow(0, row_offset, chunk.size(0)).copy_(chunk);
+                row_offset += chunk.size(0);
+            }
+        }
 
         std::vector<int64_t> split_sizes;
         for (auto split_size : output_pb->split_size()) {
@@ -213,11 +249,12 @@ private:
 
             std::vector<torch::Tensor>        mm_tensors;
             std::vector<MMRdmaTensorPB::Role> roles;
-            bool                              read_ok = true;
+            MMRdmaReadStatus                  read_status = MMRdmaReadStatus::SUCCESS;
             for (const auto* desc : descs) {
                 std::vector<torch::Tensor> chunk_tensors;
-                if (!rdma_transport_->readEmbedding(*desc, &chunk_tensors)) {
-                    read_ok = false;
+                const auto                 chunk_status = rdma_transport_->readEmbedding(*desc, &chunk_tensors);
+                if (chunk_status != MMRdmaReadStatus::SUCCESS) {
+                    read_status = chunk_status;
                     break;
                 }
                 for (int i = 0; i < desc->tensors_size(); ++i) {
@@ -227,7 +264,7 @@ private:
             }
             releaseRemoteSlots(stub, handles);  // either way, free the encoder slot(s)
 
-            if (read_ok) {
+            if (read_status == MMRdmaReadStatus::SUCCESS) {
                 // Benchmark hook: MM_RDMA_READ_ONLY=1 aborts the request right after a
                 // successful RDMA READ (already timed + logged as [MM-RDMA-BW]), so we can
                 // measure pure read bandwidth without running prefill/decode. The request
@@ -241,6 +278,9 @@ private:
                     return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "MM_RDMA_READ_ONLY: aborted after rdma read");
                 }
                 return assembleRdmaOutput(mm_tensors, roles, &output_pb);
+            }
+            if (read_status == MMRdmaReadStatus::POOL_EXHAUSTED) {
+                return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "multimodal RDMA pinned receive pool exhausted");
             }
             // RDMA read failed. As agreed, fall back to the inline-bytes path: re-issue the
             // request with support_rdma=false so the encoder returns the embedding as bytes

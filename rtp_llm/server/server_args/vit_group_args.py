@@ -320,7 +320,7 @@ def init_vit_group_args(parser, vit_config):
         bind_to=(vit_config, "mm_rdma_max_inflight_bytes"),
         type=int,
         default=8 * 1024 * 1024 * 1024,
-        help="encoder 侧在途（已注册未释放）embedding slot 的总字节软上限，超过则该次回退 bytes；0 表示不限制",
+        help="encoder 侧在途 embedding slot 上限；LLM 侧启动时按该值一次性申请并注册 pinned CPU 内存池，池耗尽时请求直接失败",
     )
     vit_group.add_argument(
         "--mm_rdma_max_slot_bytes",

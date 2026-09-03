@@ -19,6 +19,36 @@ namespace py = pybind11;
 
 namespace rtp_llm {
 
+namespace {
+
+ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* tensor_name) {
+#if USING_CUDA
+    try {
+        for (auto& tensor : tensors) {
+            if (!tensor.defined() || tensor.is_pinned()) {
+                continue;
+            }
+            if (tensor.is_cuda()) {
+                auto options =
+                    torch::TensorOptions().dtype(tensor.scalar_type()).device(torch::kCPU).pinned_memory(true);
+                tensor = tensor.to(options, /*non_blocking=*/true);
+            } else {
+                tensor = tensor.pin_memory();
+            }
+        }
+    } catch (const std::exception& e) {
+        return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
+                         std::string("failed to move multimodal ") + tensor_name + " to pinned CPU: " + e.what());
+    }
+#else
+    (void)tensors;
+    (void)tensor_name;
+#endif
+    return ErrorInfo::OkStatus();
+}
+
+}  // namespace
+
 ErrorInfo MultimodalProcessor::getFeatureHash(int32_t* token_ids, const torch::Tensor& mm_emb) {
     if (mm_emb.dim() < 1 || mm_emb.size(0) <= 0) {
         return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "multimodal feature tensor is empty");
@@ -218,16 +248,21 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
     CHECK_AND_RETURN_REF(
         mm_embedding_res,
         MultimodalEmbedding(input->multimodal_inputs.value(), ip_port, input->request_id, server_context));
-    input->multimodal_features = std::move(mm_embedding_res.mm_features);
-    input->mm_position_ids     = std::move(mm_embedding_res.mm_position_ids);
-    input->mm_extra_input      = std::move(mm_embedding_res.mm_extra_input);
-    CHECK_AND_RETURN_REF(
-        expanded_ids,
-        expandTokenIds(input->multimodal_features.value(), input->input_ids, input->multimodal_inputs.value()));
+    auto                       mm_features = std::move(mm_embedding_res.mm_features);
+    std::vector<torch::Tensor> mm_extra_input;
+    if (mm_embedding_res.mm_extra_input.has_value()) {
+        mm_extra_input = std::move(mm_embedding_res.mm_extra_input.value());
+    }
+    input->mm_position_ids = std::move(mm_embedding_res.mm_position_ids);
+    CHECK_AND_RETURN_REF(expanded_ids, expandTokenIds(mm_features, input->input_ids, input->multimodal_inputs.value()));
     RETURN_IF_STATUS_ERROR(checkExpandLength(expanded_ids));
-    input->input_ids        = expanded_ids.expanded_ids;
-    input->text_tokens_mask = expanded_ids.text_tokens_mask;
-    input->mm_locs          = expanded_ids.locs;
+    RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_features, "embedding"));
+    RETURN_IF_STATUS_ERROR(pinMultimodalTensors(mm_extra_input, "extra input"));
+    input->multimodal_features = std::move(mm_features);
+    input->mm_extra_input      = std::move(mm_extra_input);
+    input->input_ids           = expanded_ids.expanded_ids;
+    input->text_tokens_mask    = expanded_ids.text_tokens_mask;
+    input->mm_locs             = expanded_ids.locs;
     return ErrorInfo::OkStatus();
 }
 

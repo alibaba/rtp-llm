@@ -259,11 +259,11 @@ void QueryConverter::transMMPreprocessConfig(MMPreprocessConfigPB* config_pb, co
 }
 
 MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputPB* output_pb) {
-    torch::Tensor mm_embedding        = transTensor(output_pb->multimodal_embedding()), mm_position_id;
+    torch::Tensor mm_embedding        = transPinnedTensor(output_pb->multimodal_embedding()), mm_position_id;
     bool          contain_pos         = output_pb->has_multimodal_pos_id();
     bool          contain_extra_input = output_pb->multimodal_extra_input_size() > 0;
     if (contain_pos) {
-        mm_position_id = transTensor(output_pb->multimodal_pos_id());
+        mm_position_id = transPinnedTensor(output_pb->multimodal_pos_id());
     }
     MultimodalOutput     mm_output;
     std::vector<int64_t> split_sizes;
@@ -290,7 +290,7 @@ MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputPB* output_
         std::vector<torch::Tensor> extra_inputs;
         extra_inputs.reserve(output_pb->multimodal_extra_input_size());
         for (const auto& extra_input_pb : output_pb->multimodal_extra_input()) {
-            extra_inputs.emplace_back(transTensor(extra_input_pb));
+            extra_inputs.emplace_back(transPinnedTensor(extra_input_pb));
         }
         mm_output.mm_extra_input = std::move(extra_inputs);
     }
@@ -299,6 +299,10 @@ MultimodalOutput QueryConverter::transMMOutput(const MultimodalOutputPB* output_
 
 torch::Tensor QueryConverter::transTensor(const TensorPB& tensor_pb) {
     return TensorPbConvert::pbToTorch(tensor_pb);
+}
+
+torch::Tensor QueryConverter::transPinnedTensor(const TensorPB& tensor_pb) {
+    return TensorPbConvert::pbToPinnedTorch(tensor_pb);
 }
 
 void QueryConverter::transTensorPB(TensorPB* tensor_pb, const torch::Tensor& tensor) {

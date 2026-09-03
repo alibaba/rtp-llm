@@ -16,6 +16,12 @@ enum class MMRdmaRole {
     LLM_CLIENT,      // LLM side: pulls embeddings via one-sided RDMA READ
 };
 
+enum class MMRdmaReadStatus {
+    SUCCESS,
+    RETRYABLE_ERROR,
+    POOL_EXHAUSTED,
+};
+
 // Abstract data-plane for moving multimodal embeddings between the (separated) ViT
 // encoder and the LLM over GPUDirect RDMA.
 //
@@ -34,19 +40,24 @@ public:
     // nbytes). The slot stays alive until releaseEmbedding(handle) or the GC timeout fires.
     // `tensors` and `roles` must have equal, non-zero size. Returns false on any failure;
     // the caller must then fall back to inline bytes.
-    virtual bool exportEmbedding(const std::vector<torch::Tensor>&         tensors,
-                                 const std::vector<MMRdmaTensorPB::Role>&  roles,
-                                 MMRdmaDescPB*                             desc) = 0;
+    virtual bool exportEmbedding(const std::vector<torch::Tensor>&        tensors,
+                                 const std::vector<MMRdmaTensorPB::Role>& roles,
+                                 MMRdmaDescPB*                            desc) = 0;
 
     // Return the slots backing `handles` to the free pool (MR kept registered). Best-effort.
     virtual void releaseEmbedding(const std::vector<std::string>& handles) = 0;
 
     // ---- LLM (LLM_CLIENT) side ----
-    // Issue a single one-sided RDMA READ pulling the whole slot described by `desc`, then
-    // slice it into one tensor per `desc.tensors()` entry (shape/dtype/offset from the
-    // manifest), returned via `out` in the same order. Blocks until completion or timeout.
-    // Returns false on any failure; the caller falls back to bytes if present.
-    virtual bool readEmbedding(const MMRdmaDescPB& desc, std::vector<torch::Tensor>* out) = 0;
+    // Issue a single one-sided RDMA READ directly into a pooled pinned-CPU region, then slice
+    // it into one tensor per `desc.tensors()` entry (shape/dtype/offset from the manifest),
+    // returned via `out` in the same order. The views retain the pool lease; the region is
+    // reusable only after the last view dies. POOL_EXHAUSTED is a hard request error; other
+    // failures may fall back to inline bytes.
+    virtual MMRdmaReadStatus readEmbedding(const MMRdmaDescPB& desc, std::vector<torch::Tensor>* out) = 0;
+
+    // Suballocate a raw uint8 tensor from the same fixed pinned receive arena. This is used
+    // for outputs that must be materialized after an RDMA read, such as multi-slot assembly.
+    virtual MMRdmaReadStatus allocatePinnedBuffer(uint64_t nbytes, torch::Tensor* out) = 0;
 };
 
 // Creator registered by the internal implementation at static-init time (alwayslink).

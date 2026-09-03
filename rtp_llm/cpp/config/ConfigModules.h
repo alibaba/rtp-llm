@@ -363,10 +363,11 @@ struct VitConfig {
     // Encoder-side slot lifetime: force-reclaim a slot this long after export if no
     // Release(handle) arrived (backstop against LLM crash / READ failure -> leak).
     int64_t mm_rdma_slot_gc_timeout_ms = 60 * 1000;
-    // Encoder-side soft cap on the physical allocation buckets of live, unreleased slots.
-    // AllocLimitBuffer also enforces the process-wide RDMA pool bound. When this cap is
-    // exceeded, exportEmbedding fails and the request transparently falls back to gRPC.
-    // 0 disables the cap.
+    // Encoder-side soft cap on live physical allocation buckets. On the LLM side this is
+    // the size of one pinned-CPU receive arena, allocated and registered at startup. RDMA
+    // reads suballocate contiguous regions from the arena and return them after the last
+    // embedding view dies. Pool exhaustion fails the request immediately. A positive value
+    // is required to initialize the LLM-side RDMA transport.
     int64_t mm_rdma_max_inflight_bytes = 8L * 1024 * 1024 * 1024;
     // Upper bound on one RDMA slot. Larger outputs use the existing multi-slot protocol.
     int64_t mm_rdma_max_slot_bytes = 1024L * 1024 * 1024;

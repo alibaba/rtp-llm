@@ -1,8 +1,29 @@
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 
+#include <cstring>
 #include <stdexcept>
 
 namespace rtp_llm {
+
+namespace {
+
+torch::Tensor copyPbTensor(
+    const void* data, size_t data_bytes, const std::vector<int64_t>& shape, torch::ScalarType dtype, bool pinned) {
+    auto options = torch::TensorOptions().dtype(dtype).device(torch::kCPU);
+    if (pinned) {
+        options = options.pinned_memory(true);
+    }
+    auto result = torch::empty(shape, options);
+    if (result.nbytes() != static_cast<int64_t>(data_bytes)) {
+        throw std::runtime_error("TensorPB data size does not match shape and dtype");
+    }
+    if (data_bytes > 0) {
+        std::memcpy(result.data_ptr(), data, data_bytes);
+    }
+    return result;
+}
+
+}  // namespace
 
 torch::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
     std::vector<int64_t> shape(tensor_pb.shape().begin(), tensor_pb.shape().end());
@@ -28,6 +49,26 @@ torch::Tensor TensorPbConvert::pbToTorch(const TensorPB& tensor_pb) {
             auto options = torch::TensorOptions().dtype(torch::kBFloat16);
             return torch::from_blob(data_ptr, shape, options).clone();
         }
+        default:
+            throw std::runtime_error("Unsupported data type.");
+    }
+}
+
+torch::Tensor TensorPbConvert::pbToPinnedTorch(const TensorPB& tensor_pb) {
+    std::vector<int64_t> shape(tensor_pb.shape().begin(), tensor_pb.shape().end());
+    switch (tensor_pb.data_type()) {
+        case TensorPB::FP32:
+            return copyPbTensor(
+                tensor_pb.fp32_data().data(), tensor_pb.fp32_data().size(), shape, torch::kFloat32, true);
+        case TensorPB::INT32:
+            return copyPbTensor(
+                tensor_pb.int32_data().data(), tensor_pb.int32_data().size(), shape, torch::kInt32, true);
+        case TensorPB::FP16:
+            return copyPbTensor(
+                tensor_pb.fp16_data().data(), tensor_pb.fp16_data().size(), shape, torch::kFloat16, true);
+        case TensorPB::BF16:
+            return copyPbTensor(
+                tensor_pb.bf16_data().data(), tensor_pb.bf16_data().size(), shape, torch::kBFloat16, true);
         default:
             throw std::runtime_error("Unsupported data type.");
     }
