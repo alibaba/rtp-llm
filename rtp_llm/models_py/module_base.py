@@ -140,6 +140,8 @@ class RtpModule(nn.Module):
     their post-load completeness checks.
     """
 
+    supports_custom_weight_mappings = False
+
     def validate_runtime_device(self, device: torch.device) -> None:
         """Validate device-specific runtime requirements before migration."""
 

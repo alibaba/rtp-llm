@@ -12,16 +12,19 @@ from rtp_llm.config.quant_config import (
     CompressedW8A8Int8PerChannelQuantConfig,
     GPTQConfig,
     ModelOptFp4Config,
-    QuantizationConfig as SourceQuantizationConfig,
-    WeightOnlyInt8PerChannelQuantConfig,
 )
-from rtp_llm.model_loader.load_config import LoadMethod
+from rtp_llm.config.quant_config import QuantizationConfig as SourceQuantizationConfig
+from rtp_llm.config.quant_config import WeightOnlyInt8PerChannelQuantConfig
 from rtp_llm.metrics import GaugeMetrics
+from rtp_llm.model_loader.load_config import LoadMethod
+from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.qwen3.language import Qwen3ForCausalLM
 from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
+from rtp_llm.ops import TaskType
+from rtp_llm.utils.model_weight import CkptWeightInfo
 
 
 def _model_config():
@@ -48,6 +51,7 @@ def _model_config():
         quant_config=types.SimpleNamespace(get_runtime_method_key=lambda: "none"),
         use_new_loader=True,
         require_weight_update=False,
+        task_type=TaskType.LANGUAGE_MODEL,
     )
 
 
@@ -149,6 +153,145 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         model.model_config.use_new_loader = True
         self.assertTrue(model._use_new_loader())
 
+    def test_load_initializes_custom_module_before_loader_routing(self):
+        model = _base_model(_model_config())
+        custom_module = object()
+
+        def verify_route(**_kwargs):
+            self.assertIs(model.custom_module, custom_module)
+            return True
+
+        with patch.object(
+            model, "_init_custom_module", return_value=custom_module
+        ), patch.object(
+            model, "_use_new_loader", side_effect=verify_route
+        ), patch.object(
+            model, "_load_with_new_loader"
+        ) as load_with_newloader:
+            model.load()
+
+        load_with_newloader.assert_called_once_with()
+
+    def test_automatic_route_falls_back_for_fastsafetensors(self):
+        config = _model_config()
+        config.use_new_loader = None
+        model = _base_model(config)
+        model.load_method = LoadMethod.FASTSAFETENSORS
+
+        self.assertIn(
+            "fastsafetensors is not supported",
+            model._new_loader_unsupported_reason(),
+        )
+        self.assertFalse(model._use_new_loader())
+
+        config.use_new_loader = True
+        self.assertTrue(model._use_new_loader())
+        with self.assertRaisesRegex(ValueError, "fastsafetensors is not supported"):
+            model._load_with_new_loader()
+
+    def test_automatic_route_resolves_load_method_environment_override(self):
+        config = _model_config()
+        config.use_new_loader = None
+        model = _base_model(config)
+        model.load_method = LoadMethod.AUTO
+
+        with patch.dict(os.environ, {"LOAD_METHOD": "fastsafetensors"}, clear=False):
+            self.assertFalse(model._use_new_loader())
+
+        with patch.dict(os.environ, {"LOAD_METHOD": "scratch"}, clear=False):
+            self.assertTrue(model._use_new_loader())
+
+    def test_automatic_route_falls_back_for_unsupported_custom_weights(self):
+        config = _model_config()
+        config.use_new_loader = None
+        model = _base_model(config)
+        custom_weight = CustomAtomicWeight(
+            "__custom__.lm_head.weight",
+            [CkptWeightInfo("lm_head.weight")],
+        )
+        model.custom_module = types.SimpleNamespace(
+            get_custom_weight_info=lambda: [custom_weight]
+        )
+
+        self.assertIn(
+            "does not support downstream custom weights",
+            model._new_loader_unsupported_reason(),
+        )
+        self.assertFalse(model._use_new_loader())
+
+        config.use_new_loader = True
+        self.assertTrue(model._use_new_loader())
+        with self.assertRaisesRegex(
+            ValueError, "does not support downstream custom weights"
+        ):
+            model._load_with_new_loader()
+
+        config.model_type = "bert"
+        config.use_new_loader = None
+        self.assertIsNone(model._new_loader_unsupported_reason())
+        self.assertTrue(model._use_new_loader())
+
+    def test_compressed_w8a8_preserves_all_exclusion_aliases(self):
+        ignored_by_name = "model.layers.0.self_attn.o_proj"
+        ignored_by_compat_name = ["model.layers.0.mlp.down_proj"]
+        excluded = "lm_head"
+
+        with tempfile.TemporaryDirectory() as path:
+            with open(f"{path}/config.json", "w") as output:
+                json.dump(
+                    {
+                        "quantization_config": {
+                            "quant_method": "compressed-tensors",
+                            "config_groups": {
+                                "group_0": {
+                                    "weights": {
+                                        "type": "int",
+                                        "num_bits": 8,
+                                        "strategy": "channel",
+                                        "dynamic": False,
+                                        "symmetric": True,
+                                    },
+                                    "input_activations": {
+                                        "type": "int",
+                                        "num_bits": 8,
+                                        "strategy": "token",
+                                        "dynamic": True,
+                                        "symmetric": True,
+                                    },
+                                }
+                            },
+                            "ignore": ignored_by_name,
+                            "modules_to_not_convert": ignored_by_compat_name,
+                            "exclude": excluded,
+                        }
+                    },
+                    output,
+                )
+
+            source_config = SourceQuantizationConfig.load_from_ckpt(path)
+
+        self.assertIsInstance(source_config, CompressedW8A8Int8PerChannelQuantConfig)
+        self.assertEqual(
+            source_config.ignored_layers,
+            [ignored_by_name, *ignored_by_compat_name],
+        )
+        self.assertEqual(
+            source_config.exclude_modules,
+            {ignored_by_name, *ignored_by_compat_name, excluded},
+        )
+
+    def test_explicit_legacy_route_still_checks_checkpoint_compatibility(self):
+        config = _model_config()
+        config.use_new_loader = False
+        model = _base_model(config)
+
+        with patch.object(
+            model,
+            "_legacy_loader_unsupported_reason",
+            return_value="test checkpoint has no legacy layout",
+        ), self.assertRaisesRegex(ValueError, "no legacy layout"):
+            model._use_new_loader()
+
     def test_registry_default_falls_back_for_unsupported_quantization(self):
         config = _model_config()
         config.use_new_loader = None
@@ -240,6 +383,32 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
                 },
             ),
             (
+                "",
+                {
+                    "quant_method": "compressed-tensors",
+                    "config_groups": {
+                        "group_0": {
+                            "weights": {
+                                "type": "int",
+                                "num_bits": 8,
+                                "strategy": "channel",
+                                "dynamic": False,
+                                "symmetric": True,
+                            },
+                            "input_activations": {
+                                "type": "int",
+                                "num_bits": 8,
+                                "strategy": "token",
+                                "dynamic": True,
+                                "symmetric": True,
+                            },
+                        }
+                    },
+                    "modules_to_not_convert": ignored,
+                    "exclude": excluded,
+                },
+            ),
+            (
                 "fp8_per_channel",
                 {
                     "quant_method": "quark",
@@ -277,7 +446,10 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
                     source_config.get_runtime_method_key(), expected_method
                 )
                 self.assertEqual(source_config.ignored_layers, ignored)
-                self.assertEqual(source_config.exclude_modules, {excluded})
+                expected_excluded = {excluded}
+                if isinstance(source_config, CompressedW8A8Int8PerChannelQuantConfig):
+                    expected_excluded.update(ignored)
+                self.assertEqual(source_config.exclude_modules, expected_excluded)
 
     def test_checkpoint_ignore_reaches_real_newloader_projection(self):
         ignored = [
