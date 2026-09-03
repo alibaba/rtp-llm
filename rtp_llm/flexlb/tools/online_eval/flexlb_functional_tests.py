@@ -28,7 +28,7 @@ with `python3 flexlb_functional_tests.py --list`.)
 Usage:
     python3 flexlb_functional_tests.py --category all --profile batch-window
     python3 flexlb_functional_tests.py --list
-    python3 flexlb_functional_tests.py --filter cancel_t1 --profile single-nonbatch
+    python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbatch
     python3 flexlb_functional_tests.py --category kv --json results.json
 """
 import argparse

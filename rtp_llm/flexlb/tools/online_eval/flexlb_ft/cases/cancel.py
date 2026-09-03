@@ -122,9 +122,9 @@ def _cancel_rpc_total(ops) -> int:
 # ===========================================================================
 
 
-@case("cancel_t1", source="cancel_smoke.py T1")
-def t1_basic_cancel(ctx: CaseContext):
-    """T1: mid-flight client Cancel terminates stream + engine state.
+@case("cancel_basic", source="cancel_smoke.py T1")
+def cancel_basic(ctx: CaseContext):
+    """Mid-flight client Cancel terminates stream + engine state.
 
     Scenario: one request is streaming its first outputs; the client
     issues the explicit Cancel RPC while the request is still running.
@@ -139,8 +139,9 @@ def t1_basic_cancel(ctx: CaseContext):
     seeing the cancel is not an implementation accident), master
     inflight ledger drains, a follow-up request completes normally.
 
-    Prediction: passes (t1-t6 kept engine verification observational
-    while the cancel channel wiring was under construction; the BATCH
+    Prediction: passes (the six legacy-ported cases kept engine
+    verification observational while the cancel channel wiring was under
+    construction; the BATCH
     hard assertion is the 2026-09 upgrade — see the family docstring).
     """
     ops = ctx.ops()
@@ -189,8 +190,8 @@ def t1_basic_cancel(ctx: CaseContext):
         return False, f"exception: {exc!r}"
 
 
-@case("cancel_t2", source="cancel_smoke.py T2")
-def t2_cancel_idempotency(ctx: CaseContext):
+@case("cancel_idempotent", source="cancel_smoke.py T2")
+def cancel_idempotent(ctx: CaseContext):
     ops = ctx.ops()
     rid = ops.next_request_id(rid_base(ctx, "cancel"))
     try:
@@ -233,8 +234,8 @@ def t2_cancel_idempotency(ctx: CaseContext):
         return False, f"exception: {exc!r}"
 
 
-@case("cancel_t3", source="cancel_smoke.py T3")
-def t3_multi_request_isolation(ctx: CaseContext):
+@case("cancel_sibling_isolation", source="cancel_smoke.py T3")
+def cancel_sibling_isolation(ctx: CaseContext):
     ops = ctx.ops()
     base = rid_base(ctx, "cancel")
     rids = [ops.next_request_id(base) for _ in range(3)]
@@ -264,8 +265,8 @@ def t3_multi_request_isolation(ctx: CaseContext):
                 # the leaked EnqueueBatch result sits in the engine's fetch
                 # queue and the master's inflight/ledger far past the 30s
                 # stale TTL (fence-quarantine family), poisoning later cases
-                # on the shared env (observed cascade: T3 leak ->
-                # kv_prefix_stickiness / balance_len_mixed /
+                # on the shared env (observed cascade: this case's leak
+                # -> kv_prefix_stickiness / balance_len_mixed /
                 # admission_gate_no_starvation failures in the batch-window
                 # full run, all solo-PASS). Cancel every scheduled sibling
                 # before failing the case; the streams were never opened, so
@@ -353,8 +354,8 @@ def t3_multi_request_isolation(ctx: CaseContext):
         return False, f"exception: {exc!r}"
 
 
-@case("cancel_t4", source="cancel_smoke.py T4")
-def t4_cancel_after_completion(ctx: CaseContext):
+@case("cancel_after_terminal", source="cancel_smoke.py T4")
+def cancel_after_terminal(ctx: CaseContext):
     ops = ctx.ops()
     rid = ops.next_request_id(rid_base(ctx, "cancel"))
     try:
@@ -398,8 +399,8 @@ def t4_cancel_after_completion(ctx: CaseContext):
         return False, f"exception: {exc!r}"
 
 
-@case("cancel_t5", source="cancel_smoke.py T5")
-def t5_cancel_nonexistent(ctx: CaseContext):
+@case("cancel_unknown_rid", source="cancel_smoke.py T5")
+def cancel_unknown_rid(ctx: CaseContext):
     ops = ctx.ops()
     try:
         fake_rid = 99999
@@ -416,8 +417,8 @@ def t5_cancel_nonexistent(ctx: CaseContext):
         return False, f"exception: {exc!r}"
 
 
-@case("cancel_t6", source="cancel_smoke.py T6")
-def t6_cancel_at_prefill_vs_decode(ctx: CaseContext):
+@case("cancel_phase_timing", source="cancel_smoke.py T6")
+def cancel_phase_timing(ctx: CaseContext):
     ops = ctx.ops()
     base = rid_base(ctx, "cancel")
     try:
@@ -490,7 +491,7 @@ def t6_cancel_at_prefill_vs_decode(ctx: CaseContext):
     "cancel_anomaly_path",
     source="anomaly_smoke.py E1",
 )
-def e1_cancel_path(ctx: CaseContext):
+def cancel_anomaly_path(ctx: CaseContext):
     ops = ctx.ops()
     rid = ops.next_request_id(rid_base(ctx, "cancel"))
     try:
@@ -738,9 +739,9 @@ def cancel_engine_notfound_settle(ctx: CaseContext):
     rewrite); the master inflight ledger stays clean (nothing re-opened);
     a follow-up request completes normally.
 
-    Prediction: passes (t4 already covers the master-idempotent half;
-    the engine NOT_FOUND branch is the mock's documented three-branch
-    cancel semantics).
+    Prediction: passes (cancel_after_terminal already covers the
+    master-idempotent half; the engine NOT_FOUND branch is the mock's
+    documented three-branch cancel semantics).
     """
     ops = ctx.ops()
     rid = ops.next_request_id(rid_base(ctx, "cancel"))

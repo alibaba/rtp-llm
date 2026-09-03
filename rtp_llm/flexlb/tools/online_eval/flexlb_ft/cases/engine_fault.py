@@ -621,12 +621,12 @@ def inject_crash_after(ctx: CaseContext):
 
 
 @case("engine_fault_no_respond", source="anomaly_smoke.py E2")
-def e2_timeout(ctx: CaseContext):
+def engine_fault_no_respond(ctx: CaseContext):
     return _anomaly_error_case(ctx, {"no_respond": True}, TIMEOUT_WAIT_S, False)
 
 
 @case("engine_fault_enqueue_error", source="anomaly_smoke.py E3")
-def e3_worker_fail(ctx: CaseContext):
+def engine_fault_enqueue_error(ctx: CaseContext):
     return _anomaly_error_case(
         ctx, {"enqueue_error": True}, ANOMALY_STREAM_TIMEOUT_S, True
     )

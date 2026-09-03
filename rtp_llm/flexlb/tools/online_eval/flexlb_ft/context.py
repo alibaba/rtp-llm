@@ -42,7 +42,7 @@ class CaseDef:
     set is a superset.
     """
 
-    name: str  # e.g. cancel_t1
+    name: str  # e.g. cancel_basic
     category: str  # cancel | status | kv | balance | elastic | engine_fault | master | admission | direct
     fn: Callable  # ctx -> (passed, detail)
     profiles: Optional[List[str]] = None  # None = all profiles apply

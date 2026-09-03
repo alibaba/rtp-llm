@@ -12,7 +12,7 @@ cd rtp_llm/flexlb/tools/online_eval
 python3 flexlb_functional_tests.py                 # 全量（默认 category=all profile=batch-window grade=normal）
 python3 flexlb_functional_tests.py --list          # 列出用例
 python3 flexlb_functional_tests.py --category kv --json results.json                  # 单分类 + JSON 结果
-python3 flexlb_functional_tests.py --filter cancel_t1 --profile single-nonbatch      # 子串过滤
+python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbatch      # 子串过滤
 ```
 
 ## CLI
@@ -39,12 +39,12 @@ python3 flexlb_functional_tests.py --filter cancel_t1 --profile single-nonbatch 
 
 | 用例 | 场景 | 期望 |
 | --- | --- | --- |
-| `cancel_t1` | 请求流式输出中客户端发显式 Cancel | 流终止；引擎侧取消可见；master inflight 排空；后续请求正常 |
-| `cancel_t2` | 同一请求连续 Cancel 两次 | 第二次幂等不报错；流终止；恢复 |
-| `cancel_t3` | 3 并发请求，长 decode 的 B 中途被取消，A/C 为短请求 | B 终止且未完成；A/C 照常完成；引擎记录取消；恢复 |
-| `cancel_t4` | 请求已完成后再发 Cancel | 幂等成功、无二次结算；恢复 |
-| `cancel_t5` | 对从未存在的 rid 发 Cancel | 调用不抛异常（幂等处理） |
-| `cancel_t6` | A 处于 prefill 相位、B 处于 decode 相位时分别取消 | 两相位取消都终止流；恢复 |
+| `cancel_basic` | 请求流式输出中客户端发显式 Cancel | 流终止；引擎侧取消可见；master inflight 排空；后续请求正常 |
+| `cancel_idempotent` | 同一请求连续 Cancel 两次 | 第二次幂等不报错；流终止；恢复 |
+| `cancel_sibling_isolation` | 3 并发请求，长 decode 的 B 中途被取消，A/C 为短请求 | B 终止且未完成；A/C 照常完成；引擎记录取消；恢复 |
+| `cancel_after_terminal` | 请求已完成后再发 Cancel | 幂等成功、无二次结算；恢复 |
+| `cancel_unknown_rid` | 对从未存在的 rid 发 Cancel | 调用不抛异常（幂等处理） |
+| `cancel_phase_timing` | A 处于 prefill 相位、B 处于 decode 相位时分别取消 | 两相位取消都终止流；恢复 |
 | `cancel_anomaly_path` | 注入失败后的请求走客户端侧取消路径 | 流终止、取消记录可见；（BATCH 投递）inflight 清零；恢复 |
 | `cancel_deadline_exempt_inflight` | queueTimeout 到期落在请求已被引擎认领之后 | 不取消：完整输出、无引擎侧取消记录、走普通完成路径 |
 | `cancel_schedule_drop_delivered` | 批已认领后客户端取消 Schedule RPC 本身（仅 BATCH 投递） | master 仍向原 prefill 发真引擎 Cancel；账目经 CANCELLED reconcile 结算 |
