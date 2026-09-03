@@ -159,19 +159,14 @@ sums and the division is presentation-layer, with a cluster-sum fallback
 caption 「集群和（引擎数未知）」 + stderr warning when the engine count
 is unavailable — chain: `run_meta.json` params > `engine_dist` > mock
 final_snapshot role counts); the client-side token reconciliation is
-not a report panel but the aggregate's fail-closed validity item
-`validity_checks.token_reconciliation_ok`: per input/output side,
-`|client completed tokens − (Σ mock_tps_ts + in-flight Σ)| ≤ max(5% ×
-client, 5 × peak per-second tokens)` — the in-flight term adds the
-Σil/Σol of ok rows whose rid is absent from the engine-terminal done sets
-(`mock_prefill_done` / `mock_decode_done`, the same join full_e2e uses):
-fire-and-forget runs record ok at schedule success with the expected
-output_len, so requests still decoding at run end never feed the mock Σ
-(measured 7.1M / 15.3% of client output tokens on run 20260901_200108);
-runs without engine terminal logs degrade to in-flight = 0 (legacy
-formula). 5% absorbs scrape-window edge / clock residue and
-cancelled-request one-sided accounting, 5 × peak bounds the post-scrape
-drain tail; a missing series → `null` (no false failure).
+not a report panel either — the aggregate validity item
+`token_reconciliation_ok` was removed on 20260903 (fire-and-forget runs
+record ok at schedule success while the engine is still executing, so
+in-flight requests pollute both sides and the aggregate-time in-flight
+compensation cannot close reliably; per-request correctness verification
+is already covered by the client_events × engine_events rid join — the
+same join full_e2e / engine_exec uses — making the aggregate assertion
+redundant).
 
 **Block-pool observability series (`mock_engine_*`, 20260902)**: `/metrics`
 reports the KV v2 block-pool state as time series in BOTH emission modes
@@ -182,9 +177,12 @@ split: available = free + pure LRU, held = in-flight keyless leases,
 referenced = in-flight-referenced key blocks — the same snapshot fields the
 `/snapshot` terminal view exposes) and four cumulative COUNTERS
 `mock_engine_cache_evictions_total` (LRU evictions, allocation-coupled),
-`mock_engine_kv_admission_fails_total` (DECODE degradations: un-pooled
-continue + growth stall), `mock_engine_lack_mem_rejects_total` (PREFILL
-synchronous 602 rejections — prefill REJECTS, decode DEGRADES, the two
+`mock_engine_kv_admission_fails_total` (DECODE-side KV failures — each a
+REQUEST TERMINAL LACK_MEM: P-enqueue reservation rejects + hand-off admission
+failures + in-step growth failures; the former un-pooled degradation era is
+retired, 20260903), `mock_engine_lack_mem_rejects_total` (PREFILL
+synchronous 602 rejections — prefill REJECTS on its own pool, decode
+TERMINATES on its own pool, the two
 surfaces never cross-book; healthy runs keep both at 0, overload runs light
 them up each on its own role) and `mock_engine_decode_reuse_blocks_total`
 (the KV v2 fix #5 net-demand deduction: hit keys against the engine's OWN
@@ -254,7 +252,7 @@ name, same naming scheme as the cluster) or `{"port": N}` (gRPC port).
 | MatrixSweepTest | 1 | P/D config × concurrency sweep |
 | MetricsValidationTest | 3 | /metrics + /snapshot validation, KV block-pool tracking + pressure-surface consistency |
 | TpsMetricsAccountingTest | 3 | rtp_llm_* TPS series: completion-event accounting, drain semantics, cancelled exclusion, hit_tokens_total |
-| BlockPoolMetricsObservabilityTest | 3 | Block-pool series in both /metrics modes: three-state gauges over a request's life, prefill-602 vs decode-degrade counter split, decode reuse accumulation (cumulative, never drained) |
+| BlockPoolMetricsObservabilityTest | 6 | Block-pool series in both /metrics modes: three-state gauges over a request's life, prefill-602 vs decode-terminal-fail counter split, decode reuse accumulation (cumulative, never drained), decode admission-failure terminal semantics, P-enqueue reservation reject/adopt/release lifecycle |
 | CacheKeyHitMetricsTest | 2 | Cache key-hit counters: prefix-match run accumulation (hit/requested key sums across requests, /metrics + /snapshot terminal fields) and empty-block-hash 0/0 contribution |
 | RealisticTimingTest | 1 | Real timing verification |
 
@@ -423,12 +421,31 @@ master-side curves are indistinguishable from production:
   reference their LRU blocks, making them non-evictable and non-available: the
   hotter the cache while requests run, the lower available drops — the
   scheduling-pressure shape the previous model could not express.
-- **Decode never rejects**: on pool exhaustion a decode request degrades to un-pooled
-  execution and bumps the `kv_admission_fails` counter. Known divergence
-  (alignment ruling pending): production decode KV failure is terminal —
-  first-block allocation failure rejects with ALLOCATE (retryable), in-step
-  incremental failure terminates the request with LACK_MEM — whereas the mock
-  degrades and continues, so overload-tier error-rate readings skew optimistic.
+- **Decode KV failure is terminal (aligned, 20260903)**: a decode request whose
+  blocks cannot be provisioned at admission (hand-off, run-start promotion, or
+  the opt-in queued-claim) or grown mid-step terminates with LACK_MEM (error
+  602 on the typed terminal; `engine_events` `decode_done` row carries
+  `error_code: 602` and `cancelled: false`; an error frame closes the client
+  stream) and bumps `kv_admission_fails` on the DECODE engine — mirroring
+  production where first-block ALLOCATE rejects and in-step `incrKVBlock`
+  LACK_MEM both end the request. The former divergence ("decode degrades to
+  un-pooled execution and continues") is retired. Remaining known divergence:
+  production retries a first-block ALLOCATE rejection master-side
+  (`decode_retry_times`) and re-routes; the mock terminal is FINAL — the
+  master-side retry semantics are out of the mock's scope (future work).
+- **P-enqueue decode-KV reservation (aligned, 20260903)**: at EnqueueBatch
+  Phase 1 the prefill engine pre-allocates the request's decode blocks on the
+  role_addrs-targeted DECODE engine (the mock counterpart of production's
+  prepare-stage ALLOCATE RPC — the D pool is reserved while the prefill still
+  executes). Net-demand caliber, same as hand-off admission; the reservation is
+  ADOPTED (not re-charged) at hand-off and released on prefill cancel /
+  alreadyCancelled completion / a rejected hand-off. A reservation reject is a
+  request-level synchronous 602 in the enqueue ack (message marks it
+  decode-side), counted on the D engine's `kv_admission_fails` — the P-side
+  `lack_mem_rejects` counter stays the P-POOL rejection surface. Single-engine
+  / self-routed topologies (no resolvable DECODE in role_addrs) reserve
+  nothing; the D engine is located from role_addrs exactly as `startDecode`
+  does (mock routing parity: same resolver, same target).
 - **Flag semantics change**: `--prefill-cache-blocks` / `--decode-cache-blocks` have
   RETIRED their old meaning ("max cached key count") and now override the pool
   block count (default `0` = derive from token capacity). The 6000/3000 defaults

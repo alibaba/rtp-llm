@@ -1,18 +1,23 @@
-"""eval_collectors G6 (master server_latency counter poller) unit tests.
+"""eval_collectors G3 (master prometheus lane) unit tests.
 
-G6 is one lane of the eval_collectors process run_online_eval.sh starts
-per run. The wire contract that MUST NOT drift:
+G3 is one lane of the eval_collectors process run_online_eval.sh starts per
+run — and, since the G6/G4 collapse, the sole master-plane collector. The
+wire contract that MUST NOT drift:
 
-  * output file master_counters_timeseries.txt, one kv line per round:
-      ts_epoch_ms=<epoch_ms int> arrival_count=<int> completion_count=<int>
-    — parsed by consolidate_run_outputs.parse_counter_timeseries into
-    master.json["counters_timeseries"] rows, whose keys are consumed by
-    aggregate_canvas_run (master_arrivals_ts differential).
-  * a failed round (connection error / non-200 / bad JSON) writes NO line
-    (no zero-fabricated sample);
-  * a JSON body missing the counter keys writes explicit zeros;
+  * output file master_prometheus_timeseries.prom, one "# ts=<epoch_ms>"
+    grouped block per round, block body = the whitelisted sample lines
+    verbatim — parsed by consolidate_run_outputs
+    .parse_grouped_prometheus_timeseries into master.json
+    ["prometheus_timeseries"], whose rows feed aggregate_canvas_run
+    (master_arrivals_ts counter differencing, inflight_ts gauge sums, and
+    the pre-existing queue/KV/age series);
+  * the whitelist (MASTER_PROMETHEUS_PREFIXES) carries exactly the series
+    the aggregate consumes — the G6/G4 collapse added the
+    auto_tpm_request_count / all_qps counters and the five inflight gauges
+    — so an unconsumed flexlb series or a jvm.* line must be filtered out;
+  * a failed round (connection error / non-200) writes NO block;
   * urlopen happens before the timestamp is taken (started-of-round
-    semantics — the line's ts is the round start, not the response time).
+    semantics — the block's ts is the round start, not the response time).
 
 The tests run a scripted local HTTP server and drive either the thread
 function directly or the full CLI subprocess (SIGTERM graceful stop).
@@ -32,14 +37,33 @@ from pathlib import Path
 TOOLS_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS_DIR))
 
-import consolidate_run_outputs  # noqa: E402
 import eval_collectors  # noqa: E402
 
 COLLECTORS = TOOLS_DIR / "eval_collectors.py"
 
+# A management-port /actuator/prometheus sample: whitelisted series from
+# every family (incl. the G6/G4-collapse additions) plus two lines that the
+# whitelist must filter out (an unconsumed flexlb series, a jvm.* line).
+PROM_BODY = "\n".join(
+    [
+        'flexlb_app_cache_used_kv_cache_tokens{role="PREFILL",engineIp="10.0.0.1"} 1000.0',
+        "flexlb_app_cache_hit_ratio 0.5",
+        'flexlb_app_engine_balancing_master_dispatch_reason_total{reason="batch_full"} 2.0',
+        'flexlb_auto_tpm_request_count_total{priority="50"} 42.0',
+        'flexlb_app_engine_balancing_master_all_qps_total{code="ok"} 40.0',
+        "flexlb_app_flexlb_scheduler_inflight_size 7.0",
+        'flexlb_app_flexlb_inflight_batch_count{engineIp="10.0.0.1"} 3.0',
+        'flexlb_app_flexlb_inflight_request_count{engineIp="10.0.0.1"} 30.0',
+        'flexlb_auto_tpm_decode_reserved_count{endpoint="10.0.0.2:1"} 5.0',
+        'flexlb_auto_tpm_decode_running_count{endpoint="10.0.0.2:1"} 4.0',
+        "flexlb_app_unrelated_metric 999.0",
+        "jvm_memory_used_bytes 12345.0",
+    ]
+)
+
 
 class _ScriptedHandler(BaseHTTPRequestHandler):
-    """Serves /rtp_llm/server_latency from a scripted (status, body) list.
+    """Serves /actuator/prometheus from a scripted (status, body) list.
 
     One entry is consumed per request; the last entry repeats forever.
     """
@@ -48,7 +72,7 @@ class _ScriptedHandler(BaseHTTPRequestHandler):
     requests = 0
 
     def do_GET(self):
-        if self.path != "/rtp_llm/server_latency":
+        if self.path != "/actuator/prometheus":
             self.send_error(404)
             return
         cls = type(self)
@@ -56,7 +80,7 @@ class _ScriptedHandler(BaseHTTPRequestHandler):
         status, body = cls.script[min(cls.requests - 1, len(cls.script) - 1)]
         payload = body.encode("utf-8")
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", "text/plain; version=0.0.4")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
@@ -74,145 +98,140 @@ def _serving(script):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield f"127.0.0.1:{server.server_address[1]}", handler
+        yield server.server_address[1], handler
     finally:
         server.shutdown()
         server.server_close()
 
 
-def _wait_for_lines(path, count, timeout_s=5.0):
+def _wait_for_blocks(path, count, timeout_s=5.0):
     deadline = time.time() + timeout_s
-    lines = []
+    blocks = []
     while time.time() < deadline:
         if path.is_file():
-            lines = [
-                line for line in path.read_text(encoding="utf-8").splitlines() if line
+            blocks = [
+                block
+                for block in path.read_text(encoding="utf-8").split("# ts=")
+                if block.strip()
             ]
-            if len(lines) >= count:
-                return lines
+            if len(blocks) >= count:
+                return blocks
         time.sleep(0.02)
     raise AssertionError(
-        f"expected >= {count} lines in {path.name} within {timeout_s}s, got {len(lines)}"
+        f"expected >= {count} '# ts=' blocks in {path.name} within {timeout_s}s, "
+        f"got {len(blocks)}"
     )
 
 
-def _run_thread_until(addr, out_path, min_lines, interval=0.05, timeout_s=5.0):
+def _run_prom_thread_until(port, out_path, min_blocks, interval=0.05, timeout_s=5.0):
     eval_collectors._STOP.clear()
     thread = threading.Thread(
-        target=eval_collectors.run_master_counter_poller,
-        args=(addr, str(out_path), interval),
+        target=eval_collectors.run_master_prometheus_poller,
+        args=(port, str(out_path), interval),
         daemon=True,
     )
     thread.start()
     try:
-        return _wait_for_lines(out_path, min_lines, timeout_s)
+        return _wait_for_blocks(out_path, min_blocks, timeout_s)
     finally:
         eval_collectors._STOP.set()
         thread.join(timeout=3.0)
 
 
-class G6CounterPollerTest(unittest.TestCase):
-    def test_line_format_matches_counters_timeseries_schema(self):
-        body = '{"arrival_count": 7, "completion_count": 5, "other": "ignored"}'
-        with tempfile.TemporaryDirectory() as tmp, _serving([(200, body)]) as (addr, _):
-            out = Path(tmp) / "master_counters_timeseries.txt"
-            lines = _run_thread_until(addr, out, min_lines=3)
-            # The consolidation-side parser must reproduce the exact
-            # counters_timeseries row schema (key set + int typing) the
-            # aggregator consumes from master.json.
-            rows = consolidate_run_outputs.parse_counter_timeseries(out)
-        self.assertGreaterEqual(len(lines), 3)
-        for line in lines:
-            self.assertRegex(
-                line, r"^ts_epoch_ms=\d+ arrival_count=7 completion_count=5$"
-            )
-        self.assertGreaterEqual(len(rows), 3)
-        now_ms = int(time.time() * 1000)
-        for row in rows:
-            self.assertEqual(
-                {"ts_epoch_ms", "arrival_count", "completion_count"}, set(row)
-            )
-            self.assertEqual(7, row["arrival_count"])
-            self.assertEqual(5, row["completion_count"])
-            self.assertIsInstance(row["ts_epoch_ms"], int)
-            self.assertLess(abs(row["ts_epoch_ms"] - now_ms), 60_000)
+class G3PrometheusLaneTest(unittest.TestCase):
+    def test_whitelist_keeps_consumed_series_and_filters_the_rest(self):
+        # The G3 whitelist is the consumed-set contract: every analyzer-fed
+        # family (incl. the G6/G4-collapse counter/gauge additions) rides
+        # through verbatim; an unconsumed flexlb series and jvm.* lines are
+        # dropped before anything is appended.
+        with tempfile.TemporaryDirectory() as tmp, _serving([(200, PROM_BODY)]) as (
+            port,
+            _,
+        ):
+            out = Path(tmp) / "master_prometheus_timeseries.prom"
+            blocks = _run_prom_thread_until(port, out, min_blocks=2)
+        self.assertGreaterEqual(len(blocks), 2)
+        for block in blocks:
+            # split("# ts=") leaves the ts value as the block's first line.
+            lines = block.splitlines()[1:]
+            for line in lines:
+                self.assertNotIn("flexlb_app_unrelated_metric", line)
+                self.assertNotIn("jvm_memory_used_bytes", line)
+                self.assertTrue(
+                    line.startswith(eval_collectors.MASTER_PROMETHEUS_PREFIXES)
+                )
+            joined = "\n".join(lines)
+            for kept in (
+                "flexlb_app_cache_used_kv_cache_tokens",
+                "flexlb_auto_tpm_request_count_total",
+                "flexlb_app_engine_balancing_master_all_qps_total",
+                "flexlb_app_flexlb_scheduler_inflight_size",
+                "flexlb_app_flexlb_inflight_batch_count",
+                "flexlb_app_flexlb_inflight_request_count",
+                "flexlb_auto_tpm_decode_reserved_count",
+                "flexlb_auto_tpm_decode_running_count",
+                "flexlb_app_engine_balancing_master_dispatch_reason_total",
+            ):
+                self.assertIn(kept, joined)
 
-    def test_missing_counter_keys_default_to_zero(self):
-        with tempfile.TemporaryDirectory() as tmp, _serving([(200, "{}")]) as (addr, _):
-            out = Path(tmp) / "master_counters_timeseries.txt"
-            lines = _run_thread_until(addr, out, min_lines=2)
-        for line in lines:
-            self.assertRegex(
-                line, r"^ts_epoch_ms=\d+ arrival_count=0 completion_count=0$"
-            )
-
-    def test_failed_rounds_write_no_line(self):
+    def test_failed_rounds_write_no_block(self):
         # First two requests fail (HTTP 500), later ones succeed: the failed
-        # rounds must be skipped entirely — no zero-fabricated sample, no
-        # empty kv line.
-        body = '{"arrival_count": 3, "completion_count": 2}'
+        # rounds must be skipped entirely — no empty block, no fabricated
+        # sample.
         with tempfile.TemporaryDirectory() as tmp, _serving(
-            [(500, "boom"), (500, "boom"), (200, body)]
-        ) as (addr, handler):
-            out = Path(tmp) / "master_counters_timeseries.txt"
-            lines = _run_thread_until(addr, out, min_lines=3)
+            [(500, "boom"), (500, "boom"), (200, PROM_BODY)]
+        ) as (port, handler):
+            out = Path(tmp) / "master_prometheus_timeseries.prom"
+            blocks = _run_prom_thread_until(port, out, min_blocks=3)
             requests = handler.requests
-            rows = consolidate_run_outputs.parse_counter_timeseries(out)
         self.assertGreaterEqual(requests, 5)  # two failures already consumed
-        for line in lines:
-            self.assertRegex(
-                line, r"^ts_epoch_ms=\d+ arrival_count=3 completion_count=2$"
-            )
-        self.assertEqual(len(rows), len(lines))
+        for block in blocks:
+            self.assertIn("flexlb_auto_tpm_request_count_total", block)
 
-    def test_g6_only_cli_end_to_end(self):
-        # G6-only invocation: no mock/prometheus/inflight/pid argv — exactly
-        # what run_online_eval.sh passes when FLEXLB_SECONDARY_POLLERS_ENABLED=0
-        # && START_FLEXLB=1.
-        body = '{"arrival_count": 11, "completion_count": 9}'
-        with tempfile.TemporaryDirectory() as tmp, _serving([(200, body)]) as (addr, _):
-            out = Path(tmp) / "master_counters_timeseries.txt"
+    def test_g3_only_cli_end_to_end(self):
+        # G3-only invocation: no mock/pid argv — exactly what
+        # run_online_eval.sh passes when FLEXLB_SECONDARY_POLLERS_ENABLED=0
+        # && START_FLEXLB=1 (the M7 exemption keeps the master-plane data
+        # source alive on A/B-off baselines).
+        with tempfile.TemporaryDirectory() as tmp, _serving([(200, PROM_BODY)]) as (
+            port,
+            _,
+        ):
+            out = Path(tmp) / "master_prometheus_timeseries.prom"
             with subprocess.Popen(
                 [
                     sys.executable,
                     str(COLLECTORS),
-                    "--counter-http-addr",
-                    addr,
-                    "--counter-out",
+                    "--prometheus-port",
+                    str(port),
+                    "--prometheus-out",
                     str(out),
-                    "--counter-interval",
-                    "0.05",
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
             ) as proc:
                 try:
-                    lines = _wait_for_lines(out, 2)
+                    blocks = _wait_for_blocks(out, 2)
                 finally:
                     proc.terminate()
                     proc.wait(timeout=5.0)
                 stderr = proc.stderr.read()
                 self.assertEqual(0, proc.returncode, stderr)
-        for line in lines:
-            self.assertRegex(
-                line, r"^ts_epoch_ms=\d+ arrival_count=11 completion_count=9$"
-            )
+        self.assertGreaterEqual(len(blocks), 2)
+        for block in blocks:
+            self.assertIn("flexlb_auto_tpm_request_count_total", block)
+            self.assertNotIn("flexlb_app_unrelated_metric", block)
 
-    def test_cli_rejects_half_passed_counter_argv(self):
+    def test_cli_rejects_half_passed_prometheus_argv(self):
         proc = subprocess.run(
-            [
-                sys.executable,
-                str(COLLECTORS),
-                "--counter-http-addr",
-                "127.0.0.1:1",
-            ],
+            [sys.executable, str(COLLECTORS), "--prometheus-port", "1234"],
             capture_output=True,
             text=True,
         )
         self.assertEqual(2, proc.returncode)
         self.assertIn(
-            "--counter-http-addr and --counter-out must be passed together",
+            "--prometheus-port and --prometheus-out must be passed together",
             proc.stderr,
         )
 
@@ -229,38 +248,53 @@ class G6CounterPollerTest(unittest.TestCase):
         self.assertEqual(2, proc.returncode)
         self.assertIn("unrecognized arguments: --group", proc.stderr)
 
+    def test_cli_rejects_removed_counter_and_inflight_flags(self):
+        # The G6 counter and G4 inflight lanes were collapsed into G3, so
+        # their argv pairs are gone from the CLI. This locks the removal AND
+        # guards the shell call site: a stale --counter-*/--inflight-* pair
+        # in run_online_eval.sh would kill the collector at startup (rc 2)
+        # instead of silently collecting nothing.
+        for stale_flag in ("--counter-http-addr", "--inflight-http-addr"):
+            proc = subprocess.run(
+                [sys.executable, str(COLLECTORS), stale_flag, "127.0.0.1:1"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(2, proc.returncode, stale_flag)
+            self.assertIn(f"unrecognized arguments: {stale_flag}", proc.stderr)
+
     def test_sigterm_burst_exits_cleanly(self):
         # Regression (SIGTERM re-entry deadlock): run_online_eval.sh's stop
-        # loop used to send one SIGTERM per legacy PID variable — up to 5
-        # rapid SIGTERMs to the SAME unified collector process. A second
-        # signal landing inside the handler's Event.set() window re-entered
-        # the handler on the Event's non-reentrant Condition lock and froze
-        # the whole process (one leaked frozen collector per run; py-spy
-        # showed 3-level recursive handler frames). The handler now masks
-        # both stop signals on entry, so a burst must still terminate
-        # gracefully: in-flight round finishes, output flushed, exit 0.
+        # loop used to send one SIGTERM per PID variable — several rapid
+        # SIGTERMs to the SAME unified collector process. A second signal
+        # landing inside the handler's Event.set() window re-entered the
+        # handler on the Event's non-reentrant Condition lock and froze the
+        # whole process (one leaked frozen collector per run; py-spy showed
+        # 3-level recursive handler frames). The handler now masks both stop
+        # signals on entry, so a burst must still terminate gracefully:
+        # in-flight round finishes, output flushed, exit 0.
         # proc.wait(timeout=...) failing (TimeoutExpired) is the deadlock
         # detector here.
-        body = '{"arrival_count": 4, "completion_count": 3}'
-        with tempfile.TemporaryDirectory() as tmp, _serving([(200, body)]) as (addr, _):
-            out = Path(tmp) / "master_counters_timeseries.txt"
+        with tempfile.TemporaryDirectory() as tmp, _serving([(200, PROM_BODY)]) as (
+            port,
+            _,
+        ):
+            out = Path(tmp) / "master_prometheus_timeseries.prom"
             with subprocess.Popen(
                 [
                     sys.executable,
                     str(COLLECTORS),
-                    "--counter-http-addr",
-                    addr,
-                    "--counter-out",
+                    "--prometheus-port",
+                    str(port),
+                    "--prometheus-out",
                     str(out),
-                    "--counter-interval",
-                    "0.05",
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
             ) as proc:
                 try:
-                    _wait_for_lines(out, 2)
+                    _wait_for_blocks(out, 2)
                 finally:
                     # 5 back-to-back SIGTERMs, no spacing — the worst the old
                     # shell kill loop could do (same semantics as `kill pid` x5).

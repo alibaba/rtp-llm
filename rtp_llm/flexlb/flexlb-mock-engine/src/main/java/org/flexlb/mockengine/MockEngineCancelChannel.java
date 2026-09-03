@@ -13,9 +13,13 @@ import java.util.concurrent.CompletableFuture;
  * the endpoint's gRPC port and drives the mock cancel behaviour: a live
  * request is removed and a CANCELLED completion surfaces in the next
  * WorkerStatus finished list, exactly like a real engine would report.
- * Mirrors the engine contract: a live request and its accepted-cancel
- * tombstone return ACCEPTED; a request not known by the specifically addressed
- * Prefill returns NOT_FOUND; Decode rejects this RPC as unsupported.
+ * Mirrors the production engine contract (C++ Prefill Cancel): a live
+ * request and its accepted-cancel tombstone return ACCEPTED; a request the
+ * addressed Prefill has seen but already finished returns NOT_FOUND
+ * (seen-but-terminal; the completion record stays deliverable from the
+ * retain window); a rid the Prefill NEVER saw returns TOMBSTONED with the
+ * ABSENT_FENCE tombstone installed (racing later Enqueues of that rid are
+ * rejected with 8429); Decode rejects this RPC as unsupported.
  *
  * <p><b>Wiring:</b> this class is NOT a Spring component. Tests inject it
  * explicitly, e.g.:
@@ -49,8 +53,19 @@ public final class MockEngineCancelChannel implements EngineCancelChannel {
             // Deliberately inspect only the addressed Prefill. Scanning other
             // workers would hide an incorrect Prefill route in tests.
             JavaMockEngineCluster.CancelResult result = service.cancelRequest(requestId);
+            if (result.found()) {
+                return CompletableFuture.completedFuture(CancelOutcome.accepted());
+            }
+            // Production-faithful mapping (C++ Cancel handler): a request
+            // this engine has seen but already finished answers NOT_FOUND
+            // (the completion record stays deliverable from the retain
+            // window); a never-seen rid answers TOMBSTONED — cancelRequest
+            // installed the ABSENT_FENCE tombstone that rejects any racing
+            // later Enqueue of that rid with the typed 8429.
             return CompletableFuture.completedFuture(
-                    result.found() ? CancelOutcome.accepted() : CancelOutcome.notFound());
+                    result.alreadyFinished()
+                            ? CancelOutcome.notFound()
+                            : CancelOutcome.tombstoned());
         } catch (UnsupportedOperationException e) {
             return CompletableFuture.completedFuture(CancelOutcome.failed());
         } catch (Exception e) {

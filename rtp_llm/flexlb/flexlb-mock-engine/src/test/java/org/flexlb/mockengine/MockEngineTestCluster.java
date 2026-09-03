@@ -109,7 +109,15 @@ final class MockEngineTestCluster implements AutoCloseable {
                         services,
                         scheduler,
                         model,
-                        100,
+                        // Sizable pool: these behavioral tests (scheduling /
+                        // completion / latency) treat KV capacity as a NON-
+                        // constraint. Since the P-enqueue decode-KV reservation
+                        // (20260903) the whole in-flight population holds D-side
+                        // leases AT ENQUEUE (production prepare-stage semantics),
+                        // so a 100-block pool rejects past ~95 concurrent requests
+                        // on the 5% reserve watermark — a KV-rejection surface
+                        // these tests never intended to exercise.
+                        6144,
                         new JavaMockEngineCluster.ClusterStats());
         services.put(port, service);
         return service;

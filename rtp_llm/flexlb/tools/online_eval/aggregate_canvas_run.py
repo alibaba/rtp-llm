@@ -18,9 +18,11 @@ Reads (consolidated run-root layout, the only supported form):
   mock_engine.log or mock.json (stats + final_snapshot; comparison source
   alongside the jsonl streams — the per-rid data itself is jsonl-only),
   flexlb_logs/flexlb.log* or master.log (dispatch lines + server-schedule-latency rows),
-  master.json (inflight_timeseries G4 / prometheus_timeseries G3 /
-  counters_timeseries master per-second arrival/completion rates;
-  comparison source),
+  master.json (prometheus_timeseries G3 — the sole master-plane collector
+  since the G6/G4 collapse: queue/KV/age gauges plus the arrival/
+  completion counters and inflight gauges feeding master_arrivals_ts /
+  inflight_ts; the legacy inflight_timeseries / counters_timeseries keys
+  from older runs are no longer read — such runs cannot be re-aggregated),
   run_meta.json (process_usage G5).
 client_events rows are the sole per-request metrics source; the engine-side
 event rows are rid-joined onto them (the same join full_e2e always used).
@@ -31,16 +33,18 @@ Outputs meta/summary/batch (mock_last)/batch_decisions (run-level batch
 dispatch-reason + prediction-gap analysis, merged 20260903 from the
 removed analyze_slo_batch.py)/per_second (schedule + e2e/ttft percentiles)/
 master_arrivals_ts (master-side per-second arrival/completion rates, the
-send-series source of record) /queue_timeseries/engine_dist (requests / tokens / busy-time utilization,
+send-series source of record — differenced from the G3 request-count
+counter)
+/queue_timeseries/engine_dist (requests / tokens / busy-time utilization,
 per-engine Gini/CV/Lorenz/window Gini) plus compact time series:
 stage_latency_ts (master 10s stage p95 rows), engine_exec_ts (mock
 prefill/decode execution windows), per_second prefill_exec_* /
 decode_exec_* (engine exec percentiles joined by request_id onto the
 request-BIRTH second — same axis as e2e/full_e2e, unlike the
 completion-window engine_exec_ts), process_ts (mock/master/client CPU+RSS),
-inflight_ts (G4 scheduler/prefill batches+requests/decode reserved+
-confirmed_running), inflight_age_ts / kv_ts /
-batcher_ts / dispatch_reason_ts (G3 master prometheus; the reason series is
+inflight_ts (scheduler/prefill batches+requests/decode reserved+
+confirmed_running — summed from the G3 prometheus gauges), inflight_age_ts /
+kv_ts / batcher_ts / dispatch_reason_ts (G3 master prometheus; the reason series is
 per-second dispatch rate derived from the dispatch_reason_total counters).
 cancel_qps_ts additionally carries master/prefill/decode cancel split rates
 (census unknown/finished/tombstone diff for the master side; per-engine
@@ -405,7 +409,10 @@ for _evf in _engine_events_candidates:
                     f"ERROR: engine event row missing/invalid rid in {_evf}: "
                     f"{line[:200]!r}"
                 )
-            if ev.get("cancelled"):
+            if ev.get("cancelled") or ev.get("error_code"):
+                # cancelled 行与 KV 终态失败行（error_code=602，20260903 decode
+                # LACK_MEM 对齐改造）都不进延迟 join：生产口径失败请求不进
+                # 延迟分布，只有成功终态才计入 full_e2e/exec 口径。
                 continue
             _ev_kind = ev.get("event")
             try:
@@ -1886,42 +1893,30 @@ if proc_entries:
         if len(row) > 1:
             process_ts.append(row)
 
-# G4 inflight snapshots: scheduler in-flight plus per-endpoint batch/request
-# counts summed cluster-wide.
-# decode 侧 schema 已随 G4 分层准入改版（HttpLoadBalanceServer
-# .inflightStatus）：decode_endpoints 旧 inflight_requests 字段已不存在
-# （旧键读取恒 0 的 bug 根因），现读 reserved_total（master 预约未
-# 确认）与 confirmed_running（引擎确认运行中）；prefill_endpoints 补读
-# inflight_requests（master 账本请求数，与 inflight_batches 同源）。
-# no-backward-compat：旧 run（旧 schema 快照）不再产出 decode 线。
-inflight_pts = []
-for grp in master_json.get("inflight_timeseries") or []:
-    if not isinstance(grp, dict):
-        continue
-    try:
-        ts = int(float(grp.get("ts_epoch_ms", 0) or 0))
-    except (TypeError, ValueError):
-        continue
-    if not ts:
-        continue
-    infl = grp.get("inflight")
-    if not isinstance(infl, dict):
-        continue
-    try:
-        sched = int(infl.get("scheduler_inflight", 0) or 0)
-        p_endpoints = [
-            e for e in infl.get("prefill_endpoints") or [] if isinstance(e, dict)
-        ]
-        p_batches = sum(int(e.get("inflight_batches", 0) or 0) for e in p_endpoints)
-        p_reqs = sum(int(e.get("inflight_requests", 0) or 0) for e in p_endpoints)
-        d_endpoints = [
-            e for e in infl.get("decode_endpoints") or [] if isinstance(e, dict)
-        ]
-        d_reserved = sum(int(e.get("reserved_total", 0) or 0) for e in d_endpoints)
-        d_running = sum(int(e.get("confirmed_running", 0) or 0) for e in d_endpoints)
-    except (TypeError, ValueError):
-        continue
-    inflight_pts.append((ts, (sched, p_batches, p_reqs, d_reserved, d_running)))
+# Inflight snapshots: scheduler in-flight plus per-engine prefill batch/
+# request counts and decode reserved/running counts summed cluster-wide.
+# G3 prometheus is the sole master-plane source since the G6/G4 collapse:
+# the five fields are rebuilt from the G3 gauges — scheduler_inflight_size
+# direct, per-engine prefill batch/request counts and per-endpoint decode
+# reserved/running counts summed across label variants (decode reserved =
+# master 预约未确认，running = 引擎确认运行中). SchedulerRuntime sets
+# those gauges every 2s, so the series naturally runs at the 2s cadence
+# the samples carry (vs the retired poller's 1s). Output keys unchanged
+# (canvas/compare_twin consume them as-is).
+# no-backward-compat: the retired inflight_timeseries snapshots (old runs)
+# are no longer read — those runs cannot be re-aggregated.
+_inflight_gauges = (
+    ("flexlb_app_flexlb_scheduler_inflight_size", 0),
+    ("flexlb_app_flexlb_inflight_batch_count", 1),
+    ("flexlb_app_flexlb_inflight_request_count", 2),
+    ("flexlb_auto_tpm_decode_reserved_count", 3),
+    ("flexlb_auto_tpm_decode_running_count", 4),
+)
+_inflight_by_ts = {}
+for _base, _idx in _inflight_gauges:
+    for _ts, _v in prom_ts_extract(_base, agg="sum"):
+        _inflight_by_ts.setdefault(int(_ts), [0, 0, 0, 0, 0])[_idx] = int(round(_v))
+inflight_pts = [(_ts, tuple(_row)) for _ts, _row in sorted(_inflight_by_ts.items())]
 inflight_ts = [
     {
         "t": t,
@@ -1934,7 +1929,15 @@ inflight_ts = [
     for t, (s, pb, pr, drv, drn) in rel_axis(inflight_pts)
 ]
 
-# master 每秒到达/完成速率（counters_timeseries 累计计数器差分）。
+# master 每秒到达/完成速率（累计计数器差分）。G6/G4 收缩后 G3
+# prometheus 是唯一 master 采集路：累计序列从 G3 counter 重建——
+# 每 ts 对 flexlb_auto_tpm_request_count 系列按 priority 标签求和、
+# flexlb_app_engine_balancing_master_all_qps 按 code 标签求和（跨标签
+# 求和 = cluster 累计值；系列首次 increment 前不出现，缺席即 0）。
+# master 每 run 重启，counter 天然从 0 起（对齐旧 server_latency/reset
+# 起点语义）。
+# no-backward-compat：退役的 counters_timeseries 键（老 run）不再读取，
+# 老 run 无法重聚合。
 # arrival_count / completion_count 是 master 侧单调累计计数器（1s 采样，
 # 间隔 ~1001ms）；相邻样本正差分 ÷ 间隔秒 = 每秒速率（计数器重置的
 # 负差分区间丢弃，不造峰）。这是 QPS 图表发送序列的权威数据源：
@@ -1944,19 +1947,25 @@ inflight_ts = [
 # rel_axis 重锚 epoch0；负 t 样本（首请求发送前的暖机零值）保留，
 # 报告端按需丢弃。rel_axis 的元组透传同时携带 completions 速率与
 # 到达累计值（cum_arrivals，冻结点取证用）。
+_arr_by_ts = {
+    int(_ts): _v
+    for _ts, _v in prom_ts_extract("flexlb_auto_tpm_request_count_total", agg="sum")
+}
+_cmp_by_ts = {
+    int(_ts): _v
+    for _ts, _v in prom_ts_extract(
+        "flexlb_app_engine_balancing_master_all_qps_total", agg="sum"
+    )
+}
 _counter_pts = []
-for _row in master_json.get("counters_timeseries") or []:
-    if not isinstance(_row, dict):
-        continue
-    try:
-        _ts = int(float(_row.get("ts_epoch_ms", 0) or 0))
-        _arr = int(float(_row.get("arrival_count", 0) or 0))
-        _cmp = int(float(_row.get("completion_count", 0) or 0))
-    except (TypeError, ValueError):
-        continue
-    if not _ts:
-        continue
-    _counter_pts.append((_ts, _arr, _cmp))
+for _ts in sorted(set(_arr_by_ts) | set(_cmp_by_ts)):
+    _counter_pts.append(
+        (
+            _ts,
+            int(round(_arr_by_ts.get(_ts, 0.0))),
+            int(round(_cmp_by_ts.get(_ts, 0.0))),
+        )
+    )
 _arrival_rate_pts = []
 for (_ts0, _a0, _c0), (_ts1, _a1, _c1) in zip(_counter_pts, _counter_pts[1:]):
     _dt_s = (_ts1 - _ts0) / 1000.0
@@ -1983,7 +1992,7 @@ master_arrivals_ts = [
 ]
 
 # master-side queue depth + inflight age from the G3 prometheus timeline
-# (needs FLEXLB_MONITOR_MODE=all; per-priority label variants summed).
+# (per-priority label variants summed).
 # ad2d6224+: INFLIGHT_MAX_AGE_MS carries {role, engineIp} tags —
 # role=SCHEDULER + engineIp="scheduler" marks the scheduler's own ledger,
 # PREFILL/DECODE + real engineIp the per-worker ledgers. Keep age_ms as the
@@ -2216,8 +2225,9 @@ mock_tps_ts = [{"t": t, **vals} for t, vals in rel_axis(sorted(_tps_by_ts.items(
 #     available = free + 纯 LRU；held = 运行中裸块；referenced =
 #     在途请求引用的 key 块）；
 #   cache_evictions —— LRU 淘汰累计（容量 + 强制 /cache_evict）；
-#   kv_admission_fails —— decode 降级/增长失速累计（prefill 同步拒绝
-#     不在此列，另计 lack_mem_rejects）；
+#   kv_admission_fails —— D 侧 decode KV 终态失败累计（准入/步内增长
+#     失败 + P 入队预租被拒；每个计数 = 请求终态 LACK_MEM，20260903
+#     对齐生产；prefill 自身池的同步拒绝不在此列，另计 lack_mem_rejects）；
 #   lack_mem_rejects —— prefill 同步 602 拒绝累计（生产 MALLOC_FAILED
 #     同码，enqueue ack 直接拒）；
 #   decode_reuse_blocks —— decode 接手自身 LRU 重算命中的复用块累计
@@ -2381,121 +2391,15 @@ if _engine_token_run is not None:
     cache_hit_summary["engine_hit_tokens"] = cache_saved_tokens_calc
     cache_hit_summary["engine_input_tokens"] = ok_input_tokens
 
-# ---- token 对账（20260901 纠偏；同日二次修复补在途项）：client 完成 ----
-# ---- token vs mock 自报累计 ----
-# 原 canvas 2.3 节 input/output 侧 client 对账面板移除后，丢请求 /
-# 自报造假的检测能力保留为 validity 项 token_reconciliation_ok
-# （fail-closed 断言，与 leak KPI 同族）。数据源与口径：
-#   * client 侧 = ok 行 Σil/Σol（ok_input_tokens / ok_output_tokens，
-#     完成请求口径，与 mock 完成事件记账语义对齐——被拒/取消行两边
-#     都不进分子）。
-#   * mock 侧 = Σ mock_tps_ts 窗口值 + 在途项 in-flight Σ。/metrics
-#     的 scrape-先-drain 语义保证每个 token 恰好被 drain 一次（漏拍
-#     时下窗并入，Σ 对 scrape 抖动稳健），Σ = 截至最后一次 scrape 的
-#     累计完成 token。
-#   * 在途项 in-flight（20260901 run 20260901_200108 取证）：fire-and-
-#     forget（FETCH_OUTPUT_STREAM=0，标准 run）下 client 在 master
-#     schedule 成功即记 ok（output_len 记期望值），run 结束仍在
-#     decode 引擎在途的长 ol 请求（实测 904 个、Σol≈7.1M、占 client
-#     Σ 15.3%）不进 mock Σ（decode 未完成 → 无完成事件可记账）。修复
-#     方案：复用 engine_exec/full_e2e 的引擎终态 rid 集合
-#     （decode_done_map / prefill_done_map，engine_events.jsonl 的
-#     decode_done / prefill_done 行解析），ok 行中 rid 不在对应 done 集的
-#     行即在途，其 token 对称补进 mock 侧（input 侧 join prefill done 集、
-#     output 侧 join decode done 集；join 判定只用 rid membership 不做
-#     时间戳过滤——引擎已记终态即 token 已入 mock 完成事件流，时间戳
-#     异常只影响延迟样本有效性不影响记账归属）。rid 缺失/不可解析的
-#     ok 行无法证明完成，保守计为在途（fail-closed 方向：宁可放大残差
-#     也不掩盖缺口）。
-# 容限（input/output 两侧各自）：|client − (mock + in-flight)| ≤
-#   max(5% × client, 5 × 每秒峰值 token)。
-#   * 5% 相对项：吸收 scrape 窗口边缘 / 时钟对齐残差与取消请求的
-#     单侧记账不对称（prefill 已完成但 client 记 error）；健康 run
-#     实测完成口径差 ~1%，5% 有 5 倍余量。
-#   * 5 × 峰值绝对项：覆盖 G1 scrape 停止后的 drain 尾巴（最后一次
-#     scrape 之后、引擎已完成但未被 drain 记账的量，实测残差 1.1M <
-#     容限 2.5M）与首尾窗口错位，按 ≤5s × 峰值速率的上界估计。若某
-#     run 的 G1 尾巴特别长导致仍 False，属真实采集缺口，如实失败是
-#     正确行为。
-# 双向检测：丢请求（mock < client）与自报虚高（mock > client）任一
-# 超容限即 False。缺数据（mock_tps_ts 空 / 侧系列全零 / client 侧无
-# token）→ None（不误报，与现有六项缺输入语义一致；test_valid =
-# all 保守判 invalid）。两侧子对账任一可评估即以可评估侧的 AND
-# 定值；均不可评估 → None。
-# 退化语义：engine_events.jsonl 已 fail-closed（缺失即硬错），终态
-# done 集恒可用；全 cancelled 的极端情形 done 集为空且 client 有大量
-# 未完成行 → 正常计算（在途 = 全部未完成行）。两侧数值依据输出进
-# summary.token_reconciliation 诊断键（validity 不进 canvas 版面，报
-# 告层不消费，供取证与排查）。
-_mock_in_total = sum(
-    r.get("context_tps_with_cache") or 0 for r in mock_tps_ts if isinstance(r, dict)
-)
-_mock_out_total = sum(
-    r.get("generate_tps") or 0 for r in mock_tps_ts if isinstance(r, dict)
-)
-# 在途项：ok 行 rid 不在引擎终态 done 集的 Σil/Σol（两侧对称，见上
-# 块注释）。engine_events.jsonl fail-closed 后终态流必在，done 集恒
-# 可用（旧「无引擎终态日志→在途恒 0」的退化分支已随数据层消亡）。
-_engine_rids_available = True
-inflight_input_tokens = 0
-inflight_output_tokens = 0
-if _engine_rids_available:
-    for d in rows:
-        if not is_ok(d):
-            continue
-        _rid = d.get("request_id")
-        try:
-            _rid = int(_rid)
-        except (TypeError, ValueError):
-            _rid = None
-        if _rid not in prefill_done_map:
-            inflight_input_tokens += d.get("input_len") or 0
-        if _rid not in decode_done_map:
-            inflight_output_tokens += d.get("output_len") or 0
-token_recon_diag = None
-if isinstance(validity_checks_calc, dict):
-    _token_recon_subs = []
-    token_recon_diag = {
-        "engine_rids_available": _engine_rids_available,
-        "input": None,
-        "output": None,
-    }
-    for _side, _client_tok, _mock_tok, _infl_tok, _peaks in (
-        (
-            "input",
-            ok_input_tokens,
-            _mock_in_total,
-            inflight_input_tokens,
-            [(p.get("input_tokens") or 0) for p in per_second]
-            + [r.get("context_tps_with_cache") or 0 for r in mock_tps_ts],
-        ),
-        (
-            "output",
-            ok_output_tokens,
-            _mock_out_total,
-            inflight_output_tokens,
-            [(p.get("output_tokens_completed") or 0) for p in per_second]
-            + [r.get("generate_tps") or 0 for r in mock_tps_ts],
-        ),
-    ):
-        if _client_tok <= 0 or _mock_tok <= 0:
-            continue
-        _peak = max(_peaks) if _peaks else 0
-        _tol = max(0.05 * _client_tok, 5 * _peak)
-        _residual = abs(_client_tok - (_mock_tok + _infl_tok))
-        _token_recon_subs.append(_residual <= _tol)
-        token_recon_diag[_side] = {
-            "client_tokens": _client_tok,
-            "mock_tokens": round(_mock_tok, 1),
-            "inflight_tokens": _infl_tok,
-            "residual": round(_residual, 1),
-            "tolerance": round(_tol, 1),
-            "pass": _residual <= _tol,
-        }
-    validity_checks_calc["token_reconciliation_ok"] = (
-        all(_token_recon_subs) if _token_recon_subs else None
-    )
-    test_valid_calc = all(v is True for v in validity_checks_calc.values())
+# ---- token 聚合对账（20260903 移除）：原 validity 项 ----
+# ---- token_reconciliation_ok 与 summary.token_reconciliation 已删 ----
+# 根因：fire-and-forget（FETCH_OUTPUT_STREAM=0）下 client 在 master
+# schedule 成功即记 ok（output_len 记期望值），run 结束仍在引擎在途的
+# 请求系统性污染两侧口径，聚合时机的在途补偿无法可靠闭合（时机缺陷）。
+# 正确性验证已由逐请求 rid join（client_events × engine_events，
+# full_e2e / engine_exec 同源 join）覆盖，聚合对账冗余——用户裁决
+# 20260903「没必要测试这个」，不修复时机直接移除。validity 回到六项
+# 原生检查（sh L1315-1322 语义），报告层本就不消费该诊断键。
 
 # Per-dispatch batch size gauge (engine.balancing.master.batch.size, tags
 # role + engineIp + reason, reported once per dispatch). Per reason the
@@ -2883,10 +2787,6 @@ out = {
         # app.cache 族 / recent_cache_key_hit / reuse-input 的对齐
         # 关系）。
         "cache_hit_summary": cache_hit_summary,
-        # token 对账诊断（20260901 in-flight 修复）：两侧 client/mock/
-        # in-flight/residual/tolerance 取证值（validity 判定的数值依据，
-        # 报告层不消费；rows 缺失 → None）。
-        "token_reconciliation": token_recon_diag,
         "client_pacing_lag_ms": _pacing_dist if _have_rows else None,
         # server_* 直读：server_latency 是当前格式正式输入，非 rows 依赖。
         "server_arrival_qps": server_latency.get("arrival_qps"),

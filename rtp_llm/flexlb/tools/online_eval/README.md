@@ -32,13 +32,14 @@ rtp_llm/flexlb/tools/online_eval/run_online_eval.sh
 ```
 
 The run directory defaults to `rtp_llm/flexlb/tools/online_eval/run/<timestamp>/`.
-During the load window the script also runs four per-second collectors (see
+During the load window the script also runs three per-second collectors (see
 **Second-by-second collectors** below): mock per-engine Prometheus metrics,
-master Prometheus business metrics, master inflight snapshots, and CPU/RSS
-sampling of the three JVM groups. `JAVA_MOCK_STATS_INTERVAL_MS` defaults to
+master Prometheus business metrics, and CPU/RSS sampling of the three JVM
+groups. `JAVA_MOCK_STATS_INTERVAL_MS` defaults to
 `1000` (1s mock stats cadence; was 5000) for fine-grained timelines, and
-`FLEXLB_MONITOR_MODE` defaults to `all` so the master exposes the full
-business metric surface (see the note under **Run output layout**).
+`FLEXLB_MONITOR_METRIC_WHITELIST` defaults to the analyzer-consumed series
+so the master trims its exposition at the source (see the note under
+**Run output layout**).
 After completion, the important outputs are (see the **Run output layout**
 section below for the full table):
 
@@ -67,28 +68,17 @@ section below for the full table):
   (standard runs always expose the count; the fallback is defensive
   only). `mock_tps_ts` itself keeps the raw cluster sums — the division
   is a presentation-layer unit choice (same class as k/M rescaling).
-  The 20260901 correction moved the client-side token
-  reconciliation from report panels into the fail-closed validity item
-  `validity_checks.token_reconciliation_ok` (detects dropped requests /
-  inflated self-reporting): per input/output side,
-  `|client completed tokens − (Σ mock_tps_ts + in-flight Σ)| ≤ max(5% ×
-  client, 5 × peak per-second tokens)` — the in-flight term reuses the
-  engine-terminal rid sets (`mock_prefill_done` / `mock_decode_done`, the
-  same join full_e2e/engine_exec uses): ok rows whose rid is absent from
-  the done set were still in flight at run end (fire-and-forget runs
-  record ok at schedule success with the expected output_len, so their
-  tokens never enter the mock Σ — measured 7.1M / 15.3% of client output
-  tokens on run 20260901_200108), and their Σil/Σol joins the mock side
-  symmetrically (input joins the prefill done set, output the decode one;
-  runs without engine terminal logs degrade to in-flight = 0, keeping the
-  legacy formula and the `null` semantics). The 5% relative term absorbs
-  scrape-window edge / clock-alignment residue and cancelled-request
-  one-sided accounting (healthy runs measure ~1%), the 5 × peak absolute
-  term bounds the post-scrape drain tail (completed after the last scrape
-  but never drained); missing mock TPS data → `null` (no false failure),
-  and `summary.test_valid` aggregates it via `all`; the per-side
-  client/mock/in-flight/residual/tolerance numbers are surfaced in
-  `summary.token_reconciliation` for forensics); since 20260902 also the
+  The client-side token reconciliation (20260901 panels → validity
+  item `token_reconciliation_ok`, 20260903 removed): the aggregate-
+  level check compared client ok-row token sums against engine-side
+  Σ sums, but fire-and-forget runs record ok at schedule success while
+  the engine is still executing — in-flight requests pollute both
+  sides and the aggregate-time in-flight compensation cannot close
+  reliably. Per-request correctness verification is already covered by
+  the rid join of client_events × engine_events (the same join
+  full_e2e / engine_exec uses), so the aggregate assertion was
+  redundant and removed outright per user verdict; validity stays at
+  its six native checks; since 20260902 also the
   engine-side KV v2 block-pool timeline `kv_blocks_ts_by_role` —
   `{role: [{t, total/available/held/referenced_blocks (three-state
   gauges), cache_evictions / kv_admission_fails / lack_mem_rejects /
@@ -97,10 +87,12 @@ section below for the full table):
   divide by the engine count for the per-engine average via the same
   three-level chain as the TPS charts and render the counter columns as
   adjacent-bucket cumulative diffs ÷ bucket gap with counter resets
-  clamped to zero — the prefill-602-rejection vs decode-degradation split,
-  decode reuse as the fix #5 net-demand deduction readout, evictions as
-  the allocation-coupled LRU pressure readout; healthy runs keep both
-  admission surfaces at zero, non-zero = overload signal; old aggregates
+  clamped to zero — the prefill-602-rejection vs decode-terminal-failure
+  split (kv_admission_fails counts D-side terminal LACK_MEM since 20260903,
+  including P-enqueue reservation rejects), decode reuse as the fix #5
+  net-demand deduction readout, evictions as the allocation-coupled LRU
+  pressure readout; healthy runs keep both admission surfaces at zero,
+  non-zero = overload signal; old aggregates
   without the series → the whole panel group silently omitted); since
   20260903 also the run-level batch-decision analysis `batch_decisions`
   (dispatch-reason counts — `master.json` `prometheus_after` counters as
@@ -159,7 +151,7 @@ It also defaults to `MAVEN_PROFILES=opensource,!internal` so an adjacent `intern
 
 | File | Content |
 |---|---|
-| `run_meta.json` | `flexlb_env.txt` + `client_env.json` contents (the 36 JavaLoadClient env effective values snapshotted at client launch), endpoints summary, and the startup parameter snapshot (`--param` values incl. `FLEXLB_CONFIG`, JVM sizing, cache blocks, timeouts, `FLEXLB_MONITOR_MODE`, and the trace file's sha256 + line count). Also embeds the full config inputs (`performance_json` / `process_config_json` — the contents of the `performance_file` / `process_config_file` params; `null` when the file is missing) and the `process_usage` per-second CPU/RSS timeline of the mock / master / client JVMs |
+| `run_meta.json` | `flexlb_env.txt` + `client_env.json` contents (the 36 JavaLoadClient env effective values snapshotted at client launch), endpoints summary, and the startup parameter snapshot (`--param` values incl. `FLEXLB_CONFIG`, JVM sizing, cache blocks, timeouts, and the trace file's sha256 + line count). Also embeds the full config inputs (`performance_json` / `process_config_json` — the contents of the `performance_file` / `process_config_file` params; `null` when the file is missing) and the `process_usage` per-second CPU/RSS timeline of the mock / master / client JVMs |
 | `mock.json` | `java_mock_stats` timeline (`stats` array, source field names `ts_epoch_ms` / `prefill_waiting` / ...). Note the parsers capture 26 of the 28 fields — `decode_exec_p50` / `decode_exec_p95` carry digits in the key and are skipped; the verbatim lines stay in `mock.log`. Also holds the final cluster `/snapshot` from the control plane (when reachable), the endpoints summary, and the A-split pointer `per_engine_file` + `per_engine_sample_count` — the per-second per-engine Prometheus timeline itself lives in `mock_per_engine_timeseries.json.gz` |
 | `mock_per_engine_timeseries.json.gz` | the A-split target: the G1 per-second per-engine Prometheus timeline as gzip-streamed `[{ts, metrics: {"name{labels}": value}}]` groups (engine series like `mock_engine_running{engine_name="prefill-0",...}`). Splitting it out of `mock.json` keeps the main file lightweight — at 1250 engines × 120s the embedded key used to approach **~1GB** of pretty-printed JSON (the raw per-sample text is ~2.2KB × N_engines; the JSON-ified embedded form inflates ~2.5-3×). After the split + the G1 whitelist the same run writes a ~65MB `.json.gz` and `mock.json` stays in the KB range |
 | `mock.log` | The original `mock_engine.log` verbatim (tail-friendly) with the JVM GC log appended under a `=====` separator |
@@ -202,21 +194,18 @@ zero observation overhead for A/B comparisons. (The retired Mac-local
 their scenarios are now covered by the `flexlb_ft/` framework and the remote
 skill eval chain.)
 
-### FLEXLB_MONITOR_MODE
+### FLEXLB_MONITOR_METRIC_WHITELIST
 
-The script defaults to `FLEXLB_MONITOR_MODE=all`: the critical-only mode
-filters the master's Prometheus exposition down to ~6 `flexlb_*` series,
-which drops exactly the KV / inflight / batcher / cache-hit business metrics
-the per-second master collector exists for. Explicitly set
-`FLEXLB_MONITOR_MODE=critical-only` to restore the trimmed metric set.
-
-Skill-driven runs are **not** affected by this default change: the
-flexlb-mock-engine-test skill exports `FLEXLB_MONITOR_MODE=full` unconditionally
-(`MONITOR_MODE="${MONITOR_MODE:-full}"` in its launcher), and the Java side
-treats any value other than `critical-only` as the full metric surface —
-`full` and `all` are equivalent. So skill runs have always collected the
-full business metric surface; the `all` default here only matters for
-direct invocations of `run_online_eval.sh` that do not set the variable.
+The master trims its `flexlb_*` exposition with a metric whitelist — the
+single filtering mechanism, there is no mode switch. `FLEXLB_MONITOR_METRIC_WHITELIST`
+is a comma-separated list of prometheus-form prefixes or full names, passed
+to the master as `flexlb.monitor.metric-whitelist`. The script default pins
+the 13 prefixes the per-second master collector consumes — trimming at the
+source instead of exposing ~100 unconsumed series — and MUST stay in sync
+with `MASTER_PROMETHEUS_PREFIXES` in `eval_collectors.py` (the collector
+re-filters on top). An explicitly empty/blank whitelist fails closed (no
+`flexlb_*` series at all); set the bare `flexlb_` prefix to expose every
+`flexlb_*` series.
 `JAVA_MOCK_STATS_INTERVAL_MS` likewise defaults to `1000` (was `5000`) so
 `java_mock_stats` lines land at 1s granularity; the mock JVM startup
 argument is the only thing that changes.

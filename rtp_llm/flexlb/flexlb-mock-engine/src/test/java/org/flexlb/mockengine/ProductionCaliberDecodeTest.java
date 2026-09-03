@@ -207,7 +207,13 @@ class ProductionCaliberDecodeTest {
         JavaMockEngineCluster.FastRpcService decode = new JavaMockEngineCluster.FastRpcService(
                 "production-caliber-" + port, "127.0.0.1", "decode",
                 EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                port, services, scheduler, model, 100,
+                // KV pool decoupled from the throughput anchors: the full-batch
+                // anchor runs 128 concurrent streams, each holding ≥1 block;
+                // a 100-block pool breaching its 5% reserve would — since
+                // decode-KV failure became request-terminal (20260903) — fail
+                // streams this anchor expects to run. Block-pool admission is
+                // covered by dedicated tests, not by these rate anchors.
+                port, services, scheduler, model, 6144,
                 new JavaMockEngineCluster.ClusterStats(),
                 10_000_000L, 128);
         services.put(port, decode);

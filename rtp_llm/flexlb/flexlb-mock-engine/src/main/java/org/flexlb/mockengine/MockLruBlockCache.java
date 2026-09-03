@@ -27,7 +27,9 @@ import java.util.Set;
  *       "release != delete" and "free != available" both hold.</li>
  *   <li>Admission gate ({@code KVCacheAllocator::evaluateInitCapacity},
  *       TOTAL_AND_AVAILABLE): {@code need <= available && reserve <= available - need}
- *       with {@code reserve = ceil(reserveRatio x totalBlocks)}.</li>
+ *       with {@code reserve = ceil(reserveRatio x totalBlocks)}; a gate
+ *       failure classifies PERMANENT vs RETRYABLE (see
+ *       {@link AllocationFailure}).</li>
  *   <li>Allocation coupling: malloc needs FREE blocks; when short, pure-LRU blocks
  *       are evicted tail-first ({@code KVCacheGroup::ensureFreeBlocks} /
  *       {@code evictAndFreeForGroup}); only if that still fails is the request
@@ -119,14 +121,24 @@ final class MockLruBlockCache {
      * @return the lease to hand back on admit/release, or {@code null} = LACK_MEM
      */
     synchronized BlockLease acquire(int needBlocks, List<Long> keys) {
+        return acquireDetailed(needBlocks, keys).lease();
+    }
+
+    /**
+     * Detailed prefill-flavoured admission: the lease on success, or the
+     * FAILURE FAMILY (production {@code KVCacheAllocator::initKVBlock}
+     * classification) on the LACK_MEM gate — see {@link AllocationFailure}.
+     * Same state contract as {@link #acquire}: failure changes no state.
+     */
+    synchronized AllocationOutcome acquireDetailed(int needBlocks, List<Long> keys) {
         if (needBlocks <= 0) {
-            return new BlockLease(List.of(), 0);
+            return new AllocationOutcome(new BlockLease(List.of(), 0), null);
         }
         List<Long> hitKeys = matchPrefix(keys);
         int newBlocks = needBlocks - hitKeys.size();
         int avail = availableBlocks();
         if (needBlocks > avail || avail - needBlocks < reserveBlocks()) {
-            return null; // LACK_MEM (or reserve watermark) — no state changed
+            return new AllocationOutcome(null, failureFamily(needBlocks));
         }
         // Allocation coupling: free first, then evict the LRU tail (each
         // eviction trades prefix reuse for capacity — evictions counter).
@@ -141,7 +153,7 @@ final class MockLruBlockCache {
             blocks.put(key, blocks.get(key) + 1);
         }
         heldBlocks += newBlocks;
-        return new BlockLease(hitKeys, newBlocks);
+        return new AllocationOutcome(new BlockLease(hitKeys, newBlocks), null);
     }
 
     /**
@@ -156,6 +168,27 @@ final class MockLruBlockCache {
         lease.nakedBlocks++;
         heldBlocks++;
         return true;
+    }
+
+    /**
+     * Grow a running request's allocation toward {@code targetBlocks} TOTAL
+     * blocks (the per-step growth entrypoint — production incrMalloc toward
+     * ceil((seq_len + reserve_step)/spb); only free/LRU are consulted, no
+     * reserve gate). On exhaustion the outcome carries the FAILURE FAMILY
+     * classified against the target demand (the growth twin of the admission
+     * gate's required + reserve vs physical total) — blocks already grown
+     * stay grown (the partial lease survives; the caller releases it).
+     *
+     * @return the lease on success; {@code failure} = the family when the
+     *         pool cannot reach the target
+     */
+    synchronized AllocationOutcome growTo(BlockLease lease, int targetBlocks) {
+        while (lease.totalBlocks() < targetBlocks) {
+            if (!grow(lease)) {
+                return new AllocationOutcome(null, failureFamily(targetBlocks));
+            }
+        }
+        return new AllocationOutcome(lease, null);
     }
 
     /**
@@ -190,8 +223,17 @@ final class MockLruBlockCache {
      *         (no state changed)
      */
     synchronized BlockLease acquireWithReuse(int totalBlocksDemand, List<Long> keys) {
+        return acquireWithReuseDetailed(totalBlocksDemand, keys).lease();
+    }
+
+    /**
+     * Detailed decode-flavoured admission (same semantics as
+     * {@link #acquireWithReuse}, plus the failure family on the LACK_MEM
+     * gate — see {@link AllocationFailure}). Failure changes no state.
+     */
+    synchronized AllocationOutcome acquireWithReuseDetailed(int totalBlocksDemand, List<Long> keys) {
         if (totalBlocksDemand <= 0) {
-            return new BlockLease(List.of(), 0);
+            return new AllocationOutcome(new BlockLease(List.of(), 0), null);
         }
         List<Long> hitKeys = matchPrefix(keys);
         if (hitKeys.size() > totalBlocksDemand) {
@@ -203,7 +245,7 @@ final class MockLruBlockCache {
         int netNew = totalBlocksDemand - hitKeys.size();
         int avail = availableBlocks();
         if (netNew > avail || avail - netNew < reserveBlocks()) {
-            return null; // LACK_MEM (or reserve watermark) — no state changed
+            return new AllocationOutcome(null, failureFamily(netNew));
         }
         // Pin the reused blocks FIRST: each reference moves the key out of the
         // evictable pure-LRU set, so the LRU-tail eviction below can never
@@ -219,7 +261,7 @@ final class MockLruBlockCache {
             }
         }
         heldBlocks += netNew;
-        return new BlockLease(hitKeys, netNew);
+        return new AllocationOutcome(new BlockLease(hitKeys, netNew), null);
     }
 
     // ─────────────────────────── completion / cancel ───────────────────────────
@@ -378,6 +420,46 @@ final class MockLruBlockCache {
     /** Reserve watermark in blocks: ceil(reserveRatio x totalBlocks). */
     synchronized int reserveBlocks() {
         return (int) Math.ceil(totalBlocks * reserveRatio);
+    }
+
+    // ─────────────────────────── failure classification ───────────────────────────
+
+    /**
+     * Production {@code KVCacheAllocator.cc} {@code initKVBlock} failure
+     * classification (Zola forensics, lines 100-110):
+     * <ul>
+     *   <li>{@link #PERMANENT} — {@code required + reserve > physical total
+     *       blocks}: the request can NEVER fit this pool, retrying is
+     *       pointless (production still spins to the retry timeout — the
+     *       retry LOOP treats both families identically; only the counting
+     *       differs).</li>
+     *   <li>{@link #RETRYABLE} — the pool TOTAL is sufficient but currently
+     *       short: another request's completion may release blocks and flip
+     *       the verdict within the retry window.</li>
+     * </ul>
+     */
+    enum AllocationFailure {
+        PERMANENT,
+        RETRYABLE
+    }
+
+    /**
+     * Result of a detailed admission attempt: exactly one of {@code lease}
+     * (success) or {@code failure} (the family for counting/retry policy)
+     * is non-null.
+     */
+    record AllocationOutcome(BlockLease lease, AllocationFailure failure) {
+
+        boolean success() {
+            return lease != null;
+        }
+    }
+
+    /** Family of a gate failure: {@code required + reserve} vs the PHYSICAL pool. */
+    private AllocationFailure failureFamily(int requiredBlocks) {
+        return requiredBlocks + reserveBlocks() > totalBlocks
+                ? AllocationFailure.PERMANENT
+                : AllocationFailure.RETRYABLE;
     }
 
     // ─────────────────────────── internals ───────────────────────────

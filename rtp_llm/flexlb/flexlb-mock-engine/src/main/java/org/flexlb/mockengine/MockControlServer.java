@@ -379,6 +379,27 @@ final class MockControlServer {
                 }
                 perf.setOverrideMaxWaitingPrefillBatches(cap);
             }
+            if (body.has("decode_retry_times") || body.has("decode_retry_interval_ms")
+                    || body.has("decode_retry_timeout_ms")) {
+                // D-side ALLOCATE retry window (production decode_retry_* /
+                // DecodeRpcServer.cc EXECUTE_WITH_RETRY, defaults 100/1/100):
+                // FULL-REPLACE policy — a partial POST supplies the engine's
+                // current values for the absent fields, so the window never
+                // ends up half-configured. Negative values are meaningless
+                // (0 = immediate fail, a valid degenerate) -> 400.
+                int times = body.path("decode_retry_times").asInt(
+                        service.getDecodeAllocateRetryTimes());
+                long intervalMs = body.path("decode_retry_interval_ms").asLong(
+                        service.getDecodeAllocateRetryIntervalMs());
+                long timeoutMs = body.path("decode_retry_timeout_ms").asLong(
+                        service.getDecodeAllocateRetryTimeoutMs());
+                if (times < 0 || intervalMs < 0 || timeoutMs < 0) {
+                    throw new ApiException(400, String.format(
+                            "decode_retry_* must be >= 0, got: times=%d interval_ms=%d timeout_ms=%d",
+                            times, intervalMs, timeoutMs));
+                }
+                service.setDecodeAllocateRetryPolicy(times, intervalMs, timeoutMs);
+            }
             return successResponse(service);
         });
     }
@@ -768,8 +789,8 @@ final class MockControlServer {
                 {"mock_engine_available_blocks", "available blocks (free + pure-LRU, held excluded)", "gauge"},
                 {"mock_engine_held_blocks", "blocks held by in-flight requests", "gauge"},
                 {"mock_engine_referenced_blocks", "cache-key blocks referenced by in-flight requests", "gauge"},
-                {"mock_engine_kv_admission_fails_total", "total KV admission/growth failures (decode degradations)", "counter"},
-                {"mock_engine_lack_mem_rejects_total", "total prefill LACK_MEM synchronous rejections (error 602)", "counter"},
+                {"mock_engine_kv_admission_fails_total", "total decode KV admission/growth failures, RETRYABLE family (temporarily short; 8211 terminals after the ALLOCATE retry window)", "counter"},
+                {"mock_engine_lack_mem_rejects_total", "total LACK_MEM rejections, PERMANENT family (never fits) + prefill pool 602 surface", "counter"},
                 {"mock_engine_decode_reuse_blocks_total", "total decode prefix-reuse blocks (own-LRU net-demand deduction)", "counter"},
                 // Key-level cache-hit observability (recent_cache_key_hit_count /
                 // total_count production caliber): cumulative counters recorded at

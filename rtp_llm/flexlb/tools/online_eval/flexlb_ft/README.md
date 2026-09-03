@@ -27,9 +27,9 @@ python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbat
 | `--list` | — | 列出当前过滤条件下的用例并退出 |
 | `--keep` | — | 跑完保留环境不 teardown |
 
-全集 **86 例**；`--list` 按当前 profile 过滤，默认 profile 下显示 85 例（1 例仅 NON_BATCH 投递形态适用）。用例间环境按需复用 / 重建。
+全集 **99 例**；`--list` 按当前 profile 过滤，默认 profile 下显示 98 例（1 例仅 NON_BATCH 投递形态适用）。用例间环境按需复用 / 重建。
 
-## 测试分类（86 例）
+## 测试分类（99 例）
 
 断言一律写**正确契约**而非当前实现——跑挂即 finding。表内「期望」为一句话摘要，完整断言与构造细节以各用例 docstring 为准。
 
@@ -154,25 +154,38 @@ KV 前缀缓存生命周期契约：per-engine 账本隔离、全局共享块的
 | `engine_fault_status_gap_long_retire` | 长状态空窗 | 代际退役；其账目 / inflight 被栅栏 |
 | `engine_fault_recovery_kv_usage_reset` | 引擎全量重启后 | KV 用量从零起步（不沿用旧读数）；不被误拉黑 |
 
-### master（3 例 · 固定 batch-window）
+### master（8 例 · 固定 batch-window）
 
-master 自身进程级故障与冷启动行为。
+master 自身进程级故障与冷启动行为，以及双实例 HA 链路（冻结判活 / kill -9 failover / 全下线直连兑底 / 回切 wrap-around）。
 
 | 用例 | 场景 | 期望 |
 | --- | --- | --- |
 | `master_kill` | kill -9 杀死 master 后重启 | 拓扑重新收敛；inflight 干净；恢复率达标 |
 | `master_quota_block` | 1P+1D 小集群配额阻塞 | 阻塞经 TTL 清理后恢复 ≥90% |
 | `master_coldstart_burst` | 冷启动 ready 瞬间 20 请求风暴 | 首连风暴下不误杀健康引擎、请求被服务（回归探针） |
+| `master_freeze` | SIGSTOP/SIGCONT 冻结 sticky master，短挂（6s）与长挂（46s）两档 | 短挂解冻后行不蒸发不切换；长挂判死后同请求重试切走，解冻后同进程账目连续、无错误风暴 |
+| `master_ha_failover` | 双 master、sticky A，kill -9 A | 同请求重试兑底切 B（切换窗错误≈0）；切换后 B 100% 服务；无重复 rid |
+| `fallback_direct` | ENABLE_FALLBACK 下杀掉全部 master | in-flight 双连接失败触发直连引擎兑底：fallback 路成功率健康、master 路为 0、无重复 rid |
+| `fallback_negative_errorcode` | 业务错误码（8431）与短 deadline（800ms 冻结）下 fallback 已武装 | 均不触发兑底：业务错误经 master 应答带码、deadline 失败不重试不切换；清除后账目收敛 |
+| `failback_wraparound` | 重建 sticky B 端态后重启 A、再杀 B | A 60s 内重新收敛并接恢复流量；对称切换绕回 A；inflight 干净、无 8511 风暴 |
 
-### admission（3 例 · 2 例固定 batch-window）
+### admission（11 例 · 10 例固定 batch-window、1 例仅 BATCH 投递）
 
-三级准入拒绝：引擎队列深度快速拒、KV 压力 SLO 等待-超时、全局 outstanding 上限。
+准入门全谱——可等待 park 与快速拒两种语义：引擎侧（prefill 并发、decode 硬门、等待批上限、KV 块池、队列深度）与 master 侧（batcher 队列容量、placement 池、准入许可、全局 outstanding），外加 SLO 排队超时终态。
 
 | 用例 | 场景 | 期望 |
 | --- | --- | --- |
 | `admission_queue_depth_reject` | 引擎队列深度超限（仅 BATCH 投递） | 快速拒绝（BATCH_DISPATCH_FAILED）；注入清除后恢复 |
 | `admission_slo_queue_deadline` | KV 压力门触发 WAIT 后排队超时 | ~1.5s 内带类型的 deadline 错误；恢复 |
-| `admission_master_capacity_reject` | 全局 outstanding 上限（=2）打满 | 同步快速拒绝（RESOURCE_EXHAUSTED）；排空后恢复 |
+| `admission_master_capacity_reject` | 全局 outstanding 上限（=2）打满 | 同步快速拒绝（8502 QUEUE_FULL / TooManyRequests）；排空后恢复 |
+| `engine_prefill_concurrency_gate_park` | 单 prefill 并发门=1 下连发 4 请求，后续批整批驻留引擎等待队列 | 门为 WAIT 语义：零拒绝、等待可见；FIFO 全部完成；排空后账目干净并恢复 |
+| `engine_decode_hard_gate_unbounded_park` | decode 硬并发门=128、master 路由上限放开，150 请求溢出 | 无界 park 不拒绝：Schedule 全部成功、等待可见；≥95% 完成后排空、账目干净并恢复 |
+| `admission_priority_incomer_reject` | 唯一准入许可被低优先级请求占用，高优先级新来者到达且无抢占块 | 快速带类型 8431 拒绝、不悬挂；受害者不被抢占正常完成；许可释放后恢复 |
+| `admission_batcher_queue_capacity_park` | batcher 等待队列容量收紧为 2，7 请求逐发溢出 | master 侧 park：零快速拒、parked≥1；FIFO 串行完成（批间隔≥1.2s）；排空后账目干净并恢复 |
+| `admission_batcher_queue_deadline` | batcher 队列容量门下 queueTimeout=1.5s，溢出波 park 后到期 | 排队者 1-5s 内带类型 deadline 终态（8511，与 KV 门同码分类统一）；已投递者不受扰；账目干净并恢复 |
+| `admission_placement_pool_wait` | prefill placement 池仅 1 席，A 运行中 B 到达被拒入池 | 池满为 WAIT：B 驻留 master 侧，池释放后被唤醒重试并晚于 A≥1s 完成；账目干净并恢复 |
+| `admission_engine_waiting_batch_cap_reject` | 引擎等待批上限=1（运行时注入）打满后探测批到达 | 非等待门：快速整批 backpressure 拒绝；占用者不受扰；同压力下放开 cap 可 park；账目干净并恢复 |
+| `admission_engine_kv_lack_mem_fast_reject` | 17 块引擎 KV 池被两个 8 块租约占满后第 3 个 8 块请求入队 | 非等待门：快速 602 LACK_MEM 拒绝（引擎侧码非 8431）；租约完成后归还；恢复后新请求成功、账目干净 |
 
 ### direct（1 例 · 全 profile）
 

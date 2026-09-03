@@ -6,11 +6,12 @@ run_online_eval.sh starts one process per run and passes only the lanes
 whose guards are on —
                       G1 mock per-engine prometheus (mock control port),
                       G3 master business prometheus (management port),
-                      G4 master inflight snapshot,
-                      G5 process CPU/RSS sampling,
-                      G6 master server_latency counter poller
-                      (GET {addr}/rtp_llm/server_latency ->
-                       master_counters_timeseries.txt).
+                      G5 process CPU/RSS sampling.
+
+(G6 counter poller and G4 inflight poller were collapsed into G3: their
+consumed series now ride the G3 whitelist — see MASTER_PROMETHEUS_PREFIXES
+— and aggregate_canvas_run.py derives master_arrivals_ts / inflight_ts
+from the prometheus timeline.)
 
 Each thread is best-effort: a failed round is skipped, never fatal, and
 each round sleeps the remainder of the poll interval. The output files
@@ -25,7 +26,6 @@ the process exits.
 
 import argparse
 import collections
-import json
 import os
 import signal
 import subprocess
@@ -81,6 +81,22 @@ MASTER_PROMETHEUS_PREFIXES = (
     "flexlb_app_flexlb_inflight_ttl",
     "flexlb_app_engine_balancing_master_dispatch_reason_total",
     "flexlb_app_engine_balancing_master_batch_size",
+    # G6/G4 collapse — the G3 lane is now the sole master-plane collector,
+    # so the series those retired pollers fed to aggregate moved here:
+    # arrival/completion counters (request_count_total{priority}, summed
+    # + differenced by aggregate_canvas_run into master_arrivals_ts;
+    # all_qps_total{code} the completion side) and the five inflight
+    # gauges (scheduler direct, per-engine prefill batch/request counts,
+    # per-endpoint decode reserved/running — rebuilt into inflight_ts).
+    # Keep in sync with FLEXLB_MONITOR_METRIC_WHITELIST in
+    # run_online_eval.sh (the master-side trim at the source).
+    "flexlb_auto_tpm_request_count",
+    "flexlb_app_engine_balancing_master_all_qps",
+    "flexlb_app_flexlb_scheduler_inflight_size",
+    "flexlb_app_flexlb_inflight_batch_count",
+    "flexlb_app_flexlb_inflight_request_count",
+    "flexlb_auto_tpm_decode_reserved_count",
+    "flexlb_auto_tpm_decode_running_count",
 )
 
 _STOP = threading.Event()
@@ -116,29 +132,6 @@ def _sleep_remaining(started, interval_s):
     remaining = interval_s - (time.time() - started)
     if remaining > 0:
         _STOP.wait(remaining)
-
-
-def run_master_counter_poller(http_addr, out_path, interval_s):
-    """G6: master server_latency counter poller.
-
-    GET http://{addr}/rtp_llm/server_latency -> cumulative arrival/completion
-    counters, one kv line per round."""
-    url = f"http://{http_addr}/rtp_llm/server_latency"
-    with open(out_path, "a", encoding="utf-8") as out:
-        while not _STOP.is_set():
-            started = time.time()
-            try:
-                with urllib.request.urlopen(url, timeout=2) as response:
-                    data = json.load(response)
-                out.write(
-                    f"ts_epoch_ms={int(started * 1000)} "
-                    f"arrival_count={data.get('arrival_count', 0)} "
-                    f"completion_count={data.get('completion_count', 0)}\n"
-                )
-                out.flush()
-            except Exception:
-                pass  # master briefly unavailable; skip this sample
-            _sleep_remaining(started, interval_s)
 
 
 def run_mock_per_engine_poller(port, out_path, interval_s):
@@ -198,29 +191,6 @@ def run_master_prometheus_poller(port, out_path, interval_s):
                     out.write("\n".join(kept) + "\n")
                     out.flush()
                 break
-            _sleep_remaining(started, interval_s)
-
-
-def run_master_inflight_poller(http_addr, out_path, interval_s):
-    """G4 (was: start_master_inflight_poller heredoc).
-
-    GET http://{addr}/rtp_llm/inflight_status, one JSONL line per round."""
-    url = f"http://{http_addr}/rtp_llm/inflight_status"
-    with open(out_path, "a", encoding="utf-8") as out:
-        while not _STOP.is_set():
-            started = time.time()
-            try:
-                with urllib.request.urlopen(url, timeout=2) as response:
-                    payload = json.load(response)
-                out.write(
-                    json.dumps(
-                        {"ts_epoch_ms": int(started * 1000), "inflight": payload}
-                    )
-                    + "\n"
-                )
-                out.flush()
-            except Exception:
-                pass  # master briefly unavailable; skip this sample
             _sleep_remaining(started, interval_s)
 
 
@@ -296,10 +266,7 @@ def _supervise(threads):
 # Poller lane table — one entry per collector thread. A lane is enabled by
 # passing its (enable, out) argv pair together. A lane with an interval flag
 # controls its own cadence: a None default falls back to the shared
-# --secondary-interval, an explicit default stays independent of it (the
-# counter lane's 1.0: the counter series is the aggregate master_arrivals_ts
-# data source and is collected even when the observation lanes are switched
-# off, so its cadence must not follow SECONDARY_POLL_INTERVAL_S).
+# --secondary-interval.
 _Lane = collections.namedtuple(
     "_Lane",
     "enable_flag out_flag interval_flag interval_default target name desc",
@@ -325,15 +292,6 @@ _LANES = (
         "G3 master business prometheus (management port)",
     ),
     _Lane(
-        "--inflight-http-addr",
-        "--inflight-out",
-        None,
-        None,
-        run_master_inflight_poller,
-        "master-inflight-poller",
-        "G4 master inflight snapshot",
-    ),
-    _Lane(
         "--pid-file",
         "--process-out",
         None,
@@ -342,27 +300,18 @@ _LANES = (
         "process-usage-poller",
         "G5 process CPU/RSS sampling",
     ),
-    _Lane(
-        "--counter-http-addr",
-        "--counter-out",
-        "--counter-interval",
-        1.0,
-        run_master_counter_poller,
-        "master-counter-poller",
-        "G6 master server_latency counter poller",
-    ),
 )
 
 
 def _argv_name(flag):
-    """--counter-http-addr -> the args attribute name counter_http_addr."""
+    """--prometheus-port -> the args attribute name prometheus_port."""
     return flag.lstrip("-").replace("-", "_")
 
 
 def main():
     parser = argparse.ArgumentParser(
         description="run_online_eval.sh secondary collectors: one process, "
-        "one thread per enabled poller lane (G1/G3/G4/G5/G6)."
+        "one thread per enabled poller lane (G1/G3/G5)."
     )
     parser.add_argument(
         "--secondary-interval",
