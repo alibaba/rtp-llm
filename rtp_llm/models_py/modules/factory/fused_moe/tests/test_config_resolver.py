@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, Fp8PerTensorQuantConfig
 from rtp_llm.device.device_type import DeviceType
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
@@ -93,6 +93,22 @@ class TestMoeConfigResolver(unittest.TestCase):
         quant_config = Fp8BlockWiseQuantConfig()
         config = create_config_adapter(quant_config=quant_config)
         self.assertEqual(self.resolver.get_quant_method(config), "FP8_PER_BLOCK")
+
+    def test_get_quant_method_normalizes_online_fp8_for_execution(self):
+        quant_config = Fp8PerTensorQuantConfig(is_quanted=False)
+        config = create_config_adapter(quant_config=quant_config)
+
+        self.assertEqual(
+            self.resolver.get_quant_method(config), "FP8_DYNAMIC_PER_TENSOR"
+        )
+
+    def test_get_quant_method_normalizes_prequantized_fp8_for_execution(self):
+        quant_config = Fp8PerTensorQuantConfig(is_quanted=True)
+        config = create_config_adapter(quant_config=quant_config)
+
+        self.assertEqual(
+            self.resolver.get_quant_method(config), "FP8_DYNAMIC_PER_TENSOR"
+        )
 
     def test_is_bf16_false(self):
         """Test is_bf16 returns False for fp16"""

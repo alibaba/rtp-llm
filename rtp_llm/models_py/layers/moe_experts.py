@@ -907,9 +907,22 @@ class BaseMoEExperts(RtpModule):
                 # Per-tensor FP8 scales are 1D and do not encode gate/up rows.
                 if tensor.dim() == 1:
                     continue
-                weights_dict[name] = runtime_device.shuffle_moe_weight(
+                runtime_tensor = runtime_device.shuffle_moe_weight(
                     tensor, self._model_config.data_type, name
                 )
+                module_attr = {
+                    W.moe_w1: "w13",
+                    W.moe_w2: "w2",
+                    W.moe_s1: "w13_scale",
+                    W.moe_s2: "w2_scale",
+                }[name]
+                owned_tensor = getattr(self, module_attr)
+                # Rebind the registered Parameter/buffer to the runtime
+                # layout. The module and executor then share one allocation,
+                # and the checkpoint-layout storage can be released as soon as
+                # this local dictionary entry is replaced.
+                owned_tensor.data = runtime_tensor
+                weights_dict[name] = owned_tensor.data
         return weights_dict
 
     def _maybe_build_fused_moe(self):
