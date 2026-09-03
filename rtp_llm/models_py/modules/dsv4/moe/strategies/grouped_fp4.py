@@ -63,6 +63,36 @@ _GROUPED_ALIGNMENT = 128
 # DeepGEMM's SM120 kernel reads); only the scale tensors switch format.
 _DG_BACKEND = os.environ.get("DSV4_MOE_FP4_BACKEND", "flashinfer").strip().lower()
 _DG_BE_CT = [0]  # deepgemm-backend engagement proof (DSV4_DIAG, first 3 fires)
+# DGV native wire (Sep 3, results_20260903_dg1/VERDICT.md CORRECTION): when the
+# dispatch already quantized per-128 ue8m0 (deepep.py _DG_NATIVE_WIRE), the
+# received x IS the per-128 fp8 activation and input_scale IS the plain
+# per-token [N, D/128] ue8m0 bytes — skip the dequant+requant and rebuild
+# DeepGEMM's TMA-aligned packed scale from the plain bytes (bench/q5e proved
+# the transform bit-exact). Both modules read the same env → consistent gate.
+_DG_NATIVE_WIRE = (
+    int(os.environ.get("DSV4_DG_NATIVE_WIRE", "0")) and _DG_BACKEND == "deepgemm"
+)
+
+
+def _dg_repack_tma_scale(plain, n_rows):
+    """Plain per-token [n_rows, k_groups] uint8 ue8m0 scales -> DeepGEMM's
+    TMA-aligned column-major packed-int32 scale view
+    [n_rows, ceil_align(k_groups,4)//4] — the exact tensor
+    sgl_per_token_group_quant_fp8(scale_tma_aligned=True, scale_ue8m0=True)
+    produces (4 ue8m0 bytes per int32, little-endian; token dim padded to
+    ceil_align(n_rows,4)). bench/q5e: reconstruct(reference) == sgl BIT-EXACT."""
+    k_groups = plain.shape[1]
+    aligned_k = (k_groups + 3) // 4 * 4
+    aligned_mn = (n_rows + 3) // 4 * 4
+    ncol = aligned_k // 4
+    pad = torch.zeros(n_rows, aligned_k, dtype=torch.uint8, device=plain.device)
+    pad[:, :k_groups] = plain
+    p = pad.view(n_rows, ncol, 4).to(torch.int64)
+    packed = (p[..., 0] | (p[..., 1] << 8) | (p[..., 2] << 16)
+              | (p[..., 3] << 24)).to(torch.int32)
+    base = torch.zeros((ncol, aligned_mn), dtype=torch.int32, device=plain.device)
+    base[:, :n_rows] = packed.t()
+    return base.transpose(-1, -2)[:n_rows, :]
 _SM120_FUSED_MOE_WORKSPACES = {}
 
 
@@ -409,35 +439,45 @@ class GroupedFP4Strategy(RoutedExpertsStrategy):
         routed_ids = torch.where(
             weights != 0, indices, torch.full_like(indices, -1)
         )
-        if input_scale is not None:
-            s = (
-                input_scale.reshape(N, D // FP4_BLOCK)
-                .view(torch.float8_e8m0fnu)
-                .to(torch.bfloat16)
+        if _DG_NATIVE_WIRE:
+            # DGV native wire: x IS the per-128 fp8 activation and input_scale
+            # IS the plain per-token [N, D/128] ue8m0 bytes from the dispatch —
+            # rebuild DeepGEMM's TMA-aligned packed scale (bench/q5e: bit-exact)
+            # and use x directly. NO dequant, NO requant — that double-quant was
+            # the ~+115 ms which swamped the −28 ms GEMM1 win in the dg1 A/B.
+            a_fp8 = x
+            a_scale = _dg_repack_tma_scale(
+                input_scale.reshape(N, D // FP8_BLOCK), N)
+        else:
+            if input_scale is not None:
+                s = (
+                    input_scale.reshape(N, D // FP4_BLOCK)
+                    .view(torch.float8_e8m0fnu)
+                    .to(torch.bfloat16)
+                )
+                x = (
+                    x.to(torch.bfloat16).view(N, D // FP4_BLOCK, FP4_BLOCK)
+                    * s.unsqueeze(2)
+                ).view(N, D).contiguous()
+            a_fp8, a_scale = sgl_per_token_group_quant_fp8(
+                x.contiguous(),
+                group_size=FP8_BLOCK,
+                eps=1e-4,
+                column_major_scales=True,
+                scale_tma_aligned=True,
+                scale_ue8m0=True,
             )
-            x = (
-                x.to(torch.bfloat16).view(N, D // FP4_BLOCK, FP4_BLOCK)
-                * s.unsqueeze(2)
-            ).view(N, D).contiguous()
         if os.environ.get("DSV4_DIAG") and _DG_BE_CT[0] < 3:
             _DG_BE_CT[0] += 1
             import sys
             print(
-                "[DG-BE] rank=%d N=%d E=%d backend=deepgemm" % (
+                "[DG-BE] rank=%d N=%d E=%d backend=deepgemm native_wire=%d" % (
                     torch.distributed.get_rank()
                     if torch.distributed.is_initialized() else -1,
-                    N, E),
+                    N, E, int(_DG_NATIVE_WIRE)),
                 file=sys.stderr,
                 flush=True,
             )
-        a_fp8, a_scale = sgl_per_token_group_quant_fp8(
-            x.contiguous(),
-            group_size=FP8_BLOCK,
-            eps=1e-4,
-            column_major_scales=True,
-            scale_tma_aligned=True,
-            scale_ue8m0=True,
-        )
         adjusted_topk_ids, num_recv = recompute_topk_ids_sum_expert_count(
             routed_ids,
             current_expert_start_id=0,

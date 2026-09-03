@@ -69,6 +69,33 @@ _X1_AG_CT = [0]  # X1' engagement proof: relocated count-AG completions
 # the count-AG result (rank-identical), so it stays rank-invariant.
 _A2_MIN_TOKENS = int(os.environ.get("DSV4_MOE_HALVES_MIN_TOKENS", "8192"))
 _A2_STREAMS: dict[int, torch.cuda.Stream] = {}
+# DGV native wire (Sep 3, results_20260903_dg1/VERDICT.md CORRECTION): the
+# DeepGEMM grouped kernel is a real −28 ms win on GEMM1, but the shipped
+# backend pays a per-layer dequant(per-32→bf16)+requant(bf16→per-128 ue8m0)
+# (~+115 ms) because this dispatch emits per-32 fp8 (flashinfer's native
+# format) while DeepGEMM wants per-128 ue8m0. When BOTH the deepgemm backend
+# AND DSV4_DG_NATIVE_WIRE are set, quantize per-128 HERE (once, at the source,
+# exactly like the flashinfer path quantizes per-32 here) and ship [D fp8 +
+# D/128 scale bytes]/token; the expert rank rebuilds DeepGEMM's TMA-aligned
+# scale layout from the plain bytes (bench/q5e proved the transform bit-exact)
+# and skips the dequant+requant entirely. Rank-invariant by construction (the
+# granularity is uniform; payload_cols shrinks identically on every rank).
+_DG_NATIVE_WIRE = (
+    int(os.environ.get("DSV4_DG_NATIVE_WIRE", "0"))
+    and os.environ.get("DSV4_MOE_FP4_BACKEND", "flashinfer").strip().lower()
+    == "deepgemm"
+)
+_DG_NW_CT = [0]  # native-wire engagement proof (DSV4_DIAG, first 3 fires)
+
+
+def _dg_unpack_tma_scale(a_scale_tma, n_rows, k_groups):
+    """Inverse of the receive-side repack: sgl's TMA-aligned packed-int32 scale
+    view [n_rows, ncol] (col-major, 4 ue8m0 bytes per int32, little-endian) ->
+    plain per-token [n_rows, k_groups] uint8 for the a2a wire. bench/q5e
+    verified unpack(sgl) == the reference per-128 ue8m0 bytes bit-exact."""
+    s = a_scale_tma.to(torch.int64)
+    b = torch.stack([(s >> (8 * i)) & 0xFF for i in range(4)], dim=-1)
+    return b.reshape(n_rows, -1)[:, :k_groups].to(torch.uint8).contiguous()
 # Lever 1b (Sep 2): overlap variant of the real deep_ep path. The raw DeepEP
 # pair (dispatch ~3 ms + combine ~6 ms/layer) is SLOWER than the NCCL pair
 # it replaces (6.64 ms exposed — boot #3 measured +16% @32K synchronous), so
@@ -847,10 +874,34 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         group = dist.group.WORLD; world = dist.get_world_size(group)
         cfg = self.cfg
         experts_per_rank = cfg.n_routed_experts // world
-        from flashinfer import mxfp8_quantize
-        x_fp8, x_scale = mxfp8_quantize(x.contiguous(), is_sf_swizzled_layout=False)
-        scale_cols = int(x.size(1)) // 32
-        x_scale = x_scale.reshape(x.size(0), scale_cols)
+        if _DG_NATIVE_WIRE:
+            # DGV native wire: quantize per-128 ue8m0 HERE (once, at the
+            # source) so the expert rank feeds DeepGEMM GEMM1 directly — no
+            # dequant/requant. sgl always writes x_q as [T, D] row-major fp8
+            # (layout-independent) and x_s as the TMA-aligned packed int32;
+            # unpack x_s to plain per-token bytes for the a2a wire (the expert
+            # rank repacks it — bench/q5e proved the round-trip bit-exact).
+            from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+                sgl_per_token_group_quant_fp8,
+            )
+            x_fp8, x_scale_tma = sgl_per_token_group_quant_fp8(
+                x.contiguous(), group_size=128, eps=1e-4,
+                column_major_scales=True, scale_tma_aligned=True,
+                scale_ue8m0=True)
+            scale_cols = int(x.size(1)) // 128
+            x_scale = _dg_unpack_tma_scale(x_scale_tma, int(x.size(0)), scale_cols)
+            del x_scale_tma
+            if os.environ.get("DSV4_DIAG") and _DG_NW_CT[0] < 3:
+                _DG_NW_CT[0] += 1
+                import sys
+                print("[DG-NW] rank=%d T=%d scale_cols=%d (per-128 native wire)" % (
+                    dist.get_rank(group) if dist.is_initialized() else -1,
+                    int(x.size(0)), scale_cols), file=sys.stderr, flush=True)
+        else:
+            from flashinfer import mxfp8_quantize
+            x_fp8, x_scale = mxfp8_quantize(x.contiguous(), is_sf_swizzled_layout=False)
+            scale_cols = int(x.size(1)) // 32
+            x_scale = x_scale.reshape(x.size(0), scale_cols)
         topk = weights.size(1)
         x_end = int(x.size(1))
         scale_end = x_end + scale_cols
@@ -1104,7 +1155,10 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         del recv_x, recv_scale, recv_w, recv_i, local_w, local_i, valid
         combine_q, combine_scale = mxfp8_quantize(
             out.contiguous(), is_sf_swizzled_layout=False)
-        combine_scale = combine_scale.reshape(n_rows, scale_cols)
+        # The COMBINE (expert-output return path) is ALWAYS per-32 mxfp8 —
+        # independent of the dispatch activation width, which is per-128 (32
+        # cols) under the DGV native wire. Never reuse ``scale_cols`` here.
+        combine_scale = combine_scale.reshape(n_rows, int(x.size(1)) // 32)
         payload = torch.cat(
             [combine_q.view(torch.uint8), combine_scale], dim=1).contiguous()
         return payload
