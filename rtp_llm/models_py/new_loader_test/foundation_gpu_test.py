@@ -2,13 +2,16 @@ import os
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 import torch
 import torch.nn as nn
+from safetensors.torch import save_file
+
+from rtp_llm.models_py.layers import activation
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.registry import register_model
-from safetensors.torch import save_file
 
 
 class _GpuModel(RtpModule):
@@ -53,6 +56,56 @@ register_model("foundation_gpu_alias_model")(_GpuAliasModel)
 
 
 class FoundationGpuTest(unittest.TestCase):
+    def test_fused_silu_uses_the_input_device_stream(self):
+        gate_up = torch.randn(2, 256, dtype=torch.bfloat16, device="cuda:0")
+        fake_stream = types.SimpleNamespace(cuda_stream=12345)
+
+        def fake_silu_and_mul(output, input_tensor, stream_id):
+            self.assertEqual(stream_id, fake_stream.cuda_stream)
+            gate, up = input_tensor.chunk(2, dim=-1)
+            output.copy_(
+                (torch.nn.functional.silu(gate.float()) * up.float()).to(output.dtype)
+            )
+
+        with mock.patch.object(
+            activation, "_SILU_FUSED_ENABLED", True
+        ), mock.patch.object(
+            torch.cuda, "current_stream", return_value=fake_stream
+        ) as current_stream, mock.patch(
+            "rtp_llm.ops.compute_ops.rtp_llm_ops.silu_and_mul",
+            side_effect=fake_silu_and_mul,
+        ):
+            output = activation.silu_and_mul(gate_up)
+
+        current_stream.assert_called_once_with(gate_up.device)
+        gate, up = gate_up.chunk(2, dim=-1)
+        expected = (torch.nn.functional.silu(gate.float()) * up.float()).to(
+            gate_up.dtype
+        )
+        torch.testing.assert_close(output, expected)
+
+    @unittest.skipUnless(torch.cuda.device_count() >= 2, "requires two CUDA devices")
+    def test_fused_silu_uses_non_current_input_device(self):
+        original_device = torch.cuda.current_device()
+        input_device = 1 if original_device == 0 else 0
+        gate_up = torch.randn(
+            2, 256, dtype=torch.bfloat16, device=f"cuda:{input_device}"
+        )
+        try:
+            torch.cuda.set_device(original_device)
+            with mock.patch.object(activation, "_SILU_FUSED_ENABLED", True):
+                output = activation.silu_and_mul(gate_up)
+            torch.cuda.synchronize(input_device)
+        finally:
+            torch.cuda.set_device(original_device)
+
+        gate, up = gate_up.chunk(2, dim=-1)
+        expected = (torch.nn.functional.silu(gate.float()) * up.float()).to(
+            gate_up.dtype
+        )
+        self.assertEqual(output.device, gate_up.device)
+        torch.testing.assert_close(output, expected, rtol=2e-2, atol=2e-2)
+
     def test_persistent_buffer_marker_survives_device_migration(self):
         with tempfile.TemporaryDirectory() as model_path:
             save_file(

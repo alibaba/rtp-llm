@@ -31,6 +31,66 @@ class Fp8QuantRegressionTest(TestCase):
         ), self.assertRaisesRegex(ValueError, "v2 does not support"):
             sgl_per_token_group_quant_fp8(x, group_size=96)
 
+    def test_v2_large_offset_matches_reference_at_first_and_last_rows(self):
+        if getattr(torch.version, "hip", None) is not None:
+            self.skipTest("v2 fp8 kernel path is CUDA-only")
+
+        hidden_dim = 4096
+        group_size = 128
+        num_tokens = (2**31 // hidden_dim) + 8
+        input_bytes = num_tokens * hidden_dim * torch.bfloat16.itemsize
+        output_bytes = num_tokens * hidden_dim
+        scale_bytes = num_tokens * (hidden_dim // group_size) * 4
+        required_bytes = input_bytes + output_bytes + scale_bytes
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        if total_bytes < 16 * 1024**3 or free_bytes < required_bytes + 2 * 1024**3:
+            self.skipTest(
+                "insufficient GPU memory for large-offset quant test: "
+                f"free={free_bytes} required={required_bytes}"
+            )
+
+        x = torch.zeros((num_tokens, hidden_dim), device="cuda", dtype=torch.bfloat16)
+        first_pattern = (
+            torch.arange(hidden_dim, device="cuda", dtype=torch.float32)
+            .remainder(257)
+            .sub(128)
+            .div(16)
+            .to(torch.bfloat16)
+        )
+        last_pattern = (
+            torch.arange(hidden_dim, device="cuda", dtype=torch.float32)
+            .remainder(193)
+            .sub(64)
+            .div(8)
+            .to(torch.bfloat16)
+        )
+        x[0].copy_(first_pattern)
+        x[-1].copy_(last_pattern)
+
+        with mock.patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": "v2"}):
+            quantized, scales = sgl_per_token_group_quant_fp8(x, group_size=group_size)
+        torch.cuda.synchronize()
+
+        boundary_input = torch.stack((x[0], x[-1])).float()
+        grouped = boundary_input.reshape(2, hidden_dim // group_size, group_size)
+        fp8_info = torch.finfo(quantized.dtype)
+        expected_scales = grouped.abs().amax(dim=-1).clamp_min(1e-10) / float(
+            fp8_info.max
+        )
+        expected_quantized = (
+            grouped.div(expected_scales.unsqueeze(-1))
+            .clamp(float(fp8_info.min), float(fp8_info.max))
+            .to(quantized.dtype)
+            .reshape(2, hidden_dim)
+        )
+
+        actual_quantized = torch.stack((quantized[0], quantized[-1]))
+        actual_scales = torch.stack((scales[0], scales[-1]))
+        torch.testing.assert_close(
+            actual_quantized.float(), expected_quantized.float(), rtol=0, atol=0
+        )
+        torch.testing.assert_close(actual_scales, expected_scales, rtol=1e-5, atol=1e-7)
+
     def test_per_tensor_empty_input_does_not_resolve_kernel(self):
         input_tensor = torch.empty((0, 128), dtype=torch.bfloat16, device="cuda")
         with mock.patch(
