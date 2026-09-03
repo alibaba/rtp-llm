@@ -14,6 +14,7 @@ using block_transfer_engine_test::makeTestDevicePool;
 using block_transfer_engine_test::makeTestGroupBase;
 using block_transfer_engine_test::makeTestGroupSet;
 using block_transfer_engine_test::makeTestTopology;
+using block_transfer_engine_test::makeHostPool;
 
 GroupBase makeGroupBase(std::vector<int> layer_ids, bool reusable = true) {
     auto policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
@@ -77,6 +78,22 @@ TEST(GroupSetTest, ForwardsTreeReferencesToDevicePools) {
     group->unreferenceBlocks(resource, BlockTreeRefType::LOAD);
     EXPECT_FALSE(pool_a->isAllocated(*block_a));
     EXPECT_FALSE(pool_b->isAllocated(*block_b));
+}
+
+TEST(GroupSetTest, ReleasesLowerTierTreeReferencesInBatch) {
+    const auto topology    = makeTestTopology({makeGroupBase({0})});
+    const auto device_pool = makeTestDevicePool({{64, 16}}, 2, "group_set_batch_release_device");
+    const auto host_pool   = makeHostPool(/*payload_bytes=*/80, /*usable_count=*/2, /*enable_pinned=*/false);
+    const auto group       = makeTestGroupSet(0, topology, {0}, {device_pool}, host_pool);
+    const auto blocks      = group->allocateBlocks(2, Tier::HOST, BlockTreeRefType::EVICTION);
+    ASSERT_TRUE(blocks.has_value());
+    ASSERT_EQ(blocks->size(), 2u);
+    ASSERT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 2u);
+
+    group->releaseBlocks(Tier::HOST, *blocks, BlockTreeRefType::EVICTION);
+
+    EXPECT_EQ(host_pool->freeBlocksNum(), 2u);
+    EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
 }
 
 TEST(GroupSetTest, BatchOuterReferenceRejectsInvalidTailWithoutMutatingPrefix) {

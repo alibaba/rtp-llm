@@ -421,7 +421,7 @@ void BlockTreeLoader::abortLoadLocked(const std::vector<TransferDescriptor>& loa
         }
         tree_->groupSets()[desc.group_set_id]->unreferenceBlocks(resource, BlockTreeRefType::LOAD);
         if (desc.node->group_set_resources[desc.group_set_id].transfer_detached) {
-            evictor_.discardDetachedTransfer(desc);
+            evictor_.discardDetachedTransfer({desc});
             tree_data_mutated = true;
             continue;
         }
@@ -517,7 +517,7 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&                    
 
         GroupSetResource& resource = desc.node->group_set_resources[desc.group_set_id];
         if (resource.transfer_detached) {
-            evictor_.discardDetachedTransfer(desc);
+            evictor_.discardDetachedTransfer({desc});
             tree_data_mutated = true;
             state_settled     = true;
             continue;

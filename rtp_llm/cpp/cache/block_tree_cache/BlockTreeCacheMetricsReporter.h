@@ -96,11 +96,10 @@ public:
     std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>
          collectCacheReuseTimeMetrics(const std::vector<BlockTreeCacheReuseTimeSample>& samples) const;
     void reportCacheReuseTimeMetrics(const std::vector<BlockTreeCacheReuseTimeMetricsSnapshot>& snapshots) const;
-    void reportEvictionFinished(const EvictionTransferTask&     task,
-                                Tier                            settled_target_tier,
-                                const std::vector<GroupSetPtr>& group_sets) const;
+    void reportEvictionFinished(const EvictionTransferTask& task, const std::vector<GroupSetPtr>& group_sets) const;
     void reportEvictionFinished(const EvictionDropTask& task, const std::vector<GroupSetPtr>& group_sets) const;
     void reportEvictionTriggered(Tier source_tier, CacheGroupType group_type, bool force_drop) const;
+    void reportWatermarkRequired(Tier tier, CacheGroupType group_type, size_t required_blocks) const;
 
     int64_t reportTransferStarted(CacheTransferOperation operation, Tier source_tier, Tier target_tier);
     void    reportTransferFinished(CacheTransferOperation                 operation,

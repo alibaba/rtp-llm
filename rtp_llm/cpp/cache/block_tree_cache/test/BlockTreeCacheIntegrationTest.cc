@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <functional>
 #include <future>
@@ -522,8 +523,9 @@ std::vector<BlockIdxType> allocatedBlocksSnapshot(const IBlockPool& pool) {
 
 void runSingleMaintenance(FullSWAEnvironment& environment, Tier tier, double ratio) {
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment.cache, tier, ratio);
-    environment.runMaintenance();
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*environment.cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment.cache, tier, 0.0);
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment.cache);
 }
 
 void demoteSwaSuffixKeepingFullDevice(FullSWAEnvironment& environment) {
@@ -576,16 +578,69 @@ public:
         ASSERT_EQ(cache.task_pool_->pending_tasks_.load(), 0);
         {
             std::lock_guard<std::mutex> lock(cache.mutex_);
-            cache.config_.watermark_host.ratio   = 0.0;
-            cache.config_.watermark_disk.ratio   = 0.0;
-            cache.config_.watermark_device.ratio = ratio;
+            cache.config_.watermark_host   = {};
+            cache.config_.watermark_disk   = {};
+            cache.config_.watermark_device = {ratio, std::nextafter(ratio, 1.0)};
             cache.checkWatermark();
-            cache.config_.watermark_device.ratio = 0.0;
+            cache.config_.watermark_device = {};
         }
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(cache);
         EXPECT_EQ(cache.task_pool_->pending_tasks_.load(), 0);
     }
 };
+
+TEST_F(BlockTreeCacheIntegrationTest, WatermarkChecksLowerTierBeforeUpperTier) {
+    constexpr size_t payload_bytes = 16;
+    auto             device_pool   = makeDevicePool({{payload_bytes, 0}}, 2, "lower_to_upper_watermark");
+    auto             host_pool     = makeHostPool(payload_bytes, 2);
+    auto             disk_pool     = makeDiskPool(payload_bytes, 4, std::make_unique<MemoryDiskBlockIO>());
+    ASSERT_NE(device_pool, nullptr);
+    ASSERT_NE(host_pool, nullptr);
+    ASSERT_NE(disk_pool, nullptr);
+
+    auto group = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, disk_pool);
+    BlockTreeCacheConfig config;
+    config.enable_host_cache                                  = true;
+    config.enable_disk_cache                                  = true;
+    config.watermark_device                                   = {/*low_ratio=*/0.01, /*high_ratio=*/0.02};
+    config.watermark_host                                     = {/*low_ratio=*/0.01, /*high_ratio=*/0.02};
+    config.task_pool_size                                     = 1;
+    config.max_descriptors_per_transfer_batch                 = 1;
+    config.max_descriptors_per_non_device_host_transfer_batch = 1;
+
+    std::vector<GroupSetPtr> groups{group};
+    auto                     cache = makeBlockTreeCacheForTest(std::move(groups), config);
+    ASSERT_NE(cache, nullptr);
+    auto scripted_copy = std::make_shared<ScriptedPerRankBlockTransferEngine>(cache->groupSets(), false);
+    BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, scripted_copy);
+
+    const MultiNodeBlocks device_blocks = allocateDeviceBlocksForTest(*group, 1, BlockTreeRefType::CACHE);
+    ASSERT_EQ(device_blocks.size(), 1u);
+    const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(host_block));
+
+    std::vector<std::vector<GroupSetResource>> device_resources(1, std::vector<GroupSetResource>(1));
+    device_resources[0][0].device_blocks = device_blocks.front();
+    ASSERT_TRUE(insertGroupSetResources(*cache, {100}, device_resources));
+    unreferenceDeviceBlocksForTest(*group, device_blocks, BlockTreeRefType::CACHE);
+
+    std::vector<std::vector<GroupSetResource>> host_resources(1, std::vector<GroupSetResource>(1));
+    host_resources[0][0].host_block = host_block;
+    ASSERT_TRUE(insertGroupSetResources(*cache, {200}, host_resources));
+
+    BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+
+    const std::vector<TransferDescriptor> descriptors = scripted_copy->descriptors();
+    ASSERT_FALSE(descriptors.empty());
+    EXPECT_EQ(descriptors.front().source_tier, Tier::HOST);
+    EXPECT_EQ(descriptors.front().target_tier, Tier::DISK);
+
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/100, Tier::DEVICE);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/100, Tier::HOST);
+    BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/100, Tier::DISK);
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+}
 
 TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     auto host_pool = makeHostPool(256, 8);
@@ -2689,7 +2744,12 @@ TEST_F(BlockTreeCacheIntegrationTest, MixedHostDiskFailureInstallsNoTargets) {
     std::vector<std::vector<GroupSetResource>> resources_before;
     resources_before.reserve(environment->keys.size());
     for (size_t path_index = 0; path_index < environment->keys.size(); ++path_index) {
-        resources_before.push_back(environment->resourcesForPathNode(path_index));
+        auto resources = environment->resourcesForPathNode(path_index);
+        for (size_t group_id = 0; group_id < resources.size(); ++group_id) {
+            SCOPED_TRACE("path_index=" + std::to_string(path_index) + " group_id=" + std::to_string(group_id));
+            ASSERT_EQ(resources[group_id].transfer_state, GroupSetTransferState::IDLE);
+        }
+        resources_before.push_back(std::move(resources));
     }
 
     BlockTreeMatchResult              result  = environment->cache->match(environment->keys);
@@ -2751,6 +2811,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MixedHostDiskFailureInstallsNoTargets) {
         const auto resources_after = environment->resourcesForPathNode(path_index);
         ASSERT_EQ(resources_after.size(), resources_before[path_index].size());
         for (size_t group_id = 0; group_id < resources_after.size(); ++group_id) {
+            SCOPED_TRACE("path_index=" + std::to_string(path_index) + " group_id=" + std::to_string(group_id));
             EXPECT_EQ(resources_after[group_id].device_blocks, resources_before[path_index][group_id].device_blocks);
             EXPECT_EQ(resources_after[group_id].host_block, resources_before[path_index][group_id].host_block);
             EXPECT_EQ(resources_after[group_id].disk_block, resources_before[path_index][group_id].disk_block);

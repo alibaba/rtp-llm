@@ -799,6 +799,8 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
     kv_cache_config.enable_host_cache_pinned = false;
     auto cache                               = createBlockTreeCache(config, kv_cache_config, allocator);
     ASSERT_NE(cache, nullptr);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_host.low_ratio, 0.90);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_host.high_ratio, 0.94);
 
     const auto target_groups = allocator->cacheGroups();
     ASSERT_EQ(target_groups.size(), 2u);
@@ -1172,10 +1174,11 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkSharesPendingRel
 
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
-    // Two independent primary releases satisfy the physical watermark. Both
-    // GroupSets share the pending count for their common backing pool, so the
-    // second GroupSet does not overschedule. Their distribution is not a
-    // fairness contract.
+    // The first GroupSet submits the two descriptors required to move the
+    // shared pool from six used blocks to low=4. Both GroupSets share the
+    // pending count for their common backing pool, so the second GroupSet does
+    // not submit an additional batch. Their distribution is not a fairness
+    // contract.
     EXPECT_EQ(scripted_copy->submittedDescriptorCount(), 2u);
     EXPECT_EQ(backing->freeBlocksNum(), 3u);
     EXPECT_LT(backing->freeBlocksNum(), backing->totalBlocksNum());
@@ -1561,7 +1564,13 @@ TEST_F(BlockTreeCacheFactoryTest, CreatesDiskCacheWithoutHostCache) {
     EXPECT_EQ(cache->config().transfer_worker_count, 4u);
     EXPECT_EQ(cache->config().device_disk_staging_block_count, 4u);
     EXPECT_EQ(cache->config().max_descriptors_per_transfer_batch, 8u);
-    EXPECT_EQ(cache->config().max_descriptors_per_non_device_host_transfer_batch, 1u);
+    EXPECT_EQ(cache->config().max_descriptors_per_non_device_host_transfer_batch, 16u);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_device.low_ratio, 0.82);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_device.high_ratio, 0.90);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_host.low_ratio, 0.0);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_host.high_ratio, 0.0);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_disk.low_ratio, 0.92);
+    EXPECT_DOUBLE_EQ(cache->config().watermark_disk.high_ratio, 0.97);
     ASSERT_FALSE(cache->groupSets().empty());
     for (const auto& group_set : cache->groupSets()) {
         ASSERT_NE(group_set, nullptr);

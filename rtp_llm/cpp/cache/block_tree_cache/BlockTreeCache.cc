@@ -36,6 +36,8 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
         mutex_,
         config_.host_cache_sync_timeout_ms,
         config_.disk_cache_sync_timeout_ms,
+        config_.max_descriptors_per_transfer_batch,
+        config_.max_descriptors_per_non_device_host_transfer_batch,
         [this](Tier tier) { return config_.isTierEnabled(tier); },
         [this](bool tree_data_mutated, bool check_watermark) {
             onWorkflowSettledLocked(tree_data_mutated, check_watermark);
@@ -188,7 +190,7 @@ int BlockTreeCache::evictForGroup(size_t group_id, size_t num_blocks) {
     size_t       reclaimed          = 0;
     bool         eviction_triggered = false;
     while (reclaimed < num_blocks) {
-        if (!evictor_.evictLocked(location->group_set_id, Tier::DEVICE, /*force_drop=*/true)) {
+        if (!evictor_.dropLocked(location->group_set_id, Tier::DEVICE, true)) {
             break;
         }
         eviction_triggered        = true;
@@ -285,12 +287,12 @@ void BlockTreeCache::onWorkflowSettledLocked(bool tree_data_mutated, bool check_
 }
 
 void BlockTreeCache::checkWatermark() {
-    for (Tier tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
+    for (Tier tier : {Tier::DISK, Tier::HOST, Tier::DEVICE}) {
         const auto watermark = config_.watermarkForTier(tier);
-        if (!config_.isTierEnabled(tier) || watermark.ratio <= 0.0) {
+        if (!config_.isTierEnabled(tier) || !watermark.enabled()) {
             continue;
         }
-        evictor_.scheduleWatermarkEvictionsLocked(tier, watermark.ratio);
+        evictor_.scheduleWatermarkEvictionsLocked(tier, watermark);
     }
 }
 

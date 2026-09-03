@@ -990,11 +990,13 @@ public:
     std::string group_type;
     std::string trigger_type;
     int64_t     evictable_candidate_count  = 0;
+    int64_t     watermark_required_blocks  = 0;
     int64_t     eviction_trigger_count     = 0;
     int64_t     tier_residence_time_ms     = 0;
     int64_t     candidate_idle_time_ms     = 0;
     int64_t     candidate_age_ms           = 0;
     bool        report_evictable           = false;
+    bool        report_watermark_required  = false;
     bool        report_eviction_trigger    = false;
     bool        report_eviction            = false;
     bool        report_tier_residence_time = false;
@@ -1009,6 +1011,7 @@ public:
 
 public:
     kmonitor::MutableMetric* evictable_candidate_count_metric            = nullptr;
+    kmonitor::MutableMetric* watermark_required_blocks_metric            = nullptr;
     kmonitor::MutableMetric* eviction_trigger_qps_metric                 = nullptr;
     kmonitor::MutableMetric* eviction_qps_metric                         = nullptr;
     kmonitor::MutableMetric* evicted_block_tier_residence_time_ms_metric = nullptr;

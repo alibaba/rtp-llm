@@ -577,6 +577,7 @@ void RtpLLMCacheTransferMetrics::report(const kmonitor::MetricsTags*         tag
 
 bool RtpLLMCacheEvictionMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(evictable_candidate_count_metric, "rtp_llm_kv_cache_evictable_candidate_count");
+    REGISTER_GAUGE_MUTABLE_METRIC(watermark_required_blocks_metric, "rtp_llm_kv_cache_watermark_required_blocks");
     REGISTER_QPS_MUTABLE_METRIC(eviction_trigger_qps_metric, "rtp_llm_kv_cache_eviction_trigger_qps");
     REGISTER_QPS_MUTABLE_METRIC(eviction_qps_metric, "rtp_llm_kv_cache_eviction_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(evicted_block_tier_residence_time_ms_metric,
@@ -593,6 +594,11 @@ void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*         tag
         kmonitor::MetricsTags evictable_tags("tier", collector->source_tier);
         evictable_tags.AddTag("group_type", collector->group_type);
         evictable_candidate_count_metric->Report(&evictable_tags, collector->evictable_candidate_count);
+    }
+    if (collector->report_watermark_required) {
+        kmonitor::MetricsTags watermark_tags("tier", collector->source_tier);
+        watermark_tags.AddTag("group_type", collector->group_type);
+        watermark_required_blocks_metric->Report(&watermark_tags, collector->watermark_required_blocks);
     }
     if (collector->report_eviction_trigger) {
         kmonitor::MetricsTags trigger_tags("trigger_type", collector->trigger_type);

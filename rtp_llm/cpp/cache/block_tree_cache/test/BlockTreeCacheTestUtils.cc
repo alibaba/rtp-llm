@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <exception>
 #include <numeric>
@@ -510,16 +511,25 @@ void BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(
 }
 
 void BlockTreeCacheTestPeer::setTierWatermarkForTest(BlockTreeCache& cache, Tier tier, double ratio) {
+    const double high_ratio = ratio == 0.0 ? 0.0 : std::nextafter(ratio, 1.0);
+    setTierWatermarkForTest(cache, tier, ratio, high_ratio);
+}
+
+void BlockTreeCacheTestPeer::setTierWatermarkForTest(BlockTreeCache& cache,
+                                                     Tier            tier,
+                                                     double          low_ratio,
+                                                     double          high_ratio) {
     std::lock_guard<std::mutex> lock(cache.mutex_);
+    const TierWatermark         watermark{low_ratio, high_ratio};
     switch (tier) {
         case Tier::DEVICE:
-            cache.config_.watermark_device.ratio = ratio;
+            cache.config_.watermark_device = watermark;
             break;
         case Tier::HOST:
-            cache.config_.watermark_host.ratio = ratio;
+            cache.config_.watermark_host = watermark;
             break;
         case Tier::DISK:
-            cache.config_.watermark_disk.ratio = ratio;
+            cache.config_.watermark_disk = watermark;
             break;
         default:
             break;
@@ -569,7 +579,8 @@ bool BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(BlockTreeCache& cache,
     if (!cache.config_.isTierEnabled(tier)) {
         return false;
     }
-    return cache.evictor_.evictLocked(group_set_id, tier, force_drop);
+    return force_drop ? cache.evictor_.dropLocked(group_set_id, tier, /*notify_settled=*/true) :
+                        cache.evictor_.batchEvictLocked(group_set_id, tier, /*max_victim_count=*/1);
 }
 
 int BlockTreeCacheTestPeer::reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier) {
@@ -582,7 +593,7 @@ int BlockTreeCacheTestPeer::reclaimBlocksForTest(BlockTreeCache& cache, size_t n
     for (size_t attempt = 0; attempt < num_blocks; ++attempt) {
         bool evicted = false;
         for (const GroupSetPtr& group_set : cache.tree_->groupSets()) {
-            if (cache.evictor_.evictLocked(group_set->groupSetId(), tier, /*force_drop=*/true)) {
+            if (cache.evictor_.dropLocked(group_set->groupSetId(), tier, /*notify_settled=*/true)) {
                 evicted = true;
                 break;
             }

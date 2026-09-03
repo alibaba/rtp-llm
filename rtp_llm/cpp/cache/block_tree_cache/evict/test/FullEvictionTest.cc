@@ -538,7 +538,7 @@ TEST(FullPruneTest, PrunesCascadedDescendantGroupResourcesAndTopology) {
     EXPECT_EQ(cache->getStats().device_heap_total_size, 2u);
 }
 
-TEST(FullPruneTest, RefreshesSurvivingFullResourceAfterDescendantPrune) {
+TEST(FullPruneTest, RemovesUnmatchableClosureRootAcrossFullGroups) {
     DeviceBlockPoolPtr full0_device_pool = block_tree_cache_test::makeStructuralDevicePool(0);
     DeviceBlockPoolPtr full1_device_pool = block_tree_cache_test::makeStructuralDevicePool(1);
     auto               full0_host_pool   = block_tree_cache_test::makeHostPool(1, 2);
@@ -560,12 +560,24 @@ TEST(FullPruneTest, RefreshesSurvivingFullResourceAfterDescendantPrune) {
     resources[1][1].device_blocks = {21};
     ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, {100, 200}, resources));
 
-    // FULL group 0 is complete across tiers. Dropping its HOST root prunes
-    // the descendant closure, so group 1 at [100] becomes a DEVICE leaf.
+    // Losing group 0's sole closure-root tier makes the whole FULL path
+    // unmatchable. Pruning therefore removes every group and tier in the
+    // closure, including group 1's otherwise valid DEVICE resources.
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::HOST), 1);
-    ASSERT_EQ(cache->tree()->findNode({100, 200}).size(), 1u);
-    EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 1);
-    EXPECT_EQ(cache->getStats().tree_node_count, 0u);
+    EXPECT_TRUE(cache->tree()->findNode({100, 200}).empty());
+
+    const CacheStats stats = cache->getStats();
+    EXPECT_EQ(stats.tree_node_count, 0u);
+    EXPECT_EQ(stats.device_heap_total_size, 0u);
+    EXPECT_EQ(stats.host_heap_total_size, 0u);
+    EXPECT_EQ(stats.disk_heap_total_size, 0u);
+    EXPECT_FALSE(full0_host_pool->isAllocated(full0_host_block));
+    EXPECT_FALSE(full0_device_pool->isAllocated(10));
+    EXPECT_FALSE(full1_device_pool->isAllocated(20));
+    EXPECT_FALSE(full1_device_pool->isAllocated(21));
+    EXPECT_EQ(full0_host_pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
+    EXPECT_EQ(full0_device_pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
+    EXPECT_EQ(full1_device_pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
 }
 
 TEST(FullPruneTest, DetachesBusyDescendantGroupResource) {
