@@ -17,15 +17,31 @@ injection is a MECHANISM inside case tests (the engine_fault / status /
 direct categories), not a suite name.
 
 Nine scenario categories (flexlb_ft/cases/, one contract theme per
-module — 86 cases total):
+module; cases self-register per module, so category totals move with
+in-flight category work — verify the current count with
+`python3 flexlb_functional_tests.py --list`):
 
-    cancel 13 | status 24 | kv 15 | balance 6 | elastic 8
-    engine_fault 13 | master 3 | admission 3 | direct 1
+    cancel | status | kv | balance | elastic
+    engine_fault | master | admission | direct
 
-(engine_fault includes the six recovery / status-gap cases — generation
-bump, KV resync, no-resurrect, short-gap tolerance, long-gap retirement,
-KV usage reset; verify with
-`python3 flexlb_functional_tests.py --list`.)
+(cancel_stream_break_decode_autonomous requires generate_stream, so the
+batch-window --list shows one fewer cancel row — profile filtering, not
+a missing case.)
+
+Outcome classification (task #101 expected-fail mechanism): every case is
+normal or a declared-finding probe (``@case(..., expected_fail=True)``).
+
+    PASS               normal case passed (contract-pass)
+    FAIL               normal case failed → gates the exit code (1)
+    FINDING-CONFIRMED  expected_fail probe failed as predicted — the
+                       declared finding stands (exit 0)
+    FINDING-RESOLVED   expected_fail probe unexpectedly passed — the
+                       finding was FIXED; counted and reported for mark
+                       review (exit 0)
+
+Verdict roll-up and exit code consume ONLY normal cases: a declared
+finding never renders the suite verdict unusable, so CI can gate on the
+contract cases while findings are tracked as first-class outcomes.
 
 Usage:
     python3 flexlb_functional_tests.py --category all --profile batch-window
@@ -75,6 +91,30 @@ ALL_CASES: list[CaseDef] = (
 
 # CLI spelling (kebab-case) -> CaseDef.category (python identifier).
 CATEGORY_ALIASES = {"engine-fault": "engine_fault"}
+
+# ── Three-way outcome classification (task #101 expected-fail) ─────────────
+
+STATUS_PASS = "PASS"  # normal case passed (contract-pass)
+STATUS_FAIL = "FAIL"  # normal case failed → exit 1
+# Declared-finding probe failed as predicted — the finding stands.
+STATUS_FINDING_CONFIRMED = "FINDING-CONFIRMED"
+# Declared-finding probe unexpectedly passed — the finding was fixed;
+# reported for mark review, never silently absorbed.
+STATUS_FINDING_RESOLVED = "FINDING-RESOLVED"
+
+
+def classify_outcome(expected_fail: bool, ok: bool) -> str:
+    """Three-way classification of one case outcome (task #101).
+
+    Normal cases: PASS / FAIL.  Declared-finding probes (expected_fail —
+    contract written per the CORRECT behaviour, current master known not
+    to satisfy it): FINDING-CONFIRMED when they fail as predicted,
+    FINDING-RESOLVED when they unexpectedly pass.  Neither finding class
+    enters failed_count / the verdict roll-up / the exit code.
+    """
+    if not expected_fail:
+        return STATUS_PASS if ok else STATUS_FAIL
+    return STATUS_FINDING_RESOLVED if ok else STATUS_FINDING_CONFIRMED
 
 
 def main():
@@ -143,16 +183,20 @@ def main():
 
     if args.list:
         print(
-            f"{'NAME':<40} {'CATEGORY':<14} {'PROFILES':<20} {'REQUIRES':<24} {'SOURCE'}"
+            f"{'NAME':<40} {'CATEGORY':<14} {'PROFILES':<20} {'REQUIRES':<24} "
+            f"{'FINDING':<17} {'SOURCE'}"
         )
-        print("-" * 120)
+        print("-" * 140)
         for c in cases:
             profiles = ",".join(c.profiles) if c.profiles else "all"
             requires = ",".join(c.requires) if c.requires else "-"
+            finding = "expected-fail" if c.expected_fail else "-"
             print(
-                f"{c.name:<40} {c.category:<14} {profiles:<20} {requires:<24} {c.source}"
+                f"{c.name:<40} {c.category:<14} {profiles:<20} {requires:<24} "
+                f"{finding:<17} {c.source}"
             )
-        print(f"\nTotal: {len(cases)} cases")
+        n_findings = sum(1 for c in cases if c.expected_fail)
+        print(f"\nTotal: {len(cases)} cases ({n_findings} expected-fail probes)")
         return 0
 
     if not cases:
@@ -172,8 +216,10 @@ def main():
     )
 
     results = []
-    passed_count = 0
-    failed_count = 0
+    passed_count = 0  # contract-pass (normal cases only)
+    failed_count = 0  # normal-case failures — the ONLY exit-code gate
+    finding_confirmed = 0
+    finding_resolved = 0
 
     print(f"\n{'='*60}")
     print(
@@ -183,7 +229,9 @@ def main():
     print(f" {len(cases)} cases, run_root={run_root}")
     print(f"{'='*60}\n")
 
-    graded_achieved: list[str] = []  # achieved grade per graded case (verdict roll-up)
+    graded_achieved: list[str] = []  # achieved grade per NORMAL graded case
+    # (verdict roll-up — task #101: an expected_fail graded case's achieved
+    # is finding evidence, not suite quality; see grade.overall_verdict)
 
     for i, case in enumerate(cases, 1):
         print(f"[{i}/{len(cases)}] {case.name} ... ", end="", flush=True)
@@ -201,9 +249,12 @@ def main():
         except Exception as e:
             ok, detail = False, f"EXCEPTION: {e}\n{traceback.format_exc()}"
         duration_ms = int((time.monotonic() - t0) * 1000)
-        status = "PASS" if ok else "FAIL"
+        status = classify_outcome(case.expected_fail, ok)
         achieved = report.achieved if report is not None else None
-        if report is not None:
+        # Verdict roll-up takes ONLY normal graded cases (task #101): an
+        # expected_fail graded case's achieved (e.g. kv_storm_hot_churn's
+        # band failure) is finding evidence, not suite quality.
+        if report is not None and not case.expected_fail:
             graded_achieved.append(report.achieved)
         results.append(
             {
@@ -211,16 +262,17 @@ def main():
                 "name": case.name,
                 "profile": args.profile,
                 "status": status,
+                "expected_fail": case.expected_fail,
                 "duration_ms": duration_ms,
                 "detail": detail if not ok else "",
                 **({"grade": report.to_dict()} if report is not None else {}),
             }
         )
         grade_note = f" [{achieved}]" if achieved else ""
-        if ok:
+        if status == STATUS_PASS:
             passed_count += 1
             print(f"PASS{grade_note} ({duration_ms}ms)")
-        else:
+        elif status == STATUS_FAIL:
             failed_count += 1
             print(f"FAIL{grade_note} ({duration_ms}ms)")
             if detail:
@@ -228,6 +280,22 @@ def main():
                     print(f"    {line}")
             if report is not None and report.results:
                 print(f"    grades: {report.summary()}")
+        elif status == STATUS_FINDING_CONFIRMED:
+            finding_confirmed += 1
+            print(f"FINDING-CONFIRMED{grade_note} ({duration_ms}ms)")
+            # The failing detail IS the finding evidence — surface it.
+            if detail:
+                for line in str(detail).split("\n")[:5]:
+                    print(f"    {line}")
+            if report is not None and report.results:
+                print(f"    grades: {report.summary()}")
+        else:  # STATUS_FINDING_RESOLVED
+            finding_resolved += 1
+            print(f"FINDING-RESOLVED{grade_note} ({duration_ms}ms)")
+            print(
+                "    probe unexpectedly PASSED — the declared finding looks "
+                "fixed; review the expected_fail mark"
+            )
 
     # Teardown
     if not args.keep:
@@ -236,7 +304,17 @@ def main():
 
     # Summary
     print(f"\n{'='*60}")
-    print(f" Results: {passed_count} PASS / {failed_count} FAIL / {len(cases)} total")
+    print(
+        f" Results: {passed_count} PASS / {failed_count} FAIL / "
+        f"{finding_confirmed} finding-confirmed / "
+        f"{finding_resolved} finding-resolved / {len(cases)} total"
+    )
+    if finding_confirmed or finding_resolved:
+        print(
+            f" Findings: {finding_confirmed} confirmed (expected-fail probes "
+            f"failed as declared), {finding_resolved} resolved (probes "
+            f"unexpectedly PASSED — review the expected_fail marks)"
+        )
     verdict = overall_verdict(graded_achieved)
     if verdict is not None:
         print(
@@ -247,9 +325,30 @@ def main():
     print(f"{'='*60}\n")
 
     if args.json:
-        Path(args.json).write_text(json.dumps(results, indent=2, ensure_ascii=False))
+        # JSON payload (task #101): summary block first (CI reads the counts
+        # and the exit code without scanning the case rows), then the
+        # per-case rows — each row carries expected_fail plus the four-way
+        # status (PASS / FAIL / FINDING-CONFIRMED / FINDING-RESOLVED).
+        exit_code = 1 if failed_count > 0 else 0
+        payload = {
+            "summary": {
+                "total": len(cases),
+                "passed": passed_count,
+                "failed": failed_count,
+                "finding_confirmed": finding_confirmed,
+                "finding_resolved": finding_resolved,
+                "verdict": verdict,
+                "exit_code": exit_code,
+            },
+            "cases": results,
+        }
+        Path(args.json).write_text(json.dumps(payload, indent=2, ensure_ascii=False))
         print(f"JSON written to {args.json}")
 
+    # Exit code (task #101): only NORMAL-case failures gate CI.  A pure
+    # finding-confirmed run exits 0 — findings are the suite's product,
+    # not an unstable verdict; finding-resolved runs also exit 0 (flagged
+    # in the summary / JSON for mark review instead).
     return 1 if failed_count > 0 else 0
 
 

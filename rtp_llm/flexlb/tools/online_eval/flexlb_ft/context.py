@@ -39,7 +39,9 @@ class CaseDef:
     profiles apply).  ``requires`` declares semantic capabilities the case
     needs (vocabulary: see harness.PROFILE_CAPS, e.g. ``enqueue_batch``,
     ``generate_stream``); a case runs only under profiles whose capability
-    set is a superset.
+    set is a superset.  ``expected_fail`` (task #101) declares a
+    declared-finding probe — see the field note below and the runner's
+    three-way outcome classification.
     """
 
     name: str  # e.g. cancel_basic
@@ -48,6 +50,16 @@ class CaseDef:
     profiles: Optional[List[str]] = None  # None = all profiles apply
     requires: Optional[List[str]] = None  # semantic capability requirements
     source: str = ""  # legacy script this was ported from
+    # Declared-finding probe (task #101 expected-fail mechanism): the case's
+    # assertions state the CORRECT contract while the current master is
+    # known not to satisfy it — failing IS the confirmation of the finding.
+    # The runner classifies such a case as finding-confirmed (failed as
+    # predicted) or finding-resolved (unexpectedly passed — the finding was
+    # fixed); NEITHER class enters failed_count / the suite verdict / the
+    # exit code, so a declared finding never renders the whole suite
+    # unusable for CI gating.  Marked per-case via the category modules'
+    # @case(..., expected_fail=True); default False = normal contract case.
+    expected_fail: bool = False
 
 
 class CaseContext:

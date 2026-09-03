@@ -47,7 +47,19 @@ from ..harness import (
 CANCEL_CASES: list[CaseDef] = []
 
 
-def case(name: str, profiles=None, requires=None, source: str = ""):
+def case(
+    name: str,
+    profiles=None,
+    requires=None,
+    source: str = "",
+    expected_fail: bool = False,
+):
+    """Register into CANCEL_CASES (category is always "cancel").
+
+    ``expected_fail=True`` declares a declared-finding probe (task #101):
+    failing confirms the finding, passing resolves it — neither counts
+    toward failed_count / the suite verdict / the exit code."""
+
     def deco(fn):
         CANCEL_CASES.append(
             CaseDef(
@@ -57,6 +69,7 @@ def case(name: str, profiles=None, requires=None, source: str = ""):
                 profiles=profiles,
                 requires=requires,
                 source=source,
+                expected_fail=expected_fail,
             )
         )
         return fn
@@ -82,8 +95,9 @@ def _schedule_with_priority(ops, request_id: int, priority: int, **kwargs):
     """Schedule RPC carrying an explicit priority (proto field 14).
 
     EngineOps.build_schedule_request does not expose the priority kwarg
-    yet; the legacy flexlb_smoke_base._build_schedule_request proved the
-    proto carries it ("Priority must be carried by the schedule protocol;
+    yet; the legacy smoke client's schedule builder (since removed with the
+    rest of the smoke family) proved the proto carries it ("Priority must be
+    carried by the schedule protocol;
     embedding it only in unique_key metadata does not reach Auto-TPM
     admission").  Rather than widening engine_ops.py from the cancel
     category (other agents own the neighbouring modules), set the field
@@ -1046,8 +1060,8 @@ def cancel_preemption_victim(ctx: CaseContext):
     went out); the P70 request completes normally once the slot frees;
     the master inflight ledger drains with no leak; recovery works.
 
-    Prediction: expected to pass — this is the priority_preemption_smoke
-    scenario (RUNNING decode victim, batch default) ported onto the
+    Prediction: expected to pass — this is the legacy priority-preemption
+    smoke scenario (RUNNING decode victim, batch default) ported onto the
     flexlb_ft framework; capacity here comes from maxEngineRequests=1
     instead of the smoke line's KV pressure so the eviction trigger is
     deterministic.  Priority rides the Schedule proto's priority field

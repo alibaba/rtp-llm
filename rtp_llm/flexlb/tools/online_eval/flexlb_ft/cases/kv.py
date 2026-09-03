@@ -135,7 +135,19 @@ CONFLICT_SEED_INPUT_LEN = 147456
 E4_PROBE_DEADLINE_S = 5.0
 
 
-def case(name: str, profiles=None, requires=None, source: str = ""):
+def case(
+    name: str,
+    profiles=None,
+    requires=None,
+    source: str = "",
+    expected_fail: bool = False,
+):
+    """Register into KV_CASES (category is always "kv").
+
+    ``expected_fail=True`` declares a declared-finding probe (task #101):
+    failing confirms the finding, passing resolves it — neither counts
+    toward failed_count / the suite verdict / the exit code."""
+
     def deco(fn):
         KV_CASES.append(
             CaseDef(
@@ -145,6 +157,7 @@ def case(name: str, profiles=None, requires=None, source: str = ""):
                 profiles=profiles,
                 requires=requires,
                 source=source,
+                expected_fail=expected_fail,
             )
         )
         return fn
@@ -1323,6 +1336,7 @@ def kv_g_engine_down_cleanup(ctx: CaseContext):
 @case(
     "kv_storm_hot_churn",
     source="kv family: hot-prefix churn storm vs small LRU (task #84)",
+    expected_fail=True,
 )
 def kv_storm_hot_churn(ctx: CaseContext):
     """[storm] Rotating hot prefixes vs a small LRU — FINDING case.
@@ -1345,6 +1359,15 @@ def kv_storm_hot_churn(ctx: CaseContext):
     and the hit rate collapses; THAT COLLAPSE IS THE FINDING (no
     replication suppression / admission control in the KV sync
     layer), not a flake to retry away.
+
+    Expected-fail marking (task #101): the hit-rate collapse is the
+    DECLARED finding, so the case is marked expected_fail — a failure
+    classifies as finding-confirmed (the finding stands, exit 0), an
+    unexpected pass as finding-resolved (replication suppression /
+    admission control landed; review the mark).  The M3/P6 grade
+    report still records the achieved bands as finding evidence, but
+    its achieved grade is EXCLUDED from the suite verdict roll-up
+    (grade.py task #101 contract).
     """
     env = ctx.env_manager.ensure(
         _kv_spec(ctx, "_storm", prefill_cache_blocks=STORM_CAPACITY_BLOCKS)

@@ -37,7 +37,19 @@ STREAM_TIMEOUT_S = 15.0
 MASTER_EVICT_S = 30.0
 
 
-def case(name: str, profiles=None, requires=None, source: str = ""):
+def case(
+    name: str,
+    profiles=None,
+    requires=None,
+    source: str = "",
+    expected_fail: bool = False,
+):
+    """Register into MASTER_CASES (category is always "master").
+
+    ``expected_fail=True`` declares a declared-finding probe (task #101):
+    failing confirms the finding, passing resolves it — neither counts
+    toward failed_count / the suite verdict / the exit code."""
+
     def deco(fn):
         MASTER_CASES.append(
             CaseDef(
@@ -47,6 +59,7 @@ def case(name: str, profiles=None, requires=None, source: str = ""):
                 profiles=profiles,
                 requires=requires,
                 source=source,
+                expected_fail=expected_fail,
             )
         )
         return fn
