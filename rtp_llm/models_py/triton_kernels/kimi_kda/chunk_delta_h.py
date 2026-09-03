@@ -158,8 +158,12 @@ def chunk_gated_delta_rule_fwd_h_cublas(
             else:
                 h[batch_index, target_chunk] = stored_state
 
-            w_chunk = w[batch_index, start:stop].permute(1, 0, 2).contiguous()
-            u_chunk = u[batch_index, start:stop].permute(1, 0, 2).contiguous()
+            # baddbmm accepts the head-interleaved strided views directly.
+            # Materializing both chunks here adds two D2D copies per Python
+            # iteration (2,048 copies per layer at a 65K context) without
+            # changing the CUDA BLAS result.
+            w_chunk = w[batch_index, start:stop].permute(1, 0, 2)
+            u_chunk = u[batch_index, start:stop].permute(1, 0, 2)
             new_value = torch.baddbmm(
                 u_chunk.float(),
                 w_chunk,
