@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/model_rpc/DecodeGenerateContext.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 
 namespace rtp_llm {
 
@@ -94,6 +95,17 @@ private:
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);
     static std::vector<MTPModuleLoadPlan> makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params);
+    // Projects the producer's buildCacheStorePlan onto one group's decode block
+    // table: key_index indexes the global cache keys, offset_index the group-local
+    // BlockIds::blocks(). Derived from group policy plus block geometry only, never
+    // from how many prefill peers answered this load. Static so it is testable.
+    static std::vector<CacheStoreBlockPair> buildGroupLoadPlan(const CacheGroupPolicy& policy,
+                                                               size_t                  local_block_num,
+                                                               size_t                  cache_key_count,
+                                                               size_t                  reuse_block_size,
+                                                               bool                    use_hybrid,
+                                                               size_t                  group_seq_size_per_block,
+                                                               size_t                  base_seq_size_per_block);
     static grpc::Status                   generateRequestReadFailureStatus(bool cancelled);
     // Classifies error.type for the synthesized Decode phase spans. Static and
     // side-effect free so the classification itself is unit testable.

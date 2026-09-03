@@ -8,7 +8,7 @@ import sys
 import time
 import traceback
 from contextlib import ExitStack
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 from filelock import FileLock, Timeout
 
@@ -93,6 +93,7 @@ class DeviceResource:
                 f"required gpu count {required_gpu_count} is greater than total gpu count {len(self.total_gpus)}"
             )
         self.gpu_ids: List[int] = []
+        self.candidate_groups: Optional[List[List[int]]] = None
         self.gpu_locks = ExitStack()
         self.global_lock_file = "/tmp/rtp_llm/smoke/test/gpu_status_lock"
         self.gpu_status_root_path = "/tmp/rtp_llm/smoke/test/gpu_status"
@@ -203,14 +204,14 @@ class DeviceResource:
                 gpu_ids = []
                 with ExitStack() as group_stack:
                     for id in group:
-                        if self._has_zombie_gpu_contexts(str(id)):
-                            logging.info(f"skip GPU {id}: zombie CUDA contexts detected")
-                            break
                         lock_device = FileLock(f"{self.gpu_status_root_path}/{id}")
                         try:
-                            group_stack.enter_context(lock_device.acquire(timeout=1))
+                            group_stack.enter_context(lock_device.acquire(timeout=0))
                         except Timeout as _:
                             logging.info(f"lock device {id} failed")
+                            break
+                        if self._has_zombie_gpu_contexts(str(id)):
+                            logging.info(f"skip GPU {id}: zombie CUDA contexts detected")
                             break
                         gpu_ids.append(str(id))
                         logging.info(f"{get_ip()} lock device {id} done")
@@ -223,8 +224,11 @@ class DeviceResource:
         return False
 
     def _candidate_gpu_groups(self) -> List[List[int]]:
+        if self.candidate_groups is not None:
+            return self.candidate_groups
         if self.required_gpu_count <= 1:
-            return [[id] for id in self.total_gpus]
+            self.candidate_groups = [[id] for id in self.total_gpus]
+            return self.candidate_groups
 
         numa_groups = self._get_topology_numa_groups()
         candidates: List[List[int]] = []
@@ -239,13 +243,17 @@ class DeviceResource:
                     seen.add(key)
                     candidates.append(candidate)
 
-        if not candidates:
-            for start in range(0, len(self.total_gpus), self.required_gpu_count):
-                candidate = self.total_gpus[start : start + self.required_gpu_count]
-                if len(candidate) == self.required_gpu_count:
-                    candidates.append(candidate)
+        # NUMA grouping is only a preference: fall back to every window over the
+        # visible GPUs so a busy NUMA node can never starve the whole request.
+        for start in range(0, len(self.total_gpus) - self.required_gpu_count + 1):
+            candidate = self.total_gpus[start : start + self.required_gpu_count]
+            key = tuple(candidate)
+            if key not in seen:
+                seen.add(key)
+                candidates.append(candidate)
         if candidates:
             logging.info(f"candidate gpu groups: {candidates}")
+        self.candidate_groups = candidates
         return candidates
 
     def _get_topology_numa_groups(self) -> List[List[int]]:
@@ -258,17 +266,23 @@ class DeviceResource:
             )
             if result.returncode != 0:
                 return []
+            numa_column = -1
             groups: Dict[str, List[int]] = {}
             for raw_line in result.stdout.splitlines():
-                line = raw_line.strip()
-                if not line.startswith("GPU"):
+                columns = [column.strip() for column in raw_line.split("\t")]
+                if numa_column < 0:
+                    if "NUMA Affinity" in columns:
+                        numa_column = columns.index("NUMA Affinity")
                     continue
-                parts = line.split()
-                if len(parts) < 3 or not parts[0][3:].isdigit():
+                name = columns[0]
+                if not name.startswith("GPU") or not name[3:].isdigit():
                     continue
-                gpu_id = int(parts[0][3:])
-                numa_id = parts[-2]
-                groups.setdefault(numa_id, []).append(gpu_id)
+                if numa_column >= len(columns):
+                    continue
+                numa_id = columns[numa_column]
+                if not numa_id.isdigit():
+                    continue
+                groups.setdefault(numa_id, []).append(int(name[3:]))
             return [sorted(group) for _, group in sorted(groups.items())]
         except Exception:
             return []
