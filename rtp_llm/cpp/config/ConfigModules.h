@@ -4,7 +4,9 @@
 #include <sstream>
 #include <map>
 #include <vector>
+#include "rtp_llm/cpp/config/MMTransportMode.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
+#include "rtp_llm/cpp/config/RdmaConfig.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 
 namespace rtp_llm {
@@ -333,9 +335,26 @@ struct SpeculativeExecutionConfig {
     static std::string     to_string(SpeculativeType type);
 };
 
+struct MMControlConfig {
+    // Best-effort release RPC deadline.
+    int64_t release_timeout_ms = 1000;
+};
+
+struct MMTransportConfig {
+    std::string     mode = kMMTransportModeGrpc;
+    MMControlConfig control;
+    RdmaConfig      rdma;
+    // LLM-to-ViT RPC budget when no request input sets mm_timeout_ms.
+    int64_t default_rpc_timeout_ms = 125 * 1000;
+    // Let the ViT worker return its structured timeout before the client deadline.
+    int64_t rpc_timeout_margin_ms = 5 * 1000;
+};
+
 struct VitConfig {
-    VitSeparation vit_separation = VitSeparation::VIT_SEPARATION_LOCAL;
-    std::string   to_string() const;
+    VitSeparation     vit_separation = VitSeparation::VIT_SEPARATION_LOCAL;
+    MMTransportConfig output_transport;
+
+    std::string to_string() const;
 };
 
 struct CacheStoreConfig {

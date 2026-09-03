@@ -25,6 +25,12 @@ cc_library(
 )
 
 cc_library(
+    name = "rdma_config",
+    hdrs = ["RdmaConfig.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "config_modules",
     hdrs = ["ConfigModules.h"],
     srcs = ["ConfigModules.cc"],
@@ -32,6 +38,8 @@ cc_library(
         "@havenask//aios/autil:env_util",
         ":role_types",
         ":eplb_config",
+        ":mm_transport_mode",
+        ":rdma_config",
         "//rtp_llm/models_py/bindings/core:types",
     ],
     copts = copts(),
@@ -41,6 +49,13 @@ cc_library(
     name = "eplb_config",
     hdrs = ["EplbConfig.h"],
     srcs = ["EplbConfig.cc"],
+    visibility = ["//visibility:public"],
+    copts = copts(),
+)
+
+cc_library(
+    name = "mm_transport_mode",
+    hdrs = ["MMTransportMode.h"],
     visibility = ["//visibility:public"],
     copts = copts(),
 )
