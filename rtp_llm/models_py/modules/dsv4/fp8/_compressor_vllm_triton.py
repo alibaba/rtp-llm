@@ -689,6 +689,239 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     tl.store(scale_ptr.to(tl.pointer_type(tl.float32)), scale_val)
 
 
+@triton.jit
+def _fused_kpool_decode_update_kernel(
+    state_cache_ptr,
+    state_cache_stride0,
+    state_cache_stride1,
+    state_block_table_ptr,
+    state_block_table_stride0,
+    state_block_table_cols,
+    state_slots_ptr,
+    kv_buf_fp8_ptr,
+    kv_buf_fp32_ptr,
+    kv_slot_mapping_ptr,
+    key_ptr,
+    key_stride_b,
+    key_stride_t,
+    score_ptr,
+    score_stride_b,
+    score_stride_t,
+    ape_ptr,
+    ape_stride0,
+    positions_ptr,
+    next_n,
+    state_tokens_per_block,
+    KV_PAGE_SIZE: tl.constexpr,
+    KV_PAGE_BYTES: tl.constexpr,
+    KV_SCALE_OFFSET_BYTES: tl.constexpr,
+    STATE_RING_ENTRIES: tl.constexpr,
+    STATE_WIDTH: tl.constexpr,
+    NUM_STATE_BLOCKS: tl.constexpr,
+    POOL_SIZE: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    ROUND_SCALE: tl.constexpr,
+    TRAP_INVALID_KV_ACCESS: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    """Ordered per-request KPool update for decode and MTP verification.
+
+    One program iterates a request's decode tokens in position order.  At a
+    pool boundary it reads prior prompt values from the paged FP32 state ring,
+    uses raw rows for tokens in this invocation, compresses the completed pool,
+    and finally stashes the current row for later decode steps.  The ordering
+    prevents a future MTP token from overwriting a ring slot needed by an
+    earlier boundary in the same invocation.
+    """
+
+    req = tl.program_id(0)
+    offsets = tl.arange(0, BLOCK_D)
+    dim_mask = offsets < HEAD_DIM
+    req_start_idx = req * next_n
+    req_start_pos = tl.load(positions_ptr + req_start_idx).to(tl.int64)
+
+    for token_offset in tl.range(0, next_n):
+        token_idx = req_start_idx + token_offset
+        position = tl.load(positions_ptr + token_idx).to(tl.int64)
+        position_valid = position >= 0
+        safe_position = tl.maximum(position, 0)
+        key = tl.load(
+            key_ptr + req * key_stride_b + token_offset * key_stride_t + offsets,
+            mask=dim_mask & position_valid,
+            other=0.0,
+        ).to(tl.float32)
+        score_current = tl.load(
+            score_ptr + req * score_stride_b + token_offset * score_stride_t + offsets,
+            mask=dim_mask & position_valid,
+            other=0.0,
+        ).to(tl.float32)
+
+        kv_slot = tl.load(kv_slot_mapping_ptr + token_idx)
+        completes_pool = (
+            position_valid & (kv_slot >= 0) & ((safe_position + 1) % POOL_SIZE == 0)
+        )
+        if completes_pool:
+            pool_start = safe_position - (POOL_SIZE - 1)
+            max_score = tl.full((BLOCK_D,), -float("inf"), tl.float32)
+            for pool_slot in tl.static_range(0, POOL_SIZE):
+                pool_position = pool_start + pool_slot
+                raw_offset = pool_position - req_start_pos
+                use_raw = (raw_offset >= 0) & (raw_offset <= token_offset)
+                safe_raw_offset = tl.maximum(raw_offset, 0)
+                score_raw = tl.load(
+                    score_ptr
+                    + req * score_stride_b
+                    + safe_raw_offset * score_stride_t
+                    + offsets,
+                    mask=dim_mask & use_raw,
+                    other=0.0,
+                ).to(tl.float32)
+                ape = tl.load(
+                    ape_ptr + pool_slot * ape_stride0 + offsets,
+                    mask=dim_mask,
+                    other=0.0,
+                ).to(tl.float32)
+                score_raw += ape
+
+                logical_block = (
+                    pool_position // state_tokens_per_block
+                ) % state_block_table_cols
+                state_block = tl.load(
+                    state_block_table_ptr
+                    + req * state_block_table_stride0
+                    + logical_block
+                )
+                invalid_block = state_block >= NUM_STATE_BLOCKS
+                if invalid_block:
+                    _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+                cache_valid = (~use_raw) & (state_block > 0) & (~invalid_block)
+                safe_state_block = tl.where(cache_valid, state_block, 0).to(tl.int64)
+                state_offset = pool_position % STATE_RING_ENTRIES
+                state_base = (
+                    state_cache_ptr
+                    + safe_state_block * state_cache_stride0
+                    + state_offset * state_cache_stride1
+                )
+                score_cached = tl.load(
+                    state_base + STATE_WIDTH + offsets,
+                    mask=dim_mask & cache_valid,
+                    other=-float("inf"),
+                ).to(tl.float32)
+                pool_score = tl.where(use_raw, score_raw, score_cached)
+                max_score = tl.maximum(max_score, pool_score)
+
+            numerator = tl.full((BLOCK_D,), 0.0, tl.float32)
+            denominator = tl.full((BLOCK_D,), 0.0, tl.float32)
+            for pool_slot in tl.static_range(0, POOL_SIZE):
+                pool_position = pool_start + pool_slot
+                raw_offset = pool_position - req_start_pos
+                use_raw = (raw_offset >= 0) & (raw_offset <= token_offset)
+                safe_raw_offset = tl.maximum(raw_offset, 0)
+                key_raw = tl.load(
+                    key_ptr
+                    + req * key_stride_b
+                    + safe_raw_offset * key_stride_t
+                    + offsets,
+                    mask=dim_mask & use_raw,
+                    other=0.0,
+                ).to(tl.float32)
+                score_raw = tl.load(
+                    score_ptr
+                    + req * score_stride_b
+                    + safe_raw_offset * score_stride_t
+                    + offsets,
+                    mask=dim_mask & use_raw,
+                    other=0.0,
+                ).to(tl.float32)
+                ape = tl.load(
+                    ape_ptr + pool_slot * ape_stride0 + offsets,
+                    mask=dim_mask,
+                    other=0.0,
+                ).to(tl.float32)
+                score_raw += ape
+
+                logical_block = (
+                    pool_position // state_tokens_per_block
+                ) % state_block_table_cols
+                state_block = tl.load(
+                    state_block_table_ptr
+                    + req * state_block_table_stride0
+                    + logical_block
+                )
+                invalid_block = state_block >= NUM_STATE_BLOCKS
+                if invalid_block:
+                    _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
+                cache_valid = (~use_raw) & (state_block > 0) & (~invalid_block)
+                safe_state_block = tl.where(cache_valid, state_block, 0).to(tl.int64)
+                state_offset = pool_position % STATE_RING_ENTRIES
+                state_base = (
+                    state_cache_ptr
+                    + safe_state_block * state_cache_stride0
+                    + state_offset * state_cache_stride1
+                )
+                key_cached = tl.load(
+                    state_base + offsets,
+                    mask=dim_mask & cache_valid,
+                    other=0.0,
+                ).to(tl.float32)
+                score_cached = tl.load(
+                    state_base + STATE_WIDTH + offsets,
+                    mask=dim_mask & cache_valid,
+                    other=-float("inf"),
+                ).to(tl.float32)
+                pool_key = tl.where(use_raw, key_raw, key_cached)
+                pool_score = tl.where(use_raw, score_raw, score_cached)
+                probability = tl.exp(pool_score - max_score)
+                numerator += pool_key * probability
+                denominator += probability
+
+            result = (numerator / denominator).to(tl.bfloat16).to(tl.float32)
+            result = _glm_kpool_hadamard128(result).to(tl.bfloat16).to(tl.float32)
+
+            fp8_max = 448.0
+            absmax = tl.maximum(tl.max(tl.abs(result), axis=0), 1e-4)
+            if ROUND_SCALE:
+                scale = tl.exp2(tl.ceil(tl.log2(absmax / fp8_max)))
+            else:
+                scale = absmax / fp8_max
+            quantized = tl.minimum(tl.maximum(result / scale, -fp8_max), fp8_max)
+
+            kv_slot_i64 = kv_slot.to(tl.int64)
+            kv_page = kv_slot_i64 // KV_PAGE_SIZE
+            kv_offset = kv_slot_i64 % KV_PAGE_SIZE
+            kv_value_offsets = kv_page * KV_PAGE_BYTES + kv_offset * HEAD_DIM + offsets
+            kv_scale_offset = (
+                kv_page * KV_PAGE_BYTES // 4 + KV_SCALE_OFFSET_BYTES // 4 + kv_offset
+            )
+            tl.store(kv_buf_fp8_ptr + kv_value_offsets, quantized, mask=dim_mask)
+            tl.store(kv_buf_fp32_ptr + kv_scale_offset, scale)
+
+        # Keep the current raw row for later decode steps. State slots are
+        # pre-masked by metadata (-1 for rows that cannot survive the ring).
+        state_slot = tl.load(state_slots_ptr + token_idx)
+        stash_valid = position_valid & (state_slot >= 0)
+        safe_state_slot = tl.maximum(state_slot, 0).to(tl.int64)
+        state_block = safe_state_slot // STATE_RING_ENTRIES
+        state_offset = safe_state_slot % STATE_RING_ENTRIES
+        state_base = (
+            state_cache_ptr
+            + state_block * state_cache_stride0
+            + state_offset * state_cache_stride1
+        )
+        ape_row = safe_position % POOL_SIZE
+        ape_current = tl.load(
+            ape_ptr + ape_row * ape_stride0 + offsets,
+            mask=dim_mask & stash_valid,
+            other=0.0,
+        ).to(tl.float32)
+        tl.store(state_base + offsets, key, mask=dim_mask & stash_valid)
+        tl.store(
+            state_base + STATE_WIDTH + offsets,
+            score_current + ape_current,
+            mask=dim_mask & stash_valid,
+        )
+
+
 # =============================================================================
 # Python wrappers
 # =============================================================================
@@ -823,6 +1056,172 @@ def run_save_partial_states(
         STATE_WIDTH=state_width,
         COMPRESS_RATIO=compress_ratio,
         TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+    )
+
+
+def run_fused_kpool_decode_update(
+    state_cache: torch.Tensor,
+    state_block_table: torch.Tensor,
+    state_slots: torch.Tensor,
+    kv_cache: torch.Tensor,
+    kv_slots: torch.Tensor,
+    key: torch.Tensor,
+    score: torch.Tensor,
+    ape: torch.Tensor,
+    positions: torch.Tensor,
+    *,
+    state_tokens_per_block: int,
+    pool_size: int,
+    round_scale: bool = True,
+) -> None:
+    """Fuse KPool state update, completion, Hadamard, quant and cache write.
+
+    Inputs are grouped as ``[batch, next_n, ...]``. One Triton program owns
+    each request and iterates ``next_n`` in position order, which is required
+    when MTP verification crosses a pool boundary.
+    """
+
+    if key.dim() != 3 or int(key.shape[-1]) != 128:
+        raise ValueError(f"KPool decode key must be [B, next_n, 128], got {key.shape}")
+    if score.shape != key.shape:
+        raise ValueError(f"KPool score shape {score.shape} != key shape {key.shape}")
+    batch_size, next_n, head_dim = (int(v) for v in key.shape)
+    expected_2d = (batch_size, next_n)
+    for name, tensor in (
+        ("state_slots", state_slots),
+        ("kv_slots", kv_slots),
+        ("positions", positions),
+    ):
+        if tuple(tensor.shape) != expected_2d:
+            raise ValueError(
+                f"{name} must have shape {expected_2d}, got {tensor.shape}"
+            )
+    if ape.shape != (pool_size, head_dim):
+        raise ValueError(
+            f"KPool ape must have shape {(pool_size, head_dim)}, got {ape.shape}"
+        )
+    if state_cache.dim() != 3 or int(state_cache.shape[-1]) != 2 * head_dim:
+        raise ValueError(
+            "KPool state cache must be [blocks, ring, 256], got " f"{state_cache.shape}"
+        )
+    state_ring_entries = int(state_cache.shape[1])
+    if state_ring_entries < pool_size:
+        raise ValueError(
+            f"KPool state ring {state_ring_entries} must cover pool_size {pool_size}"
+        )
+    if (
+        state_block_table.dim() != 2
+        or int(state_block_table.shape[0]) < batch_size
+        or int(state_block_table.shape[1]) == 0
+    ):
+        raise ValueError(
+            "KPool state block table must be non-empty [B, blocks] with "
+            f"B >= {batch_size}, got {state_block_table.shape}"
+        )
+    if state_block_table.dtype not in (torch.int32, torch.int64):
+        raise TypeError(
+            "KPool state block table must be int32 or int64, got "
+            f"{state_block_table.dtype}"
+        )
+    if batch_size == 0 or next_n == 0:
+        return
+    if key.dtype not in (torch.bfloat16, torch.float32) or score.dtype not in (
+        torch.bfloat16,
+        torch.float32,
+    ):
+        raise TypeError(
+            "KPool key/score must be bfloat16 or float32, got "
+            f"{key.dtype}/{score.dtype}"
+        )
+    if state_cache.dtype != torch.float32 or ape.dtype != torch.float32:
+        raise TypeError(
+            "KPool state cache/ape must be float32, got "
+            f"{state_cache.dtype}/{ape.dtype}"
+        )
+    if kv_cache.dtype != torch.uint8:
+        raise TypeError(f"KPool KV cache must be uint8, got {kv_cache.dtype}")
+    if state_tokens_per_block <= 0:
+        raise ValueError(
+            f"state_tokens_per_block must be positive, got {state_tokens_per_block}"
+        )
+
+    named_tensors = (
+        ("state_cache", state_cache),
+        ("state_block_table", state_block_table),
+        ("state_slots", state_slots),
+        ("kv_cache", kv_cache),
+        ("kv_slots", kv_slots),
+        ("score", score),
+        ("ape", ape),
+        ("positions", positions),
+    )
+    for name, tensor in named_tensors:
+        if tensor.device != key.device:
+            raise ValueError(
+                f"KPool {name} device {tensor.device} != key device {key.device}"
+            )
+    for name, tensor in (
+        ("state_block_table", state_block_table),
+        ("state_slots", state_slots),
+        ("kv_slots", kv_slots),
+        ("positions", positions),
+    ):
+        if not tensor.is_contiguous():
+            raise ValueError(
+                f"KPool {name} must be contiguous for CUDA Graph, "
+                f"got stride={tensor.stride()}"
+            )
+    validate_slot_mapping(
+        "compressor.fused_kpool_decode.state_slots",
+        state_slots,
+        block_size=state_ring_entries,
+        num_blocks=int(state_cache.shape[0]),
+        negative_mode="skip_any",
+    )
+    validate_slot_mapping(
+        "compressor.fused_kpool_decode.kv_slots",
+        kv_slots,
+        block_size=int(kv_cache.shape[1]),
+        num_blocks=int(kv_cache.shape[0]),
+        negative_mode="skip_any",
+    )
+
+    kv_fp8 = kv_cache.view(torch.float8_e4m3fn)
+    kv_fp32 = kv_cache.view(torch.float32)
+    _fused_kpool_decode_update_kernel[(batch_size,)](
+        state_cache,
+        state_cache.stride(0),
+        state_cache.stride(1),
+        state_block_table,
+        state_block_table.stride(0),
+        state_block_table.shape[1],
+        state_slots,
+        kv_fp8,
+        kv_fp32,
+        kv_slots,
+        key,
+        key.stride(0),
+        key.stride(1),
+        score,
+        score.stride(0),
+        score.stride(1),
+        ape,
+        ape.stride(0),
+        positions,
+        next_n,
+        state_tokens_per_block,
+        KV_PAGE_SIZE=int(kv_cache.shape[1]),
+        KV_PAGE_BYTES=int(kv_cache.stride(0)),
+        KV_SCALE_OFFSET_BYTES=int(kv_cache.shape[1]) * head_dim,
+        STATE_RING_ENTRIES=state_ring_entries,
+        STATE_WIDTH=head_dim,
+        NUM_STATE_BLOCKS=int(state_cache.shape[0]),
+        POOL_SIZE=pool_size,
+        HEAD_DIM=head_dim,
+        ROUND_SCALE=round_scale,
+        TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
+        BLOCK_D=triton.next_power_of_2(head_dim),
+        num_warps=1,
     )
 
 

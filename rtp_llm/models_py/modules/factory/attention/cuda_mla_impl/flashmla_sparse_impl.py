@@ -41,6 +41,7 @@ from rtp_llm.models_py.modules.indexer_grouping import (
     IndexerGroupingGeometry,
     append_incomplete_tail_indices,
     expand_indexer_group_indices,
+    fused_expand_indexer_groups_with_tail,
 )
 from rtp_llm.models_py.triton_kernels.common.strided_slice_copy import (
     strided_slice_copy_,
@@ -269,15 +270,21 @@ class SparseMlaOp(object):
                 f"indexer topk {topk_2d.shape[1]} does not match configured "
                 f"selection topk {self.indexer_top_k}"
             )
-        expanded = expand_indexer_group_indices(
-            topk_2d,
-            self.indexer_group_size,
-            raw_sequence_lengths=raw_sequence_lengths,
-        )
+        expanded = None
         if raw_sequence_lengths is not None:
-            expanded = append_incomplete_tail_indices(
-                expanded, raw_sequence_lengths, self.indexer_group_size
+            expanded = fused_expand_indexer_groups_with_tail(
+                topk_2d, raw_sequence_lengths, self.indexer_group_size
             )
+        if expanded is None:
+            expanded = expand_indexer_group_indices(
+                topk_2d,
+                self.indexer_group_size,
+                raw_sequence_lengths=raw_sequence_lengths,
+            )
+            if raw_sequence_lengths is not None:
+                expanded = append_incomplete_tail_indices(
+                    expanded, raw_sequence_lengths, self.indexer_group_size
+                )
         if int(expanded.shape[1]) != self.top_k:
             raise RuntimeError(
                 f"expanded sparse topk width {expanded.shape[1]} does not "
@@ -314,9 +321,7 @@ class SparseMlaOp(object):
                 f"local head count {self.num_heads}"
             )
         if self.kernel_num_heads != local_heads:
-            q_padded = q.new_zeros(
-                q.shape[0], self.kernel_num_heads, q.shape[2]
-            )
+            q_padded = q.new_zeros(q.shape[0], self.kernel_num_heads, q.shape[2])
             q_padded[:, :local_heads].copy_(q)
             q = q_padded
 
@@ -569,9 +574,7 @@ class SparseMlaFp8Op(SparseMlaOp):
             ).view_as(chunk_indices)
             local_indices.masked_fill_(chunk_indices < 0, -1)
             output[start:end].copy_(
-                self._forward_sparse(
-                    q[start:end], fused_kv.unsqueeze(1), local_indices
-                )
+                self._forward_sparse(q[start:end], fused_kv.unsqueeze(1), local_indices)
             )
         return output
 

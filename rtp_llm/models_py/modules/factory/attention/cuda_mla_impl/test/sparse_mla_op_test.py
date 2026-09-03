@@ -460,16 +460,52 @@ class SparseMlaOpTest(TestCase):
             indexer_top_k=4,
             indexer_group_size=4,
         )
-        pooled = torch.tensor([[0, 1, 2, -1], [0, -1, -1, -1]], dtype=torch.int32)
-        raw_lengths = torch.tensor([10, 3], dtype=torch.int32)
-        expanded = op._prepare_local_topk_indices(pooled, raw_lengths)
+        devices = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
+        for device in devices:
+            with self.subTest(device=device):
+                pooled = torch.tensor(
+                    [[0, 1, 2, -1], [0, -1, -1, -1]],
+                    dtype=torch.int32,
+                    device=device,
+                )
+                raw_lengths = torch.tensor([10, 3], dtype=torch.int32, device=device)
+                expanded = op._prepare_local_topk_indices(pooled, raw_lengths)
 
-        self.assertEqual(tuple(expanded.shape), (2, 19))
-        self.assertEqual(expanded[0, :8].tolist(), list(range(8)))
-        self.assertTrue(torch.all(expanded[0, 8:16] == -1))
-        self.assertEqual(expanded[0, -3:].tolist(), [8, 9, -1])
-        self.assertTrue(torch.all(expanded[1, :16] == -1))
-        self.assertEqual(expanded[1, -3:].tolist(), [0, 1, 2])
+                self.assertEqual(tuple(expanded.shape), (2, 19))
+                self.assertEqual(expanded[0, :8].cpu().tolist(), list(range(8)))
+                self.assertTrue(torch.all(expanded[0, 8:16] == -1).item())
+                self.assertEqual(expanded[0, -3:].cpu().tolist(), [8, 9, -1])
+                self.assertTrue(torch.all(expanded[1, :16] == -1).item())
+                self.assertEqual(expanded[1, -3:].cpu().tolist(), [0, 1, 2])
+
+                if device == "cuda":
+                    with patch.dict(os.environ, {"GLM53_INDEXER_GROUP_FUSED": "0"}):
+                        reference = op._prepare_local_topk_indices(pooled, raw_lengths)
+                    torch.testing.assert_close(expanded, reference, rtol=0.0, atol=0.0)
+
+                    # Non-production index dtypes retain the reference dtype
+                    # through the applicability fallback.
+                    pooled_i64 = pooled.to(torch.int64)
+                    expanded_i64 = op._prepare_local_topk_indices(
+                        pooled_i64, raw_lengths
+                    )
+                    self.assertEqual(expanded_i64.dtype, torch.int64)
+                    with patch.dict(os.environ, {"GLM53_INDEXER_GROUP_FUSED": "0"}):
+                        reference_i64 = op._prepare_local_topk_indices(
+                            pooled_i64, raw_lengths
+                        )
+                    torch.testing.assert_close(
+                        expanded_i64, reference_i64, rtol=0.0, atol=0.0
+                    )
+
+                    # Allocation and launch must be safe under CUDA Graph.
+                    graph = torch.cuda.CUDAGraph()
+                    torch.cuda.synchronize()
+                    with torch.cuda.graph(graph):
+                        captured = op._prepare_local_topk_indices(pooled, raw_lengths)
+                    graph.replay()
+                    torch.cuda.synchronize()
+                    torch.testing.assert_close(captured, reference, rtol=0.0, atol=0.0)
 
     def test_glm53_topk2051_prefill_and_decode_kernel(self):
         """Run TP-local and unsharded kernels at the checkpoint's 2048+3 width."""
@@ -863,9 +899,7 @@ class SparseMlaOpTest(TestCase):
             tuple(captured_q[0].shape), (num_tokens, kernel_heads, head_dim)
         )
         torch.testing.assert_close(captured_q[0][:, :local_heads], q)
-        self.assertEqual(
-            torch.count_nonzero(captured_q[0][:, local_heads:]).item(), 0
-        )
+        self.assertEqual(torch.count_nonzero(captured_q[0][:, local_heads:]).item(), 0)
         self.assertEqual(tuple(output.shape), tuple(q.shape))
         torch.testing.assert_close(output, q)
 
@@ -916,9 +950,11 @@ class SparseMlaOpTest(TestCase):
             dtype=torch.bfloat16,
             device="cuda",
         )
-        topk_indices = torch.arange(
-            top_k, dtype=torch.int32, device="cuda"
-        ).view(1, 1, top_k).expand(num_tokens, 1, top_k)
+        topk_indices = (
+            torch.arange(top_k, dtype=torch.int32, device="cuda")
+            .view(1, 1, top_k)
+            .expand(num_tokens, 1, top_k)
+        )
         with patch.dict(
             os.environ, {"GLM5_FLASH_MLA_SPARSE_Q_CHUNK": "2"}, clear=False
         ):
@@ -935,9 +971,9 @@ class SparseMlaOpTest(TestCase):
         global_indices = op._convert_topk_indices_to_global(topk_indices)[:, 0, :]
         torch.testing.assert_close(
             global_indices,
-            torch.arange(
-                page_size, page_size + top_k, dtype=torch.int32, device="cuda"
-            ).view(1, top_k).expand(num_tokens, top_k),
+            torch.arange(page_size, page_size + top_k, dtype=torch.int32, device="cuda")
+            .view(1, top_k)
+            .expand(num_tokens, top_k),
         )
         gathered_kv = compressed_kv.new_empty(num_tokens * top_k, kv_lora_rank)
         rtp_llm_ops.gather_selected_glm53_fp8_mla_kv(
@@ -963,9 +999,9 @@ class SparseMlaOpTest(TestCase):
         expected = ref_sparse_mla_forward(
             q,
             gathered_kv.unsqueeze(1),
-            torch.arange(
-                num_tokens * top_k, dtype=torch.int32, device="cuda"
-            ).view(num_tokens, top_k),
+            torch.arange(num_tokens * top_k, dtype=torch.int32, device="cuda").view(
+                num_tokens, top_k
+            ),
             256**-0.5,
             kv_lora_rank,
         )

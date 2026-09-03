@@ -33,6 +33,7 @@ Public API:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
@@ -79,6 +80,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._compressor_consts import (
 from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
     build_cos_sin_cache,
     run_fused_compress_kv_write,
+    run_fused_kpool_decode_update,
     run_save_partial_states,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import PoolBackedModule
@@ -712,6 +714,8 @@ class CompressorFP8(PoolBackedModule):
         score_flat: torch.Tensor,  # [N, coff*head_dim] fp32
         meta: CompressorMeta,
         seq_start: Optional[int] = None,
+        *,
+        is_decode: bool = False,
     ) -> None:
         """Launch the two vLLM kernels (state write + boundary KV write).
 
@@ -722,8 +726,9 @@ class CompressorFP8(PoolBackedModule):
         ``kv_flat / score_flat`` instead of reading back through the state
         pool, where current-launch writes are still in flight.
 
-        Pass ``None`` to disable the raw path (decode: ``kv_flat`` is
-        indexed by ``req_idx``, not by absolute position offset).
+        Pass ``None`` to disable the raw path (decode and batched prefill use
+        different layouts that both require it). ``is_decode`` is explicit so
+        batched prefill can never enter the decode-only KPool fusion.
 
         All slot-mapping math is consumed from ``meta`` — this method only
         does kernel launches and the cos_sin_cache lazy build. Designed to
@@ -740,6 +745,40 @@ class CompressorFP8(PoolBackedModule):
 
         N = int(meta.positions.shape[0])
         if N == 0:
+            return
+
+        use_fused_kpool_decode = (
+            self.kpool_mode
+            and is_decode
+            and seq_start is None
+            and os.environ.get("GLM53_INDEXER_POOL_FUSED", "1") != "0"
+            and meta.seq_start_per_req is not None
+            and meta.cu_seq_per_req is not None
+        )
+        if use_fused_kpool_decode:
+            batch_size = int(meta.seq_start_per_req.numel())
+            if batch_size <= 0 or N % batch_size:
+                raise RuntimeError(
+                    "fused KPool decode requires uniform per-request tokens: "
+                    f"tokens={N}, batch={batch_size}"
+                )
+            q_len = N // batch_size
+            with record_function_range(
+                "dsv4.fp8.compressor.launch.fused_kpool_decode_update"
+            ):
+                run_fused_kpool_decode_update(
+                    self._state_pool_3d,
+                    self._state_block_table,
+                    meta.state_slots.view(batch_size, q_len),
+                    self._kv_pool_view,
+                    meta.kv_slots.view(batch_size, q_len),
+                    kv_flat.view(batch_size, q_len, self.head_dim),
+                    score_flat.view(batch_size, q_len, self.head_dim),
+                    self.ape,
+                    meta.positions.view(batch_size, q_len),
+                    state_tokens_per_block=self._state_tokens_per_block,
+                    pool_size=self.compress_ratio,
+                )
             return
 
         with record_function_range("dsv4.fp8.compressor.launch.cos_sin_cache"):
@@ -1197,7 +1236,7 @@ class CompressorFP8(PoolBackedModule):
                     .contiguous(),
                     cu_seq_per_req=cu_seq_per_req,
                 )
-        self._launch(kv_flat, score_flat, meta)
+        self._launch(kv_flat, score_flat, meta, is_decode=True)
         return None
 
 

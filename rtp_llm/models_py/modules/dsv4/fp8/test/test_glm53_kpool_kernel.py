@@ -6,16 +6,19 @@ import torch
 
 from rtp_llm.models_py.modules.dsv4.fp8._compressor_vllm_triton import (
     run_fused_compress_kv_write,
+    run_fused_kpool_decode_update,
     run_save_partial_states,
 )
 from rtp_llm.models_py.modules.hybrid.indexer_compressor import (
     compress_indexer_projection_reference,
 )
 
-
 HEAD_DIM = 128
 COMPRESS_RATIO = 4
-STATE_RING_ENTRIES = 4
+# Serving uses an 8-entry FP32 state ring with a 4-token KPool.  Keep these
+# deliberately different so the fused path cannot confuse storage geometry
+# with compression geometry.
+STATE_RING_ENTRIES = 8
 KV_ENTRIES_PER_BLOCK = 32
 
 
@@ -227,7 +230,244 @@ def test_glm53_kpool_decode_reads_ring_state() -> None:
     torch.cuda.synchronize()
     _assert_matches_reference(key, score, ape, kv_cache)
 
+    # The fused q_len=1 path must reconstruct the same three cached prefix
+    # rows plus the current decode row, then leave both state and quantized KV
+    # byte-identical to the established two-kernel path above.
+    state_fused = torch.zeros_like(state_cache)
+    kv_fused = torch.zeros_like(kv_cache)
+    run_save_partial_states(
+        key[:3],
+        score[:3],
+        ape,
+        prefix_positions,
+        state_fused,
+        _state_slots(prefix_positions),
+        compress_ratio=COMPRESS_RATIO,
+    )
+    run_fused_kpool_decode_update(
+        state_fused,
+        torch.tensor([[1]], dtype=torch.int32, device="cuda"),
+        _state_slots(decode_position).view(1, 1),
+        kv_fused,
+        _kv_slots(decode_position).view(1, 1),
+        key[3:].view(1, 1, HEAD_DIM),
+        score[3:].view(1, 1, HEAD_DIM),
+        ape,
+        decode_position.view(1, 1),
+        state_tokens_per_block=128,
+        pool_size=COMPRESS_RATIO,
+    )
+    torch.cuda.synchronize()
+    torch.testing.assert_close(state_fused, state_cache, rtol=0.0, atol=0.0)
+    assert torch.equal(kv_fused, kv_cache)
+
+
+def test_glm53_fused_kpool_decode_matches_ordered_reference() -> None:
+    """Batched MTP update must match four ordered single-token launches."""
+
+    batch_size, q_len = 2, 4
+    generator = torch.Generator(device="cuda").manual_seed(5304)
+    prefix_key = torch.randn(
+        batch_size,
+        COMPRESS_RATIO,
+        HEAD_DIM,
+        generator=generator,
+        dtype=torch.float32,
+        device="cuda",
+    )
+    prefix_score = torch.randn_like(prefix_key)
+    decode_key = torch.randn(
+        batch_size,
+        q_len,
+        HEAD_DIM,
+        generator=generator,
+        dtype=torch.float32,
+        device="cuda",
+    )
+    decode_score = torch.randn_like(decode_key)
+    ape = torch.randn(
+        COMPRESS_RATIO,
+        HEAD_DIM,
+        generator=generator,
+        dtype=torch.float32,
+        device="cuda",
+    )
+    # Decode graph metadata pads each request's logical block table. Keep a
+    # 64-column row here so the kernel cannot accidentally confuse row stride
+    # with the number of addressable logical blocks.
+    state_block_table = torch.zeros(batch_size, 64, dtype=torch.int32, device="cuda")
+    state_block_table[:, 0] = torch.tensor([1, 2], dtype=torch.int32, device="cuda")
+    state_ref = torch.zeros(
+        3,
+        STATE_RING_ENTRIES,
+        2 * HEAD_DIM,
+        dtype=torch.float32,
+        device="cuda",
+    )
+    kv_ref = torch.zeros(
+        3, KV_ENTRIES_PER_BLOCK, HEAD_DIM + 4, dtype=torch.uint8, device="cuda"
+    )
+
+    prefix_positions = (
+        torch.arange(8, 12, dtype=torch.int64, device="cuda")
+        .view(1, -1)
+        .expand(batch_size, -1)
+        .contiguous()
+    )
+    prefix_slots = torch.tensor([1, 2], dtype=torch.int64, device="cuda").view(
+        -1, 1
+    ) * STATE_RING_ENTRIES + torch.remainder(prefix_positions, STATE_RING_ENTRIES)
+    run_save_partial_states(
+        prefix_key.view(-1, HEAD_DIM),
+        prefix_score.view(-1, HEAD_DIM),
+        ape,
+        prefix_positions.view(-1),
+        state_ref,
+        prefix_slots.view(-1),
+        compress_ratio=COMPRESS_RATIO,
+    )
+
+    positions = (
+        torch.arange(12, 16, dtype=torch.int64, device="cuda")
+        .view(1, -1)
+        .expand(batch_size, -1)
+        .contiguous()
+    )
+    state_slots = torch.tensor([1, 2], dtype=torch.int64, device="cuda").view(
+        -1, 1
+    ) * STATE_RING_ENTRIES + torch.remainder(positions, STATE_RING_ENTRIES)
+    kv_slots = torch.full_like(positions, -1)
+    kv_slots[:, -1] = torch.tensor(
+        [KV_ENTRIES_PER_BLOCK + 3, 2 * KV_ENTRIES_PER_BLOCK + 3],
+        dtype=torch.int64,
+        device="cuda",
+    )
+
+    # Reference is the established pair of kernels, launched one token at a
+    # time in request order so no future MTP token can overwrite the state ring.
+    token_to_req = torch.arange(batch_size, dtype=torch.int32, device="cuda")
+    empty_rope = torch.empty((1, 0), dtype=torch.float32, device="cuda")
+    for token_offset in range(q_len):
+        p = positions[:, token_offset].contiguous()
+        ss = state_slots[:, token_offset].contiguous()
+        ks = kv_slots[:, token_offset].contiguous()
+        k = decode_key[:, token_offset].contiguous()
+        score = decode_score[:, token_offset].contiguous()
+        run_save_partial_states(
+            k,
+            score,
+            ape,
+            p,
+            state_ref,
+            ss,
+            compress_ratio=COMPRESS_RATIO,
+        )
+        run_fused_compress_kv_write(
+            state_ref,
+            token_to_req,
+            p,
+            ss,
+            state_block_table,
+            torch.ones(HEAD_DIM, dtype=torch.bfloat16, device="cuda"),
+            1e-6,
+            empty_rope,
+            kv_ref,
+            ks,
+            k,
+            score,
+            ape,
+            0,
+            disable_raw_path=True,
+            head_dim=HEAD_DIM,
+            rope_head_dim=0,
+            compress_ratio=COMPRESS_RATIO,
+            overlap=False,
+            state_tokens_per_block=128,
+            kpool_mode=True,
+        )
+
+    # Restore the prompt-only state: replaying the ordered reference above has
+    # already inserted decode rows into state_ref.
+    state_fused = torch.zeros_like(state_ref)
+    run_save_partial_states(
+        prefix_key.view(-1, HEAD_DIM),
+        prefix_score.view(-1, HEAD_DIM),
+        ape,
+        prefix_positions.view(-1),
+        state_fused,
+        prefix_slots.view(-1),
+        compress_ratio=COMPRESS_RATIO,
+    )
+    kv_fused = torch.zeros_like(kv_ref)
+    run_fused_kpool_decode_update(
+        state_fused,
+        state_block_table,
+        state_slots,
+        kv_fused,
+        kv_slots,
+        decode_key,
+        decode_score,
+        ape,
+        positions,
+        state_tokens_per_block=128,
+        pool_size=COMPRESS_RATIO,
+    )
+    torch.cuda.synchronize()
+
+    torch.testing.assert_close(state_fused, state_ref, rtol=0.0, atol=0.0)
+    assert torch.equal(kv_fused, kv_ref)
+
+    # The decode path is replayed from CUDA Graph in production. Warm the JIT,
+    # restore the prompt-only state, then require byte-exact graph output.
+    state_graph = torch.zeros_like(state_ref)
+    kv_graph = torch.zeros_like(kv_ref)
+    run_fused_kpool_decode_update(
+        state_graph,
+        state_block_table,
+        state_slots,
+        kv_graph,
+        kv_slots,
+        decode_key,
+        decode_score,
+        ape,
+        positions,
+        state_tokens_per_block=128,
+        pool_size=COMPRESS_RATIO,
+    )
+    state_graph.zero_()
+    kv_graph.zero_()
+    run_save_partial_states(
+        prefix_key.view(-1, HEAD_DIM),
+        prefix_score.view(-1, HEAD_DIM),
+        ape,
+        prefix_positions.view(-1),
+        state_graph,
+        prefix_slots.view(-1),
+        compress_ratio=COMPRESS_RATIO,
+    )
+    graph = torch.cuda.CUDAGraph()
+    torch.cuda.synchronize()
+    with torch.cuda.graph(graph):
+        run_fused_kpool_decode_update(
+            state_graph,
+            state_block_table,
+            state_slots,
+            kv_graph,
+            kv_slots,
+            decode_key,
+            decode_score,
+            ape,
+            positions,
+            state_tokens_per_block=128,
+            pool_size=COMPRESS_RATIO,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    torch.testing.assert_close(state_graph, state_ref, rtol=0.0, atol=0.0)
+    assert torch.equal(kv_graph, kv_ref)
+
 
 if __name__ == "__main__":
     test_glm53_kpool_prefill_math()
     test_glm53_kpool_decode_reads_ring_state()
+    test_glm53_fused_kpool_decode_matches_ordered_reference()
