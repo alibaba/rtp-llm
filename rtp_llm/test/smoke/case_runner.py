@@ -157,7 +157,7 @@ class CaseRunner(object):
         if enable_remote_cache:
             self.remote_kvcm_server = self._start_remote_kvcm_server()
             assert self.remote_kvcm_server is not None, "remote kvcm shoule not be None"
-            env_dict["RECO_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
+            env_dict["KVCM_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
         task_states = TaskStates()
         logging.info(f"smoke_args_str: {self.smoke_args_str}")
         server_manager = self.start_server(
@@ -195,9 +195,7 @@ class CaseRunner(object):
 
     @staticmethod
     def _keepalive_enabled(after_curl: bool = False) -> bool:
-        before = str_to_bool(
-            os.environ.get("SMOKE_KEEP_SERVER_ALIVE", "False")
-        )
+        before = str_to_bool(os.environ.get("SMOKE_KEEP_SERVER_ALIVE", "False"))
         after = str_to_bool(
             os.environ.get("SMOKE_KEEP_SERVER_ALIVE_AFTER_CURL", "False")
         )
@@ -274,9 +272,7 @@ class CaseRunner(object):
                 output.flush()
                 os.fsync(output.fileno())
             os.replace(tmp_live_info, live_info_path)
-            logging.info(
-                "SMOKE_KEEP_SERVER_ALIVE active; live info: %s", live_info
-            )
+            logging.info("SMOKE_KEEP_SERVER_ALIVE active; live info: %s", live_info)
 
             while not stop_event.is_set():
                 if os.path.exists(stop_file):
