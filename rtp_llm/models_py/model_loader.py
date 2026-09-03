@@ -316,8 +316,16 @@ class NewModelLoader:
         self.model_path = model_path
         self._ckpt_files = None
 
-    def _resolve_load_method(self) -> NewLoaderLoadMethod:
-        configured = self.load_config.load_method
+    @staticmethod
+    def resolve_requested_load_method(configured: Any) -> NewLoaderLoadMethod:
+        """Resolve the configured method and the LOAD_METHOD override once."""
+        raw_method = configured.value if isinstance(configured, Enum) else configured
+        try:
+            configured = NewLoaderLoadMethod(str(raw_method).strip().lower())
+        except ValueError as exc:
+            raise ValueError(
+                f"Unsupported newloader load method {raw_method!r}"
+            ) from exc
         if configured == NewLoaderLoadMethod.AUTO:
             env_method = os.environ.get("LOAD_METHOD", "").strip().lower()
             if env_method:
@@ -331,6 +339,10 @@ class NewModelLoader:
                 configured = NewLoaderLoadMethod.SCRATCH
             if configured == NewLoaderLoadMethod.AUTO:
                 configured = NewLoaderLoadMethod.SCRATCH
+        return configured
+
+    def _resolve_load_method(self) -> NewLoaderLoadMethod:
+        configured = self.resolve_requested_load_method(self.load_config.load_method)
         if configured == NewLoaderLoadMethod.FASTSAFETENSORS:
             raise RuntimeError(
                 "fastsafetensors is not part of the newloader foundation; use scratch"
@@ -502,8 +514,9 @@ class NewModelLoader:
                 f"Registered model {model_cls.__name__} must inherit RtpModule to "
                 "provide newloader completeness validation"
             )
-        if self.load_config.custom_weight_mappings and not bool(
-            getattr(model, "supports_custom_weight_mappings", False)
+        if (
+            self.load_config.custom_weight_mappings
+            and not type(model).supports_custom_weight_mappings
         ):
             raise NotImplementedError(
                 f"{type(model).__name__} does not support downstream custom weights"
