@@ -104,7 +104,7 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
     bool                                   workflow_credit_acquired = false;
     block_tree_cache_detail::ScopeRollback prepare_guard([this, &task, &workflow_credit_acquired]() {
         if (workflow_credit_acquired) {
-            task_pool_->releaseWorkflowCredit();
+            task_pool_->releaseWorkflowCredit(BlockTreeTaskClass::BACKGROUND);
         }
         settleLocked(*task, /*publish=*/false);
     });
@@ -112,7 +112,7 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
     if (!store_task_runner_.prepareTask(*task, resources)) {
         return;
     }
-    if (!task_pool_->acquireWorkflowCredit()) {
+    if (!task_pool_->acquireWorkflowCredit(BlockTreeTaskClass::BACKGROUND)) {
         RTP_LLM_LOG_WARNING("store aborted: workflow limit reached, target=%s blocks=%zu",
                             tierName(target_tier),
                             task->descriptors.size());
@@ -129,7 +129,7 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
     };
     task->enqueue_time_us = currentTimeUs();
     if (!task_pool_->submit([this, task]() { runStoreTask(task); },
-                            BlockTreeTaskPool::kDefaultQueueWaitTimeout,
+                            std::chrono::milliseconds(target_tier == Tier::DISK ? disk_timeout_ms_ : host_timeout_ms_),
                             std::move(on_timeout))) {
         RTP_LLM_LOG_WARNING("store aborted: business task submission rejected, target=%s blocks=%zu",
                             tierName(target_tier),
@@ -175,9 +175,10 @@ void BlockTreeStorer::scheduleStoreSettlement(const StoreTaskPtr& task, ErrorInf
 }
 
 void BlockTreeStorer::settleTask(const StoreTask& task, bool copy_success) {
-    block_tree_cache_detail::ScopeRollback credit_guard([this]() { task_pool_->releaseWorkflowCredit(); });
-    bool                                   stopping = false;
-    size_t                                 accepted = 0;
+    block_tree_cache_detail::ScopeRollback credit_guard(
+        [this]() { task_pool_->releaseWorkflowCredit(BlockTreeTaskClass::BACKGROUND); });
+    bool   stopping = false;
+    size_t accepted = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         stopping = stopping_.load();
