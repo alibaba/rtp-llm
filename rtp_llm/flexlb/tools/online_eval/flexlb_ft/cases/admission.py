@@ -1695,14 +1695,27 @@ def admission_engine_waiting_batch_cap_reject(ctx: CaseContext):
                 "batch #2 never reached the waiting queue (cap never saturated)",
             )
 
-        # Probe batch #3: whole-batch backpressure reject.
+        # Probe batch #3: whole-batch backpressure reject.  The master
+        # surfaces the engine's EnqueueBatch reject SYNCHRONOUSLY on the
+        # Schedule RPC — code 8510, "Delivery failed: EnqueueBatch rejected
+        # request N: prefill waiting queue full (backpressure): waiting=1
+        # cap=1" (DefaultBatchDispatcher wraps the ack error and the RPC
+        # returns it to the caller) — so the probe accepts EITHER surface:
+        # the RPC-level typed reject, or a successful fire whose stream
+        # then terminates with the backpressure family.
         rid3 = ops.next_request_id(base)
-        fire_err3 = _fire_tracked(ops, rid3, fired, input_len=512, output_len=2)
-        if fire_err3 is not None:
-            return False, f"probe fire failed: {fire_err3}"
-        _, r3_handle, r3_t0 = fired[-1]
-        r3_ended = r3_handle.wait_end(10.0)
-        r3_err = str(r3_handle.snap.error or "") if r3_ended else "no terminal"
+        r3_t0 = time.monotonic()
+        r3_err = ""
+        try:
+            resp3 = ops.schedule(rid3, input_len=512, output_len=2)
+            if resp3.code != 200 or not resp3.success:
+                r3_err = f"schedule failed ({resp3.code}): " f"{resp3.error_message}"
+            else:
+                handle3 = ops.start_stream(resp3, rid3)
+                ended3 = handle3.wait_end(10.0)
+                r3_err = str(handle3.snap.error or "") if ended3 else "no terminal"
+        except Exception as exc:
+            r3_err = repr(exc)
         reject_latency = time.monotonic() - r3_t0
         rejected = (
             "prefill waiting queue full" in r3_err.lower()
@@ -1726,11 +1739,15 @@ def admission_engine_waiting_batch_cap_reject(ctx: CaseContext):
         occupant_ok = len(outcomes) >= 2 and all(
             ok and err is None for _, _, _, ok, err in outcomes[:2]
         )
+        # rid4 is fired[-1] whenever its fire succeeded; a synchronously
+        # rejected probe (rid3) never enters `fired`, so index by identity,
+        # not by ordinal.
         recovers_ok = (
             fire_err4 is None
-            and len(outcomes) == 4
-            and outcomes[3][3]
-            and outcomes[3][4] is None
+            and len(fired) >= 3
+            and outcomes[-1][0] == rid4
+            and outcomes[-1][3]
+            and outcomes[-1][4] is None
         )
 
         def park_empty() -> bool:

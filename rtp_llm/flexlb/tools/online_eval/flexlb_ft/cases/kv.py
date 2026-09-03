@@ -432,7 +432,21 @@ def _kv_spec(
 ) -> EnvSpec:
     """Shared KV-family env: 2P+2D default, default prefill LRU capacity
     unless the case pins a small one (tiny capacities pair with the
-    10-block families so the hit still prices past the affinity line)."""
+    10-block families so the hit still prices past the affinity line).
+
+    decode_cache_blocks=12: KV-family requests carry
+    PREFIX_INPUT_LEN=10240 tokens (10 blocks), and since the
+    total=blocks*spb reporting fix the master's
+    CostBasedDecodeStrategy.rejectIfPhysicalCapacityIsTooSmall compares
+    the decode seq_len against the engine-reported totalKv — a 4-block
+    pool (4096 tokens) made every prefix-sized decode request a typed
+    StaticCapacityExceededException reject before routing even started
+    (observed: "Decode request seq_len=10240 exceeds max known physical
+    KV=4096").  12 blocks = 12288 tokens covers the 10-block prefix with
+    the KV-v2 reserve margin to spare; decode-pool size plays no role in
+    the family's prefill-side assertions (affinity/evict/replication all
+    price against the PREFILL pool), so widening it changes no other
+    case semantics."""
     return EnvSpec(
         label=f"kv{suffix}_{ctx.profile}",
         n_prefill=n_prefill,
@@ -444,7 +458,7 @@ def _kv_spec(
             if prefill_cache_blocks is not None
             else DEFAULT_PREFILL_CACHE_BLOCKS
         ),
-        decode_cache_blocks=4,
+        decode_cache_blocks=12,
         discovery=discovery,
     )
 
