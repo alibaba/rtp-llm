@@ -109,8 +109,11 @@ public final class SessionPlacementStore {
     }
 
     private static boolean valid(String sessionId) {
-        return sessionId != null && !sessionId.isBlank()
-                && sessionId.length() <= MAX_SESSION_ID_LENGTH;
+        if (sessionId == null || sessionId.isEmpty()
+                || sessionId.length() > MAX_SESSION_ID_LENGTH) {
+            return false;
+        }
+        return sessionId.chars().allMatch(character -> character >= 0x21 && character <= 0x7e);
     }
 
     private long nextEpoch() {

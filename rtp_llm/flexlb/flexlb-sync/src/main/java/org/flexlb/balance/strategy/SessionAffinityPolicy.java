@@ -11,6 +11,31 @@ final class SessionAffinityPolicy {
     private SessionAffinityPolicy() {
     }
 
+    static void initialize(Request request,
+                           RoutingConfig.SessionAffinityConfig config,
+                           SessionPlacementStore store) {
+        if (request.getSessionSchemaVersion() != Request.SESSION_SCHEMA_VERSION
+                || request.getInferenceSessionId() == null
+                || request.getInferenceSessionId().isBlank()) {
+            return;
+        }
+        synchronized (request) {
+            if (request.getSessionPlacementEpoch() >= 0) {
+                return;
+            }
+            String model = request.getModel();
+            String sessionId = request.getInferenceSessionId();
+            if (request.getInferenceSessionState() == Request.SessionState.NEW) {
+                request.setSessionPlacementEpoch(config == null
+                        ? store.resetIfPresent(model, sessionId)
+                        : store.reset(model, sessionId));
+            } else if (config != null
+                    && request.getInferenceSessionState() == Request.SessionState.ESTABLISHED) {
+                request.setSessionPlacementEpoch(store.currentEpoch(model, sessionId));
+            }
+        }
+    }
+
     static Decision evaluate(Request request,
                              RoutingConfig.SessionAffinityConfig config,
                              SessionPlacementStore store,
@@ -27,23 +52,12 @@ final class SessionAffinityPolicy {
         String model = request.getModel();
         String sessionId = request.getInferenceSessionId();
         Request.SessionState state = request.getInferenceSessionState();
+        initialize(request, config, store);
         if (state == Request.SessionState.NEW) {
-            synchronized (request) {
-                if (request.getSessionPlacementEpoch() < 0) {
-                    request.setSessionPlacementEpoch(config == null
-                            ? store.resetIfPresent(model, sessionId)
-                            : store.reset(model, sessionId));
-                }
-            }
             return Decision.none(Reason.NEW_SESSION);
         }
         if (config == null || state != Request.SessionState.ESTABLISHED) {
             return Decision.none(Reason.DISABLED);
-        }
-        synchronized (request) {
-            if (request.getSessionPlacementEpoch() < 0) {
-                request.setSessionPlacementEpoch(store.currentEpoch(model, sessionId));
-            }
         }
         for (int i = 0; i < candidateCount; i++) {
             if (cacheHit.applyAsLong(i) > 0) {

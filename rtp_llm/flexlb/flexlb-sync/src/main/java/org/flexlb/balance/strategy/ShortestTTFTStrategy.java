@@ -107,6 +107,10 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         long requestId = balanceContext.getRequestId();
         long seqLen = balanceContext.getRequest().getSeqLen();
         FlexlbConfig config = balanceContext.getConfig();
+        SessionAffinityPolicy.initialize(
+                balanceContext.getRequest(),
+                config.getRouter().getRoles().getPrefill().getSessionAffinity(),
+                sessionPlacementStore);
 
         List<PrefillEndpoint> eligible = getAvailableEndpoints(
                 roleType,

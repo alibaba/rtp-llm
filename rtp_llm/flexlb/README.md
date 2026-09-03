@@ -164,6 +164,10 @@ export FLEXLB_CONFIG='{
         "cacheAffinity": {
           "maxExtraTtftMs": 100,
           "minPrefixHitPercent": 5
+        },
+        "sessionAffinity": {
+          "ttlMs": 1800000,
+          "maxExtraTtftMs": 100
         }
       },
       "decode": {
@@ -315,6 +319,10 @@ valid only with `ESTIMATED_TTFT`. Omit the object to disable it. Decode admissio
 controlled by the optional positive
 `router.roles.decode.availability.maxEngineRequests`; omit it for no FlexLB-side
 request-count cap.
+
+Session affinity is enabled by including `router.roles.prefill.sessionAffinity` and
+is valid only with `ESTIMATED_TTFT`. `ttlMs` must be in `[1, 3600000]` and
+`maxExtraTtftMs` must be non-negative. Omit the object to disable it.
 
 See [QUEUE ordering and dispatcher modes](docs/priority-scheduler-delivery-modes.md)
 for the QUEUE lifecycle, accounting invariants, complete scheduler/dispatcher

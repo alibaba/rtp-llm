@@ -19,8 +19,8 @@ from rtp_llm.config.py_config_modules import MasterConfig
 from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
     CANCEL_REASON_CLIENT_CANCELLED,
     CANCEL_REASON_DEADLINE_EXCEEDED,
-    ESTABLISHED,
-    NEW,
+    SESSION_STATE_ESTABLISHED,
+    SESSION_STATE_NEW,
     FlexlbCancelRequestPB,
     FlexlbScheduleRequestPB,
     SessionRoutingHintPB,
@@ -34,6 +34,7 @@ from rtp_llm.server.request_headers import (
     INFERENCE_SESSION_ID_HEADER,
     INFERENCE_SESSION_STATE_HEADER,
     extract_request_headers,
+    is_valid_inference_session_id,
     resolve_qos_priority,
 )
 from rtp_llm.server.worker_status import _coerce_role_type
@@ -395,13 +396,13 @@ class MasterClient:
     def _extract_session_routing_hint(
         input: GenerateInput,
     ) -> Optional[SessionRoutingHintPB]:
-        headers = extract_request_headers(getattr(input, "headers", None))
+        headers = extract_request_headers(input.headers)
         session_id = headers.get(INFERENCE_SESSION_ID_HEADER, "")
         state = {
-            "new": NEW,
-            "established": ESTABLISHED,
+            "new": SESSION_STATE_NEW,
+            "established": SESSION_STATE_ESTABLISHED,
         }.get(headers.get(INFERENCE_SESSION_STATE_HEADER, "").lower())
-        if not session_id or len(session_id) > 256 or state is None:
+        if not is_valid_inference_session_id(session_id) or state is None:
             return None
         return SessionRoutingHintPB(
             schema_version=1,

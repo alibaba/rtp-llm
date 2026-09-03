@@ -124,6 +124,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private FlexlbServiceGrpc.FlexlbServiceStub masterStub;
     private ServerScheduleLatencyRecorder latencyRecorder;
     private ActiveRequestCounter activeRequestCounter;
+    private final SessionPlacementStore sessionPlacementStore = new SessionPlacementStore();
     private static ch.qos.logback.classic.Logger flexlbLogger;
     private static ch.qos.logback.classic.Logger mockRpcLogger;
     private static ch.qos.logback.classic.Logger nettyLogger;
@@ -215,7 +216,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 new EmptyCacheAwareService(),
                 resourceMeasureFactory,
                 mock(EngineHealthReporter.class, withSettings().stubOnly()),
-                new SessionPlacementStore());
+                sessionPlacementStore);
         new CostBasedDecodeStrategy(engineWorkerStatus, resourceMeasureFactory);
         new RandomStrategy(engineWorkerStatus, configService, resourceMeasureFactory);
         return new DefaultRouter(
@@ -252,7 +253,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 reporter,
                 latencyRecorder,
                 mock(PrioritySchedulerReporter.class, withSettings().stubOnly()),
-                new SessionPlacementStore());
+                sessionPlacementStore);
 
         int grpcPort;
         try (ServerSocket socket = new ServerSocket(0)) {

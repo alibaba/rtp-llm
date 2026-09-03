@@ -556,7 +556,8 @@ class FlexlbServiceImplTest {
                                 .newBuilder()
                                 .setSchemaVersion(1)
                                 .setSessionId("isess_v1_example")
-                                .setState(FlexlbScheduleProtocol.SessionStatePB.ESTABLISHED))
+                                .setState(FlexlbScheduleProtocol.SessionStatePB
+                                        .SESSION_STATE_ESTABLISHED))
                         .build();
 
         service.schedule(request, mock(StreamObserver.class));
@@ -613,7 +614,7 @@ class FlexlbServiceImplTest {
                                 .newBuilder()
                                 .setSchemaVersion(1)
                                 .setSessionId("isess_v1_example")
-                                .setState(FlexlbScheduleProtocol.SessionStatePB.NEW))
+                                .setState(FlexlbScheduleProtocol.SessionStatePB.SESSION_STATE_NEW))
                         .build();
 
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
@@ -657,7 +658,8 @@ class FlexlbServiceImplTest {
                                 .newBuilder()
                                 .setSchemaVersion(1)
                                 .setSessionId("isess_v1_example")
-                                .setState(FlexlbScheduleProtocol.SessionStatePB.ESTABLISHED))
+                                .setState(FlexlbScheduleProtocol.SessionStatePB
+                                        .SESSION_STATE_ESTABLISHED))
                         .build();
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                 mock(StreamObserver.class);
@@ -697,7 +699,8 @@ class FlexlbServiceImplTest {
                                 .newBuilder()
                                 .setSchemaVersion(1)
                                 .setSessionId("isess_v1_example")
-                                .setState(FlexlbScheduleProtocol.SessionStatePB.ESTABLISHED))
+                                .setState(FlexlbScheduleProtocol.SessionStatePB
+                                        .SESSION_STATE_ESTABLISHED))
                         .build();
 
         service.schedule(request, observer);
@@ -732,7 +735,8 @@ class FlexlbServiceImplTest {
                                 .newBuilder()
                                 .setSchemaVersion(1)
                                 .setSessionId("isess_v1_pdfusion")
-                                .setState(FlexlbScheduleProtocol.SessionStatePB.ESTABLISHED))
+                                .setState(FlexlbScheduleProtocol.SessionStatePB
+                                        .SESSION_STATE_ESTABLISHED))
                         .build();
 
         service.schedule(request, mock(StreamObserver.class));

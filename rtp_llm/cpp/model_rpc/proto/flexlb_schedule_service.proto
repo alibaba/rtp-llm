@@ -40,8 +40,8 @@ message RequestLifecyclePB {
 
 enum SessionStatePB {
     SESSION_STATE_UNSPECIFIED = 0;
-    NEW = 1;
-    ESTABLISHED = 2;
+    SESSION_STATE_NEW = 1;
+    SESSION_STATE_ESTABLISHED = 2;
 }
 
 message SessionRoutingHintPB {

@@ -29,13 +29,11 @@ from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
 from rtp_llm.dash_sc.codec import (
     DASH_ERROR_ABORT,
-    DASH_ERROR_ADMISSION_OVERLOADED,
     DASH_ERROR_AUTO_TPM_PREEMPTED,
     DASH_ERROR_BAD_REQUEST,
     DASH_ERROR_CAPACITY,
     DASH_ERROR_INTERNAL,
     DASH_ERROR_INVALID_OUTPUT,
-    DASH_ERROR_RESOURCE_EXHAUSTED,
     DASH_ERROR_TIMEOUT,
     DASH_ERROR_TOO_LONG,
     DASH_ERROR_UNSUPPORTED,
@@ -57,7 +55,9 @@ from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.metrics import AccMetrics
 from rtp_llm.ops import RoleType
 from rtp_llm.server.master_client import MasterClient
-from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import ESTABLISHED
+from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
+    SESSION_STATE_ESTABLISHED,
+)
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateInput,
@@ -3204,7 +3204,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         hint = MasterClient._extract_session_routing_hint(visitor.last_generate_input)
         self.assertIsNotNone(hint)
         self.assertEqual(hint.session_id, "isess_v1_grpc")
-        self.assertEqual(hint.state, ESTABLISHED)
+        self.assertEqual(hint.state, SESSION_STATE_ESTABLISHED)
         # qos_priority must NOT be set when x-dashscope-inner-qos-level
         # is absent from the request.
         self.assertIsNone(generate_config.qos_priority)

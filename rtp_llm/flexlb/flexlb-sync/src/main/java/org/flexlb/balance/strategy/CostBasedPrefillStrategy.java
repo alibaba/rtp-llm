@@ -75,6 +75,10 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         long requestId = balanceContext.getRequestId();
         long seqLen = balanceContext.getRequest().getSeqLen();
         FlexlbConfig config = balanceContext.getConfig();
+        SessionAffinityPolicy.initialize(
+                balanceContext.getRequest(),
+                config.getRouter().getRoles().getPrefill().getSessionAffinity(),
+                sessionPlacementStore);
 
         EndpointFilterResult filterResult = getAvailableEndpoints(roleType, group,
                 config.resourceMeasureFor(roleType), balanceContext.getExcludedPrefillIpPort());

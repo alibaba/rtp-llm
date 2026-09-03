@@ -7,11 +7,11 @@ from rtp_llm.config.exceptions import (
     FtRuntimeException,
 )
 from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
-    ESTABLISHED,
     HIGHER_PRIORITY_AHEAD,
-    NEW,
     RESOURCE_EXHAUSTED,
     SAME_PRIORITY_AHEAD,
+    SESSION_STATE_ESTABLISHED,
+    SESSION_STATE_NEW,
     SCHEDULE_FAILURE_REASON_UNSPECIFIED,
     FlexlbScheduleResponsePB,
     FlexlbServerStatusPB,
@@ -192,7 +192,10 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.calls[0]["request_pb"].priority, 70)
 
     async def test_schedule_payload_contains_session_routing_hint(self):
-        for state, expected in (("new", NEW), ("established", ESTABLISHED)):
+        for state, expected in (
+            ("new", SESSION_STATE_NEW),
+            ("established", SESSION_STATE_ESTABLISHED),
+        ):
             with self.subTest(state=state):
                 client = _CaptureMasterClient()
                 await client.get_backend_role_addrs(

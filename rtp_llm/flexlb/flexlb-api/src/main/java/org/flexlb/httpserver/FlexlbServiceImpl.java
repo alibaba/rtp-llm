@@ -530,9 +530,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             }
         }
         try {
+            recordSessionPlacementSafely(ctx, response, origin);
             observer.onNext(response);
             observer.onCompleted();
-            recordSessionPlacement(ctx, response, origin);
         } finally {
             try {
                 serverLatencyRecorder.recordCompletion(ctx, System.nanoTime());
@@ -545,6 +545,17 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         if (ctx != null) {
             engineHealthReporter.reportBalancingService(ctx);
             reportPrioritySchedule(ctx, response);
+        }
+    }
+
+    private void recordSessionPlacementSafely(
+            BalanceContext ctx,
+            FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
+            ScheduleOrigin origin) {
+        try {
+            recordSessionPlacement(ctx, response, origin);
+        } catch (RuntimeException exception) {
+            Logger.warn("Failed to record session placement", exception);
         }
     }
 
@@ -720,8 +731,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             request.setSessionSchemaVersion(hint.getSchemaVersion());
             request.setInferenceSessionId(hint.getSessionId());
             request.setInferenceSessionState(switch (hint.getState()) {
-                case NEW -> Request.SessionState.NEW;
-                case ESTABLISHED -> Request.SessionState.ESTABLISHED;
+                case SESSION_STATE_NEW -> Request.SessionState.NEW;
+                case SESSION_STATE_ESTABLISHED -> Request.SessionState.ESTABLISHED;
                 default -> Request.SessionState.UNSPECIFIED;
             });
         }

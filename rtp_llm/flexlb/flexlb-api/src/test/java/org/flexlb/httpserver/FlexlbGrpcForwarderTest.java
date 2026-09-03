@@ -269,7 +269,8 @@ class FlexlbGrpcForwarderTest {
                         .setSessionRoutingHint(FlexlbScheduleProtocol.SessionRoutingHintPB.newBuilder()
                                 .setSchemaVersion(1)
                                 .setSessionId("isess_v1_relay")
-                                .setState(FlexlbScheduleProtocol.SessionStatePB.ESTABLISHED))
+                                .setState(FlexlbScheduleProtocol.SessionStatePB
+                                        .SESSION_STATE_ESTABLISHED))
                         .build();
 
         // Model an older FlexLB binary whose descriptor only knows fields 1
