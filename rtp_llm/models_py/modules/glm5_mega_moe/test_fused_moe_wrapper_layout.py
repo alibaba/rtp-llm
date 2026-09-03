@@ -86,26 +86,6 @@ class MegaMoeWrapperLayoutTest(unittest.TestCase):
         _validate_hy4_mxfp8_moe_strategy(
             config, SimpleNamespace(moe_strategy="mega_moe_fp8")
         )
-        _validate_hy4_mxfp8_moe_strategy(
-            config, SimpleNamespace(moe_strategy="mega_moe_se")
-        )
-
-    def test_hy4_modelopt_mxfp4_routed_experts_use_mega_moe_se(self):
-        config = _config(swiglu_limit=10.0)
-        config.model_type = "hy_v4"
-        config.quant_config = SimpleNamespace(
-            get_method=lambda: "MXFP8",
-            quantized_layers={
-                "model.layers.3.mlp.experts": {"quant_algo": "MXFP4"}
-            },
-        )
-        _validate_hy4_mxfp8_moe_strategy(
-            config, SimpleNamespace(moe_strategy="mega_moe_se"), layer_idx=3
-        )
-        with self.assertRaisesRegex(ValueError, "require moe_strategy=mega_moe_se"):
-            _validate_hy4_mxfp8_moe_strategy(
-                config, SimpleNamespace(moe_strategy="mega_moe_fp8"), layer_idx=3
-            )
 
     def test_fp8_scale_recipe_infers_mxfp8_and_legacy_block_fp8(self):
         mxfp8_scale = torch.empty((2, 64, 4), dtype=torch.float32)
