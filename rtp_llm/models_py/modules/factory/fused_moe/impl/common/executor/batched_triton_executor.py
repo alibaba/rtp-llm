@@ -23,19 +23,18 @@ from rtp_llm.utils.model_weight import W
 
 
 class BatchedTritonExperts(FusedMoeExpertExecutor):
-    """
-    A Triton based MoE expert class that operates on expert batched format,
-    i.e. E x max_num_tokens x K.  This is the format that the pplx
-    dispatch/combine kernels use.
-    """
+    """Triton experts for BatchedDataRouter's (E, rows, hidden) layout."""
 
     @classmethod
     def executor_type(cls):
         return ExecutorType.BATCHED_TRITON
 
+    @property
+    def topk_ids_dtype(self) -> torch.dtype:
+        return torch.int32
+
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
-        """Check if BatchedTritonExperts can handle the configuration"""
         from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
             MoeConfigResolver,
         )
@@ -51,14 +50,10 @@ class BatchedTritonExperts(FusedMoeExpertExecutor):
     ):
         super().__init__(config, quant_config, weights)
 
-        # Calculate parameters from config
-        max_num_tokens = (
-            config.ll_num_max_token + config.tp_size - 1
-        ) // config.tp_size
-        self.max_num_tokens = max_num_tokens
-        self.num_dispatchers = 1
         self.w1 = weights[W.moe_w1]
         self.w2 = weights[W.moe_w2]
+        assert self.w1.stride(-1) == 1 and self.w2.stride(-1) == 1
+        assert self.w2.size(0) == self.w1.size(0)
 
     @property
     def local_num_experts(self) -> int:
@@ -73,66 +68,64 @@ class BatchedTritonExperts(FusedMoeExpertExecutor):
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
     ) -> CombineForwardPayload:
-        # Check constraints.
-        assert payload.expert_x is not None, "expert_x is None"
-        assert payload.expert_x.size(-1) == self.w1.size(
-            2
-        ), f"Hidden size mismatch {payload.expert_x.size(-1)} != {self.w1.size(2)}"
+        if expert_map is not None:
+            raise ValueError("BatchedTritonExperts does not support expert_map")
+        if apply_router_weight_on_input:
+            raise ValueError(
+                "BatchedTritonExperts requires output-side router weighting"
+            )
 
-        assert payload.expert_x.is_contiguous(), "Hidden_states must be contiguous"
-        assert self.w1.stride(-1) == 1, "Stride of last dimension must be 1"
-        assert self.w2.stride(-1) == 1, "Stride of last dimension must be 1"
-        assert payload.expert_x.dtype in [torch.float16, torch.bfloat16]
-        assert payload.expert_tokens_meta is not None
-        assert (
-            payload.expert_tokens_meta.expert_num_tokens is not None
-        ), "expert_num_tokens is None"
-
-        expert_num_tokens = payload.expert_tokens_meta.expert_num_tokens
+        expert_x = payload.expert_x
+        meta = payload.expert_tokens_meta
+        if meta is None or meta.expert_num_tokens is None:
+            raise ValueError("expert_num_tokens is required")
+        expert_num_tokens = meta.expert_num_tokens
 
         E = self.local_num_experts
         N = self.w1.size(1)
-        assert payload.expert_topk_ids is not None
+        if (
+            expert_x.dim() != 3
+            or expert_x.size(0) != E
+            or expert_x.size(2) != self.w1.size(2)
+            or expert_num_tokens.shape != (E,)
+        ):
+            raise ValueError(
+                f"Invalid expert shapes: {tuple(expert_x.shape)}, "
+                f"{tuple(expert_num_tokens.shape)}"
+            )
 
-        assert self.w1.size(0) == E
-        assert self.w2.size(0) == E
-
-        if payload.expert_x.dtype == torch.bfloat16:
+        if expert_x.dtype == torch.bfloat16:
             compute_type = tl.bfloat16
-        elif payload.expert_x.dtype == torch.float16:
+        elif expert_x.dtype == torch.float16:
             compute_type = tl.float16
         else:
-            raise ValueError(f"Unsupported compute_type: {payload.expert_x.dtype}")
+            raise ValueError(f"Unsupported compute_type: {expert_x.dtype}")
 
+        num_rows = expert_x.size(1)
+        # GEMMs skip rows past expert_num_tokens; activation padding is discarded.
         intermediate_cache1 = torch.empty(
-            (E, self.max_num_tokens, N),
-            device=payload.expert_x.device,
-            dtype=payload.expert_x.dtype,
+            (E, num_rows, N),
+            device=expert_x.device,
+            dtype=expert_x.dtype,
         )
         intermediate_cache2 = torch.empty(
-            (E, self.max_num_tokens, N // 2),
-            device=payload.expert_x.device,
-            dtype=payload.expert_x.dtype,
-        )
-        output_shape = (
-            self.local_num_experts,
-            self.max_num_tokens,
-            self.w2.size(1),
+            (E, num_rows, N // 2),
+            device=expert_x.device,
+            dtype=expert_x.dtype,
         )
         output = torch.empty(
-            output_shape, device=payload.expert_x.device, dtype=self.w2.dtype
+            (E, num_rows, self.w2.size(1)),
+            device=expert_x.device,
+            dtype=self.w2.dtype,
         )
 
-        # MM1
         invoke_moe_batched_triton_kernel(
-            A=payload.expert_x,
+            A=expert_x,
             B=self.w1,
             C=intermediate_cache1,
             expert_num_tokens=expert_num_tokens,
             compute_type=compute_type,
         )
-
-        intermediate_cache2.fill_(0)
 
         silu_and_mul(
             intermediate_cache2.view(-1, N // 2),

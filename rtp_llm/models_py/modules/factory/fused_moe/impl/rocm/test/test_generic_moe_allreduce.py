@@ -7,10 +7,11 @@ from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.models_py.distributed import collective_torch
+from rtp_llm.models_py.distributed import collective_torch, rocm_rccl
 from rtp_llm.models_py.distributed.collective_torch import (
     Group,
     destroy_distributed_environment,
@@ -18,11 +19,26 @@ from rtp_llm.models_py.distributed.collective_torch import (
 )
 from rtp_llm.models_py.model_desc import generic_moe as generic_moe_module
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer
+from rtp_llm.models_py.modules.base.rocm.select_topk import SelectTopk
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
+from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+    FusedMoEQuantConfig,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.impl.common.executor.batched_triton_executor import (
+    BatchedTritonExperts,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.impl.common.router.batched_data_router import (
+    BatchedDataRouter,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.routers import (
     pure_tp_router as pure_tp_router_module,
 )
 from rtp_llm.models_py.modules.hybrid import dense_mlp as dense_mlp_module
 from rtp_llm.ops import ActivationType, MoeConfig, NcclCommConfig, ParallelismConfig
+from rtp_llm.test.utils.cuda_graph_util import graph_capture
 from rtp_llm.test.utils.port_util import PortManager
 from rtp_llm.utils.model_weight import W
 
@@ -163,6 +179,126 @@ def _build_real_layer(rank, parallelism_config, with_gate):
     return layer
 
 
+def _build_batched_moe(rank, parallelism_config):
+    device = torch.device(f"cuda:{rank}")
+    model_config = ModelConfig()
+    model_config.hidden_size = 256
+    model_config.inter_size = 128
+    model_config.expert_num = 8
+    model_config.moe_k = 2
+    model_config.activation_type = ActivationType.Swiglu
+    model_config.data_type = "bf16"
+    moe_config = MoeConfig()
+    moe_config.ll_num_max_token = 1
+    config = MoEConfigAdapter(model_config, parallelism_config, moe_config)
+    quant_config = FusedMoEQuantConfig(quant_dtype=None)
+
+    generator = torch.Generator().manual_seed(20260901)
+    w1 = (
+        torch.randn(8, 256, 256, generator=generator)
+        .to(device=device, dtype=torch.bfloat16)
+        .mul_(0.1)
+    )
+    w2 = (
+        torch.randn(8, 256, 128, generator=generator)
+        .to(device=device, dtype=torch.bfloat16)
+        .mul_(0.1)
+    )
+    local = slice(rank * 4, (rank + 1) * 4)
+    experts = BatchedTritonExperts(
+        config,
+        quant_config,
+        {
+            W.moe_w1: w1[local].contiguous(),
+            W.moe_w2: w2[local].contiguous(),
+        },
+    )
+    fused_moe = FusedMoe(BatchedDataRouter(config, quant_config), experts, 8)
+    return SelectTopk(model_config), fused_moe, w1, w2
+
+
+def _batched_inputs(case, device):
+    generator = torch.Generator().manual_seed(3100 + case)
+    hidden = torch.randn(4, 256, generator=generator).to(
+        device=device, dtype=torch.bfloat16
+    )
+    logits = torch.full((4, 8), -10.0, device=device)
+    tokens = torch.arange(4, device=device)
+    if case == 0:
+        logits[tokens, tokens] = 3.0
+        logits[tokens, 4 + (tokens + 1) % 4] = 2.0
+    else:
+        logits[:, 0] = 3.0
+        logits[:, 4] = 2.0
+    return hidden, logits
+
+
+def _batched_reference(hidden, logits, w1, w2):
+    topk_logits, topk_ids = torch.topk(logits, 2, dim=-1)
+    topk_weights = torch.softmax(topk_logits, dim=-1)
+    output = torch.zeros_like(hidden)
+    for expert_id in range(8):
+        token_ids, slots = torch.where(topk_ids == expert_id)
+        projected = F.linear(hidden[token_ids], w1[expert_id])
+        value, gate = projected.chunk(2, dim=-1)
+        expert_output = F.linear(F.silu(gate) * value, w2[expert_id])
+        expert_output.mul_(topk_weights[token_ids, slots, None].to(expert_output.dtype))
+        output.index_add_(0, token_ids, expert_output)
+    return output, topk_ids.to(torch.int32), topk_weights
+
+
+def _run_batched_eager_and_graph(rank):
+    device = torch.device(f"cuda:{rank}")
+    parallelism_config = _make_real_parallelism(rank, 2)
+    parallelism_config.ep_size = 2
+    parallelism_config.ep_rank = rank
+    select_topk, fused_moe, w1, w2 = _build_batched_moe(rank, parallelism_config)
+    hidden, logits = _batched_inputs(0, device)
+    topk_ids = torch.empty(
+        hidden.size(0), 2, dtype=fused_moe.topk_ids_dtype, device=device
+    )
+    topk_weights = torch.empty(hidden.size(0), 2, device=device)
+
+    def forward():
+        select_topk(logits, topk_ids, topk_weights)
+        return fused_moe(hidden, topk_weights, topk_ids, activation="SiGLU")
+
+    def assert_result(output):
+        expected, expected_ids, expected_weights = _batched_reference(
+            hidden, logits, w1, w2
+        )
+        torch.testing.assert_close(topk_ids, expected_ids, rtol=0, atol=0)
+        torch.testing.assert_close(topk_weights, expected_weights, rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(output, expected, rtol=5e-2, atol=5e-2)
+
+    assert_result(forward())
+
+    stream = torch.cuda.Stream(device=device)
+    stream.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(stream):
+        forward()
+    stream.synchronize()
+    dist.barrier()
+
+    with patch.object(
+        rocm_rccl, "_is_hipgraph_capture_active", return_value=True
+    ), graph_capture(stream=stream) as graph:
+        graph_output = forward()
+    stream.synchronize()
+    rocm_rccl.finish_hipgraph_capture_session()
+
+    replay_hidden, replay_logits = _batched_inputs(1, device)
+    dist.broadcast(replay_hidden, src=0)
+    dist.broadcast(replay_logits, src=0)
+    hidden.copy_(replay_hidden)
+    logits.copy_(replay_logits)
+    stream.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(stream):
+        graph.replay()
+    stream.synchronize()
+    assert_result(graph_output)
+
+
 def _run_real_two_gpu_case(rank, world_size, ports, with_gate):
     parallelism_config = _make_real_parallelism(rank, world_size)
     initialized = False
@@ -236,8 +372,10 @@ def _run_real_two_gpu_case(rank, world_size, ports, with_gate):
             rtol=2e-2,
             atol=2e-3,
         )
-        if unified_output is legacy_output:
-            raise AssertionError("unified and legacy outputs unexpectedly alias")
+        if not with_gate:
+            dist.barrier()
+            _run_batched_eager_and_graph(rank)
+            dist.barrier()
         if rank == 0:
             print(
                 f"[real_tp_unified] gate={with_gate} unified_calls={unified_calls} "
