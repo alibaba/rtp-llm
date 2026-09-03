@@ -45,7 +45,13 @@ def glm5_sample_frame_indices(
     max_frame_count: int = GLM53_DEFAULT_VIDEO_MAX_FRAMES,
     temporal_patch_size: int = 2,
 ) -> list[int]:
-    """Sample GLM-5.3 video frames with the training-reference policy."""
+    """Sample frames with the Hugging Face GLM-5.3 policy.
+
+    ``max_frame_count`` is rounded down to a complete temporal group before
+    applying the reference sampler.  This keeps RTP-LLM's explicit request and
+    server frame limits strict; the sampling positions otherwise follow the
+    Hugging Face implementation.
+    """
     if total_frames <= 0:
         raise ValueError("GLM-5.3-Flash video must contain at least one frame")
     if fps <= 0:
@@ -60,9 +66,7 @@ def glm5_sample_frame_indices(
         )
     # The ViT consumes frames in complete temporal groups.  Round the budget
     # down so duplicating an odd tail can never exceed the caller's max_frames.
-    max_frame_count = (
-        int(max_frame_count) // temporal_patch_size * temporal_patch_size
-    )
+    max_frame_count = int(max_frame_count) // temporal_patch_size * temporal_patch_size
 
     max_frame_idx = total_frames - 1
     if duration <= 0:
@@ -73,20 +77,18 @@ def glm5_sample_frame_indices(
     )
 
     duration_per_frame = 1 / fps
-    max_second = int(duration)
+    max_seconds = int(duration)
     if total_frames < extract_t:
-        frame_indices = [
-            math.floor(i * total_frames / extract_t) for i in range(extract_t)
-        ]
+        frame_indices = np.linspace(0, total_frames - 1, extract_t, dtype=int).tolist()
     else:
         frame_indices = []
         current_second = 0.0
-        interval = 1 / (temporal_patch_size * target_fps)
+        inv_fps = 1 / target_fps
         for frame_index in range(total_frames):
             if frame_index * duration_per_frame >= current_second:
-                current_second += interval
+                current_second += inv_fps
                 frame_indices.append(frame_index)
-                if current_second >= max_second:
+                if current_second >= max_seconds:
                     break
 
     if len(frame_indices) < extract_t:
@@ -94,9 +96,7 @@ def glm5_sample_frame_indices(
         end = frame_indices[-1] if frame_indices else max_frame_idx
         frame_indices = np.linspace(start, end, extract_t, dtype=int).tolist()
     elif len(frame_indices) > extract_t:
-        frame_indices = np.linspace(
-            0, total_frames - 1, extract_t, dtype=int
-        ).tolist()
+        frame_indices = np.linspace(0, total_frames - 1, extract_t, dtype=int).tolist()
 
     unique_indices = list(dict.fromkeys(int(index) for index in frame_indices))
     if len(unique_indices) % temporal_patch_size:
@@ -253,14 +253,21 @@ class Glm53FlashVisionAttention(nn.Module):
     def _apply_rope(
         self, q: torch.Tensor, k: torch.Tensor, freqs: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        q_dtype = q.dtype
+        k_dtype = k.dtype
+        freqs = freqs.float()
         emb = torch.cat((freqs, freqs), dim=-1)
-        cos = emb.cos().to(q.dtype).unsqueeze(1)
-        sin = emb.sin().to(q.dtype).unsqueeze(1)
+        cos = emb.cos().unsqueeze(1)
+        sin = emb.sin().unsqueeze(1)
         rotary_dim = cos.shape[-1]
         q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
         k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
-        q = torch.cat((q_rot * cos + self._rotate_half(q_rot) * sin, q_pass), -1)
-        k = torch.cat((k_rot * cos + self._rotate_half(k_rot) * sin, k_pass), -1)
+        q_rot = q_rot.float()
+        k_rot = k_rot.float()
+        q_embed = q_rot * cos + self._rotate_half(q_rot) * sin
+        k_embed = k_rot * cos + self._rotate_half(k_rot) * sin
+        q = torch.cat((q_embed.to(q_dtype), q_pass), -1)
+        k = torch.cat((k_embed.to(k_dtype), k_pass), -1)
         return q, k
 
     def forward(
@@ -395,9 +402,7 @@ class Glm53FlashImageEmbedding(MultiModalEmbeddingInterface):
         self.visual = Glm53FlashVisionModel(SimpleNamespace(**config))
         self.processor_config = mm_related_params.config["processor_config"]
         self.ckpt_path = mm_related_params.config["ckpt_path"]
-        self.special_token_ids = mm_related_params.config[
-            "vision_special_token_ids"
-        ]
+        self.special_token_ids = mm_related_params.config["vision_special_token_ids"]
         self._timestamp_tokenizer = None
         processor_config = self.processor_config["image_processor"]
         self.processor = Qwen2VLImageProcessor(
@@ -444,7 +449,9 @@ class Glm53FlashImageEmbedding(MultiModalEmbeddingInterface):
             MMUrlType.IMAGE,
             MMUrlType.VIDEO,
         ):
-            raise ValueError(f"unsupported GLM-5.3-Flash media type: {mm_input.mm_type}")
+            raise ValueError(
+                f"unsupported GLM-5.3-Flash media type: {mm_input.mm_type}"
+            )
         media_config = (
             processor_config["video_processor"]
             if mm_input.mm_type == MMUrlType.VIDEO
@@ -453,9 +460,7 @@ class Glm53FlashImageEmbedding(MultiModalEmbeddingInterface):
         patch_size = media_config["patch_size"]
         temporal_patch_size = media_config["temporal_patch_size"]
         merge_size = media_config["merge_size"]
-        factor = (
-            patch_size * merge_size * media_config.get("patch_expand_factor", 1)
-        )
+        factor = patch_size * merge_size * media_config.get("patch_expand_factor", 1)
         token_pixels = temporal_patch_size * (patch_size * merge_size) ** 2
         min_pixels = media_config["min_image_tokens"] * token_pixels
         max_pixels = media_config["max_image_tokens"] * token_pixels
@@ -482,9 +487,7 @@ class Glm53FlashImageEmbedding(MultiModalEmbeddingInterface):
             requested_fps = float(mm_input.mm_preprocess_config.fps)
             if requested_fps <= 0:
                 requested_fps = float(
-                    media_config.get(
-                        "fps_interval", media_config.get("fps", 2.0)
-                    )
+                    media_config.get("fps_interval", media_config.get("fps", 2.0))
                 )
             request_max_frames = int(mm_input.mm_preprocess_config.max_frames)
             processor_max_frames = int(
@@ -541,7 +544,7 @@ class Glm53FlashImageEmbedding(MultiModalEmbeddingInterface):
                 videos=frames, return_tensors="pt", do_resize=False
             )
             timestamps = [
-                int(indices[i] / source_fps)
+                indices[i] / source_fps
                 for i in range(0, len(indices), temporal_patch_size)
             ]
             return (
@@ -574,7 +577,7 @@ class Glm53FlashImageEmbedding(MultiModalEmbeddingInterface):
             "processor_config": self.processor_config,
         }
 
-    def _encode_timestamp(self, seconds: int) -> list[int]:
+    def _encode_timestamp(self, seconds: float) -> list[int]:
         if self._timestamp_tokenizer is None:
             from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
                 TokenizerFactory,
@@ -609,9 +612,7 @@ class Glm53FlashImageEmbedding(MultiModalEmbeddingInterface):
         grid_thw = data[1].to(self._device)
         embeddings = self.visual(pixel_values, grid_thw)
         if len(data) == 2:
-            layout = self._layout_tensor(
-                group_start=True, prefix_ids=[], suffix_ids=[]
-            )
+            layout = self._layout_tensor(group_start=True, prefix_ids=[], suffix_ids=[])
             return [embeddings], None, [layout]
 
         timestamps = data[2]

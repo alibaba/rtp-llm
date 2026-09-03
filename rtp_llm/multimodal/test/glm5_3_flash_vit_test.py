@@ -36,7 +36,42 @@ class Glm53FlashVitTest(unittest.TestCase):
         self.assertEqual(len(indices), 20)
         self.assertEqual(len(indices) % 2, 0)
         self.assertEqual(indices[0], 0)
-        self.assertEqual(indices[-1], 299)
+        self.assertEqual(indices, list(range(0, 300, 15)))
+
+    def test_video_sampler_matches_huggingface_positions(self):
+        indices = glm5_sample_frame_indices(
+            251,
+            25.0,
+            10.04,
+            target_fps=2.0,
+            max_frame_count=64,
+            temporal_patch_size=2,
+        )
+        self.assertEqual(
+            indices,
+            [
+                0,
+                13,
+                25,
+                38,
+                50,
+                63,
+                75,
+                88,
+                100,
+                113,
+                125,
+                138,
+                150,
+                163,
+                175,
+                188,
+                200,
+                213,
+                225,
+                238,
+            ],
+        )
 
     def test_short_video_duplicates_tail_for_temporal_patch(self):
         self.assertEqual(
@@ -137,13 +172,13 @@ class Glm53FlashVitTest(unittest.TestCase):
             requested_indices = None
 
             def __init__(self, data, ctx, num_threads):
-                self.frames = np.zeros((4, 56, 84, 3), dtype=np.uint8)
+                self.frames = np.zeros((5, 56, 84, 3), dtype=np.uint8)
 
             def __len__(self):
                 return len(self.frames)
 
             def get_avg_fps(self):
-                return 2.0
+                return 2.5
 
             def get_batch(self, indices):
                 _FakeVideoReader.requested_indices = list(indices)
@@ -204,14 +239,14 @@ class Glm53FlashVitTest(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(_FakeVideoReader.requested_indices, [0, 1, 2, 3])
+        self.assertEqual(_FakeVideoReader.requested_indices, [0, 2, 3, 4])
         self.assertEqual(video_processor.assertions, ("pt", False))
         self.assertEqual(
             [frame.size for frame in video_processor.frames], [(28, 28)] * 4
         )
         self.assertEqual(pixel_values.shape, (4, 6))
         self.assertEqual(grid_thw.tolist(), [[2, 2, 2]])
-        self.assertEqual(timestamps, [0, 1])
+        self.assertEqual(timestamps, [0.0, 1.2])
 
     def test_real_mp4_decord_preprocess(self):
         video_path = Path(os.environ["TEST_TMPDIR"]) / "glm53_decord_test.mp4"
@@ -270,17 +305,15 @@ class Glm53FlashVitTest(unittest.TestCase):
             preprocess_config,
         )
 
-        pixel_values, grid_thw, timestamps = (
-            Glm53FlashImageEmbedding.preprocess_input(
-                [mm_input],
-                SimpleNamespace(download_headers="", mm_video_max_frames=8),
-                processor=None,
-                video_processor=video_processor,
-                processor_config={
-                    "image_processor": media_config,
-                    "video_processor": media_config,
-                },
-            )
+        pixel_values, grid_thw, timestamps = Glm53FlashImageEmbedding.preprocess_input(
+            [mm_input],
+            SimpleNamespace(download_headers="", mm_video_max_frames=8),
+            processor=None,
+            video_processor=video_processor,
+            processor_config={
+                "image_processor": media_config,
+                "video_processor": media_config,
+            },
         )
 
         grid_t, grid_h, grid_w = grid_thw[0].tolist()
@@ -330,6 +363,7 @@ class Glm53FlashVitTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(output).all())
 
     def test_rope_preserves_bfloat16(self):
+        torch.manual_seed(20260903)
         config = SimpleNamespace(
             attention_bias=True,
             hidden_size=32,
@@ -338,10 +372,23 @@ class Glm53FlashVitTest(unittest.TestCase):
         attention = Glm53FlashVisionAttention(config)
         q = torch.randn(3, 4, 8, dtype=torch.bfloat16)
         k = torch.randn_like(q)
-        freqs = torch.randn(3, 4)
-        q, k = attention._apply_rope(q, k, freqs)
-        self.assertEqual(q.dtype, torch.bfloat16)
-        self.assertEqual(k.dtype, torch.bfloat16)
+        freqs = torch.randn(3, 4, dtype=torch.bfloat16)
+        actual_q, actual_k = attention._apply_rope(q, k, freqs)
+
+        emb = torch.cat((freqs.float(), freqs.float()), dim=-1)
+        cos = emb.cos().unsqueeze(1)
+        sin = emb.sin().unsqueeze(1)
+        expected_q = (q.float() * cos + attention._rotate_half(q.float()) * sin).to(
+            q.dtype
+        )
+        expected_k = (k.float() * cos + attention._rotate_half(k.float()) * sin).to(
+            k.dtype
+        )
+
+        self.assertEqual(actual_q.dtype, torch.bfloat16)
+        self.assertEqual(actual_k.dtype, torch.bfloat16)
+        torch.testing.assert_close(actual_q, expected_q, rtol=0, atol=0)
+        torch.testing.assert_close(actual_k, expected_k, rtol=0, atol=0)
 
 
 if __name__ == "__main__":
