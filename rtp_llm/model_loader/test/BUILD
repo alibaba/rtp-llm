@@ -44,10 +44,8 @@ py_test(
         # auto_model: the finalize coverage imports rtp_llm.models.base_model.
         "//rtp_llm/models_py/standalone:auto_model",
     ],
-    tags = ["H20"],
-    exec_properties = {
-        'gpu': 'H20',
-    },
+    # Metadata-only weight-info test (fake ckpt objects, no device copies):
+    # no H20 pin, runs on the default gpu_cuda12 pool.
 )
 
 py_test(

@@ -17,7 +17,6 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'H20'},
 )
 
 py_test(

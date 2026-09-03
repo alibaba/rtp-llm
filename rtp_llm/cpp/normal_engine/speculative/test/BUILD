@@ -35,11 +35,11 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
-    # CPU-only logic but normal_engine links libtorch_cuda; H20 host needed for loader.
+    # CPU-only logic, but normal_engine links libtorch_cuda, so the loader needs a
+    # CUDA host. Any generic CUDA worker suffices (default gpu=gpu_cuda12) — no H20.
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -66,7 +66,6 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -92,5 +91,4 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
 )

@@ -14,7 +14,6 @@ cc_test(
         "main.cc",
     ],
     copts = test_copts,
-    exec_properties = {'gpu':'H20'},
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_task_context",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
@@ -34,7 +33,6 @@ cc_test(
         "main.cc",
     ],
     copts = test_copts,
-    exec_properties = {'gpu':'H20'},
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_transfer_service",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
@@ -54,7 +52,6 @@ cc_test(
         "main.cc",
     ],
     copts = test_copts,
-    exec_properties = {'gpu':'H20'},
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_backend",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",

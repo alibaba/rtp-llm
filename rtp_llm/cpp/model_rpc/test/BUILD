@@ -71,7 +71,6 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
     env = {},
-    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -86,7 +85,6 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -101,7 +99,6 @@ cc_test(
         "@havenask//aios/autil:net",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -110,7 +107,6 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
     env = {},
-    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -119,7 +115,6 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
     env = {},
-    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -145,7 +140,6 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -158,7 +152,6 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -171,7 +164,6 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -184,5 +176,4 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
 )
