@@ -33,3 +33,9 @@ py_test(
     srcs = ["test_loader_eplb.py"],
     deps = py_test_deps,
 )
+
+py_test(
+    name = "test_loader_fastsafetensors",
+    srcs = ["test_loader_fastsafetensors.py"],
+    deps = py_test_deps,
+)

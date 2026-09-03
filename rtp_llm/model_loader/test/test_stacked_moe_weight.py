@@ -148,6 +148,37 @@ class TestOfflineFp4SharedExpertWeight(unittest.TestCase):
             ],
         )
 
+    def test_fastsafetensors_loader_keeps_fp8_quant_postprocess_boundary(self):
+        """Do not split a QuantWeight into independent kernel/scale load units.
+
+        Loading the scale as an AtomicWeight bypasses PerBlockFp8Weight._postprocess,
+        leaving a checkpoint UE8M0 tensor unconverted when generic DeepGEMM expects
+        a float32 or packed int32 scale.
+        """
+        from rtp_llm.model_loader.loader import ModelLoader
+
+        ffn = self._make_shared_ffn()
+        fp8_wrapped = ffn.w13.create(ffn.w13, Fp8BlockWiseQuantConfig(is_quanted=True))
+        self.assertIsInstance(fp8_wrapped, PerBlockFp8Weight)
+
+        loader = object.__new__(ModelLoader)
+        loader._load_config = MagicMock()
+        loader._load_config.vit_separation = object()
+        loader._model_weights_info = MagicMock()
+        loader._model_weights_info.layer_weights = [fp8_wrapped]
+        loader._model_weights_info.weights = []
+        loader._misc_weights_info = []
+
+        tensor_to_weight, load_units = loader._generate_weight_info()
+        expected_keys = fp8_wrapped.get_tensor_names(0, loader._load_config)
+
+        self.assertEqual(len(load_units), 1)
+        self.assertIs(load_units[0].weight, fp8_wrapped)
+        self.assertEqual(set(tensor_to_weight), expected_keys)
+        self.assertTrue(
+            all(infos == [load_units[0]] for infos in tensor_to_weight.values())
+        )
+
     def test_unwraps_fp8_shared_w2_to_offline_fp8_scale_name(self):
         ffn = self._make_shared_ffn()
         fp8_wrapped = ffn.w2.create(ffn.w2, Fp8BlockWiseQuantConfig(is_quanted=True))
