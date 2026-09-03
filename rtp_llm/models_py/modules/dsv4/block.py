@@ -199,9 +199,15 @@ class Block(nn.Module):
 
         self._mega_hca_adapter = MegaHCAAdapter(self, layer_weights, runtime)
 
-    def enable_mega_front(self) -> None:
-        """Attach the CUDA-extension MoE front for an explicit Mega decode."""
-        if getattr(self.ffn._strategy, "name", "") != "mega_se":
+    def enable_mega_front(self, *, required: bool = False) -> None:
+        """Attach the CUDA-extension MoE front to a MegaMoE-SE decode layer."""
+        strategy_name = getattr(self.ffn._strategy, "name", "")
+        if strategy_name != "mega_se":
+            if required:
+                raise RuntimeError(
+                    "DSV4 Mega decode with EP>1 requires the mega_se MoE strategy, "
+                    f"got {strategy_name or 'unknown'!r}"
+                )
             return
         from rtp_llm.models_py.modules.dsv4.moe.mega_front import MegaMoeFrontAdapter
 
@@ -348,11 +354,12 @@ class Block(nn.Module):
 
         _dbg_layer = _rt.should_record_layer(self.layer_id)
         mega_adapter = self._mega_csa_adapter or self._mega_hca_adapter
-        if (
+        use_mega_attention = (
             attn_fn is None
             and mega_adapter is not None
             and mega_adapter.supports_decode_shape(x, attn_metadata)
-        ):
+        )
+        if use_mega_attention:
             x = mega_adapter.forward_attention_sublayer(
                 self, x, attn_metadata, kv_cache=kv_cache
             )
@@ -387,9 +394,14 @@ class Block(nn.Module):
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_residual", x)
 
         # Mega decode replaces the ordinary HC/norm/router/pack sequence with
-        # the extension front; non-Mega strategies keep the generic path.
+        # the extension front. Unsupported request sizes keep the generic path.
         residual = x
-        if self._mega_front_adapter is not None:
+        use_mega_front = (
+            self._mega_front_adapter is not None
+            and self._mega_front_adapter.supports(x)
+            and (attn_fn is not None or mega_adapter is None or use_mega_attention)
+        )
+        if use_mega_front:
             ffn_out, x_pre, post, comb = self._mega_front_adapter.forward(x, input_ids)
         else:
             x_pre, post, comb = self.ffn_hc.pre(

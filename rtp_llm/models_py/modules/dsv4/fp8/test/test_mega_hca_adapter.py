@@ -63,7 +63,7 @@ def _block_stub(adapter: object | None) -> Block:
 
 
 class MegaHCARoutingTest(unittest.TestCase):
-    def test_transformer_switch_attaches_hca_adapters(self) -> None:
+    def test_transformer_switch_enables_csa_and_hca_together(self) -> None:
         class _Layer(torch.nn.Module):
             def __init__(self) -> None:
                 super().__init__()
@@ -82,11 +82,10 @@ class MegaHCARoutingTest(unittest.TestCase):
             is_decode_role=False,
             fp8_kv_cache=True,
             tp_size=1,
+            ep_size=8,
         )
 
-        with patch.dict(
-            os.environ, {"DSV4_MEGA_HCA": "1", "DSV4_MEGA_CSA": "0"}
-        ), patch(
+        with patch.dict(os.environ, {"DSV4_MEGA": "1"}, clear=True), patch(
             "rtp_llm.models_py.modules.dsv4.transformer._build_block",
             return_value=layer,
         ), patch(
@@ -98,6 +97,10 @@ class MegaHCARoutingTest(unittest.TestCase):
         ), patch(
             "rtp_llm.models_py.modules.dsv4.transformer.build_hc_head",
             return_value=torch.nn.Identity(),
+        ), patch(
+            "rtp_llm.models_py.modules.dsv4.fp8.decode.mega_support."
+            "mega_decode_unavailable_reason",
+            return_value=None,
         ):
             transformer = V4Transformer(args, model_weights)
 
@@ -105,8 +108,10 @@ class MegaHCARoutingTest(unittest.TestCase):
         layer.enable_mega_hca.assert_called_once_with(
             transformer._mega_csa_runtime, model_weights.weights[0]
         )
-        layer.enable_mega_csa.assert_not_called()
-        layer.enable_mega_front.assert_called_once_with()
+        layer.enable_mega_csa.assert_called_once_with(
+            transformer._mega_csa_runtime, model_weights.weights[0]
+        )
+        layer.enable_mega_front.assert_called_once_with(required=True)
 
     def test_decode_q_len_one_uses_complete_hca_sublayer(self) -> None:
         adapter = MagicMock()

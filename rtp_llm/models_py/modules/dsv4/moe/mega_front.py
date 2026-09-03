@@ -231,6 +231,14 @@ class MegaMoeFrontAdapter:
         self._plans[tokens] = plan
         return plan
 
+    def supports(self, residual: torch.Tensor) -> bool:
+        """Return whether this request fits the fused front's physical buffers."""
+
+        if residual.dim() < 2:
+            return False
+        tokens = reduce(mul, (int(value) for value in residual.shape[:-2]), 1)
+        return 0 <= tokens <= _CAPACITY_M
+
     def forward(
         self, residual: torch.Tensor, input_ids: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:

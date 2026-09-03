@@ -17,7 +17,6 @@ from .mega_csa_weights import (
     INDEX_HEADS,
     MAX_BATCH,
     O_LORA_RANK,
-    PRO_GEOMETRY,
     ROPE_DIM,
     CSAGeometry,
     MegaCSAWeights,
@@ -124,101 +123,9 @@ class MegaCSAAdapter:
             from rtp_kernel import dsv4_mega
 
             return dsv4_mega
+        from .mega_support import require_mega_runtime
 
-        capability = torch.cuda.get_device_capability(device)
-        if capability not in ((10, 0), (10, 3)):
-            raise RuntimeError(
-                "DSV4 Mega CSA requires sm_100a or sm_103a, "
-                f"got sm_{capability[0]}{capability[1]}"
-            )
-
-        from rtp_kernel import dsv4_mega
-
-        required = (
-            "geometry_csa",
-            "hc_reduce_fuse_out",
-            "front_mixed_gemm_csa",
-            "wq_b_proj_gemm_merged_csa",
-            "mqa_logits_fp8_decode_out",
-            "mla_o_inv_rope_quant",
-        )
-        missing = [name for name in required if not hasattr(dsv4_mega, name)]
-        if missing:
-            raise RuntimeError(
-                "rtp-kernel does not provide the DSV4 TP1 CSA ABI: "
-                + ", ".join(missing)
-            )
-        import inspect
-
-        required_parameters = {
-            "front_mixed_gemm_csa": ("hc_mix", "main_state", "idx_state", "pdl"),
-            "wq_b_proj_gemm_merged_csa": (
-                "indexer_fp8",
-                "idx_cache",
-                "idx_state_block_table",
-                "swa_cache",
-                "iq_dst",
-                "pdl",
-            ),
-            "mqa_logits_fp8_decode_out": (
-                "schedule_meta",
-                "comp_state",
-                "comp_state_block_table",
-                "cmp_cache",
-                "query_x",
-                "query_out",
-                "pdl",
-            ),
-            "mla_o_inv_rope_quant": (
-                "input",
-                "positions",
-                "rope_cos",
-                "rope_sin",
-                "output_fp8",
-                "output_scale",
-            ),
-        }
-        incompatible = []
-        for function_name, parameters in required_parameters.items():
-            signature = inspect.signature(getattr(dsv4_mega, function_name))
-            absent = [name for name in parameters if name not in signature.parameters]
-            if absent:
-                incompatible.append(f"{function_name} missing {','.join(absent)}")
-        if incompatible:
-            raise RuntimeError(
-                "rtp-kernel DSV4 TP1 CSA ABI is incompatible: "
-                + "; ".join(incompatible)
-            )
-        geometry = dsv4_mega.geometry_csa()
-        g = self._geometry
-        suffix = "" if g is PRO_GEOMETRY else "_flash"
-        expected = {
-            f"n_main{suffix}": g.n_main,
-            "n_index": INDEX_HEADS * INDEX_HEAD_DIM,
-            f"n_merged{suffix}": g.n_merged,
-            f"num_main_heads{suffix}": g.main_heads,
-            "num_index_heads": INDEX_HEADS,
-            "slot_dtype_bits": 64,
-        }
-        mismatched = {
-            key: geometry.get(key)
-            for key, value in expected.items()
-            if geometry.get(key) != value
-        }
-        if mismatched:
-            raise RuntimeError(
-                f"rtp-kernel DSV4 geometry mismatch: got {mismatched}, "
-                f"expected {expected}"
-            )
-        import deep_gemm
-
-        for name in (
-            "tf32_hc_prenorm_gemm",
-            "get_paged_mqa_logits_metadata",
-            "get_num_sms",
-        ):
-            if not hasattr(deep_gemm, name):
-                raise RuntimeError(f"DeepGEMM is missing required DSV4 API {name}")
+        dsv4_mega = require_mega_runtime(device, ("csa",))
         self._runtime_checked = True
         return dsv4_mega
 
