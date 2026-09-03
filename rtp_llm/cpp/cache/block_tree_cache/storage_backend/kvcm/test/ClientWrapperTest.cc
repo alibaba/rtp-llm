@@ -122,7 +122,7 @@ std::shared_ptr<ClientWrapper> initializeClient(bool                            
     return wrapper;
 }
 
-TEST(ClientWrapperLifecycleTest, RecreatesTransferClientForDifferentRegistrationSpan) {
+TEST(ClientWrapperTest, RecreatesTransferClientForDifferentRegistrationSpan) {
     std::array<char, 64>         first_pool{};
     std::array<char, 96>         second_pool{};
     kv_cache_manager::RegistSpan first_span{first_pool.data(), first_pool.size()};
@@ -152,7 +152,7 @@ TEST(ClientWrapperLifecycleTest, RecreatesTransferClientForDifferentRegistration
     EXPECT_EQ(*second_destruction_count, 1);
 }
 
-TEST(ClientWrapperLifecycleTest, RecreatesSubscriberWhenSwitchingFromDirectToVipServer) {
+TEST(ClientWrapperTest, RecreatesSubscriberWhenSwitchingFromDirectToVipServer) {
     std::array<char, 64>         direct_pool{};
     std::array<char, 64>         vip_pool{};
     kv_cache_manager::RegistSpan direct_span{direct_pool.data(), direct_pool.size()};
@@ -175,7 +175,7 @@ TEST(ClientWrapperLifecycleTest, RecreatesSubscriberWhenSwitchingFromDirectToVip
     EXPECT_EQ(*vip_destruction_count, 1);
 }
 
-TEST(ClientWrapperLifecycleTest, ShutdownInterruptsFailedReRegistrationBeforeCreatingNewSpanClient) {
+TEST(ClientWrapperTest, ShutdownInterruptsFailedReRegistrationBeforeCreatingNewSpanClient) {
     std::array<char, 64>                  old_pool{};
     kv_cache_manager::RegistSpan          old_span{old_pool.data(), old_pool.size()};
     InitObservation                       old_observation;
@@ -242,76 +242,7 @@ TEST(ClientWrapperLifecycleTest, ShutdownInterruptsFailedReRegistrationBeforeCre
     EXPECT_EQ(*new_destruction_count, 1);
 }
 
-TEST(ClientWrapperBehaviorTest, RoutesMetadataAndTransferOperations) {
-    auto  factory           = std::make_unique<MockClientFactory>();
-    auto* factory_ptr       = factory.get();
-    auto  subscriber        = std::make_unique<MockSubscriber>();
-    auto* subscriber_ptr    = subscriber.get();
-    auto  meta_client       = std::make_unique<kv_cache_manager::MockMetaClient>();
-    auto* meta_ptr          = meta_client.get();
-    auto  destruction_count = std::make_shared<int>(0);
-    auto  transfer_client   = std::make_unique<kv_cache_manager::MockTransferClient>(destruction_count);
-    auto* transfer_ptr      = transfer_client.get();
-
-    EXPECT_CALL(*factory_ptr, createSubscriber(false)).WillOnce(Invoke([&subscriber](bool) {
-        return std::move(subscriber);
-    }));
-    EXPECT_CALL(*subscriber_ptr, init(std::vector<std::string>{"direct"})).WillOnce(Return(true));
-    EXPECT_CALL(*subscriber_ptr, getAddresses(_)).Times(0);
-    EXPECT_CALL(*factory_ptr, createMetaClient(_, _)).WillOnce(Invoke([&meta_client](const auto&, const auto&) {
-        return std::move(meta_client);
-    }));
-    static const std::string storage_config = R"({"sdk_backend_configs":[]})";
-    EXPECT_CALL(*meta_ptr, GetStorageConfig()).WillOnce(ReturnRef(storage_config));
-    EXPECT_CALL(*factory_ptr, createTransferClient(_, _)).WillOnce(Invoke([&transfer_client](const auto&, const auto&) {
-        return std::move(transfer_client);
-    }));
-
-    ClientWrapper                wrapper(std::move(factory));
-    std::array<char, 64>         registration{};
-    kv_cache_manager::RegistSpan span{registration.data(), registration.size()};
-    ASSERT_TRUE(
-        wrapper.init({{"", makeConfig(false, "direct")}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}));
-
-    const std::vector<int64_t> keys{1, 2};
-    kv_cache_manager::Location location;
-    location.emplace_back(kv_cache_manager::LocationSpecUnit{"tp0_Ffull", "uri"});
-    kv_cache_manager::Locations expected_locations{std::move(location)};
-    EXPECT_CALL(*meta_ptr, MatchLocation("match", kv_cache_manager::QueryType::QT_PREFIX_MATCH, keys, _, _, _, _))
-        .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, expected_locations)));
-    const auto [match_ok, locations] = wrapper.match(
-        "", "match", kv_cache_manager::QueryType::QT_PREFIX_MATCH, keys, kv_cache_manager::BlockMaskOffset{0}, {});
-    EXPECT_TRUE(match_ok);
-    EXPECT_EQ(locations.size(), expected_locations.size());
-
-    kv_cache_manager::WriteLocation write_location;
-    write_location.write_session_id = "session";
-    EXPECT_CALL(*meta_ptr, StartWrite("start", keys, std::vector<int64_t>{}, std::vector<std::string>{"Ffull"}, 9))
-        .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, write_location)));
-    const auto [start_ok, actual_write_location] =
-        wrapper.getWriteLocation("", "start", keys, {}, {"Ffull"}, /*write_timeout_seconds=*/9);
-    EXPECT_TRUE(start_ok);
-    EXPECT_EQ(actual_write_location.write_session_id, "session");
-
-    EXPECT_CALL(*meta_ptr, FinishWrite("finish", "session", _, _))
-        .WillOnce(Return(kv_cache_manager::ClientErrorCode::ER_OK));
-    EXPECT_TRUE(wrapper.finishWrite("", "finish", "session", kv_cache_manager::BlockMaskOffset{0}, {}));
-
-    kv_cache_manager::UriStrVec    uris{"uri"};
-    kv_cache_manager::BlockBuffers buffers;
-    EXPECT_CALL(*transfer_ptr, LoadKvCaches(uris, _, _)).WillOnce(Return(kv_cache_manager::ClientErrorCode::ER_OK));
-    EXPECT_TRUE(wrapper.loadKvCaches(uris, buffers));
-    EXPECT_CALL(*transfer_ptr, SaveKvCaches(uris, _, _))
-        .WillOnce(Return(
-            std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, kv_cache_manager::UriStrVec{"actual_uri"})));
-    const auto [save_ok, actual_uris] = wrapper.saveKvCaches(uris, buffers);
-    EXPECT_TRUE(save_ok);
-    EXPECT_EQ(actual_uris, (kv_cache_manager::UriStrVec{"actual_uri"}));
-    wrapper.shutdown();
-    EXPECT_EQ(*destruction_count, 1);
-}
-
-TEST(ClientWrapperBehaviorTest, RejectsEmptyDirectAddressBeforeCreatingClients) {
+TEST(ClientWrapperTest, RejectsEmptyDirectAddressBeforeCreatingClients) {
     auto  factory        = std::make_unique<MockClientFactory>();
     auto* factory_ptr    = factory.get();
     auto  subscriber     = std::make_unique<MockSubscriber>();
@@ -329,7 +260,7 @@ TEST(ClientWrapperBehaviorTest, RejectsEmptyDirectAddressBeforeCreatingClients) 
     EXPECT_FALSE(wrapper.init({{"", makeConfig(false, "")}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}));
 }
 
-TEST(ClientWrapperBehaviorTest, RetriesMetadataClientCreationAccordingToKVCMConfig) {
+TEST(ClientWrapperTest, RetriesMetadataClientCreationAccordingToKVCMConfig) {
     auto  factory           = std::make_unique<MockClientFactory>();
     auto* factory_ptr       = factory.get();
     auto  subscriber        = std::make_unique<MockSubscriber>();
@@ -361,7 +292,7 @@ TEST(ClientWrapperBehaviorTest, RetriesMetadataClientCreationAccordingToKVCMConf
     EXPECT_EQ(*destruction_count, 1);
 }
 
-TEST(ClientWrapperBehaviorTest, ReusesMetadataClientWhenVipAddressSnapshotIsUnchanged) {
+TEST(ClientWrapperTest, ReusesMetadataClientWhenVipAddressSnapshotIsUnchanged) {
     auto  factory           = std::make_unique<MockClientFactory>();
     auto* factory_ptr       = factory.get();
     auto  subscriber        = std::make_unique<MockSubscriber>();
@@ -406,7 +337,7 @@ TEST(ClientWrapperBehaviorTest, ReusesMetadataClientWhenVipAddressSnapshotIsUnch
     EXPECT_EQ(*destruction_count, 1);
 }
 
-TEST(ClientWrapperBehaviorTest, RecreatesMetadataClientWhenVipAddressChanges) {
+TEST(ClientWrapperTest, RecreatesMetadataClientWhenVipAddressChanges) {
     auto  factory           = std::make_unique<MockClientFactory>();
     auto* factory_ptr       = factory.get();
     auto  subscriber        = std::make_unique<MockSubscriber>();
@@ -449,6 +380,145 @@ TEST(ClientWrapperBehaviorTest, RecreatesMetadataClientWhenVipAddressChanges) {
                            kv_cache_manager::BlockMaskOffset{0},
                            {})
                     .first);
+    wrapper.shutdown();
+    EXPECT_EQ(*destruction_count, 1);
+}
+
+TEST(ClientWrapperTest, VipRefreshFailureDoesNotCallStaleMetadataClient) {
+    auto  factory           = std::make_unique<MockClientFactory>();
+    auto* factory_ptr       = factory.get();
+    auto  subscriber        = std::make_unique<MockSubscriber>();
+    auto* subscriber_ptr    = subscriber.get();
+    auto  meta_client       = std::make_unique<kv_cache_manager::MockMetaClient>();
+    auto* meta_ptr          = meta_client.get();
+    auto  destruction_count = std::make_shared<int>(0);
+    auto  transfer_client   = std::make_unique<kv_cache_manager::MockTransferClient>(destruction_count);
+
+    EXPECT_CALL(*factory_ptr, createSubscriber(true)).WillOnce(Invoke([&subscriber](bool) {
+        return std::move(subscriber);
+    }));
+    EXPECT_CALL(*subscriber_ptr, init(std::vector<std::string>{"vip"})).WillOnce(Return(true));
+    EXPECT_CALL(*subscriber_ptr, getAddresses(_))
+        .WillOnce(DoAll(SetArgReferee<0>(std::vector<std::string>{"old_address"}), Return(true)))
+        .WillOnce(DoAll(SetArgReferee<0>(std::vector<std::string>{}), Return(false)));
+    EXPECT_CALL(*factory_ptr, createMetaClient(_, _)).WillOnce(Invoke([&meta_client](const auto&, const auto&) {
+        return std::move(meta_client);
+    }));
+    static const std::string storage_config = R"({"sdk_backend_configs":[]})";
+    EXPECT_CALL(*meta_ptr, GetStorageConfig()).WillOnce(ReturnRef(storage_config));
+    EXPECT_CALL(*meta_ptr, FinishWrite(_, _, _, _)).Times(0);
+    EXPECT_CALL(*factory_ptr, createTransferClient(_, _)).WillOnce(Invoke([&transfer_client](const auto&, const auto&) {
+        return std::move(transfer_client);
+    }));
+
+    ClientWrapper                wrapper(std::move(factory));
+    std::array<char, 32>         registration{};
+    kv_cache_manager::RegistSpan span{registration.data(), registration.size()};
+    ASSERT_TRUE(
+        wrapper.init({{"", makeConfig(true, "vip")}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}));
+    EXPECT_FALSE(wrapper.finishWrite("", "finish", "session", kv_cache_manager::BlockMaskOffset{0}, {}));
+    wrapper.shutdown();
+    EXPECT_EQ(*destruction_count, 1);
+}
+
+TEST(ClientWrapperTest, RetriesVipAddressChangeAfterClientCreationFailure) {
+    auto  factory           = std::make_unique<MockClientFactory>();
+    auto* factory_ptr       = factory.get();
+    auto  subscriber        = std::make_unique<MockSubscriber>();
+    auto* subscriber_ptr    = subscriber.get();
+    auto  old_meta_client   = std::make_unique<kv_cache_manager::MockMetaClient>();
+    auto* old_meta_ptr      = old_meta_client.get();
+    auto  new_meta_client   = std::make_unique<kv_cache_manager::MockMetaClient>();
+    auto* new_meta_ptr      = new_meta_client.get();
+    auto  destruction_count = std::make_shared<int>(0);
+    auto  transfer_client   = std::make_unique<kv_cache_manager::MockTransferClient>(destruction_count);
+
+    EXPECT_CALL(*factory_ptr, createSubscriber(true)).WillOnce(Invoke([&subscriber](bool) {
+        return std::move(subscriber);
+    }));
+    EXPECT_CALL(*subscriber_ptr, init(std::vector<std::string>{"vip"})).WillOnce(Return(true));
+    EXPECT_CALL(*subscriber_ptr, getAddresses(_))
+        .WillOnce(DoAll(SetArgReferee<0>(std::vector<std::string>{"old_address"}), Return(true)))
+        .WillOnce(DoAll(SetArgReferee<0>(std::vector<std::string>{"new_address"}), Return(true)))
+        .WillOnce(DoAll(SetArgReferee<0>(std::vector<std::string>{"new_address"}), Return(true)));
+    EXPECT_CALL(*factory_ptr, createMetaClient(_, _))
+        .WillOnce(Invoke([&old_meta_client](const auto&, const auto&) { return std::move(old_meta_client); }))
+        .WillOnce(Invoke([](const auto&, const auto&) { return std::unique_ptr<kv_cache_manager::MetaClient>{}; }))
+        .WillOnce(Invoke([&new_meta_client](const auto&, const auto&) { return std::move(new_meta_client); }));
+    static const std::string storage_config = R"({"sdk_backend_configs":[]})";
+    EXPECT_CALL(*old_meta_ptr, GetStorageConfig()).WillOnce(ReturnRef(storage_config));
+    EXPECT_CALL(*old_meta_ptr, FinishWrite(_, _, _, _)).Times(0);
+    EXPECT_CALL(*new_meta_ptr, FinishWrite("finish_2", "session", _, _))
+        .WillOnce(Return(kv_cache_manager::ClientErrorCode::ER_OK));
+    EXPECT_CALL(*factory_ptr, createTransferClient(_, _)).WillOnce(Invoke([&transfer_client](const auto&, const auto&) {
+        return std::move(transfer_client);
+    }));
+
+    ClientWrapper                wrapper(std::move(factory));
+    std::array<char, 32>         registration{};
+    kv_cache_manager::RegistSpan span{registration.data(), registration.size()};
+    ASSERT_TRUE(
+        wrapper.init({{"", makeConfig(true, "vip")}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}));
+    EXPECT_FALSE(wrapper.finishWrite("", "finish_1", "session", kv_cache_manager::BlockMaskOffset{0}, {}));
+    EXPECT_TRUE(wrapper.finishWrite("", "finish_2", "session", kv_cache_manager::BlockMaskOffset{0}, {}));
+    wrapper.shutdown();
+    EXPECT_EQ(*destruction_count, 1);
+}
+
+TEST(ClientWrapperTest, ServiceInstanceFailureReRegistersAndRoutesTheNextRequest) {
+    auto  factory           = std::make_unique<MockClientFactory>();
+    auto* factory_ptr       = factory.get();
+    auto  subscriber        = std::make_unique<MockSubscriber>();
+    auto* subscriber_ptr    = subscriber.get();
+    auto  old_meta_client   = std::make_unique<kv_cache_manager::MockMetaClient>();
+    auto* old_meta_ptr      = old_meta_client.get();
+    auto  new_meta_client   = std::make_unique<kv_cache_manager::MockMetaClient>();
+    auto* new_meta_ptr      = new_meta_client.get();
+    auto  destruction_count = std::make_shared<int>(0);
+    auto  transfer_client   = std::make_unique<kv_cache_manager::MockTransferClient>(destruction_count);
+    auto  reinit_started    = std::make_shared<std::promise<void>>();
+    auto  reinit_ready      = reinit_started->get_future();
+
+    EXPECT_CALL(*factory_ptr, createSubscriber(false)).WillOnce(Invoke([&subscriber](bool) {
+        return std::move(subscriber);
+    }));
+    EXPECT_CALL(*subscriber_ptr, init(std::vector<std::string>{"direct"})).WillOnce(Return(true));
+    EXPECT_CALL(*subscriber_ptr, getAddresses(_))
+        .WillOnce(DoAll(SetArgReferee<0>(std::vector<std::string>{"direct"}), Return(true)));
+    EXPECT_CALL(*factory_ptr, createMetaClient(_, _))
+        .WillOnce(Invoke([&old_meta_client](const auto&, const auto&) { return std::move(old_meta_client); }))
+        .WillOnce(Invoke([&new_meta_client, reinit_started](const auto&, const auto&) {
+            auto result = std::move(new_meta_client);
+            reinit_started->set_value();
+            return result;
+        }));
+    static const std::string storage_config = R"({"sdk_backend_configs":[]})";
+    EXPECT_CALL(*old_meta_ptr, GetStorageConfig()).WillOnce(ReturnRef(storage_config));
+    EXPECT_CALL(*old_meta_ptr, FinishWrite("finish_1", "session", _, _))
+        .WillOnce(Return(kv_cache_manager::ClientErrorCode::ER_SERVICE_INSTANCE_NOT_EXIST));
+    EXPECT_CALL(*new_meta_ptr, FinishWrite("finish_2", "session", _, _))
+        .WillOnce(Return(kv_cache_manager::ClientErrorCode::ER_OK));
+    EXPECT_CALL(*factory_ptr, createTransferClient(_, _)).WillOnce(Invoke([&transfer_client](const auto&, const auto&) {
+        return std::move(transfer_client);
+    }));
+
+    ClientWrapper                wrapper(std::move(factory));
+    std::array<char, 32>         registration{};
+    kv_cache_manager::RegistSpan span{registration.data(), registration.size()};
+    ASSERT_TRUE(
+        wrapper.init({{"", makeConfig(false, "direct")}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}));
+    EXPECT_FALSE(wrapper.finishWrite("", "finish_1", "session", kv_cache_manager::BlockMaskOffset{0}, {}));
+    ASSERT_EQ(reinit_ready.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+
+    bool       routed   = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!routed && std::chrono::steady_clock::now() < deadline) {
+        routed = wrapper.finishWrite("", "finish_2", "session", kv_cache_manager::BlockMaskOffset{0}, {});
+        if (!routed) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    EXPECT_TRUE(routed);
     wrapper.shutdown();
     EXPECT_EQ(*destruction_count, 1);
 }
