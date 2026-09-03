@@ -1,11 +1,13 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 
 #include <algorithm>
+#include <cassert>
 #include <unordered_map>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 
@@ -29,6 +31,8 @@ LoadAsyncContext::LoadAsyncContext(std::vector<TransferDescriptor>              
     remaining_transfer_count_(std::count_if(load_descs_.begin(), load_descs_.end(), [](const auto& desc) {
         return desc.source_tier == Tier::HOST || desc.source_tier == Tier::DISK;
     })) {
+    remaining_join_count_.store(static_cast<size_t>(std::count(joined_load_.begin(), joined_load_.end(), true)),
+                                std::memory_order_relaxed);
     rebuildMatchedBlocksByTier();
 }
 
@@ -256,8 +260,26 @@ bool LoadAsyncContext::abortPending() {
     return true;
 }
 
-bool LoadAsyncContext::completeOne(bool success) {
-    return completeTransfers(1, success);
+void LoadAsyncContext::startJoinWait(int64_t start_time_us) {
+    assert(remaining_join_count_.load(std::memory_order_relaxed) != 0);
+    assert(join_start_time_us_ == 0);
+    join_start_time_us_ = start_time_us;
+}
+
+bool LoadAsyncContext::completeJoinedOne(bool success, bool& join_completed, int64_t& join_wait_latency_us) {
+    join_completed       = false;
+    join_wait_latency_us = 0;
+    if (!completeTransfers(1, success)) {
+        return false;
+    }
+    const size_t previous_count = remaining_join_count_.fetch_sub(1, std::memory_order_acq_rel);
+    assert(previous_count != 0);
+    if (previous_count == 1) {
+        assert(join_start_time_us_ != 0);
+        join_completed       = true;
+        join_wait_latency_us = currentTimeUs() - join_start_time_us_;
+    }
+    return true;
 }
 
 bool LoadAsyncContext::completeTransfers(size_t count, bool success) {
