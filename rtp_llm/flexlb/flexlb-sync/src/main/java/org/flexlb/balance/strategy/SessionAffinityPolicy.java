@@ -3,7 +3,9 @@ package org.flexlb.balance.strategy;
 import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.util.Logger;
 
+import java.util.Optional;
 import java.util.function.IntFunction;
 import java.util.function.IntToLongFunction;
 
@@ -38,7 +40,7 @@ final class SessionAffinityPolicy {
                 return Decision.none(Reason.EXACT_CACHE_PRESENT);
             }
         }
-        var placement = store.find(model, sessionId, config.getTtlMs());
+        var placement = findPlacement(request, config, store, model, sessionId);
         if (placement.isEmpty()) {
             return Decision.none(Reason.NO_PLACEMENT);
         }
@@ -51,6 +53,21 @@ final class SessionAffinityPolicy {
             }
         }
         return Decision.none(Reason.ENDPOINT_UNAVAILABLE);
+    }
+
+    private static Optional<SessionPlacementStore.Placement> findPlacement(
+            Request request,
+            RoutingConfig.SessionAffinityConfig config,
+            SessionPlacementStore store,
+            String model,
+            String sessionId) {
+        try {
+            return store.find(model, sessionId, config.getTtlMs());
+        } catch (RuntimeException exception) {
+            Logger.warn("Failed to read session placement, request_id={}",
+                    request.getRequestId(), exception);
+            return Optional.empty();
+        }
     }
 
     private static long saturatedAdd(long left, long right) {

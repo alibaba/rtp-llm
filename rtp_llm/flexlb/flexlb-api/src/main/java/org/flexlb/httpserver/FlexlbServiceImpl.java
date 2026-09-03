@@ -7,7 +7,6 @@ import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.balance.session.SessionPlacementLifecycle;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
