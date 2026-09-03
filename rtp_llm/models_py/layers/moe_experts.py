@@ -888,7 +888,12 @@ class BaseMoEExperts(RtpModule):
         }
         self.quant_method.add_weight_tensors(self, weights_dict)
         runtime_device = getattr(self._model_config, "exported_device", None)
-        if runtime_device is None:
+        # CUDA and PPU keep this checkpoint layout unchanged. ROCm requires
+        # aiter's runtime shuffle, so only initialize the backend device when
+        # that transformation is actually needed. Besides avoiding unnecessary
+        # startup work, this keeps CUDA-only loader tests independent of the
+        # full server/device configuration import chain.
+        if runtime_device is None and torch.version.hip is not None:
             runtime_device = get_current_device()
         if self.layer_idx == 0 and not getattr(
             self, "_logged_moe_runtime_device", False

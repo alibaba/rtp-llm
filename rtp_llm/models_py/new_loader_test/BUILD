@@ -28,6 +28,7 @@ py_test(
 py_test(
     name = "multi_gpu_device_context_test",
     srcs = ["multi_gpu_device_context_test.py"],
+    env = {"GPU_COUNT": "2"},
     exec_properties = {
         "gpu": "H20",
         "gpu_count": "2",
