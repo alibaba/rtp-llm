@@ -206,6 +206,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             AtomicBoolean completionClaimed,
             ScheduleOrigin origin) {
         try {
+            initializeSessionPlacementSafely(context.getRequest(), context.getConfig());
             routeLocally(context).whenComplete((response, routeError) -> {
                 if (routeError != null) {
                     Logger.warn("FlexlbService.schedule async error, request_id={}",
@@ -231,6 +232,17 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     origin,
                     token,
                     completionClaimed);
+        }
+    }
+
+    private void initializeSessionPlacementSafely(Request request, FlexlbConfig config) {
+        try {
+            initializeSessionPlacement(request, config);
+        } catch (RuntimeException exception) {
+            request.setSessionPlacementEpoch(-1L);
+            request.setInferenceSessionState(Request.SessionState.UNSPECIFIED);
+            Logger.warn("Failed to initialize session placement, request_id={}",
+                    request.getRequestId(), exception);
         }
     }
 
@@ -739,7 +751,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
 
         var config = configService.loadBalanceConfig();
-        initializeSessionPlacement(request, config);
         // QUEUE owns one absolute scheduling deadline, measured from FlexLB
         // admission through delivery acknowledgement. DIRECT never queues and
         // therefore has no scheduling timeout.
@@ -755,6 +766,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 requestExpiresAtMs,
                 defaultPriority);
         request.setPriority(schedulingMetadata.priority());
+        ctx.setConfig(config);
         ctx.setRequest(request);
         ctx.setSchedulingMetadata(schedulingMetadata);
         prioritySchedulerReporter.reportRequest(schedulingMetadata.priority());

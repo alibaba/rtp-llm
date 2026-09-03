@@ -449,6 +449,41 @@ class FlexlbServiceImplTest {
     }
 
     @Test
+    void masterNotFoundInitializesSessionPlacementBeforeLocalFallback() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(
+                CompletableFuture.completedFuture(
+                        FlexlbGrpcForwarder.MasterForwardResult.noMaster()));
+        when(sessionPlacementStore.currentEpoch("kimi-k3", "isess_v1_example"))
+                .thenReturn(11L);
+        ArgumentCaptor<BalanceContext> contextCaptor =
+                ArgumentCaptor.forClass(BalanceContext.class);
+        Response localResponse = new Response();
+        localResponse.setSuccess(true);
+        localResponse.setCode(200);
+        when(routeService.route(contextCaptor.capture()))
+                .thenReturn(CompletableFuture.completedFuture(localResponse));
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(100_010L)
+                        .setModel("kimi-k3")
+                        .setSessionRoutingHint(FlexlbScheduleProtocol.SessionRoutingHintPB
+                                .newBuilder()
+                                .setSchemaVersion(1)
+                                .setSessionId("isess_v1_example")
+                                .setState(FlexlbScheduleProtocol.SessionStatePB
+                                        .SESSION_STATE_ESTABLISHED))
+                        .build();
+
+        service.schedule(request, mock(StreamObserver.class));
+
+        verify(sessionPlacementStore).currentEpoch("kimi-k3", "isess_v1_example");
+        assertEquals(11L,
+                contextCaptor.getValue().getRequest().getSessionPlacementEpoch());
+    }
+
+    @Test
     void testSchedule_forwardFailureIsTerminalAndNeverRoutesLocally() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
         when(lbStatusConsistencyService.isMaster()).thenReturn(false);
