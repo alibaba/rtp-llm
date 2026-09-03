@@ -705,9 +705,20 @@ class CaseRunner(object):
         # a value) — picking the last query's class is fine because all queries
         # in one fixture share an endpoint / comparer in practice.
         prepared = []
+        # Whether this case runs with prefix-cache reuse on. Used below to decide
+        # if a query's cold-cache golden makes a same-query retry unsound. For PD
+        # cases the prefill role is the one that publishes reusable blocks, so
+        # check it too.
+        reuse_arg_sources = [self.smoke_args_str]
+        if isinstance(self.smoke_args, dict):
+            reuse_arg_sources.extend(self.smoke_args.values())
+        reuse_cache_enabled = any(
+            self._extract_bool_arg(src, "--reuse_cache") for src in reuse_arg_sources
+        )
         for q_idx, q_r in enumerate(qr_array):
             q_r["_taskinfo_rel_path"] = task_info.taskinfo_rel_path
             q_r["_query_idx"] = q_idx
+            q_r["_reuse_cache_enabled"] = reuse_cache_enabled
             # DashGrpcComparer needs to load a tokenizer client-side; the HTTP
             # comparers never see these fields so this is a no-op for them.
             q_r["_model_path"] = task_info.tokenizer_path or task_info.model_path
