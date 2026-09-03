@@ -197,6 +197,58 @@ class TestFp8ToFp4Conversion(unittest.TestCase):
         self.assertEqual(packed.shape, (E, N, K // 2))
         self.assertEqual(sf.shape, (E, N, K // 32))
 
+    def test_mxfp8_1x32_conversion_matches_reference(self):
+        """ModelOpt MXFP8 exponent bytes are decoded before FP4 quantization."""
+        from deep_gemm.utils import per_token_cast_to_fp4
+        from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
+            convert_fp8_moe_to_fp4_ue8m0 as _convert_fp8_moe_to_fp4,
+        )
+
+        torch.manual_seed(20260903)
+        E, N, K = 2, 96, 256
+        source = torch.randn((E, N, K), device="cuda", dtype=torch.bfloat16)
+        blocked = source.float().view(E, N, K // 32, 32)
+        amax = blocked.abs().amax(dim=-1).clamp_min(2.0**-126)
+        scale_exp = torch.ceil(torch.log2(amax / 448.0)).clamp(-126, 127)
+        scale = torch.exp2(scale_exp)
+        weight_fp8 = (
+            (blocked / scale.unsqueeze(-1))
+            .clamp(-448, 448)
+            .to(torch.float8_e4m3fn)
+            .reshape(E, N, K)
+            .contiguous()
+        )
+        # This is what AtomicWeight sees after loading a uint8 UE8M0 scale as
+        # fp32: the exponent byte value, not the materialized power of two.
+        scale_bytes_as_fp32 = (scale_exp + 127.0).to(torch.float32).contiguous()
+
+        expected_packed = torch.empty((E, N, K // 2), dtype=torch.int8, device="cuda")
+        expected_scale = torch.empty(
+            (E, N, K // 32), dtype=torch.float32, device="cuda"
+        )
+        for expert in range(E):
+            dequant = (
+                weight_fp8[expert]
+                .float()
+                .view(N, K // 32, 32)
+                .mul(scale[expert].unsqueeze(-1))
+                .reshape(N, K)
+                .to(torch.bfloat16)
+            )
+            expected_packed[expert], expected_scale[expert] = per_token_cast_to_fp4(
+                dequant, use_ue8m0=True, gran_k=32
+            )
+
+        actual_packed, actual_scale = _convert_fp8_moe_to_fp4(
+            weight_fp8,
+            scale_bytes_as_fp32,
+            source_block_size=32,
+            scale_is_ue8m0_exponent=True,
+        )
+
+        self.assertTrue(torch.equal(actual_packed, expected_packed))
+        self.assertTrue(torch.equal(actual_scale, expected_scale))
+
 
 if __name__ == "__main__":
     unittest.main()

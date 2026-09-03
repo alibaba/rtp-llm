@@ -76,6 +76,11 @@ class MegaMoeWrapper(nn.Module):
         n_routed_experts = config.expert_num
         n_activated_experts = config.moe_k
         swiglu_limit = float(getattr(config, "swiglu_limit", 10.0) or 10.0)
+        self._activation_clamp = (
+            swiglu_limit
+            if getattr(config, "model_type", "") in ("hy_v4", "hy_v4_mtp")
+            else None
+        )
 
         moe_inter_dim_raw = getattr(config, "moe_inter_size", None) or None
         if moe_inter_dim_raw is None or moe_inter_dim_raw == 0:
@@ -247,6 +252,7 @@ class MegaMoeWrapper(nn.Module):
         nn.Module.__init__(clone)
         clone.mega_moe = self.mega_moe.clone_for_cuda_graph()
         clone.expert_num = self.expert_num
+        clone._activation_clamp = self._activation_clamp
         return clone
 
     @property
@@ -259,6 +265,12 @@ class MegaMoeWrapper(nn.Module):
         return self.mega_moe.prepacked_input_views(tokens)
 
     def forward_prepacked(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # The subclasses own different fused-shared/FP8 clamp contracts. This
+        # routed-only override is intentionally limited to plain mega_moe.
+        if type(self) is MegaMoeWrapper:
+            return self.mega_moe.forward_prepacked(
+                hidden_states, activation_clamp=self._activation_clamp
+            )
         return self.mega_moe.forward_prepacked(hidden_states)
 
     def forward(
@@ -275,9 +287,18 @@ class MegaMoeWrapper(nn.Module):
         extra_expert_args: Optional[Dict[str, Any]] = None,
         extra_finalize_args: Optional[Dict[str, Any]] = None,
     ) -> torch.Tensor:
+        swiglu_limit = float(
+            (extra_expert_args or {}).get("swiglu_limit", self._activation_clamp or 0.0)
+        )
+        activation_clamp = swiglu_limit if swiglu_limit > 0 else None
         return self._forward_chunked(
             hidden_states,
             topk_weights,
             topk_ids,
-            self.mega_moe,
+            lambda x, weights, indices: self.mega_moe(
+                x,
+                weights,
+                indices,
+                activation_clamp=activation_clamp,
+            ),
         )

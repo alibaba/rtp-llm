@@ -12,7 +12,10 @@ from unittest.mock import MagicMock
 
 import torch
 
-from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.config.quant_config import (
+    Fp8BlockWiseQuantConfig,
+    Fp8MxBlockWiseQuantConfig,
+)
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import (
     FfnAtomicWeight,
@@ -28,6 +31,11 @@ from rtp_llm.model_loader.offline_modelopt_fp4_quant_weight import (
     OfflineMegaMoeFp8SharedExpertWeight,
     wrap_for_offline_fp4,
     wrap_shared_expert_for_offline_fp4,
+)
+from rtp_llm.model_loader.mxfp8_quant_weight import Mxfp8Weight
+from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
+    OnlineMegaMoeFp4FromFp8Weight,
+    wrap_moe_for_mega_moe,
 )
 from rtp_llm.model_loader.per_block_fp8_quant_weight import (
     PerBlockFp8Weight,
@@ -87,6 +95,36 @@ class TestV4SharedExpertW13Weight(unittest.TestCase):
         )
         self.assertIs(wrapped.kernel.process_fun, concat_0)
         self.assertIs(wrapped.scale.process_fun, concat_0)
+
+
+class TestOnlineMxfp8ToMegaMoeFp4Weight(unittest.TestCase):
+    def test_routed_expert_selects_1x32_fp4_converter(self):
+        src = MoeAtomicWeight(
+            W.moe_w1,
+            [CkptWeightInfo("model.layers.{i}.mlp.experts.gate_up_proj")],
+            identity,
+            config=MoeConfig(expert_num=256),
+            stacked_ckpt_keys=True,
+        )
+        mxfp8 = Mxfp8Weight(
+            src,
+            Fp8MxBlockWiseQuantConfig(
+                is_quanted=True,
+                checkpoint_scale_suffix=".weight_scale",
+                packed_scale_suffix="_scale",
+            ),
+            name=src.name,
+        )
+
+        wrapped = wrap_moe_for_mega_moe(mxfp8)
+
+        self.assertIsInstance(wrapped, OnlineMegaMoeFp4FromFp8Weight)
+        self.assertEqual(wrapped._source_block_size, 32)
+        self.assertTrue(wrapped._scale_is_ue8m0_exponent)
+        self.assertEqual(
+            [item.name for item in wrapped.fp8_scale.weights],
+            ["model.layers.{i}.mlp.experts.gate_up_proj_scale"],
+        )
 
 
 class TestOfflineFp4SharedExpertWeight(unittest.TestCase):

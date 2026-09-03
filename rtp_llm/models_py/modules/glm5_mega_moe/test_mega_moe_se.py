@@ -94,10 +94,11 @@ class MegaMoeSEWrapperTest(unittest.TestCase):
             )
 
         captured = _FakeMegaMoESE.instance
-        torch.testing.assert_close(captured.routed["w1_w"][:, :4], routed_gate)
-        torch.testing.assert_close(captured.routed["w1_w"][:, 4:], routed_up)
-        torch.testing.assert_close(captured.routed["w1_s"][:, :4], routed_gate_sf)
-        torch.testing.assert_close(captured.routed["w1_s"][:, 4:], routed_up_sf)
+        torch.testing.assert_close(captured.routed["w1_w"][:, :4], routed_up)
+        torch.testing.assert_close(captured.routed["w1_w"][:, 4:], routed_gate)
+        torch.testing.assert_close(captured.routed["w1_s"][:, :4], routed_up_sf)
+        torch.testing.assert_close(captured.routed["w1_s"][:, 4:], routed_gate_sf)
+        self.assertEqual(captured.routed["w1_layout"], "up_gate")
         torch.testing.assert_close(captured.shared["w1_w"], shared_w13)
         torch.testing.assert_close(captured.shared["w2_w"], shared_w2)
         self.assertTrue(captured.warmed)

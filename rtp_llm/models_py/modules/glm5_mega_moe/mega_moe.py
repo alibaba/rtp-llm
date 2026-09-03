@@ -690,6 +690,7 @@ class GLM5MegaMoE(nn.Module):
         x: torch.Tensor,  # [T, D] BF16 local-rank tokens
         weights: torch.Tensor,  # [T, topk] FP32 router weights
         indices: torch.Tensor,  # [T, topk] int64 GLOBAL expert IDs
+        activation_clamp: Optional[float] = None,
     ) -> torch.Tensor:
         """Run the fused DeepGEMM Mega MoE kernel.
 
@@ -698,7 +699,13 @@ class GLM5MegaMoE(nn.Module):
 
         Returns [T, D] BF16 combined routed-expert output.
         """
-        return self._forward_impl(x, weights, indices, inputs_prepacked=False)
+        return self._forward_impl(
+            x,
+            weights,
+            indices,
+            inputs_prepacked=False,
+            activation_clamp=activation_clamp,
+        )
 
     def prepacked_input_views(
         self, tokens: int
@@ -717,8 +724,16 @@ class GLM5MegaMoE(nn.Module):
             buf.topk_weights[:tokens],
         )
 
-    def forward_prepacked(self, x: torch.Tensor) -> torch.Tensor:
-        return self._forward_impl(x, None, None, inputs_prepacked=True)
+    def forward_prepacked(
+        self, x: torch.Tensor, activation_clamp: Optional[float] = None
+    ) -> torch.Tensor:
+        return self._forward_impl(
+            x,
+            None,
+            None,
+            inputs_prepacked=True,
+            activation_clamp=activation_clamp,
+        )
 
     def _forward_impl(
         self,
@@ -727,6 +742,7 @@ class GLM5MegaMoE(nn.Module):
         indices: torch.Tensor | None,
         *,
         inputs_prepacked: bool,
+        activation_clamp: Optional[float] = None,
     ) -> torch.Tensor:
         import deep_gemm
 
@@ -762,7 +778,7 @@ class GLM5MegaMoE(nn.Module):
             buf,
             recipe=(1, 1, FP4_BLOCK),
             activation="swiglu",
-            activation_clamp=None,  # (self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None),
+            activation_clamp=activation_clamp,
             fast_math=False,
         )
         return y
