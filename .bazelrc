@@ -86,6 +86,10 @@ build:cuda12_6 --config=cuda12
 build:cuda12_6 --action_env TF_CUDA_VERSION="12.6"
 build:cuda12_6 --host_action_env TF_CUDA_VERSION="12.6"
 build:cuda12_6 --copt="-D_GLIBCXX_USE_CXX11_ABI=1"
+# CUDA 12.6's bundled CUB can discover an undeclared nvtx3.hpp copied from the
+# build environment. Disable only CUB's optional profiling ranges so the
+# production build remains hermetic; inference behavior is unchanged.
+build:cuda12_6 --copt="-DCCCL_DISABLE_NVTX=1"
 
 build:cuda12_9 --config=cuda12
 build:cuda12_9 --define=using_cuda12_9_x86=true
