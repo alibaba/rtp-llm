@@ -8,7 +8,7 @@ its dedicated buffer type, or an external shared intermediate workspace.
 from __future__ import annotations
 
 import logging
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 
@@ -28,7 +28,6 @@ from .mega_se_buf import (
 )
 from .quant_layouts_se import (
     FP4_BLOCK,
-    MXFP8_SHARED_WEIGHT_RECIPE,
     SHARED_WEIGHT_RECIPE,
     prepare_shared_fp8_scale_for_mega_moe_se,
 )
@@ -49,35 +48,6 @@ class GLM5MegaMoESE(GLM5MegaMoE):
         self._shared_l1_sf: Optional[torch.Tensor] = None
         self._shared_l2_w: Optional[torch.Tensor] = None
         self._shared_l2_sf: Optional[torch.Tensor] = None
-        self._shared_weight_recipe = SHARED_WEIGHT_RECIPE
-
-    @staticmethod
-    def _infer_shared_scale_recipe(
-        scale: torch.Tensor, mn: int, k: int
-    ) -> Tuple[int, int]:
-        """Infer legacy block-FP8 versus ModelOpt MXFP8 shared scales."""
-        if scale.dtype == torch.int32:
-            return SHARED_WEIGHT_RECIPE[1:]
-
-        trailing = tuple(scale.shape[-2:])
-        expected_mxfp8 = (mn, (k + 31) // 32)
-        if trailing == expected_mxfp8 or scale.numel() == (
-            expected_mxfp8[0] * expected_mxfp8[1]
-        ):
-            return MXFP8_SHARED_WEIGHT_RECIPE[1:]
-
-        expected_legacy = ((mn + 127) // 128, (k + 127) // 128)
-        if trailing == expected_legacy or scale.numel() == (
-            expected_legacy[0] * expected_legacy[1]
-        ):
-            return SHARED_WEIGHT_RECIPE[1:]
-
-        raise ValueError(
-            "Cannot infer MegaMoE-SE shared FP8 scale recipe from "
-            f"shape={tuple(scale.shape)} for weight ({mn}, {k}); expected "
-            f"trailing dims {expected_mxfp8} for MXFP8 or "
-            f"{expected_legacy} for legacy block FP8"
-        )
 
     def _setup_buffer_and_warmup(self) -> None:
         """Defer allocation until both routed and shared weights are ready."""
@@ -165,25 +135,9 @@ class GLM5MegaMoESE(GLM5MegaMoE):
                 f"got w13={tuple(w1_w.shape)}, w2={tuple(w2_w.shape)}"
             )
 
-        w1_recipe = self._infer_shared_scale_recipe(
-            w1_s, 2 * shared_intermediate, cfg.dim
-        )
-        w2_recipe = self._infer_shared_scale_recipe(
-            w2_s, cfg.dim, shared_intermediate
-        )
-        if w1_recipe != w2_recipe:
-            raise ValueError(
-                "mega_moe_se requires the same shared FP8 scale recipe for "
-                f"w13 and w2, got {w1_recipe} and {w2_recipe}"
-            )
-        self._shared_weight_recipe = (1, *w1_recipe)
-
-        # Legacy 128x128 float32 inverse scales must be requantized to native
-        # UE8M0. ModelOpt MXFP8 fp32 scales are already exact powers of two and
-        # only need the same 1x32 DeepGEMM layout transform used by vLLM.
-        if w1_recipe == SHARED_WEIGHT_RECIPE[1:] and (
-            w1_s.dtype == torch.float32 or w2_s.dtype == torch.float32
-        ):
+        # Legacy float32 inverse scales must be requantized to native UE8M0.
+        # Native e8m0 checkpoint scales only need the DeepGEMM TMA transform.
+        if w1_s.dtype == torch.float32 or w2_s.dtype == torch.float32:
             if w1_s.dtype != torch.float32 or w2_s.dtype != torch.float32:
                 raise TypeError(
                     "mega_moe_se requires both shared scales to be raw float32 "
@@ -195,16 +149,10 @@ class GLM5MegaMoESE(GLM5MegaMoE):
             w2_w, w2_sf = requant_weight_ue8m0(w2_w.contiguous(), w2_s)
         else:
             w1_sf = prepare_shared_fp8_scale_for_mega_moe_se(
-                w1_s,
-                2 * shared_intermediate,
-                cfg.dim,
-                recipe=w1_recipe,
+                w1_s, 2 * shared_intermediate, cfg.dim
             )
             w2_sf = prepare_shared_fp8_scale_for_mega_moe_se(
-                w2_s,
-                cfg.dim,
-                shared_intermediate,
-                recipe=w2_recipe,
+                w2_s, cfg.dim, shared_intermediate
             )
 
         (self._shared_l1_w, self._shared_l1_sf), (
@@ -268,7 +216,7 @@ class GLM5MegaMoESE(GLM5MegaMoE):
             cfg.moe_inter_dim,
             int(cfg.max_tokens_per_rank),
             self._num_shared_experts,
-            self._shared_weight_recipe,
+            SHARED_WEIGHT_RECIPE,
             cfg.swiglu_limit,
             num_sms,
             tuple(token_counts),
@@ -318,7 +266,6 @@ class GLM5MegaMoESE(GLM5MegaMoE):
         clone._shared_l2_w = self._shared_l2_w
         clone._shared_l2_sf = self._shared_l2_sf
         clone._num_shared_experts = self._num_shared_experts
-        clone._shared_weight_recipe = self._shared_weight_recipe
         clone._mega_buf = get_or_create_mega_moe_se_clone_buf(
             self._mega_buf,
             self._mega_group,
@@ -406,11 +353,9 @@ class GLM5MegaMoESE(GLM5MegaMoE):
             shared_l1_weights=(self._shared_l1_w, self._shared_l1_sf),
             shared_l2_weights=(self._shared_l2_w, self._shared_l2_sf),
             recipe=(1, 1, FP4_BLOCK),
-            shared_recipe=self._shared_weight_recipe,
+            shared_recipe=SHARED_WEIGHT_RECIPE,
             activation="swiglu",
-            activation_clamp=(
-                self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
-            ),
+            activation_clamp=None,
             fast_math=False,
         )
         return y

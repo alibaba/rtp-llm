@@ -10,7 +10,6 @@ Only two things differ from FP8_PER_BLOCK:
   deferred to first forward and cached by the linear/MoE executor.
 """
 
-import fnmatch
 import functools
 from typing import Any, Dict, List, Union
 
@@ -31,8 +30,6 @@ from rtp_llm.model_loader.weight_module import CompositeWeight, WeightModule
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
-    ffn_sp_0,
-    ffn_sp_neg1,
     identity,
     is_v4_weight,
     pad,
@@ -136,16 +133,6 @@ class Mxfp8Weight(PerBlockFp8Weight):
             self, "kernel", None
         ) is not None:
             kernel_split = self.kernel._get_split_func()
-            # PerBlockFp8Weight's row-major FFN mapping uses the attention TP
-            # size for plain w1/w2/w3 tensors.  MXFP8 FFN weights must instead
-            # follow FFN TP so FFN sequence parallelism can leave a full
-            # shared expert on each EP rank (for example TP=8, FFN_SP=8 gives
-            # FFN_TP=1).  The stacked w13 splitter already uses FFN TP.
-            if self.kernel.name in (W.ffn_w1, W.ffn_w3):
-                kernel_split = ffn_sp_0
-            elif self.kernel.name == W.ffn_w2:
-                kernel_split = ffn_sp_neg1
-            self.kernel._get_split_func = lambda _f=kernel_split: _f
             self.scale._get_split_func = lambda _f=kernel_split: _f
 
     def _get_scale_suffix(self, scale_fmt: object) -> str:
@@ -162,7 +149,8 @@ class Mxfp8Weight(PerBlockFp8Weight):
         quant_config: QuantizationConfig, src_weight_info: WeightModule
     ) -> bool:
         excluded = getattr(quant_config, "exclude_modules", set())
-        quantized_layers = getattr(quant_config, "quantized_layers", {}) or {}
+        if not excluded:
+            return False
         layer_id = getattr(src_weight_info, "layer_id", None)
         for ckpt in getattr(src_weight_info, "weights", ()):
             source_name = ckpt.name
@@ -175,27 +163,8 @@ class Mxfp8Weight(PerBlockFp8Weight):
                 if source_name.endswith(".weight")
                 else source_name
             )
-            if any(
-                name == pattern or fnmatch.fnmatch(name, pattern)
-                for pattern in excluded
-                for name in (source_name, module_name)
-            ):
+            if source_name in excluded or module_name in excluded:
                 return True
-
-            if quantized_layers:
-                # MIXED_PRECISION is an allowlist, not merely an exclusion
-                # list.  Exact linears use exact keys; fused routed experts
-                # use a parent key such as ``...mlp.experts``.
-                matches = [
-                    (prefix, info)
-                    for prefix, info in quantized_layers.items()
-                    if module_name == prefix or module_name.startswith(prefix + ".")
-                ]
-                if not matches:
-                    return True
-                _, info = max(matches, key=lambda item: len(item[0]))
-                if str(info.get("quant_algo", "")).upper() != "MXFP8":
-                    return True
         return False
 
     @staticmethod
