@@ -85,6 +85,7 @@ class Hy4Weight(DeepSeekV2Weight):
     """Checkpoint mapping for HY V4 backbone weights."""
 
     has_fused_experts = False
+    has_direct_mxfp4_experts = False
     fused_gate_up_suffix = ""
     fused_down_suffix = ""
 
@@ -95,6 +96,7 @@ class Hy4Weight(DeepSeekV2Weight):
         self.q_use_lora = False
         self.has_e_score_correction_bias = False
         self.has_fused_experts = False
+        self.has_direct_mxfp4_experts = False
         self.fused_gate_up_suffix = ""
         self.fused_down_suffix = ""
         super().__init__(*args, **kwargs)
@@ -103,6 +105,12 @@ class Hy4Weight(DeepSeekV2Weight):
         super()._process_meta(meta_dict, weight_keys)
         self.has_fused_experts = self.has_fused_experts or any(
             ".mlp.experts.gate_up_proj" in key for key in weight_keys
+        )
+        self.has_direct_mxfp4_experts = self.has_direct_mxfp4_experts or any(
+            key.endswith(".mlp.experts.w13_weight") for key in weight_keys
+        )
+        self.has_fused_experts = (
+            self.has_fused_experts or self.has_direct_mxfp4_experts
         )
         if any(
             key.endswith(".mlp.experts.gate_up_proj.weight")
@@ -232,6 +240,18 @@ class Hy4Weight(DeepSeekV2Weight):
             is_moe=False,
         )
         moe_config = MoeConfig(align_size=align_size, expert_num=self.expert_num_)
+        direct_mxfp4 = getattr(self, "has_direct_mxfp4_experts", False)
+        routed_w2_name = (
+            "model.layers.{i}.mlp.experts.w2_weight"
+            if direct_mxfp4
+            else "model.layers.{i}.mlp.experts.down_proj" + self.fused_down_suffix
+        )
+        routed_w13_name = (
+            "model.layers.{i}.mlp.experts.w13_weight"
+            if direct_mxfp4
+            else "model.layers.{i}.mlp.experts.gate_up_proj"
+            + self.fused_gate_up_suffix
+        )
         layer_weights: List[WeightModule] = [
             FfnWeight(
                 sub_weights=[
@@ -282,24 +302,14 @@ class Hy4Weight(DeepSeekV2Weight):
                     ),
                     MoeAtomicWeight(
                         W.moe_w2,
-                        [
-                            CkptWeightInfo(
-                                "model.layers.{i}.mlp.experts.down_proj"
-                                + self.fused_down_suffix
-                            )
-                        ],
+                        [CkptWeightInfo(routed_w2_name)],
                         stack_,
                         config=moe_config,
                         stacked_ckpt_keys=True,
                     ),
                     MoeAtomicWeight(
                         W.moe_w1,
-                        [
-                            CkptWeightInfo(
-                                "model.layers.{i}.mlp.experts.gate_up_proj"
-                                + self.fused_gate_up_suffix
-                            )
-                        ],
+                        [CkptWeightInfo(routed_w13_name)],
                         _transpose_stacked_gate_up,
                         config=moe_config,
                         stacked_ckpt_keys=True,
@@ -366,6 +376,14 @@ class Hy4MtpWeight(Hy4Weight):
         self.has_fused_experts = self.has_fused_experts or any(
             key.startswith("model.mtp_layers.0.mlp.experts.gate_up_proj")
             for key in weight_keys
+        )
+        self.has_direct_mxfp4_experts = getattr(
+            self, "has_direct_mxfp4_experts", False
+        ) or (
+            "model.mtp_layers.0.mlp.experts.w13_weight" in weight_keys
+        )
+        self.has_fused_experts = (
+            self.has_fused_experts or self.has_direct_mxfp4_experts
         )
         if "model.mtp_layers.0.mlp.experts.gate_up_proj.weight" in weight_keys:
             self.fused_gate_up_suffix = ".weight"

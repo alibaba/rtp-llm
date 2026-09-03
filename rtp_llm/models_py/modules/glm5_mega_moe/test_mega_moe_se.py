@@ -127,6 +127,20 @@ class MegaMoeSEWrapperTest(unittest.TestCase):
 
 
 class MegaMoeSEBufferCompatibilityTest(unittest.TestCase):
+    def test_shared_scale_recipe_supports_modelopt_mxfp8(self):
+        scale = torch.empty((4096, 192), dtype=torch.float32)
+        recipe = mega_moe_se.GLM5MegaMoESE._infer_shared_scale_recipe(
+            scale, 4096, 6144
+        )
+        self.assertEqual(recipe, (1, 32))
+
+    def test_shared_scale_recipe_keeps_legacy_block_fp8(self):
+        scale = torch.empty((32, 48), dtype=torch.float32)
+        recipe = mega_moe_se.GLM5MegaMoESE._infer_shared_scale_recipe(
+            scale, 4096, 6144
+        )
+        self.assertEqual(recipe, (128, 128))
+
     def test_deep_gemm_261_buffer_need_not_expose_shared_count(self):
         cfg = SimpleNamespace(
             layer_id=3,

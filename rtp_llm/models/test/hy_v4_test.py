@@ -289,6 +289,63 @@ class Hy4WeightTest(unittest.TestCase):
         self.assertTrue(loader.has_e_score_correction_bias)
         self.assertTrue(loader.has_fused_experts)
 
+    def test_direct_modelopt_mxfp4_expert_mapping_for_target_and_mtp(self):
+        for loader_cls, prefix in (
+            (Hy4Weight, "model.layers.{i}"),
+            (Hy4MtpWeight, "model.mtp_layers.0"),
+        ):
+            with self.subTest(loader=loader_cls.__name__):
+                loader = loader_cls.__new__(loader_cls)
+                loader.moe_layer_index_ = [0]
+                loader._num_layers = 1
+                loader.has_fused_experts = False
+                loader.has_direct_mxfp4_experts = False
+                loader.fused_gate_up_suffix = ""
+                loader.fused_down_suffix = ""
+                loader._align_size = 0
+                loader._is_gated_activation = True
+                loader.expert_num_ = 8
+                loader.has_e_score_correction_bias = False
+                loader.q_use_lora = False
+                metadata_prefix = (
+                    "model.mtp_layers.0"
+                    if loader_cls is Hy4MtpWeight
+                    else "model.layers.0"
+                )
+                loader._process_meta(
+                    None,
+                    {
+                        f"{metadata_prefix}.mlp.experts.w13_weight",
+                        f"{metadata_prefix}.mlp.experts.w13_weight_scale",
+                        f"{metadata_prefix}.mlp.experts.w2_weight",
+                        f"{metadata_prefix}.mlp.experts.w2_weight_scale",
+                    },
+                )
+
+                weights = loader._get_hf_ffn_layer_weight_info(0)
+                if loader_cls is Hy4MtpWeight:
+                    loader._remap_to_mtp(weights)
+                components = [
+                    component
+                    for weight in weights
+                    for component in weight.get_components()
+                ]
+                by_name = {component.name: component for component in components}
+                self.assertTrue(loader.has_direct_mxfp4_experts)
+                self.assertEqual(
+                    by_name[W.moe_w1].weights[0].name,
+                    f"{prefix}.mlp.experts.w13_weight",
+                )
+                self.assertEqual(
+                    by_name[W.moe_w2].weights[0].name,
+                    f"{prefix}.mlp.experts.w2_weight",
+                )
+                self.assertIs(
+                    by_name[W.moe_w1].process_fun, _transpose_stacked_gate_up
+                )
+                self.assertTrue(by_name[W.moe_w1].stacked_ckpt_keys)
+                self.assertTrue(by_name[W.moe_w2].stacked_ckpt_keys)
+
     def test_mtp_final_norm_uses_checkpoint_final_layernorm(self):
         loader = Hy4MtpWeight.__new__(Hy4MtpWeight)
         loader._num_layers = 1
@@ -356,6 +413,59 @@ class Hy4Mxfp8WeightTest(unittest.TestCase):
         self.assertEqual(config.weight_block_size, [1, 32])
         self.assertEqual(config.checkpoint_scale_suffix, ".weight_scale")
         self.assertEqual(config.packed_scale_suffix, "_scale")
+
+    def test_modelopt_mixed_precision_uses_per_module_allowlist(self):
+        quantized_layers = {
+            "model.layers.0.self_attn.o_proj": {"quant_algo": "MXFP8"},
+            "model.layers.1.mlp.experts": {"quant_algo": "MXFP4"},
+            "model.mtp_layers.0.self_attn.o_proj": {"quant_algo": "MXFP8"},
+            "model.mtp_layers.0.mlp.experts": {"quant_algo": "MXFP4"},
+        }
+        raw = {
+            "quantization_config": {
+                "quant_method": "modelopt",
+                "quantization": {
+                    "quant_algo": "MIXED_PRECISION",
+                    "exclude_modules": [],
+                    "quantized_layers": quantized_layers,
+                },
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "config.json").write_text(json.dumps(raw))
+            config = QuantizationConfig.load_from_ckpt(tmp)
+
+        self.assertIsInstance(config, Fp8MxBlockWiseQuantConfig)
+        self.assertEqual(config.quantized_layers, quantized_layers)
+        self.assertEqual(config.scale_fmt, "ue8m0")
+
+        quantized = MlaAttnAtomicWeight(
+            W.attn_o_w,
+            [CkptWeightInfo("model.layers.{i}.self_attn.o_proj.weight")],
+            identity,
+            config=self.mla_config,
+        )
+        quantized.layer_id = 0
+        self.assertTrue(Mxfp8Weight.support(config, quantized))
+
+        unlisted = MlaAttnAtomicWeight(
+            W.attn_o_w,
+            [CkptWeightInfo("model.layers.{i}.self_attn.unlisted.weight")],
+            identity,
+            config=self.mla_config,
+        )
+        unlisted.layer_id = 0
+        self.assertFalse(Mxfp8Weight.support(config, unlisted))
+
+        routed_fp4 = MoeAtomicWeight(
+            W.moe_w1,
+            [CkptWeightInfo("model.layers.{i}.mlp.experts.w13_weight")],
+            _transpose_stacked_gate_up,
+            config=MoeConfig(align_size=0, expert_num=8),
+            stacked_ckpt_keys=True,
+        )
+        routed_fp4.layer_id = 1
+        self.assertFalse(Mxfp8Weight.support(config, routed_fp4))
 
     def test_indexer_q_layout_merge_propagates_to_mxfp8_weight_and_scale(self):
         prefix = "model.layers.{i}.self_attn.indexer.wq_b"
