@@ -235,9 +235,41 @@ _PROCESS_LOG_PATTERNS = re.compile(
     r"Error|Exception|OOM|out of memory|CUDA|NCCL|"
     r"Segmentation|Aborted|killed|SIGSE|SIGAB|"
     r"RuntimeError|FileNotFoundError|KeyError|AttributeError|"
-    r"core dumped|exit code|failed to",
-    re.IGNORECASE,
+    r"core dumped|exit code|failed to|"
+    # Python tracebacks: without these the whole body of every traceback is
+    # filtered out and only the final "SomeError: msg" line can survive.
+    r"Traceback \(most recent call last\)|trace:|^\s+File \"",
+    re.IGNORECASE | re.MULTILINE,
 )
+
+_TRACEBACK_START = re.compile(r"Traceback \(most recent call last\)")
+
+
+def _extract_traceback_blocks(all_lines: List[str]) -> List[List[str]]:
+    """Group each traceback into one contiguous block.
+
+    A traceback is the most valuable thing in the log but its frame lines are
+    indented continuations, so line-by-line filtering shreds it. Collect from
+    the ``Traceback`` header until indentation stops (the final ``Error: msg``
+    line is included, since it is the first non-indented line after the frames).
+    """
+    blocks: List[List[str]] = []
+    i = 0
+    n = len(all_lines)
+    while i < n:
+        if not _TRACEBACK_START.search(all_lines[i]):
+            i += 1
+            continue
+        block = [all_lines[i].rstrip()]
+        i += 1
+        while i < n and (all_lines[i].startswith((" ", "\t")) or not all_lines[i].strip()):
+            block.append(all_lines[i].rstrip())
+            i += 1
+        if i < n:  # the exception line terminating the traceback
+            block.append(all_lines[i].rstrip())
+            i += 1
+        blocks.append(block)
+    return blocks
 
 
 def scan_process_log(log_path: Optional[str], max_lines: int = 50) -> List[str]:
@@ -247,10 +279,29 @@ def scan_process_log(log_path: Optional[str], max_lines: int = 50) -> List[str]:
     try:
         with open(log_path, "r") as f:
             all_lines = f.readlines()
+
+        result: List[str] = []
+
+        # Full tracebacks first -- these carry the actual root cause. Keep the
+        # last few so a startup failure is never reduced to "exited with code 1".
+        blocks = _extract_traceback_blocks(all_lines)
+        if blocks:
+            result.append(
+                f"--- {len(blocks)} traceback(s) found, showing last "
+                f"{min(len(blocks), 3)} ---"
+            )
+            for block in blocks[-3:]:
+                result.extend(block)
+                result.append("-" * 40)
+
         matched = [l.rstrip() for l in all_lines if _PROCESS_LOG_PATTERNS.search(l)]
+        if matched:
+            result.append("--- error-pattern lines ---")
+            result.extend(matched[-max_lines:])
+
         tail = all_lines[-20:]
-        tail_lines = [f"[TAIL] {l.rstrip()}" for l in tail]
-        result = matched[-max_lines:] + ["--- last 20 lines ---"] + tail_lines
+        result.append("--- last 20 lines ---")
+        result.extend(f"[TAIL] {l.rstrip()}" for l in tail)
         return result
     except Exception as e:
         return [f"Failed to scan {log_path}: {e}"]
