@@ -18,6 +18,11 @@ TAU2_TARBALL_URL = os.environ.get(
     "TAU2_TARBALL_URL",
     "https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/tau2-bench.tar.gz",
 )
+# Set by the dev image (see internal_source/cuda_arm_docker/dev.Dockerfile), which
+# bakes the tarball and preinstalls evalscope/litellm/tau2. When it points at a
+# populated directory the test performs no network I/O: downloading a tarball from
+# OSS inside a merge-blocking job made the gate depend on bucket availability.
+TAU2_BENCH_HOME_ENV = "TAU2_BENCH_HOME"
 
 DEFAULT_THRESHOLD = 0.76
 DEFAULT_MODEL_ARG = "Qwen3-30B"
@@ -39,7 +44,7 @@ class Tau2BenchComparer(BaseComparer):
         task_ids_file = self.qr_info.get("tau2_task_ids_file", DEFAULT_TASK_IDS_FILE)
         script_file = self.qr_info.get("tau2_script_file", DEFAULT_SCRIPT_FILE)
 
-        extract_root = self._download_and_extract(out_dir)
+        extract_root = self._prepare_tau2(out_dir)
         self._install_evalscope()
         self._install_tau2_from_tarball(extract_root)
         task_ids_path = self._resolve_task_ids_file(extract_root, task_ids_file)
@@ -134,6 +139,24 @@ class Tau2BenchComparer(BaseComparer):
             QueryStatus.OTHERS,
             f"no installable tau2 package (wheel/setup.py/pyproject.toml) found under {extract_root}",
         )
+
+    def _prepare_tau2(self, work_dir: str) -> str:
+        """Return the tau2-bench root, preferring a copy baked into the image.
+
+        Falls back to downloading so environments without the prepared image
+        (open-source checkouts, local runs) keep working.
+        """
+        preinstalled = os.environ.get(TAU2_BENCH_HOME_ENV, "").strip()
+        if preinstalled and os.path.isdir(preinstalled) and os.listdir(preinstalled):
+            root = self._resolve_extract_root(preinstalled)
+            logging.info(f"[TAU2] using preinstalled tau2-bench at {root}")
+            return root
+        if preinstalled:
+            logging.warning(
+                f"[TAU2] {TAU2_BENCH_HOME_ENV}={preinstalled} is unset/empty on disk, "
+                f"falling back to download"
+            )
+        return self._download_and_extract(work_dir)
 
     def _download_and_extract(self, work_dir: str) -> str:
         dest_dir = os.path.join(work_dir, "tau2-bench")
