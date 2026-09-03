@@ -21,24 +21,39 @@ namespace {
 class ScopedEnvFlag {
 public:
     ScopedEnvFlag(const char* name, const char* value): name_(name) {
-        const char* old_value = std::getenv(name_);
-        if (old_value != nullptr) {
+        // Python's os.environ is a cached mapping: changing the process
+        // environment with setenv() does not update the mapping that
+        // os.environ.get() reads.  The warmup signal is consumed by Python,
+        // so update os.environ itself (which also calls putenv()) while the
+        // GIL is held.  Otherwise the compiled SM120 MoE path is skipped
+        // during warmup and torch.compile first runs inside graph capture.
+        py::gil_scoped_acquire gil;
+        auto                   environ = py::module_::import("os").attr("environ");
+        auto                   py_name = py::str(name_);
+        if (environ.contains(py_name)) {
             had_old_value_ = true;
-            old_value_     = old_value;
+            old_value_     = py::cast<std::string>(environ[py_name]);
         }
-        setenv(name_, value, 1);
+        environ[py_name] = py::str(value);
     }
 
-    ~ScopedEnvFlag() {
-        if (had_old_value_) {
-            setenv(name_, old_value_.c_str(), 1);
-        } else {
-            unsetenv(name_);
+    ~ScopedEnvFlag() noexcept {
+        py::gil_scoped_acquire gil;
+        try {
+            auto environ = py::module_::import("os").attr("environ");
+            auto py_name = py::str(name_);
+            if (had_old_value_) {
+                environ[py_name] = py::str(old_value_);
+            } else {
+                environ.attr("pop")(py_name, py::none());
+            }
+        } catch (py::error_already_set& error) {
+            error.discard_as_unraisable("ScopedEnvFlag::~ScopedEnvFlag");
         }
     }
 
 private:
-    const char* name_;
+    std::string name_;
     bool        had_old_value_ = false;
     std::string old_value_;
 };
@@ -194,8 +209,8 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
     RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareInputData");
     const size_t graph_idx =
         is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
-    auto& py_model_inputs = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
-    const int token_num   = is_prefill_cuda_graph_mode_ ? state.current_seq_len : inputs.input_ids.size(0);
+    auto&     py_model_inputs = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
+    const int token_num       = is_prefill_cuda_graph_mode_ ? state.current_seq_len : inputs.input_ids.size(0);
 
     optimizedCopyAsync(inputs.input_ids, py_model_inputs.input_ids, token_num * sizeof(int));
 
@@ -295,7 +310,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // async strided D2H copy that the pre-callPrepareCudaGraph synchronize below
     // waits for; host sources keep main's synchronous row-by-row memcpy.
     bool pending_host_mirror_d2h = false;
-    auto stridedCopyHost = [&pending_host_mirror_d2h](const torch::Tensor& src, torch::Tensor& dst) {
+    auto stridedCopyHost         = [&pending_host_mirror_d2h](const torch::Tensor& src, torch::Tensor& dst) {
         if (!src.defined() || src.numel() <= 0 || !dst.defined() || dst.is_cuda())
             return;
         if (src.is_cuda()) {
@@ -470,8 +485,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                     "CUDA graph capture has no attention input for tag=%s",
                                     tag.c_str());
             auto& dst_inputs = dst_it->second;
-            if (dst_inputs.kv_cache_kernel_block_id.defined()
-                && !dst_inputs.kv_cache_kernel_block_id.is_cuda()) {
+            if (dst_inputs.kv_cache_kernel_block_id.defined() && !dst_inputs.kv_cache_kernel_block_id.is_cuda()) {
                 dst_inputs.kv_cache_kernel_block_id.zero_();
             }
             tryAddStridedD2DCopy(src_inputs.kv_cache_kernel_block_id_device,
@@ -535,8 +549,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             // whole captured range - not just the padding tail - would otherwise
             // keep the capture-time max_seq_len values.
             const bool has_live_sequence_lengths = inputs.attention_inputs.sequence_lengths.defined()
-                                                  && inputs.attention_inputs.sequence_lengths.numel() > 0;
-            const int  fill_start                = has_live_sequence_lengths ? state.current_batch_size : 0;
+                                                   && inputs.attention_inputs.sequence_lengths.numel() > 0;
+            const int fill_start = has_live_sequence_lengths ? state.current_batch_size : 0;
             if (fill_start < selected_graph_batch_size) {
                 py_model_inputs_.attention_inputs.sequence_lengths.slice(0, fill_start, selected_graph_batch_size)
                     .fill_(0);
@@ -556,10 +570,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                 const auto& input_lengths_host = live_input_lengths_on_cuda ?
                                                      py_model_inputs_.attention_inputs.input_lengths :
                                                      inputs.attention_inputs.input_lengths;
-                auto* input_lengths      = input_lengths_host.data_ptr<int32_t>();
-                auto* padding_offset     = py_model_inputs_.attention_inputs.padding_offset.data_ptr<int32_t>();
-                int   cumulative_padding = 0;
-                int   token_idx          = 0;
+                auto*       input_lengths      = input_lengths_host.data_ptr<int32_t>();
+                auto*       padding_offset     = py_model_inputs_.attention_inputs.padding_offset.data_ptr<int32_t>();
+                int         cumulative_padding = 0;
+                int         token_idx          = 0;
                 for (int batch_idx = 0; batch_idx < state.current_batch_size; ++batch_idx) {
                     const int input_length = input_lengths[batch_idx];
                     std::fill_n(padding_offset + token_idx, input_length, cumulative_padding);
@@ -675,8 +689,7 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
             RTP_LLM_CHECK_WITH_INFO(dst_it != py_model_inputs.attention_inputs_by_tag.end(),
                                     "CUDA graph capture has no attention input for tag=%s",
                                     tag.c_str());
-            add_block_table(src_inputs.kv_cache_kernel_block_id_device,
-                            dst_it->second.kv_cache_kernel_block_id_device);
+            add_block_table(src_inputs.kv_cache_kernel_block_id_device, dst_it->second.kv_cache_kernel_block_id_device);
         }
     }
     fusedCopy(d2d_copies);

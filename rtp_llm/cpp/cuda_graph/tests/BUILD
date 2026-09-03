@@ -137,3 +137,20 @@ py_test(
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
 )
+
+py_test(
+    name = "cuda_graph_compiled_warmup_test",
+    srcs = ["cuda_graph_compiled_warmup_test.py"],
+    data = [
+        ":test_cuda_graph_runner",
+        "//:th_transformer",
+    ],
+    deps = [
+        "//rtp_llm/test/model_test/test_util:test_util",
+    ],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO"},
+)
