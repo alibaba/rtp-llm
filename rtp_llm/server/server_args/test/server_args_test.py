@@ -75,6 +75,28 @@ class ServerArgsSetTest(TestCase):
         os.environ.update(self._environ_backup)
         sys.argv = self._argv_backup
 
+    def test_fastsafetensors_reserve_defaults_and_cli_precedence(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        self.assertEqual(setup_args([]).load_config.fastsafetensors_reserve_mb, 2048)
+        os.environ["RTP_FASTSAFETENSORS_RESERVE_MB"] = "512"
+        self.assertEqual(setup_args([]).load_config.fastsafetensors_reserve_mb, 512)
+        configs = setup_args(["--fastsafetensors_reserve_mb", "0"])
+        self.assertEqual(configs.load_config.fastsafetensors_reserve_mb, 0)
+        self.assertIn("fastsafetensors_reserve_mb: 0", configs.load_config.to_string())
+
+    def test_fastsafetensors_reserve_rejects_invalid_cli_and_environment(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        for value in ("-1", "1.5", "", "invalid"):
+            with self.subTest(value=value):
+                os.environ.pop("RTP_FASTSAFETENSORS_RESERVE_MB", None)
+                with self.assertRaises(SystemExit):
+                    setup_args(["--fastsafetensors_reserve_mb", value])
+                os.environ["RTP_FASTSAFETENSORS_RESERVE_MB"] = value
+                with self.assertRaises(SystemExit):
+                    setup_args([])
+
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
         # Set environment variables

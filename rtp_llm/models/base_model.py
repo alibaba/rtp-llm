@@ -90,6 +90,7 @@ class BaseModel(object):
         force_cpu_load_weights: bool = False,
         loader_recycle_handles: bool = False,
         moe_pure_tp_preshard: bool = False,
+        fastsafetensors_reserve_mb: int = 2048,
     ) -> None:
         """Initialize BaseModel with independent configuration objects.
         Args:
@@ -118,6 +119,7 @@ class BaseModel(object):
         self.force_cpu_load_weights = force_cpu_load_weights
         self.loader_recycle_handles = loader_recycle_handles
         self.moe_pure_tp_preshard = moe_pure_tp_preshard
+        self.fastsafetensors_reserve_mb = fastsafetensors_reserve_mb
         self.weight = None
         self.weight_manager = None
         # Keep the owner alive for the complete lifetime of any non-owning
@@ -305,6 +307,7 @@ class BaseModel(object):
         moe_pure_tp_preshard: bool = False,
         weight_alias_owner: Optional["BaseModel"] = None,
         weight_alias_names: Sequence[str] = (),
+        fastsafetensors_reserve_mb: int = 2048,
     ) -> "BaseModel":
         """Create model from independent configuration objects.
 
@@ -335,6 +338,7 @@ class BaseModel(object):
             force_cpu_load_weights=force_cpu_load_weights,
             loader_recycle_handles=loader_recycle_handles,
             moe_pure_tp_preshard=moe_pure_tp_preshard,
+            fastsafetensors_reserve_mb=fastsafetensors_reserve_mb,
         )
         if weight_alias_names and weight_alias_owner is None:
             raise ValueError(
@@ -505,4 +509,5 @@ class BaseModel(object):
             load_method=self.load_method,
             force_cpu_load_weights=self.force_cpu_load_weights,
             moe_pure_tp_preshard=self.moe_pure_tp_preshard,
+            fastsafetensors_reserve_mb=self.fastsafetensors_reserve_mb,
         )
