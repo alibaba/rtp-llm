@@ -98,6 +98,32 @@ class MegaMoeWrapperLayoutTest(unittest.TestCase):
                 config, SimpleNamespace(moe_strategy="mega_moe_se")
             )
 
+    def test_hy4_native_mxfp4_requires_plain_mega_moe(self):
+        config = _config(swiglu_limit=10.0)
+        config.model_type = "hy_v4"
+        config.quant_config = SimpleNamespace(
+            get_method=lambda: "MXFP8",
+            quantized_layers={
+                "model.layers.3.mlp.experts": {"quant_algo": "MXFP4"}
+            },
+        )
+
+        _validate_hy4_mxfp8_moe_strategy(
+            config, SimpleNamespace(moe_strategy="mega_moe"), layer_idx=3
+        )
+        with self.assertRaisesRegex(ValueError, "checkpoint-native MXFP4"):
+            _validate_hy4_mxfp8_moe_strategy(
+                config,
+                SimpleNamespace(moe_strategy="mega_moe_fp8"),
+                layer_idx=3,
+            )
+        with self.assertRaisesRegex(ValueError, "clamps routed experts only"):
+            _validate_hy4_mxfp8_moe_strategy(
+                config,
+                SimpleNamespace(moe_strategy="mega_moe_se"),
+                layer_idx=3,
+            )
+
     def test_fp4_wrapper_forwards_routed_clamp(self):
         wrapper = object.__new__(mega_moe_wrapper.MegaMoeWrapper)
         torch.nn.Module.__init__(wrapper)

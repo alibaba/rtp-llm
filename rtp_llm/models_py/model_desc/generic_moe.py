@@ -61,14 +61,15 @@ class _FusedSharedExpertSentinel(nn.Module):
 
 
 def _validate_hy4_mxfp8_moe_strategy(
-    config: ModelConfig, moe_config: MoeConfig
+    config: ModelConfig, moe_config: MoeConfig, layer_idx: int = 0
 ) -> None:
-    """Reject MXFP8 HY4 expert backends that silently drop SwiGLU clamp.
+    """Validate HY4 expert quantization against the selected MoE backend.
 
     HY4 applies ``swiglu_limit`` only to routed experts. Both ``mega_moe_fp8``
     and plain ``mega_moe`` leave the shared expert on its separate, unclamped
-    path; plain ``mega_moe`` converts routed MXFP8 weights to FP4 at load time.
-    A fused-shared strategy cannot represent routed-clamped/shared-unclamped.
+    path. Plain ``mega_moe`` accepts either checkpoint-native routed MXFP4 or
+    routed MXFP8 converted to FP4 at load time. A fused-shared strategy cannot
+    represent routed-clamped/shared-unclamped.
     """
     if config.model_type not in ("hy_v4", "hy_v4_mtp"):
         return
@@ -76,6 +77,23 @@ def _validate_hy4_mxfp8_moe_strategy(
     quant_method = quant_config.get_method() if quant_config is not None else None
     if quant_method != "MXFP8" or float(config.swiglu_limit) <= 0:
         return
+
+    routed_quant_method = quant_method
+    quantized_layers = getattr(quant_config, "quantized_layers", {}) or {}
+    if quantized_layers:
+        routed_prefix = (
+            "model.mtp_layers.0.mlp.experts"
+            if config.model_type == "hy_v4_mtp"
+            else f"model.layers.{layer_idx}.mlp.experts"
+        )
+        routed_info = quantized_layers.get(routed_prefix)
+        if not isinstance(routed_info, dict):
+            raise ValueError(
+                "HY V4 ModelOpt MIXED_PRECISION is missing routed expert "
+                f"configuration for {routed_prefix}"
+            )
+        routed_quant_method = str(routed_info.get("quant_algo", "")).upper()
+
     if moe_config.moe_strategy in {
         "mega_moe_se",
         "mega_moe_fused",
@@ -86,6 +104,14 @@ def _validate_hy4_mxfp8_moe_strategy(
             "the fused MegaMoE kernel applies one activation_clamp to routed "
             "and shared experts, while HY V4 clamps routed experts only"
         )
+    if routed_quant_method == "MXFP4":
+        if moe_config.moe_strategy != "mega_moe":
+            raise ValueError(
+                "HY V4 checkpoint-native MXFP4 routed experts require "
+                "moe_strategy=mega_moe with a separate shared expert: "
+                f"got moe_strategy={moe_config.moe_strategy!r}"
+            )
+        return
     if moe_config.moe_strategy not in {"mega_moe_fp8", "mega_moe"}:
         raise ValueError(
             "HY V4 MXFP8 routed experts require mega_moe_fp8, or mega_moe "
@@ -154,7 +180,7 @@ class GenericMoeLayer(nn.Module):
 
         # Get quant_config from model_config
         quant_config = config.quant_config
-        _validate_hy4_mxfp8_moe_strategy(config, moe_config)
+        _validate_hy4_mxfp8_moe_strategy(config, moe_config, layer_idx)
         self._hy4_fp32_router = getattr(config, "model_type", "") in (
             "hy_v4",
             "hy_v4_mtp",
