@@ -61,46 +61,22 @@ class _FusedSharedExpertSentinel(nn.Module):
 
 
 def _validate_hy4_mxfp8_moe_strategy(
-    config: ModelConfig, moe_config: MoeConfig, layer_idx: int = 0
+    config: ModelConfig, moe_config: MoeConfig
 ) -> None:
-    """Reject HY4 expert backends that do not match routed quantization.
+    """Reject MXFP8 HY4 expert backends that silently drop SwiGLU clamp.
 
-    A ModelOpt mixed checkpoint reports ``MXFP8`` as its top-level method even
-    when routed experts are MXFP4. Use the concrete per-layer entry so the
-    W4A8 ``mega_moe_se`` path is not mistaken for an all-MXFP8 expert path.
+    HY4 applies ``swiglu_limit`` only to routed experts. The dedicated
+    ``mega_moe_fp8`` wrapper forwards that limit to DeepGEMM while leaving the
+    separately evaluated shared expert unclamped. The generic and fused-shared
+    executors currently accept ``extra_expert_args`` but do not implement this
+    asymmetric clamp, so allowing them would produce plausible-shaped but
+    numerically different output.
     """
     if config.model_type not in ("hy_v4", "hy_v4_mtp"):
         return
     quant_config = config.quant_config
     quant_method = quant_config.get_method() if quant_config is not None else None
     if quant_method != "MXFP8" or float(config.swiglu_limit) <= 0:
-        return
-
-    routed_quant_method = quant_method
-    quantized_layers = getattr(quant_config, "quantized_layers", {}) or {}
-    if quantized_layers:
-        routed_prefix = (
-            "model.mtp_layers.0.mlp.experts"
-            if config.model_type == "hy_v4_mtp"
-            else f"model.layers.{layer_idx}.mlp.experts"
-        )
-        routed_info = quantized_layers.get(routed_prefix, {})
-        routed_quant_method = str(routed_info.get("quant_algo", "")).upper()
-
-    # For an all-MXFP8 HY4 checkpoint, selecting mega_moe_se explicitly asks
-    # the loader to convert routed MXFP8 weights to MXFP4 at load time.  The
-    # shared expert remains MXFP8 and the runtime therefore uses the
-    # fp8_fp4_mega_moe path, just like a native mixed MXFP4/MXFP8 checkpoint.
-    if moe_config.moe_strategy == "mega_moe_se":
-        return
-
-    if routed_quant_method == "MXFP4":
-        if moe_config.moe_strategy != "mega_moe_se":
-            raise ValueError(
-                "HY V4 MXFP4 routed experts with fused MXFP8 shared experts "
-                "require moe_strategy=mega_moe_se: "
-                f"got {moe_config.moe_strategy!r}"
-            )
         return
     if moe_config.moe_strategy != "mega_moe_fp8":
         raise ValueError(
@@ -170,7 +146,7 @@ class GenericMoeLayer(nn.Module):
 
         # Get quant_config from model_config
         quant_config = config.quant_config
-        _validate_hy4_mxfp8_moe_strategy(config, moe_config, layer_idx)
+        _validate_hy4_mxfp8_moe_strategy(config, moe_config)
         self._hy4_fp32_router = getattr(config, "model_type", "") in (
             "hy_v4",
             "hy_v4_mtp",
