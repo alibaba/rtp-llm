@@ -18,14 +18,12 @@ from __future__ import annotations
 import json
 import threading
 import time
-import urllib.request
 from dataclasses import dataclass, field
 from typing import List, Optional
 
 import grpc
 
 from .harness import (
-    DEFAULT_MASTER_MANAGEMENT_PORT,
     encode_unique_key,
     ensure_proto_modules,
     ensure_schedule_proto_modules,
@@ -44,86 +42,6 @@ CHANNEL_OPTIONS = [
     ("grpc.max_receive_message_length", 64 * 1024 * 1024),
     ("grpc.max_send_message_length", 64 * 1024 * 1024),
 ]
-
-# Master management-port prometheus exposition: primary Spring Boot
-# actuator path first, then the plain /prometheus fallback — the same URL
-# ladder as the G3 poller (eval_collectors.py).
-MASTER_PROMETHEUS_PATHS = ("actuator/prometheus", "prometheus")
-
-
-def _http_get_text(url: str, timeout: float = 5.0) -> Optional[str]:
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as resp:
-            return resp.read().decode("utf-8", "replace")
-    except Exception:
-        return None
-
-
-def _parse_label_block(raw: str) -> dict:
-    """Parse the inside of a ``{k1="v1",k2="v2"}`` label block.
-
-    Tolerates the Micrometer/Spring actuator trailing comma
-    (``{role="PREFILL",}``).  Label values in this codebase (role /
-    engineIp / reason) never carry commas or escapes, so a plain split
-    is sufficient — a documented limitation, not a general parser.
-    """
-    out: dict = {}
-    for pair in raw.split(","):
-        pair = pair.strip()
-        if not pair:
-            continue
-        key, sep, value = pair.partition("=")
-        if not sep:
-            continue
-        out[key.strip()] = value.strip().strip('"')
-    return out
-
-
-def parse_prometheus_samples(
-    body: str, name_prefix: str, labels: Optional[dict] = None
-) -> list:
-    """Parse a Prometheus text-exposition body into prefix-filtered samples.
-
-    Returns ``[(metric_name, labels_dict, value), ...]`` in file order.
-    ``# HELP`` / ``# TYPE`` lines, samples whose name does not start with
-    ``name_prefix``, samples missing any required ``labels`` pair, and
-    lines with unparseable values are skipped; optional trailing
-    timestamps are ignored.  Pure function — locally testable with a
-    synthetic body, no network involved.
-    """
-    samples: list = []
-    for raw_line in body.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        # Metric name runs from column 0 to the first "{" or blank.
-        name_end = len(line)
-        for idx, ch in enumerate(line):
-            if ch == "{" or ch == " ":
-                name_end = idx
-                break
-        name = line[:name_end]
-        if not name.startswith(name_prefix):
-            continue
-        rest = line[name_end:]
-        label_values: dict = {}
-        if rest.startswith("{"):
-            close = rest.find("}")
-            if close < 0:
-                continue
-            label_values = _parse_label_block(rest[1:close])
-            rest = rest[close + 1 :]
-        if labels and any(label_values.get(k) != v for k, v in labels.items()):
-            continue
-        parts = rest.split()
-        if not parts:
-            continue
-        try:
-            value = float(parts[0])
-        except ValueError:
-            continue
-        samples.append((name, label_values, value))
-    return samples
 
 
 @dataclass
@@ -202,21 +120,10 @@ class EngineOps:
         master_ip: str,
         master_http_port: int,
         mock_http_port: int,
-        master_management_port: Optional[int] = None,
     ):
         self.master_ip = master_ip
         self.master_http_port = master_http_port
         self.mock_http_port = mock_http_port
-        # Management port serves the actuator/prometheus exposition.
-        # Defaults to the harness constant (FLEXLB_FT_MASTER_MANAGEMENT_PORT
-        # env, falling back to http+1) — the port start_master actually binds
-        # via --management.server.port — so the existing three-argument
-        # construction in context.py resolves correctly without changes.
-        self.master_management_port = (
-            master_management_port
-            if master_management_port is not None
-            else DEFAULT_MASTER_MANAGEMENT_PORT
-        )
         self.pb2, self.pb2_grpc = ensure_proto_modules()
         self.schedule_pb2, self.schedule_pb2_grpc = ensure_schedule_proto_modules()
         self._channels: dict = {}
@@ -636,126 +543,6 @@ class EngineOps:
             return int(data.get("scheduler_inflight", -1))
         except (TypeError, ValueError):
             return -1
-
-    # -- master prometheus (management port) --------------------------------
-
-    def master_prometheus_text(self) -> Optional[str]:
-        """Raw prometheus exposition from the master management port.
-
-        Tries /actuator/prometheus first, then the /prometheus fallback
-        (MASTER_PROMETHEUS_PATHS).  Returns None when neither path
-        answers (master down / management port not exposed) — distinct
-        from an empty exposition string.
-        """
-        for path in MASTER_PROMETHEUS_PATHS:
-            body = _http_get_text(
-                f"http://127.0.0.1:{self.master_management_port}/{path}"
-            )
-            if body is not None:
-                return body
-        return None
-
-    def master_prometheus_metric(
-        self, name_pattern: str, labels: Optional[dict] = None
-    ) -> Optional[dict]:
-        """Scrape the master prometheus exposition, prefix+label filtered.
-
-        Args:
-            name_pattern: metric-name PREFIX.  Prometheus names lose the
-                Java dots: the ``app.flexlb.inflight.ttl.expired.qps``
-                counter is exposed as
-                ``flexlb_app_flexlb_inflight_ttl_expired_qps_total``.
-            labels: optional {label_name: required_value} — a sample
-                matches only when it carries ALL of these pairs.
-
-        Returns:
-            ``{labels_key: value}`` over the matching samples, where
-            labels_key is ``name`` for unlabeled samples and
-            ``name{k1="v1",k2="v2"}`` (the sample's own label order)
-            otherwise — ``.values()`` yields the plain value list.  None
-            when the exposition endpoint is unreachable; ``{}`` when
-            reachable but no sample matches.
-
-        Sparse-counter semantics (read before computing deltas): the
-        master only reports non-zero series, so "sequence absent" and
-        "value zero" are indistinguishable — a missing key means "no
-        such event has ever happened (yet)".  Before/after delta callers
-        must therefore treat a missing key as a 0 baseline; that is safe
-        because these counters first APPEAR with a non-zero value (the
-        first event), so a None→0 baseline never masks an event nor
-        double-counts one.
-        """
-        body = self.master_prometheus_text()
-        if body is None:
-            return None
-        result: dict = {}
-        for name, label_values, value in parse_prometheus_samples(
-            body, name_pattern, labels
-        ):
-            if label_values:
-                rendered = ",".join(f'{k}="{v}"' for k, v in label_values.items())
-                key = f"{name}{{{rendered}}}"
-            else:
-                key = name
-            result[key] = value
-        return result
-
-    def master_ttl_eviction_counts(
-        self, engine_ip: Optional[str] = None
-    ) -> Optional[dict]:
-        """TTL-eviction counters aggregated by ledger role — the assertion
-        channel for TTL cases (no G3 timeline file involved).
-
-        Master counter: Java ``app.flexlb.inflight.ttl.expired.qps``, a
-        Counter exposed as
-        ``flexlb_app_flexlb_inflight_ttl_expired_qps_total`` with tags
-        {role, engineIp, reason}, reported at the 60s maintenance-sweep
-        granularity, two levels:
-
-          * role=SCHEDULER, engineIp="scheduler" — the scheduler's own
-            request-slot ledger sweep (ExpirationTimer);
-          * role=PREFILL/DECODE, engineIp=<real engine IP> — per-endpoint
-            ledger orphan sweeps (EndpointRegistry).
-
-        Returns ``{"scheduler": v, "prefill": Σ, "decode": Σ}``.  A
-        role's value is None when its series is absent — the
-        sparse-counter "never happened" state, which delta callers
-        treat as a 0 baseline (see master_prometheus_metric).  Overall
-        None means the exposition endpoint was unreachable — NOT zero
-        evictions; assertions must fail rather than compute a delta
-        from it.  ``engine_ip`` restricts PREFILL/DECODE aggregation to
-        one engine's series (the scheduler series, tagged
-        engineIp="scheduler", only survives that filter when
-        engine_ip="scheduler" is passed explicitly).
-
-        Case usage (before/after delta):
-
-            before = ops.master_ttl_eviction_counts()
-            ...  # park a request past its inflight TTL
-            after = ops.master_ttl_eviction_counts()
-            delta = after["decode"] - (before["decode"] or 0)
-            assert delta >= 1  # after waiting out the 60s sweep
-
-        The 60s maintenance-sweep granularity means the counter lags
-        the eviction event: after-side assertions must poll (wait_for)
-        instead of sampling once.
-        """
-        body = self.master_prometheus_text()
-        if body is None:
-            return None
-        label_filter = {"engineIp": engine_ip} if engine_ip is not None else None
-        counts: dict = {"scheduler": None, "prefill": None, "decode": None}
-        for _, label_values, value in parse_prometheus_samples(
-            body, "flexlb_app_flexlb_inflight_ttl_expired", label_filter
-        ):
-            role = label_values.get("role", "")
-            if role == "SCHEDULER":
-                counts["scheduler"] = (counts["scheduler"] or 0.0) + value
-            elif role == "PREFILL":
-                counts["prefill"] = (counts["prefill"] or 0.0) + value
-            elif role == "DECODE":
-                counts["decode"] = (counts["decode"] or 0.0) + value
-        return counts
 
     # -- composite request helper ------------------------------------------
 

@@ -174,6 +174,14 @@ def _clear_all_prefill_inject(ops, names: list[str]) -> None:
 def _anomaly_error_case(
     ctx: CaseContext, inject_config: dict, wait_s: float, require_error_detail: bool
 ) -> tuple[bool, str]:
+    """Shared body of the /inject error family (no_respond, enqueue_error).
+
+    Verdict: the injected fault must surface on the request, the env
+    recovers, and — under BATCH delivery, where the explicit cleanup
+    Cancel can safely release the master ledger — the inflight ledger
+    drains to zero (asserted since the 2026-09 eval batch A; NON_BATCH
+    keeps the residue contract, see cancel_anomaly_path).
+    """
     ops = ctx.ops()
     rid = ops.next_request_id(rid_base(ctx, "engine_fault"))
     error_observed = False
@@ -220,7 +228,10 @@ def _anomaly_error_case(
 
         time.sleep(WORKER_RECOVERY_WAIT_S)
         recovery_ok, recovery_msg = ops.verify_recovery()
-        if response is not None and response.success and response.enqueued_by_master:
+        batch_delivered = (
+            response is not None and response.success and response.enqueued_by_master
+        )
+        if batch_delivered:
             inflight_ok, inflight_detail = AssertUtils.inflight_clean(
                 _master_http(ops), 10.0
             )
@@ -229,7 +240,10 @@ def _anomaly_error_case(
             # safely release a delivered ledger entry, so immediate-zero is
             # not asserted.
             inflight_ok, inflight_detail = True, "N/A (NON_BATCH residue contract)"
-        passed = error_observed and recovery_ok
+        # 修复（eval batch A）：BATCH 交付的失败请求在显式 cancel 清理后
+        # master 账本必须排空——inflight_ok 升格进 passed（no_respond /
+        # enqueue_error 受益）；NON_BATCH 维持 residue contract 不变。
+        passed = error_observed and recovery_ok and (not batch_delivered or inflight_ok)
         return passed, (
             f"error_observed={error_observed} ({error_detail}), "
             f"inflight_clean={inflight_ok}({inflight_detail}), "
@@ -1082,7 +1096,15 @@ def recovery_generation_bump(ctx: CaseContext):
 
         recovery_ok, recovery_msg = ops.verify_recovery()
 
-        passed = retired and alive_back and generation_bumped and recovery_ok
+        # 修复（eval batch A）：docstring 四条承诺之一"recovered ledger
+        # starts from zero"进 passed——E3 同项已断，族内对齐。
+        passed = (
+            retired
+            and alive_back
+            and generation_bumped
+            and ledger_clean
+            and recovery_ok
+        )
         return passed, (
             f"ip={ip}, created_generations={created_before}->{created_after}, "
             f"transport_retired={retired}, alive_restored={alive_back}, "

@@ -600,6 +600,13 @@ def build_flexlb_config(
     stale_inflight_ms: int = 30_000,
     delivered_not_accepted_timeout_ms: int = 30_000,
     max_delivered_not_accepted: int = 200,
+    # Admission-family capacity passthrough (admission wave-2 triggers,
+    # 2026-09): None → omit the key, keep the Java default / the template
+    # status quo (waiting queue 1024, prefill placement pool 100000 here);
+    # only an explicit value reaches FLEXLB_CONFIG.  Harness is a pipe —
+    # no default changes.
+    max_waiting_requests_per_prefill_worker: Optional[int] = None,
+    prefill_max_pending_requests: Optional[int] = None,
     # dispatcher knobs
     max_inflight_batches: int = 4,  # BATCH
     enqueue_rpc_timeout_ms: Optional[int] = None,  # BATCH; None → Java default 5000
@@ -644,11 +651,16 @@ def build_flexlb_config(
             dispatcher_cfg["maxInflightRequestsPerPrefillWorker"] = (
                 max_inflight_requests_per_worker
             )
+    capacity_cfg: dict = {"maxOutstandingRequestsGlobal": max_outstanding}
+    if max_waiting_requests_per_prefill_worker is not None:
+        capacity_cfg["maxWaitingRequestsPerPrefillWorker"] = (
+            max_waiting_requests_per_prefill_worker
+        )
     scheduler_cfg: dict = {
         "type": "QUEUE",
         "ordering": {"type": ordering.upper()},
         "decision": decision_cfg,
-        "capacity": {"maxOutstandingRequestsGlobal": max_outstanding},
+        "capacity": capacity_cfg,
         "lifecycle": {
             "staleInflightTimeoutMs": stale_inflight_ms,
             "deliveredNotAcceptedTimeoutMs": delivered_not_accepted_timeout_ms,
@@ -657,6 +669,9 @@ def build_flexlb_config(
     }
     if queue_timeout_ms is not None:
         scheduler_cfg["queueTimeoutMs"] = queue_timeout_ms
+    prefill_availability: dict = {"maxPendingRequests": 100000}
+    if prefill_max_pending_requests is not None:
+        prefill_availability["maxPendingRequests"] = prefill_max_pending_requests
     return json.dumps(
         {
             "schemaVersion": 2,
@@ -666,7 +681,7 @@ def build_flexlb_config(
                 "availabilityHysteresisPercent": 0,
                 "roles": {
                     "prefill": {
-                        "availability": {"maxPendingRequests": 100000},
+                        "availability": prefill_availability,
                         # Production DSv4 prefill fit injected explicitly
                         # (see DSV4_PREFILL_EXPRESSION above): the test line
                         # stays on the production-fit caliber regardless of
@@ -1364,6 +1379,14 @@ class AssertUtils:
                 # decode leg still observes a live field instead of a missing
                 # key that always reads 0.
                 def _decode_inflight(ep: dict) -> int:
+                    # 修复（eval batch A）：两键齐缺时 fail loudly——静默回
+                    # 退 0 会把上游字段改名伪装成"账本干净"。
+                    if "inflight_requests" not in ep and "total_load" not in ep:
+                        raise RuntimeError(
+                            "decode endpoint exposes neither inflight_requests "
+                            "nor total_load — inflight_status schema changed: "
+                            f"keys={sorted(ep.keys())}"
+                        )
                     return ep.get("inflight_requests", 0) or ep.get("total_load", 0)
 
                 decode_clean = all(_decode_inflight(ep) == 0 for ep in decode_eps)
@@ -1381,9 +1404,19 @@ class AssertUtils:
     def ttft_degradation(
         base_p50: Optional[float], new_p50: Optional[float], threshold_pct: float = 50.0
     ) -> tuple[bool, str]:
-        """new_p50 must not exceed base_p50 by more than threshold_pct %."""
+        """new_p50 must not exceed base_p50 by more than threshold_pct %.
+
+        A missing baseline/recovery reading FAILS the gate instead of
+        silently passing it (fail-loud, the kv_capacity_conflict P7
+        philosophy: a missing timing value is a failure state, never a
+        skip).  Callers whose Phase-1 baseline fully failed return before
+        reaching this gate, so this cannot amplify an existing failure.
+        """
         if base_p50 is None or new_p50 is None:
-            return True, "ttft baseline unavailable — skipped comparison"
+            # 修复（eval batch A）：基线缺失静默直通会令 TTFT 回归门无声
+            # 消失——值缺失即失败态（对齐 kv_capacity_conflict 的处理）。
+            missing = "baseline" if base_p50 is None else "recovery"
+            return False, f"ttft {missing} p50 unavailable — gate not skippable"
         degradation = (new_p50 - base_p50) / base_p50 * 100 if base_p50 > 0 else 0.0
         ok = degradation <= threshold_pct
         return ok, (
@@ -1520,12 +1553,28 @@ def admission_config(
     queue_timeout_ms: int = 60_000,
     max_outstanding: int = 5_000,
     stale_inflight_ms: int = 30_000,
+    max_delivered_not_accepted: Optional[int] = None,
+    max_waiting_requests_per_prefill_worker: Optional[int] = None,
+    prefill_max_pending_requests: Optional[int] = None,
 ) -> str:
     """FLEXLB_CONFIG for the admission-gate cases: the legacy fault axes
     (QUEUE + PRIORITY + FIXED_WINDOW + BATCH) via the unified
     harness.build_flexlb_config template, with the admission knobs
-    parameterised."""
-    return build_flexlb_config(
+    parameterised.
+
+    The three admission wave-2 capacity triggers are optional passthrough
+    (None → not emitted, keeping the current template values — lifecycle
+    maxDeliveredNotAcceptedRequestsGlobal=200, Java defaults for the other
+    two); only an explicit value overrides:
+
+      * max_waiting_requests_per_prefill_worker — scheduler.capacity
+        (batcher waiting-queue capacity; Java default 1024)
+      * max_delivered_not_accepted — scheduler.lifecycle
+        maxDeliveredNotAcceptedRequestsGlobal (acceptance global limit)
+      * prefill_max_pending_requests — router.roles.prefill.availability
+        maxPendingRequests (placement pool limit; Java default 64)
+    """
+    kwargs = dict(
         ordering="priority",
         decision="fixed_window",
         dispatcher="batch",
@@ -1533,6 +1582,15 @@ def admission_config(
         max_outstanding=max_outstanding,
         stale_inflight_ms=stale_inflight_ms,
     )
+    if max_delivered_not_accepted is not None:
+        kwargs["max_delivered_not_accepted"] = max_delivered_not_accepted
+    if max_waiting_requests_per_prefill_worker is not None:
+        kwargs["max_waiting_requests_per_prefill_worker"] = (
+            max_waiting_requests_per_prefill_worker
+        )
+    if prefill_max_pending_requests is not None:
+        kwargs["prefill_max_pending_requests"] = prefill_max_pending_requests
+    return build_flexlb_config(**kwargs)
 
 
 def elastic_spec(ctx: "CaseContext") -> EnvSpec:

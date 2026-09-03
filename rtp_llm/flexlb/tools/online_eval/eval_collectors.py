@@ -75,15 +75,6 @@ MASTER_PROMETHEUS_PREFIXES = (
     "flexlb_app_cache_",
     "flexlb_app_flexlb_batcher_queue_size",
     "flexlb_app_flexlb_inflight_max_age_ms",
-    # TTL-eviction two-level counter (scheduler request-slot ledger sweep
-    # + P/D endpoint-ledger orphan sweeps).  Sparse: the master reports a
-    # series only once it is non-zero, so rounds with no lines for this
-    # prefix mean "no eviction in that window", not a collection gap; the
-    # series persists forever after first appearance (cumulative counter).
-    # Stress-run observability side benefit — the case-side assertions
-    # scrape the endpoint directly (EngineOps.master_ttl_eviction_counts),
-    # not this G3 file.
-    "flexlb_app_flexlb_inflight_ttl",
     "flexlb_app_engine_balancing_master_dispatch_reason_total",
     "flexlb_app_engine_balancing_master_batch_size",
 )
