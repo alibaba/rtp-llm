@@ -5,7 +5,7 @@ Run inside a run dir on the remote host:
   cd <run_dir> && python3 aggregate_canvas_run.py
 Reads (consolidated run-root layout, the only supported form):
   client.json (summary source: sh-merged scalar keys + embedded
-  server_latency / slo_batch_analysis)
+  server_latency)
   client_events.jsonl / client_events.jsonl.gz (run root; renamed from
   per_request.jsonl together with the multi-component JSONL event streams)
   engine_events.jsonl / engine_events.jsonl.gz (run root; the engine-side
@@ -27,7 +27,9 @@ event rows are rid-joined onto them (the same join full_e2e always used).
 Both jsonl streams are fail-closed: a missing file or a malformed row is a
 hard error, never a silent empty column (no-backward-compat: legacy runs
 that predate the jsonl streams are no longer supported).
-Outputs meta/summary/batch/per_second (schedule + e2e/ttft percentiles)/
+Outputs meta/summary/batch (mock_last)/batch_decisions (run-level batch
+dispatch-reason + prediction-gap analysis, merged 20260903 from the
+removed analyze_slo_batch.py)/per_second (schedule + e2e/ttft percentiles)/
 master_arrivals_ts (master-side per-second arrival/completion rates, the
 send-series source of record) /queue_timeseries/engine_dist (requests / tokens / busy-time utilization,
 per-engine Gini/CV/Lorenz/window Gini) plus compact time series:
@@ -59,6 +61,7 @@ summary.json passthrough, no-backward-compat).
 import glob
 import gzip
 import json
+import math
 import os
 import re
 import sys
@@ -255,7 +258,7 @@ def latency_summary(values, nd=1):
 
 
 # ---- inputs: consolidated run-root layout (the only supported form) ----
-# 当前格式（consolidate 后）：client.json（server_latency / slo 嵌入）+
+# 当前格式（consolidate 后）：client.json（server_latency 嵌入）+
 # run 根 client_events.jsonl(.gz) + engine_events.jsonl(.gz) + master.json +
 # mock.json。legacy load_client/summary.json 双源切换与 shard_* 布局读取链
 # 已删（no-backward-compat，旧 run 不再是支持对象）；summary.json 文件随
@@ -266,7 +269,6 @@ def latency_summary(values, nd=1):
 # rid-join 主数据源互为印证），不再承担 per-request 数据职责。
 client_json = load_json("client.json") or {}
 summary = client_json
-slo = client_json.get("slo_batch_analysis") or {}
 
 # run_meta.json（params + client_env）：Phase A 派生统计需要 client_env 里的
 # CLIENT_PACING_LAG_P99_LIMIT_MS，提前到此处加载（原先在 compact time series
@@ -904,6 +906,25 @@ if os.path.isfile("mock_engine.log"):
         mock_stats.append(dict(kv_pair_re.findall(line)))
 else:
     mock_stats = mock_payload.get("stats") or []
+# batch.mock_last 直出（原经 slo_batch_analysis.json 转发，20260903 改为
+# aggregate 自取末帧）：mock_stats 双路径值类型不一——mock_engine.log 解析
+# 为字符串、mock.json stats 已是数值——统一归一为 int/float（与历史 slo
+# 转发值同口径，报告层 num() 直读）。
+
+
+def _kv_as_number(raw):
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return raw
+    text = str(raw)
+    try:
+        return float(text) if "." in text else int(text)
+    except (TypeError, ValueError):
+        return raw
+
+
+batch_mock_last = {}
+if isinstance(mock_stats, list) and mock_stats and isinstance(mock_stats[-1], dict):
+    batch_mock_last = {k: _kv_as_number(v) for k, v in mock_stats[-1].items()}
 queue_ts = []
 t0 = None
 _raw_ts = []
@@ -1551,6 +1572,44 @@ _GENERATION_RETIRED_RE = re.compile(
     r"\[(remove|replace)\] retiring (?:missing worker|worker topology generation),"
     r" model=([^,]*), role=([^,]*), ipPort=([^,]*), generation=(\d+)"
 )
+# 批决策结构化行（flexlb.log 家族；原 analyze_slo_batch.py 的行型解析，
+# 20260903 并入本脚本——行可带时间戳前缀（master.log 合并视图），search
+# 任意位置匹配；字段集与原脚本逐字对齐）。
+_BATCH_DISPATCH_RE = re.compile(
+    r"flexlb_batch_dispatch batch_id=(?P<batch_id>\d+) "
+    r"reason=(?P<reason>\S+) batch_size=(?P<batch_size>\d+) "
+    r"wait_ms=(?P<wait_ms>\d+) predicted_ms=(?P<predicted_ms>\d+) "
+    r"threshold_ms=(?P<threshold_ms>\d+) fixed_wait_ms=(?P<fixed_wait_ms>\d+) "
+    r"batch_size_max=(?P<batch_size_max>\d+) queue_after=(?P<queue_after>\d+) "
+    r"worker=(?P<worker>\S*)"
+)
+_BATCH_COMPLETE_RE = re.compile(
+    r"flexlb_batch_complete batch_id=(?P<batch_id>\d+) "
+    r"predicted_ms=(?P<predicted_ms>-?\d+) actual_ms=(?P<actual_ms>-?\d+) "
+    r"gap_ms=(?P<gap_ms>-?\d+) batch_size=(?P<batch_size>\d+) "
+    r"engine=(?P<engine>\S+)"
+)
+_BATCH_INT_FIELDS = {
+    "batch_id",
+    "batch_size",
+    "wait_ms",
+    "predicted_ms",
+    "threshold_ms",
+    "fixed_wait_ms",
+    "batch_size_max",
+    "queue_after",
+    "actual_ms",
+    "gap_ms",
+}
+
+
+def _batch_record(match):
+    return {
+        key: int(value) if key in _BATCH_INT_FIELDS else value
+        for key, value in match.groupdict().items()
+    }
+
+
 if os.path.isfile("master.log"):
     _master_log_sources = ["master.log"]
 else:
@@ -1582,6 +1641,8 @@ def _log_line_epoch_ms(line):
 
 
 master_events_rows = []
+_batch_decision_rows = []
+_batch_completion_rows = []
 _master_window_rows = 0
 for _mf in _master_log_sources:
     with open(_mf, errors="replace") as _mstream:
@@ -1639,6 +1700,17 @@ for _mf in _master_log_sources:
                             "generation": int(m.group(5)),
                         }
                     )
+            elif "flexlb_batch_dispatch " in line:
+                # 批决策采集（原 analyze_slo_batch.py 并入）：dispatch 行只进
+                # 独立列表，不进 master_events.jsonl（后者是 window /
+                # generation 事件流，语义不同）。
+                m = _BATCH_DISPATCH_RE.search(line)
+                if m:
+                    _batch_decision_rows.append(_batch_record(m))
+            elif "flexlb_batch_complete " in line:
+                m = _BATCH_COMPLETE_RE.search(line)
+                if m:
+                    _batch_completion_rows.append(_batch_record(m))
 if _master_window_rows == 0:
     sys.exit(
         "ERROR: zero flexlb_server_schedule_latency window rows in the master "
@@ -2496,10 +2568,190 @@ if reason_series:
     reason_rate_rows = sorted(rate_by_ts.items())
 dispatch_reason_ts = [{"t": t, **vals} for t, vals in rel_axis(reason_rate_rows)]
 
+# ---- batch_decisions（原 analyze_slo_batch.py 并入，20260903）----
+# flexlb_batch_dispatch / flexlb_batch_complete 结构化行（同一条 master
+# 日志链：master.log 合并视图或 flexlb_logs 原始族）——批决策采集分析：
+# dispatch reason 分布、等待/预测时延分布、完成侧 prediction gap 与
+# 不变量违规。与 dispatch_reason_ts 互补（后者是 Prometheus counter 的
+# per-second 速率时序视角，这里是 run 级汇总分布）。
+#   * reason 总量权威计数用 master.json prometheus_after 的 counter
+#     （与 batch_size_final / dispatch_reason_ts 同一数据源模式，不做
+#     .prom 文件回退——consolidate 后 prom 已并入 master.json）；
+#   * 结构化日志行只承担分布样本与不变量检查，log_coverage_ratio 标注
+#     覆盖率；
+#   * 分位口径沿用原脚本 ceil-rank（math.ceil(nq)−1），与主链
+#     percentile_nr（int(np)）刻意不同——保持与历史 slo_batch_analysis
+#     数字可比。
+
+
+def _bd_percentile(sorted_values, quantile):
+    if not sorted_values:
+        return 0
+    index = max(0, math.ceil(quantile * len(sorted_values)) - 1)
+    return sorted_values[index]
+
+
+def _bd_distribution(values):
+    ordered = sorted(values)
+    if not ordered:
+        return {
+            "count": 0,
+            "mean": 0.0,
+            "p50": 0,
+            "p90": 0,
+            "p95": 0,
+            "p99": 0,
+            "max": 0,
+        }
+    return {
+        "count": len(ordered),
+        "mean": round(sum(ordered) / len(ordered), 3),
+        "p50": _bd_percentile(ordered, 0.50),
+        "p90": _bd_percentile(ordered, 0.90),
+        "p95": _bd_percentile(ordered, 0.95),
+        "p99": _bd_percentile(ordered, 0.99),
+        "max": ordered[-1],
+    }
+
+
+_bd_violation_count = 0
+_bd_violations = []
+for _bd in _batch_decision_rows:
+    _bd_invalid = (
+        (
+            # cap 只放行能让整组保持预算内的成员：多成员组必须低于阈值；
+            # 强制队头豁免——单飞时可超任何成本。
+            _bd["reason"] == "predicted_execution_cap"
+            and _bd["batch_size"] > 1
+            and _bd["predicted_ms"] >= _bd["threshold_ms"]
+        )
+        or (
+            _bd["reason"] == "fixed_window_timeout"
+            and _bd["wait_ms"] + 2 < _bd["fixed_wait_ms"]
+        )
+        or (_bd["reason"] == "batch_full" and _bd["batch_size"] < _bd["batch_size_max"])
+    )
+    if _bd_invalid:
+        _bd_violation_count += 1
+        if len(_bd_violations) < 20:
+            _bd_violations.append(_bd)
+
+_bd_completion_by_batch = {item["batch_id"]: item for item in _batch_completion_rows}
+_bd_matched = sum(
+    1 for item in _batch_decision_rows if item["batch_id"] in _bd_completion_by_batch
+)
+_bd_first = _batch_decision_rows[0] if _batch_decision_rows else {}
+_bd_log_reasons = dict(
+    sorted(Counter(item["reason"] for item in _batch_decision_rows).items())
+)
+
+# Prometheus counter 权威 reason 计数（master.json prometheus_after；照
+# batch_size_final 的 key 遍历模式：base 名 split 过滤 + reason 标签提取）。
+_bd_prom_reasons = {}
+if isinstance(master_prom_after, dict):
+    _bd_reason_re = re.compile(r'reason="([^"]*)"')
+    _bd_counts = Counter()
+    for _bd_k, _bd_v in master_prom_after.items():
+        if not isinstance(_bd_v, (int, float)):
+            continue
+        _bd_key = str(_bd_k)
+        if _bd_key.split("{", 1)[0] != DISPATCH_REASON_BASE:
+            continue
+        _bd_m = _bd_reason_re.search(_bd_key)
+        if _bd_m:
+            _bd_counts[_bd_m.group(1)] += round(float(_bd_v))
+    _bd_prom_reasons = dict(sorted(_bd_counts.items()))
+
+_bd_exact_count = sum(_bd_prom_reasons.values())
+_bd_decision_count = _bd_exact_count or len(_batch_decision_rows)
+
+# config 双源：run_meta.params.flexlb_config（FLEXLB_CONFIG 字符串快照）
+# 优先，其次 process_config_json 嵌入文档（zone_process_setting →
+# process_info → envs → FLEXLB_CONFIG，原 analyze_slo_batch.py 的
+# load_flexlb_config 链）。
+_bd_config_doc = {}
+_bd_params = run_meta.get("params") or {}
+_bd_fc = _bd_params.get("flexlb_config")
+if isinstance(_bd_fc, str) and _bd_fc.strip():
+    try:
+        _bd_parsed = json.loads(_bd_fc)
+        if isinstance(_bd_parsed, dict):
+            _bd_config_doc = _bd_parsed
+    except ValueError:
+        pass
+if not _bd_config_doc:
+    _bd_pc = run_meta.get("process_config_json")
+    if isinstance(_bd_pc, dict):
+        _bd_envs = (
+            (_bd_pc.get("zone_process_setting") or {})
+            .get("process_info", {})
+            .get("envs", [])
+        )
+        for _bd_env in _bd_envs:
+            if (
+                isinstance(_bd_env, list)
+                and len(_bd_env) == 2
+                and _bd_env[0] == "FLEXLB_CONFIG"
+            ):
+                try:
+                    _bd_parsed = json.loads(str(_bd_env[1]))
+                    if isinstance(_bd_parsed, dict):
+                        _bd_config_doc = _bd_parsed
+                except ValueError:
+                    pass
+                break
+_bd_scheduler = _bd_config_doc.get("scheduler") or {}
+_bd_dispatcher = _bd_config_doc.get("dispatcher") or {}
+
+batch_decisions = {
+    "config": {
+        "predict_threshold_ms": _bd_first.get("threshold_ms", 0),
+        "fixed_wait_ms": _bd_first.get("fixed_wait_ms", 0),
+        "batch_size_max": _bd_first.get("batch_size_max", 0),
+        "scheduler_type": _bd_scheduler.get("type"),
+        "ordering_type": (_bd_scheduler.get("ordering") or {}).get("type"),
+        "dispatcher_type": _bd_dispatcher.get("type"),
+    },
+    "decisions": {
+        "count": _bd_decision_count,
+        "source": "prometheus_counter" if _bd_prom_reasons else "structured_log",
+        "reasons": _bd_prom_reasons or _bd_log_reasons,
+        "log_count": len(_batch_decision_rows),
+        "log_reasons": _bd_log_reasons,
+        "log_coverage_ratio": (
+            round(len(_batch_decision_rows) / _bd_decision_count, 6)
+            if _bd_decision_count
+            else 0.0
+        ),
+        "distribution_source": "structured_log",
+        "batch_size": _bd_distribution(
+            item["batch_size"] for item in _batch_decision_rows
+        ),
+        "wait_ms": _bd_distribution(item["wait_ms"] for item in _batch_decision_rows),
+        "predicted_ms": _bd_distribution(
+            item["predicted_ms"] for item in _batch_decision_rows
+        ),
+        "estimated_wait_plus_prefill_ms": _bd_distribution(
+            item["wait_ms"] + item["predicted_ms"] for item in _batch_decision_rows
+        ),
+        "invariant_violation_count": _bd_violation_count,
+        "invariant_violation_samples": _bd_violations,
+    },
+    "completions": {
+        "count": len(_batch_completion_rows),
+        "matched_decision_count": _bd_matched,
+        "actual_ms": _bd_distribution(
+            item["actual_ms"] for item in _batch_completion_rows
+        ),
+        "prediction_gap_ms": _bd_distribution(
+            item["gap_ms"] for item in _batch_completion_rows
+        ),
+    },
+}
+
 # consolidate integrity markers (consolidate_run_outputs.py): how the
-# final_snapshot was obtained (live HTTP fetch vs stale fallback) and
-# whether the slo analysis predates this run's client_events data. Empty for
-# pre-integrity consolidations; the generator then stays silent.
+# final_snapshot was obtained (live HTTP fetch vs stale fallback). Empty
+# for pre-integrity consolidations; the generator then stays silent.
 integrity = {}
 if per_second_unstamped:
     # Degradation marker: rows that carry no usable send timestamp (0/None)
@@ -2534,8 +2786,6 @@ if any(_cancel_role_unmatched.values()):
     }
 if isinstance(mock_payload, dict) and mock_payload.get("final_snapshot_source"):
     integrity["final_snapshot_source"] = mock_payload["final_snapshot_source"]
-if isinstance(master_json, dict) and master_json.get("slo_integrity"):
-    integrity["slo_integrity"] = master_json["slo_integrity"]
 
 _run_params = run_meta.get("params") or {}
 if "fetch_output_stream" in _run_params:
@@ -2665,8 +2915,12 @@ out = {
         "test_valid": test_valid_calc,
     },
     "batch": {
-        "mock_last": slo.get("mock", {}).get("last"),
+        "mock_last": batch_mock_last,
     },
+    # 批决策采集分析（原 analyze_slo_batch.py 并入，20260903）：dispatch
+    # reason 分布 + 预测精度 + 不变量违规；日志链与 master.json
+    # prometheus_after counter 同源（见上方 batch_decisions 计算块注释）。
+    "batch_decisions": batch_decisions,
     "per_second": per_second,
     "master_arrivals_ts": master_arrivals_ts,
     "queue_timeseries": queue_ts,

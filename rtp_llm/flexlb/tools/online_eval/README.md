@@ -6,8 +6,9 @@ Java-only (`flexlb-mock-engine`, JDK 21+); the Python mock engine / Python
 load client implementations have been removed. The smoke client family
 (`flexlb_smoke_base.py`, `priority_preemption_smoke.py`) has been removed
 as well: its coverage now lives in the `flexlb_ft/` functional-test
-framework. The retained Python tools (`analyze_*.py` and the
-`flexlb_ft/` framework itself) run on the system `python3` and are intended
+framework. The retained Python tools (the online_eval aggregation / report /
+consolidation scripts and the `flexlb_ft/` framework itself) run on the
+system `python3` and are intended
 for the `luoli_gpu` container, where `grpcio`, `grpcio-tools`, and
 `protobuf` are available.
 
@@ -100,7 +101,13 @@ section below for the full table):
   decode reuse as the fix #5 net-demand deduction readout, evictions as
   the allocation-coupled LRU pressure readout; healthy runs keep both
   admission surfaces at zero, non-zero = overload signal; old aggregates
-  without the series → the whole panel group silently omitted)
+  without the series → the whole panel group silently omitted); since
+  20260903 also the run-level batch-decision analysis `batch_decisions`
+  (dispatch-reason counts — `master.json` `prometheus_after` counters as
+  the authoritative totals with `log_coverage_ratio` marking the
+  structured-log coverage — plus batch_size / wait_ms / predicted_ms
+  distributions, completion-side prediction gaps and
+  invariant-violation samples; merged from the removed `analyze_slo_batch.py`)
 - `run_meta.json`, `mock.json` / `mock.log`, `master.json` / `master.log`,
   `client.json` / `client.log` (one JSON + one log per component)
 - `per_request.jsonl` (or `per_request.jsonl.gz` for larger runs)
@@ -156,9 +163,9 @@ It also defaults to `MAVEN_PROFILES=opensource,!internal` so an adjacent `intern
 | `mock.json` | `java_mock_stats` timeline (`stats` array, source field names `ts_epoch_ms` / `prefill_waiting` / ...). Note the parsers capture 26 of the 28 fields — `decode_exec_p50` / `decode_exec_p95` carry digits in the key and are skipped; the verbatim lines stay in `mock.log`. Also holds the final cluster `/snapshot` from the control plane (when reachable), the endpoints summary, and the A-split pointer `per_engine_file` + `per_engine_sample_count` — the per-second per-engine Prometheus timeline itself lives in `mock_per_engine_timeseries.json.gz` |
 | `mock_per_engine_timeseries.json.gz` | the A-split target: the G1 per-second per-engine Prometheus timeline as gzip-streamed `[{ts, metrics: {"name{labels}": value}}]` groups (engine series like `mock_engine_running{engine_name="prefill-0",...}`). Splitting it out of `mock.json` keeps the main file lightweight — at 1250 engines × 120s the embedded key used to approach **~1GB** of pretty-printed JSON (the raw per-sample text is ~2.2KB × N_engines; the JSON-ified embedded form inflates ~2.5-3×). After the split + the G1 whitelist the same run writes a ~65MB `.json.gz` and `mock.json` stays in the KB range |
 | `mock.log` | The original `mock_engine.log` verbatim (tail-friendly) with the JVM GC log appended under a `=====` separator |
-| `master.json` | `master_counters_timeseries.txt` as a timeline array, `master_prometheus_after.prom` as a flat `{"name{labels}": value}` dict (HELP/TYPE skipped), `prometheus_timeseries` — the per-second master Prometheus timeline (same `[{ts, metrics}]` grouped shape; whitelisted to the analyzer-consumed series: `flexlb_app_cache_*` / batcher + routing queue gauges / inflight max age / dispatch reason counters, plus `jvm_memory_used` / `jvm_gc_pause` / `process_cpu` / `system_cpu`), `inflight_timeseries` — per-second `/rtp_llm/inflight_status` snapshots (`[{"ts_epoch_ms", "inflight": {...}}]` JSONL rows), `master_info_before/after.json` payloads, SLO batch summary fields |
+| `master.json` | `master_counters_timeseries.txt` as a timeline array, `master_prometheus_after.prom` as a flat `{"name{labels}": value}` dict (HELP/TYPE skipped), `prometheus_timeseries` — the per-second master Prometheus timeline (same `[{ts, metrics}]` grouped shape; whitelisted to the analyzer-consumed series: `flexlb_app_cache_*` / batcher + routing queue gauges / inflight max age / dispatch reason counters, plus `jvm_memory_used` / `jvm_gc_pause` / `process_cpu` / `system_cpu`), `inflight_timeseries` — per-second `/rtp_llm/inflight_status` snapshots (`[{"ts_epoch_ms", "inflight": {...}}]` JSONL rows), `master_info_before/after.json` payloads |
 | `master.log` | `flexlb_logs/application.log` verbatim prefix with `flexlb.log` (structured dispatch/complete lines), `sync.log`, `sync_consistency.log` and the run-root `flexlb.log` (master stdout) appended |
-| `client.json` | `server_latency.json` + the full `slo_batch_analysis.json` + `per_request_source` row-count metadata (Phase B: the legacy `load_client/summary.json` base and the `per_second` timeline are gone — derived statistics live in `aggregate.json`) |
+| `client.json` | `server_latency.json` + `per_request_source` row-count metadata (Phase B: the legacy `load_client/summary.json` base and the `per_second` timeline are gone — derived statistics live in `aggregate.json`) |
 | `client.log` | All `client_shard_*.stdout` merged with `===== client_shard_N =====` separators (single-worker runs rename `client.stdout` directly) |
 | `per_request.jsonl` / `.gz` | Merged per-request streams. Under 10 MB total the merge stays plain `per_request.jsonl` (uniform-mode runs — no unpack step needed); larger runs gzip into `per_request.jsonl.gz` (~10x smaller) |
 
@@ -236,18 +243,20 @@ path needs `FLEXLB_PV_LOG` added to the skill script's explicit env
 export whitelist before it takes effect there.
 
 `consolidate_run_outputs.py` is idempotent and retro-runnable — it can be
-re-run on an already consolidated directory (no-op; a regenerated
-`slo_batch_analysis.json` only refreshes the `slo_batch_summary` keys) or
+re-run on an already consolidated directory (no-op) or
 applied to a legacy run directory to produce the same layout. Legacy fat
 `mock.json` files (embedded `per_engine_timeseries`) are migrated by the
 A-split on the next consolidation that rewrites `mock.json`; the unified
 analyzer reads both layouts (`.json.gz` first, embedded key, then the raw
 `.prom`), so old runs stay fully analyzable. The
-consumers (`analyze_slo_batch.py`, `aggregate_canvas_run.py`) read the
+consumers (`aggregate_canvas_run.py` among them) read the
 **legacy source files first** and fall back to the consolidated ones —
 a successful consolidation deletes the legacy files, so a legacy file that
 is present always means fresher data (RUN_DIR reuse), and **pre-consolidation
-run directories remain fully analyzable**.
+run directories remain fully analyzable**. A stale
+`slo_batch_analysis.json` left by pre-refactor runs is swept as a leftover
+(the batch-decision analysis now lives in `aggregate.json`'s
+`batch_decisions` section).
 
 ## Manual flow
 

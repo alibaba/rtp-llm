@@ -56,7 +56,7 @@ def _write_scaffold(run_dir):
     """run 目录最小采集产物（除 client_events / engine_events 外）。"""
     run_dir = Path(run_dir)
     (run_dir / "client.json").write_text(
-        json.dumps({"slo_batch_analysis": {}, "server_latency": {}}),
+        json.dumps({"server_latency": {}}),
         encoding="utf-8",
     )
     (run_dir / "mock.json").write_text(

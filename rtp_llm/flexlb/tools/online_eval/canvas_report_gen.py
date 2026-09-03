@@ -40,14 +40,12 @@ T_END = 全部时序面板最大采样点（ceil 整秒，含收尾排空）；m
 用法：
   python3 canvas_report_gen.py --aggregate <agg.json> \
       [--engine-dist <engine_dist.json>] \
-      [--slo <slo_batch_analysis.json>] \
       --out <out.html> [--run-id <id>] \
       [--p-engines 750] [--d-engines 500] [--shards 8] \
       [--send-mode replay] [--replay <speed>] \
       [--git-branch <b>] [--git-commit <c>]
 
 缺省规则：
-  * --slo 未指定时取 aggregate 同目录同名文件（存在才读）；
   * engine_dist 来源优先级：--engine-dist 显式指定 > aggregate 顶层内嵌键
     （aggregate_canvas_run.py 已把 engine_dist 计算进 aggregate，一个脚本
     出全部数据）> aggregate 同目录 engine_dist.json；
@@ -543,10 +541,6 @@ def main():
         help="引擎维度分布 JSON（缺省取 aggregate 同目录 engine_dist.json，存在才读）",
     )
     ap.add_argument(
-        "--slo",
-        help="slo_batch_analysis.json（缺省取 aggregate 同目录同名文件，存在才读）",
-    )
-    ap.add_argument(
         "--out", required=True, help="输出 .html 路径（self-contained Chart.js HTML）"
     )
     ap.add_argument("--run-id", help="run 标识（缺省取 aggregate meta.run_dir）")
@@ -616,13 +610,11 @@ def main():
     agg = load_json(args.aggregate)
     agg_dir = os.path.dirname(os.path.abspath(args.aggregate))
 
-    slo_path = args.slo or os.path.join(agg_dir, "slo_batch_analysis.json")
     ed_path = args.engine_dist or os.path.join(agg_dir, "engine_dist.json")
 
     # no-backward-compat：--summary / summary_standalone 独立输入已删
     # （旧 run 不再支持）；summary 仅从 aggregate.summary 单键直读，
     # 缺失即无数据按可选逻辑省略。
-    slo = load_json(slo_path) if os.path.isfile(slo_path) else None
     # engine_dist 来源优先级：显式 --engine-dist > aggregate 顶层内嵌键
     # （aggregate_canvas_run.py 一个脚本出全部数据）> 同目录独立文件。
     if args.engine_dist:
@@ -704,8 +696,6 @@ def main():
         else not _meta.get("schedule_only")
     )
     mock_last = (agg.get("batch") or {}).get("mock_last") or {}
-    if not mock_last and slo:
-        mock_last = (slo.get("mock") or {}).get("last") or {}
     validity = sm.get("validity_checks") or {}
 
     run_id = args.run_id or (agg.get("meta") or {}).get("run_dir") or "unknown"
@@ -1406,8 +1396,10 @@ def main():
     lines.append('      <Text tone="secondary">')
     lines.append("        " + esc_text(identity))
     lines.append("      </Text>")
-    # consolidate 完整性声明：final_snapshot 非 live / slo 陈旧时在报告头
-    # 显式降级声明，避免读者把田数据当作本 run 终态。
+    # consolidate 完整性声明：final_snapshot 非 live 时在报告头显式降级
+    # 声明，避免读者把田数据当作本 run 终态。（原 slo_integrity 陈旧残留
+    # 检查已随 analyze_slo_batch.py 退役删除——批决策分析内嵌 aggregate 的
+    # batch_decisions 段，同一次聚合自产自销，不再存在跨文件陈旧问题。）
     integrity_notes = []
     _fss = integrity.get("final_snapshot_source")
     if _fss and _fss != "live":
@@ -1417,11 +1409,6 @@ def main():
         }.get(_fss, str(_fss))
         integrity_notes.append(
             "final_snapshot 为" + _fss_label + "，引擎利用率/终态不代表本 run"
-        )
-    _si = integrity.get("slo_integrity") or {}
-    if _si and not _si.get("fresh", True):
-        integrity_notes.append(
-            "slo_batch_analysis.json 早于 client_events.jsonl（陈旧残留），SLO/批决策结论不可信"
         )
     _unstamped = integrity.get("per_second_rows_without_send_ts")
     if _unstamped:
@@ -4262,8 +4249,6 @@ def main():
     lines.extend(table_lines)
 
     src_names = [os.path.basename(args.aggregate)]
-    if slo is not None:
-        src_names.append(os.path.basename(slo_path))
     if ed is not None:
         embedded = args.engine_dist is None and isinstance(agg.get("engine_dist"), dict)
         src_names.append(
@@ -4811,8 +4796,6 @@ def main():
         TAG
         + " inputs: aggregate="
         + os.path.basename(args.aggregate)
-        + " slo="
-        + ("yes" if slo is not None else "no")
         + " engine_dist="
         + ("yes" if ed is not None else "no")
     )
