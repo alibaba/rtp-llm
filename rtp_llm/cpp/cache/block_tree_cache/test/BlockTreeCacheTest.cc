@@ -308,22 +308,96 @@ TEST_F(BlockTreeCacheTest, ReportTransferFinishedAcceptsSuccessfulDescriptors) {
     EXPECT_EQ(reporter.transfer_in_flight_[operation_index][direction_index].load(), 0);
 }
 
-TEST(BlockTreeCacheMetricsTest, TransferTaskQueueWaitReportsOnlyOperation) {
+TEST(BlockTreeCacheMetricsTest, BusinessQueueWaitReportsQpsLatencyOperationAndPool) {
     kmonitor::MetricsTags                      tags;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
         std::make_shared<kmonitor::MetricsReporter>("", "", tags);
     BlockTreeCacheMetricsReporter reporter;
     reporter.setMetricsReporter(metrics_reporter);
 
-    reporter.reportTransferTaskQueueWait(CacheTransferOperation::LOAD, 123);
+    const int64_t begin_time_us          = reporter.reportBusinessQueueWaitStarted(CacheTransferOperation::LOAD, false);
+    const int64_t callback_begin_time_us = reporter.reportBusinessQueueWaitStarted(CacheTransferOperation::LOAD, true);
+    reporter.reportBusinessQueueWaitFinished(CacheTransferOperation::LOAD, false, begin_time_us);
+    reporter.reportBusinessQueueWaitFinished(CacheTransferOperation::LOAD, true, callback_begin_time_us);
 
     RtpLLMCacheTransferMetrics* transfer_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>();
     ASSERT_NE(transfer_metrics, nullptr);
-    kmonitor::MetricsTags queue_wait_tags("operation", "load");
+    kmonitor::MetricsTags queue_wait_tags("pool_type", "business");
+    queue_wait_tags.AddTag("operation", "load");
     EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_task_queue_wait_latency_us_metric), 1u);
-    EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->transfer_task_queue_wait_latency_us_metric, queue_wait_tags), 123);
+    EXPECT_GE(snapshotQps(transfer_metrics->transfer_task_queue_wait_latency_us_metric, queue_wait_tags), 0);
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->callback_queue_wait_latency_us_metric), 1u);
+    EXPECT_GE(snapshotQps(transfer_metrics->callback_queue_wait_latency_us_metric, queue_wait_tags), 0);
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->task_queue_waiting_tasks_metric), 1u);
+    EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->task_queue_waiting_tasks_metric, queue_wait_tags), 1);
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->callback_queue_waiting_tasks_metric), 1u);
+    EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->callback_queue_waiting_tasks_metric, queue_wait_tags), 1);
     EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_qps_metric), 0u);
     EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_in_flight_metric), 0u);
+}
+
+TEST(BlockTreeCacheMetricsTest, TransferQueueWaitReportsQpsLatencyDirectionAndPool) {
+    kmonitor::MetricsTags                      tags;
+    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
+        std::make_shared<kmonitor::MetricsReporter>("", "", tags);
+    BlockTreeCacheMetricsReporter reporter;
+    reporter.setMetricsReporter(metrics_reporter);
+
+    const int64_t begin_time_us = reporter.reportTransferQueueWaitStarted(Tier::HOST, Tier::DEVICE);
+    reporter.reportTransferQueueWaitFinished(Tier::HOST, Tier::DEVICE, begin_time_us);
+
+    RtpLLMCacheTransferMetrics* transfer_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    ASSERT_NE(transfer_metrics, nullptr);
+    kmonitor::MetricsTags queue_wait_tags("pool_type", "transfer");
+    queue_wait_tags.AddTag("source_tier", tierName(Tier::HOST));
+    queue_wait_tags.AddTag("target_tier", tierName(Tier::DEVICE));
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_task_queue_wait_latency_us_metric), 1u);
+    EXPECT_GE(snapshotQps(transfer_metrics->transfer_task_queue_wait_latency_us_metric, queue_wait_tags), 0);
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->task_queue_waiting_tasks_metric), 1u);
+    EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->task_queue_waiting_tasks_metric, queue_wait_tags), 1);
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->callback_queue_waiting_tasks_metric), 0u);
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->transfer_qps_metric), 0u);
+}
+
+TEST(BlockTreeCacheMetricsTest, QueueBacklogReportsLoadBackgroundCompletionAndNormal) {
+    kmonitor::MetricsTags                      tags;
+    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter =
+        std::make_shared<kmonitor::MetricsReporter>("", "", tags);
+    BlockTreeCacheMetricsReporter reporter;
+    reporter.setMetricsReporter(metrics_reporter);
+
+    BlockTreeTaskPool pool(1, 8, "QueueBacklogTest");
+    ASSERT_TRUE(pool.start());
+    auto barrier = std::make_shared<CallbackBarrier>();
+    ASSERT_TRUE(pool.submit([barrier] { barrier->enterAndWait(); }));
+    barrier->waitUntilEntered();
+    [[maybe_unused]] auto release_guard = std::shared_ptr<void>(nullptr, [barrier](void*) { barrier->release(); });
+
+    for (size_t i = 0; i < 2; ++i) {
+        ASSERT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [] {}));
+    }
+    for (size_t i = 0; i < 3; ++i) {
+        ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [] {}));
+    }
+    for (size_t i = 0; i < 4; ++i) {
+        ASSERT_TRUE(pool.submitCompletion([] {}));
+    }
+    reporter.reportQueueBacklog(pool, "business");
+
+    RtpLLMCacheTransferMetrics* transfer_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    ASSERT_NE(transfer_metrics, nullptr);
+    kmonitor::MetricsTags pool_tags("pool_type", "business");
+    auto                  backlog = [&](const char* queue_type) {
+        kmonitor::MetricsTags queue_tags = pool_tags;
+        queue_tags.AddTag("queue_type", queue_type);
+        return snapshotQps(transfer_metrics->task_queue_backlog_metric, queue_tags);
+    };
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->task_queue_backlog_metric), 3u);
+    EXPECT_DOUBLE_EQ(backlog("load"), 2);
+    EXPECT_DOUBLE_EQ(backlog("background"), 3);
+    EXPECT_DOUBLE_EQ(backlog("completion"), 4);
+    EXPECT_EQ(metricSeriesCount(transfer_metrics->normal_task_queue_backlog_metric), 1u);
+    EXPECT_DOUBLE_EQ(snapshotQps(transfer_metrics->normal_task_queue_backlog_metric, pool_tags), 5);
 }
 
 TEST(BlockTreeCacheMetricsTest, LoadJoinMetricsKeepRequestAndDependencyGranularity) {

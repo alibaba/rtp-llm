@@ -19,6 +19,9 @@ class MetricsReporter;
 
 namespace rtp_llm {
 
+class BlockTreeCache;
+class BlockTreeTaskPool;
+
 struct BlockTreePoolMetricsSnapshot {
     Tier        tier{Tier::DEVICE};
     std::string pool_name;
@@ -107,7 +110,6 @@ public:
 
     void reportLoadJoin(size_t dependency_count) const;
     void reportLoadJoinWait(int64_t join_wait_latency_us) const;
-    void reportTransferTaskQueueWait(CacheTransferOperation operation, int64_t queue_wait_latency_us) const;
 
     int64_t reportTransferStarted(CacheTransferOperation operation, Tier source_tier, Tier target_tier);
     void    reportTransferFinished(CacheTransferOperation                 operation,
@@ -118,9 +120,21 @@ public:
                                    bool                                   success,
                                    const std::vector<TransferDescriptor>& successful_descriptors,
                                    const std::vector<GroupSetPtr>&        group_sets);
+    int64_t reportBusinessQueueWaitStarted(CacheTransferOperation operation, bool callback) noexcept;
+    void    reportBusinessQueueWaitFinished(CacheTransferOperation operation,
+                                            bool                   callback,
+                                            int64_t                begin_time_us,
+                                            bool                   report_latency = true) noexcept;
+    int64_t reportTransferQueueWaitStarted(Tier source_tier, Tier target_tier) noexcept;
+    void    reportTransferQueueWaitFinished(Tier    source_tier,
+                                            Tier    target_tier,
+                                            int64_t begin_time_us,
+                                            bool    report_latency = true) noexcept;
     void    reportStorePublish(Tier target_tier, size_t accepted_blocks, size_t duplicate_blocks) const;
 
 private:
+    friend class BlockTreeCache;
+
     static constexpr size_t kOperationCount = 3;
     static constexpr size_t kDirectionCount = 5;
 
@@ -139,6 +153,13 @@ private:
     void accumulateTransferBytes(const std::vector<TransferDescriptor>& descs,
                                  const std::vector<GroupSetPtr>&        group_sets,
                                  BlockTreeTransferBytes&                transfer_bytes) const;
+    void reportQueueWaitMetric(bool        callback,
+                               const char* pool_type,
+                               const char* operation,
+                               Tier        source_tier,
+                               Tier        target_tier,
+                               int64_t     latency_us) const noexcept;
+    void reportQueueBacklog(BlockTreeTaskPool& task_pool, const char* pool_type) const;
 
     std::shared_ptr<kmonitor::MetricsReporter>                                     metrics_reporter_;
     std::array<std::array<std::atomic<int64_t>, kDirectionCount>, kOperationCount> transfer_in_flight_{};
