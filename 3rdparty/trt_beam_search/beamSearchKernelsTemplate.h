@@ -224,6 +224,7 @@ __launch_bounds__(BLOCK_SIZE) __global__ void beamStage3Kernel(
     size_t const nMBS{bh.nMaxBatchSize}; // Only for bh.logProbsTiled
     size_t const nBMIn{bh.nBeamWidthIn};
     size_t const nBMOut{bh.nBeamWidthOut};
+    size_t const nStage2TopK{IS_V2 && bh.nStage2TopK > 0 ? bh.nStage2TopK : nBMOut * 2};
     size_t const nMSL{bh.nMaxSeqLen};
     size_t const nV{bh.nVocabSize};
     float const diversityRate{bh.diversityRates == nullptr ? kBeamSearchDiversity : bh.diversityRates[slot]};
@@ -258,8 +259,8 @@ __launch_bounds__(BLOCK_SIZE) __global__ void beamStage3Kernel(
     // This TopK is needless in V2 workflow
     if constexpr (IS_V2)
     {
-        pStage2Ids += bid * nBMOut * 2;
-        pStage2LogProbs += bid * nBMOut * 2;
+        pStage2Ids += bid * nStage2TopK;
+        pStage2LogProbs += bid * nStage2TopK;
     }
     else
     {
@@ -332,10 +333,11 @@ __launch_bounds__(BLOCK_SIZE) __global__ void beamStage3Kernel(
     if (tid == 0)
     {
         int nBeamForNextStep{0};
+        size_t const nStage3Candidate{IS_V2 ? nStage2TopK : nBMOut * 2};
         // Select finished beams into CBA or select tokens for next step sequentially
         // Reference (might be changed along HF in the future):
         // https://github.com/huggingface/transformers/blob/main/src/transformers/generation/beam_search.py#L272
-        for (int i = 0; i < 2 * nBMOut; ++i)
+        for (size_t i = 0; i < nStage3Candidate; ++i)
         {
             int topId;
             T topLogProb;
@@ -668,6 +670,9 @@ void beamSearchKernelLauncher(
 
     if constexpr (IS_V2)
     {
+        size_t const nStage1TopK{bh.nStage1TopK > 0 ? bh.nStage1TopK : nBMOut * 2};
+        size_t const nStage2InputLen{bh.nStage2InputLen > 0 ? bh.nStage2InputLen : nBMIn * nStage1TopK};
+        size_t const nStage2TopK{bh.nStage2TopK > 0 ? bh.nStage2TopK : nBMOut * 2};
         // currently all the mask value of logits in beam search is -inf, pass to the kernel with the mask value fixed for now
         // note the function is just a kernel launcher running on host, it's perfectly fine to have a static varible here
         const static T mask_val = T(-std::numeric_limits<float>::infinity());
@@ -676,32 +681,33 @@ void beamSearchKernelLauncher(
         // TODO: align the workspace structure with tensorrt_llm::configureBeamSearch, padding or not?
         size_t offset = 0;
         pStage2Ids = reinterpret_cast<int*>(workspace);
-        offset += roundUp(sizeof(int) * nBS * nBMOut * 2, 4);
+        offset += roundUp(sizeof(int) * nBS * nStage2TopK, 4);
         pStage2LogProbs = reinterpret_cast<T*>(reinterpret_cast<char*>(workspace) + offset);
-        offset += roundUp(sizeof(T) * nBS * nBMOut * 2, 4);
+        offset += roundUp(sizeof(T) * nBS * nStage2TopK, 4);
         int* pStage1Ids = reinterpret_cast<int*>(reinterpret_cast<char*>(workspace) + offset);
         pStage3 = reinterpret_cast<float*>(reinterpret_cast<char*>(workspace) + offset);
-        offset += roundUp(sizeof(int) * nBS * nBMIn * nBMOut * 2, 4);
+        offset += roundUp(sizeof(int) * nBS * nStage2InputLen, 4);
         T* pStage1LogProbs = reinterpret_cast<T*>(reinterpret_cast<char*>(workspace) + offset);
-        offset += roundUp(sizeof(T) * nBS * nBMIn * nBMOut * 2, 4);
+        offset += roundUp(sizeof(T) * nBS * nStage2InputLen, 4);
         void* pTopK = reinterpret_cast<void*>(reinterpret_cast<char*>(workspace) + offset);
 
         // Stage 1
-        invokeTopkLastDim<T>(nBS * nBMIn, nV, nBMOut * 2, true, mask_val, logProbs, pStage1LogProbs, pStage1Ids, 
-            pTopK, stream);
+        invokeTopkLastDim<T>(nBS * nBMIn, nV, static_cast<runtime::SizeType32>(nStage1TopK), true, mask_val,
+            logProbs, pStage1LogProbs, pStage1Ids, pTopK, stream);
         check_cuda_error();
 
-        int nThread = std::min(std::max(roundUp(nBMIn * nBMOut * 2, 32), MIN_BLOCK_SIZE), MAX_BLOCK_SIZE);
+        int nThread = std::min(std::max(roundUp(nStage2InputLen, static_cast<size_t>(32)), MIN_BLOCK_SIZE), MAX_BLOCK_SIZE);
         launchAddCumLogProbs<T>(pStage1LogProbs, bh.cumLogProbsIn, bh.finished, bh.endIds,
-            bh.diversityRates, bh.batchSlots, nBS, nBMIn, nBMOut, nThread, stream);
+            bh.diversityRates, bh.batchSlots, nBS, nBMIn, nStage1TopK, nStage2InputLen, nThread, stream);
 
         // Stage 2
-        invokeTopkLastDim<T>(nBS, nBMIn * nBMOut * 2, nBMOut * 2, true, mask_val, pStage1LogProbs, pStage2LogProbs, 
+        invokeTopkLastDim<T>(nBS, static_cast<runtime::SizeType32>(nStage2InputLen),
+            static_cast<runtime::SizeType32>(nStage2TopK), true, mask_val, pStage1LogProbs, pStage2LogProbs,
             pStage2Ids, pTopK, stream);
         check_cuda_error();
 
-        nThread = std::min(std::max(roundUp(nBMOut * 2, 32), MIN_BLOCK_SIZE), MAX_BLOCK_SIZE);
-        gatherId<<<nBS, nThread, 0, stream>>>(pStage1Ids, pStage2Ids, nBS, nBMIn, nBMOut, nV);
+        nThread = std::min(std::max(roundUp(nStage2TopK, static_cast<size_t>(32)), MIN_BLOCK_SIZE), MAX_BLOCK_SIZE);
+        gatherId<<<nBS, nThread, 0, stream>>>(pStage1Ids, pStage2Ids, nBS, nBMIn, nStage1TopK, nStage2TopK, nV);
         check_cuda_error();
     }
     else // V1
