@@ -1,11 +1,16 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/load/BlockTreeLoader.h"
 
+#include <atomic>
+#include <chrono>
+#include <future>
 #include <memory>
+#include <mutex>
 #include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
@@ -91,6 +96,105 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     }
     environment->reclaimAll();
     environment->expectFullyReclaimed();
+}
+
+TEST(BlockTreeLoaderTest, HostLoadUsesReservedAdmissionWhenBackgroundQueueIsFull) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
+    FullSWAEnvironmentOptions options;
+    options.path_length = 1;
+    options.enable_disk = false;
+    auto environment    = FullSWAEnvironment::create(options);
+    ASSERT_NE(environment, nullptr);
+
+    environment->insertRequestPath();
+    environment->releaseRequestRefs();
+    environment->demoteAll(Tier::DEVICE);
+    ASSERT_TRUE(environment->allResourcesAtTier(Tier::HOST));
+
+    constexpr size_t worker_count = 2;
+    constexpr size_t queue_size   = BlockTreeTaskPool::kLoadReservedSlots + 2;
+    auto replacement = std::make_unique<BlockTreeTaskPool>(worker_count, queue_size, "load_reserved_admission");
+    ASSERT_TRUE(replacement->start());
+    environment->cache->task_pool_->shutdown();
+    environment->cache->task_pool_          = std::move(replacement);
+    environment->cache->evictor_.task_pool_ = environment->cache->task_pool_.get();
+    environment->cache->loader_.task_pool_  = environment->cache->task_pool_.get();
+    environment->cache->storer_.task_pool_  = environment->cache->task_pool_.get();
+
+    auto release_promise = std::make_shared<std::promise<void>>();
+    auto release_future  = release_promise->get_future().share();
+    auto release_once    = std::make_shared<std::once_flag>();
+    auto release_workers = [release_promise, release_once]() {
+        std::call_once(*release_once, [release_promise]() { release_promise->set_value(); });
+    };
+    [[maybe_unused]] auto release_guard =
+        std::shared_ptr<void>(nullptr, [release_workers](void*) { release_workers(); });
+
+    auto entered_count   = std::make_shared<std::atomic<size_t>>(0);
+    auto entered_promise = std::make_shared<std::promise<void>>();
+    auto entered_future  = entered_promise->get_future();
+    for (size_t worker = 0; worker < worker_count; ++worker) {
+        ASSERT_TRUE(environment->cache->task_pool_->submit(BlockTreeTaskClass::BACKGROUND,
+                                                           [release_future, entered_count, entered_promise]() {
+                                                               if (entered_count->fetch_add(1) + 1 == worker_count) {
+                                                                   entered_promise->set_value();
+                                                               }
+                                                               release_future.wait();
+                                                           }));
+    }
+    ASSERT_EQ(entered_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+
+    ASSERT_TRUE(environment->cache->task_pool_->submit(BlockTreeTaskClass::BACKGROUND, [] {}));
+    ASSERT_TRUE(environment->cache->task_pool_->submit(BlockTreeTaskClass::BACKGROUND, [] {}));
+    EXPECT_FALSE(environment->cache->task_pool_->submit(BlockTreeTaskClass::BACKGROUND, [] {}));
+
+    BlockTreeMatchResult result       = environment->cache->match(environment->keys);
+    auto                 load_context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
+    ASSERT_NE(load_context, nullptr);
+    std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_targets;
+    for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
+        std::vector<BlockIdxType> targets;
+        const size_t              group_set_id = load_context->loadDescs()[desc_index].group_set_id;
+        for (const DeviceBlockPoolPtr& pool : environment->groups.at(group_set_id)->devicePools()) {
+            const BlockIdList blocks = pool->malloc(1).value();
+            ASSERT_EQ(blocks.size(), 1u);
+            pool->incRef(blocks);
+            targets.push_back(blocks.front());
+            request_targets.emplace_back(pool, blocks.front());
+        }
+        load_context->setTargetBlocks(desc_index, std::move(targets));
+    }
+
+    auto completion_promise = std::make_shared<std::promise<ErrorInfo>>();
+    auto completion_future  = completion_promise->get_future();
+    load_context->onDone([completion_promise](ErrorInfo error) { completion_promise->set_value(std::move(error)); });
+    ASSERT_TRUE(load_context->commit());
+    {
+        std::lock_guard<std::mutex> lock(environment->cache->task_pool_->lifecycle_mutex_);
+        EXPECT_EQ(environment->cache->task_pool_->load_queue_.size(), 1u);
+        EXPECT_EQ(environment->cache->task_pool_->background_queue_.size(), 2u);
+    }
+
+    release_workers();
+    ASSERT_EQ(completion_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_TRUE(completion_future.get().ok());
+    EXPECT_TRUE(load_context->done());
+    EXPECT_TRUE(load_context->success());
+    EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
+
+    result.async_context.reset();
+    load_context.reset();
+    environment->reclaimAll();
+    for (const auto& [pool, block] : request_targets) {
+        releaseDeviceBlocks(*environment->cache, pool, {block});
+    }
+    environment->reclaimAll();
+    environment->expectFullyReclaimed();
+    EXPECT_EQ(environment->cache->task_pool_->pending_tasks_.load(), 0);
+    EXPECT_EQ(environment->cache->task_pool_->workflow_credits_.load(), 0u);
 }
 
 TEST(BlockTreeLoaderTest, HostOnlyPolicyReadsHostCopyWhenDeviceCopyAlsoExists) {

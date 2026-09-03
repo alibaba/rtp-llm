@@ -135,7 +135,9 @@ std::shared_ptr<AsyncContext> PerRankBlockTransferEngine::submit(const std::vect
     auto on_timeout = [context]() {
         context->complete(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer expired in TE worker queue"));
     };
-    const bool accepted = transfer_task_pool_->submit(
+    const auto task_class = target == Tier::DEVICE ? BlockTreeTaskClass::LOAD : BlockTreeTaskClass::BACKGROUND;
+    const bool accepted   = transfer_task_pool_->submit(
+        task_class,
         [this, descriptors, group_sets, hosts, context, batch_limit] {
             try {
                 for (size_t begin = 0; begin < descriptors.size(); begin += batch_limit) {

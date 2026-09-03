@@ -375,9 +375,11 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
                                                           currentTimeUs() - task->enqueue_time_us);
         };
         task->enqueue_time_us = currentTimeUs();
-        if (!task_pool_->submit([this, task]() { runLoadTask(task); },
-                                BlockTreeTaskPool::kDefaultQueueWaitTimeout,
-                                std::move(on_timeout))) {
+        if (!task_pool_->submit(
+                BlockTreeTaskClass::LOAD,
+                [this, task]() { runLoadTask(task); },
+                BlockTreeTaskPool::kDefaultQueueWaitTimeout,
+                std::move(on_timeout))) {
             return false;
         }
     }
