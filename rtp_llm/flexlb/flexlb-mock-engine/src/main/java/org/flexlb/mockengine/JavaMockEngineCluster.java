@@ -267,11 +267,12 @@ public final class JavaMockEngineCluster {
         EngineRpcService.RoleTypePB roleType = "decode".equalsIgnoreCase(roleName)
                 ? EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE
                 : EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL;
-        // Per-role KV pool sizing (capacity model v2): totalKvTokens decides the
-        // reported token capacity, the pool itself is sized in blocks
-        // (ceil(total/spb)); --prefill-cache-blocks/--decode-cache-blocks override
-        // the block count directly (legacy flags repurposed from key-count caps
-        // to pool-size overrides so the load scripts keep working unchanged).
+        // Per-role KV pool sizing (capacity model v2): the pool is sized in
+        // blocks — ceil(totalKvTokens/spb), or the --prefill-cache-blocks/
+        // --decode-cache-blocks override (legacy flags repurposed from
+        // key-count caps to pool-size overrides so the load scripts keep
+        // working unchanged) — and the REPORTED token capacity always equals
+        // the pool actually built (totalBlocks x spb).
         long roleTotalKvTokens = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
                 ? config.prefillTotalKvTokens : config.decodeTotalKvTokens;
         int blocksOverride = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
@@ -280,10 +281,23 @@ public final class JavaMockEngineCluster {
         int totalBlocks = blocksOverride > 0
                 ? blocksOverride
                 : (int) ((roleTotalKvTokens + spb - 1) / spb);
+        // The master-facing total must track the pool the engine actually
+        // built: production engines report the allocator's REAL capacity
+        // (totalBlocks x blockSize), and every reporting surface here
+        // (getCacheStatus.totalKvCache / getWorkerStatus.totalKvCache /
+        // /snapshot total_kv_tokens) derives from this one value.  Passing
+        // the raw config token number while a --*-cache-blocks override
+        // shrinks the pool left the master computing used = total -
+        // available ~= 99.9% on a 4-block decode pool -> every decode
+        // engine read as KV-full and the whole KV family structurally
+        // parked.  Token configs that do not divide by spb report the
+        // ceil-aligned blocks x spb for the same reason — the pool IS the
+        // allocator truth.
+        long poolTotalKvTokens = (long) totalBlocks * spb;
         FastRpcService service = new FastRpcService(
                 engineName, declaredHost(config, engineIndex), roleName, roleType, grpcPort,
                 services, scheduler, performance, totalBlocks, stats,
-                roleTotalKvTokens, config.decodeMaxConcurrency);
+                poolTotalKvTokens, config.decodeMaxConcurrency);
         service.setResponsePollTimeoutMs(DEFAULT_RESPONSE_POLL_TIMEOUT_MS);
         services.put(grpcPort, service);
         try {
@@ -965,6 +979,20 @@ public final class JavaMockEngineCluster {
                     // missing response queue.
                     for (EngineRpcService.EnqueueBatchExternalInputPB input : slot.getRequestsList()) {
                         long requestId = input.getInput().getRequestId();
+                        // Arrival stamp at the batch-ingress point, BEFORE any
+                        // admission/scheduling decision (Phase 1.5 KV gate,
+                        // Phase 2 waiting cap, and the immediate-admission
+                        // runPrefillBatch that stamps start in this same call
+                        // stack a few frames below): arrival means "the request
+                        // reached the engine", so it must never land after
+                        // start. The former Phase-3 bookkeeping point stamped
+                        // arrival only after admission, so on the
+                        // immediately-admitted path start preceded arrival —
+                        // under load that inversion grew to a constant +2ms
+                        // and blew the engine_events arrival<=start<=done
+                        // invariant. First-arrival-wins (putIfAbsent) keeps a
+                        // master retry on the same requestId from re-booking.
+                        recordEventArrival(requestId);
                         MockPerformanceModel.RequestShape shape = performance.shape(input.getInput(), cache);
                         // Key-level cache-hit accounting at the admission hit
                         // computation point (recorded whether or not the request
@@ -1029,7 +1057,9 @@ public final class JavaMockEngineCluster {
                         long requestId = input.getInput().getRequestId();
                         response.addSuccessesBuilder().setRequestId(requestId);
                         recordLifecycleStart(requestId, request.getBatchId(), "enqueue_batch");
-                        recordEventArrival(requestId);
+                        // Arrival was already stamped at the Phase-1 ingress
+                        // above (recordEventArrival) — before admission, so it
+                        // can never trail the immediate-admission start stamp.
                     }
                 }
                 // ── EnqueueBatch ack fault injections: all phases above ran
@@ -2824,7 +2854,7 @@ public final class JavaMockEngineCluster {
             // schedule-only full-e2e metric (client send → decode end); without
             // this row the engine side has no per-rid persisted terminal time
             // (completions queue / requestLifecycles are in-memory only).
-            writeDecodeDoneEvent(stream, executionMs,
+            writeDecodeDoneEvent(stream,
                     cancelledRequests.containsKey(requestId));
             // Per-engine decode busy: one executionMs per completed request.
             busyMs.addAndGet(executionMs);
@@ -3128,8 +3158,10 @@ public final class JavaMockEngineCluster {
 
         /**
          * Master-facing available tokens: pool availability clamped to the reported
-         * total, minus injected KV pressure. The clamp keeps total/spb non-divisible
-         * configs reporting at most totalKvTokens when idle (legacy compatibility).
+         * total, minus injected KV pressure.  The total is pool-aligned at
+         * construction (totalBlocks x spb), so the clamp is a structural guard
+         * (pool availability never exceeds the pool) that keeps the
+         * available <= total invariant explicit on every reporting surface.
          */
         private long availableKvTokens() {
             return Math.max(0L,
@@ -3504,6 +3536,42 @@ public final class JavaMockEngineCluster {
         int getActivePrefillBatchCount() { return activePrefillBatches.get(); }
         int getDecodePendingQueueDepth() { return decodePendingQueueSize(); }
         int getPrefillPendingQueueDepth() { return prefillPendingQueueSize(); }
+
+        /**
+         * Whether this engine still has ANY work that must finish before a
+         * GRACEFUL removal may tear the gRPC server down: running tasks, both
+         * prefill wait queues (master-composed batches + direct-path parks),
+         * the decode pending queue, running batch/decode counters, and
+         * cross-engine P→D ownership in BOTH directions (a prefill victim must
+         * outlive requests it already handed to a decode engine; a decode
+         * victim must outlive streams an upstream prefill parked on it).
+         *
+         * <p>Deliberately NOT included: the un-acked completion backlog
+         * ({@code completions}) — its consumer is the master's status poll, and
+         * once the master has dropped the endpoint's route it will never come;
+         * waiting on it would only stretch every graceful drain to its deadline.
+         * Post-completion visibility is the master's scale-in contract, not the
+         * engine's.
+         */
+        boolean hasInflightWork() {
+            return !runningTasks.isEmpty()
+                    || waitingPrefillRequests.get() != 0
+                    || activePrefillBatches.get() != 0
+                    || activePrefillRequests.get() != 0
+                    || activeDecodeRequests.get() != 0
+                    || prefillPendingQueueSize() != 0
+                    || decodePendingQueueSize() != 0
+                    || directPrefillQueueSize() != 0
+                    || !downstreamDecodeOwners.isEmpty()
+                    || !upstreamPrefillOwners.isEmpty();
+        }
+
+        /** Snapshot size of the direct (NON_BATCH) prefill park queue. */
+        private int directPrefillQueueSize() {
+            synchronized (prefillQueueLock) {
+                return directPrefillQueue.size();
+            }
+        }
         Map<Long, String> getRequestStates() { return requestStates; }
 
         /**
@@ -3707,13 +3775,17 @@ public final class JavaMockEngineCluster {
         /**
          * engine_events.jsonl terminal row for one decode stream — the
          * structured replacement of the former mock_decode_done stdout line.
-         * exec_ms is the summed booked step durations (per-step continuous
-         * batching caliber); batch_size is the terminal-step running batch
+         * exec_ms is the decode_done_ms − decode_start_ms WALL-SPAN (20260903
+         * caliber change, symmetric with the prefill batch's done−start
+         * semantics — the former summed-booked-step-durations stream caliber
+         * retired; under the step-boundary admission model wall-span ≈ Σstep
+         * durations, the only error being the ≤1-step admission quantization
+         * plus scheduler jitter). batch_size is the terminal-step running batch
          * (claimed under decodeQueueLock, includes this stream); kv_used_tokens
          * reads the still-live block lease (the lease hands over to the LRU
          * only AFTER this row, on the normal path).
          */
-        private void writeDecodeDoneEvent(DecodeStream stream, long executionMs, boolean cancelled) {
+        private void writeDecodeDoneEvent(DecodeStream stream, boolean cancelled) {
             MockPerformanceModel.RequestShape shape = stream.shape;
             long requestId = shape.input().getRequestId();
             EngineEventLog log = engineEventLog;
@@ -3722,6 +3794,7 @@ public final class JavaMockEngineCluster {
             if (log == null) {
                 return;
             }
+            long doneMs = System.currentTimeMillis();
             ObjectNode row = OBJECT_MAPPER.createObjectNode();
             row.put("event", "decode_done");
             row.put("rid", requestId);
@@ -3729,8 +3802,10 @@ public final class JavaMockEngineCluster {
             row.put("batch_id", stream.batchId);
             row.put("engine_arrival_ms", arrivalMs);
             row.put("decode_start_ms", startMs);
-            row.put("decode_done_ms", System.currentTimeMillis());
-            row.put("exec_ms", executionMs);
+            row.put("decode_done_ms", doneMs);
+            // Missing start stamps (log injected mid-run) serialize as 0,
+            // mirroring the prefill ttft_ms guard — never a fabricated span.
+            row.put("exec_ms", startMs > 0 ? Math.max(0L, doneMs - startMs) : 0L);
             row.put("batch_size", stream.terminalBatchSize);
             row.put("output_len", shape.outputLen());
             MockLruBlockCache.BlockLease lease = activeBlockLeases.get(requestId);

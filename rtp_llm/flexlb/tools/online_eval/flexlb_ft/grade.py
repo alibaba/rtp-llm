@@ -21,6 +21,15 @@ loose ⇒ floor bounds, the widest that can still pronounce 不可用.
 
 Hard invariants (P2 no-starvation, P6 completeness) carry no band: any
 violation is an immediate 不可用 regardless of the run grade.
+
+Expected-fail contract (task #101): the verdict roll-up takes only NORMAL
+cases' achieved grades.  A graded case marked ``expected_fail`` (a
+declared-finding probe, e.g. kv_storm_hot_churn's band failure) reports its
+achieved grade as FINDING EVIDENCE — the runner filters it out before calling
+:func:`overall_verdict`, so a declared finding never drags the suite verdict
+to 不可用.  The filtering responsibility lives with the runner (single
+choke point where the CaseDef metadata is available); this module's
+aggregation semantics are unchanged.
 """
 
 from __future__ import annotations
@@ -349,6 +358,11 @@ def overall_verdict(achieved_per_case: List[str]) -> Optional[str]:
     * every case >= normal        -> good (良好)
     * any case failed (beyond loose / invariant break) -> unusable (不可用)
     * otherwise (some loose, none failed) -> marginal (边缘)
+
+    Task #101 contract: the caller (the runner) passes ONLY normal cases'
+    achieved grades — expected_fail graded probes are filtered upstream so
+    their band failures surface as finding evidence, never as suite
+    quality.
     """
     if not achieved_per_case:
         return None

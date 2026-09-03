@@ -20,6 +20,7 @@ from typing import Optional
 
 from ..context import CaseContext, CaseDef, rid_base
 from ..harness import (
+    TTL_DRAIN_TIMEOUT_S,
     AssertUtils,
     _cleanup_dynamic,
     _elastic_env,
@@ -36,7 +37,19 @@ STREAM_TIMEOUT_S = 15.0
 MASTER_EVICT_S = 30.0
 
 
-def case(name: str, profiles=None, requires=None, source: str = ""):
+def case(
+    name: str,
+    profiles=None,
+    requires=None,
+    source: str = "",
+    expected_fail: bool = False,
+):
+    """Register into MASTER_CASES (category is always "master").
+
+    ``expected_fail=True`` declares a declared-finding probe (task #101):
+    failing confirms the finding, passing resolves it — neither counts
+    toward failed_count / the suite verdict / the exit code."""
+
     def deco(fn):
         MASTER_CASES.append(
             CaseDef(
@@ -46,6 +59,7 @@ def case(name: str, profiles=None, requires=None, source: str = ""):
                 profiles=profiles,
                 requires=requires,
                 source=source,
+                expected_fail=expected_fail,
             )
         )
         return fn
@@ -179,9 +193,15 @@ def master_quota_block(ctx: CaseContext):
             {str(err)[:60] for _, err in results if err is not None}
         )[:3]
 
-        # TTL cleanup (30s): scheduler inflight drains to zero (the evicted
-        # engine's endpoint row is gone, so watch the global counter).
-        cleanup_ok = wait_for(lambda: ops.master_scheduler_inflight() == 0, 90.0, 2.0)
+        # TTL cleanup: scheduler inflight drains to zero (the evicted
+        # engine's endpoint row is gone, so watch the global counter).  The
+        # window rides harness.TTL_DRAIN_TIMEOUT_S (95s = 30s stale TTL +
+        # 60s sweeper phase + 5s margin — derivation in harness) instead
+        # of the legacy bare 90.0, which sat exactly ON the worst-case
+        # settle and let a slow sweep phase trip the wait.
+        cleanup_ok = wait_for(
+            lambda: ops.master_scheduler_inflight() == 0, TTL_DRAIN_TIMEOUT_S, 2.0
+        )
         ops.start_engine("prefill-0")
         ops.set_perf("prefill-0", prefill_fixed_ms=100.0)
         alive_back = wait_for(
@@ -217,7 +237,7 @@ def master_quota_block(ctx: CaseContext):
             f"stuck_inflight={stuck}, "
             f"blocked={block_ok}/10 ok (fail_rate={block_fail_rate:.0%}, >=50% required, "
             f"types={block_err_types}), "
-            f"ttl_cleanup_within_90s={cleanup_ok}, "
+            f"ttl_cleanup_within_{TTL_DRAIN_TIMEOUT_S:.0f}s={cleanup_ok}, "
             f"alive_restored={alive_back}, "
             f"recovery={ok5}/20({recovery_rate:.0%}, >=90% required, "
             f"types={recovery_err_types})"

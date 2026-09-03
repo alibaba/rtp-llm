@@ -5,7 +5,7 @@ Run inside a run dir on the remote host:
   cd <run_dir> && python3 aggregate_canvas_run.py
 Reads (consolidated run-root layout, the only supported form):
   client.json (summary source: sh-merged scalar keys + embedded
-  server_latency / slo_batch_analysis)
+  server_latency)
   client_events.jsonl / client_events.jsonl.gz (run root; renamed from
   per_request.jsonl together with the multi-component JSONL event streams)
   engine_events.jsonl / engine_events.jsonl.gz (run root; the engine-side
@@ -27,7 +27,9 @@ event rows are rid-joined onto them (the same join full_e2e always used).
 Both jsonl streams are fail-closed: a missing file or a malformed row is a
 hard error, never a silent empty column (no-backward-compat: legacy runs
 that predate the jsonl streams are no longer supported).
-Outputs meta/summary/batch/per_second (schedule + e2e/ttft percentiles)/
+Outputs meta/summary/batch (mock_last)/batch_decisions (run-level batch
+dispatch-reason + prediction-gap analysis, merged 20260903 from the
+removed analyze_slo_batch.py)/per_second (schedule + e2e/ttft percentiles)/
 master_arrivals_ts (master-side per-second arrival/completion rates, the
 send-series source of record) /queue_timeseries/engine_dist (requests / tokens / busy-time utilization,
 per-engine Gini/CV/Lorenz/window Gini) plus compact time series:
@@ -59,6 +61,7 @@ summary.json passthrough, no-backward-compat).
 import glob
 import gzip
 import json
+import math
 import os
 import re
 import sys
@@ -255,7 +258,7 @@ def latency_summary(values, nd=1):
 
 
 # ---- inputs: consolidated run-root layout (the only supported form) ----
-# 当前格式（consolidate 后）：client.json（server_latency / slo 嵌入）+
+# 当前格式（consolidate 后）：client.json（server_latency 嵌入）+
 # run 根 client_events.jsonl(.gz) + engine_events.jsonl(.gz) + master.json +
 # mock.json。legacy load_client/summary.json 双源切换与 shard_* 布局读取链
 # 已删（no-backward-compat，旧 run 不再是支持对象）；summary.json 文件随
@@ -266,7 +269,6 @@ def latency_summary(values, nd=1):
 # rid-join 主数据源互为印证），不再承担 per-request 数据职责。
 client_json = load_json("client.json") or {}
 summary = client_json
-slo = client_json.get("slo_batch_analysis") or {}
 
 # run_meta.json（params + client_env）：Phase A 派生统计需要 client_env 里的
 # CLIENT_PACING_LAG_P99_LIMIT_MS，提前到此处加载（原先在 compact time series
@@ -331,7 +333,6 @@ if not isinstance(server_latency, dict) or not server_latency:
     server_latency = dict(_embedded_sl) if isinstance(_embedded_sl, dict) else {}
 rpc_start_ms = []  # stamped 行 send_start（actual_send_qps 轴）
 pacing_lag_samples = []  # stamped 行 pacing_lag（Java 同规则：仅 send_start>0）
-ttft_samples = []  # is_ok 行 ttft_ms>0（全程分位，全量口径）
 e2e_samples = []  # is_ok 行 total_ms>0
 sched_client_samples = []  # is_ok 行 schedule_ms（schedule 双源的 client 口径）
 ok_count = 0  # is_ok 行数（success_count 自算口径）
@@ -347,17 +348,26 @@ wall_clock_vals = []  # wall_clock_ts（秒）——elapsed_s 主口径窗口
 # engine_arrival_ms / decode_start_ms / decode_done_ms / exec_ms /
 # batch_size / output_len / kv_used_tokens / cancelled; event=prefill_done
 # carries the prefill twin set (prefill_start_ms / prefill_done_ms / ttft_ms
-# / input_len / cache_hit_tokens; exec_ms = BATCH duration — prefill runs
-# whole batches). Client, master and the mock engine all run in the same
+# / input_len / cache_hit_tokens). exec_ms 口径（20260903 起 P/D 对称
+# 批口径）：prefill = BATCH duration（整批执行时长，同批成员同值）；
+# decode = decode_done_ms − decode_start_ms 墙钟跨度（原 Σ步长流口径
+# 退役——步边界准入下 wall-span ≈ Σ步长，误差仅入界量化与调度抖动）。
+# Client, master and the mock engine all run in the same
 # container, so decode_done_ms / prefill_done_ms and the client's
 # send_start_epoch_ms share one wall clock — no domain conversion needed.
 # cancelled=true rows are non-normal terminals and are skipped (they never
 # join; the row lands in the join-miss integrity markers instead of being
-# fabricated). Two consumers share one pass over the engine stream:
+# fabricated). Three consumers share one pass over the engine stream:
 #   * full_e2e (schedule-only full path): decode_done_ms - send_start
 #   * birth-axis engine exec percentiles: exec_ms bucketed by the request's
 #     BIRTH second (send_start) — same axis as e2e/full_e2e, unlike the
 #     legacy engine_exec_ts completion-window snapshot (kept unchanged).
+#   * engine-caliber ttft (20260903, REPLACES the client first-frame
+#     ttft_ms semantics of ttft_*/ttft_latency_ms): prefill_done_ms -
+#     send_start via the prefill join; the same joins also derive in-engine
+#     waits (prefill_wait = prefill_start_ms - engine_arrival_ms,
+#     decode_wait = decode_start_ms - engine_arrival_ms; negative diffs =
+#     clock anomaly, the sample is skipped, not fabricated).
 # fail-closed: this stream is a peer of client_events.jsonl — a missing
 # file, a malformed row, an unknown event kind, or a row missing rid /
 # terminal ts / exec_ms is a hard error, never a silent empty full_e2e
@@ -367,6 +377,7 @@ decode_done_map = {}
 prefill_done_map = {}
 full_e2e_join_miss = 0
 prefill_exec_join_miss = 0
+ttft_engine_join_miss = 0
 _engine_events_candidates = [
     n for n in ("engine_events.jsonl", "engine_events.jsonl.gz") if os.path.isfile(n)
 ]
@@ -398,15 +409,23 @@ for _evf in _engine_events_candidates:
                 continue
             _ev_kind = ev.get("event")
             try:
+                # 元组布局（20260903 扩展）：[0] 终态时刻 / [1] exec_ms
+                # ——既有消费索引不变；[2] engine_arrival_ms / [3] start_ms
+                # 供 ttft_engine 与引擎内等待派生（绝对时戳同容器共时钟，
+                # 见流头注释；引擎侧三时戳已在产，缺失/非法硬错）。
                 if _ev_kind == "decode_done":
                     decode_done_map[_ev_rid] = (
                         int(ev["decode_done_ms"]),
                         int(ev["exec_ms"]),
+                        int(ev["engine_arrival_ms"]),
+                        int(ev["decode_start_ms"]),
                     )
                 elif _ev_kind == "prefill_done":
                     prefill_done_map[_ev_rid] = (
                         int(ev["prefill_done_ms"]),
                         int(ev["exec_ms"]),
+                        int(ev["engine_arrival_ms"]),
+                        int(ev["prefill_start_ms"]),
                     )
                 else:
                     sys.exit(
@@ -415,8 +434,8 @@ for _evf in _engine_events_candidates:
                     )
             except (KeyError, TypeError, ValueError):
                 sys.exit(
-                    f"ERROR: {_ev_kind} row missing/invalid terminal ts or exec_ms "
-                    f"in {_evf}: {line[:200]!r}"
+                    f"ERROR: {_ev_kind} row missing/invalid terminal ts / "
+                    f"exec_ms / arrival / start ts in {_evf}: {line[:200]!r}"
                 )
 per_sec = defaultdict(
     lambda: {
@@ -442,10 +461,16 @@ per_sec = defaultdict(
         "err_other": 0,
         "sched": [],
         "e2e": [],
+        # ttft（20260903 换血 engine 口径）：发出 → prefill 批完成
+        # （rid join 派生，见 ok 分支 join 注释）；client 首帧样本退役
+        # 不再进桶。prefill_wait / decode_wait = 引擎内等待（start_ms −
+        # engine_arrival_ms，同 join 派生）。
         "ttft": [],
         "full_e2e": [],
         "prefill_exec": [],
         "decode_exec": [],
+        "prefill_wait": [],
+        "decode_wait": [],
         "input_len": [],
         "output_len": [],
         "input_tokens": 0,
@@ -483,8 +508,6 @@ for d in rows:
         sched_client_samples.append(d.get("schedule_ms", 0))
         if d.get("total_ms"):
             e2e_samples.append(d["total_ms"])
-        if d.get("ttft_ms"):
-            ttft_samples.append(d["ttft_ms"])
     if d.get("wall_clock_ts"):
         wall_clock_vals.append(d["wall_clock_ts"])
     if not _send_ts:
@@ -526,8 +549,6 @@ for d in rows:
         b["sched"].append(d.get("schedule_ms", 0))
         if d.get("total_ms"):
             b["e2e"].append(d["total_ms"])
-        if d.get("ttft_ms"):
-            b["ttft"].append(d["ttft_ms"])
         # full_e2e（schedule-only 全链路）：client 发出 → 引擎侧 decode
         # 正常终态，按 request_id（引擎 GenerateInputPB.requestId 原样
         # 回传的数值字段）关联。ok 行 join 不到终态行（run 结束仍在
@@ -536,7 +557,9 @@ for d in rows:
         # （map 空，理论上仅极端场景）时整列不产出、也不计 miss。
         # 同一 join 顺带产出出生轴 decode_exec：终态行 exec_ms 归入该
         # 请求的出生秒桶（与 e2e/full_e2e 同轴可比；旧完成轴快照见
-        # engine_exec_ts，字段保留）。decode 侧 join miss 与 full_e2e
+        # engine_exec_ts，字段保留）。decode exec_ms 自 20260903 起为
+        # done − start 墙钟跨度（P/D 对称批口径，见文件头注释）。
+        # decode 侧 join miss 与 full_e2e
         # 同源同数（full_e2e_join_miss），不重复计数。
         _rid = d.get("request_id")
         try:
@@ -548,18 +571,35 @@ for d in rows:
             if _done is not None and _done[0] >= _send_ts:
                 b["full_e2e"].append(_done[0] - _send_ts)
                 b["decode_exec"].append(_done[1])
+                # decode_wait（引擎内等待，同 join 顺带派生）：decode_start
+                # − engine_arrival（hand-off 到达 → 进 running slot）。负值
+                # = 时钟异常，跳过该样本不编造（与 join miss 卫兵同风格；
+                # miss 计数与 full_e2e 同源同数，不重复计）。
+                if _done[3] >= _done[2]:
+                    b["decode_wait"].append(_done[3] - _done[2])
             else:
                 full_e2e_join_miss += 1
         # prefill_exec（出生轴）：ok 行按 rid join 引擎侧 prefill 批完成
         # 行（exec_ms = 批执行时长，同批成员同值）。join 不到（cancelled
         # 批成员/jsonl 截断/时钟异常）计 prefill_exec_join_miss 不编造；
-        # 全部终态行均 cancelled（map 空）时不产出不计 miss。
+        # 全部终态行均 cancelled（map 空）时不产出不计 miss。同一次 join
+        # 顺带派生：ttft = prefill_done_ms − send_start（用户发出
+        # → 首 token 就绪，含 schedule+dispatch+引擎排队+prefill 执行；
+        # 20260903 起 ttft 键统一为此 engine 口径，client 首帧样本退役）与
+        # prefill_wait = prefill_start − engine_arrival（EnqueueBatch 准入
+        # → 批开始执行，含 lane 排队；负值 = 时钟异常跳过不编造）。
+        # ttft join miss 与 prefill_exec 同源同数（同一 map 同一
+        # 卫兵），独立计数仅为 integrity 标记语义清晰。
         if prefill_done_map:
             _pf = prefill_done_map.get(_rid) if _rid is not None else None
             if _pf is not None and _pf[0] >= _send_ts:
                 b["prefill_exec"].append(_pf[1])
+                b["ttft"].append(_pf[0] - _send_ts)
+                if _pf[3] >= _pf[2]:
+                    b["prefill_wait"].append(_pf[3] - _pf[2])
             else:
                 prefill_exec_join_miss += 1
+                ttft_engine_join_miss += 1
     else:
         b["errors"] += 1
         b[_bucket_key] += 1
@@ -604,6 +644,11 @@ for t in sorted(per_sec):
             "e2e_n": len(b["e2e"]),
             "e2e_p50": pct(b["e2e"], 0.5),
             "e2e_p95": pct(b["e2e"], 0.95),
+            # ttft（20260903 换血 engine 口径）：发出 → prefill 批完成
+            # （ok 行 rid join prefill_done 行，按 send_start 出生秒分桶，
+            # 幸存者口径）；client 首帧样本退役，与历史 client 口径 ttft
+            # 不可比（断代）。
+            "ttft_n": len(b["ttft"]),
             "ttft_p50": pct(b["ttft"], 0.5),
             "ttft_p95": pct(b["ttft"], 0.95),
             # full_e2e：跨两侧全链路（发出→decode 结束）分位，样本为
@@ -614,7 +659,9 @@ for t in sorted(per_sec):
             # 引擎执行分位（出生轴，20260830）：ok 行按 rid join 引擎终态行
             # （engine_events.jsonl 的 prefill_done / decode_done）的
             # exec_ms，按 send_start 出生秒分桶——与 e2e/full_e2e 同轴可比
-            # （幸存者口径）；旧完成轴窗口快照见 engine_exec_ts（字段保留，
+            # （幸存者口径）；decode exec_ms 自 20260903 起为 done − start
+            # 墙窗（P/D 对称批口径，与 prefill 批时长语义对称）。
+            # 旧完成轴窗口快照见 engine_exec_ts（字段保留，
             # 口径不同：完成流含 cancel、按完成秒分桶）。终态流全
             # cancelled（map 空）时这些键恒为 0/n=0，报告层按全零回退完成轴。
             "prefill_exec_n": len(b["prefill_exec"]),
@@ -623,6 +670,15 @@ for t in sorted(per_sec):
             "decode_exec_n": len(b["decode_exec"]),
             "decode_exec_p50": pct(b["decode_exec"], 0.5),
             "decode_exec_p95": pct(b["decode_exec"], 0.95),
+            # 引擎内等待分位（20260903）：同 rid join 派生的差值
+            # （start − arrival），按出生秒分桶；负值样本（时钟异常）
+            # 已跳过不编造（见桶化处注释）。
+            "prefill_wait_n": len(b["prefill_wait"]),
+            "prefill_wait_p50": pct(b["prefill_wait"], 0.5),
+            "prefill_wait_p95": pct(b["prefill_wait"], 0.95),
+            "decode_wait_n": len(b["decode_wait"]),
+            "decode_wait_p50": pct(b["decode_wait"], 0.5),
+            "decode_wait_p95": pct(b["decode_wait"], 0.95),
             # token 长度时序（出生秒分桶，全部带时间戳行）：replay run
             # 的长度组成随 trace loop 周期变化，供报告层与 batch size
             # 时序对照（输入侧驱动识别）。旧 run 无字段时桶为空 -> n=0。
@@ -660,6 +716,22 @@ if full_e2e_all:
         "p99": pct(full_e2e_all, 0.99),
     }
 
+# ttft 全程分位（20260903 换血 engine 口径，跨桶合并样本）与引擎内
+# 等待全程分位；无样本（join 全 miss / 终态流全 cancelled）时为 None
+# ——零样本与真实 0 可区分（client 口径旧实现的全零 dict 陷阱）。
+ttft_all = []
+prefill_wait_all = []
+decode_wait_all = []
+for _t in sorted(per_sec):
+    ttft_all.extend(per_sec[_t]["ttft"])
+    prefill_wait_all.extend(per_sec[_t]["prefill_wait"])
+    decode_wait_all.extend(per_sec[_t]["decode_wait"])
+ttft_latency_ms_calc = latency_summary(ttft_all) if ttft_all else None
+prefill_wait_latency_ms = (
+    latency_summary(prefill_wait_all) if prefill_wait_all else None
+)
+decode_wait_latency_ms = latency_summary(decode_wait_all) if decode_wait_all else None
+
 # ---- Phase A 派生统计：validity / quick-stats / 全程分位（统一聚合侧） ----
 # 公式逐字搬 run_online_eval.sh 多 worker 合并段（L1253-1362）。rows 是
 # 唯一指标源（no-backward-compat；client_events.jsonl 已 fail-closed，
@@ -688,7 +760,6 @@ _error_count_calc = len(rows) - ok_count  # 与 error_breakdown 同口径（全�
 _success_count_calc = ok_count
 # pacing 分布：sh distribution 的 round 3 精度（p99 与 limit 比较保真）。
 _pacing_dist = latency_summary(pacing_lag_samples, nd=3)
-_ttft_summary_calc = latency_summary(ttft_samples)
 _e2e_summary_calc = latency_summary(e2e_samples)
 
 # pacing limit：client_env 快照（run_meta.client_env，字符串值）；缺省
@@ -835,6 +906,25 @@ if os.path.isfile("mock_engine.log"):
         mock_stats.append(dict(kv_pair_re.findall(line)))
 else:
     mock_stats = mock_payload.get("stats") or []
+# batch.mock_last 直出（原经 slo_batch_analysis.json 转发，20260903 改为
+# aggregate 自取末帧）：mock_stats 双路径值类型不一——mock_engine.log 解析
+# 为字符串、mock.json stats 已是数值——统一归一为 int/float（与历史 slo
+# 转发值同口径，报告层 num() 直读）。
+
+
+def _kv_as_number(raw):
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return raw
+    text = str(raw)
+    try:
+        return float(text) if "." in text else int(text)
+    except (TypeError, ValueError):
+        return raw
+
+
+batch_mock_last = {}
+if isinstance(mock_stats, list) and mock_stats and isinstance(mock_stats[-1], dict):
+    batch_mock_last = {k: _kv_as_number(v) for k, v in mock_stats[-1].items()}
 queue_ts = []
 t0 = None
 _raw_ts = []
@@ -1482,6 +1572,44 @@ _GENERATION_RETIRED_RE = re.compile(
     r"\[(remove|replace)\] retiring (?:missing worker|worker topology generation),"
     r" model=([^,]*), role=([^,]*), ipPort=([^,]*), generation=(\d+)"
 )
+# 批决策结构化行（flexlb.log 家族；原 analyze_slo_batch.py 的行型解析，
+# 20260903 并入本脚本——行可带时间戳前缀（master.log 合并视图），search
+# 任意位置匹配；字段集与原脚本逐字对齐）。
+_BATCH_DISPATCH_RE = re.compile(
+    r"flexlb_batch_dispatch batch_id=(?P<batch_id>\d+) "
+    r"reason=(?P<reason>\S+) batch_size=(?P<batch_size>\d+) "
+    r"wait_ms=(?P<wait_ms>\d+) predicted_ms=(?P<predicted_ms>\d+) "
+    r"threshold_ms=(?P<threshold_ms>\d+) fixed_wait_ms=(?P<fixed_wait_ms>\d+) "
+    r"batch_size_max=(?P<batch_size_max>\d+) queue_after=(?P<queue_after>\d+) "
+    r"worker=(?P<worker>\S*)"
+)
+_BATCH_COMPLETE_RE = re.compile(
+    r"flexlb_batch_complete batch_id=(?P<batch_id>\d+) "
+    r"predicted_ms=(?P<predicted_ms>-?\d+) actual_ms=(?P<actual_ms>-?\d+) "
+    r"gap_ms=(?P<gap_ms>-?\d+) batch_size=(?P<batch_size>\d+) "
+    r"engine=(?P<engine>\S+)"
+)
+_BATCH_INT_FIELDS = {
+    "batch_id",
+    "batch_size",
+    "wait_ms",
+    "predicted_ms",
+    "threshold_ms",
+    "fixed_wait_ms",
+    "batch_size_max",
+    "queue_after",
+    "actual_ms",
+    "gap_ms",
+}
+
+
+def _batch_record(match):
+    return {
+        key: int(value) if key in _BATCH_INT_FIELDS else value
+        for key, value in match.groupdict().items()
+    }
+
+
 if os.path.isfile("master.log"):
     _master_log_sources = ["master.log"]
 else:
@@ -1513,6 +1641,8 @@ def _log_line_epoch_ms(line):
 
 
 master_events_rows = []
+_batch_decision_rows = []
+_batch_completion_rows = []
 _master_window_rows = 0
 for _mf in _master_log_sources:
     with open(_mf, errors="replace") as _mstream:
@@ -1570,6 +1700,17 @@ for _mf in _master_log_sources:
                             "generation": int(m.group(5)),
                         }
                     )
+            elif "flexlb_batch_dispatch " in line:
+                # 批决策采集（原 analyze_slo_batch.py 并入）：dispatch 行只进
+                # 独立列表，不进 master_events.jsonl（后者是 window /
+                # generation 事件流，语义不同）。
+                m = _BATCH_DISPATCH_RE.search(line)
+                if m:
+                    _batch_decision_rows.append(_batch_record(m))
+            elif "flexlb_batch_complete " in line:
+                m = _BATCH_COMPLETE_RE.search(line)
+                if m:
+                    _batch_completion_rows.append(_batch_record(m))
 if _master_window_rows == 0:
     sys.exit(
         "ERROR: zero flexlb_server_schedule_latency window rows in the master "
@@ -2427,10 +2568,190 @@ if reason_series:
     reason_rate_rows = sorted(rate_by_ts.items())
 dispatch_reason_ts = [{"t": t, **vals} for t, vals in rel_axis(reason_rate_rows)]
 
+# ---- batch_decisions（原 analyze_slo_batch.py 并入，20260903）----
+# flexlb_batch_dispatch / flexlb_batch_complete 结构化行（同一条 master
+# 日志链：master.log 合并视图或 flexlb_logs 原始族）——批决策采集分析：
+# dispatch reason 分布、等待/预测时延分布、完成侧 prediction gap 与
+# 不变量违规。与 dispatch_reason_ts 互补（后者是 Prometheus counter 的
+# per-second 速率时序视角，这里是 run 级汇总分布）。
+#   * reason 总量权威计数用 master.json prometheus_after 的 counter
+#     （与 batch_size_final / dispatch_reason_ts 同一数据源模式，不做
+#     .prom 文件回退——consolidate 后 prom 已并入 master.json）；
+#   * 结构化日志行只承担分布样本与不变量检查，log_coverage_ratio 标注
+#     覆盖率；
+#   * 分位口径沿用原脚本 ceil-rank（math.ceil(nq)−1），与主链
+#     percentile_nr（int(np)）刻意不同——保持与历史 slo_batch_analysis
+#     数字可比。
+
+
+def _bd_percentile(sorted_values, quantile):
+    if not sorted_values:
+        return 0
+    index = max(0, math.ceil(quantile * len(sorted_values)) - 1)
+    return sorted_values[index]
+
+
+def _bd_distribution(values):
+    ordered = sorted(values)
+    if not ordered:
+        return {
+            "count": 0,
+            "mean": 0.0,
+            "p50": 0,
+            "p90": 0,
+            "p95": 0,
+            "p99": 0,
+            "max": 0,
+        }
+    return {
+        "count": len(ordered),
+        "mean": round(sum(ordered) / len(ordered), 3),
+        "p50": _bd_percentile(ordered, 0.50),
+        "p90": _bd_percentile(ordered, 0.90),
+        "p95": _bd_percentile(ordered, 0.95),
+        "p99": _bd_percentile(ordered, 0.99),
+        "max": ordered[-1],
+    }
+
+
+_bd_violation_count = 0
+_bd_violations = []
+for _bd in _batch_decision_rows:
+    _bd_invalid = (
+        (
+            # cap 只放行能让整组保持预算内的成员：多成员组必须低于阈值；
+            # 强制队头豁免——单飞时可超任何成本。
+            _bd["reason"] == "predicted_execution_cap"
+            and _bd["batch_size"] > 1
+            and _bd["predicted_ms"] >= _bd["threshold_ms"]
+        )
+        or (
+            _bd["reason"] == "fixed_window_timeout"
+            and _bd["wait_ms"] + 2 < _bd["fixed_wait_ms"]
+        )
+        or (_bd["reason"] == "batch_full" and _bd["batch_size"] < _bd["batch_size_max"])
+    )
+    if _bd_invalid:
+        _bd_violation_count += 1
+        if len(_bd_violations) < 20:
+            _bd_violations.append(_bd)
+
+_bd_completion_by_batch = {item["batch_id"]: item for item in _batch_completion_rows}
+_bd_matched = sum(
+    1 for item in _batch_decision_rows if item["batch_id"] in _bd_completion_by_batch
+)
+_bd_first = _batch_decision_rows[0] if _batch_decision_rows else {}
+_bd_log_reasons = dict(
+    sorted(Counter(item["reason"] for item in _batch_decision_rows).items())
+)
+
+# Prometheus counter 权威 reason 计数（master.json prometheus_after；照
+# batch_size_final 的 key 遍历模式：base 名 split 过滤 + reason 标签提取）。
+_bd_prom_reasons = {}
+if isinstance(master_prom_after, dict):
+    _bd_reason_re = re.compile(r'reason="([^"]*)"')
+    _bd_counts = Counter()
+    for _bd_k, _bd_v in master_prom_after.items():
+        if not isinstance(_bd_v, (int, float)):
+            continue
+        _bd_key = str(_bd_k)
+        if _bd_key.split("{", 1)[0] != DISPATCH_REASON_BASE:
+            continue
+        _bd_m = _bd_reason_re.search(_bd_key)
+        if _bd_m:
+            _bd_counts[_bd_m.group(1)] += round(float(_bd_v))
+    _bd_prom_reasons = dict(sorted(_bd_counts.items()))
+
+_bd_exact_count = sum(_bd_prom_reasons.values())
+_bd_decision_count = _bd_exact_count or len(_batch_decision_rows)
+
+# config 双源：run_meta.params.flexlb_config（FLEXLB_CONFIG 字符串快照）
+# 优先，其次 process_config_json 嵌入文档（zone_process_setting →
+# process_info → envs → FLEXLB_CONFIG，原 analyze_slo_batch.py 的
+# load_flexlb_config 链）。
+_bd_config_doc = {}
+_bd_params = run_meta.get("params") or {}
+_bd_fc = _bd_params.get("flexlb_config")
+if isinstance(_bd_fc, str) and _bd_fc.strip():
+    try:
+        _bd_parsed = json.loads(_bd_fc)
+        if isinstance(_bd_parsed, dict):
+            _bd_config_doc = _bd_parsed
+    except ValueError:
+        pass
+if not _bd_config_doc:
+    _bd_pc = run_meta.get("process_config_json")
+    if isinstance(_bd_pc, dict):
+        _bd_envs = (
+            (_bd_pc.get("zone_process_setting") or {})
+            .get("process_info", {})
+            .get("envs", [])
+        )
+        for _bd_env in _bd_envs:
+            if (
+                isinstance(_bd_env, list)
+                and len(_bd_env) == 2
+                and _bd_env[0] == "FLEXLB_CONFIG"
+            ):
+                try:
+                    _bd_parsed = json.loads(str(_bd_env[1]))
+                    if isinstance(_bd_parsed, dict):
+                        _bd_config_doc = _bd_parsed
+                except ValueError:
+                    pass
+                break
+_bd_scheduler = _bd_config_doc.get("scheduler") or {}
+_bd_dispatcher = _bd_config_doc.get("dispatcher") or {}
+
+batch_decisions = {
+    "config": {
+        "predict_threshold_ms": _bd_first.get("threshold_ms", 0),
+        "fixed_wait_ms": _bd_first.get("fixed_wait_ms", 0),
+        "batch_size_max": _bd_first.get("batch_size_max", 0),
+        "scheduler_type": _bd_scheduler.get("type"),
+        "ordering_type": (_bd_scheduler.get("ordering") or {}).get("type"),
+        "dispatcher_type": _bd_dispatcher.get("type"),
+    },
+    "decisions": {
+        "count": _bd_decision_count,
+        "source": "prometheus_counter" if _bd_prom_reasons else "structured_log",
+        "reasons": _bd_prom_reasons or _bd_log_reasons,
+        "log_count": len(_batch_decision_rows),
+        "log_reasons": _bd_log_reasons,
+        "log_coverage_ratio": (
+            round(len(_batch_decision_rows) / _bd_decision_count, 6)
+            if _bd_decision_count
+            else 0.0
+        ),
+        "distribution_source": "structured_log",
+        "batch_size": _bd_distribution(
+            item["batch_size"] for item in _batch_decision_rows
+        ),
+        "wait_ms": _bd_distribution(item["wait_ms"] for item in _batch_decision_rows),
+        "predicted_ms": _bd_distribution(
+            item["predicted_ms"] for item in _batch_decision_rows
+        ),
+        "estimated_wait_plus_prefill_ms": _bd_distribution(
+            item["wait_ms"] + item["predicted_ms"] for item in _batch_decision_rows
+        ),
+        "invariant_violation_count": _bd_violation_count,
+        "invariant_violation_samples": _bd_violations,
+    },
+    "completions": {
+        "count": len(_batch_completion_rows),
+        "matched_decision_count": _bd_matched,
+        "actual_ms": _bd_distribution(
+            item["actual_ms"] for item in _batch_completion_rows
+        ),
+        "prediction_gap_ms": _bd_distribution(
+            item["gap_ms"] for item in _batch_completion_rows
+        ),
+    },
+}
+
 # consolidate integrity markers (consolidate_run_outputs.py): how the
-# final_snapshot was obtained (live HTTP fetch vs stale fallback) and
-# whether the slo analysis predates this run's client_events data. Empty for
-# pre-integrity consolidations; the generator then stays silent.
+# final_snapshot was obtained (live HTTP fetch vs stale fallback). Empty
+# for pre-integrity consolidations; the generator then stays silent.
 integrity = {}
 if per_second_unstamped:
     # Degradation marker: rows that carry no usable send timestamp (0/None)
@@ -2450,6 +2771,12 @@ if full_e2e_join_miss:
 # no miss counted).
 if prefill_exec_join_miss:
     integrity["prefill_exec_join_miss"] = prefill_exec_join_miss
+# Degradation marker (engine-caliber ttft, 20260903): scheduled-ok rows
+# with no normal engine-side prefill batch-completion row to join against —
+# same source and count as prefill_exec_join_miss (one map, one guard);
+# counted separately so each metric's miss surface stays self-describing.
+if ttft_engine_join_miss:
+    integrity["ttft_engine_join_miss"] = ttft_engine_join_miss
 # cancel 按角色拆分的降级标记：cancelled_rids 里无法在 master 终态行
 # 定位时刻的 rid 数（这些 tracked cancel 事件被丢弃、不计入
 # prefill/decode cancel 线，不编造时刻）。
@@ -2459,8 +2786,6 @@ if any(_cancel_role_unmatched.values()):
     }
 if isinstance(mock_payload, dict) and mock_payload.get("final_snapshot_source"):
     integrity["final_snapshot_source"] = mock_payload["final_snapshot_source"]
-if isinstance(master_json, dict) and master_json.get("slo_integrity"):
-    integrity["slo_integrity"] = master_json["slo_integrity"]
 
 _run_params = run_meta.get("params") or {}
 if "fetch_output_stream" in _run_params:
@@ -2572,15 +2897,30 @@ out = {
         # 关联，schedule-only（FETCH=0）下也覆盖完整链路。
         "full_e2e_latency_ms": full_e2e_latency_ms,
         "server_stage_latency_ms": _server_stage_calc,
-        # ttft/e2e 全程分位（聚合层自算，幸存者口径）；rows 缺失即 None。
-        "ttft_latency_ms": _ttft_summary_calc if _have_rows else None,
+        # ttft 全程分位（20260903 换血 engine 口径）：发出 → prefill 批
+        # 完成（ok 行 rid join prefill_done 行，幸存者口径）；client 首帧
+        # 样本退役，与历史 client 口径 ttft 不可比（断代）。无样本
+        # （join 全 miss / 终态流全 cancelled）为 None——零样本与真实 0
+        # 可区分。source 恒 engine，供报告层口径标注与断代识别。
+        "ttft_latency_ms": ttft_latency_ms_calc,
+        "ttft_latency_source": "engine" if _have_rows else None,
+        # e2e 全程分位（client total_ms 口径，幸存者）；rows 缺失即 None。
         "e2e_latency_ms": _e2e_summary_calc if _have_rows else None,
+        # 引擎内等待全程分位（20260903）：prefill_wait = prefill_start −
+        # engine_arrival / decode_wait = decode_start − engine_arrival
+        # （ok 行 rid join 引擎终态行派生，负值样本已跳过）；无样本 None。
+        "prefill_wait_latency_ms": prefill_wait_latency_ms,
+        "decode_wait_latency_ms": decode_wait_latency_ms,
         "validity_checks": validity_checks_calc,
         "test_valid": test_valid_calc,
     },
     "batch": {
-        "mock_last": slo.get("mock", {}).get("last"),
+        "mock_last": batch_mock_last,
     },
+    # 批决策采集分析（原 analyze_slo_batch.py 并入，20260903）：dispatch
+    # reason 分布 + 预测精度 + 不变量违规；日志链与 master.json
+    # prometheus_after counter 同源（见上方 batch_decisions 计算块注释）。
+    "batch_decisions": batch_decisions,
     "per_second": per_second,
     "master_arrivals_ts": master_arrivals_ts,
     "queue_timeseries": queue_ts,

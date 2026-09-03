@@ -121,9 +121,9 @@ def _write_engine_events(run_dir, n):
 def _write_full_run(run_dir):
     """构造三口径数据齐备的 run 目录（数值见模块 docstring）。"""
     run_dir = Path(run_dir)
-    # client.json：空 slo / server_latency（validity 缺数据路径，不误报）
+    # client.json：空 server_latency（validity 缺数据路径，不误报）
     (run_dir / "client.json").write_text(
-        json.dumps({"slo_batch_analysis": {}, "server_latency": {}}), encoding="utf-8"
+        json.dumps({"server_latency": {}}), encoding="utf-8"
     )
     # client_events：3 行 ok，input_len 80 ×3 = 240（token 级 run 分母）
     rows = [
@@ -205,7 +205,7 @@ def _write_old_run(run_dir):
     另两口径整体缺省）。"""
     run_dir = Path(run_dir)
     (run_dir / "client.json").write_text(
-        json.dumps({"slo_batch_analysis": {}, "server_latency": {}}), encoding="utf-8"
+        json.dumps({"server_latency": {}}), encoding="utf-8"
     )
     # 2 行 ok（input_len 80 ×2 = 160）：token 级 run = 120/160 =
     # 75.0%；第 2 行同时保证 T_END > 0（canvas 时间轴断言 min < max）

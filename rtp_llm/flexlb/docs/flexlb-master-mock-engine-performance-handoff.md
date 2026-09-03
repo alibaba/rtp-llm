@@ -394,7 +394,7 @@ bash run_online_eval.sh
 
 做容量矩阵时只修改 `REPLAY_SPEED`，按 14、130、650、1400 依次运行，分别对应约 100、1K、5K、10K QPS。比较不同压力时不要改变 Master/load worker 数。
 
-脚本会在开始阶段校验 Java 21；mock engine 与 load client 均为 Java 实现，无需 Python 虚拟环境。测试结束会保存 `master_prometheus_after.prom`，随后 run 目录收尾（`consolidate_run_outputs.py`）把它并入 run 根的 `master.json`（`prometheus_after` 键）。`analyze_slo_batch.py` 优先使用 Prometheus counter 统计精确 dispatch reason 总量（legacy `.prom` 文件存在时优先，其次读 `master.json`），并用 `log_coverage_ratio` 标识逐批日志覆盖率。
+脚本会在开始阶段校验 Java 21；mock engine 与 load client 均为 Java 实现，无需 Python 虚拟环境。测试结束会保存 `master_prometheus_after.prom`，随后 run 目录收尾（`consolidate_run_outputs.py`）把它并入 run 根的 `master.json`（`prometheus_after` 键）。批决策采集分析（dispatch reason 总量与逐批日志覆盖率）由 `aggregate_canvas_run.py` 内嵌完成：aggregate 顶层 `batch_decisions` 段用 Prometheus counter 作权威计数，`log_coverage_ratio` 标注结构化日志覆盖率；原独立脚本 `analyze_slo_batch.py` 已删除。
 
 ## 9. 读取和校验结果
 
@@ -404,8 +404,8 @@ bash run_online_eval.sh
 |---|---|
 | `load_client/summary.json` | 合并后的 QPS、错误数和 Master 服务端延迟（收编后原样保留） |
 | `load_client/server_latency.json` | Master arrival/completion 计数和各阶段延迟原始值（原样保留） |
-| `client.json` | summary.json 与 server_latency.json、`slo_batch_analysis.json`、每秒聚合时间线的合并视图 |
-| `master.json` | Master 计数时间序列、Prometheus 快照（含精确 dispatch reason counter）、master_info 前后快照、SLO 汇总 |
+| `client.json` | summary.json 与 server_latency.json、每秒聚合时间线的合并视图 |
+| `master.json` | Master 计数时间序列、Prometheus 快照（含精确 dispatch reason counter）、master_info 前后快照 |
 | `master.log` | Master 日志（application.log 前缀 + `flexlb.log` 结构化行 + sync 日志）、拒绝执行、无可用 worker、GC/OOM 线索 |
 | `mock.json` / `mock.log` | mock 的 RPC 数、prefill pending 和 decode running 时间线（解析覆盖 26/28 字段，`decode_exec_p50`/`p95` 见 `mock.log` 原文行） |
 | `per_request.jsonl(.gz)` | 合并后的逐请求数据（run 根；10 MB 以下保持明文，更大的 run 为 gzip） |
@@ -413,7 +413,7 @@ bash run_online_eval.sh
 | `flexlb_env.txt` | 本次 engine endpoint 和启动环境（原样保留，同时快照进 `run_meta.json`） |
 | `run_meta.json` | 启动参数快照（含 `FLEXLB_CONFIG`）与环境 |
 
-注：`load_client/shard_*/`、`load_client/slo_batch_analysis.json`、`master_prometheus_after.prom`、run 根 `flexlb.log`、`mock_engine.log` 等中间产物在成功收编后删除（内容已并入上表对应文件）；`load_client/slo_batch_analysis.json` 仅在其内容成功并入 `client.json` 后才删除。
+注：`load_client/shard_*/`、`master_prometheus_after.prom`、run 根 `flexlb.log`、`mock_engine.log` 等中间产物在成功收编后删除（内容已并入上表对应文件）；旧 run 残留的 `slo_batch_analysis.json` / `slo_batch_analysis.stdout`（批决策分析已并入 `aggregate.json` 的 `batch_decisions` 段）会被作为陈旧残留清扫删除。
 
 用以下命令打印单个 run 的正式报告字段并做计数校验（`load_client/summary.json` 与 `load_client/server_latency.json` 收编后原样保留，该命令在收编前后同样可用；若更喜欢读合并视图，可将第二行换成 `json.loads((run / "client.json").read_text())` 并以 `client["server_latency"]` 取同一份数据）：
 

@@ -40,14 +40,12 @@ T_END = 全部时序面板最大采样点（ceil 整秒，含收尾排空）；m
 用法：
   python3 canvas_report_gen.py --aggregate <agg.json> \
       [--engine-dist <engine_dist.json>] \
-      [--slo <slo_batch_analysis.json>] \
       --out <out.html> [--run-id <id>] \
       [--p-engines 750] [--d-engines 500] [--shards 8] \
       [--send-mode replay] [--replay <speed>] \
       [--git-branch <b>] [--git-commit <c>]
 
 缺省规则：
-  * --slo 未指定时取 aggregate 同目录同名文件（存在才读）；
   * engine_dist 来源优先级：--engine-dist 显式指定 > aggregate 顶层内嵌键
     （aggregate_canvas_run.py 已把 engine_dist 计算进 aggregate，一个脚本
     出全部数据）> aggregate 同目录 engine_dist.json；
@@ -543,10 +541,6 @@ def main():
         help="引擎维度分布 JSON（缺省取 aggregate 同目录 engine_dist.json，存在才读）",
     )
     ap.add_argument(
-        "--slo",
-        help="slo_batch_analysis.json（缺省取 aggregate 同目录同名文件，存在才读）",
-    )
-    ap.add_argument(
         "--out", required=True, help="输出 .html 路径（self-contained Chart.js HTML）"
     )
     ap.add_argument("--run-id", help="run 标识（缺省取 aggregate meta.run_dir）")
@@ -616,13 +610,11 @@ def main():
     agg = load_json(args.aggregate)
     agg_dir = os.path.dirname(os.path.abspath(args.aggregate))
 
-    slo_path = args.slo or os.path.join(agg_dir, "slo_batch_analysis.json")
     ed_path = args.engine_dist or os.path.join(agg_dir, "engine_dist.json")
 
     # no-backward-compat：--summary / summary_standalone 独立输入已删
     # （旧 run 不再支持）；summary 仅从 aggregate.summary 单键直读，
     # 缺失即无数据按可选逻辑省略。
-    slo = load_json(slo_path) if os.path.isfile(slo_path) else None
     # engine_dist 来源优先级：显式 --engine-dist > aggregate 顶层内嵌键
     # （aggregate_canvas_run.py 一个脚本出全部数据）> 同目录独立文件。
     if args.engine_dist:
@@ -704,8 +696,6 @@ def main():
         else not _meta.get("schedule_only")
     )
     mock_last = (agg.get("batch") or {}).get("mock_last") or {}
-    if not mock_last and slo:
-        mock_last = (slo.get("mock") or {}).get("last") or {}
     validity = sm.get("validity_checks") or {}
 
     run_id = args.run_id or (agg.get("meta") or {}).get("run_dir") or "unknown"
@@ -1406,8 +1396,10 @@ def main():
     lines.append('      <Text tone="secondary">')
     lines.append("        " + esc_text(identity))
     lines.append("      </Text>")
-    # consolidate 完整性声明：final_snapshot 非 live / slo 陈旧时在报告头
-    # 显式降级声明，避免读者把田数据当作本 run 终态。
+    # consolidate 完整性声明：final_snapshot 非 live 时在报告头显式降级
+    # 声明，避免读者把田数据当作本 run 终态。（原 slo_integrity 陈旧残留
+    # 检查已随 analyze_slo_batch.py 退役删除——批决策分析内嵌 aggregate 的
+    # batch_decisions 段，同一次聚合自产自销，不再存在跨文件陈旧问题。）
     integrity_notes = []
     _fss = integrity.get("final_snapshot_source")
     if _fss and _fss != "live":
@@ -1417,11 +1409,6 @@ def main():
         }.get(_fss, str(_fss))
         integrity_notes.append(
             "final_snapshot 为" + _fss_label + "，引擎利用率/终态不代表本 run"
-        )
-    _si = integrity.get("slo_integrity") or {}
-    if _si and not _si.get("fresh", True):
-        integrity_notes.append(
-            "slo_batch_analysis.json 早于 client_events.jsonl（陈旧残留），SLO/批决策结论不可信"
         )
     _unstamped = integrity.get("per_second_rows_without_send_ts")
     if _unstamped:
@@ -1837,6 +1824,10 @@ def main():
     # 反馈 2：多延迟合一（full_e2e / ttft / schedule / prefill exec /
     # decode exec，全部 p95；e2e 系列已于 20260831 删除——与
     # full_e2e 口径重叠且易误读，只保留 full_e2e）。
+    # ttft（20260903 换血 engine 口径）：per_second.ttft_* 键名不变、
+    # 数据源换为发出 → prefill 批完成（rid join）；FETCH=0 下 client
+    # 首帧恒 0 导致的「ttft 线消失」随之修复，但与历史 client 口径
+    # ttft 断代不可比（caption 注记）。
     # full_e2e（20260830）：client 发出 → 引擎 decode 正常终态，按
     # request_id 关联的跨两侧全链路口径——schedule-only（FETCH=0）下
     # 覆盖调度+prefill+传输+decode 完整链路；旧 aggregate 无该字段
@@ -1875,7 +1866,7 @@ def main():
                 five_series.append(
                     (
                         "ttft",
-                        "ttft（p95）",
+                        "ttft（p95·engine）",
                         const(
                             "ttftP95",
                             num_arr(
@@ -1985,8 +1976,11 @@ def main():
             )
             five_cap = (
                 "x = 压测时间（s，1s 采样）；y = 延迟 p95（ms）。口径："
-                "ttft = 成功请求按发送秒的分位（幸存者口径，过载下慢"
-                "请求已转为错误被排除）"
+                "ttft(engine) = 发出 → prefill 批完成（引擎 prefill_done"
+                " 终态行按 rid 关联回成功请求、按出生秒分桶，含 "
+                "schedule+dispatch+引擎排队+prefill 执行；幸存者口径）；"
+                "20260903 断代：ttft 键已由 client 首帧口径换血为 engine "
+                "口径，与历史 run 的 ttft 不可比；每秒样本量见 ttft_n"
             )
             # exec 线口径段：出生轴与完成轴分别标注（可能混合——如旧引擎
             # build 有 decode_done 无 prefill_done 时 decode 出生轴 +
@@ -2047,6 +2041,108 @@ def main():
                         five_series,
                         suffix=" ms",
                         domain="[0, " + num(nice_max(five_max * 1.15)) + "]",
+                    ),
+                )
+            )
+        # P/D 引擎内等待（20260903）：rid join 引擎终态行派生的引擎内
+        # 等待时序（出生轴，与五延迟图同轴）；fail-closed——按样本量
+        # 键（prefill_wait_n / decode_wait_n）判有数据才注册面板，
+        # 不许空面板；旧 aggregate 无该键时整体省略。
+        has_pw = any((p.get("prefill_wait_n", 0) or 0) for p in per_second)
+        has_dw = any((p.get("decode_wait_n", 0) or 0) for p in per_second)
+        if has_pw or has_dw:
+            wait_series = []
+            if has_pw:
+                wait_series.append(
+                    (
+                        "pw95",
+                        "prefill wait（p95）",
+                        const(
+                            "pwP95",
+                            num_arr(
+                                [
+                                    (ps_by_t.get(t) or {}).get("prefill_wait_p95", 0)
+                                    for t in tsec_vals
+                                ]
+                            ),
+                        ),
+                        "danger",
+                    )
+                )
+                wait_series.append(
+                    (
+                        "pw50",
+                        "prefill wait（p50）",
+                        const(
+                            "pwP50",
+                            num_arr(
+                                [
+                                    (ps_by_t.get(t) or {}).get("prefill_wait_p50", 0)
+                                    for t in tsec_vals
+                                ]
+                            ),
+                        ),
+                        "neutral",
+                    )
+                )
+            if has_dw:
+                wait_series.append(
+                    (
+                        "dw95",
+                        "decode wait（p95）",
+                        const(
+                            "dwP95",
+                            num_arr(
+                                [
+                                    (ps_by_t.get(t) or {}).get("decode_wait_p95", 0)
+                                    for t in tsec_vals
+                                ]
+                            ),
+                        ),
+                        "success",
+                    )
+                )
+                wait_series.append(
+                    (
+                        "dw50",
+                        "decode wait（p50）",
+                        const(
+                            "dwP50",
+                            num_arr(
+                                [
+                                    (ps_by_t.get(t) or {}).get("decode_wait_p50", 0)
+                                    for t in tsec_vals
+                                ]
+                            ),
+                        ),
+                        "neutral",
+                    )
+                )
+            wait_max = max(
+                max((p.get("prefill_wait_p95", 0) or 0) for p in per_second),
+                max((p.get("decode_wait_p95", 0) or 0) for p in per_second),
+                1,
+            )
+            wait_cap = (
+                "x = 压测时间（s，1s 采样）；y = 引擎内等待（ms，出生秒"
+                "分桶）。prefill_wait = prefill_start − engine_arrival"
+                "（EnqueueBatch 准入 → 批开始执行，含 lane 排队）；"
+                "decode_wait = decode_start − engine_arrival（hand-off "
+                "到达 → 进 running slot）；ok 行按 rid join 引擎终态行"
+                "派生（幸存者口径），负值样本（时钟异常）已跳过；每秒"
+                "样本量见 prefill_wait_n / decode_wait_n"
+            )
+            latency_containers.append(
+                emit_container(
+                    "引擎内等待：prefill / decode（p50 / p95，出生轴）",
+                    wait_cap,
+                    emit_chart(
+                        "LineChart",
+                        TSEC,
+                        230,
+                        wait_series,
+                        suffix=" ms",
+                        domain="[0, " + num(nice_max(wait_max * 1.15)) + "]",
                     ),
                 )
             )
@@ -3916,8 +4012,13 @@ def main():
     # ttft/e2e 全程分位（聚合层自算，幸存者口径 = ok 行带值样本；
     # 与 per_second 图的每秒分位互补）：单键直读，缺失整行不显示
     # （full_e2e 行同例；no-backward-compat：ttft_ms / total_ms 旧键回退已删）。
+    # ttft（20260903 换血 engine 口径）：发出 → prefill 批完成（rid
+    # join）；ttft_latency_source 标记口径（新 aggregate 恒 "engine"，
+    # 照 schedule 双源标记模式）；无样本 None 或旧 client 口径全零
+    # dict（FETCH=0 下 latency_summary([]) 陷阱）均显示 "——零样本
+    # ≠ 真实 0；与历史 client 口径 ttft 断代不可比。
     ttft_sum = sm.get("ttft_latency_ms")
-    if ttft_sum:
+    if ttft_sum and ttft_sum.get("count"):
         _ttft_cell = (
             "p50 "
             + fmt_ms(ttft_sum.get("p50"))
@@ -3925,9 +4026,13 @@ def main():
             + fmt_ms(ttft_sum.get("p99"))
             + " ms"
         )
-        if ttft_sum.get("count"):
-            _ttft_cell += " · n=" + fmt_int_trunc(ttft_sum.get("count"))
+        _ttft_cell += " · n=" + fmt_int_trunc(ttft_sum.get("count"))
+        _ttft_src = sm.get("ttft_latency_source")
+        if _ttft_src:
+            _ttft_cell += " · 口径 " + str(_ttft_src)
         rows.append(["TTFT（全程）", _ttft_cell])
+    else:
+        rows.append(["TTFT（全程）", "—"])
     e2e_sum = sm.get("e2e_latency_ms")
     if e2e_sum:
         _e2e_cell = (
@@ -3957,6 +4062,36 @@ def main():
                 " · n=" + fmt_int_trunc(full_e2e_sum.get("count")) + "（按 rid 关联）"
             )
         rows.append(["全链路延迟（发出→decode 结束）", _fe_cell])
+    # P/D 引擎内等待全程分位（20260903）：prefill_wait = prefill_start
+    # − engine_arrival / decode_wait = decode_start − engine_arrival
+    # （rid join 派生，负值样本已跳过）。新 aggregate 才有；无样本
+    # /无键整行不显示（照 full_e2e 模式，不占位）。
+    pw_sum = sm.get("prefill_wait_latency_ms")
+    if pw_sum and pw_sum.get("count"):
+        rows.append(
+            [
+                "prefill 引擎内等待（全程）",
+                "p50 "
+                + fmt_ms(pw_sum.get("p50"))
+                + " / p99 "
+                + fmt_ms(pw_sum.get("p99"))
+                + " ms · n="
+                + fmt_int_trunc(pw_sum.get("count")),
+            ]
+        )
+    dw_sum = sm.get("decode_wait_latency_ms")
+    if dw_sum and dw_sum.get("count"):
+        rows.append(
+            [
+                "decode 引擎内等待（全程）",
+                "p50 "
+                + fmt_ms(dw_sum.get("p50"))
+                + " / p99 "
+                + fmt_ms(dw_sum.get("p99"))
+                + " ms · n="
+                + fmt_int_trunc(dw_sum.get("count")),
+            ]
+        )
     pcv = (ed.get("prefill") or {}).get("cv") if ed else None
     dcv = (ed.get("decode") or {}).get("cv") if ed else None
     p_tg = ed_p.get("tokens_gini_cum")
@@ -4114,8 +4249,6 @@ def main():
     lines.extend(table_lines)
 
     src_names = [os.path.basename(args.aggregate)]
-    if slo is not None:
-        src_names.append(os.path.basename(slo_path))
     if ed is not None:
         embedded = args.engine_dist is None and isinstance(agg.get("engine_dist"), dict)
         src_names.append(
@@ -4663,8 +4796,6 @@ def main():
         TAG
         + " inputs: aggregate="
         + os.path.basename(args.aggregate)
-        + " slo="
-        + ("yes" if slo is not None else "no")
         + " engine_dist="
         + ("yes" if ed is not None else "no")
     )

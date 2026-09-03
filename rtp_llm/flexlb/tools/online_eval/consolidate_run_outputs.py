@@ -23,12 +23,12 @@ Target layout (run root), one JSON + one log per component:
                              + prometheus_timeseries (per-second filtered
                              flexlb_app_*/JVM series) + inflight_timeseries
                              (per-second /rtp_llm/inflight_status JSONL)
-                             + master_info before/after + slo batch summary
+                             + master_info before/after snapshots
   master.log                 flexlb_logs/application.log (verbatim prefix) with
                              flexlb.log / sync.log / sync_consistency.log and the
                              run-root flexlb.log (master stdout) appended
-  client.json                server_latency.json + slo_batch_analysis.json
-                             embedded, plus per_request_source metadata
+  client.json                server_latency.json embedded, plus
+                             per_request_source metadata
                              (Phase B: no summary base — the load client
                              records raw rows only and aggregate_canvas_run.py
                              is the single derived-statistics source)
@@ -53,9 +53,9 @@ master_counters_timeseries.txt, mock_metrics_per_engine.prom,
 master_prometheus_timeseries.prom, master_inflight_timeseries.jsonl,
 process_usage_timeseries.txt, client_shard_*.stdout, client.stdout,
 flexlb.log (run root), flexlb_logs/ (minus pv.log), load_client/shard_*/,
-load_client/client_events.jsonl, slo_batch_analysis.stdout.
-load_client/slo_batch_analysis.json is deleted only once its content is
-embedded in client.json.
+load_client/client_events.jsonl. A legacy slo_batch_analysis.json left by
+pre-refactor runs is deleted as a stale leftover (the batch-decision
+analysis now lives in aggregate.json's batch_decisions section).
 
 Every artifact is written to a ``.tmp`` sibling first and then os.replace()d
 onto the final name, so an interrupted consolidation (kill, OOM, timeout)
@@ -63,11 +63,9 @@ never leaves a truncated file under a final name — the not-yet-deleted source
 files stay authoritative and a re-run rebuilds everything.
 
 The tool is idempotent and retro-runnable: re-running on an already
-consolidated directory is a no-op (a regenerated slo_batch_analysis.json only
-refreshes the slo_batch_summary keys, never blanks the merged one-shot
-fields), and running it on a legacy (pre-consolidation) directory yields the
-same layout. Missing inputs are skipped, never fatal, so the same code covers
-partial runs.
+consolidated directory is a no-op, and running it on a legacy
+(pre-consolidation) directory yields the same layout. Missing inputs are
+skipped, never fatal, so the same code covers partial runs.
 """
 
 from __future__ import annotations
@@ -440,33 +438,6 @@ def collect_per_request_sources(run_dir: Path, load_client: Path) -> list[Path]:
     return sources
 
 
-def build_slo_summary(slo: dict) -> dict:
-    """slo_batch_analysis.json -> the master.json slo_batch_summary fields."""
-    slo_decisions = (
-        slo.get("decisions", {}) if isinstance(slo.get("decisions"), dict) else {}
-    )
-    return {
-        "decisions_count": slo_decisions.get("count"),
-        "decision_reasons": slo_decisions.get("reasons", {}),
-        "invariant_violation_count": slo_decisions.get("invariant_violation_count"),
-        "completions_count": (
-            slo.get("completions", {}).get("count")
-            if isinstance(slo.get("completions"), dict)
-            else None
-        ),
-        "mock_stats_samples": (
-            slo.get("mock", {}).get("stats_samples")
-            if isinstance(slo.get("mock"), dict)
-            else None
-        ),
-        "test_valid": (
-            slo.get("master", {}).get("test_valid")
-            if isinstance(slo.get("master"), dict)
-            else None
-        ),
-    }
-
-
 def consolidate(
     run_dir: Path, params: dict[str, str], mock_http_port: int | None
 ) -> dict:
@@ -606,30 +577,7 @@ def consolidate(
         report["created"].append("mock.log")
 
     # ---- master.json / master.log ------------------------------------------
-    slo_path = load_client / "slo_batch_analysis.json"
-    slo = load_json(slo_path)
-    # SLO freshness gate: slo_batch_analysis.json is regenerable at any time
-    # by re-running analyze_slo_batch.py, so a stale leftover from an older
-    # run would silently poison slo_batch_summary. The analysis is only
-    # trusted when its mtime is >= the run's client_events.jsonl mtime (i.e.
-    # it was produced from THIS run's data; the JSON key keeps the legacy
-    # per_request_mtime name — canvas_report_gen.py renders it).
-    per_request_path = load_client / "client_events.jsonl"
-    slo_integrity = None
-    if slo_path.is_file() and per_request_path.is_file():
-        slo_mtime = slo_path.stat().st_mtime
-        per_request_mtime = per_request_path.stat().st_mtime
-        slo_integrity = {
-            "slo_mtime": slo_mtime,
-            "per_request_mtime": per_request_mtime,
-            "fresh": slo_mtime >= per_request_mtime,
-        }
     master_json_path = run_dir / "master.json"
-    # Idempotency considers ONE-SHOT sources only. The slo file can be
-    # regenerated at any time by re-running analyze_slo_batch.py after
-    # consolidation; treating it as a rebuild trigger would blank
-    # counters/prometheus/master_info (their sources are already merged away
-    # and unrecoverable). A fresh slo file only refreshes slo_batch_summary.
     master_one_shot_sources = [
         run_dir / "master_counters_timeseries.txt",
         run_dir / "master_prometheus_after.prom",
@@ -661,21 +609,9 @@ def consolidate(
             ),
             "master_info_before": load_json(run_dir / "master_info_before.json"),
             "master_info_after": load_json(run_dir / "master_info_after.json"),
-            "slo_batch_summary": build_slo_summary(slo) if slo else {},
-            "slo_integrity": slo_integrity,
         }
         write_json_atomic(master_json_path, master_payload)
         report["created"].append("master.json")
-    elif slo:
-        # Key-level incremental refresh: only slo_batch_summary tracks the
-        # freshly regenerated slo file; the merged one-shot fields stay put.
-        existing_master = load_json(master_json_path)
-        if existing_master:
-            existing_master["slo_batch_summary"] = build_slo_summary(slo)
-            if slo_integrity is not None:
-                existing_master["slo_integrity"] = slo_integrity
-            write_json_atomic(master_json_path, existing_master)
-            report["created"].append("master.json")
 
     master_log_sources: list[tuple[str, list[Path]]] = [
         (
@@ -806,8 +742,8 @@ def consolidate(
     # Phase B: load_client/summary.json no longer exists (the Java client
     # records raw rows only; aggregate_canvas_run.py is the single derived-
     # statistics source). client.json is now a small embedding document —
-    # server_latency + slo_batch_analysis + per_request_source — seeded from
-    # the existing client.json (re-run case) so merged-away sources survive.
+    # server_latency + per_request_source — seeded from the existing
+    # client.json (re-run case) so merged-away sources survive.
     client_payload = dict(load_json(run_dir / "client.json"))
     # server_latency.json is kept in place (aggregate validity input; the
     # skill's fetch_server_latency reads that exact path) but is still
@@ -817,8 +753,11 @@ def consolidate(
         client_payload["server_latency"] = server_latency
     elif not isinstance(client_payload.get("server_latency"), dict):
         client_payload["server_latency"] = {}
-    if slo:
-        client_payload["slo_batch_analysis"] = slo
+    # Legacy-key cleanup (20260903): the slo_batch_analysis.json embedding is
+    # gone — the batch-decision analysis now lives in aggregate.json's
+    # batch_decisions section. A stale embedded copy from a pre-refactor
+    # consolidation is dropped so client.json never carries dead weight.
+    client_payload.pop("slo_batch_analysis", None)
     if per_request_sources:
         client_payload["per_request_source"] = {
             "shard_count": len(per_request_sources),
@@ -855,9 +794,8 @@ def consolidate(
         report["created"].append("client.log")
 
     # ---- cleanup of merged sources -----------------------------------------
-    # Deletion is bound to successful merges: slo_batch_analysis.json is only
-    # removed once its content is embedded in client.json. server_latency.json
-    # stays in place entirely (aggregate validity input + skill
+    # Deletion is bound to successful merges; server_latency.json stays in
+    # place entirely (aggregate validity input + skill
     # fetch_server_latency contract).
     for name in (
         "master_info_before.json",
@@ -872,11 +810,16 @@ def consolidate(
         path = run_dir / name
         if path.is_file():
             deleted.append(path)
-    if slo:
-        deleted.append(slo_path)
-    slo_stdout = run_dir / "slo_batch_analysis.stdout"
-    if slo_stdout.is_file():
-        deleted.append(slo_stdout)
+    # Pre-refactor leftovers: the standalone SLO analysis script is gone
+    # (merged into aggregate_canvas_run.py's batch_decisions section), so its
+    # output files are stale by definition and get swept.
+    for name in ("slo_batch_analysis.json", "slo_batch_analysis.stdout"):
+        stale_path = run_dir / name
+        if stale_path.is_file():
+            deleted.append(stale_path)
+    stale_slo = load_client / "slo_batch_analysis.json"
+    if stale_slo.is_file():
+        deleted.append(stale_slo)
     for path in per_request_sources:
         if path.is_file():
             deleted.append(path)

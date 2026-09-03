@@ -30,6 +30,9 @@ from __future__ import annotations
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
+
+import grpc
 
 from ..context import CaseContext, CaseDef, rid_base
 from ..engine_ops import clear_type_all, engine_inflight_clean, inject_type_all
@@ -44,7 +47,19 @@ from ..harness import (
 CANCEL_CASES: list[CaseDef] = []
 
 
-def case(name: str, profiles=None, requires=None, source: str = ""):
+def case(
+    name: str,
+    profiles=None,
+    requires=None,
+    source: str = "",
+    expected_fail: bool = False,
+):
+    """Register into CANCEL_CASES (category is always "cancel").
+
+    ``expected_fail=True`` declares a declared-finding probe (task #101):
+    failing confirms the finding, passing resolves it — neither counts
+    toward failed_count / the suite verdict / the exit code."""
+
     def deco(fn):
         CANCEL_CASES.append(
             CaseDef(
@@ -54,6 +69,7 @@ def case(name: str, profiles=None, requires=None, source: str = ""):
                 profiles=profiles,
                 requires=requires,
                 source=source,
+                expected_fail=expected_fail,
             )
         )
         return fn
@@ -79,8 +95,9 @@ def _schedule_with_priority(ops, request_id: int, priority: int, **kwargs):
     """Schedule RPC carrying an explicit priority (proto field 14).
 
     EngineOps.build_schedule_request does not expose the priority kwarg
-    yet; the legacy flexlb_smoke_base._build_schedule_request proved the
-    proto carries it ("Priority must be carried by the schedule protocol;
+    yet; the legacy smoke client's schedule builder (since removed with the
+    rest of the smoke family) proved the proto carries it ("Priority must be
+    carried by the schedule protocol;
     embedding it only in unique_key metadata does not reach Auto-TPM
     admission").  Rather than widening engine_ops.py from the cancel
     category (other agents own the neighbouring modules), set the field
@@ -117,14 +134,92 @@ def _cancel_rpc_total(ops) -> int:
     )
 
 
+def _engine_cancel_receipt_within(
+    ops, rid: int, timeout_s: float = 5.0, since: Optional[float] = None
+) -> tuple[bool, str]:
+    """Engine-side cancel receipt within a tight propagation bound.
+
+    The master→engine cancel channel is a real gRPC wiring
+    (GrpcEngineCancelChannel), so the engine recording the rid in
+    cancelled_rids is a second-scale expectation.  The 95s TTL drain
+    window is a leak safety net, NOT an acceptable propagation path:
+    waiting "eventually" conflates a correct cancel with TTL-swept
+    cleanup — exactly where F1/F8-class findings hide (2026-09 eval
+    batch A timing-contract upgrade).  *since* anchors the clock at the
+    ops.cancel() issuance instant for callers whose poll starts after
+    intermediate waits; the measured receipt latency lands in the
+    detail.
+    """
+    t0 = time.monotonic() if since is None else since
+    detail = "no poll yet"
+    while True:
+        ok, detail = ops.verify_engine_cancelled(rid)
+        elapsed = time.monotonic() - t0
+        if ok:
+            if elapsed <= timeout_s:
+                return True, (
+                    f"{detail}, receipt={elapsed:.3f}s "
+                    f"(within {timeout_s:.0f}s propagation contract)"
+                )
+            # Receipt exists but landed outside the window — the
+            # TTL/fence sweep, not a timely cancel.
+            return False, (
+                f"{detail} but receipt={elapsed:.3f}s exceeds the "
+                f"{timeout_s:.0f}s propagation contract (TTL sweep is NOT "
+                "an acceptable cancel path)"
+            )
+        if elapsed >= timeout_s:
+            break
+        time.sleep(0.05)
+    return False, (
+        f"{detail}; no engine receipt within {timeout_s:.0f}s of cancel "
+        f"issuance ({time.monotonic() - t0:.3f}s elapsed) — TTL sweep is "
+        "NOT an acceptable cancel path"
+    )
+
+
+def _inflight_fingerprint(ops):
+    """Master inflight fingerprint: scheduler count + per-endpoint
+    (ip_port, inflight_batches, inflight_requests) rows.
+
+    Same construction as the status family's homonym (equal
+    fingerprints mean "no ledger mutation"); copied locally to keep the
+    cancel category decoupled from status.py (parallel edits, 2026-09
+    eval batch A).
+    """
+    data = ops.master_inflight()
+    if data is None:
+        return None
+
+    def ep_rows(eps) -> tuple:
+        rows = []
+        for ep in eps or []:
+            batches = ep.get("inflight_batches", 0)
+            counted = len(batches) if isinstance(batches, list) else int(batches)
+            rows.append(
+                (
+                    ep.get("ip_port", "?"),
+                    counted,
+                    int(ep.get("inflight_requests", 0) or 0),
+                )
+            )
+        return tuple(rows)
+
+    return (
+        int(data.get("scheduler_inflight", 0)),
+        ep_rows(data.get("prefill_endpoints")),
+        ep_rows(data.get("decode_endpoints")),
+    )
+
+
 # ===========================================================================
 # Cancel cases (cancel_smoke.py T1-T6, ported 1:1)
 # ===========================================================================
 
 
-@case("cancel_t1", source="cancel_smoke.py T1")
-def t1_basic_cancel(ctx: CaseContext):
-    """T1: mid-flight client Cancel terminates stream + engine state.
+@case("cancel_basic", source="cancel_smoke.py T1")
+def cancel_basic(ctx: CaseContext):
+    """Mid-flight client Cancel terminates stream + engine state.
 
     Scenario: one request is streaming its first outputs; the client
     issues the explicit Cancel RPC while the request is still running.
@@ -133,14 +228,18 @@ def t1_basic_cancel(ctx: CaseContext):
     dispatch the master walks the real GrpcEngineCancelChannel and the
     engine records the cancellation (cancelled_rids / lifecycle).
 
-    Expected (contract): stream terminates, engine-side cancel is
-    OBSERVED for NON_BATCH but CONTRACT-GUARANTEED for BATCH (the
-    production cancel channel is a real gRPC wiring, so the engine
-    seeing the cancel is not an implementation accident), master
-    inflight ledger drains, a follow-up request completes normally.
+    Expected (contract): stream terminates; engine-side cancel receipt
+    is OBSERVED for NON_BATCH but CONTRACT-GUARANTEED for BATCH with a
+    5s propagation bound (the cancel channel is a real gRPC wiring —
+    engine receipt within 5s of cancel issuance; the TTL sweep is NOT
+    an acceptable path); the master inflight ledger drains (asserted
+    for BATCH — fixed in the 2026-09 eval batch A: the docstring
+    previously promised more than the verdict checked); a follow-up
+    request completes normally.
 
-    Prediction: passes (t1-t6 kept engine verification observational
-    while the cancel channel wiring was under construction; the BATCH
+    Prediction: passes (the six legacy-ported cases kept engine
+    verification observational while the cancel channel wiring was under
+    construction; the BATCH
     hard assertion is the 2026-09 upgrade — see the family docstring).
     """
     ops = ctx.ops()
@@ -160,10 +259,18 @@ def t1_basic_cancel(ctx: CaseContext):
         ops.cancel(rid, response)
         ended = handle.wait_end(5.0)
         cancel_latency = time.monotonic() - cancel_at
+        # 修复（eval batch A + 时效契约）：BATCH 分支 engine 收证从"最终
+        # 出现"收紧为 cancel 发出后 5s 内出现——cancel 走真实 gRPC 通道
+        # 秒级应然；95s TTL 兜底把"正确取消"与"TTL 清理"混成同一通过态。
+        if response.enqueued_by_master:
+            engine_cancelled, cancel_detail = _engine_cancel_receipt_within(
+                ops, rid, timeout_s=5.0, since=cancel_at
+            )
+        else:
+            engine_cancelled, cancel_detail = ops.verify_engine_cancelled(rid)
         recovery_ok, recovery_msg = ops.verify_recovery()
         method = "enqueue_batch" if response.enqueued_by_master else "generate_stream"
         engine_recv, recv_detail = ops.verify_engine_received(rid, method)
-        engine_cancelled, cancel_detail = ops.verify_engine_cancelled(rid)
         if response.enqueued_by_master:
             inflight_ok, inflight_detail = AssertUtils.inflight_clean(
                 _master_http(ops), 10.0
@@ -171,10 +278,12 @@ def t1_basic_cancel(ctx: CaseContext):
         else:
             inflight_ok, inflight_detail = True, "N/A"
         # BATCH: engine cancellation is contract-guaranteed (real cancel
-        # channel wiring) — hard assertion.  NON_BATCH keeps the legacy
-        # client-driven worker-cancel path observational for compatibility.
+        # channel wiring) with the 5s propagation bound — hard assertion.
+        # 修复（eval batch A）：docstring 承诺的 master inflight ledger
+        # drains 进 passed（BATCH）；NON_BATCH 保持 observational（口径
+        # 限制见 family docstring）。
         if response.enqueued_by_master:
-            passed = ended and recovery_ok and engine_cancelled
+            passed = ended and recovery_ok and engine_cancelled and inflight_ok
         else:
             passed = ended and recovery_ok
         return passed, (
@@ -189,8 +298,8 @@ def t1_basic_cancel(ctx: CaseContext):
         return False, f"exception: {exc!r}"
 
 
-@case("cancel_t2", source="cancel_smoke.py T2")
-def t2_cancel_idempotency(ctx: CaseContext):
+@case("cancel_idempotent", source="cancel_smoke.py T2")
+def cancel_idempotent(ctx: CaseContext):
     ops = ctx.ops()
     rid = ops.next_request_id(rid_base(ctx, "cancel"))
     try:
@@ -204,7 +313,20 @@ def t2_cancel_idempotency(ctx: CaseContext):
         if not handle.wait_first_output():
             handle.cancel()
             return False, "no output received before cancel window"
+        # 修复（eval batch A）：以 engine 侧 Cancel RPC 计数
+        # （_cancel_rpc_total / snapshot rpc_counts.cancel）为收证口径——
+        # 二次 cancel 不重复触发 engine 取消正是本用例语义核心。
+        baseline_cancel = _cancel_rpc_total(ops)
+        first_cancel_at = time.monotonic()
         ops.cancel(rid, response)
+        # 时效契约：第一次 cancel 的 engine 收证须在 5s 内（BATCH）。
+        if response.enqueued_by_master:
+            engine_cancelled, cancel_detail = _engine_cancel_receipt_within(
+                ops, rid, timeout_s=5.0, since=first_cancel_at
+            )
+        else:
+            engine_cancelled, cancel_detail = ops.verify_engine_cancelled(rid)
+        first_cancel_delta = _cancel_rpc_total(ops) - baseline_cancel
         second_cancel_ok, second_cancel_err = True, ""
         try:
             ops.cancel(rid, response)
@@ -214,27 +336,48 @@ def t2_cancel_idempotency(ctx: CaseContext):
         recovery_ok, recovery_msg = ops.verify_recovery()
         method = "enqueue_batch" if response.enqueued_by_master else "generate_stream"
         engine_recv, recv_detail = ops.verify_engine_received(rid, method)
-        engine_cancelled, cancel_detail = ops.verify_engine_cancelled(rid)
+        # recovery 之后读取：二次 cancel 若错误地又触发 engine 取消，异步
+        # 转发已在 recovery 窗口内落地，此处计数已覆盖。
+        second_cancel_delta = (
+            _cancel_rpc_total(ops) - baseline_cancel - first_cancel_delta
+        )
         if response.enqueued_by_master:
             inflight_ok, inflight_detail = AssertUtils.inflight_clean(
                 _master_http(ops), 10.0
             )
         else:
             inflight_ok, inflight_detail = True, "N/A"
-        passed = second_cancel_ok and ended and recovery_ok
+        # 修复（eval batch A）：BATCH 分支升格 engine 收证（5s 时效）+
+        # 收证计数恰为 1（第二次 cancel 命中终态快照，不得再触发 engine
+        # 取消）；NON_BATCH 二次 cancel 直发 worker（幂等 NOT_FOUND），
+        # 计数断言不适用，保持现状。
+        if response.enqueued_by_master:
+            passed = (
+                second_cancel_ok
+                and ended
+                and recovery_ok
+                and engine_cancelled
+                and first_cancel_delta >= 1
+                and second_cancel_delta == 0
+            )
+        else:
+            passed = second_cancel_ok and ended and recovery_ok
         return passed, (
             f"second_cancel_ok={second_cancel_ok} {second_cancel_err}, "
             f"stream_terminated={ended}, "
             f"engine_recv={engine_recv}({recv_detail}), "
             f"engine_cancelled={engine_cancelled}({cancel_detail}), "
+            f"cancel_rpc_delta=first:{first_cancel_delta}/"
+            f"second:{second_cancel_delta}"
+            f"[{'hard' if response.enqueued_by_master else 'observational'}], "
             f"inflight_clean={inflight_ok}({inflight_detail}), recovery={recovery_msg}"
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
 
 
-@case("cancel_t3", source="cancel_smoke.py T3")
-def t3_multi_request_isolation(ctx: CaseContext):
+@case("cancel_sibling_isolation", source="cancel_smoke.py T3")
+def cancel_sibling_isolation(ctx: CaseContext):
     ops = ctx.ops()
     base = rid_base(ctx, "cancel")
     rids = [ops.next_request_id(base) for _ in range(3)]
@@ -264,8 +407,8 @@ def t3_multi_request_isolation(ctx: CaseContext):
                 # the leaked EnqueueBatch result sits in the engine's fetch
                 # queue and the master's inflight/ledger far past the 30s
                 # stale TTL (fence-quarantine family), poisoning later cases
-                # on the shared env (observed cascade: T3 leak ->
-                # kv_prefix_stickiness / balance_len_mixed /
+                # on the shared env (observed cascade: this case's leak
+                # -> kv_prefix_stickiness / balance_len_mixed /
                 # admission_gate_no_starvation failures in the batch-window
                 # full run, all solo-PASS). Cancel every scheduled sibling
                 # before failing the case; the streams were never opened, so
@@ -353,8 +496,8 @@ def t3_multi_request_isolation(ctx: CaseContext):
         return False, f"exception: {exc!r}"
 
 
-@case("cancel_t4", source="cancel_smoke.py T4")
-def t4_cancel_after_completion(ctx: CaseContext):
+@case("cancel_after_terminal", source="cancel_smoke.py T4")
+def cancel_after_terminal(ctx: CaseContext):
     ops = ctx.ops()
     rid = ops.next_request_id(rid_base(ctx, "cancel"))
     try:
@@ -387,37 +530,95 @@ def t4_cancel_after_completion(ctx: CaseContext):
             )
         else:
             inflight_ok, inflight_detail = True, "N/A"
-        passed = cancel_ok and recovery_ok
+        # 修复（eval batch A）：终态请求的 cancel 不应产生 engine 取消
+        # 动作（cancel_engine_notfound_settle 同契约已证可断）+ master
+        # 账本不被重开（inflight_ok；NON_BATCH 下恒 N/A 不放大失败面）。
+        passed = cancel_ok and recovery_ok and not engine_cancelled and inflight_ok
         return passed, (
             f"cancel_ok={cancel_ok} {cancel_err}, completed={handle.snap.completed}, "
             f"engine_recv={engine_recv}({recv_detail}), "
-            f"engine_cancelled={engine_cancelled}({cancel_detail}), "
+            f"engine_cancelled={engine_cancelled}({cancel_detail})"
+            "[expect False — terminal preserved], "
             f"inflight_clean={inflight_ok}({inflight_detail}), recovery={recovery_msg}"
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
 
 
-@case("cancel_t5", source="cancel_smoke.py T5")
-def t5_cancel_nonexistent(ctx: CaseContext):
+@case("cancel_unknown_rid", source="cancel_smoke.py T5")
+def cancel_unknown_rid(ctx: CaseContext):
+    """Cancel for a rid the master has never seen: typed NOT_FOUND, zero
+    ledger mutation.
+
+    Rewritten in the 2026-09 eval batch A: the legacy port only asserted
+    "the Cancel RPC did not raise" — nearly vacuous (any well-formed
+    gRPC error also satisfies it).  The real contract has two layers:
+
+      * response semantics: the master answers the unknown-rid Cancel
+        with a typed NOT_FOUND — either an OK response carrying
+        found=false (RequestRegistry has no slot for the rid) or a gRPC
+        NOT_FOUND status; any other outcome (a found=true hallucination,
+        INTERNAL/UNAVAILABLE/...) fails;
+      * ledger invariant: the master inflight fingerprint is
+        bit-identical before vs after the cancel (scheduler count +
+        every endpoint row — same construction as the status family's
+        _inflight_fingerprint, copied locally to avoid cross-category
+        import churn).
+    """
     ops = ctx.ops()
     try:
         fake_rid = 99999
-        cancel_ok, cancel_err = True, ""
+        # 清零基线（status_unknown_rid_finished 先例）：共享 env 的前序
+        # 残渣排空后，"逐位不变"才可观察。
+        clean0, clean0_detail = AssertUtils.inflight_clean(_master_http(ops), 20.0)
+        before = _inflight_fingerprint(ops)
+        semantics_ok, semantics_detail = False, "no attempt"
         try:
-            ops.cancel(fake_rid)
+            stub = ops.schedule_pb2_grpc.FlexlbServiceStub(
+                ops._channel(ops.master_target())
+            )
+            ack = stub.Cancel(
+                ops.schedule_pb2.FlexlbCancelRequestPB(
+                    request_id=fake_rid,
+                    reason=ops.schedule_pb2.CANCEL_REASON_CLIENT_CANCELLED,
+                ),
+                timeout=10.0,
+            )
+            if not ack.found:
+                semantics_ok = True
+                semantics_detail = "typed NOT_FOUND (found=false)"
+            else:
+                semantics_detail = (
+                    f"found=true for unknown rid={fake_rid} "
+                    f"(lifecycle={ack.lifecycle})"
+                )
+        except grpc.RpcError as exc:
+            if exc.code() == grpc.StatusCode.NOT_FOUND:
+                semantics_ok = True
+                semantics_detail = "gRPC NOT_FOUND status"
+            else:
+                semantics_detail = f"gRPC {exc.code()}: {exc.details()}"
         except Exception as exc:
-            cancel_ok, cancel_err = False, repr(exc)
-        return cancel_ok, (
-            f"cancel(rid={fake_rid}) ok={cancel_ok} {cancel_err}, "
-            f"engine_verify=N/A (nonexistent request)"
+            semantics_detail = repr(exc)
+
+        after = _inflight_fingerprint(ops)
+        # 修复（eval batch A）：两层真断言——响应语义（NOT_FOUND 或幂等
+        # found=false，其它 gRPC 状态皆 fail）+ 账本指纹逐位不变。
+        ledger_unchanged = before is not None and after is not None and before == after
+        passed = clean0 and semantics_ok and ledger_unchanged
+        return passed, (
+            f"cancel(rid={fake_rid}): semantics={semantics_ok}"
+            f"({semantics_detail}), "
+            f"baseline_clean={clean0}({clean0_detail}), "
+            f"ledger_unchanged={ledger_unchanged} "
+            f"(before={before}, after={after})"
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
 
 
-@case("cancel_t6", source="cancel_smoke.py T6")
-def t6_cancel_at_prefill_vs_decode(ctx: CaseContext):
+@case("cancel_phase_timing", source="cancel_smoke.py T6")
+def cancel_phase_timing(ctx: CaseContext):
     ops = ctx.ops()
     base = rid_base(ctx, "cancel")
     try:
@@ -432,8 +633,16 @@ def t6_cancel_at_prefill_vs_decode(ctx: CaseContext):
         handle_a = ops.start_stream(resp_a, rid_a, input_pb=input_pb_a)
         time.sleep(0.1)
         a_in_prefill = not handle_a.snap.first_received
+        a_cancel_at = time.monotonic()
         ops.cancel(rid_a, resp_a)
         a_ended = handle_a.wait_end(5.0)
+        # 时效契约：A 的 engine 收证须在 A cancel 发出后 5s 内（BATCH）。
+        if resp_a.enqueued_by_master:
+            engine_cancelled_a, cancel_detail_a = _engine_cancel_receipt_within(
+                ops, rid_a, timeout_s=5.0, since=a_cancel_at
+            )
+        else:
+            engine_cancelled_a, cancel_detail_a = ops.verify_engine_cancelled(rid_a)
 
         # B: cancel in decode phase (after first output)
         rid_b = ops.next_request_id(base)
@@ -448,16 +657,22 @@ def t6_cancel_at_prefill_vs_decode(ctx: CaseContext):
         if not b_got_first:
             handle_b.cancel()
             return False, "B never received first output (decode phase)"
+        b_cancel_at = time.monotonic()
         ops.cancel(rid_b, resp_b)
         b_ended = handle_b.wait_end(5.0)
+        # 时效契约：B 的 engine 收证须在 B cancel 发出后 5s 内（BATCH）。
+        if resp_b.enqueued_by_master:
+            engine_cancelled_b, cancel_detail_b = _engine_cancel_receipt_within(
+                ops, rid_b, timeout_s=5.0, since=b_cancel_at
+            )
+        else:
+            engine_cancelled_b, cancel_detail_b = ops.verify_engine_cancelled(rid_b)
 
         recovery_ok, recovery_msg = ops.verify_recovery()
         method_a = "enqueue_batch" if resp_a.enqueued_by_master else "generate_stream"
         method_b = "enqueue_batch" if resp_b.enqueued_by_master else "generate_stream"
         engine_recv_a, _ = ops.verify_engine_received(rid_a, method_a)
-        engine_cancelled_a, _ = ops.verify_engine_cancelled(rid_a)
         engine_recv_b, _ = ops.verify_engine_received(rid_b, method_b)
-        engine_cancelled_b, _ = ops.verify_engine_cancelled(rid_b)
         if resp_a.enqueued_by_master or resp_b.enqueued_by_master:
             inflight_ok, inflight_detail = AssertUtils.inflight_clean(
                 _master_http(ops), 10.0
@@ -465,14 +680,24 @@ def t6_cancel_at_prefill_vs_decode(ctx: CaseContext):
         else:
             inflight_ok, inflight_detail = True, "N/A"
 
+        # 修复（eval batch A）：engine 收证（5s 时效契约）与 master 账本
+        # 排空升格进 passed——BATCH 分支按各自交付模式断言。
         passed = a_ended and b_ended and a_in_prefill and recovery_ok
+        if resp_a.enqueued_by_master:
+            passed = passed and engine_cancelled_a
+        if resp_b.enqueued_by_master:
+            passed = passed and engine_cancelled_b
+        if resp_a.enqueued_by_master or resp_b.enqueued_by_master:
+            passed = passed and inflight_ok
         return passed, (
             f"A_prefill_phase={a_in_prefill}, A_terminated={a_ended}, "
             f"A_outputs={len(handle_a.snap.outputs)}, "
             f"B_decode_phase={b_got_first}, B_terminated={b_ended}, "
             f"B_outputs={len(handle_b.snap.outputs)}, "
-            f"engine_recv_A={engine_recv_a}, engine_cancel_A={engine_cancelled_a}, "
-            f"engine_recv_B={engine_recv_b}, engine_cancel_B={engine_cancelled_b}, "
+            f"engine_recv_A={engine_recv_a}, "
+            f"engine_cancel_A={engine_cancelled_a}({cancel_detail_a}), "
+            f"engine_recv_B={engine_recv_b}, "
+            f"engine_cancel_B={engine_cancelled_b}({cancel_detail_b}), "
             f"inflight_clean={inflight_ok}({inflight_detail}), recovery={recovery_msg}"
         )
     except Exception as exc:
@@ -490,7 +715,7 @@ def t6_cancel_at_prefill_vs_decode(ctx: CaseContext):
     "cancel_anomaly_path",
     source="anomaly_smoke.py E1",
 )
-def e1_cancel_path(ctx: CaseContext):
+def cancel_anomaly_path(ctx: CaseContext):
     ops = ctx.ops()
     rid = ops.next_request_id(rid_base(ctx, "cancel"))
     try:
@@ -738,9 +963,9 @@ def cancel_engine_notfound_settle(ctx: CaseContext):
     rewrite); the master inflight ledger stays clean (nothing re-opened);
     a follow-up request completes normally.
 
-    Prediction: passes (t4 already covers the master-idempotent half;
-    the engine NOT_FOUND branch is the mock's documented three-branch
-    cancel semantics).
+    Prediction: passes (cancel_after_terminal already covers the
+    master-idempotent half; the engine NOT_FOUND branch is the mock's
+    documented three-branch cancel semantics).
     """
     ops = ctx.ops()
     rid = ops.next_request_id(rid_base(ctx, "cancel"))
@@ -835,8 +1060,8 @@ def cancel_preemption_victim(ctx: CaseContext):
     went out); the P70 request completes normally once the slot frees;
     the master inflight ledger drains with no leak; recovery works.
 
-    Prediction: expected to pass — this is the priority_preemption_smoke
-    scenario (RUNNING decode victim, batch default) ported onto the
+    Prediction: expected to pass — this is the legacy priority-preemption
+    smoke scenario (RUNNING decode victim, batch default) ported onto the
     flexlb_ft framework; capacity here comes from maxEngineRequests=1
     instead of the smoke line's KV pressure so the eviction trigger is
     deterministic.  Priority rides the Schedule proto's priority field
