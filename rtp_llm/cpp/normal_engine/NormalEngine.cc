@@ -143,8 +143,8 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                                 "pipeline parallelism does not support multi-task system prompts");
         RTP_LLM_CHECK_WITH_INFO(!deviceInputEnabled(),
                                 "pipeline parallelism does not support device-input mode (RTP_LLM_DEVICE_INPUT)");
-        RTP_LLM_CHECK_WITH_INFO(!model_config_.mm_model_config.is_multimodal,
-                                "pipeline parallelism does not support multimodal models");
+        // Multimodal + PP is gated python-side by BaseModel.support_pp(); the
+        // engine transport (plan broadcast) carries mm features natively.
     }
     if (!model_config_.output_vocab_ids.empty()) {
         RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE && !propose_params_,

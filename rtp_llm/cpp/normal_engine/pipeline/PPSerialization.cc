@@ -1,8 +1,8 @@
-// Placeholder implementation, provided solely to unblock integration testing:
-// PPSerialization.h shipped without a .cc, leaving undefined symbols in
-// libth_transformer.so. The PP transport owner may delete this file and
-// replace it with the official implementation, as long as the contract in
-// PPSerialization.h (consumed by PPExecutor/PPTransport) is preserved.
+// Binary serialization for the PP transport payloads: execution plans
+// (leading stage -> all stages), execution results (last stage -> leading
+// stage), and intermediate tensor metadata (adjacent stages). Sender and
+// receiver compile from the same source tree, so kVersion guards against
+// mixed builds and corrupted payloads rather than rolling upgrades.
 
 #include "rtp_llm/cpp/normal_engine/pipeline/PPSerialization.h"
 
