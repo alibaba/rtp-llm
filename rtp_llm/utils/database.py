@@ -4,7 +4,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Callable, Dict, Generator, List, Optional
 
 import torch
 from tqdm.auto import tqdm
@@ -267,14 +267,14 @@ class CkptDatabase(BaseDatabase):
         device: str,
         use_tqdm_on_load: bool,
         stacked_key_config: Optional[Dict[str, str]] = None,
+        local_copyout_filter: Optional[Callable[[str], bool]] = None,
     ):
-        from fastsafetensors import ParallelLoader, SingleGroup
+        from fastsafetensors import AutoLoader, SingleGroup
 
-        from rtp_llm.model_loader.per_expert_parallel_loader import (
-            PerExpertParallelLoader,
-        )
+        # Progress and buffering are configured by the pinned wrapper.
+        del use_tqdm_on_load
 
-        def iterator(device: str, use_tqdm_on_load: bool):
+        def iterator(device: str):
             if torch.distributed.is_initialized():
                 pg = torch.distributed.group.WORLD
             else:
@@ -287,31 +287,28 @@ class CkptDatabase(BaseDatabase):
                 device = f"cuda:{pg.rank()}"
                 logging.debug(f"origin device is cuda, set to {device}")
 
-            # FASTSAFETENSORS_NOGDS=1 forces the 'nogds' copier (skips the
-            # fast_safetensors C++ extension), needed when the patched
-            # 0.1.20+ali wheel is installed without the underscore-named
-            # native helper (e.g. dev environments where torch ABI does not
-            # match the prebuilt fast_safetensors).
-            use_nogds = os.environ.get("FASTSAFETENSORS_NOGDS", "0") == "1"
-            loader_kwargs: Dict[str, Any] = dict(
-                pg=pg,
-                hf_weights_files=hf_weights_files,
-                use_tqdm_on_load=use_tqdm_on_load,
+            loader = AutoLoader(
+                pg,
+                hf_weights_files,
                 device=device,
-                bbuf_size_kb=1024 * 1024 * 2,
-                use_shm=not use_nogds,
-                nogds=use_nogds,
+                local_copyout_filter=local_copyout_filter,
+                stacked_moe_tensors=stacked_key_config,
             )
-            if stacked_key_config:
-                loader = PerExpertParallelLoader(stacked_key_config, **loader_kwargs)
-            else:
-                loader = ParallelLoader(**loader_kwargs)
             try:
                 yield from loader.iterate_weights()
-            finally:
-                loader.loader.close()
+            except BaseException:
+                try:
+                    loader.close()
+                except BaseException:
+                    logging.warning(
+                        "FastSafeTensors close failed while preserving active error",
+                        exc_info=True,
+                    )
+                raise
+            else:
+                loader.close()
 
-        return iterator(device, use_tqdm_on_load)
+        return iterator(device)
 
     def get_lora_tensor_names(self, config_name: str) -> List[str]:
         return self.lora_ckpt.get_lora_tensor_names(config_name)
