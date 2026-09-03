@@ -165,4 +165,14 @@ public:
             }
         }
     }
+
+    void runPrunedVocabV2Tests() {
+        const int batch_size  = 1;
+        const int beam_width  = 1500;
+        const int vocab_size  = 2048;
+        const int max_seq_len = 16;
+
+        variableBeamWidthTest(batch_size, 1, beam_width, vocab_size, max_seq_len);
+        simpleTest(batch_size, beam_width, vocab_size, max_seq_len);
+    }
 };

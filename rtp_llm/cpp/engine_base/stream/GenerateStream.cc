@@ -25,6 +25,8 @@ namespace rtp_llm {
 
 namespace {
 
+constexpr size_t kSmallBeamSearchV1MaxBeamWidth = 8;  // Keep in sync with trt_beam_search kMaxBeamWidthForV1.
+
 std::optional<std::string> validateOutputVocabRequest(GenerateConfig& config, size_t output_vocab_size) {
     if (config.repetition_penalty != 1.0f || config.presence_penalty != 0.0f || config.frequency_penalty != 0.0f) {
         return "output vocabulary pruning does not support active repetition, presence, or frequency penalties";
@@ -39,8 +41,15 @@ std::optional<std::string> validateOutputVocabRequest(GenerateConfig& config, si
         || config.calculate_loss != 0 || !config.select_tokens_id.empty() || !config.select_tokens_str.empty()) {
         return "output vocabulary pruning does not support full-vocabulary logits, probabilities, labels, or loss";
     }
-    if (config.hasNumBeams() && output_vocab_size <= 2 * static_cast<size_t>(config.maxNumBeams())) {
-        return "output vocabulary size must be greater than twice the maximum beam width";
+    if (config.hasNumBeams()) {
+        const size_t max_num_beams = static_cast<size_t>(config.maxNumBeams());
+        if (output_vocab_size < max_num_beams) {
+            return "output vocabulary size must be at least the maximum beam width";
+        }
+        if (config.variable_num_beams.empty() && max_num_beams <= kSmallBeamSearchV1MaxBeamWidth
+            && output_vocab_size <= 2 * max_num_beams) {
+            return "output vocabulary size must be greater than twice the maximum beam width for small-beam search";
+        }
     }
     return std::nullopt;
 }
