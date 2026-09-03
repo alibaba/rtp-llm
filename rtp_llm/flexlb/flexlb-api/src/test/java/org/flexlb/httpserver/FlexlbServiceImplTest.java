@@ -569,6 +569,38 @@ class FlexlbServiceImplTest {
     }
 
     @Test
+    void newSessionInvalidatesPlacementBeforeRandomRouting() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        FlexlbConfig randomConfig = new FlexlbConfig();
+        randomConfig.getRouter().getRoles().getPrefill()
+                .setSelector(new org.flexlb.config.RoutingConfig.RandomPrefillSelectorConfig());
+        when(configService.loadBalanceConfig()).thenReturn(randomConfig);
+        when(sessionPlacementStore.resetIfPresent("kimi-k3", "isess_v1_example"))
+                .thenReturn(7L);
+        ArgumentCaptor<BalanceContext> contextCaptor =
+                ArgumentCaptor.forClass(BalanceContext.class);
+        Response response = new Response();
+        response.setSuccess(false);
+        when(routeService.route(contextCaptor.capture()))
+                .thenReturn(CompletableFuture.completedFuture(response));
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(100_007L)
+                        .setModel("kimi-k3")
+                        .setSessionRoutingHint(FlexlbScheduleProtocol.SessionRoutingHintPB
+                                .newBuilder()
+                                .setSchemaVersion(1)
+                                .setSessionId("isess_v1_example")
+                                .setState(FlexlbScheduleProtocol.SessionStatePB.SESSION_STATE_NEW))
+                        .build();
+
+        service.schedule(request, mock(StreamObserver.class));
+
+        verify(sessionPlacementStore).resetIfPresent("kimi-k3", "isess_v1_example");
+        assertEquals(7L, contextCaptor.getValue().getRequest().getSessionPlacementEpoch());
+    }
+
+    @Test
     void testSchedule_missingSessionHintKeepsAffinityDisabled() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
         Response response = new Response();
