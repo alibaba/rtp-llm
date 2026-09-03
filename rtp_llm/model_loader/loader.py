@@ -266,10 +266,17 @@ class ModelLoader:
             / (1024.0**2)
         )
         max_file_mem = max_file_size / (1024.0**2)
-        logging.debug(
-            f"free mem: {free_mem}, model mem: {model_mem}, max file mem: {max_file_mem}"
+        # Empirical reserve for RTP TensorCollector inputs overlapping final
+        # weight materialization. Revisit after model-level peak measurements.
+        rtp_reserve_mem = 2 * 1024
+        transient_mem = 3 * max_file_mem + rtp_reserve_mem
+        logging.info(
+            f"fastsafetensor memory check: free_mem={free_mem:.0f}MB, "
+            f"model_mem={model_mem:.0f}MB, max_file_mem={max_file_mem:.0f}MB, "
+            f"rtp_reserve_mem={rtp_reserve_mem:.0f}MB, "
+            f"enough={(free_mem - model_mem) > transient_mem}"
         )
-        return (free_mem - model_mem) > (3 * max_file_mem)
+        return (free_mem - model_mem) > transient_mem
 
     @staticmethod
     def _build_stacked_key_config(weight_info_list) -> dict:
@@ -303,6 +310,7 @@ class ModelLoader:
             device,
             True,
             stacked_key_config=stacked_key_config,
+            local_copyout_filter=tensor_to_weight_map.__contains__,
         )
 
         for key, loaded_tensor in all_tensors:
