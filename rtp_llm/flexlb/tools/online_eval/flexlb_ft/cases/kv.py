@@ -24,7 +24,7 @@ category-reorg migrations:
 
   storm / capacity
     kv_storm_hot_churn             rotating hot prefixes vs a small LRU
-                                   (FINDING case — see its docstring)
+                                   (graded replication-band case)
     kv_capacity_conflict_overflow  affinity yields to a full ledger
     kv_decode_capacity_park        every decode KV-exhausted -> the
                                    request parks; Cancel releases it
@@ -123,6 +123,18 @@ STORM_WINDOW = 5
 STORM_WINDOWS = 10
 STORM_CAPACITY_BLOCKS = 24
 STORM_FLIP_BOUND = 8 * STORM_WINDOWS  # anti ping-pong bound (TODO calibrate)
+# Average replication-factor bands (per-family prefill holder count
+# mean; P5 case override — the KV-redundancy caliber, upper bound).
+# Calibration (decode=512 dress rehearsal, 2 prefills): mean 1.125,
+# steady-state 1.5, max 2 (= the 2-prefill structural ceiling), flips 7,
+# M3 0.86, 50/50 requests OK — the mean sits ~8.6 sigma below the
+# normal tier, so strict 1.5 IS the steady-state mode and loose 2.0 is
+# the 2-of-4-family double-hold saturation line (every family
+# double-held).  The band guards the FAKE-FIX direction: repairing hit
+# rate by replicating everywhere (admission control gone) trades KV
+# footprint for nothing.  CAVEAT: n=1 calibration run — re-check (and
+# tighten) from multi-run regression data before trusting strict.
+STORM_REPLICATION_BANDS = {"strict": 1.5, "normal": 1.75, "loose": 2.0}
 # Capacity-conflict shape: a 40-block family keeps the seed's hit share
 # above minPrefixHitPercent even against a 147456-token seqLen
 # (40960 / 147456 = 27.8% >= 20%).
@@ -1336,38 +1348,46 @@ def kv_g_engine_down_cleanup(ctx: CaseContext):
 @case(
     "kv_storm_hot_churn",
     source="kv family: hot-prefix churn storm vs small LRU (task #84)",
-    expected_fail=True,
 )
 def kv_storm_hot_churn(ctx: CaseContext):
-    """[storm] Rotating hot prefixes vs a small LRU — FINDING case.
+    """[storm] Rotating hot prefixes vs a small LRU — graded
+    replication-band case.
 
     Scenario: 4 hot families (10 blocks each = 40 hot blocks) rotate
     one per window (5 requests/window, 10 windows = 50 requests) while
     each engine's LRU holds only 24 blocks — every rotation must evict
     yesterday's hot family somewhere.  Behaviour: churn-driven
-    replication and the master index's stability under it.  Expected
-    (contract): (a) the REPLICATION FACTOR (holders per family via
-    cache_key_set) stays bounded — first run is OBSERVATION-MODE,
-    recorded not asserted, TODO calibrate a band (<= 2 to start);
-    (b) holder FLIPS stay within the traffic-driven bound (an
-    unbounded ping-pong means sync thrash); (c) the hit-tier
-    concentration M3 keeps >= loose (a request counts as hit-served
-    when its landing engine already held the family's contiguous
-    prefix, >= 8 blocks).  Prediction: EXPECTED TO FAIL — nothing
-    suppresses replication, so every miss re-admits the family onto a
-    second engine, the doubled footprint accelerates self-eviction
-    and the hit rate collapses; THAT COLLAPSE IS THE FINDING (no
-    replication suppression / admission control in the KV sync
-    layer), not a flake to retry away.
+    replication and the master index's stability under it.  Contract:
+    (a) the AVERAGE REPLICATION FACTOR (per-family prefill holder
+    count mean, via cache_key_set) stays inside the calibrated band
+    (strict/normal/loose = 1.5/1.75/2.0 — see STORM_REPLICATION_BANDS)
+    with a hard structural cap max_replication <= n_prefill; (b)
+    holder FLIPS stay within the traffic-driven bound (an unbounded
+    ping-pong means sync thrash); (c) the hit-tier concentration M3
+    keeps >= loose (a request counts as hit-served when its landing
+    engine already held the family's contiguous prefix, >= 8 blocks).
 
-    Expected-fail marking (task #101): the hit-rate collapse is the
-    DECLARED finding, so the case is marked expected_fail — a failure
-    classifies as finding-confirmed (the finding stands, exit 0), an
-    unexpected pass as finding-resolved (replication suppression /
-    admission control landed; review the mark).  The M3/P6 grade
-    report still records the achieved bands as finding evidence, but
-    its achieved grade is EXCLUDED from the suite verdict roll-up
-    (grade.py task #101 contract).
+    Prediction (post the env reporting-caliber fix): the kv env's
+    decode pool (decode_cache_blocks=4 -> 4096 tokens) is now
+    REPORTED at its real size, so the master's used/total math no
+    longer reads 99.9% on it and the decode fleet does not park —
+    P6/flips/M3 all pass and the replication band is the only
+    potential trip point (calibration mean 1.125 sits deep inside
+    strict).  The pre-fix "hit rate collapse" prediction was an
+    artifact of the mis-reported total (structurally parked decodes
+    starve everything downstream), not a real replication blow-up.
+
+    Promotion from expected-fail (task #101 -> graded): the declared
+    finding ("no replication suppression in the KV sync layer ->
+    hit-rate collapse") did not survive calibration — replication is
+    healthy (mean 1.125, steady-state 1.5, max = the 2-prefill
+    structural ceiling, M3 0.86 >= loose) — so the case is a regular
+    graded case now and its achieved grade rolls into the suite
+    verdict again.  The band polices the FAKE-FIX direction: a hit
+    rate repaired by replicating everywhere (admission control gone)
+    parks KV footprint for no throughput.  The replication
+    distribution / flips / M3 numbers stay in the case detail as
+    evidence either way.
     """
     env = ctx.env_manager.ensure(
         _kv_spec(ctx, "_storm", prefill_cache_blocks=STORM_CAPACITY_BLOCKS)
@@ -1424,19 +1444,26 @@ def kv_storm_hot_churn(ctx: CaseContext):
                 flips += sum(1 for k in cur if cur[k] != prev_hold.get(k))
             prev_hold = cur
 
-        # -- replication factor: OBSERVATION-MODE this round (spec):
-        #    record the per-family holder-count distribution, assert
-        #    nothing yet.  TODO(calibrate): band <= 2 to start once the
-        #    distribution is known (meaningful at 3+ engines; with 2 it
-        #    saturates trivially).
+        # -- replication factor: calibrated band (STORM_REPLICATION_BANDS)
+        #    on the per-family MEAN, plus a hard structural cap
+        #    max <= n_prefill.  With 2 prefills the cap is trivially
+        #    saturated (max <= 2 always) and carries NO statistical
+        #    power — it is a pure regression hard-hat for the
+        #    n_prefill >= 3 fleet, where max > n_prefill would mean a
+        #    holder-index accounting bug rather than traffic-driven
+        #    replication.
         replication = {
             f: sum(1 for n in names if prev_hold.get((n, f)))
             for f in range(STORM_FAMILIES)
         }
         max_replication = max(replication.values()) if replication else 0
+        mean_replication = (
+            sum(replication.values()) / len(replication) if replication else 0.0
+        )
 
         hit_rate = m3_hits / m3_total if m3_total else 0.0
         flips_ok = flips <= STORM_FLIP_BOUND
+        max_repl_ok = max_replication <= len(names)
         report.invariant("P6", not failures, detail=f"failures={failures[:2]}")
         report.check(
             "M3",
@@ -1447,14 +1474,26 @@ def kv_storm_hot_churn(ctx: CaseContext):
                 f"(<= {STORM_FLIP_BOUND}), replication={replication}"
             ),
         )
+        report.check(
+            "P5",
+            mean_replication,
+            context="storm_replication",
+            bands=STORM_REPLICATION_BANDS,
+            detail=(
+                f"replication={replication}, max={max_replication}"
+                f"/{len(names)} (hard cap), flips={flips}"
+            ),
+        )
         passed, detail, rep = report.finish(
             f"windows={STORM_WINDOWS}, grades: {report.summary()}"
         )
         return (
-            passed and flips_ok,
+            passed and flips_ok and max_repl_ok,
             f"flips={flips} (bound {STORM_FLIP_BOUND}, ok={flips_ok}), "
-            f"max_replication={max_replication} (observation-mode, "
-            f"TODO band), {detail}",
+            f"mean_replication={mean_replication:.3f} "
+            f"(bands {STORM_REPLICATION_BANDS}), "
+            f"max_replication={max_replication}/{len(names)} (hard cap, "
+            f"ok={max_repl_ok}), {detail}",
             rep,
         )
     except Exception as exc:

@@ -267,11 +267,12 @@ public final class JavaMockEngineCluster {
         EngineRpcService.RoleTypePB roleType = "decode".equalsIgnoreCase(roleName)
                 ? EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE
                 : EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL;
-        // Per-role KV pool sizing (capacity model v2): totalKvTokens decides the
-        // reported token capacity, the pool itself is sized in blocks
-        // (ceil(total/spb)); --prefill-cache-blocks/--decode-cache-blocks override
-        // the block count directly (legacy flags repurposed from key-count caps
-        // to pool-size overrides so the load scripts keep working unchanged).
+        // Per-role KV pool sizing (capacity model v2): the pool is sized in
+        // blocks — ceil(totalKvTokens/spb), or the --prefill-cache-blocks/
+        // --decode-cache-blocks override (legacy flags repurposed from
+        // key-count caps to pool-size overrides so the load scripts keep
+        // working unchanged) — and the REPORTED token capacity always equals
+        // the pool actually built (totalBlocks x spb).
         long roleTotalKvTokens = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
                 ? config.prefillTotalKvTokens : config.decodeTotalKvTokens;
         int blocksOverride = roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
@@ -280,10 +281,23 @@ public final class JavaMockEngineCluster {
         int totalBlocks = blocksOverride > 0
                 ? blocksOverride
                 : (int) ((roleTotalKvTokens + spb - 1) / spb);
+        // The master-facing total must track the pool the engine actually
+        // built: production engines report the allocator's REAL capacity
+        // (totalBlocks x blockSize), and every reporting surface here
+        // (getCacheStatus.totalKvCache / getWorkerStatus.totalKvCache /
+        // /snapshot total_kv_tokens) derives from this one value.  Passing
+        // the raw config token number while a --*-cache-blocks override
+        // shrinks the pool left the master computing used = total -
+        // available ~= 99.9% on a 4-block decode pool -> every decode
+        // engine read as KV-full and the whole KV family structurally
+        // parked.  Token configs that do not divide by spb report the
+        // ceil-aligned blocks x spb for the same reason — the pool IS the
+        // allocator truth.
+        long poolTotalKvTokens = (long) totalBlocks * spb;
         FastRpcService service = new FastRpcService(
                 engineName, declaredHost(config, engineIndex), roleName, roleType, grpcPort,
                 services, scheduler, performance, totalBlocks, stats,
-                roleTotalKvTokens, config.decodeMaxConcurrency);
+                poolTotalKvTokens, config.decodeMaxConcurrency);
         service.setResponsePollTimeoutMs(DEFAULT_RESPONSE_POLL_TIMEOUT_MS);
         services.put(grpcPort, service);
         try {
@@ -3144,8 +3158,10 @@ public final class JavaMockEngineCluster {
 
         /**
          * Master-facing available tokens: pool availability clamped to the reported
-         * total, minus injected KV pressure. The clamp keeps total/spb non-divisible
-         * configs reporting at most totalKvTokens when idle (legacy compatibility).
+         * total, minus injected KV pressure.  The total is pool-aligned at
+         * construction (totalBlocks x spb), so the clamp is a structural guard
+         * (pool availability never exceeds the pool) that keeps the
+         * available <= total invariant explicit on every reporting surface.
          */
         private long availableKvTokens() {
             return Math.max(0L,
