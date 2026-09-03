@@ -274,6 +274,28 @@ cache 结果必须以 `cache_len_observed` 为准。请求的 cache 长度可能
 
 建议每个结果 JSON 顶层同时记录：`model_id`、代码 commit、完整 argv、关键 env 的脱敏 hash、GPU 型号、`max_seq_len`、`max_batch_tokens_size`、测量轮数、grid 文件 SHA。没有这些 provenance，结果只能用于临时排查，不能拿去拟合或横向比较。
 
+### 专用 cache runner 的实际位置
+
+这一点不能靠默认入口推断：标准 `GridRunner` 没有 cache 维度。本轮带 cache 的临时 runner 实际放在：
+
+```text
+/tmp/cache_grid_runner.remote.py
+```
+
+它提供 `PrefixPromptFactory` 和 `CacheGridRunner`，流程是“写入唯一 prefix → 发起带相同 prefix 的 continuation → 读取 `aux_info.reuse_len` → 保存三轮 RT”。配套的临时入口是：
+
+```text
+/tmp/batch_decode_test.remote.py
+```
+
+其中 `--cache_grid_json` 指向显式的 `input_len × cache_len` case 文件，`--cache_measure_runs=3` 控制每个 geometry 的测量次数，结果文件为：
+
+```text
+$RESULT_DIR/cache_grid_results.json
+```
+
+需要特别说明：这两个 `/tmp` 文件不是当前 Git 分支里的受版本控制文件，机器重启或清理临时目录后可能消失。因此它们只能解释历史结果，不能作为正式交接依赖。正式交接前应把 runner 和入口纳入目标分支，并为其补一个 Bazel target；在此之前，接手人不能只按本手册第 6 节的标准 target 完成 cache-hit 测试。
+
 ## 8. 运行时监控和停机
 
 启动后至少每 30 秒看一次：
