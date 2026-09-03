@@ -26,10 +26,11 @@ from rtp_llm.ops.compute_ops import (
 # Pad max_q_len / max_kv_len to this minimum so the dispatch selects flash kernels.
 _TRTLLM_FMHA_V2_MIN_SEQ_LEN = 16
 
-# This interface uses persistent CTAs, so partial outputs stay within each CTA
-# instead of being stored in the workspace. Only a few runtime variables need
-# workspace storage.
+# FlashInfer <= 0.6.6 also placed two float softmax statistics per query/head
+# in this workspace even when the caller did not request LSE output. Newer
+# versions need only counters, but sizing for both keeps the adapter compatible.
 _TRTLLM_FMHA_V2_WORKSPACE_SIZE_BYTES = 1024
+_TRTLLM_FMHA_V2_WORKSPACE_ALIGNMENT_BYTES = 128
 _g_trtllm_fmha_v2_workspace_pool: list[torch.Tensor] = []
 _g_trtllm_fmha_v2_pool_lock = __import__("threading").Lock()
 
@@ -73,15 +74,47 @@ def _supports_trtllm_fmha_v2(attn_configs: AttentionConfigs) -> bool:
     return False
 
 
-def _get_trtllm_fmha_v2_workspace(device: str = "cuda") -> torch.Tensor:
+def _trtllm_fmha_v2_workspace_size_bytes(
+    batch_size: int,
+    max_q_len: int,
+    num_q_heads: int,
+) -> int:
+    softmax_stats_bytes = 2 * 4 * batch_size * max_q_len * num_q_heads
+    aligned_bytes = (
+        (softmax_stats_bytes + _TRTLLM_FMHA_V2_WORKSPACE_ALIGNMENT_BYTES - 1)
+        // _TRTLLM_FMHA_V2_WORKSPACE_ALIGNMENT_BYTES
+        * _TRTLLM_FMHA_V2_WORKSPACE_ALIGNMENT_BYTES
+    )
+    return max(
+        _TRTLLM_FMHA_V2_WORKSPACE_SIZE_BYTES,
+        aligned_bytes + _TRTLLM_FMHA_V2_WORKSPACE_ALIGNMENT_BYTES,
+    )
+
+
+def _get_trtllm_fmha_v2_workspace(
+    device: str | torch.device = "cuda",
+    min_size_bytes: int = _TRTLLM_FMHA_V2_WORKSPACE_SIZE_BYTES,
+) -> torch.Tensor:
+    requested_device = torch.device(device)
+    if requested_device.type == "cuda" and requested_device.index is None:
+        requested_device = torch.device("cuda", torch.cuda.current_device())
     with _g_trtllm_fmha_v2_pool_lock:
-        if _g_trtllm_fmha_v2_workspace_pool:
-            return _g_trtllm_fmha_v2_workspace_pool.pop()
-        return torch.zeros(
-            _TRTLLM_FMHA_V2_WORKSPACE_SIZE_BYTES,
-            dtype=torch.uint8,
-            device=device,
-        )
+        best_idx = -1
+        best_size = 0
+        for idx, buffer in enumerate(_g_trtllm_fmha_v2_workspace_pool):
+            buffer_size = buffer.numel() * buffer.element_size()
+            if (
+                buffer.device == requested_device
+                and buffer_size >= min_size_bytes
+                and (best_idx < 0 or buffer_size < best_size)
+            ):
+                best_idx = idx
+                best_size = buffer_size
+        if best_idx >= 0:
+            buffer = _g_trtllm_fmha_v2_workspace_pool.pop(best_idx)
+            buffer.zero_()
+            return buffer
+    return torch.zeros(min_size_bytes, dtype=torch.uint8, device=requested_device)
 
 
 def _release_trtllm_fmha_v2_workspace(buf: torch.Tensor) -> None:
@@ -97,6 +130,27 @@ class TRTLLMFMHAv2Params(NamedTuple):
     cu_seqlens: torch.Tensor
     cu_kv_seqlens: Optional[torch.Tensor] = None  # paged only
     block_tables: Optional[torch.Tensor] = None  # paged only
+
+
+def _ensure_trtllm_fmha_v2_workspace_size(
+    workspace_buffer: torch.Tensor,
+    params: TRTLLMFMHAv2Params,
+    num_q_heads: int,
+) -> torch.Tensor:
+    required_bytes = _trtllm_fmha_v2_workspace_size_bytes(
+        params.batch_size,
+        params.max_q_len,
+        num_q_heads,
+    )
+    current_bytes = workspace_buffer.numel() * workspace_buffer.element_size()
+    if current_bytes >= required_bytes:
+        return workspace_buffer
+    resized_buffer = _get_trtllm_fmha_v2_workspace(
+        workspace_buffer.device,
+        required_bytes,
+    )
+    _release_trtllm_fmha_v2_workspace(workspace_buffer)
+    return resized_buffer
 
 
 class TRTLLMFMHAv2PagedPrefillOp:
@@ -120,7 +174,9 @@ class TRTLLMFMHAv2PagedPrefillOp:
         self.workspace_buffer = _get_trtllm_fmha_v2_workspace()
 
     def __del__(self) -> None:
-        _release_trtllm_fmha_v2_workspace(self.workspace_buffer)
+        workspace_buffer = getattr(self, "workspace_buffer", None)
+        if workspace_buffer is not None:
+            _release_trtllm_fmha_v2_workspace(workspace_buffer)
 
     @classmethod
     def support(
@@ -144,7 +200,7 @@ class TRTLLMFMHAv2PagedPrefillOp:
             (attn_inputs.prefix_lengths + attn_inputs.input_lengths).max().item(),
             _TRTLLM_FMHA_V2_MIN_SEQ_LEN,
         )
-        return TRTLLMFMHAv2Params(
+        params = TRTLLMFMHAv2Params(
             batch_size=attn_inputs.input_lengths.size(0),
             max_q_len=max(
                 attn_inputs.input_lengths.max().item(), _TRTLLM_FMHA_V2_MIN_SEQ_LEN
@@ -155,6 +211,12 @@ class TRTLLMFMHAv2PagedPrefillOp:
             cu_kv_seqlens=cu_kv_seqlens,
             block_tables=block_tables,
         )
+        self.workspace_buffer = _ensure_trtllm_fmha_v2_workspace_size(
+            self.workspace_buffer,
+            params,
+            self.head_num,
+        )
+        return params
 
     def prepare_cuda_graph(
         self,
@@ -235,7 +297,9 @@ class TRTLLMFMHAv2PrefillOp:
         self.workspace_buffer = _get_trtllm_fmha_v2_workspace()
 
     def __del__(self) -> None:
-        _release_trtllm_fmha_v2_workspace(self.workspace_buffer)
+        workspace_buffer = getattr(self, "workspace_buffer", None)
+        if workspace_buffer is not None:
+            _release_trtllm_fmha_v2_workspace(workspace_buffer)
 
     @classmethod
     def support(
@@ -255,13 +319,19 @@ class TRTLLMFMHAv2PrefillOp:
         max_len = max(
             attn_inputs.input_lengths.max().item(), _TRTLLM_FMHA_V2_MIN_SEQ_LEN
         )
-        return TRTLLMFMHAv2Params(
+        params = TRTLLMFMHAv2Params(
             batch_size=attn_inputs.input_lengths.size(0),
             max_q_len=max_len,
             max_kv_len=max_len,
             seq_lens=seq_lens,
             cu_seqlens=cu_seqlens,
         )
+        self.workspace_buffer = _ensure_trtllm_fmha_v2_workspace_size(
+            self.workspace_buffer,
+            params,
+            self.head_num,
+        )
+        return params
 
     def prepare_cuda_graph(
         self,
