@@ -26,7 +26,7 @@ import java.util.function.Consumer;
 final class UniConfigConfigSource implements ConfigSource {
 
     private static final int CONFIG_READ_TIMEOUT_MS = 3000;
-    private static final int POLL_INTERVAL_SECONDS = 10;
+    private static final int POLL_INTERVAL_SECONDS = 60;
     private static final int PRIORITY = 3;
 
     private final URI configUri;
