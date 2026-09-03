@@ -162,6 +162,8 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
 
             generate_output.aux_info.speculative_draft_rounds            = sp_iter_count_;
             generate_output.aux_info.speculative_accepted_tokens_per_pos = speculative_accepted_tokens_per_pos_;
+            generate_output.aux_info.prefill_cuda_graph_status =
+                prefillCudaGraphStatusString(prefill_cuda_graph_status_);
 
             if (calculateSoftmaxProbs() && softmax_probs_.defined()) {
                 generate_output.aux_info.softmax_probs =
@@ -214,6 +216,13 @@ void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_resu
 void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     // TODO(xinfei.sxf) consider the case of pd-sep first token finished.
+
+    // Prefill is followed by one or more decode updates. Decode uses the
+    // default NOT_REQUESTED value, so retain the first meaningful prefill
+    // result until the request's final/streaming response is serialized.
+    if (update_info.prefill_cuda_graph_status != PrefillCudaGraphStatus::NOT_REQUESTED) {
+        prefill_cuda_graph_status_ = update_info.prefill_cuda_graph_status;
+    }
 
     if (update_info.loss.defined()) {
         setLoss(update_info.loss);
@@ -282,5 +291,10 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     }
 
     last_output_pos_ = seqLength();
+}
+
+PrefillCudaGraphStatus NormalGenerateStream::prefillCudaGraphStatus() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return prefill_cuda_graph_status_;
 }
 };  // namespace rtp_llm

@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <numeric>
 #include <unordered_set>
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -101,12 +102,18 @@ MallocStatus KVCacheAllocator::evaluateInitCapacity(const MallocInfo& malloc_inf
         return MallocStatus::NONE;
     }
 
-    const size_t required_blocks = static_cast<size_t>(need_blocks);
-    auto         fits            = [required_blocks, reserve_blocks](size_t capacity) {
+    const size_t required_blocks           = static_cast<size_t>(need_blocks);
+    const size_t permanent_reserved_blocks = std::accumulate(malloc_info.permanent_reserved_blocks_by_group.begin(),
+                                                             malloc_info.permanent_reserved_blocks_by_group.end(),
+                                                             size_t{0});
+    auto         fits                      = [required_blocks, reserve_blocks](size_t capacity) {
         return required_blocks <= capacity && reserve_blocks <= capacity - required_blocks;
     };
 
-    if (!fits(totalBlocksNum())) {
+    const size_t total_blocks = totalBlocksNum();
+    const size_t effective_total_blocks =
+        permanent_reserved_blocks < total_blocks ? total_blocks - permanent_reserved_blocks : 0;
+    if (!fits(effective_total_blocks)) {
         return MallocStatus::PERMANENT_RESOURCE_EXHAUSTED;
     }
     if (mode == InitCapacityMode::TOTAL_AND_AVAILABLE && !fits(availableBlocksNum())) {

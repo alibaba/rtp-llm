@@ -3,9 +3,11 @@
 
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/models/PrefillCudaGraphEligibility.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 
+#include <functional>
 #include <type_traits>
 
 using namespace std;
@@ -109,14 +111,14 @@ TEST_F(ModelDataTest, testDSparkLongPrefillShapeHintsStayInt64) {
     EXPECT_EQ(wire_hints.scalar_type(), torch::kInt64);
     EXPECT_EQ(wire_hints.data_ptr<int64_t>()[GptModelInputIndex::mtpHiddenStates], 3221225472LL);
     EXPECT_EQ(decodeMtpHiddenStatesShape(shape_hints[GptModelInputIndex::mtpHiddenStates],
-                                        shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
+                                         shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
               (std::array<int64_t, 2>{262144, 12288}));
 
     inputs.last_hidden_states = backing.expand({1048576, 12288});
     shape_hints               = getModelInputShapeHints(inputs);
     EXPECT_EQ(shape_hints[GptModelInputIndex::mtpHiddenStates], 12884901888LL);
     EXPECT_EQ(decodeMtpHiddenStatesShape(shape_hints[GptModelInputIndex::mtpHiddenStates],
-                                        shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
+                                         shape_hints[GptModelInputIndex::mtpHiddenStatesRows]),
               (std::array<int64_t, 2>{1048576, 12288}));
 }
 
@@ -125,6 +127,158 @@ TEST_F(ModelDataTest, testMtpHiddenShapeRejectsInvalidMetadataBeforeAllocation) 
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(1, 0), RTPException);
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(5, 2), RTPException);
     EXPECT_THROW((void)decodeMtpHiddenStatesShape(0, 1), RTPException);
+}
+
+namespace {
+
+GptModelDescription makePrefillCudaGraphMoeDescription() {
+    GptModelDescription description;
+    description.data_type   = DataType::TYPE_BF16;
+    description.act_qscheme = QScheme::Qfp8PerTokenBlock;
+    MoeConfigs model_moe_config;
+    model_moe_config.expert_num     = 96;
+    model_moe_config.top_k          = 8;
+    model_moe_config.use_all_gather = true;
+    description.ffn_conf.moe_configs.emplace(model_moe_config);
+    return description;
+}
+
+MoeConfig makePrefillCudaGraphMoeRuntimeConfig() {
+    MoeConfig config;
+    config.moe_strategy           = "fp8_per_block_no_dp_masked";
+    config.use_all_gather         = true;
+    config.use_deepep_moe         = false;
+    config.use_deepep_internode   = false;
+    config.use_deepep_low_latency = false;
+    return config;
+}
+
+}  // namespace
+
+TEST_F(ModelDataTest, testPrefillCudaGraphSupportsDenseModel) {
+    GptModelDescription description;
+    EXPECT_TRUE(supportsPrefillCudaGraphMoe(description, ParallelismConfig{}, MoeConfig{}));
+}
+
+TEST_F(ModelDataTest, testPrefillCudaGraphRequiresSingleFullCacheGroup) {
+    EXPECT_TRUE(supportsPrefillCudaGraphCacheTopology({CacheGroupType::FULL}));
+    EXPECT_FALSE(supportsPrefillCudaGraphCacheTopology({}));
+    EXPECT_FALSE(supportsPrefillCudaGraphCacheTopology({CacheGroupType::LINEAR}));
+    EXPECT_FALSE(supportsPrefillCudaGraphCacheTopology({CacheGroupType::SWA}));
+    EXPECT_FALSE(supportsPrefillCudaGraphCacheTopology({CacheGroupType::FULL, CacheGroupType::LINEAR}));
+    EXPECT_FALSE(supportsPrefillCudaGraphCacheTopology({CacheGroupType::FULL, CacheGroupType::SWA}));
+}
+
+TEST_F(ModelDataTest, testDefaultPrefillCudaGraphBucketsAreClippedToModelLimit) {
+    EXPECT_TRUE(defaultPrefillCudaGraphCaptureSeqLens(0).empty());
+    EXPECT_EQ(defaultPrefillCudaGraphCaptureSeqLens(4), (std::vector<int>{4}));
+    EXPECT_EQ(defaultPrefillCudaGraphCaptureSeqLens(64), (std::vector<int>{64}));
+    EXPECT_EQ(defaultPrefillCudaGraphCaptureSeqLens(160), (std::vector<int>{64, 128, 160}));
+    EXPECT_EQ(defaultPrefillCudaGraphCaptureSeqLens(4096), (std::vector<int>{64, 128, 256, 384, 512, 768, 1024}));
+
+    for (int64_t max_seq_len : {7, 64, 159}) {
+        const auto buckets = defaultPrefillCudaGraphCaptureSeqLens(max_seq_len);
+        ASSERT_FALSE(buckets.empty());
+        EXPECT_TRUE(std::is_sorted(buckets.begin(), buckets.end()));
+        EXPECT_EQ(buckets.back(), max_seq_len);
+    }
+}
+
+TEST_F(ModelDataTest, testPrefillCudaGraphSupportsSingleGpuFp8MaskedMoe) {
+    EXPECT_TRUE(supportsPrefillCudaGraphMoe(
+        makePrefillCudaGraphMoeDescription(), ParallelismConfig{}, makePrefillCudaGraphMoeRuntimeConfig()));
+}
+
+TEST_F(ModelDataTest, testPrefillCudaGraphRequiresSingleDeviceParallelism) {
+    const auto expect_rejected = [](const std::function<void(ParallelismConfig&)>& mutate) {
+        ParallelismConfig config;
+        mutate(config);
+        EXPECT_FALSE(isSingleDevicePrefillCudaGraphConfig(config));
+    };
+
+    EXPECT_TRUE(isSingleDevicePrefillCudaGraphConfig(ParallelismConfig{}));
+    expect_rejected([](auto& c) { c.world_size = 2; });
+    expect_rejected([](auto& c) { c.tp_size = 2; });
+    expect_rejected([](auto& c) { c.dp_size = 2; });
+    expect_rejected([](auto& c) { c.ep_size = 2; });
+    expect_rejected([](auto& c) { c.pp_size = 2; });
+    expect_rejected([](auto& c) { c.ffn_sp_size = 2; });
+    expect_rejected([](auto& c) { c.ffn_tp_size = 2; });
+    expect_rejected([](auto& c) { c.enable_sp = true; });
+    expect_rejected([](auto& c) { c.prefill_cp_config.method = CPRotateMethod::ALL_GATHER; });
+    expect_rejected([](auto& c) { c.prefill_cp_config.method = CPRotateMethod::PREFILL_CP; });
+    expect_rejected([](auto& c) { c.ffn_disaggregate_config.enable_ffn_disaggregate = true; });
+}
+
+TEST_F(ModelDataTest, testPrefillCudaGraphRejectsAutoMoeStrategy) {
+    auto config         = makePrefillCudaGraphMoeRuntimeConfig();
+    config.moe_strategy = "auto";
+    EXPECT_FALSE(supportsPrefillCudaGraphMoe(makePrefillCudaGraphMoeDescription(), ParallelismConfig{}, config));
+}
+
+TEST_F(ModelDataTest, testPrefillCudaGraphRejectsNonFp8PerBlockMoe) {
+    auto description        = makePrefillCudaGraphMoeDescription();
+    description.act_qscheme = QScheme::NoQuantize;
+    EXPECT_FALSE(supportsPrefillCudaGraphMoe(description, ParallelismConfig{}, makePrefillCudaGraphMoeRuntimeConfig()));
+}
+
+TEST_F(ModelDataTest, testPrefillCudaGraphRejectsGraphUnsafeMoeTransport) {
+    auto config                   = makePrefillCudaGraphMoeRuntimeConfig();
+    config.use_deepep_low_latency = true;
+    EXPECT_FALSE(supportsPrefillCudaGraphMoe(makePrefillCudaGraphMoeDescription(), ParallelismConfig{}, config));
+
+    config                = makePrefillCudaGraphMoeRuntimeConfig();
+    config.use_all_gather = false;
+    EXPECT_FALSE(supportsPrefillCudaGraphMoe(makePrefillCudaGraphMoeDescription(), ParallelismConfig{}, config));
+}
+
+TEST_F(ModelDataTest, testPrefillCudaGraphMoeGateCoversEveryRuntimeConstraint) {
+    const auto expect_rejected = [](const std::function<void(MoeConfig&)>& mutate) {
+        auto config = makePrefillCudaGraphMoeRuntimeConfig();
+        mutate(config);
+        EXPECT_FALSE(supportsPrefillCudaGraphMoe(makePrefillCudaGraphMoeDescription(), ParallelismConfig{}, config));
+    };
+
+    expect_rejected([](auto& c) { c.use_deepep_moe = true; });
+    expect_rejected([](auto& c) { c.use_deepep_internode = true; });
+    expect_rejected([](auto& c) { c.use_deepep_low_latency = true; });
+    expect_rejected([](auto& c) { c.use_deepep_p2p_low_latency = true; });
+    expect_rejected([](auto& c) { c.use_mori_ep = true; });
+    expect_rejected([](auto& c) { c.fake_balance_expert = true; });
+    expect_rejected([](auto& c) { c.hack_moe_expert = true; });
+    expect_rejected([](auto& c) { c.use_all_gather = false; });
+}
+
+TEST_F(ModelDataTest, testPrefillCudaGraphMoeGateCoversEveryModelConstraint) {
+    const auto expect_rejected = [](const std::function<void(MoeConfigs&)>& mutate) {
+        auto description = makePrefillCudaGraphMoeDescription();
+        mutate(description.ffn_conf.moe_configs.value());
+        EXPECT_FALSE(
+            supportsPrefillCudaGraphMoe(description, ParallelismConfig{}, makePrefillCudaGraphMoeRuntimeConfig()));
+    };
+
+    expect_rejected([](auto& c) { c.tp_size = 2; });
+    expect_rejected([](auto& c) { c.dp_size = 2; });
+    expect_rejected([](auto& c) { c.ep_size = 2; });
+    expect_rejected([](auto& c) { c.use_all_gather = false; });
+    expect_rejected([](auto& c) { c.expert_num = 0; });
+    expect_rejected([](auto& c) { c.top_k = 0; });
+    expect_rejected([](auto& c) { c.top_k = c.expert_num + 1; });
+    expect_rejected([](auto& c) { c.extra_expert_num = 1; });
+    expect_rejected([](auto& c) { c.enable_eplb = true; });
+}
+
+TEST_F(ModelDataTest, testPrefillCudaGraphRejectsDistributedOrEplbMoe) {
+    auto parallelism       = ParallelismConfig{};
+    parallelism.ep_size    = 2;
+    parallelism.dp_size    = 2;
+    parallelism.world_size = 2;
+    EXPECT_FALSE(supportsPrefillCudaGraphMoe(
+        makePrefillCudaGraphMoeDescription(), parallelism, makePrefillCudaGraphMoeRuntimeConfig()));
+
+    auto description                              = makePrefillCudaGraphMoeDescription();
+    description.ffn_conf.moe_configs->enable_eplb = true;
+    EXPECT_FALSE(supportsPrefillCudaGraphMoe(description, ParallelismConfig{}, makePrefillCudaGraphMoeRuntimeConfig()));
 }
 
 }  // namespace rtp_llm

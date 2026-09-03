@@ -288,6 +288,7 @@ message AuxInfoPB {
     map<int32, int32> multimodal_lengths = 27;
     int32 speculative_draft_rounds = 28;
     repeated int32 speculative_accepted_tokens_per_pos = 29;
+    string prefill_cuda_graph_status = 30;
 }
 
 message PromptLogitsOutputPB {

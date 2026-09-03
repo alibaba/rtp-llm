@@ -37,7 +37,7 @@ struct PrefillCPConfig {
     bool kv_cache_sharded = false;
     // Explicit prefill CP size for decode-side fixed/SWA ring sizing; 0 = unset.
     int64_t prefill_cp_size = 0;
-    bool           is_enabled() const {
+    bool    is_enabled() const {
         return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
                && method != CPRotateMethod::PREFILL_CP;
     }
@@ -259,6 +259,9 @@ struct ProfilingDebugLoggingConfig {
 };
 
 struct HWKernelConfig {
+    static constexpr int kPrefillCudaGraphMaxRequestsLimit = 64;
+    static constexpr int kPrefillCudaGraphMaxCaptureTokens = 1 << 20;
+
     int         deep_gemm_num_sm             = -1;
     bool        arm_gemm_use_kai             = false;
     bool        enable_multi_block_mode      = true;
@@ -267,8 +270,16 @@ struct HWKernelConfig {
     bool        use_swizzleA                 = false;
     bool        enable_cuda_graph            = false;
     bool        enable_cuda_graph_debug_mode = false;
-    bool        enable_native_cuda_graph     = false;
-    int         num_native_cuda_graph        = 200;
+    // Experimental prefill CUDA graph for graph-safe generative attention
+    // backends. It requires the CUDA graph master switch and defaults to disabled.
+    bool enable_prefill_cuda_graph       = false;
+    int  prefill_cuda_graph_max_requests = 8;
+    // Empty means auto-select the sparse default buckets and clip them to the
+    // model's max sequence length. An explicit non-empty list is validated
+    // strictly during model construction.
+    std::vector<int> prefill_cuda_graph_capture_seq_lens;
+    bool             enable_native_cuda_graph = false;
+    int              num_native_cuda_graph    = 200;
     // Prefill CUDA Graph capture configuration
     // Can be set via: prefill_capture_file_path, prefill_capture_seq_lens, or prefill_capture_max_seq_len + step
     std::vector<int> prefill_capture_seq_lens;
@@ -419,7 +430,7 @@ struct FIFOSchedulerConfig {
     //   "N"   -> 1 prefill : N decode (decode-heavy); "1" = strict alternation.
     //   "1/X" -> X prefill : 1 decode (prefill-heavy).
     //   invalid input falls back to "1".
-    std::string decode_prefill_ratio = "1";
+    std::string decode_prefill_ratio           = "1";
     bool        cp_force_single_prefill        = true;
     int64_t     max_inited_kv_cache_streams    = 0;
     int64_t     max_batch_tokens_without_cache = 0;

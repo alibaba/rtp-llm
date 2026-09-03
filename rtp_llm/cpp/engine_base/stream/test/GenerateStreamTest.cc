@@ -133,6 +133,54 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
 }
 
+TEST_F(GenerateStreamTest, prefillCudaGraphReplayStatusIsReturnedInAuxInfo) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2, 3}));
+    stream->generateConfig()->num_return_sequences = 1;
+    stream->generateConfig()->max_new_tokens       = 4;
+    stream->generateConfig()->aux_info             = true;
+    stream->generateConfig()->pd_separation        = true;
+    stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+
+    const auto       new_tokens = torch::tensor({{42}}, torch::kInt32);
+    StreamUpdateInfo update_info{new_tokens,
+                                 1,
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor()};
+    update_info.prefill_cuda_graph_status = PrefillCudaGraphStatus::REPLAYED;
+    stream->update(update_info);
+
+    auto output_result = stream->nextOutput();
+    ASSERT_TRUE(output_result.ok());
+    ASSERT_EQ(output_result.value().generate_outputs.size(), 1);
+    EXPECT_EQ(output_result.value().generate_outputs[0].aux_info.prefill_cuda_graph_status, "replayed");
+
+    // A later decode update carries the default status and must not erase the
+    // request's meaningful prefill result.
+    StreamUpdateInfo decode_update{torch::tensor({{43}}, torch::kInt32),
+                                   1,
+                                   torch::Tensor(),
+                                   torch::Tensor(),
+                                   torch::Tensor(),
+                                   torch::Tensor(),
+                                   torch::Tensor(),
+                                   torch::Tensor(),
+                                   torch::Tensor(),
+                                   torch::Tensor()};
+    stream->update(decode_update);
+    auto decode_output_result = stream->nextOutput();
+    ASSERT_TRUE(decode_output_result.ok());
+    ASSERT_EQ(decode_output_result.value().generate_outputs.size(), 1);
+    EXPECT_EQ(decode_output_result.value().generate_outputs[0].aux_info.prefill_cuda_graph_status, "replayed");
+}
+
 TEST_F(GenerateStreamTest, mtpUpdateKeepsLastGpuProposalWhenNextProposalIsMissing) {
     auto builder                                             = GenerateStreamBuilder();
     auto stream                                              = builder.createContextStream({1, 2, 3});

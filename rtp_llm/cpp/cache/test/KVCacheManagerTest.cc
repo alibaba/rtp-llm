@@ -327,6 +327,113 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
     EXPECT_EQ(cache_manager->freeBlocksNum(), 0);
 }
 
+TEST_F(KVCacheManagerTest, PermanentReservationReducesAdmissionCapacity) {
+    auto cache_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/10, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.reserve_block_ratio = 25;
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, nullptr, kv_cache_config);
+    ASSERT_TRUE(cache_manager->init());
+
+    constexpr int64_t kReservationId      = -1001;
+    constexpr size_t  kReservedTokenCount = 8;
+    const size_t      original_capacity   = cache_manager->maxAvailableTokensNum();
+    // The request admission ceiling is the nine usable physical blocks. The
+    // allocator reserve remains a runtime watermark and must not make an
+    // otherwise serviceable request fail at scheduler enqueue.
+    EXPECT_EQ(original_capacity, 36u);
+    ASSERT_GT(original_capacity, kReservedTokenCount);
+    ASSERT_TRUE(cache_manager->registerPermanentTokenReservation(kReservationId, kReservedTokenCount));
+    EXPECT_EQ(cache_manager->permanentReservedTokensNum(), kReservedTokenCount);
+    EXPECT_EQ(cache_manager->maxAvailableTokensNum(), original_capacity - kReservedTokenCount);
+    EXPECT_FALSE(cache_manager->registerPermanentTokenReservation(kReservationId, 1));
+
+    const int  rejected_seq_len = static_cast<int>(cache_manager->maxAvailableTokensNum() + 1);
+    auto       resource         = makeDSV4BatchResource(cache_config);
+    auto       token_ids = makeDSV4CompleteTokenIds(rejected_seq_len, rejected_seq_len, /*seq_size_per_block=*/4);
+    MallocInfo malloc_info{resource, token_ids};
+    malloc_info.verbose             = false;
+    malloc_info.reuse_cache         = false;
+    malloc_info.enable_device_cache = false;
+    const auto result               = cache_manager->malloc(malloc_info);
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.status, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED);
+
+    cache_manager->releasePermanentTokenReservation(kReservationId);
+    EXPECT_EQ(cache_manager->permanentReservedTokensNum(), 0u);
+    EXPECT_EQ(cache_manager->maxAvailableTokensNum(), original_capacity);
+}
+
+TEST_F(KVCacheManagerTest, PermanentReservationRejectsRoundedMultiSequenceBatchPermanently) {
+    // Seven configured blocks expose six usable blocks after block zero. A
+    // one-block permanent reservation leaves five blocks for requests. For a
+    // two-sequence batch at length 19, four common blocks plus one private tail
+    // per sequence require six physical blocks even though seq_len (19) is no
+    // greater than the advertised single-sequence token capacity (20).
+    auto cache_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/7, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_INT8);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+    ASSERT_TRUE(cache_manager->init());
+
+    constexpr int64_t kReservationId = -1101;
+    ASSERT_TRUE(cache_manager->registerPermanentTokenReservation(
+        kReservationId, /*token_count=*/4, /*physical_blocks_by_group=*/{1}));
+    ASSERT_EQ(cache_manager->maxAvailableTokensNum(), 20u);
+
+    auto resource = std::make_shared<BatchKVCacheResource>();
+    resource->resetBatchSize(/*batch_size=*/2);
+    resource->initGroups(cache_config.topologyPtr());
+
+    auto input             = std::make_shared<GenerateInput>();
+    input->input_ids       = torch::arange(/*end=*/19, torch::kInt32);
+    input->generate_config = std::make_shared<GenerateConfig>();
+    auto token_ids         = std::make_shared<CompleteTokenIds>(
+        /*batch_size=*/2, /*max_batch_size=*/2, /*max_seq_len=*/32, /*seq_size_per_block=*/4);
+    token_ids->init(input);
+
+    MallocInfo malloc_info{resource, token_ids};
+    malloc_info.verbose             = false;
+    malloc_info.reuse_cache         = false;
+    malloc_info.enable_device_cache = false;
+    const auto rejected             = cache_manager->malloc(malloc_info);
+    EXPECT_FALSE(rejected.success);
+    EXPECT_EQ(rejected.status, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED);
+    EXPECT_EQ(resource->curBlocksNum(), 0);
+
+    cache_manager->releasePermanentTokenReservation(kReservationId);
+    const auto accepted = cache_manager->malloc(malloc_info);
+    EXPECT_TRUE(accepted.success);
+    cache_manager->free(FreeInfo{resource, token_ids});
+}
+
+TEST_F(KVCacheManagerTest, PermanentReservationValidatesLifecycleBoundaries) {
+    auto cache_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/10, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_INT8);
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
+    ASSERT_TRUE(cache_manager->init());
+
+    const size_t capacity = cache_manager->maxAvailableTokensNum();
+    ASSERT_GT(capacity, 8u);
+    EXPECT_FALSE(cache_manager->registerPermanentTokenReservation(-2000, 0));
+    EXPECT_FALSE(cache_manager->registerPermanentTokenReservation(-2001, capacity));
+    EXPECT_FALSE(cache_manager->registerPermanentTokenReservation(-2002, capacity + 1));
+    EXPECT_EQ(cache_manager->permanentReservedTokensNum(), 0u);
+
+    ASSERT_TRUE(cache_manager->registerPermanentTokenReservation(-2010, 4));
+    ASSERT_TRUE(cache_manager->registerPermanentTokenReservation(-2011, 4));
+    EXPECT_EQ(cache_manager->permanentReservedTokensNum(), 8u);
+    EXPECT_FALSE(cache_manager->registerPermanentTokenReservation(-2010, 1));
+
+    cache_manager->releasePermanentTokenReservation(-2999);
+    EXPECT_EQ(cache_manager->permanentReservedTokensNum(), 8u);
+    cache_manager->releasePermanentTokenReservation(-2010);
+    EXPECT_EQ(cache_manager->permanentReservedTokensNum(), 4u);
+    EXPECT_EQ(cache_manager->maxAvailableTokensNum(), capacity - 4u);
+    cache_manager->releasePermanentTokenReservation(-2011);
+    EXPECT_EQ(cache_manager->permanentReservedTokensNum(), 0u);
+    EXPECT_EQ(cache_manager->maxAvailableTokensNum(), capacity);
+}
+
 TEST_F(KVCacheManagerTest, InitRejectsSingleLinearGroup) {
     auto cache_config = makeSimpleLinearCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);

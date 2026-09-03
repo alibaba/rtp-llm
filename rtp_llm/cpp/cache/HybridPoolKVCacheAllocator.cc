@@ -517,10 +517,10 @@ size_t HybridPoolKVCacheAllocator::minTokenCapacity(bool use_available_blocks, b
             if (!group_block_pools_[gid]) {
                 continue;
             }
-            saw_group        = true;
-            const auto block = use_available_blocks ? group_block_pools_[gid]->availableBlocksNum() :
-                                                      group_block_pools_[gid]->totalBlocksNum();
-            min_tokens       = std::min(min_tokens, block * logicalSeqSizePerBlockForCapacity(gid));
+            saw_group     = true;
+            size_t blocks = use_available_blocks ? group_block_pools_[gid]->availableBlocksNum() :
+                                                   group_block_pools_[gid]->totalBlocksNum();
+            min_tokens    = std::min(min_tokens, blocks * logicalSeqSizePerBlockForCapacity(gid));
         }
         return std::make_pair(saw_group, min_tokens);
     };
@@ -672,10 +672,9 @@ MallocStatus HybridPoolKVCacheAllocator::evaluateInitCapacity(const MallocInfo& 
 
     MallocStatus status = MallocStatus::NONE;
     for (int gid = 0; gid < static_cast<int>(kv_cache_groups_.size()); ++gid) {
-        const size_t group_index = static_cast<size_t>(gid);
-        const int    group_common_seq =
-            cpEffectiveSeqLenForReserve(cp_mapper, config_, group_index, raw_common_seq_len);
-        const int  group_seq_len = cpEffectiveSeqLenForReserve(cp_mapper, config_, group_index, raw_seq_len);
+        const size_t group_index    = static_cast<size_t>(gid);
+        const int  group_common_seq = cpEffectiveSeqLenForReserve(cp_mapper, config_, group_index, raw_common_seq_len);
+        const int  group_seq_len    = cpEffectiveSeqLenForReserve(cp_mapper, config_, group_index, raw_seq_len);
         const int  group_reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, gid) : 0;
         const auto need                   = kv_cache_groups_[group_index]->getNeedBlocks(
             group_common_seq, group_seq_len, reserve_step, group_reuse_blocks_len, reuse_enabled);
@@ -683,26 +682,34 @@ MallocStatus HybridPoolKVCacheAllocator::evaluateInitCapacity(const MallocInfo& 
         if (need_blocks <= 0) {
             continue;
         }
-        const auto&  pool             = group_block_pools_[group_index];
-        const size_t available_blocks = pool->availableBlocksNum();
-        const size_t total_blocks     = pool->totalBlocksNum();
-        const size_t required_blocks  = static_cast<size_t>(need_blocks);
+        const auto&  pool                      = group_block_pools_[group_index];
+        const size_t available_blocks          = pool->availableBlocksNum();
+        const size_t total_blocks              = pool->totalBlocksNum();
+        const size_t required_blocks           = static_cast<size_t>(need_blocks);
+        const size_t permanent_reserved_blocks = group_index < malloc_info.permanent_reserved_blocks_by_group.size() ?
+                                                     malloc_info.permanent_reserved_blocks_by_group[group_index] :
+                                                     0;
+        const size_t effective_total_blocks =
+            permanent_reserved_blocks < total_blocks ? total_blocks - permanent_reserved_blocks : 0;
 
         const size_t total_reserve_blocks =
             (config_.usesExplicitIndependentBlocks(group_index) || total_reservable_blocks == 0) ?
                 0 :
                 reserve_blocks * total_blocks / total_reservable_blocks;
-        if (required_blocks > total_blocks || total_reserve_blocks > total_blocks - required_blocks) {
+        if (required_blocks > effective_total_blocks
+            || total_reserve_blocks > effective_total_blocks - required_blocks) {
             if (malloc_info.verbose) {
                 RTP_LLM_LOG_INFO("HybridPool initMalloc permanently rejected: request_id=%ld pool_name=%s "
-                                 "group=%d tag=%s need_blocks=%d total_blocks=%zu "
-                                 "reserve_blocks=%zu group_reserve_blocks=%zu",
+                                 "group=%d tag=%s need_blocks=%d total_blocks=%zu permanent_reserved_blocks=%zu "
+                                 "effective_total_blocks=%zu reserve_blocks=%zu group_reserve_blocks=%zu",
                                  malloc_info.request_id,
                                  pool->poolName().c_str(),
                                  gid,
                                  config_.tagForGroup(group_index).c_str(),
                                  need_blocks,
                                  total_blocks,
+                                 permanent_reserved_blocks,
+                                 effective_total_blocks,
                                  reserve_blocks,
                                  total_reserve_blocks);
             }
@@ -828,9 +835,8 @@ void HybridPoolKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
         const auto&  pool      = group_block_pools_[group_index];
         const size_t available = pool->availableBlocksNum();
         const size_t group_reserve =
-            reserve_admission ?
-                reserveBlocksForPool(group_index, reserve_blocks, total_reservable_available_blocks) :
-                0;
+            reserve_admission ? reserveBlocksForPool(group_index, reserve_blocks, total_reservable_available_blocks) :
+                                0;
         const long long required_available = need_blocks < 0 ? -1 : static_cast<long long>(need_blocks + group_reserve);
         const long long shortfall =
             required_available < 0 ? -1 : std::max(required_available - static_cast<long long>(available), 0LL);
