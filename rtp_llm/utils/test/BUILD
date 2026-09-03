@@ -170,16 +170,6 @@ py_test(
 )
 
 py_test(
-    name = "expandable_segments_test",
-    srcs = [
-        "expandable_segments_test.py",
-    ],
-    deps = [
-        "//rtp_llm:utils",
-    ],
-)
-
-py_test(
     name = "duplicated_kv_test",
     srcs = [
         "duplicated_kv_test.py",

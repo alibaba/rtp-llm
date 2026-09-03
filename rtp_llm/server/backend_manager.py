@@ -12,7 +12,6 @@ from rtp_llm.distribute.distributed_server import DistributedServer, get_world_i
 from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.distributed.collective_torch import init_distributed_environment
-from rtp_llm.utils.expandable_segments import enable_runtime_expandable
 from rtp_llm.utils.concurrency_controller import get_global_controller
 
 if TYPE_CHECKING:
@@ -117,9 +116,6 @@ class BackendManager(object):
             "engine created successfully: self.engine.task_type=%s",
             self.engine.task_type,
         )
-        # All engine-startup resident allocations are complete.  Future
-        # runtime/forward allocations can now use expandable segments.
-        enable_runtime_expandable()
 
     def serve_forever(self):
         """Enter service loop to keep the process alive until shutdown is requested"""
