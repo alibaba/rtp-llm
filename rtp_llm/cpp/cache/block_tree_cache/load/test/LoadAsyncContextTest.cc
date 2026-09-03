@@ -276,11 +276,37 @@ TEST(LoadAsyncContextTest, OnDoneRunsOnceWhenCommittedTransferCompletes) {
 
     ASSERT_TRUE(context->commit());
     EXPECT_FALSE(context->done());
-    EXPECT_TRUE(context->completeOne(true));
+    EXPECT_TRUE(context->completeTransfers(1, true));
     EXPECT_TRUE(context->done());
     EXPECT_EQ(callback_count, 1u);
     EXPECT_EQ(commits, 1u);
     EXPECT_EQ(aborts, 0u);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, JoinWaitCompletesOnLastJoinedDependency) {
+    size_t                                  commits     = 0;
+    size_t                                  aborts      = 0;
+    std::shared_ptr<LoadContextCoordinator> coordinator = makeCoordinator(commits, aborts);
+    TransferDescriptor                      first;
+    first.source_tier = Tier::HOST;
+    TransferDescriptor second;
+    second.source_tier                        = Tier::HOST;
+    std::shared_ptr<LoadAsyncContext> context = coordinator->create({first, second}, {true, true}, 1);
+    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->startJoinWait(1);
+    ASSERT_TRUE(context->commit());
+
+    bool    join_completed       = false;
+    int64_t join_wait_latency_us = 0;
+    ASSERT_TRUE(context->completeJoinedOne(true, join_completed, join_wait_latency_us));
+    EXPECT_FALSE(join_completed);
+    EXPECT_EQ(join_wait_latency_us, 0);
+    ASSERT_TRUE(context->completeJoinedOne(true, join_completed, join_wait_latency_us));
+    EXPECT_TRUE(join_completed);
+    EXPECT_GT(join_wait_latency_us, 0);
+    EXPECT_TRUE(context->success());
     coordinator->shutdown();
 }
 
@@ -307,7 +333,7 @@ TEST(LoadAsyncContextTest, SettlementBarrierDefersTerminalNotificationUntilSettl
     });
 
     ASSERT_TRUE(context->commit());
-    ASSERT_TRUE(context->completeOne(true));
+    ASSERT_TRUE(context->completeTransfers(1, true));
     EXPECT_EQ(ready_count, 1u);
     EXPECT_EQ(ready_context, context);
     EXPECT_TRUE(context->aggregateSuccess());
@@ -462,7 +488,7 @@ TEST(LoadAsyncContextTest, ConcurrentCommitRunsCoordinatorCallbackOnceAndKeepsWi
 
     EXPECT_TRUE(winner.get());
     EXPECT_EQ(commits, 1u);
-    EXPECT_TRUE(context->completeOne(true));
+    EXPECT_TRUE(context->completeTransfers(1, true));
     context->waitDone();
     EXPECT_TRUE(context->success());
     EXPECT_EQ(context->mallocStatus(), MallocStatus::NONE);
@@ -474,7 +500,7 @@ TEST(LoadAsyncContextTest, ImmediateTransferFailureAfterSuccessfulCommitKeepsFal
     auto   coordinator = std::make_shared<LoadContextCoordinator>(
         [&](const std::shared_ptr<LoadAsyncContext>& context) {
             ++commits;
-            EXPECT_TRUE(context->completeOne(false));
+            EXPECT_TRUE(context->completeTransfers(1, false));
             return true;
         },
         [](LoadAsyncContext&) {});
@@ -697,7 +723,7 @@ TEST(LoadAsyncContextTest, LocalAndStorageReadsMustBothComplete) {
     backend->completeMatch(1);
     ASSERT_TRUE(backend->readPending());
     EXPECT_EQ(pool->refCount(block), 2u);
-    EXPECT_TRUE(context->completeOne(true));
+    EXPECT_TRUE(context->completeTransfers(1, true));
     EXPECT_FALSE(context->done());
     backend->completeRead();
     EXPECT_TRUE(context->done());
@@ -735,7 +761,7 @@ TEST(LoadAsyncContextTest, BackendFailureWaitsForLocalTransferBeforePublishingFa
     backend->failNextRead();
     backend->completeRead();
     EXPECT_FALSE(context->done());
-    EXPECT_TRUE(context->completeOne(true));
+    EXPECT_TRUE(context->completeTransfers(1, true));
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
     EXPECT_EQ(pool->refCount(block), 1u);

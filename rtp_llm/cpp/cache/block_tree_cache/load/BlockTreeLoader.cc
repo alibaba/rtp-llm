@@ -278,6 +278,13 @@ BlockTreeMatchResult BlockTreeLoader::createMatchResult(std::vector<TreeNode*>& 
                             result.async_context->contextId(),
                             /*release_transferred_refs=*/true);
             result.async_context = nullptr;
+        } else {
+            const size_t join_dependency_count = static_cast<size_t>(std::count(
+                result.async_context->joinedLoads().begin(), result.async_context->joinedLoads().end(), true));
+            if (join_dependency_count != 0) {
+                result.async_context->startJoinWait(currentTimeUs());
+                metrics_reporter_.reportLoadJoin(join_dependency_count);
+            }
         }
     }
     return result;
@@ -359,12 +366,15 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
             return false;
         }
         workflow_credit_acquired = true;
-        auto on_timeout          = [task]() {
+        auto on_timeout          = [this, task]() {
             RTP_LLM_LOG_WARNING("load expired in business queue, descriptor_count=%zu", task->load_descs.size());
             if (!task->context->completeTransfers(task->load_descs.size(), false)) {
                 RTP_LLM_LOG_WARNING("failed to record expired load, descriptor_count=%zu", task->load_descs.size());
             }
+            metrics_reporter_.reportTransferTaskQueueWait(CacheTransferOperation::LOAD,
+                                                          currentTimeUs() - task->enqueue_time_us);
         };
+        task->enqueue_time_us = currentTimeUs();
         if (!task_pool_->submit([this, task]() { runLoadTask(task); },
                                 BlockTreeTaskPool::kDefaultQueueWaitTimeout,
                                 std::move(on_timeout))) {
@@ -447,6 +457,8 @@ void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
         }
     };
     try {
+        metrics_reporter_.reportTransferTaskQueueWait(CacheTransferOperation::LOAD,
+                                                      currentTimeUs() - task->enqueue_time_us);
         load_task_runner_.runTransfer(
             task, *transfer_dispatcher_, metrics_reporter_, disk_timeout_ms_, host_timeout_ms_, complete);
     } catch (const std::exception& error) {
@@ -470,8 +482,12 @@ void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&  
                 settlement_success = settleLoadLocked(*task, settlement_success, joined_contexts);
             }
             for (const std::shared_ptr<LoadAsyncContext>& joined_context : joined_contexts) {
-                if (!joined_context->completeOne(settlement_success)) {
+                bool    join_completed       = false;
+                int64_t join_wait_latency_us = 0;
+                if (!joined_context->completeJoinedOne(settlement_success, join_completed, join_wait_latency_us)) {
                     RTP_LLM_LOG_WARNING("failed to complete joined load context");
+                } else if (join_completed) {
+                    metrics_reporter_.reportLoadJoinWait(join_wait_latency_us);
                 }
             }
         }

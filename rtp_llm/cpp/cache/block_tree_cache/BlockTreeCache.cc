@@ -200,6 +200,11 @@ int BlockTreeCache::evictForGroup(size_t group_id, size_t num_blocks) {
     if (eviction_triggered) {
         metrics_reporter_.reportEvictionTriggered(Tier::DEVICE, group_set->groupType(), /*force_drop=*/true);
     }
+    metrics_reporter_.reportEvictionBlocks(Tier::DEVICE,
+                                           group_set->groupType(),
+                                           /*force_drop=*/true,
+                                           num_blocks,
+                                           std::min(reclaimed, num_blocks));
     RTP_LLM_LOG_DEBUG("group_id=%zu group_set[%zu] reclaimed %zu/%zu device blocks",
                       group_id,
                       location->group_set_id,

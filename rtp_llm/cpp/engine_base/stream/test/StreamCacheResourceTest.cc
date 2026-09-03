@@ -781,7 +781,7 @@ TEST_F(StreamCacheResourceTest, testCacheLoadFailureKeepsDeviceReuseMetrics) {
     resource.malloc_begin_time_us_                           = resource.load_wait_begin_time_us_;
 
     auto load_context = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::HOST});
-    ASSERT_TRUE(load_context->completeOne(false));
+    ASSERT_TRUE(load_context->completeTransfers(1, false));
     ASSERT_EQ(load_context->mallocStatus(), MallocStatus::NONE);
     resource.allocator_load_context_ = load_context;
     ASSERT_TRUE(resource.loadCacheDone());
@@ -943,7 +943,7 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadContextGatesReadinessUntilDone)
 
     EXPECT_TRUE(resource.asyncLoadCache());
     EXPECT_FALSE(resource.loadCacheDone());
-    EXPECT_TRUE(load_context->completeOne(true));
+    EXPECT_TRUE(load_context->completeTransfers(1, true));
     EXPECT_TRUE(resource.loadCacheDone());
     EXPECT_EQ(resource.allocator_load_context_, nullptr);
     EXPECT_FALSE(stream_->hasError());
@@ -966,8 +966,8 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessCommitsCompleteReuse) {
     EXPECT_EQ(stream_->hostReuseLength(), 0);
     EXPECT_EQ(stream_->diskReuseLength(), 0);
 
-    EXPECT_TRUE(load_context->completeOne(true));
-    EXPECT_TRUE(load_context->completeOne(true));
+    EXPECT_TRUE(load_context->completeTransfers(1, true));
+    EXPECT_TRUE(load_context->completeTransfers(1, true));
     ASSERT_TRUE(resource.loadCacheDone());
     EXPECT_EQ(stream_->reuseLength(), 6);
     EXPECT_EQ(stream_->initialReuseLength(), 6);
@@ -1012,7 +1012,7 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessUsesCpGroupPolicyReuseUn
 
     ASSERT_TRUE(resource.initKVBlock().ok());
     EXPECT_EQ(stream_->reuseLength(), 2);
-    EXPECT_TRUE(load_context->completeOne(true));
+    EXPECT_TRUE(load_context->completeTransfers(1, true));
     ASSERT_TRUE(resource.loadCacheDone());
     EXPECT_EQ(stream_->reuseLength(), 4);
     EXPECT_EQ(stream_->initialReuseLength(), 4);

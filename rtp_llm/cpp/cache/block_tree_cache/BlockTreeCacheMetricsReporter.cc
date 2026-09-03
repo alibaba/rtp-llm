@@ -163,6 +163,8 @@ void BlockTreeCacheMetricsReporter::reportEvictableCandidateCount(
         metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(nullptr, &collector);
         reportEvictionTrigger(snapshot.tier, snapshot.group_type, "watermark", 0);
         reportEvictionTrigger(snapshot.tier, snapshot.group_type, "force_drop", 0);
+        reportEvictionBlocks(snapshot.tier, snapshot.group_type, false, 0, 0);
+        reportEvictionBlocks(snapshot.tier, snapshot.group_type, true, 0, 0);
     }
 }
 
@@ -172,17 +174,21 @@ void BlockTreeCacheMetricsReporter::reportEvictionTriggered(Tier           sourc
     reportEvictionTrigger(source_tier, group_type, force_drop ? "force_drop" : "watermark", 1);
 }
 
-void BlockTreeCacheMetricsReporter::reportWatermarkRequired(Tier           tier,
-                                                            CacheGroupType group_type,
-                                                            size_t         required_blocks) const {
+void BlockTreeCacheMetricsReporter::reportEvictionBlocks(Tier           source_tier,
+                                                         CacheGroupType group_type,
+                                                         bool           force_drop,
+                                                         size_t         required_blocks,
+                                                         size_t         scheduled_blocks) const {
     if (metrics_reporter_ == nullptr) {
         return;
     }
     RtpLLMCacheEvictionMetricsCollector collector;
-    collector.source_tier               = tierName(tier);
+    collector.source_tier               = tierName(source_tier);
     collector.group_type                = metricCacheGroupTypeName(group_type);
-    collector.watermark_required_blocks = static_cast<int64_t>(required_blocks);
-    collector.report_watermark_required = true;
+    collector.trigger_type              = force_drop ? "force_drop" : "watermark";
+    collector.eviction_required_blocks  = static_cast<int64_t>(required_blocks);
+    collector.eviction_scheduled_blocks = static_cast<int64_t>(scheduled_blocks);
+    collector.report_eviction_blocks    = true;
     metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(nullptr, &collector);
 }
 
@@ -331,6 +337,38 @@ void BlockTreeCacheMetricsReporter::reportEvictedDescriptor(const TransferDescri
         collector.report_candidate_age       = true;
     }
     metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(nullptr, &collector);
+}
+
+void BlockTreeCacheMetricsReporter::reportLoadJoin(size_t dependency_count) const {
+    if (metrics_reporter_ == nullptr) {
+        return;
+    }
+    RtpLLMCacheReuseMetricsCollector collector;
+    collector.join_dependency_count = static_cast<int64_t>(dependency_count);
+    collector.report_load_join      = true;
+    metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(nullptr, &collector);
+}
+
+void BlockTreeCacheMetricsReporter::reportLoadJoinWait(int64_t join_wait_latency_us) const {
+    if (metrics_reporter_ == nullptr) {
+        return;
+    }
+    RtpLLMCacheReuseMetricsCollector collector;
+    collector.join_wait_latency_us  = join_wait_latency_us;
+    collector.report_load_join_wait = true;
+    metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(nullptr, &collector);
+}
+
+void BlockTreeCacheMetricsReporter::reportTransferTaskQueueWait(CacheTransferOperation operation,
+                                                                int64_t                queue_wait_latency_us) const {
+    if (metrics_reporter_ == nullptr) {
+        return;
+    }
+    RtpLLMCacheTransferMetricsCollector collector;
+    collector.operation             = cacheTransferOperationName(operation);
+    collector.queue_wait_latency_us = queue_wait_latency_us;
+    collector.report_queue_wait     = true;
+    metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(nullptr, &collector);
 }
 
 int BlockTreeCacheMetricsReporter::transferDirectionIndex(Tier source_tier, Tier target_tier) {
