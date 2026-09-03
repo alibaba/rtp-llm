@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <memory>
 #include <vector>
@@ -21,7 +22,8 @@ public:
                                HostDiskTransferExecutor&       host_disk_executor,
                                const std::vector<GroupSetPtr>& group_sets,
                                size_t                          staging_block_count,
-                               BlockTreeTaskPool&              transfer_task_pool);
+                               BlockTreeTaskPool&              transfer_task_pool,
+                               std::chrono::milliseconds       queue_wait_timeout);
     ~DeviceDiskTransferExecutor();
 
     DeviceDiskTransferExecutor(const DeviceDiskTransferExecutor&)            = delete;
@@ -46,6 +48,7 @@ private:
     std::unique_ptr<HostStagingBlockPool> swa_staging_pool_;
     size_t                                full_batch_capacity_{0};
     size_t                                swa_batch_capacity_{0};
+    std::chrono::milliseconds             queue_wait_timeout_;
 };
 
 }  // namespace rtp_llm

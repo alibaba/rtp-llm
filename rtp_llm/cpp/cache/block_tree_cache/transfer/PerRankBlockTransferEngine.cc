@@ -41,29 +41,36 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
                                                        size_t                   device_disk_staging_block_count,
                                                        size_t                   max_device_host_descriptors_per_batch,
                                                        size_t                   transfer_worker_count,
-                                                       size_t max_non_device_host_descriptors_per_batch):
+                                                       size_t                   max_non_device_host_descriptors_per_batch,
+                                                       size_t                   transfer_queue_max_size,
+                                                       int                      host_queue_wait_timeout_ms,
+                                                       int                      disk_queue_wait_timeout_ms):
     group_sets_(std::move(group_sets)),
     device_host_executor_(std::make_unique<DeviceHostTransferExecutor>(std::move(device_host_options))),
     host_disk_executor_(std::make_unique<HostDiskTransferExecutor>()),
     max_device_host_descriptors_per_batch_(max_device_host_descriptors_per_batch),
     max_non_device_host_descriptors_per_batch_(max_non_device_host_descriptors_per_batch),
-    transfer_worker_count_(transfer_worker_count) {
+    transfer_worker_count_(transfer_worker_count),
+    host_queue_wait_timeout_ms_(host_queue_wait_timeout_ms),
+    disk_queue_wait_timeout_ms_(disk_queue_wait_timeout_ms) {
     RTP_LLM_CHECK(max_device_host_descriptors_per_batch_ > 0);
     RTP_LLM_CHECK(max_non_device_host_descriptors_per_batch_ > 0);
     RTP_LLM_CHECK(transfer_worker_count > 0);
-    transfer_task_pool_ = std::make_unique<BlockTreeTaskPool>(
-        transfer_worker_count, BlockTreeTaskPool::kDefaultQueueSize, "BlockTransferEngine");
+    transfer_task_pool_ =
+        std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "BlockTransferEngine");
     RTP_LLM_CHECK(transfer_task_pool_->start());
 
     const bool any_disk_pool = std::any_of(group_sets_.begin(), group_sets_.end(), [](const GroupSetPtr& group_set) {
         return group_set->diskPool() != nullptr;
     });
     if (any_disk_pool) {
-        device_disk_executor_ = std::make_unique<DeviceDiskTransferExecutor>(*device_host_executor_,
-                                                                             *host_disk_executor_,
-                                                                             group_sets_,
-                                                                             device_disk_staging_block_count,
-                                                                             *transfer_task_pool_);
+        device_disk_executor_ = std::make_unique<DeviceDiskTransferExecutor>(
+            *device_host_executor_,
+            *host_disk_executor_,
+            group_sets_,
+            device_disk_staging_block_count,
+            *transfer_task_pool_,
+            std::chrono::milliseconds(disk_queue_wait_timeout_ms_));
     }
 }
 
@@ -168,7 +175,8 @@ std::shared_ptr<AsyncContext> PerRankBlockTransferEngine::submit(const std::vect
                 context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown transfer executor exception"));
             }
         },
-        BlockTreeTaskPool::kDefaultQueueWaitTimeout,
+        std::chrono::milliseconds(source == Tier::DISK || target == Tier::DISK ? disk_queue_wait_timeout_ms_ :
+                                                                                host_queue_wait_timeout_ms_),
         std::move(on_timeout));
     if (!accepted) {
         context->complete(

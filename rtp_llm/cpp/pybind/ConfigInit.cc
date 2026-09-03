@@ -468,6 +468,21 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("disk_cache_staging_block_count", &KVCacheConfig::disk_cache_staging_block_count)
         .def_readwrite("memory_cache_max_descriptors_per_transfer_batch",
                        &KVCacheConfig::memory_cache_max_descriptors_per_transfer_batch)
+        .def_readwrite("block_tree_transfer_worker_count", &KVCacheConfig::block_tree_transfer_worker_count)
+        .def_readwrite("block_tree_business_queue_max_size", &KVCacheConfig::block_tree_business_queue_max_size)
+        .def_readwrite("block_tree_transfer_queue_max_size", &KVCacheConfig::block_tree_transfer_queue_max_size)
+        .def_readwrite("block_tree_device_evict_low_watermark_ratio",
+                       &KVCacheConfig::block_tree_device_evict_low_watermark_ratio)
+        .def_readwrite("block_tree_device_evict_high_watermark_ratio",
+                       &KVCacheConfig::block_tree_device_evict_high_watermark_ratio)
+        .def_readwrite("block_tree_host_evict_low_watermark_ratio",
+                       &KVCacheConfig::block_tree_host_evict_low_watermark_ratio)
+        .def_readwrite("block_tree_host_evict_high_watermark_ratio",
+                       &KVCacheConfig::block_tree_host_evict_high_watermark_ratio)
+        .def_readwrite("block_tree_disk_evict_low_watermark_ratio",
+                       &KVCacheConfig::block_tree_disk_evict_low_watermark_ratio)
+        .def_readwrite("block_tree_disk_evict_high_watermark_ratio",
+                       &KVCacheConfig::block_tree_disk_evict_high_watermark_ratio)
         .def_readwrite("linear_step", &KVCacheConfig::linear_step)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
@@ -568,11 +583,22 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.dsv4_fixed_pool_blocks,
                                       self.dsv4_hca_state_pool_blocks,
                                       self.dsv4_fixed_pool_use_memory,
-                                      self.block_tree_full_prefix_scan_interval_ms);
+                                      self.block_tree_full_prefix_scan_interval_ms,
+                                      self.block_tree_transfer_worker_count,
+                                      self.block_tree_business_queue_max_size,
+                                      self.block_tree_transfer_queue_max_size,
+                                      self.block_tree_device_evict_low_watermark_ratio,
+                                      self.block_tree_device_evict_high_watermark_ratio,
+                                      self.block_tree_host_evict_low_watermark_ratio,
+                                      self.block_tree_host_evict_high_watermark_ratio,
+                                      self.block_tree_disk_evict_low_watermark_ratio,
+                                      self.block_tree_disk_evict_high_watermark_ratio);
             },
             [](py::tuple t) {
-                constexpr size_t kFieldCount = 55;
-                if (t.size() != kFieldCount + 2 || t[0].cast<std::string>() != "KVCacheConfig"
+                constexpr size_t kFieldCount         = 55;
+                constexpr size_t kExtendedFieldCount = 64;
+                if ((t.size() != kFieldCount + 2 && t.size() != kExtendedFieldCount + 2)
+                    || t[0].cast<std::string>() != "KVCacheConfig"
                     || t[1].cast<int>() != 1) {
                     throw std::runtime_error("invalid KVCacheConfig state");
                 }
@@ -634,6 +660,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.dsv4_hca_state_pool_blocks                    = value(52).cast<uint32_t>();
                 c.dsv4_fixed_pool_use_memory                    = value(53).cast<bool>();
                 c.block_tree_full_prefix_scan_interval_ms             = value(54).cast<int64_t>();
+                if (t.size() == kExtendedFieldCount + 2) {
+                    c.block_tree_transfer_worker_count                = value(55).cast<int64_t>();
+                    c.block_tree_business_queue_max_size              = value(56).cast<int64_t>();
+                    c.block_tree_transfer_queue_max_size              = value(57).cast<int64_t>();
+                    c.block_tree_device_evict_low_watermark_ratio     = value(58).cast<double>();
+                    c.block_tree_device_evict_high_watermark_ratio = value(59).cast<double>();
+                    c.block_tree_host_evict_low_watermark_ratio       = value(60).cast<double>();
+                    c.block_tree_host_evict_high_watermark_ratio      = value(61).cast<double>();
+                    c.block_tree_disk_evict_low_watermark_ratio       = value(62).cast<double>();
+                    c.block_tree_disk_evict_high_watermark_ratio      = value(63).cast<double>();
+                }
                 return c;
             }));
 

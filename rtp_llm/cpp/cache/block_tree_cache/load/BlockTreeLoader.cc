@@ -327,8 +327,11 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
                                                           currentTimeUs() - task->enqueue_time_us);
         };
         task->enqueue_time_us = currentTimeUs();
+        const bool uses_disk = std::any_of(task->load_descs.begin(), task->load_descs.end(), [](const auto& desc) {
+            return desc.source_tier == Tier::DISK || desc.target_tier == Tier::DISK;
+        });
         if (!task_pool_->submit([this, task]() { runLoadTask(task); },
-                                BlockTreeTaskPool::kDefaultQueueWaitTimeout,
+                                std::chrono::milliseconds(uses_disk ? disk_timeout_ms_ : host_timeout_ms_),
                                 std::move(on_timeout))) {
             return false;
         }

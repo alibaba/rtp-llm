@@ -224,6 +224,45 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="Device<->Host 单次底层批调用包含的最大 descriptor 数；其他方向默认逐条执行。",
     )
     kv_cache_group.add_argument(
+        "--block_tree_transfer_worker_count",
+        env_name="BLOCK_TREE_TRANSFER_WORKER_COUNT",
+        bind_to=(kv_cache_config, "block_tree_transfer_worker_count"),
+        type=int,
+        default=4,
+        help="BlockTreeCache 每 rank 共用的 TransferEngine worker 数。",
+    )
+    kv_cache_group.add_argument(
+        "--block_tree_business_queue_max_size",
+        env_name="BLOCK_TREE_BUSINESS_QUEUE_MAX_SIZE",
+        bind_to=(kv_cache_config, "block_tree_business_queue_max_size"),
+        type=int,
+        default=10000,
+        help="BlockTreeCache 上层业务任务队列容量上限。",
+    )
+    kv_cache_group.add_argument(
+        "--block_tree_transfer_queue_max_size",
+        env_name="BLOCK_TREE_TRANSFER_QUEUE_MAX_SIZE",
+        bind_to=(kv_cache_config, "block_tree_transfer_queue_max_size"),
+        type=int,
+        default=10000,
+        help="BlockTreeCache 下层传输任务队列容量上限。",
+    )
+    for tier, low, high in (
+        ("device", 0.82, 0.90),
+        ("host", 0.90, 0.94),
+        ("disk", 0.92, 0.97),
+    ):
+        for boundary, default in (("low", low), ("high", high)):
+            name = f"block_tree_{tier}_evict_{boundary}_watermark_ratio"
+            kv_cache_group.add_argument(
+                f"--{name}",
+                env_name=name.upper(),
+                bind_to=(kv_cache_config, name),
+                type=float,
+                default=default,
+                help=f"BlockTreeCache {tier} 淘汰水位 {boundary} 比例。",
+            )
+    kv_cache_group.add_argument(
         "--write_cache_sync",
         env_name="WRITE_CACHE_SYNC",
         type=str2bool,
