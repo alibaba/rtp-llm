@@ -32,12 +32,6 @@ from rtp_llm.models_py.distributed.collective_torch import (
     barrier,
     get_process_group,
 )
-from rtp_llm.models_py.distributed.sequence_parallel import (
-    TokenShardLayout,
-    shard_tokens,
-    shard_tokens_with_padding,
-    token_shard_layout,
-)
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.base import RMSNorm
@@ -54,7 +48,6 @@ from rtp_llm.models_py.modules.hybrid.dense_mlp import (
 )
 from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import (
     configure_all_gather_gemm,
-    should_use_all_gather_gemm,
 )
 from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import (
     KimiK3ChunkCachePublisher,
@@ -70,7 +63,6 @@ from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import (
 )
 from rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter import (
     configure_gemm_reduce_scatter,
-    should_use_gemm_reduce_scatter,
 )
 from rtp_llm.models_py.modules.kimi_k3.kda import KDAExecutionMode, KimiK3KDA
 from rtp_llm.models_py.modules.kimi_k3.kda.prefill import (
@@ -96,6 +88,11 @@ from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MLA
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
 from rtp_llm.models_py.modules.kimi_k3.moe_se import KimiK3LatentMoESE
 from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
+from rtp_llm.models_py.modules.kimi_k3.token_parallel import (
+    K3TokenLayout,
+    make_k3_token_layout,
+    shard_k3_tokens,
+)
 from rtp_llm.models_py.modules.kimi_k3.utils import (
     collective_gemm_workspace_global_tokens,
     mask_multimodal_token_ids,
@@ -124,8 +121,7 @@ class KimiK3DecoderMetadata:
 
     cu_seqlens: torch.Tensor
     mode: KDAExecutionMode
-    sequence_parallel: bool
-    prefill_sp_layout: Optional[TokenShardLayout] = None
+    token_layout: K3TokenLayout
     kda_prefill_metadata: Optional[KimiKDAPrefillMetadata] = None
     kda_current_state_registry: Optional[KimiKDACurrentStateRegistry] = None
 
@@ -258,18 +254,9 @@ class KimiK3DecoderLayer(nn.Module):
     ) -> KimiK3DecoderOutput:
         cu_seqlens = attn_meta.cu_seqlens
         mode = attn_meta.mode
-        sequence_parallel = attn_meta.sequence_parallel
-        prefill_sp_layout = attn_meta.prefill_sp_layout
-        decode_sp = sequence_parallel and mode == "decode"
-        logical_tokens = int(hidden_states.shape[0])
-        tp_size = int(self.self_attn.parallelism_config.get_attn_tp_size())
-        tp_rank = int(self.self_attn.parallelism_config.get_attn_tp_rank())
-        local_valid_tokens: Optional[int] = None
-        if (
-            prefill_sp_layout is not None
-            and prefill_sp_layout.local_valid_tokens < prefill_sp_layout.local_tokens
-        ):
-            local_valid_tokens = prefill_sp_layout.local_valid_tokens
+        token_layout = attn_meta.token_layout
+        logical_tokens = token_layout.logical_tokens
+        local_valid_tokens: Optional[int] = token_layout.local_valid_tokens
         prefix_sum: Optional[torch.Tensor] = hidden_states
         expected_previous_blocks = (
             self.layer_idx + self.attn_res_block_size - 1
@@ -305,8 +292,7 @@ class KimiK3DecoderLayer(nn.Module):
                 mode=mode,
                 kv_cache=kv_cache,
                 attention_inputs=attention_inputs,
-                sequence_parallel=sequence_parallel,
-                prefill_sp_layout=prefill_sp_layout,
+                logical_tokens=logical_tokens,
                 prefill_metadata=attn_meta.kda_prefill_metadata,
                 current_state_registry=attn_meta.kda_current_state_registry,
             )
@@ -314,31 +300,10 @@ class KimiK3DecoderLayer(nn.Module):
             attention_output = self.self_attn(
                 attention_input,
                 fmha_impl,
-                kv_cache,
+                logical_tokens=logical_tokens,
+                kv_cache=kv_cache,
                 attention_inputs=attention_inputs,
-                sequence_parallel=sequence_parallel,
-                prefill_sp_layout=prefill_sp_layout,
             )
-        if decode_sp:
-            if prefix_sum is not None:
-                prefix_sum, local_valid_tokens = shard_tokens_with_padding(
-                    prefix_sum,
-                    logical_tokens,
-                    tp_size,
-                    tp_rank,
-                )
-            active_block_residual, block_valid_tokens = shard_tokens_with_padding(
-                active_block_residual,
-                logical_tokens,
-                tp_size,
-                tp_rank,
-            )
-            if local_valid_tokens is None:
-                local_valid_tokens = block_valid_tokens
-            elif local_valid_tokens != block_valid_tokens:
-                raise RuntimeError(
-                    "K3 Decode token-SP residual shards disagree on valid rows"
-                )
         attention_delta: Optional[torch.Tensor] = None
         if prefix_sum is None:
             prefix_sum = attention_output
@@ -356,12 +321,9 @@ class KimiK3DecoderLayer(nn.Module):
         )
         mlp_output = self.mlp(
             normalized_mlp_input,
-            sequence_parallel=sequence_parallel,
             valid_token_count=local_valid_tokens,
         )
         output = prefix_sum + mlp_output
-        if decode_sp:
-            output = all_gather_trim(output, logical_tokens, group=Group.TP)
         return KimiK3DecoderOutput(output, block_residual)
 
 
@@ -473,48 +435,44 @@ class KimiK3Model(GptModelBase):
                     tuple(self._mtp_hidden_buffer.shape),
                 )
         tp_size = int(self.parallelism_config.get_attn_tp_size())
-        max_global_tokens = collective_gemm_workspace_global_tokens(
-            int(self.config.max_seq_len),
-            int(init_resource.max_context_batch_size),
-            prefill_chunk_tokens(),
-        )
+        if init_resource.is_decode_role:
+            tokens_per_batch = max(int(self.config.gen_num_per_cycle) + 1, 1)
+            max_global_tokens = max(
+                self._max_generate_batch_size,
+                int(getattr(init_resource, "max_decode_graph_batch_size", 1)),
+            ) * tokens_per_batch
+        else:
+            max_global_tokens = collective_gemm_workspace_global_tokens(
+                int(self.config.max_seq_len),
+                int(init_resource.max_context_batch_size),
+                prefill_chunk_tokens(),
+            )
         max_local_tokens = (max_global_tokens + tp_size - 1) // tp_size
         max_physical_tokens = max_local_tokens * tp_size
+        collective_gemm_enabled = (
+            tp_size > 1
+            and self.embedding_weight.is_cuda
+            and self.embedding_weight.dtype == torch.bfloat16
+        )
         if not getattr(self, "_all_gather_gemm_configured", False):
-            all_gather_gemm_requested = (
-                not init_resource.is_decode_role
-                and tp_size > 1
-                and self.embedding_weight.is_cuda
-                and self.embedding_weight.dtype == torch.bfloat16
-                and should_use_all_gather_gemm(max_physical_tokens)
+            configure_all_gather_gemm(
+                get_process_group(Group.TP),
+                self.embedding_weight.device,
+                enabled=collective_gemm_enabled,
+                max_m=max_physical_tokens,
+                k=int(self.config.hidden_size),
+                dtype=self.embedding_weight.dtype,
             )
-            if all_gather_gemm_requested:
-                configure_all_gather_gemm(
-                    get_process_group(Group.TP),
-                    self.embedding_weight.device,
-                    enabled=True,
-                    max_m=max_physical_tokens,
-                    k=int(self.config.hidden_size),
-                    dtype=self.embedding_weight.dtype,
-                )
             self._all_gather_gemm_configured = True
 
         if not getattr(self, "_gemm_reduce_scatter_configured", False):
-            gemm_reduce_scatter_requested = (
-                not init_resource.is_decode_role
-                and tp_size > 1
-                and self.embedding_weight.is_cuda
-                and self.embedding_weight.dtype == torch.bfloat16
-                and should_use_gemm_reduce_scatter(max_physical_tokens)
+            configure_gemm_reduce_scatter(
+                get_process_group(Group.TP),
+                self.embedding_weight.device,
+                enabled=collective_gemm_enabled,
+                max_m=max_physical_tokens,
+                n=int(self.config.hidden_size),
             )
-            if gemm_reduce_scatter_requested:
-                configure_gemm_reduce_scatter(
-                    get_process_group(Group.TP),
-                    self.embedding_weight.device,
-                    enabled=True,
-                    max_m=max_physical_tokens,
-                    n=int(self.config.hidden_size),
-                )
             self._gemm_reduce_scatter_configured = True
         return True
 
@@ -1038,70 +996,15 @@ class KimiK3Model(GptModelBase):
             raise RuntimeError("Kimi K3 decode requires an initialized hybrid cache")
         input_ids = inputs.input_ids.reshape(-1)
         tp_size = int(self.parallelism_config.get_attn_tp_size())
-        # SP MoE 是 K3 modeling 唯一的流程,不再由开关决定 —— Decode TP8/EP8
-        # 不走 SP 就在启动时 die,Prefill 侧生产配置同样一直是 SP。
         tp_rank = int(self.parallelism_config.get_attn_tp_rank())
-        sp_requested = tp_size > 1
         is_target_verify = bool(getattr(attention_inputs, "is_target_verify", False))
-        # The engine represents the multi-token target verification pass with
-        # Prefill-shaped metadata, but the verify kernels replay every draft
-        # position on every TP rank.  It must therefore stay replicated and
-        # must not enter either token-SP path.
-        prefill_sp = (
-            sp_requested and attention_inputs.is_prefill and not is_target_verify
+        token_layout = make_k3_token_layout(
+            int(input_ids.numel()),
+            tp_size,
+            tp_rank,
         )
-        prefill_sp_layout = (
-            token_shard_layout(int(input_ids.numel()), tp_size, tp_rank)
-            if prefill_sp
-            else None
-        )
-        # Target verify replays multiple speculative positions on every TP
-        # rank and its KDA projection performs an ordinary TP all-reduce.  Its
-        # token rows are therefore replicated, unlike normal single-token
-        # Decode.  Applying Decode token-SP here shards only the residual side
-        # and produces incompatible full-token/sharded-token shapes.
-        decode_sp = (
-            sp_requested and not attention_inputs.is_prefill and not is_target_verify
-        )
-        sp_active = prefill_sp or decode_sp
-        if not attention_inputs.is_prefill and not getattr(
-            self, "_decode_sp_startup_logged", False
-        ):
-            logging.info(
-                "[K3_DECODE_SP] rank=%d requested=%s active=%s "
-                "tokens=%d tp=%d ep=%d",
-                int(self.parallelism_config.get_attn_tp_rank()),
-                sp_requested,
-                decode_sp,
-                input_ids.numel(),
-                tp_size,
-                int(self.parallelism_config.ep_size),
-            )
-            self._decode_sp_startup_logged = True
         cu_seqlens = resolve_cu_seqlens(attention_inputs, input_ids)
-        if sp_active:
-            ep_size = int(self.parallelism_config.ep_size)
-            if ep_size != tp_size:
-                raise RuntimeError(
-                    "Kimi K3 Sequence Parallel currently requires TP == EP; "
-                    f"got TP={tp_size}, EP={ep_size}"
-                )
-        hidden_states = self._embed(input_ids, inputs.multimodal_inputs)
-        if prefill_sp:
-            assert prefill_sp_layout is not None
-            hidden_states = shard_tokens(
-                hidden_states,
-                prefill_sp_layout,
-            )
-        block_residual = (
-            self._ensure_prefill_static_attn_res_bank(hidden_states)
-            if prefill_sp
-            else hidden_states.new_empty(
-                hidden_states.shape[0],
-                self.num_attn_res_blocks,
-                hidden_states.shape[1],
-            )
-        )
+
         # MTP target verification is represented as a packed multi-token
         # attention batch, so generic attention metadata may classify it as
         # prefill-shaped. KDA must nevertheless replay it through the paged
@@ -1110,6 +1013,19 @@ class KimiK3Model(GptModelBase):
             "prefill"
             if attention_inputs.is_prefill and not is_target_verify
             else "decode"
+        )
+        hidden_states = shard_k3_tokens(
+            self._embed(input_ids, inputs.multimodal_inputs),
+            token_layout,
+        )
+        block_residual = (
+            self._ensure_prefill_static_attn_res_bank(hidden_states)
+            if mode == "prefill"
+            else hidden_states.new_empty(
+                hidden_states.shape[0],
+                self.num_attn_res_blocks,
+                hidden_states.shape[1],
+            )
         )
         if self._layer_group_ids is None:
             layer_map_host = getattr(
@@ -1161,8 +1077,7 @@ class KimiK3Model(GptModelBase):
         attn_meta = KimiK3DecoderMetadata(
             cu_seqlens=cu_seqlens,
             mode=mode,
-            sequence_parallel=sp_active,
-            prefill_sp_layout=prefill_sp_layout,
+            token_layout=token_layout,
             kda_prefill_metadata=kda_prefill_metadata,
             kda_current_state_registry=kda_current_state_registry,
         )
@@ -1239,24 +1154,21 @@ class KimiK3Model(GptModelBase):
             mtp_hidden_buffer = torch.cat(
                 [by_layer[layer_id] for layer_id in aux_layers], dim=-1
             ).contiguous()
-            if prefill_sp and getattr(self, "_whole_chunk_prefill_active", False):
-                assert prefill_sp_layout is not None
+            if mode == "prefill" and getattr(
+                self, "_whole_chunk_prefill_active", False
+            ):
                 # Auxiliary hidden states are captured while Prefill token
-                # sequence parallelism is active.  Eagle3 consumes them next
-                # to the replicated full-prompt embedding, so restore the
-                # framework's global token layout just like final_hidden below.
+                # parallelism is active. Eagle3 consumes them in global order.
                 self._all_gather_whole_chunk_mtp_hidden(
                     mtp_hidden_buffer,
-                    prefill_sp_layout.logical_tokens,
+                    token_layout.logical_tokens,
                 )
             else:
-                if prefill_sp:
-                    assert prefill_sp_layout is not None
-                    mtp_hidden_buffer = all_gather_trim(
-                        mtp_hidden_buffer,
-                        prefill_sp_layout.logical_tokens,
-                        group=Group.TP,
-                    )
+                mtp_hidden_buffer = all_gather_trim(
+                    mtp_hidden_buffer,
+                    token_layout.logical_tokens,
+                    group=Group.TP,
+                )
                 self._write_mtp_hidden_buffer(
                     mtp_hidden_buffer,
                     is_cuda_graph=(
@@ -1268,13 +1180,11 @@ class KimiK3Model(GptModelBase):
                     ),
                 )
         hidden_states = self.norm(hidden_states, block_residual)
-        if prefill_sp:
-            assert prefill_sp_layout is not None
-            hidden_states = all_gather_trim(
-                hidden_states,
-                prefill_sp_layout.logical_tokens,
-                group=Group.TP,
-            )
+        hidden_states = all_gather_trim(
+            hidden_states,
+            token_layout.logical_tokens,
+            group=Group.TP,
+        )
         fmha_params = getattr(fmha_impl, "fmha_params", None)
         # Target verification only needs hidden_states on the C++ side. Avoid
         # carrying the Python FMHA parameter holder across the pybind boundary

@@ -1,10 +1,10 @@
-"""Torch symmetric-memory AllGather/GEMM for Kimi K3 Prefill."""
+"""AllGather/GEMM projection for Kimi K3 token-parallel layers."""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Optional, Sequence
 
 import torch
 import torch.distributed as dist
@@ -145,45 +145,16 @@ def all_gather_gemm(
     use_fused = (
         state is not None and state.enabled and should_use_all_gather_gemm(physical_m)
     )
-    if use_fused:
-        assert state is not None
-        if local_input.device != state.device:
-            raise ValueError(
-                f"AllGather/GEMM input device {local_input.device} != "
-                f"workspace {state.device}"
-            )
-        if physical_m > state.max_m:
-            raise RuntimeError(
-                f"AllGather/GEMM M={physical_m} exceeds max_m={state.max_m}"
-            )
-        if local_input.ndim != 2 or int(local_input.shape[1]) != state.k:
-            raise ValueError(
-                "AllGather/GEMM input must have configured [local_M, K] "
-                f"shape with K={state.k}, got {tuple(local_input.shape)}"
-            )
-        if local_input.dtype != state.dtype or not local_input.is_contiguous():
-            raise TypeError(
-                "AllGather/GEMM input must be contiguous "
-                f"{state.dtype}, got dtype={local_input.dtype} "
-                f"contiguous={local_input.is_contiguous()}"
-            )
-        with torch.profiler.record_function("RTP::kimi_k3.all_gather_gemm.fused"):
-            _, outputs = fused_all_gather_matmul(
-                local_input,
-                weights,
-                process_group,
-                return_gathered=False,
-            )
-    else:
-        with torch.profiler.record_function("RTP::kimi_k3.all_gather_gemm.all_gather"):
-            gathered = all_gather_into(
-                local_input,
-                local_input.new_empty((physical_m, *local_input.shape[1:])),
-                group,
-            )
-            gathered = gathered.narrow(0, 0, logical_m)
-        with torch.profiler.record_function("RTP::kimi_k3.all_gather_gemm.gemm"):
-            outputs = [torch.matmul(gathered, weight) for weight in weights]
+    implementations = (_torch_all_gather_gemm, _fused_all_gather_gemm)
+    outputs = implementations[int(use_fused)](
+        local_input,
+        weights,
+        logical_m,
+        physical_m,
+        group,
+        process_group,
+        state,
+    )
 
     trimmed = []
     for output in outputs:
@@ -196,6 +167,67 @@ def all_gather_gemm(
             output if output.shape[0] == logical_m else output.narrow(0, 0, logical_m)
         )
     return trimmed
+
+
+def _torch_all_gather_gemm(
+    local_input: torch.Tensor,
+    weights: Sequence[torch.Tensor],
+    logical_m: int,
+    physical_m: int,
+    group: Group,
+    process_group: dist.ProcessGroup,
+    state: Optional[_AllGatherGemmState],
+) -> list[torch.Tensor]:
+    del process_group, state
+    with torch.profiler.record_function("RTP::kimi_k3.all_gather_gemm.all_gather"):
+        gathered = all_gather_into(
+            local_input,
+            local_input.new_empty((physical_m, *local_input.shape[1:])),
+            group,
+        ).narrow(0, 0, logical_m)
+    with torch.profiler.record_function("RTP::kimi_k3.all_gather_gemm.gemm"):
+        return [torch.matmul(gathered, weight) for weight in weights]
+
+
+def _fused_all_gather_gemm(
+    local_input: torch.Tensor,
+    weights: Sequence[torch.Tensor],
+    logical_m: int,
+    physical_m: int,
+    group: Group,
+    process_group: dist.ProcessGroup,
+    state: Optional[_AllGatherGemmState],
+) -> list[torch.Tensor]:
+    del logical_m, group
+    assert state is not None
+    if local_input.device != state.device:
+        raise ValueError(
+            f"AllGather/GEMM input device {local_input.device} != "
+            f"workspace {state.device}"
+        )
+    if physical_m > state.max_m:
+        raise RuntimeError(
+            f"AllGather/GEMM M={physical_m} exceeds max_m={state.max_m}"
+        )
+    if local_input.ndim != 2 or int(local_input.shape[1]) != state.k:
+        raise ValueError(
+            "AllGather/GEMM input must have configured [local_M, K] "
+            f"shape with K={state.k}, got {tuple(local_input.shape)}"
+        )
+    if local_input.dtype != state.dtype or not local_input.is_contiguous():
+        raise TypeError(
+            "AllGather/GEMM input must be contiguous "
+            f"{state.dtype}, got dtype={local_input.dtype} "
+            f"contiguous={local_input.is_contiguous()}"
+        )
+    with torch.profiler.record_function("RTP::kimi_k3.all_gather_gemm.fused"):
+        _, outputs = fused_all_gather_matmul(
+            local_input,
+            weights,
+            process_group,
+            return_gathered=False,
+        )
+        return outputs
 
 
 __all__ = [

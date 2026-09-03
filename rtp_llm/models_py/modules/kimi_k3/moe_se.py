@@ -341,42 +341,20 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
         shared_input: torch.Tensor,
         expert_ids: torch.Tensor,
         routing_weights: torch.Tensor,
-        *,
-        sequence_parallel: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if sequence_parallel:
-            return self._deep_gemm_mega_expert_sum_with_shared(
-                routed_input,
-                shared_input,
-                expert_ids,
-                routing_weights,
-            )
-
-        token_count = int(routed_input.shape[0])
-        tokens_per_tp_rank = (token_count + self.attn_tp_size - 1) // self.attn_tp_size
-        begin = min(tokens_per_tp_rank * self.attn_tp_rank, token_count)
-        size = min(tokens_per_tp_rank, token_count - begin)
-        local_routed, local_shared = self._deep_gemm_mega_expert_sum_with_shared(
-            routed_input.narrow(0, begin, size),
-            shared_input.narrow(0, begin, size),
-            expert_ids.narrow(0, begin, size),
-            routing_weights.narrow(0, begin, size),
-        )
-        return (
-            self._tp_gather(local_routed, token_count, tokens_per_tp_rank),
-            self._tp_gather(local_shared, token_count, tokens_per_tp_rank),
+        return self._deep_gemm_mega_expert_sum_with_shared(
+            routed_input,
+            shared_input,
+            expert_ids,
+            routing_weights,
         )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         *,
-        sequence_parallel: bool = False,
         valid_token_count: Optional[int] = None,
     ) -> torch.Tensor:
-        sp_active = (
-            sequence_parallel and self.attn_tp_size > 1 and hidden_states.is_cuda
-        )
         expert_ids, routing_weights = self._route(hidden_states)
         if valid_token_count is not None:
             if valid_token_count < 0 or valid_token_count > hidden_states.shape[0]:
@@ -399,7 +377,6 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             hidden_states,
             expert_ids,
             routing_weights,
-            sequence_parallel=sp_active,
         )
         if self.routed_norm is not None:
             routed_output = self.routed_norm(routed_output.contiguous())

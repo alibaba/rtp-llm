@@ -7,9 +7,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 import torch
 
 from rtp_llm.models_py.distributed.collective_torch import Group, get_process_group
-from rtp_llm.models_py.distributed.sequence_parallel import TokenShardLayout
 from rtp_llm.models_py.modules.base import RMSNorm
-from rtp_llm.models_py.modules.factory.linear.parallel import row_parallel_linear
 from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
 from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import all_gather_gemm
 from rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter import gemm_reduce_scatter
@@ -95,35 +93,16 @@ class KimiK3MLA(MlaAttention):
         # the framework kernel.
         self.q_a_layernorm = RMSNorm(self._q_a_norm, _MLA_LATENT_NORM_EPS)
         self.kv_a_layernorm = RMSNorm(self._kv_a_norm, _MLA_LATENT_NORM_EPS)
-        self._sp_active_for_forward = False
-        self._sp_padded_for_forward = False
-        self._sp_prefill_input_is_sharded = False
-        self._sp_prefill_layout_for_forward: Optional[TokenShardLayout] = None
+        self._logical_tokens_for_forward = 0
 
     def _project_qkv_a_input(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        prefill_layout = getattr(self, "_sp_prefill_layout_for_forward", None)
-        if self._sp_prefill_input_is_sharded:
-            logical_tokens = (
-                hidden_states.shape[0] * self.attn_tp_size
-                if prefill_layout is None
-                else prefill_layout.logical_tokens
-            )
-            packed = all_gather_gemm(
-                hidden_states,
-                [self._packed_qkv_gate_w],
-                logical_m=logical_tokens,
-            )[0]
-            return torch.split(
-                packed,
-                [
-                    self.q_lora_rank + self.kv_lora_rank + self.suffix_dim,
-                    self.local_heads * self.value_dim,
-                ],
-                dim=-1,
-            )
-        packed = self.fused_qkv_a_proj(hidden_states)
+        packed = all_gather_gemm(
+            hidden_states,
+            [self._packed_qkv_gate_w],
+            logical_m=self._logical_tokens_for_forward,
+        )[0]
         return torch.split(
             packed,
             [
@@ -144,8 +123,8 @@ class KimiK3MLA(MlaAttention):
         ``[tokens, local_heads * v_head_dim]`` (head-major), matching the flat
         layout of the rank-local gate projection, so the gate multiplies element
         wise per (head, value) exactly as K3 requires before o_proj.
-        This runs before o_proj's TP all_reduce, so each rank gates only its
-        local heads.
+        This runs before o_proj's GEMM/ReduceScatter, so each rank gates only
+        its local heads.
         """
         if not self.use_output_gate:
             return attn_output
@@ -153,72 +132,27 @@ class KimiK3MLA(MlaAttention):
         return attn_output * torch.sigmoid(output_gate.reshape_as(attn_output))
 
     def _project_output(self, attn_output: torch.Tensor) -> torch.Tensor:
-        if self._sp_active_for_forward:
-            tp_size = self.parallelism_config.get_attn_tp_size()
-            pad_reduce_scatter = self._sp_padded_for_forward or (
-                self._sp_prefill_input_is_sharded
-                and attn_output.shape[0] % tp_size != 0
-            )
-            if self._sp_prefill_input_is_sharded:
-                fused = gemm_reduce_scatter(
-                    attn_output,
-                    self._o_w,
-                    get_process_group(Group.TP),
-                    pad_rows=pad_reduce_scatter,
-                )
-                if fused is not None:
-                    return fused
-            return row_parallel_linear(
-                attn_output,
-                self._o_w,
-                tp_size,
-                reduce_scatter_tokens=True,
-                pad_reduce_scatter_tokens=pad_reduce_scatter,
-                use_input_dtype_reduce_scatter=(self._sp_prefill_input_is_sharded),
-            )
-        return super()._project_output(attn_output)
+        return gemm_reduce_scatter(
+            attn_output,
+            self._o_w,
+            get_process_group(Group.TP),
+        )
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         fmha_impl: Any,
+        logical_tokens: int,
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
-        sequence_parallel: bool = False,
-        prefill_sp_layout: Optional[TokenShardLayout] = None,
     ) -> torch.Tensor:
-        attn_inputs = _select_mla_attention_inputs(attention_inputs, fmha_impl)
-        self._sp_active_for_forward = bool(
-            sequence_parallel
-            and self.parallelism_config.get_attn_tp_size() > 1
-            and hidden_states.is_cuda
-            and attn_inputs is not None
-        )
-        self._sp_prefill_input_is_sharded = prefill_sp_layout is not None
-        self._sp_prefill_layout_for_forward = prefill_sp_layout
-        if prefill_sp_layout is not None and (
-            not self._sp_active_for_forward
-            or attn_inputs is None
-            or not attn_inputs.is_prefill
-        ):
-            raise ValueError(
-                "prefill_sp_layout requires production CUDA MLA Prefill "
-                "Sequence Parallel with TP>1"
-            )
-        self._sp_padded_for_forward = bool(
-            self._sp_active_for_forward
-            and attn_inputs is not None
-            and not attn_inputs.is_prefill
-        )
         if not hidden_states.is_cuda:
             raise RuntimeError("Kimi K3 MLA requires CUDA")
+        self._logical_tokens_for_forward = logical_tokens
         try:
             return super().forward(hidden_states, fmha_impl, kv_cache)
         finally:
-            self._sp_active_for_forward = False
-            self._sp_padded_for_forward = False
-            self._sp_prefill_input_is_sharded = False
-            self._sp_prefill_layout_for_forward = None
+            self._logical_tokens_for_forward = 0
 
 
 __all__ = [

@@ -8,16 +8,7 @@ import torch
 from torch import nn
 
 from rtp_llm.model_loader.linear_attn_weight import split_kda_qkvg_fa_beta_sections
-from rtp_llm.models_py.distributed.collective_torch import (
-    Group,
-    all_reduce,
-    get_process_group,
-)
-from rtp_llm.models_py.distributed.sequence_parallel import (
-    TokenShardLayout,
-    shard_tokens_with_padding,
-)
-from rtp_llm.models_py.modules.factory.linear.parallel import row_parallel_linear
+from rtp_llm.models_py.distributed.collective_torch import Group, get_process_group
 from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import all_gather_gemm
 from rtp_llm.models_py.modules.kimi_k3.gemm_reduce_scatter import gemm_reduce_scatter
 from rtp_llm.models_py.modules.kimi_k3.kda.cache import KimiK3KDACache
@@ -60,11 +51,7 @@ class KimiK3KDA(nn.Module):
         self.attn_tp_size = int(parallelism_config.get_attn_tp_size())
         self.attn_tp_rank = int(parallelism_config.get_attn_tp_rank())
         self.total_heads = int(config.linear_attention_config.linear_num_key_heads)
-        if self.total_heads % self.attn_tp_size:
-            raise ValueError(
-                f"KDA heads {self.total_heads} must be divisible by "
-                f"attention TP {self.attn_tp_size}"
-            )
+
         self.local_heads = self.total_heads // self.attn_tp_size
         self.projection_size = self.local_heads * self.head_dim
         self.history_size = (
@@ -72,10 +59,7 @@ class KimiK3KDA(nn.Module):
         )
         self.eps = float(config.layernorm_eps)
         self.gate_lower_bound = runtime.kda_gate_lower_bound
-        if not runtime.kda_use_full_rank_gate:
-            raise NotImplementedError(
-                "K3 checkpoint manifest currently requires full-rank KDA output gate"
-            )
+
         if parallelism_config.role_type not in (
             RoleType.PREFILL,
             RoleType.DECODE,
@@ -113,57 +97,39 @@ class KimiK3KDA(nn.Module):
 
         fused_projection = weights[W.linear_attn_qkvg_fa_beta_w]
         self.forget_latent_size = int(weights[W.linear_attn_f_b_w].shape[0])
-        expected_fused_width = (
-            4 * self.projection_size + self.forget_latent_size + self.total_heads
-        )
-        if fused_projection.shape[1] != expected_fused_width:
-            raise ValueError(
-                "fused KDA QKVG/F_A/beta width "
-                f"{fused_projection.shape[1]} != {expected_fused_width}"
-            )
+
         self.kda_fused_w = fused_projection
 
-        fused_conv = weights[W.linear_attn_conv1d_w].squeeze(1)
-        if fused_conv.shape[0] != 3 * self.projection_size:
-            raise ValueError(
-                "fused KDA conv channels "
-                f"{fused_conv.shape[0]} != 3*{self.projection_size}"
-            )
+        fused_conv = weights[W.linear_attn_conv1d_w].squeeze(1)     # 这里为什么要squeeze(1)？？
 
         self.prefill_executor: Optional[KimiK3KDAPrefill]
         self.decode_executor: Optional[KimiK3KDADecode]
-        if self._role_type in (RoleType.PREFILL, RoleType.PDFUSION):
-            self.prefill_executor = KimiK3KDAPrefill(
-                weights=weights,
-                cache=self.cache,
-                local_heads=self.local_heads,
-                head_dim=self.head_dim,
-                projection_size=self.projection_size,
-                gate_lower_bound=self.gate_lower_bound,
-                fused_conv=fused_conv,
-            )
-        else:
-            self.prefill_executor = None
+        self.prefill_executor = KimiK3KDAPrefill(
+            weights=weights,
+            cache=self.cache,
+            local_heads=self.local_heads,
+            head_dim=self.head_dim,
+            projection_size=self.projection_size,
+            gate_lower_bound=self.gate_lower_bound,
+            fused_conv=fused_conv,
+        )
 
-        if self._role_type in (RoleType.DECODE, RoleType.PDFUSION):
-            self.decode_executor = KimiK3KDADecode(
-                weights=weights,
-                cache=self.cache,
-                local_heads=self.local_heads,
-                head_dim=self.head_dim,
-                projection_size=self.projection_size,
-                history_size=self.history_size,
-                gate_lower_bound=self.gate_lower_bound,
-                fused_conv=fused_conv,
-            )
-        else:
-            self.decode_executor = None
+        self.decode_executor = KimiK3KDADecode(
+            weights=weights,
+            cache=self.cache,
+            local_heads=self.local_heads,
+            head_dim=self.head_dim,
+            projection_size=self.projection_size,
+            history_size=self.history_size,
+            gate_lower_bound=self.gate_lower_bound,
+            fused_conv=fused_conv,
+        )
 
     def _project_fused_kda_inputs(
         self,
         hidden_states: torch.Tensor,
         *,
-        prefill_sp_layout: Optional[TokenShardLayout],
+        logical_tokens: int,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -175,14 +141,11 @@ class KimiK3KDA(nn.Module):
     ]:
         """Run and unpack the loader-provided Q/K/V/G/F_A/beta projection."""
 
-        if prefill_sp_layout is not None:
-            projected_fused = all_gather_gemm(
-                hidden_states,
-                [self.kda_fused_w],
-                logical_m=prefill_sp_layout.logical_tokens,
-            )[0]
-        else:
-            projected_fused = torch.matmul(hidden_states, self.kda_fused_w)
+        projected_fused = all_gather_gemm(
+            hidden_states,
+            [self.kda_fused_w],
+            logical_m=logical_tokens,
+        )[0]
         (
             q_projected,
             k_projected,
@@ -247,116 +210,22 @@ class KimiK3KDA(nn.Module):
         self,
         output: torch.Tensor,
         output_gate: torch.Tensor,
-        *,
-        is_target_verify: bool,
-        sequence_parallel: bool,
-        hidden_states: torch.Tensor,
-        mode: KDAExecutionMode,
     ) -> torch.Tensor:
         token_count = output_gate.shape[1]
-        # Decode and target-verify must use the same numerics. Mixing the fused
-        # projection path with this explicit path can change near-tied logits.
-        use_explicit_output = mode == "decode"
-        if use_explicit_output:
-            output_dtype = output.dtype
-            norm_weight = self.weights[W.linear_attn_norm_w]
-            output_float = output.float()
-            rms = torch.rsqrt(
-                output_float.square().mean(dim=-1, keepdim=True) + self.eps
-            )
-            output = output_float * rms
-            output = output * norm_weight.float()
-            output = output * torch.sigmoid(output_gate.float())
-            output = output.to(dtype=output_dtype)
-        else:
-            output = kimi_kda_rms_norm_sigmoid_gate(
-                output,
-                output_gate,
-                self.weights[W.linear_attn_norm_w],
-                self.eps,
-            )
+        # Prefill, Decode and target verify share one normalization/gate path.
+        output = kimi_kda_rms_norm_sigmoid_gate(
+            output,
+            output_gate,
+            self.weights[W.linear_attn_norm_w],
+            self.eps,
+        )
 
         projection_input = output.reshape(token_count, self.projection_size)
-        if use_explicit_output:
-            output = torch.matmul(
-                projection_input,
-                self.weights[W.linear_attn_out_w],
-            )
-            if self.attn_tp_size > 1:
-                output = all_reduce(output, group=Group.TP)
-                decode_sp = (
-                    sequence_parallel and not is_target_verify and hidden_states.is_cuda
-                )
-                if decode_sp:
-                    output, _ = shard_tokens_with_padding(
-                        output,
-                        token_count,
-                        self.attn_tp_size,
-                        self.attn_tp_rank,
-                    )
-            return output
-        use_reduce_scatter = (
-            sequence_parallel and self.attn_tp_size > 1 and hidden_states.is_cuda
-        )
-        pad_reduce_scatter = use_reduce_scatter and (
-            mode == "decode" or token_count % self.attn_tp_size != 0
-        )
-        if mode == "prefill" and use_reduce_scatter:
-            fused = gemm_reduce_scatter(
-                projection_input,
-                self.weights[W.linear_attn_out_w],
-                get_process_group(Group.TP),
-                pad_rows=pad_reduce_scatter,
-            )
-            if fused is not None:
-                return fused
-        return row_parallel_linear(
+        return gemm_reduce_scatter(
             projection_input,
             self.weights[W.linear_attn_out_w],
-            self.attn_tp_size,
-            reduce_scatter_tokens=use_reduce_scatter,
-            pad_reduce_scatter_tokens=pad_reduce_scatter,
-            use_input_dtype_reduce_scatter=(mode == "prefill"),
+            get_process_group(Group.TP),
         )
-
-    def _validate_request(
-        self,
-        hidden_states: torch.Tensor,
-        *,
-        mode: KDAExecutionMode,
-        kv_cache: Optional[LayerKVCache],
-        attention_inputs: Optional[PyAttentionInputs],
-        sequence_parallel: bool,
-        prefill_sp_layout: Optional[TokenShardLayout],
-    ) -> bool:
-        """Validate the role-specific contract and return target-verify mode."""
-
-        is_target_verify = bool(
-            attention_inputs is not None
-            and getattr(attention_inputs, "is_target_verify", False)
-        )
-        if is_target_verify and self._role_type == RoleType.PREFILL:
-            raise RuntimeError(
-                "Kimi K3 target verify requires the direct paged Decode path"
-            )
-        if self._role_type == RoleType.PREFILL and mode != "prefill":
-            raise RuntimeError("Kimi K3 Prefill role cannot execute Decode")
-        if self._role_type == RoleType.DECODE and mode != "decode":
-            raise RuntimeError("Kimi K3 Decode role cannot execute Prefill")
-        if kv_cache is None or attention_inputs is None:
-            raise RuntimeError(
-                "Kimi K3 Prefill, Decode, and target verify require direct paged cache"
-            )
-        if prefill_sp_layout is not None and (
-            mode != "prefill"
-            or not sequence_parallel
-            or self.attn_tp_size <= 1
-            or not hidden_states.is_cuda
-        ):
-            raise ValueError(
-                "prefill_sp_layout requires CUDA Prefill Sequence Parallel with TP>1"
-            )
-        return is_target_verify
 
     def forward(
         self,
@@ -364,20 +233,15 @@ class KimiK3KDA(nn.Module):
         cu_seqlens: torch.Tensor,
         *,
         mode: KDAExecutionMode,
+        logical_tokens: int,
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
-        sequence_parallel: bool = False,
-        prefill_sp_layout: Optional[TokenShardLayout] = None,
         prefill_metadata: Optional[KimiKDAPrefillMetadata] = None,
         current_state_registry: Optional[KimiKDACurrentStateRegistry] = None,
     ) -> torch.Tensor:
-        is_target_verify = self._validate_request(
-            hidden_states,
-            mode=mode,
-            kv_cache=kv_cache,
-            attention_inputs=attention_inputs,
-            sequence_parallel=sequence_parallel,
-            prefill_sp_layout=prefill_sp_layout,
+        is_target_verify = bool(
+            attention_inputs is not None
+            and getattr(attention_inputs, "is_target_verify", False)
         )
         (
             mixed_qkv_projected,
@@ -389,7 +253,7 @@ class KimiK3KDA(nn.Module):
             output_gate_projected,
         ) = self._project_fused_kda_inputs(
             hidden_states,
-            prefill_sp_layout=prefill_sp_layout,
+            logical_tokens=logical_tokens,
         )
         token_count = q_projected.shape[0]
         output_gate = output_gate_projected.reshape(
@@ -423,14 +287,7 @@ class KimiK3KDA(nn.Module):
                 attention_inputs=attention_inputs,
                 is_target_verify=is_target_verify,
             )
-        output = self._project_output(
-            output,
-            output_gate,
-            is_target_verify=is_target_verify,
-            sequence_parallel=sequence_parallel,
-            hidden_states=hidden_states,
-            mode=mode,
-        )
+        output = self._project_output(output, output_gate)
         return output
 
 

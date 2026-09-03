@@ -13,12 +13,6 @@ from rtp_llm.models_py.distributed.collective_torch import (
     reduce_scatter,
     reduce_scatter_padded,
 )
-from rtp_llm.models_py.distributed.sequence_parallel import (
-    TokenShardLayout,
-    shard_tokens,
-    shard_tokens_with_padding,
-    token_shard_layout,
-)
 
 
 def _replicate_column_weight(
@@ -196,11 +190,7 @@ def _matmul_with_padded_rows(
 
 
 __all__ = [
-    "TokenShardLayout",
     "row_parallel_linear",
     "sequence_parallel_column_weight",
     "sequence_parallel_row_weight",
-    "shard_tokens",
-    "shard_tokens_with_padding",
-    "token_shard_layout",
 ]

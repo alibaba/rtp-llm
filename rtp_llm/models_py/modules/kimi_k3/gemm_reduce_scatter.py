@@ -82,7 +82,11 @@ def configure_gemm_reduce_scatter(
         return existing.enabled
 
     backend = gemm_reduce_scatter_backend()
-    requested = enabled and backend not in ("nccl", "off")
+    requested = (
+        enabled
+        and should_use_gemm_reduce_scatter(max_m)
+        and backend not in ("nccl", "off")
+    )
     deep_gemm = None
     local_ready = requested
     failure_reason = ""
@@ -108,11 +112,13 @@ def configure_gemm_reduce_scatter(
             local_ready = False
             failure_reason = f"failed to import DeepGEMM: {exc}"
 
+    world_size = int(group.size())
     group_ready = False
     if requested:
         readiness = torch.tensor([int(local_ready)], dtype=torch.int32, device=device)
-        dist.all_reduce(readiness, op=dist.ReduceOp.MIN, group=group)
-        group_ready = bool(readiness.item())
+        readiness_by_rank = readiness.new_empty(world_size)
+        dist.all_gather_into_tensor(readiness_by_rank, readiness, group=group)
+        group_ready = bool(readiness_by_rank.min().item())
         if not group_ready:
             message = failure_reason or (
                 "at least one TP rank cannot use DeepGEMM GEMM/RS"
@@ -124,7 +130,6 @@ def configure_gemm_reduce_scatter(
                 message,
             )
 
-    world_size = int(group.size())
     use_deepgemm = requested and group_ready
     workspace = None
     if use_deepgemm:
@@ -176,42 +181,26 @@ def gemm_reduce_scatter(
     x: torch.Tensor,
     weight: torch.Tensor,
     group: dist.ProcessGroup,
-    *,
-    pad_rows: bool,
-) -> Optional[torch.Tensor]:
-    """Run fused GEMM/RS, or return ``None`` for the Torch/NCCL path.
+) -> torch.Tensor:
+    """Project row-parallel heads and return the local token shard.
 
     ``weight`` is the loader's canonical contiguous ``[K, N]`` tensor shared
-    with ``torch.mm`` fallback.  This path never transposes or caches a copy.
+    by both implementations. Runtime M selects DeepGEMM or Torch/NCCL inside
+    this operator; modeling never branches on the selected implementation.
     """
 
-    if not x.is_cuda:
-        return None
-    state = _STATES.get(collective_gemm_state_key(group, x.device))
-    if state is None or not state.enabled:
-        return None
-    if x.ndim != 2 or x.dtype != torch.bfloat16:
+    if not x.is_cuda or x.ndim != 2 or x.dtype != torch.bfloat16:
         raise TypeError(
             "K3 GEMM/RS input must be CUDA BF16 [M,K], got "
             f"shape={tuple(x.shape)} dtype={x.dtype} device={x.device}"
         )
+    state = _STATES.get(collective_gemm_state_key(group, x.device))
+    if state is None:
+        raise RuntimeError("K3 GEMM/RS must be configured before model execution")
     if x.device != state.device:
         raise ValueError(
             f"K3 GEMM/RS input device {x.device} != workspace {state.device}"
         )
-
-    m = int(x.shape[0])
-    physical_m = (
-        ((m + state.world_size - 1) // state.world_size) * state.world_size
-        if pad_rows
-        else m
-    )
-    if physical_m % state.world_size:
-        raise ValueError(
-            f"K3 GEMM/RS M={physical_m} must be divisible by TP{state.world_size}"
-        )
-    if not should_use_gemm_reduce_scatter(physical_m):
-        return None
     if (
         weight.ndim != 2
         or weight.dtype != torch.bfloat16
@@ -219,8 +208,8 @@ def gemm_reduce_scatter(
         or not weight.is_contiguous()
     ):
         raise TypeError(
-            "K3 GEMM/ReduceScatter weight must be contiguous CUDA BF16 "
-            f"[K,N], got shape={tuple(weight.shape)} dtype={weight.dtype} "
+            "K3 GEMM/RS weight must be contiguous CUDA BF16 [K,N], got "
+            f"shape={tuple(weight.shape)} dtype={weight.dtype} "
             f"device={weight.device} contiguous={weight.is_contiguous()}"
         )
     expected_weight_shape = (int(x.shape[1]), state.n)
@@ -231,14 +220,57 @@ def gemm_reduce_scatter(
         )
     if weight.device != x.device:
         raise ValueError(f"K3 o_proj weight device {weight.device} != input {x.device}")
+
+    logical_m = int(x.shape[0])
+    physical_m = (
+        (logical_m + state.world_size - 1) // state.world_size
+    ) * state.world_size
     if physical_m > state.max_m:
         raise RuntimeError(
             f"K3 GEMM/RS M={physical_m} exceeds configured max_m={state.max_m}"
         )
-    if physical_m != m:
-        padded_x = x.new_zeros((physical_m, x.shape[1]))
-        padded_x.narrow(0, 0, m).copy_(x)
-        x = padded_x
+
+    implementations = (_torch_gemm_reduce_scatter, _deepgemm_reduce_scatter)
+    implementation = implementations[
+        int(state.enabled and should_use_gemm_reduce_scatter(physical_m))
+    ]
+    return implementation(x, weight, state, physical_m)
+
+
+def _torch_gemm_reduce_scatter(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    state: _GemmReduceScatterState,
+    physical_m: int,
+) -> torch.Tensor:
+    with torch.profiler.record_function("RTP::kimi_k3.gemm_reduce_scatter.torch"):
+        partial = torch.mm(x, weight)
+        if physical_m != x.shape[0]:
+            padded = partial.new_zeros((physical_m, partial.shape[1]))
+            padded.narrow(0, 0, partial.shape[0]).copy_(partial)
+            partial = padded
+        if state.world_size == 1:
+            return partial
+        output = partial.new_empty((physical_m // state.world_size, state.n))
+        dist.reduce_scatter_tensor(
+            output,
+            partial.contiguous(),
+            op=dist.ReduceOp.SUM,
+            group=state.group,
+        )
+        return output
+
+
+def _deepgemm_reduce_scatter(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    state: _GemmReduceScatterState,
+    physical_m: int,
+) -> torch.Tensor:
+    if physical_m != x.shape[0]:
+        padded = x.new_zeros((physical_m, x.shape[1]))
+        padded.narrow(0, 0, x.shape[0]).copy_(x)
+        x = padded
     elif not x.is_contiguous():
         x = x.contiguous()
 
@@ -252,7 +284,7 @@ def gemm_reduce_scatter(
             state.workspace,
             compiled_dims="nk",
         )
-    return output
+        return output
 
 
 __all__ = [
