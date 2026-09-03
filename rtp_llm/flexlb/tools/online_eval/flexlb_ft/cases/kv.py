@@ -101,6 +101,15 @@ KV_CACHE_SYNC_WAIT_S = 2.0
 # GrpcCacheStatusCheckRunner poll period plus margin (smoke S2 used 2.0
 # as a single sleep; the eviction events need the longer convergence).
 KV_SYNC_CONVERGENCE_S = 3.5
+# P1 fired-batch wave size.  GRADE_BANDS' P1 uniformity bands (strict /
+# normal / loose = 0.65 / 0.75 / 0.85) are calibrated against B(20, 0.5):
+# normal 0.75 ~= 2 * P(X >= 15) ~= 4.1%, loose 0.85 ~= 2 * P(X >= 17) ~=
+# 0.26% two-sided nominal false-fail per wave (see the P1 entry in
+# grade.GRADE_BANDS).  Every P1 fired-batch wave MUST fire exactly this
+# many requests: the historical n=10 put the SAME bands at ~10.9%
+# (normal) / ~2.1% (loose) per wave — one loose trip drops the
+# whole-suite verdict straight to unusable.
+P1_WAVE_N = 20
 # Prefix-family calibration (module docstring): 10 blocks of 1024 tokens
 # per family; a full-hit continuation prices at hitTokens = 9216 >= 8192.
 PREFIX_BLOCKS = 10
@@ -655,8 +664,15 @@ def kv_pe_evict_zero_match(ctx: CaseContext):
 
         # -- negative control: a fired batch (two-phase, decisions inside
         #    one sync window) must spread — no stale stickiness to X.
+        #    Hedge note (deliberate, not incidental): the 0.12s fire
+        #    spacing keeps every decision inside the live ~2s ledger
+        #    window, so later fires hedge away from earlier landings —
+        #    the spread is negatively correlated and the real false-fail
+        #    rate sits BELOW the independent-binomial nominal (P1_WAVE_N
+        #    calibration); widening the fire spacing silently removes
+        #    this protection.
         wave_names = []
-        for _ in range(10):
+        for _ in range(P1_WAVE_N):
             rid = ops.next_request_id(base)
             name, err = _fire_request(
                 ops,
@@ -987,9 +1003,15 @@ def kv_g_full_release_no_ghost(ctx: CaseContext):
         )
 
         # -- fired batch (two-phase, decisions inside one sync window):
-        #    zero-hit tie-window spread — no ghost stickiness.
+        #    zero-hit tie-window spread — no ghost stickiness.  Hedge
+        #    note (deliberate, not incidental): the 0.12s fire spacing
+        #    keeps every decision inside the live ~2s ledger window, so
+        #    later fires hedge away from earlier landings — the spread is
+        #    negatively correlated and the real false-fail rate sits BELOW
+        #    the independent-binomial nominal (P1_WAVE_N calibration);
+        #    widening the fire spacing silently removes this protection.
         wave_names = []
-        for _ in range(10):
+        for _ in range(P1_WAVE_N):
             rid = ops.next_request_id(base)
             name, err = _fire_request(
                 ops,
@@ -1109,8 +1131,15 @@ def kv_g_sync_convergence(ctx: CaseContext):
         snapshot_ok = not fam0_ghost and fam1_sole == [s1] and fam2_sole == [d2]
 
         # -- fam0 (no holder): fired batch spreads (no ghost stickiness).
+        #    Hedge note (deliberate, not incidental): the 0.12s fire
+        #    spacing keeps every decision inside the live ~2s ledger
+        #    window, so later fires hedge away from earlier landings —
+        #    the spread is negatively correlated and the real false-fail
+        #    rate sits BELOW the independent-binomial nominal (P1_WAVE_N
+        #    calibration); widening the fire spacing silently removes
+        #    this protection.
         wave_names = []
-        for _ in range(10):
+        for _ in range(P1_WAVE_N):
             rid = ops.next_request_id(base)
             name, err = _fire_request(
                 ops,
