@@ -150,6 +150,7 @@ public:
     static void   setPerRankBlockTransferEngineForTest(BlockTreeCache&               cache,
                                                        PerRankBlockTransferEnginePtr per_rank_transfer_engine);
     static void   setTierWatermarkForTest(BlockTreeCache& cache, Tier tier, double ratio);
+    static void   setTierWatermarkForTest(BlockTreeCache& cache, Tier tier, double low_ratio, double high_ratio);
     static void   refreshCandidateForTest(BlockTreeCache& cache, TreeNode* node, size_t group_set_id);
     static void   markPathMatchedForTest(BlockTreeCache& cache, const std::vector<TreeNode*>& path);
     static size_t pendingEvictionReleasesForTest(const BlockTreeCache& cache);
