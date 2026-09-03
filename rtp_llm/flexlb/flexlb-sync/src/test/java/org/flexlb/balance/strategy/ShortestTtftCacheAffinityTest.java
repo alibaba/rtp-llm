@@ -6,6 +6,7 @@ import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.PriorityScheduler;
+import org.flexlb.balance.session.SessionPlacementLifecycle;
 import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
@@ -202,6 +203,7 @@ class ShortestTtftCacheAffinityTest {
         request.setSessionSchemaVersion(1);
         request.setInferenceSessionId("session-1");
         request.setInferenceSessionState(Request.SessionState.NEW);
+        initializeSession(context);
 
         ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
 
@@ -222,6 +224,7 @@ class ShortestTtftCacheAffinityTest {
         request.setSessionSchemaVersion(1);
         request.setInferenceSessionId("session-1");
         request.setInferenceSessionState(Request.SessionState.NEW);
+        initializeSession(context);
 
         ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
 
@@ -243,6 +246,7 @@ class ShortestTtftCacheAffinityTest {
         request.setSessionSchemaVersion(1);
         request.setInferenceSessionId("session-1");
         request.setInferenceSessionState(Request.SessionState.NEW);
+        initializeSession(context);
 
         ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
 
@@ -262,6 +266,7 @@ class ShortestTtftCacheAffinityTest {
         request.setSessionSchemaVersion(1);
         request.setInferenceSessionId("session-1");
         request.setInferenceSessionState(Request.SessionState.NEW);
+        initializeSession(context);
 
         ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
 
@@ -592,11 +597,19 @@ class ShortestTtftCacheAffinityTest {
         return config;
     }
 
-    private static void markEstablished(BalanceContext context, String model, String sessionId) {
+    private void markEstablished(BalanceContext context, String model, String sessionId) {
         context.getRequest().setModel(model);
         context.getRequest().setSessionSchemaVersion(1);
         context.getRequest().setInferenceSessionId(sessionId);
         context.getRequest().setInferenceSessionState(Request.SessionState.ESTABLISHED);
+        initializeSession(context);
+    }
+
+    private void initializeSession(BalanceContext context) {
+        SessionPlacementLifecycle.initialize(
+                context.getRequest(),
+                context.getConfig().getRouter().getRoles().getPrefill().getSessionAffinity(),
+                sessionPlacementStore);
     }
 
     private void record(String ipPort) {
