@@ -10,6 +10,13 @@ cc_library(
     copts = copts(),
 )
 
+py_test(
+    name = "model_config_test",
+    srcs = ["model_config_test.py"],
+    data = ["//:th_transformer_config"],
+    deps = ["//rtp_llm:ops"],
+)
+
 cc_library(
     name = "role_types",
     hdrs = ["RoleTypes.h"],
