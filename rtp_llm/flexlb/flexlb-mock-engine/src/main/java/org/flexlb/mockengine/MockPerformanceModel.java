@@ -61,6 +61,22 @@ final class MockPerformanceModel {
     static final double DEFAULT_TOKENS_PER_STEP = 2.6;
 
     /**
+     * Default decode KV reserve-step window in TOKENS, JSON
+     * "decode.reserve_step" (0 = disabled, the non-speculative production
+     * default). Production reference (Zola forensics): the speculative
+     * decode config sets {@code reserve_step_ = gen_num_per_circle + 1}
+     * (tokens proposed per step + 1, typically a single-digit number) — a
+     * CONSTANT look-ahead window front-loaded at initKVBlock: the initial
+     * allocation prices {@code ceil((seq_len + reserve_step) / spb)} blocks,
+     * and the front-loaded part is CONSUMED as seq_len grows (incrKVBlock may
+     * spend reserved blocks), adding one block only at each block boundary —
+     * constant front-load, never an accumulating append. MTP-style
+     * speculative stress profiles set it to {@code tokens_per_step + 1}; the
+     * default 0 keeps every existing behavior bit-identical.
+     */
+    static final int DEFAULT_DECODE_RESERVE_STEP = 0;
+
+    /**
      * Production DSv4 prefill execution-time fit, verbatim from the
      * RoutingConfig.FormulaEstimatorConfig.DEFAULT_EXPRESSION constant as it
      * existed on the intake3 test line (commit 6980b3d508..91498cfa4f, where
@@ -127,6 +143,10 @@ final class MockPerformanceModel {
     // MTP acceptance fold: tokens advanced per running stream per step
     // (JSON "decode.tokens_per_step", default DEFAULT_TOKENS_PER_STEP).
     private final double tokensPerStep;
+    // Decode KV reserve-step window in tokens (JSON "decode.reserve_step",
+    // default DEFAULT_DECODE_RESERVE_STEP = 0 = disabled): see the constant's
+    // javadoc for the production speculative-decode anchor.
+    private final int decodeReserveStep;
     private final double decodeScale;
     // Opt-in accepted-layer visibility window, JSON
     // "decode.report_queued_as_kv_allocated" (default false = current
@@ -167,6 +187,7 @@ final class MockPerformanceModel {
                                  double stepBaseMs,
                                  double stepPerRunningMs,
                                  double tokensPerStep,
+                                 int decodeReserveStep,
                                  double decodeScale,
                                  boolean reportQueuedAsKvAllocated,
                                  double jitterPct) {
@@ -182,6 +203,7 @@ final class MockPerformanceModel {
         this.stepBaseMs = stepBaseMs;
         this.stepPerRunningMs = stepPerRunningMs;
         this.tokensPerStep = tokensPerStep;
+        this.decodeReserveStep = Math.max(0, decodeReserveStep);
         this.decodeScale = decodeScale;
         this.reportQueuedAsKvAllocated = reportQueuedAsKvAllocated;
         this.jitterPct = jitterPct;
@@ -252,10 +274,16 @@ final class MockPerformanceModel {
             throw new IllegalStateException("Performance JSON '" + performanceFile
                     + "': decode.tokens_per_step must be > 0 (got " + tokensPerStep + ")");
         }
+        int decodeReserveStep = decode.path("reserve_step").asInt(DEFAULT_DECODE_RESERVE_STEP);
+        if (decodeReserveStep < 0) {
+            throw new IllegalStateException("Performance JSON '" + performanceFile
+                    + "': decode.reserve_step must be >= 0 (got " + decodeReserveStep + ")");
+        }
         double jitterPct = performance.path("jitter_pct").asDouble(0.0);
         return new MockPerformanceModel(blockSize, sleepScale, prefillScale,
                 prefillMinMs, prefillFixedMs, maxWaitingPrefillBatches, directBatchSizeMax, formula,
                 List.copyOf(points), stepBaseMs, stepPerRunningMs, tokensPerStep,
+                decodeReserveStep,
                 decode.path("scale").asDouble(1.0),
                 reportQueuedAsKvAllocated, jitterPct);
     }
@@ -448,6 +476,17 @@ final class MockPerformanceModel {
     /** Tokens produced per running stream per decode step (MTP acceptance fold). */
     double tokensPerStep() {
         return tokensPerStep;
+    }
+
+    /**
+     * Decode KV reserve-step window in tokens (JSON "decode.reserve_step",
+     * default 0 = disabled): when > 0, decode block demand prices
+     * {@code ceil((seq_len + reserve_step) / spb)} — initial admission and
+     * per-step growth alike (the constant look-ahead window production's
+     * speculative config front-loads; see DEFAULT_DECODE_RESERVE_STEP).
+     */
+    int decodeReserveStep() {
+        return decodeReserveStep;
     }
 
     /** Effective decode scale (runtime /set_perf override > JSON config). */

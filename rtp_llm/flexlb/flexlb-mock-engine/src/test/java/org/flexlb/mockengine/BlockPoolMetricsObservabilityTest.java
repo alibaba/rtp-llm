@@ -44,16 +44,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *       decomposition as per-scrape GAUGES (prefill leases hold keyless blocks
  *       mid-flight; completion hands them to the LRU restoring availability;
  *       decode reuse pins hit keys as references).</li>
- *   <li>{@code mock_engine_lack_mem_rejects_total} — prefill requests
- *       synchronously rejected with LACK_MEM 602 (the enqueue-batch
- *       Phase-1.5 P-pool gate; a P-enqueue DECODE-reservation reject rides
- *       the same ack surface but counts on the D engine). Distinct from
- *       {@code mock_engine_kv_admission_fails_total}, which counts DECODE-side
- *       REQUEST TERMINAL LACK_MEM failures (admission / growth /
- *       reservation rejects, production-aligned 20260903 — the former
- *       un-pooled degradation era is retired): prefill REJECTS, decode
- *       TERMINATES — the healthy-run contract is both stay 0, only overload
- *       runs light them up, and each on its own role.</li>
+ *   <li>{@code mock_engine_lack_mem_rejects_total} — the PERMANENT-family
+ *       LACK_MEM surface: prefill requests synchronously rejected with 602
+ *       (the enqueue-batch Phase-1.5 P-pool gate) AND decode-side failures
+ *       whose demand can NEVER fit (required + reserve > physical total —
+ *       the production KVCacheAllocator PERMANENT verdict), whether rejected
+ *       by the P-pool gate or by an ALLOCATE retry window exhausted on D.
+ *       Distinct from {@code mock_engine_kv_admission_fails_total}, which
+ *       counts the RETRYABLE-family DECODE-side REQUEST TERMINAL LACK_MEM
+ *       failures (admission / growth / reservation rejects — pool total
+ *       sufficient, temporarily short; production-aligned 20260903 — the
+ *       former un-pooled degradation era is retired): prefill REJECTS,
+ *       decode TERMINATES — the healthy-run contract is both stay 0, only
+ *       overload runs light them up, and each on its own role.</li>
  *   <li>{@code mock_engine_decode_reuse_blocks_total} — cumulative counter of
  *       the fix #5 net-demand deduction (acquireWithReuse hit keys against the
  *       engine's OWN LRU): a CUMULATIVE counter, never drained (unlike the
@@ -299,12 +302,15 @@ class BlockPoolMetricsObservabilityTest {
      * retired): an oversized decode request (11 blocks vs a 10-block pool,
      * cold LRU so the net demand alone overflows) cannot provision its lease
      * at hand-off admission. scheduleDecodeCompletion ACCEPTS and TERMINATES
-     * the request: the typed terminal carries error 602 (LACK_MEM), the
-     * engine_events decode_done row carries error_code=602 with
-     * cancelled=false, an error frame closes the client stream, the
-     * lifecycle ends "failed", kv_admission_fails counts 1 on the D engine,
-     * and every run-start claim (slot / pendingRequests / runningTasks) is
-     * rolled back — zero pool residue, no leak.
+     * the request: the typed terminal carries the master-surface error 8211
+     * (DECODE_MALLOC_FAILED — the production P-side closeGrpcStream rewrite;
+     * the raw 602 stays in the message text), the engine_events decode_done
+     * row carries error_code=8211 with cancelled=false, an error frame closes
+     * the client stream, the lifecycle ends "failed", and because 11 +
+     * reserve > 10 total the failure classifies PERMANENT — lack_mem_rejects
+     * counts 1 on the D engine (kv_admission_fails stays 0) — and every
+     * run-start claim (slot / pendingRequests / runningTasks) is rolled back
+     * — zero pool residue, no leak.
      */
     @Test
     void decodeAdmissionFailureIsRequestTerminalLackMem() throws Exception {
@@ -349,29 +355,38 @@ class BlockPoolMetricsObservabilityTest {
         EngineRpcService.TaskInfoPB terminal = status.getFinishedTaskList(0);
         assertEquals(201L, terminal.getRequestId());
         assertTrue(terminal.hasErrorInfo(), "the terminal must carry error info");
-        assertEquals(JavaMockEngineCluster.LACK_MEM_ERROR_CODE,
-                terminal.getErrorInfo().getErrorCode());
+        assertEquals(JavaMockEngineCluster.DECODE_LACK_MEM_ERROR_CODE,
+                terminal.getErrorInfo().getErrorCode(),
+                "decode terminals carry the master-surface 8211");
+        assertTrue(terminal.getErrorInfo().getErrorMessage().contains("602"),
+                "the raw 602 travels in the message text: "
+                        + terminal.getErrorInfo().getErrorMessage());
         // Lifecycle: the backfilled arrival row ends "failed" (/requests).
         assertEquals("failed", decode.getRequestLifecycleSnapshot()
                         .get("201").get("end_state"),
                 "the lifecycle must end failed");
 
-        // engine_events decode_done row: cancelled=false + error_code=602
+        // engine_events decode_done row: cancelled=false + error_code=8211
         // (the aggregate-side skip key).
         List<JsonNode> rows = readEventRows(eventsFile);
         assertEquals(1, rows.size(), "exactly one decode_done row");
         JsonNode row = rows.get(0);
         assertEquals("decode_done", row.path("event").asText());
-        assertEquals(602L, row.path("error_code").asLong(),
-                "the failure row must carry error_code=602");
+        assertEquals(8211L, row.path("error_code").asLong(),
+                "the failure row must carry error_code=8211 (master surface)");
         assertEquals(false, row.path("cancelled").asBoolean());
 
-        // D-side accounting + full rollback: 1 admission fail, zero residue.
+        // D-side accounting + full rollback: 11 + reserve > 10 total →
+        // PERMANENT family → lack_mem_rejects 1 / kv_admission_fails 0,
+        // zero residue.
         Map<String, Map<Integer, Long>> metrics =
                 parsePerEngineMetrics(httpGet(controlPort(), "/metrics?per_engine=true"));
-        assertEquals(1L, metrics.get("mock_engine_kv_admission_fails_total")
+        assertEquals(1L, metrics.get("mock_engine_lack_mem_rejects_total")
                         .getOrDefault(decodePort, -1L),
-                "the admission failure must count on the D engine");
+                "the PERMANENT admission failure counts in lack_mem_rejects");
+        assertEquals(0L, metrics.get("mock_engine_kv_admission_fails_total")
+                        .getOrDefault(decodePort, -1L),
+                "a never-fits failure must NOT count as RETRYABLE");
         assertEquals(0L, metrics.get("mock_engine_held_blocks")
                         .getOrDefault(decodePort, -1L),
                 "no lease residue on the pool");
@@ -389,14 +404,16 @@ class BlockPoolMetricsObservabilityTest {
      * P-enqueue decode-KV reservation reject (the mock counterpart of
      * production's prepare-stage ALLOCATE rejection): a request that fits
      * the PREFILL pool but overflows the role_addrs-targeted DECODE pool is
-     * rejected SYNCHRONOUSLY in the enqueue ack with error 602, the message
-     * marks the decode-side allocation, the P lease is released (zero P
-     * residue), and the failure counts on the DECODE engine's
-     * kv_admission_fails — never in lack_mem_rejects (the P-pool 602 surface
-     * stays clean), and the D pool keeps no residue.
+     * rejected SYNCHRONOUSLY in the enqueue ack with the master-surface 8211
+     * (raw 602 in the message text), the message marks the decode-side
+     * allocation, the P lease is released (zero P residue), and because 11 +
+     * reserve > 10 total the failure classifies PERMANENT — it counts on the
+     * DECODE engine's lack_mem_rejects (never in kv_admission_fails, and the
+     * P engine's own counters stay clean — the P pool did not reject), and
+     * the D pool keeps no residue.
      */
     @Test
-    void enqueueDecodeReservationRejectIsSynchronous602() throws Exception {
+    void enqueueDecodeReservationRejectIsSynchronous8211() throws Exception {
         MockPerformanceModel model = performanceModel(tempDir, "10");
         JavaMockEngineCluster.FastRpcService prefill = newPrefillService(model, 100);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 10);
@@ -412,8 +429,12 @@ class BlockPoolMetricsObservabilityTest {
                 enqueue(prefill, batch(6, slot(0, tooBigForDecode)));
         assertEquals(1, ack.getErrorsCount(),
                 "the D-pool overflow must reject the request synchronously");
-        assertEquals(JavaMockEngineCluster.LACK_MEM_ERROR_CODE,
-                ack.getErrors(0).getErrorInfo().getErrorCode());
+        assertEquals(JavaMockEngineCluster.DECODE_LACK_MEM_ERROR_CODE,
+                ack.getErrors(0).getErrorInfo().getErrorCode(),
+                "decode-side reservation rejects carry the master-surface 8211");
+        assertTrue(ack.getErrors(0).getErrorInfo().getErrorMessage().contains("602"),
+                "the raw 602 travels in the message text: "
+                        + ack.getErrors(0).getErrorInfo().getErrorMessage());
         assertTrue(ack.getErrors(0).getErrorInfo().getErrorMessage()
                         .contains("decode-side KV allocation rejected by D engine port="
                                 + decodePort),
@@ -422,9 +443,12 @@ class BlockPoolMetricsObservabilityTest {
 
         Map<String, Map<Integer, Long>> metrics =
                 parsePerEngineMetrics(httpGet(controlPort(), "/metrics?per_engine=true"));
-        assertEquals(1L, metrics.get("mock_engine_kv_admission_fails_total")
+        assertEquals(1L, metrics.get("mock_engine_lack_mem_rejects_total")
                         .getOrDefault(decodePort, -1L),
-                "the reservation reject counts on the D engine");
+                "the PERMANENT reservation reject counts on the D engine");
+        assertEquals(0L, metrics.get("mock_engine_kv_admission_fails_total")
+                        .getOrDefault(decodePort, -1L),
+                "a never-fits failure must NOT count as RETRYABLE");
         assertEquals(0L, metrics.get("mock_engine_lack_mem_rejects_total")
                         .getOrDefault(prefillPort, -1L),
                 "the P-pool rejection counter stays clean (the P pool did not reject)");
