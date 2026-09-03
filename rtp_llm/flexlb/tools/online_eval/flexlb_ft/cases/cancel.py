@@ -954,19 +954,27 @@ def cancel_engine_notfound_settle(ctx: CaseContext):
     terminal snapshot untouched (state is terminal → no second
     settlement, no engine cancel is forwarded); engine-side
     JavaMockEngineCluster.cancelRequest classifies the request as
-    alreadyFinished and answers CANCEL_STATUS_TOMBSTONED without
-    republishing any terminal.
+    alreadyFinished and answers CANCEL_STATUS_NOT_FOUND without
+    republishing any terminal — production ground truth (C++ Cancel
+    handler): NOT_FOUND means "seen but already terminal" (the
+    completion record stays deliverable from the retain-window
+    backlog).
 
     Expected (contract): the master Cancel RPC succeeds (idempotent);
-    the direct engine Cancel answers TOMBSTONED; the engine's recorded
-    terminal stays a completion (no cancelled_rids entry / lifecycle
-    rewrite); the master inflight ledger stays clean (nothing re-opened);
-    a follow-up request completes normally.
+    the direct engine Cancel answers NOT_FOUND (seen-and-terminal; the
+    retain window keeps the completion deliverable); the engine's
+    recorded terminal stays a completion (no cancelled_rids entry /
+    lifecycle rewrite); the master inflight ledger stays clean (nothing
+    re-opened); a follow-up request completes normally.
 
     Prediction: passes (cancel_after_terminal already covers the
-    master-idempotent half; the engine already-finished branch is the
-    mock's documented three-branch cancel semantics: NOT_FOUND
-    (unknown) / TOMBSTONED (already finished) / ACCEPTED (tracked)).
+    master-idempotent half; the engine branch is the mock's
+    production-faithful three-branch cancel semantics: ACCEPTED (live
+    or active-cancel tombstone) / NOT_FOUND (seen but already terminal
+    — this case) / TOMBSTONED (never-seen rid, absent fence installed).
+    The production 10-minute recently-seen TTL is simplified away in
+    the mock: every cancel in these cases is a sub-second race, far
+    inside that window).
     """
     ops = ctx.ops()
     rid = ops.next_request_id(rid_base(ctx, "cancel"))
@@ -994,13 +1002,15 @@ def cancel_engine_notfound_settle(ctx: CaseContext):
             master_cancel_ok, master_cancel_err = False, repr(exc)
 
         # Direct engine probe (bypass the master): the fence arriving at
-        # the engine AFTER the terminal must read TOMBSTONED (the
-        # already-finished branch of the three-branch cancel map).
+        # the engine AFTER the terminal must read NOT_FOUND (the
+        # seen-and-terminal branch of the production three-branch cancel
+        # map; TOMBSTONED is reserved for never-seen rids whose absent
+        # fence blocks later Enqueues).
         engine_status_ok, engine_status_detail = False, "no probe"
         try:
             stub = ops.pb2_grpc.RpcServiceStub(ops._channel(ops.prefill_addr(response)))
             ack = stub.Cancel(ops.pb2.CancelRequestPB(request_id=rid), timeout=10.0)
-            engine_status_ok = ack.status == ops.pb2.CANCEL_STATUS_TOMBSTONED
+            engine_status_ok = ack.status == ops.pb2.CANCEL_STATUS_NOT_FOUND
             engine_status_detail = f"status={ack.status}"
         except Exception as exc:
             engine_status_detail = repr(exc)

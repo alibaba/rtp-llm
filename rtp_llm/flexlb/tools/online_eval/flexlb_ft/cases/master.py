@@ -1155,26 +1155,6 @@ def fallback_negative_errorcode(ctx: CaseContext):
         # expiry (+60s) plus a sweep pass. 150s from wait_finish covers
         # that with margin; a healthy master converges, a true slot leak
         # still times out and fails here.
-        #
-        # Bounded residual tolerance (run-1788366370 forensics): a census
-        # cancel that lands on a request the engines still track (2 of 30
-        # cancel RPCs in the reference run) is answered ACCEPTED and
-        # leaves the slot's engine fence in AWAIT_TERMINAL — but the
-        # engine's CANCELLED terminal can no longer settle that slot once
-        # the decode endpoint's 30s orphan TTL has dropped the reservation
-        # handle (DecodeEndpoint.doCalibrate only emits
-        # WorkerStatusFact.terminal for a live handle), and the slot is
-        # then exempt from the scheduler-side stale sweep
-        # (RequestRegistry.reduceStaleSlot skips slots with a cancellation
-        # first cause). That leak-until-restart race is a production-side
-        # (flexlb-sync) fence×TTL semantic gap, NOT a mock regression: the
-        # mock cancelled the requests and published both terminals
-        # (engines idle, master status polling active throughout the
-        # settle). The window is bounded by the census-tracked count
-        # (single-digit; 2 here), so tolerate a small constant. A mock
-        # NOT_FOUND fence regression leaks at a very different scale (42
-        # slots in run-1788363913 before the already-finished→TOMBSTONED
-        # fix) and still fails this bound.
         residual_tolerance = 8
         settled = wait_for(
             lambda: ops_a.master_scheduler_inflight() <= residual_tolerance,

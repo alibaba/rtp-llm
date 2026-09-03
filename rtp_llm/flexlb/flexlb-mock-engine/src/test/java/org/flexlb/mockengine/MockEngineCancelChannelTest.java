@@ -37,8 +37,12 @@ import static org.mockito.Mockito.mock;
  *   <li>accepted: a live request on the addressed worker is cancelled and its
  *       CANCELLED completion surfaces in WorkerStatus;</li>
  *   <li>idempotent: an accepted priority-cancel tombstone stays ACCEPTED;</li>
- *   <li>not found: completed-before-cancel and unknown requests do not scan
- *       another Prefill for a match;</li>
+ *   <li>not found: a completed-before-cancel request answers NOT_FOUND
+ *       (production seen-but-terminal branch) and does not scan another
+ *       Prefill for a match;</li>
+ *   <li>tombstoned: a never-seen rid answers TOMBSTONED, installs the
+ *       ABSENT_FENCE tombstone, and a racing later Enqueue of that rid is
+ *       rejected pre-admission with the typed 8429 error;</li>
  *   <li>failed: Decode rejects the Prefill-owned Cancel RPC;</li>
  *   <li>unsupported: endpoint whose port maps to no mock engine.</li>
  * </ul>
@@ -146,7 +150,7 @@ class MockEngineCancelChannelTest {
     // ---- not found after natural completion / idempotent cancel tombstone ----
 
     @Test
-    void cancelAfterCompletionIsTombstoned() throws Exception {
+    void cancelAfterCompletionIsNotFound() throws Exception {
         startCluster(model("10"), 1, 1);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
@@ -158,12 +162,11 @@ class MockEngineCancelChannelTest {
         CancelOutcome outcome = channel
                 .cancel(target(prefill.getGrpcPort()), 11L, 2_000)
                 .get(2, TimeUnit.SECONDS);
-        // Already-finished answers TOMBSTONED: the authoritative terminal
-        // proof the master's engine fence consumes to settle the slot and
-        // release the endpoint-inflight charge (NOT_FOUND installs a
-        // DELIVERY_UNCERTAIN fence that may never reconcile for
-        // storm-disconnected requests).
-        assertEquals(CancelAck.TOMBSTONED, outcome.ack());
+        // Production-faithful branch (C++ Cancel handler):
+        // seen-but-terminal answers NOT_FOUND — the completion record
+        // stays in the retain-window backlog for GetWorkerStatus delivery
+        // (TOMBSTONED is reserved for never-seen rids).
+        assertEquals(CancelAck.NOT_FOUND, outcome.ack());
         // Behavior: the request had already finished; nothing is re-inflight.
         assertEquals(0, prefill.getInflightCount());
         assertEquals(0, prefill.getDownstreamOwnershipCount());
@@ -205,14 +208,40 @@ class MockEngineCancelChannelTest {
     // ---- not found: unknown request id / wrong worker ----
 
     @Test
-    void cancelUnknownRequestIsNotFound() throws Exception {
+    void cancelUnknownRequestIsTombstonedAndFencesLaterEnqueue() throws Exception {
         startCluster(model("10"), 1, 1);
+        JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
 
         CancelOutcome outcome = channel
-                .cancel(target(prefillServices.get(0).getGrpcPort()), 424242L, 2_000)
+                .cancel(target(prefill.getGrpcPort()), 424242L, 2_000)
                 .get(2, TimeUnit.SECONDS);
-        assertEquals(CancelAck.NOT_FOUND, outcome.ack());
+        // Never-seen rid: TOMBSTONED — the ABSENT_FENCE tombstone is
+        // installed (production Prefill contract).
+        assertEquals(CancelAck.TOMBSTONED, outcome.ack());
+
+        // Fence idempotence: a retried cancel still reads TOMBSTONED (it
+        // must NOT flip onto the ACCEPTED ACTIVE_CANCEL tombstone branch).
+        CancelOutcome retry = channel
+                .cancel(target(prefill.getGrpcPort()), 424242L, 2_000)
+                .get(2, TimeUnit.SECONDS);
+        assertEquals(CancelAck.TOMBSTONED, retry.ack());
+
+        // The absent fence rejects a racing later Enqueue of the same rid
+        // with the typed 8429 error, pre-admission: no success ack, no
+        // engine state, no inflight residue.
+        EngineRpcService.EnqueueBatchResponsePB response = enqueue(prefill,
+                batch(9101, slot(0,
+                        inputWithDecode(424242L, 10, decodeServices.get(0).getGrpcPort()))));
+        assertEquals(0, response.getSuccessesCount(),
+                "a fenced rid must not be acked as admitted");
+        assertEquals(1, response.getErrorsCount(),
+                "the fenced rid carries exactly one ack error");
+        assertEquals(424242L, response.getErrors(0).getRequestId());
+        assertEquals(8429L, response.getErrors(0).getErrorInfo().getErrorCode(),
+                "absent-fence rejection carries the typed 8429 (PRIORITY_PREEMPTED)");
+        assertEquals(0, prefill.getInflightCount(),
+                "a fenced rid must leave no engine-side inflight residue");
     }
 
     @Test
