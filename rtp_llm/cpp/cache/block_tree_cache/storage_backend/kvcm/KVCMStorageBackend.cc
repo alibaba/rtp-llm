@@ -61,7 +61,8 @@ public:
         parallelism_config_(parallelism_config),
         sp_config_(sp_config),
         broadcast_manager_(std::move(broadcast_manager)),
-        client_wrapper_(std::move(client_wrapper)) {}
+        client_wrapper_(std::move(client_wrapper)),
+        sdk_check_enabled_(autil::EnvUtil::getEnv("KVCM_SDK_CHECK", false)) {}
 
     bool init(const CacheTopology&                   topology,
               StorageBackend::BufferResolver         buffer_resolver,
@@ -325,13 +326,21 @@ public:
         if (!group_policy_->genBlockBuffersByTag(tags, blocks, buffers)) {
             return false;
         }
+        const auto trace_info = makeTransferTraceInfo(blocks);
         if (request.op() == REMOTE_OPERATION_READ) {
-            return client_wrapper_->loadKvCaches(uris, buffers);
+            return client_wrapper_->loadKvCaches(uris, buffers, trace_info);
         }
         if (request.op() == REMOTE_OPERATION_WRITE) {
-            auto [success, actual_uris] = client_wrapper_->saveKvCaches(uris, buffers);
+            auto [success, actual_uris] = client_wrapper_->saveKvCaches(uris, buffers, trace_info);
             if (!success || (!actual_uris.empty() && actual_uris.size() != uris.size())) {
                 return false;
+            }
+            // KVCM returns the input URIs when the storage backend kept the
+            // requested locations. Only publish an override when at least one
+            // URI really changed; an empty response preserves the original
+            // locations in FinishWrite.
+            if (actual_uris == uris) {
+                return true;
             }
             for (auto& uri : actual_uris) {
                 *response.add_actual_uris() = std::move(uri);
@@ -505,6 +514,20 @@ private:
         }
     }
 
+    std::shared_ptr<kv_cache_manager::TransferTraceInfo>
+    makeTransferTraceInfo(const std::vector<int32_t>& block_ids) const {
+        if (!sdk_check_enabled_) {
+            return nullptr;
+        }
+        auto trace_info        = std::make_shared<kv_cache_manager::TransferTraceInfo>();
+        trace_info->need_print = true;
+        trace_info->block_ids.reserve(block_ids.size());
+        for (const auto block_id : block_ids) {
+            trace_info->block_ids.push_back(std::to_string(block_id));
+        }
+        return trace_info;
+    }
+
 private:
     CacheConfig                          cache_config_;
     KVCacheConfig                        kv_cache_config_;
@@ -520,6 +543,7 @@ private:
     std::atomic<uint64_t> read_trace_sequence_{1};
     std::atomic<uint64_t> write_trace_sequence_{1};
     std::atomic<uint64_t> finish_write_trace_sequence_{1};
+    const bool            sdk_check_enabled_;
 };
 
 KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                   cache_config,

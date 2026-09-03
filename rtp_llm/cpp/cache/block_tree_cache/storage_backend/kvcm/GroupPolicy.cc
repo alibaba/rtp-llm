@@ -319,13 +319,14 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<int32_t>&     gr
                             "remote cache group/block count mismatch: groups=%zu blocks=%zu",
                             group_ids.size(),
                             block_ids.size());
-    block_buffers.reserve(block_ids.size());
+    kv_cache_manager::BlockBuffers pending_buffers;
+    pending_buffers.reserve(block_ids.size());
     for (size_t i = 0; i < block_ids.size(); ++i) {
         RTP_LLM_CHECK_WITH_INFO(group_ids[i] >= 0, "invalid remote cache group id=%d", group_ids[i]);
-        block_buffers.push_back({});
+        pending_buffers.push_back({});
         const auto& layer_ids          = group_to_layer_ids_.at(group_ids[i]);
         const auto& tag                = groups_.at(group_ids[i]).tag;
-        auto&       iovs               = block_buffers.back().iovs;
+        auto&       iovs               = pending_buffers.back().iovs;
         size_t      actual_block_bytes = 0;
         iovs.reserve(layer_ids.size() * 2);
         for (size_t j = 0; j < layer_ids.size(); ++j) {
@@ -357,9 +358,12 @@ bool DefaultLayerGroupPolicy::genBlockBuffers(const std::vector<int32_t>&     gr
                 block_ids[i],
                 expected_block_bytes,
                 actual_block_bytes);
-            block_buffers.pop_back();
             return false;
         }
+    }
+    block_buffers.reserve(block_buffers.size() + pending_buffers.size());
+    for (auto& pending_buffer : pending_buffers) {
+        block_buffers.push_back(std::move(pending_buffer));
     }
     return true;
 }
