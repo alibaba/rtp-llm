@@ -235,7 +235,7 @@ TEST(LoadTaskRunnerTest, PendingTransferDoesNotRetainOuterWorker) {
     std::atomic<size_t> started{0};
     std::atomic<size_t> settled{0};
     const auto          submit_task = [&](const LoadTaskRunner::TaskPtr& task) {
-        return outer_pool.submit([&, task] {
+        return outer_pool.submit(BlockTreeTaskClass::LOAD, [&, task] {
             runner.runTransfer(task, dispatcher, metrics_reporter, 100, 100, [&](ErrorInfo) {
                 EXPECT_TRUE(outer_pool.submitCompletion([&] { settled.fetch_add(1); }));
             });
@@ -274,7 +274,7 @@ TEST(LoadTaskRunnerTest, HundredPendingTransfersAreNotCappedByFourOuterWorkers) 
         auto               task        = std::make_shared<LoadTaskRunner::Task>();
         const BlockIdxType block_index = static_cast<BlockIdxType>(index + 1);
         task->load_descs               = {TransferDescriptor::hostToDevice(0, block_index, {block_index})};
-        ASSERT_TRUE(outer_pool.submit([&, task] {
+        ASSERT_TRUE(outer_pool.submit(BlockTreeTaskClass::LOAD, [&, task] {
             runner.runTransfer(task, dispatcher, metrics_reporter, 100, 100, [&](ErrorInfo) {
                 EXPECT_TRUE(outer_pool.submitCompletion([&] { settled.fetch_add(1); }));
             });

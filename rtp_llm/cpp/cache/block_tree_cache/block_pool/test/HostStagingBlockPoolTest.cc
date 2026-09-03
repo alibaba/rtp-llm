@@ -1,7 +1,9 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostStagingBlockPool.h"
 
+#include <atomic>
 #include <cstring>
 #include <optional>
+#include <stdexcept>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -12,26 +14,26 @@ namespace {
 TEST(HostStagingBlockPoolTest, UsesCallerProvidedStride) {
     HostStagingBlockPool pool(1, 65, /*try_pin_memory=*/false);
 
-    std::optional<HostStagingBlockPool::HostStagingBlockLease> lease = pool.malloc();
-    ASSERT_TRUE(lease.has_value());
-    const auto view = lease->blockBuffer(65);
+    auto leases = pool.tryMallocBatch(1);
+    ASSERT_TRUE(leases.has_value());
+    const auto view = (*leases)[0].blockBuffer(65);
     EXPECT_EQ(view.capacity_bytes, 65u);
 }
 
 TEST(HostStagingBlockPoolTest, PageableBackingServesLeasesWhenPinningDisabled) {
     HostStagingBlockPool pool(1, 4096, /*try_pin_memory=*/false);
 
-    auto lease = pool.malloc();
+    auto lease = pool.tryMallocBatch(1);
     ASSERT_TRUE(lease.has_value());
-    const auto view = lease->blockBuffer(64);
+    const auto view = (*lease)[0].blockBuffer(64);
     ASSERT_NE(view.base, nullptr);
     EXPECT_EQ(view.payload_bytes, 64u);
     EXPECT_EQ(view.capacity_bytes, 4096u);
     std::memset(view.base, 0xAB, view.payload_bytes);
 
-    EXPECT_FALSE(pool.malloc().has_value());
+    EXPECT_FALSE(pool.tryMallocBatch(1).has_value());
     lease.reset();
-    EXPECT_TRUE(pool.malloc().has_value());
+    EXPECT_TRUE(pool.tryMallocBatch(1).has_value());
 }
 
 TEST(HostStagingBlockPoolTest, BatchAllocationIsAtomic) {
@@ -41,15 +43,15 @@ TEST(HostStagingBlockPoolTest, BatchAllocationIsAtomic) {
     auto leases = pool.tryMallocBatch(2);
     ASSERT_TRUE(leases.has_value());
     EXPECT_EQ(leases->size(), 2u);
-    EXPECT_FALSE(pool.malloc().has_value());
+    EXPECT_FALSE(pool.tryMallocBatch(1).has_value());
 }
 
 TEST(HostStagingBlockPoolTest, BatchWaitersAreStrictFifo) {
     HostStagingBlockPool pool(2, 4096, /*try_pin_memory=*/false);
-    auto held = pool.malloc();
+    auto                 held = pool.tryMallocBatch(1);
     ASSERT_TRUE(held.has_value());
 
-    std::vector<int> callback_order;
+    std::vector<int>                                           callback_order;
     std::optional<HostStagingBlockPool::HostStagingBlockBatch> first_leases;
     std::optional<HostStagingBlockPool::HostStagingBlockBatch> second_leases;
     pool.requestBatch(2, [&](auto result) {
@@ -74,21 +76,58 @@ TEST(HostStagingBlockPoolTest, BatchWaitersAreStrictFifo) {
     EXPECT_TRUE(second_leases.has_value());
 }
 
-TEST(HostStagingBlockPoolTest, CancelHeadWaiterPreservesProgress) {
+TEST(HostStagingBlockPoolTest, CancelAllCompletesEveryPendingWaiterExactlyOnce) {
     HostStagingBlockPool pool(1, 4096, /*try_pin_memory=*/false);
-    auto held = pool.malloc();
+    auto                 held = pool.tryMallocBatch(1);
     ASSERT_TRUE(held.has_value());
 
-    bool first_cancelled = false;
-    bool second_ready    = false;
-    const auto first_id  = pool.requestBatch(1, [&](auto result) { first_cancelled = !result.has_value(); });
-    pool.requestBatch(1, [&](auto result) { second_ready = result.has_value(); });
+    std::atomic<size_t> callback_count{0};
+    std::atomic<size_t> cancelled_count{0};
+    for (size_t waiter = 0; waiter < 2; ++waiter) {
+        pool.requestBatch(1, [&](auto result) {
+            callback_count.fetch_add(1);
+            if (!result.has_value()) {
+                cancelled_count.fetch_add(1);
+            }
+        });
+    }
 
-    EXPECT_TRUE(pool.cancelBatchWaiter(first_id));
-    EXPECT_TRUE(first_cancelled);
-    EXPECT_FALSE(second_ready);
+    pool.cancelAllBatchWaiters();
+    EXPECT_EQ(callback_count.load(), 2u);
+    EXPECT_EQ(cancelled_count.load(), 2u);
+    pool.cancelAllBatchWaiters();
+    EXPECT_EQ(callback_count.load(), 2u);
+
     held.reset();
-    EXPECT_TRUE(second_ready);
+    EXPECT_TRUE(pool.tryMallocBatch(1).has_value());
+}
+
+TEST(HostStagingBlockPoolTest, ThrowingCancelCallbackDoesNotSuppressLaterWaiters) {
+    HostStagingBlockPool pool(1, 4096, /*try_pin_memory=*/false);
+    auto                 held = pool.tryMallocBatch(1);
+    ASSERT_TRUE(held.has_value());
+
+    std::atomic<size_t> throwing_callback_count{0};
+    std::atomic<size_t> later_callback_count{0};
+    pool.requestBatch(1, [&](auto result) {
+        EXPECT_FALSE(result.has_value());
+        throwing_callback_count.fetch_add(1);
+        throw std::runtime_error("expected cancellation callback failure");
+    });
+    pool.requestBatch(1, [&](auto result) {
+        EXPECT_FALSE(result.has_value());
+        later_callback_count.fetch_add(1);
+    });
+
+    EXPECT_NO_THROW(pool.cancelAllBatchWaiters());
+    EXPECT_EQ(throwing_callback_count.load(), 1u);
+    EXPECT_EQ(later_callback_count.load(), 1u);
+    EXPECT_NO_THROW(pool.cancelAllBatchWaiters());
+    EXPECT_EQ(throwing_callback_count.load(), 1u);
+    EXPECT_EQ(later_callback_count.load(), 1u);
+
+    held.reset();
+    EXPECT_TRUE(pool.tryMallocBatch(1).has_value());
 }
 
 }  // namespace

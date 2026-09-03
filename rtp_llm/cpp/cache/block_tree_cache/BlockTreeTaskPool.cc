@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 
 #include <cassert>
+#include <algorithm>
 #include <utility>
 
 #include "autil/LambdaWorkItem.h"
@@ -47,6 +48,13 @@ bool BlockTreeTaskPool::start() {
 bool BlockTreeTaskPool::submit(std::function<void()>     task,
                                std::chrono::milliseconds max_queue_wait,
                                std::function<void()>     on_timeout) {
+    return submit(BlockTreeTaskClass::BACKGROUND, std::move(task), max_queue_wait, std::move(on_timeout));
+}
+
+bool BlockTreeTaskPool::submit(BlockTreeTaskClass        task_class,
+                               std::function<void()>     task,
+                               std::chrono::milliseconds max_queue_wait,
+                               std::function<void()>     on_timeout) {
     if (!task) {
         return false;
     }
@@ -65,10 +73,22 @@ bool BlockTreeTaskPool::submit(std::function<void()>     task,
     }
 
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-    if (!started_ || admission_stopped_ || shutdown_ || (queue_size_ != 0 && normal_queue_.size() >= queue_size_)) {
+    if (!started_ || admission_stopped_ || shutdown_) {
         return false;
     }
-    normal_queue_.push_back(QueuedTask{std::move(task), std::move(on_timeout), std::move(deadline)});
+    if (queue_size_ != 0) {
+        if (normalQueueSizeLocked() >= queue_size_) {
+            return false;
+        }
+        const size_t background_limit =
+            queue_size_ > kLoadReservedSlots ? queue_size_ - kLoadReservedSlots : queue_size_;
+        if (task_class == BlockTreeTaskClass::BACKGROUND && background_queue_.size() >= background_limit) {
+            return false;
+        }
+    }
+
+    auto& queue = task_class == BlockTreeTaskClass::LOAD ? load_queue_ : background_queue_;
+    queue.push_back(QueuedTask{std::move(task), std::move(on_timeout), std::move(deadline)});
     taskStarted();
     queue_cv_.notify_one();
     return true;
@@ -110,18 +130,38 @@ void BlockTreeTaskPool::stopAdmission() {
     admission_stopped_ = true;
 }
 
+size_t BlockTreeTaskPool::normalQueueSizeLocked() const {
+    return load_queue_.size() + background_queue_.size();
+}
+
+BlockTreeTaskPool::QueuedTask BlockTreeTaskPool::popNextNormalTaskLocked() {
+    const bool take_background =
+        !background_queue_.empty() && (load_queue_.empty() || consecutive_load_dispatches_ >= kMaxLoadBurst);
+    if (take_background) {
+        QueuedTask task = std::move(background_queue_.front());
+        background_queue_.pop_front();
+        consecutive_load_dispatches_ = 0;
+        return task;
+    }
+
+    QueuedTask task = std::move(load_queue_.front());
+    load_queue_.pop_front();
+    consecutive_load_dispatches_ = std::min(consecutive_load_dispatches_ + 1, kMaxLoadBurst);
+    return task;
+}
+
 void BlockTreeTaskPool::workerLoop() {
     while (true) {
         std::function<void()> task;
         {
             std::unique_lock<std::mutex> lock(lifecycle_mutex_);
-            queue_cv_.wait(lock, [this] { return shutdown_ || !completion_queue_.empty() || !normal_queue_.empty(); });
+            queue_cv_.wait(lock,
+                           [this] { return shutdown_ || !completion_queue_.empty() || normalQueueSizeLocked() != 0; });
             if (!completion_queue_.empty()) {
                 task = std::move(completion_queue_.front());
                 completion_queue_.pop_front();
-            } else if (!normal_queue_.empty()) {
-                QueuedTask queued_task = std::move(normal_queue_.front());
-                normal_queue_.pop_front();
+            } else if (normalQueueSizeLocked() != 0) {
+                QueuedTask queued_task = popNextNormalTaskLocked();
                 if (queued_task.deadline && std::chrono::steady_clock::now() >= *queued_task.deadline) {
                     task = std::move(queued_task.on_timeout);
                 } else {
@@ -169,8 +209,9 @@ void BlockTreeTaskPool::shutdown() {
         }
         admission_stopped_ = true;
         shutdown_          = true;
-        dropped_tasks      = normal_queue_.size() + completion_queue_.size();
-        normal_queue_.clear();
+        dropped_tasks      = normalQueueSizeLocked() + completion_queue_.size();
+        load_queue_.clear();
+        background_queue_.clear();
         completion_queue_.clear();
         thread_pool = thread_pool_;
         was_started = started_;
