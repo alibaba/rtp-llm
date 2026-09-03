@@ -439,22 +439,10 @@ final class PrefillAdmissionResources {
             }
         }
 
-        /** No-throw bind after one batch reservation has committed. */
-        synchronized void bindBatchHandoff(
+        /** No-throw bind after one Prefill group has committed. */
+        synchronized void bindPrefillHandoff(
                 PrefillState.CommittedHandoff exactHandoff) {
             handoffs[0] = exactHandoff;
-            bound = true;
-        }
-
-        /**
-         * No-allocation bind after a route group has committed. The ledger
-         * contract guarantees one materialized handoff per exact reservation.
-         */
-        synchronized void bindRouteHandoffs(
-                List<PrefillState.CommittedHandoff> exactHandoffs) {
-            for (int index = 0; index < handoffs.length; index++) {
-                handoffs[index] = exactHandoffs.get(index);
-            }
             bound = true;
         }
 

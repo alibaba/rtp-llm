@@ -242,10 +242,20 @@ public final class RouteProjection {
             Probe probe,
             PrefillTimePredictor.Evaluator evaluator,
             DeliveryProjection deliveryProjection) {
+        return project(inputs, probe, evaluator, deliveryProjection,
+                inputs.queue().capturedAtMs());
+    }
+
+    public static Candidate project(
+            Inputs inputs,
+            Probe probe,
+            PrefillTimePredictor.Evaluator evaluator,
+            DeliveryProjection deliveryProjection,
+            long planningAtMs) {
         Candidate candidate = new RouteTimelineProjector(
                 probe, inputs.pendingRequestCount()).project(
                         inputs.queue(), inputs.work(), evaluator,
-                        deliveryProjection);
+                        deliveryProjection, planningAtMs);
         return applyAdmissionPolicy(inputs.queue(), candidate);
     }
 

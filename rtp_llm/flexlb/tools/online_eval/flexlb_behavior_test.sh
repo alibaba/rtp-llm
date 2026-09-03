@@ -89,7 +89,6 @@ print(json.dumps({
         "availabilityHysteresisPercent": 0,
         "roles": {
             "prefill": {
-                "availability": {"maxPendingRequests": 100000},
                 "candidateChoice": {
                     "type": "RANDOM_WITHIN_TOLERANCE",
                     "outlierRejection": {

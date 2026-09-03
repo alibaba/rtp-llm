@@ -240,6 +240,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         private ScheduledRequest blockedItem;
         private CapacityBoundary blockedResult;
         private ArrayList<PrefillState.RouteReservation> reservations;
+        private ArrayList<Boolean> itemOwnedReservations;
         private ArrayList<PrefillAdmissionResources.Member> members;
         private PrefillAdmissionResources.CommittedAdmissionOwner committed;
 
@@ -249,6 +250,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             this.owner = owner;
             this.prefill = prefill;
             reservations = new ArrayList<>(1);
+            itemOwnedReservations = new ArrayList<>(1);
             members = new ArrayList<>(1);
         }
 
@@ -284,11 +286,24 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             }
 
             PrefillState.ReservationResult<PrefillState.RouteReservation> result;
+            PrefillState.RouteReservation published =
+                    exact.publishedRouteReservation();
             try {
-                result = prefill.reserveRoute(
-                        exact,
-                        predictedMs,
-                        exact.maxInflightDeliveriesPerPrefillWorker());
+                if (published != null) {
+                    published.updatePrediction(exact, predictedMs);
+                    result = new PrefillState.ReservationResult<>(
+                            PrefillState.CapacityStatus.ACQUIRED, published);
+                } else if (exact.requiresRouteReservation()) {
+                    return failed(new IllegalStateException(
+                            "ACTIVE NON_BATCH request lost its publish-time route credit: request_id="
+                                    + exact.requestId()));
+                } else {
+                    // Compatibility for non-QUEUE/internal route delivery.
+                    result = prefill.reserveRoute(
+                            exact,
+                            predictedMs,
+                            exact.maxInflightDeliveriesPerPrefillWorker());
+                }
             } catch (Throwable failure) {
                 return failed(failure);
             }
@@ -305,11 +320,13 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             try {
                 memberAttempt = prepareMember(exact);
             } catch (Throwable failure) {
-                return failed(rollbackReservation(reservation, failure));
+                return failed(published == null
+                        ? rollbackReservation(reservation, failure)
+                        : failure);
             }
             if (!memberAttempt.accepted()) {
-                Throwable rollbackFailure = rollbackReservation(
-                        reservation, null);
+                Throwable rollbackFailure = published == null
+                        ? rollbackReservation(reservation, null) : null;
                 if (rollbackFailure != null) {
                     preserveRejectedCause(
                             rollbackFailure, memberAttempt.boundary());
@@ -318,6 +335,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 return rejected(memberAttempt.boundary());
             }
             reservations.add(reservation);
+            itemOwnedReservations.add(published != null);
             members.add(memberAttempt.value());
             return acceptedItem;
         }
@@ -355,18 +373,55 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                         "route commit does not match prepared identities");
             }
             if (reservations.isEmpty()
-                    || reservations.size() != members.size()) {
+                    || reservations.size() != members.size()
+                    || itemOwnedReservations.size() != members.size()) {
                 throw new IllegalStateException(
                         "route admission reservation/member ownership diverged");
             }
-            PrefillAdmissionResources.CommittedAdmissionOwner exactCommitted =
-                    createCommittedOwner(members, members.size());
-            List<PrefillState.CommittedHandoff> handoffs =
-                    reservations.get(0).commitGroup(items, reservations);
-            exactCommitted.bindRouteHandoffs(handoffs);
-            committed = exactCommitted;
-            reservations = null;
-            members = null;
+            // Validate every item-owned capability before transferring any of
+            // them.  commitUnderLock runs under the endpoint queue lock, so an
+            // ACTIVE terminal path cannot remove a validated item between this
+            // pass and the transfer pass below.
+            for (int index = 0; index < reservations.size(); index++) {
+                if (itemOwnedReservations.get(index)
+                        && items.get(index).publishedRouteReservation()
+                        != reservations.get(index)) {
+                    throw new IllegalStateException(
+                            "ACTIVE NON_BATCH request lost its exact route credit: request_id="
+                                    + items.get(index).requestId());
+                }
+            }
+            PrefillEndpoint.RouteCommitAdmission routeCommit =
+                    prefill.tryBeginRouteCommitAdmission();
+            if (routeCommit == null) {
+                throw PrefillAdmissionResources.retired(
+                        "Prefill", items.get(0));
+            }
+            try (routeCommit) {
+                for (int index = 0; index < reservations.size(); index++) {
+                    if (itemOwnedReservations.get(index)
+                            && !items.get(index).takePublishedRouteReservation(
+                                    reservations.get(index))) {
+                        throw new IllegalStateException(
+                                "ACTIVE NON_BATCH request lost its exact route credit: request_id="
+                                        + items.get(index).requestId());
+                    }
+                    if (itemOwnedReservations.get(index)) {
+                        // The transaction is now the sole owner. If a later
+                        // commit operation fails, rollbackPrepared closes it.
+                        itemOwnedReservations.set(index, false);
+                    }
+                }
+                PrefillAdmissionResources.CommittedAdmissionOwner exactCommitted =
+                        createCommittedOwner(members, 1);
+                PrefillState.CommittedHandoff handoff =
+                        routeCommit.commit(items, reservations);
+                exactCommitted.bindPrefillHandoff(handoff);
+                committed = exactCommitted;
+                reservations = null;
+                itemOwnedReservations = null;
+                members = null;
+            }
         }
 
         @Override
@@ -419,29 +474,36 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
 
         private Throwable rollbackPrepared(Throwable priorFailure) {
             List<PrefillState.RouteReservation> exactReservations;
+            List<Boolean> exactItemOwnedReservations;
             List<PrefillAdmissionResources.Member> exactMembers;
             synchronized (this) {
                 if (reservations == null) {
                     return priorFailure;
                 }
                 exactReservations = reservations;
+                exactItemOwnedReservations = itemOwnedReservations;
                 exactMembers = members;
                 reservations = null;
+                itemOwnedReservations = null;
                 members = null;
             }
             Throwable failure = priorFailure;
             for (PrefillAdmissionResources.Member member : exactMembers) {
                 failure = rollbackMember(member, failure);
             }
-            for (PrefillState.RouteReservation reservation
-                    : exactReservations) {
-                failure = rollbackReservation(reservation, failure);
+            for (int index = 0; index < exactReservations.size(); index++) {
+                if (!exactItemOwnedReservations.get(index)) {
+                    failure = rollbackReservation(
+                            exactReservations.get(index), failure);
+                }
             }
             return failure;
         }
 
         private void requirePrepared(String operation) {
-            if (reservations == null || members == null) {
+            if (reservations == null
+                    || itemOwnedReservations == null
+                    || members == null) {
                 throw new IllegalStateException(
                         operation + " requires PREPARED route admission");
             }

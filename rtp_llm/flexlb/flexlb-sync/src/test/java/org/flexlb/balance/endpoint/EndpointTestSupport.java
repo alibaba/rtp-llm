@@ -26,24 +26,14 @@ public final class EndpointTestSupport {
     private EndpointTestSupport() {
     }
 
-    /** Test-only access to the real generation handoff used by PrefillState. */
+    /** Test-only access to the endpoint-local route-capacity ledger. */
     public static PrefillState.ReservationResult<PrefillState.RouteReservation>
             reserveRoute(
             PrefillState state,
             ScheduledRequest item,
             long predictedMs,
             int maximumRequests) {
-        EndpointGenerationLifecycle lifecycle =
-                new EndpointGenerationLifecycle(() -> { });
-        EndpointGenerationLifecycle.HandoffPermit permit =
-                lifecycle.tryAcquireHandoff();
-        PrefillState.ReservationResult<PrefillState.RouteReservation> result =
-                state.reserveRoute(
-                        item, predictedMs, maximumRequests, permit);
-        if (result.reservation() == null) {
-            permit.close();
-        }
-        return result;
+        return state.reserveRoute(item, predictedMs, maximumRequests);
     }
 
     static EndpointEventProjector noopEventSink() {
@@ -287,10 +277,17 @@ public final class EndpointTestSupport {
                 }
                 reservations.add(result.reservation());
             }
-            List<PrefillState.CommittedHandoff> handoffs;
-            handoffs = reservations.get(0).commitGroup(items, reservations);
+            PrefillEndpoint.RouteCommitAdmission admission =
+                    endpoint.tryBeginRouteCommitAdmission();
+            if (admission == null) {
+                throw new IllegalStateException("route endpoint retired");
+            }
+            PrefillState.CommittedHandoff handoff;
+            try (admission) {
+                handoff = admission.commit(items, reservations);
+            }
             committed = true;
-            return handoffs;
+            return List.of(handoff);
         } finally {
             if (!committed) {
                 for (int index = reservations.size() - 1;

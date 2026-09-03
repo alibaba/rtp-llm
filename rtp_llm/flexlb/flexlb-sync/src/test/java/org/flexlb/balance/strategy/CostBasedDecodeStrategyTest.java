@@ -225,17 +225,16 @@ class CostBasedDecodeStrategyTest {
                 .orElseThrow();
         ordered.remove(globalMinimum);
         ordered.add(globalMinimum);
-        Assertions.assertTrue(
-                ordered.indexOf(globalMinimum) >= 8,
-                "the global min-KV anchor must begin outside the base window");
-        WorkerDirectory windowed = Mockito.mock(WorkerDirectory.class);
-        Mockito.when(windowed.decodeRoutingSnapshot(null)).thenReturn(ordered);
-        Mockito.when(windowed.captureDecodeGeneration(any()))
+        Assertions.assertEquals(workerCount, ordered.size(),
+                "the decode selector must retain the complete live fleet");
+        WorkerDirectory fullFleet = Mockito.mock(WorkerDirectory.class);
+        Mockito.when(fullFleet.decodeRoutingSnapshot(null)).thenReturn(ordered);
+        Mockito.when(fullFleet.captureDecodeGeneration(any()))
                 .thenAnswer(invocation -> actual.captureDecodeGeneration(
                         invocation.getArgument(
                                 0, DecodeEndpoint.DecodeRoutingView.class)));
         CostBasedDecodeStrategy costBasedDecodeStrategy =
-                new CostBasedDecodeStrategy(windowed);
+                new CostBasedDecodeStrategy(fullFleet);
         BalanceContext balanceContext = context(1, 10_000L);
         Request req = balanceContext.getRequest();
 

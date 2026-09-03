@@ -561,7 +561,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                     createCommittedOwner(members, 1);
             PrefillState.CommittedHandoff handoff =
                     reservation.commit(items, predictedMs);
-            exactCommitted.bindBatchHandoff(handoff);
+            exactCommitted.bindPrefillHandoff(handoff);
             committedAdmission = exactCommitted;
             reservation = null;
             members = null;

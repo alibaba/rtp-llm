@@ -74,7 +74,6 @@ DEFAULT_FLEXLB_CONFIG = json.dumps(
             "availabilityHysteresisPercent": 30,
             "roles": {
                 "prefill": {
-                    "availability": {"maxPendingRequests": 100000},
                     "executionTimeEstimator": {
                         "type": "FORMULA",
                         "expression": PREFILL_EXECUTION_TIME_EXPRESSION,

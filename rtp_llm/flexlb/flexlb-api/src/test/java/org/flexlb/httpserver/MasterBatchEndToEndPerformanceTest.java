@@ -295,8 +295,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         cfg.queueScheduler().getLifecycle()
                 .setMaxDeliveredNotAcceptedRequestsGlobal(
                         Math.max(20_000, REQUEST_COUNT));
-        cfg.getRouter().getRoles().getPrefill().getAvailability()
-                .setMaxPendingRequests(1_000_000L);
         return cfg;
     }
 

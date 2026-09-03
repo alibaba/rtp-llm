@@ -1,54 +1,36 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
-import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * Public request-routing facade.
+ * Public QUEUE scheduling facade.
  *
- * <p>The facade owns no request lifecycle state. Endpoint callbacks, exact
- * request generations, delivery claims, fences, deadlines and publication are
- * canonicalized by {@link RequestRegistry}.
+ * <p>Ingress only registers the canonical lifecycle slot and appends the
+ * request to the model's global ordered queue.  Endpoint selection, exact
+ * reservation and publication happen together at the queue decision point;
+ * endpoint batchers are delivery runtimes, not independent route selectors.</p>
  */
 @Component
 public final class RequestScheduler {
 
     private final ConfigService configService;
-    private final DefaultRouter router;
     private final EndpointRegistry endpointRegistry;
-    private final BatchSchedulerReporter reporter;
-    private final EvictionManager evictionManager;
     private final RequestRegistry lifecycle;
-    private final PlacementWaitRegistry placementWaiters;
-
-    RequestScheduler(
-            ConfigService configService,
-            DefaultRouter router,
-            EndpointRegistry endpointRegistry,
-            BatchSchedulerReporter reporter,
-            EvictionManager evictionManager,
-            RequestRegistry lifecycle) {
-        this(configService, router, endpointRegistry, reporter,
-                evictionManager, lifecycle, new PlacementAvailability());
-    }
+    private final GlobalQueueCoordinator globalQueue;
 
     @Autowired
     RequestScheduler(
@@ -61,25 +43,29 @@ public final class RequestScheduler {
             PlacementAvailability placementAvailability) {
         this.configService = Objects.requireNonNull(
                 configService, "configService");
-        this.router = Objects.requireNonNull(router, "router");
         this.endpointRegistry = Objects.requireNonNull(
                 endpointRegistry, "endpointRegistry");
-        this.reporter = Objects.requireNonNull(reporter, "reporter");
-        this.evictionManager = Objects.requireNonNull(
-                evictionManager, "evictionManager");
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
-        this.placementWaiters = new PlacementWaitRegistry(
-                Objects.requireNonNull(
-                        placementAvailability, "placementAvailability"));
+        FlexlbConfig startupConfig = this.configService.loadBalanceConfig();
+        this.globalQueue = startupConfig != null && startupConfig.isQueue()
+                ? new GlobalQueueCoordinator(
+                        this.configService,
+                        Objects.requireNonNull(router, "router"),
+                        this.endpointRegistry,
+                        Objects.requireNonNull(reporter, "reporter"),
+                        Objects.requireNonNull(evictionManager, "evictionManager"),
+                        this.lifecycle,
+                        Objects.requireNonNull(
+                                placementAvailability, "placementAvailability"))
+                : null;
     }
 
-    /** Route one request and hand its exact generation to the lifecycle owner. */
+    /** Register once, then enqueue without doing route work on ingress. */
     public CompletableFuture<Response> submit(BalanceContext context) {
         if (context == null || context.getRequest() == null) {
             return CompletableFuture.completedFuture(error(
                     StrategyErrorType.INVALID_REQUEST, null));
         }
-
         FlexlbConfig activeConfig;
         try {
             activeConfig = configService.loadBalanceConfig();
@@ -89,188 +75,34 @@ public final class RequestScheduler {
                     "Failed to load scheduler configuration: "
                             + failure.getMessage()));
         }
-        int maxOutstanding = activeConfig.queueScheduler()
-                .getCapacity().getMaxOutstandingRequestsGlobal();
-        CompletableFuture<Response> future =
-                lifecycle.register(context, maxOutstanding);
+        if (activeConfig == null) {
+            return CompletableFuture.completedFuture(error(
+                    StrategyErrorType.BATCH_DISPATCH_FAILED,
+                    "Scheduler configuration is unavailable"));
+        }
+        if (!activeConfig.isQueue()) {
+            return CompletableFuture.completedFuture(error(
+                    StrategyErrorType.BATCH_DISPATCH_FAILED,
+                    "RequestScheduler requires QUEUE configuration"));
+        }
+        if (globalQueue == null) {
+            return CompletableFuture.completedFuture(error(
+                    StrategyErrorType.BATCH_DISPATCH_FAILED,
+                    "QUEUE configuration was enabled after scheduler startup"));
+        }
+        int maxOutstanding = activeConfig.queueScheduler().getCapacity()
+                .getMaxOutstandingRequestsGlobal();
+        CompletableFuture<Response> future = lifecycle.register(
+                context, maxOutstanding);
         if (future.isDone()) {
             return future;
         }
-
-        boolean priorityOrdering = activeConfig.isPriorityOrdering();
-        PlacementWaitRegistry.PlacementOrder order =
-                placementWaiters.newOrder(
-                        context.getPriority(), priorityOrdering);
-        PlacementRequest placement = new PlacementRequest(
-                context, future, priorityOrdering, order);
-        long availabilitySequence = placementWaiters.availabilitySequence();
-        Optional<PlacementKey> initial = placement.attempt();
-        if (initial.isEmpty()) {
-            return future;
-        }
-        PlacementWaitRegistry.Handle handle = placementWaiters.park(
-                placement,
-                order,
-                initial.orElseThrow(),
-                availabilitySequence);
-        future.whenComplete((ignored, failure) -> handle.close());
-        return future;
-    }
-
-    /** One fresh full-selection and exact ownership attempt. */
-    private Optional<PlacementKey> attemptPlacement(
-            BalanceContext context,
-            CompletableFuture<Response> future,
-            boolean priorityOrdering,
-            PlacementWaitRegistry.PlacementOrder order) {
-        if (future.isDone()
-                || context.requestExpired(System.currentTimeMillis())) {
-            return finished();
-        }
-        AdmissionMutation mutation =
-                lifecycle.claimAdmissionMutation(context.getRequestId(), future);
-        if (mutation == null) {
-            return finished();
-        }
-
-        PlacementKey blocked = null;
-        try (mutation) {
-            PlacementResult<QueueRouteAdmission, PlacementKey> routing =
-                    router.routeForQueue(context);
-            if (routing.status() == PlacementResult.Status.REJECTED) {
-                mutation.close();
-                future.complete(routing.rejection());
-                return finished();
-            }
-            if (routing.status() == PlacementResult.Status.BLOCKED) {
-                blocked = routing.blocker();
-            } else {
-                QueueRouteAdmission admission = routing.value();
-                try (admission) {
-                    PlacementKey predecessor =
-                            placementWaiters.blockingPredecessor(
-                                    order,
-                                    admission.prefillPlacementKey(),
-                                    admission.decodePlacementKey());
-                    if (predecessor != null) {
-                        return Optional.of(predecessor);
-                    }
-                    PlacementResult<ScheduledRequest, PlacementKey> publication =
-                            admission.tryPublish(context, future, lifecycle);
-                    if (publication.status()
-                            == PlacementResult.Status.SUCCESS) {
-                        reportRouteSubmitted(context, publication.value());
-                        return finished();
-                    }
-                    if (publication.status()
-                            == PlacementResult.Status.BLOCKED) {
-                        blocked = publication.blocker();
-                    } else if (publication.status()
-                            == PlacementResult.Status.LIMIT_REACHED) {
-                        mutation.close();
-                        completeAcceptanceLimit(context, future);
-                        return finished();
-                    } else {
-                        return finished();
-                    }
-                }
-            }
-        }
-
-        if (future.isDone() || !lifecycle.isAdmissionOpen(
-                context.getRequestId(), future)) {
-            return finished();
-        }
-        PlacementKey predecessor = placementWaiters.blockingPredecessor(
-                order, blocked);
-        if (predecessor != null) {
-            return Optional.of(predecessor);
-        }
-        if (priorityOrdering
-                && evictionManager.tryAdmit(context, future)) {
-            return finished();
-        }
-        return Optional.of(blocked);
-    }
-
-    private void completeAcceptanceLimit(
-            BalanceContext context,
-            CompletableFuture<Response> future) {
-        int limit = context.getConfig().queueScheduler().getLifecycle()
-                .getMaxDeliveredNotAcceptedRequestsGlobal();
-        String detail = "admission capacity is temporarily exhausted"
-                + "; trigger=post-success backpressure: active_admissions="
-                + lifecycle.decodeAcceptanceCount() + " limit=" + limit;
-        Response failure = Response.error(
-                StrategyErrorType.RESOURCE_EXHAUSTED,
-                AdmissionRejectReason.RESOURCE_EXHAUSTED);
-        failure.setErrorMessage(
-                StrategyErrorType.RESOURCE_EXHAUSTED.buildErrorMessage(detail));
-        future.complete(failure);
-    }
-
-    private static Optional<PlacementKey> finished() {
-        return Optional.empty();
-    }
-
-    private final class PlacementRequest
-            implements PlacementWaitRegistry.Work {
-        private final BalanceContext context;
-        private final CompletableFuture<Response> future;
-        private final boolean priorityOrdering;
-        private final PlacementWaitRegistry.PlacementOrder order;
-
-        private PlacementRequest(
-                BalanceContext context,
-                CompletableFuture<Response> future,
-                boolean priorityOrdering,
-                PlacementWaitRegistry.PlacementOrder order) {
-            this.context = context;
-            this.future = future;
-            this.priorityOrdering = priorityOrdering;
-            this.order = order;
-        }
-
-        @Override
-        public boolean done() {
-            return future.isDone()
-                    || context.requestExpired(System.currentTimeMillis());
-        }
-
-        @Override
-        public Optional<PlacementKey> attempt() {
-            try {
-                return attemptPlacement(
-                        context, future, priorityOrdering, order);
-            } catch (Throwable failure) {
-                Logger.error(
-                        "Placement transaction failed: request_id={}",
-                        context.getRequestId(), failure);
-                fail(failure);
-                return finished();
-            }
-        }
-
-        @Override
-        public void fail(Throwable failure) {
+        if (!globalQueue.offer(context, future, context.getPriority())) {
             future.complete(error(
                     StrategyErrorType.BATCH_DISPATCH_FAILED,
-                    "Placement failed: " + failure.getMessage()));
+                    "request scheduler is shutting down"));
         }
-    }
-
-    private void reportRouteSubmitted(
-            BalanceContext context, ScheduledRequest item) {
-        try {
-            reporter.reportRouteSubmitTimeMs(
-                    RoleType.PREFILL.name(),
-                    item.prefillEp().getIp(),
-                    System.currentTimeMillis() - context.getStartTime());
-        } catch (RuntimeException telemetryFailure) {
-            Logger.warn(
-                    "Failed to record route-submit telemetry: request_id={}",
-                    context.getRequestId(), telemetryFailure);
-        }
+        return future;
     }
 
     public RequestState cancelRequest(
@@ -285,7 +117,7 @@ public final class RequestScheduler {
     }
 
     public int getQueuedRequestCount() {
-        long queued = placementWaiters.size();
+        long queued = globalQueue == null ? 0L : globalQueue.size();
         for (PrefillEndpoint endpoint
                 : endpointRegistry.snapshotPrefillEndpoints().values()) {
             queued += endpoint.queuedRequestCount();
@@ -300,8 +132,7 @@ public final class RequestScheduler {
         return lifecycle.snapshotActiveRequests();
     }
 
-    public RequestState getRequestState(
-            long requestId, long expectedBatchId) {
+    public RequestState getRequestState(long requestId, long expectedBatchId) {
         return lifecycle.getRequestState(requestId, expectedBatchId);
     }
 
@@ -310,11 +141,12 @@ public final class RequestScheduler {
     }
 
     public void closePlacement() {
-        placementWaiters.close();
+        if (globalQueue != null) {
+            globalQueue.close();
+        }
     }
 
-    private static Response error(
-            StrategyErrorType type, String detail) {
+    private static Response error(StrategyErrorType type, String detail) {
         return RequestRegistry.buildErrorResponse(type, detail);
     }
 }

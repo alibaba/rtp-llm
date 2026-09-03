@@ -133,7 +133,6 @@ DEFAULT_FLEXLB_CONFIG='{
     "availabilityHysteresisPercent": 30,
     "roles": {
       "prefill": {
-        "availability": {"maxPendingRequests": 100000},
         "executionTimeEstimator": {"type": "FORMULA"},
         "candidateChoice": {"type": "RANDOM_WITHIN_TOLERANCE"}
       },

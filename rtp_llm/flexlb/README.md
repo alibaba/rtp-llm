@@ -145,9 +145,6 @@ export FLEXLB_CONFIG='{
     },
     "roles": {
       "prefill": {
-        "availability": {
-          "maxPendingRequests": 64
-        },
         "executionTimeEstimator": {
           "type": "FORMULA",
           "expression": "sum(computeTokens) + 0.3*sum(hitCacheTokens)"
@@ -273,7 +270,7 @@ request is considered first, `SINGLE`/`FIXED_WINDOW` choose how many requests fo
 one decision group, and `NON_BATCH`/`BATCH` choose whether the frontend or Master
 sends them.
 
-`FIXED_WINDOW` is bounded by `maxRequests` (1–1024),
+`FIXED_WINDOW` is bounded by `maxRequests` (any positive value),
 `maxCollectionWaitMs`, and the optional
 inclusive group-growth cap `maxPredictedExecutionMs`: reaching the cap dispatches
 the group without waiting for the collection window; another request is not

@@ -25,16 +25,13 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.atomic.AtomicLong;
 
 @Component
 public class CostBasedDecodeStrategy {
 
     private static final int SNAPSHOT_CAPTURE_ATTEMPTS = 2;
-    private static final int MAX_PROJECTED_CANDIDATES = 8;
 
     private final WorkerDirectory workerDirectory;
-    private final AtomicLong candidateWindowCursor = new AtomicLong();
 
     public CostBasedDecodeStrategy(WorkerDirectory workerDirectory) {
         this.workerDirectory = workerDirectory;
@@ -62,14 +59,14 @@ public class CostBasedDecodeStrategy {
                         balanceContext, 0, Map.of("NO_REGISTERED", 1));
                 return PlacementResult.blocked(roleType);
             }
-            PlacementResult<List<DecodeRoutingView>, RoleType> window =
-                    candidateWindow(snapshots, seqLen);
-            if (window.status() == PlacementResult.Status.REJECTED) {
-                return PlacementResult.rejected(window.rejection());
+            PlacementResult<List<DecodeRoutingView>, RoleType> validated =
+                    validateFleet(snapshots, seqLen);
+            if (validated.status() == PlacementResult.Status.REJECTED) {
+                return PlacementResult.rejected(validated.rejection());
             }
-            List<DecodeRoutingView> candidates = window.value();
+            List<DecodeRoutingView> candidates = validated.value();
 
-            Map<String, Integer> availabilityRejections = new HashMap<>(1);
+            Map<String, Integer> availabilityRejections = new HashMap<>();
             List<DecodeRoutingView> eligible = softQueuePlacement
                     ? candidates
                     : filterAvailableEndpoints(
@@ -80,7 +77,7 @@ public class CostBasedDecodeStrategy {
                 return PlacementResult.blocked(roleType);
             }
 
-            Map<String, Integer> hardRejections = new HashMap<>(3);
+            Map<String, Integer> hardRejections = new HashMap<>();
             DecodeRoutingView selected = selectPreferredThenFallback(
                     eligible, balanceContext, selector,
                     softQueuePlacement, hardRejections);
@@ -132,31 +129,12 @@ public class CostBasedDecodeStrategy {
         return Collections.unmodifiableList(filtered);
     }
 
-    private PlacementResult<List<DecodeRoutingView>, RoleType> candidateWindow(
+    private PlacementResult<List<DecodeRoutingView>, RoleType> validateFleet(
             List<DecodeRoutingView> snapshots,
             long requiredKv) {
-        int size = snapshots.size();
-        DecodeRoutingView minimum = null;
-        long minimumKv = Long.MAX_VALUE;
-        long maximumKv = Long.MIN_VALUE;
-        DecodeRoutingView leastLoaded = null;
-        long minimumLoad = Long.MAX_VALUE;
-        long maximumLoad = Long.MIN_VALUE;
         long maximumPhysicalKv = 0L;
         boolean physicalKvUnknown = false;
         for (DecodeRoutingView snapshot : snapshots) {
-            long usedKv = snapshot.realKvUsed();
-            if (usedKv < minimumKv) {
-                minimum = snapshot;
-                minimumKv = usedKv;
-            }
-            maximumKv = Math.max(maximumKv, usedKv);
-            long load = snapshot.engineLoad();
-            if (load < minimumLoad) {
-                leastLoaded = snapshot;
-                minimumLoad = load;
-            }
-            maximumLoad = Math.max(maximumLoad, load);
             long physicalKv = snapshot.totalKv();
             if (physicalKv <= 0L) {
                 physicalKvUnknown = true;
@@ -170,24 +148,10 @@ public class CostBasedDecodeStrategy {
             return PlacementResult.rejected(
                     staticCapacityFailure(requiredKv, maximumPhysicalKv));
         }
-        if (size <= MAX_PROJECTED_CANDIDATES) {
-            return PlacementResult.success(snapshots);
-        }
-        long cursor = candidateWindowCursor.getAndAdd(MAX_PROJECTED_CANDIDATES);
-        int start = (int) Math.floorMod(cursor, size);
-        ArrayList<DecodeRoutingView> window =
-                new ArrayList<>(MAX_PROJECTED_CANDIDATES);
-        for (int offset = 0; offset < MAX_PROJECTED_CANDIDATES; offset++) {
-            window.add(snapshots.get((start + offset) % size));
-        }
-        if (minimumLoad < maximumLoad && !window.contains(leastLoaded)) {
-            window.add(leastLoaded);
-        }
-        if (minimumKv < maximumKv && !window.contains(minimum)) {
-            window.add(minimum);
-        }
-        return PlacementResult.success(
-                Collections.unmodifiableList(window));
+        // Selection policies need the complete live fleet. A rotating subset
+        // can hide the endpoint with the best load/KV state and makes the
+        // result depend on request timing rather than the captured snapshot.
+        return PlacementResult.success(snapshots);
     }
 
     private static Response staticCapacityFailure(

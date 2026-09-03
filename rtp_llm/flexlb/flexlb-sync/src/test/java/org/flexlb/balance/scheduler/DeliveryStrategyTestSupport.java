@@ -124,6 +124,8 @@ final class DeliveryStrategyTestSupport {
     /** Concrete endpoint capabilities used by the real delivery transaction. */
     static final class TestEndpointCapabilities {
         private final PrefillEndpoint prefill = Mockito.mock(PrefillEndpoint.class);
+        private final PrefillEndpoint.RouteCommitAdmission routeCommit =
+                Mockito.mock(PrefillEndpoint.RouteCommitAdmission.class);
         private final DecodeEndpoint decode = Mockito.mock(DecodeEndpoint.class);
         private final Map<ScheduledRequest, PrefillState.RouteReservation>
                 routeReservations = new IdentityHashMap<>();
@@ -148,6 +150,11 @@ final class DeliveryStrategyTestSupport {
             Mockito.when(prefill.reserveRoute(
                             Mockito.any(), Mockito.anyLong(), Mockito.anyInt()))
                     .thenAnswer(invocation -> reserveRoute(invocation.getArgument(0)));
+            Mockito.when(prefill.tryBeginRouteCommitAdmission())
+                    .thenReturn(routeCommit);
+            Mockito.when(routeCommit.commit(
+                            Mockito.anyList(), Mockito.anyList()))
+                    .thenAnswer(invocation -> committedHandoffs(1).getFirst());
             Mockito.when(prefill.reserveBatch(
                             Mockito.any(), Mockito.anyLong(), Mockito.anyInt()))
                     .thenAnswer(invocation -> reserveBatch());
@@ -186,6 +193,10 @@ final class DeliveryStrategyTestSupport {
             return prefill;
         }
 
+        PrefillEndpoint.RouteCommitAdmission routeCommit() {
+            return routeCommit;
+        }
+
         DecodeEndpoint.EngineDispatchPermit permit(ScheduledRequest item) {
             return permits.get(item);
         }
@@ -207,10 +218,6 @@ final class DeliveryStrategyTestSupport {
             PrefillState.RouteReservation reservation = Mockito.mock(
                     PrefillState.RouteReservation.class);
             routeReservations.put(item, reservation);
-            Mockito.when(reservation.commitGroup(
-                            Mockito.anyList(), Mockito.anyList()))
-                    .thenAnswer(invocation -> committedHandoffs(
-                            ((List<?>) invocation.getArgument(0)).size()));
             return new PrefillState.ReservationResult<>(
                     PrefillState.CapacityStatus.ACQUIRED, reservation);
         }

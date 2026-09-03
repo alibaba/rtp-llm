@@ -216,15 +216,10 @@ public final class PrefillState {
         /* guarded by PrefillState.lock */ LeaseState state =
                 LeaseState.OPEN;
         private final RequestEntry originalOwner;
-        /* guarded by PrefillState.lock; non-null only while OPEN */
-        private EndpointGenerationLifecycle.HandoffPermit generationHandoff;
 
-        private Reservation(RequestEntry originalOwner,
-                            EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
+        private Reservation(RequestEntry originalOwner) {
             this.originalOwner = Objects.requireNonNull(
                     originalOwner, "originalOwner");
-            this.generationHandoff = Objects.requireNonNull(
-                    generationHandoff, "generationHandoff");
         }
 
         /** Roll back an OPEN lease. Committed capacity stays Registry-owned. */
@@ -237,38 +232,34 @@ public final class PrefillState {
     public final class RouteReservation extends Reservation {
         private final PrefillState owner = PrefillState.this;
         private final long requestId;
-        private final long predictedWorkMs;
+        /* guarded by PrefillState.lock until the reservation commits */
+        private long predictedWorkMs;
 
         private RouteReservation(RequestEntry originalOwner,
                                  long requestId,
-                                 long predictedWorkMs,
-                                 EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
-            super(originalOwner, generationHandoff);
+                                 long predictedWorkMs) {
+            super(originalOwner);
             this.requestId = requestId;
             this.predictedWorkMs = boundedPrediction(predictedWorkMs);
         }
 
-        /** Atomically commit one exact route group. */
-        public List<CommittedHandoff> commitGroup(
-                List<ScheduledRequest> items,
-                List<RouteReservation> exactReservations) {
-            if (exactReservations.isEmpty() || exactReservations.get(0) != this) {
-                throw new IllegalArgumentException(
-                        "route commit must be invoked on its first exact reservation");
-            }
-            List<RouteReservation> exactLeases = new ArrayList<>(
-                    exactReservations.size());
-            for (RouteReservation reservation
-                    : exactReservations) {
-                if (reservation.owner != PrefillState.this) {
-                    throw new IllegalArgumentException(
-                            "route reservation belongs to another Prefill ledger");
-                }
-                exactLeases.add(reservation);
-            }
+        /** Bind the fresh delivery prediction to this exact OPEN credit. */
+        public void updatePrediction(
+                ScheduledRequest exactItem,
+                long predictedMs) {
             lock.lock();
             try {
-                return commitRoutesUnderLock(items, exactLeases);
+                RequestEntry entry = requests.get(requestId);
+                if (state != LeaseState.OPEN
+                        || entry == null
+                        || !entry.activeIdentity(exactItem)
+                        || entry.reservation != this) {
+                    throw new IllegalStateException(
+                            "route prediction no longer owns ACTIVE request_id="
+                                    + requestId);
+                }
+                predictedWorkMs = boundedPrediction(predictedMs);
+                mutationVersion++;
             } finally {
                 lock.unlock();
             }
@@ -284,10 +275,15 @@ public final class PrefillState {
                                  long headRequestId,
                                  long batchId,
                                  EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
-            super(originalOwner, generationHandoff);
+            super(originalOwner);
             this.headRequestId = headRequestId;
             this.batchId = batchId;
+            this.generationHandoff = Objects.requireNonNull(
+                    generationHandoff, "generationHandoff");
         }
+
+        /* guarded by PrefillState.lock; non-null only while OPEN */
+        private EndpointGenerationLifecycle.HandoffPermit generationHandoff;
 
         public long batchId() {
             return batchId;
@@ -622,6 +618,8 @@ public final class PrefillState {
     private Map<Long, RequestEntry> requests = new HashMap<>();
     private final LongSupplier clock;
     private final Runnable capacityAvailable;
+    /** Monotonic ownership/work revision used by projection snapshots. */
+    private volatile long mutationVersion;
     private long unknownEngineRequestCount;
     private int routeLeasesInUse;
     private int batchLeasesInUse;
@@ -643,6 +641,17 @@ public final class PrefillState {
                 capacityAvailable, "capacityAvailable");
     }
 
+    /** Caller must hold the ownership lock. */
+    public long mutationVersionUnderLock() {
+        requireLock();
+        return mutationVersion;
+    }
+
+    /** Advisory revision read for the lock-free projection-cache fast path. */
+    public long mutationVersion() {
+        return mutationVersion;
+    }
+
     public boolean enqueueActiveUnderLock(ScheduledRequest item) {
         requireLock();
         if (requests.containsKey(item.requestId())) {
@@ -656,6 +665,7 @@ public final class PrefillState {
             requests.remove(item.requestId(), entry);
             throw failure;
         }
+        mutationVersion++;
         return true;
     }
 
@@ -714,6 +724,7 @@ public final class PrefillState {
                 incoming.requestId(), new RequestEntry(incoming));
         requireState(previous == null, "validated incoming request already exists");
         activeIndex.add(incoming);
+        mutationVersion++;
         return true;
     }
 
@@ -734,6 +745,7 @@ public final class PrefillState {
         // The synchronous admission still owns any OPEN lease and releases it
         // after this queue transaction. ACTIVE removal owns only request/index.
         requests.remove(item.requestId(), entry);
+        mutationVersion++;
         return true;
     }
 
@@ -764,6 +776,7 @@ public final class PrefillState {
         // The queue-index removal is the PNR. Every fallible validation is
         // complete; the sole remaining commit is this private field store.
         entry.stopTerminalPending = true;
+        mutationVersion++;
         return item;
     }
 
@@ -777,14 +790,17 @@ public final class PrefillState {
                 || activeIndex.contains(item)) {
             return false;
         }
-        return requests.remove(item.requestId(), entry);
+        boolean removed = requests.remove(item.requestId(), entry);
+        if (removed) {
+            mutationVersion++;
+        }
+        return removed;
     }
 
     ReservationResult<RouteReservation> reserveRoute(
             ScheduledRequest exactItem,
             long predictedMs,
-            int maximum,
-            EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
+            int maximum) {
         ScheduledRequest item = exactItem;
         lock.lock();
         try {
@@ -803,9 +819,10 @@ public final class PrefillState {
                         CapacityStatus.CAPACITY_FULL, null);
             }
             RouteReservation lease = new RouteReservation(
-                    entry, item.requestId(), predictedMs, generationHandoff);
+                    entry, item.requestId(), predictedMs);
             entry.reservation = lease;
             routeLeasesInUse++;
+            mutationVersion++;
             return new ReservationResult<>(CapacityStatus.ACQUIRED, lease);
         } finally {
             lock.unlock();
@@ -841,6 +858,7 @@ public final class PrefillState {
                     entry, head.requestId(), batchId, generationHandoff);
             entry.reservation = lease;
             batchLeasesInUse++;
+            mutationVersion++;
             return new ReservationResult<>(CapacityStatus.ACQUIRED, lease);
         } finally {
             lock.unlock();
@@ -881,8 +899,83 @@ public final class PrefillState {
         return new CapacityAvailability(false, maximum);
     }
 
+    /** Return the requests needed to refill the next local batch window. */
+    public int availableBatchDecisionSlots(int targetRequests) {
+        if (targetRequests <= 0) {
+            return 0;
+        }
+        lock.lock();
+        try {
+            long available = (long) targetRequests - activeIndex.size();
+            if (available <= 0L) {
+                return 0;
+            }
+            return (int) Math.min((long) Integer.MAX_VALUE, available);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Return the remaining NON_BATCH request slots for this endpoint.
+     * Committed route leases and requests awaiting delivery consume the same
+     * dispatcher-owned request capacity, so both must be deducted.
+     */
+    public int availableRouteDecisionSlots(int maximumRequests) {
+        if (maximumRequests <= 0) {
+            return Integer.MAX_VALUE;
+        }
+        lock.lock();
+        try {
+            // Every NON_BATCH ACTIVE publication already owns one route lease.
+            // Counting activeIndex again would charge the same request twice.
+            long used = routeCapacityUsedUnderLock();
+            long available = (long) maximumRequests - used;
+            return available <= 0L ? 0 : (int) Math.min(
+                    (long) Integer.MAX_VALUE, available);
+        } finally {
+            lock.unlock();
+        }
+    }
+
     public CapacityBoundary.Availability batchAvailability(int maximum) {
         return new CapacityAvailability(true, maximum);
+    }
+
+    /** Remove one already-detached ACTIVE route credit under the ownership lock. */
+    public void releaseOpenRouteReservationUnderLock(
+            RouteReservation exactReservation) {
+        requireLock();
+        if (exactReservation == null
+                || exactReservation.owner != this) {
+            throw new IllegalArgumentException(
+                    "route reservation belongs to another Prefill ledger");
+        }
+        closeOpenLeaseUnderLock(exactReservation);
+    }
+
+    /** Whether one incoming route credit fits after exact victim credits leave. */
+    public boolean routeCapacityAvailableAfterReleasingUnderLock(
+            List<RouteReservation> exactVictims,
+            int maximumRequests) {
+        requireLock();
+        Set<RouteReservation> unique = java.util.Collections.newSetFromMap(
+                new IdentityHashMap<>());
+        for (RouteReservation reservation : exactVictims) {
+            if (reservation == null
+                    || reservation.owner != this
+                    || reservation.state != LeaseState.OPEN
+                    || !unique.add(reservation)
+                    || openLeaseOwnerUnderLock(reservation) == null) {
+                return false;
+            }
+        }
+        if (maximumRequests <= 0) {
+            return true;
+        }
+        long usedAfterRelease = Math.max(
+                0L, routeCapacityUsedUnderLock() - exactVictims.size());
+        return usedAfterRelease < maximumRequests;
     }
 
     /** Exact wake capability permanently paired with this worker runtime. */
@@ -925,9 +1018,36 @@ public final class PrefillState {
         }
     }
 
-    private List<CommittedHandoff> commitRoutesUnderLock(
+    CommittedHandoff commitRouteGroup(
             List<ScheduledRequest> items,
-            List<RouteReservation> leases) {
+            List<RouteReservation> exactReservations,
+            EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
+        Objects.requireNonNull(generationHandoff, "generationHandoff");
+        if (exactReservations.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "route commit requires at least one reservation");
+        }
+        List<RouteReservation> leases = new ArrayList<>(
+                exactReservations.size());
+        for (RouteReservation reservation : exactReservations) {
+            if (reservation == null || reservation.owner != this) {
+                throw new IllegalArgumentException(
+                        "route reservation belongs to another Prefill ledger");
+            }
+            leases.add(reservation);
+        }
+        lock.lock();
+        try {
+            return commitRoutesUnderLock(items, leases, generationHandoff);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private CommittedHandoff commitRoutesUnderLock(
+            List<ScheduledRequest> items,
+            List<RouteReservation> leases,
+            EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
         requireLock();
         List<ScheduledRequest> members = validateActiveGroup(items);
         if (members.size() != leases.size()) {
@@ -936,35 +1056,32 @@ public final class PrefillState {
         }
         Set<RouteReservation> unique = java.util.Collections.newSetFromMap(
                 new IdentityHashMap<>());
-        List<CommittedHandoff> committedHandoffs =
-                new ArrayList<>(members.size());
         for (int index = 0; index < members.size(); index++) {
             RequestEntry entry = requests.get(members.get(index).requestId());
             RouteReservation lease = leases.get(index);
-            if (!unique.add(lease) || entry.reservation != lease
+            if (entry == null || !unique.add(lease)
+                    || entry.reservation != lease
                     || lease.requestId != entry.requestId
-                    || lease.state != LeaseState.OPEN
-                    || openGenerationHandoff(lease) == null) {
+                    || lease.state != LeaseState.OPEN) {
                 throw new IllegalStateException(
                         "route commit does not own exact OPEN lease request_id="
-                                + entry.requestId);
+                                + members.get(index).requestId());
             }
-            committedHandoffs.add(new CommittedHandoff(
-                    openGenerationHandoff(lease)));
         }
-        List<CommittedHandoff> result = List.copyOf(committedHandoffs);
+        CommittedHandoff committedHandoff =
+                new CommittedHandoff(generationHandoff);
         long nowMs = clock.getAsLong();
         for (ScheduledRequest item : members) {
             removeValidatedActiveIndex(item);
         }
         for (int index = 0; index < members.size(); index++) {
             RouteReservation lease = leases.get(index);
-            moveGenerationHandoffToOwnedUnderLock(
-                    lease, committedHandoffs.get(index));
+            lease.state = LeaseState.OWNED;
             RequestEntry entry = requests.get(members.get(index).requestId());
             entry.commitIndividual(lease, nowMs);
         }
-        return result;
+        mutationVersion++;
+        return committedHandoff;
     }
 
     private CommittedHandoff commitBatchUnderLock(
@@ -1014,6 +1131,7 @@ public final class PrefillState {
         for (ScheduledRequest item : members) {
             requests.get(item.requestId()).commitBatch(work);
         }
+        mutationVersion++;
         return committedHandoff;
     }
 
@@ -1049,6 +1167,7 @@ public final class PrefillState {
             RequestEntry entry = new RequestEntry(
                     requestId, predictedMs, clock.getAsLong());
             requests.put(requestId, entry);
+            mutationVersion++;
             return new DirectRegistration(entry);
         } finally {
             lock.unlock();
@@ -1062,7 +1181,9 @@ public final class PrefillState {
                 throw new IllegalStateException(
                         "DIRECT rollback capability lost its exact owner");
             }
-            requests.remove(entry.requestId, entry);
+            if (requests.remove(entry.requestId, entry)) {
+                mutationVersion++;
+            }
         } finally {
             lock.unlock();
         }
@@ -1099,6 +1220,7 @@ public final class PrefillState {
                     invalidateRemainingBatchPredictionUnderLock(reduction);
                 }
                 terminalized = true;
+                mutationVersion++;
             }
         } finally {
             lock.unlock();
@@ -1165,6 +1287,7 @@ public final class PrefillState {
                 return List.of();
             }
             entry.protection = null;
+            mutationVersion++;
             TerminalObservation deferred = entry.deferredTerminal;
             if (deferred != null) {
                 BatchReduction reduction = entry.batchWork == null
@@ -1232,6 +1355,7 @@ public final class PrefillState {
             long previousUnknownEngineRequestCount =
                     unknownEngineRequestCount;
             unknownEngineRequestCount = nextUnknownEngineRequestCount;
+            mutationVersion++;
             capacityReleased = unknownEngineRequestCount
                     < previousUnknownEngineRequestCount;
         } finally {
@@ -1462,6 +1586,7 @@ public final class PrefillState {
             // exact prevalidated identities. Any invariant failure is captured
             // into the already materialized outcome and forces retirement.
             canonicalMutationStarted = true;
+            mutationVersion++;
             for (Map.Entry<RequestEntry, TerminalObservation> settlement
                     : settlements.entrySet()) {
                 RequestEntry entry = settlement.getKey();
@@ -1624,29 +1749,36 @@ public final class PrefillState {
             for (Reservation lease : leases) {
                 if (lease instanceof RouteReservation) {
                     observedRouteLeases++;
+                    if (lease.state != LeaseState.OPEN
+                            && lease.state != LeaseState.OWNED) {
+                        invariantFailure = appendRetirementInvariant(
+                                invariantFailure,
+                                "canonical retirement owner has an invalid route-credit state");
+                    }
                 } else if (lease instanceof BatchReservation) {
                     observedBatchLeases++;
+                    BatchReservation batch = (BatchReservation) lease;
+                    if (batch.state == LeaseState.OPEN) {
+                        if (batch.generationHandoff == null) {
+                            invariantFailure = appendRetirementInvariant(
+                                    invariantFailure,
+                                    "OPEN Prefill batch lease lost its generation handoff");
+                        } else {
+                            orphanedHandoffs.add(batch.generationHandoff);
+                            invariantFailure = appendRetirementInvariant(
+                                    invariantFailure,
+                                    "retirement reached an OPEN Prefill batch lease");
+                        }
+                    } else if (batch.state != LeaseState.OWNED
+                            || batch.generationHandoff != null) {
+                        invariantFailure = appendRetirementInvariant(
+                                invariantFailure,
+                                "canonical retirement owner has an invalid batch lease state");
+                    }
                 } else {
                     invariantFailure = appendRetirementInvariant(
                             invariantFailure,
                             "retirement found an unknown Prefill lease type");
-                }
-                if (lease.state == LeaseState.OPEN) {
-                    if (lease.generationHandoff == null) {
-                        invariantFailure = appendRetirementInvariant(
-                                invariantFailure,
-                                "OPEN Prefill lease lost its generation handoff");
-                    } else {
-                        orphanedHandoffs.add(lease.generationHandoff);
-                        invariantFailure = appendRetirementInvariant(
-                                invariantFailure,
-                                "retirement reached an OPEN Prefill lease");
-                    }
-                } else if (lease.state != LeaseState.OWNED
-                        || lease.generationHandoff != null) {
-                    invariantFailure = appendRetirementInvariant(
-                            invariantFailure,
-                            "canonical retirement owner has an invalid lease state");
                 }
             }
             if (routeLeasesInUse != observedRouteLeases) {
@@ -1684,7 +1816,9 @@ public final class PrefillState {
                 entry.stopTerminalPending = false;
             }
             for (Reservation lease : leases) {
-                lease.generationHandoff = null;
+                if (lease instanceof BatchReservation batch) {
+                    batch.generationHandoff = null;
+                }
                 lease.state = LeaseState.CLOSED;
             }
             requests.clear();
@@ -1692,6 +1826,7 @@ public final class PrefillState {
             routeLeasesInUse = 0;
             batchLeasesInUse = 0;
             unknownEngineRequestCount = 0L;
+            mutationVersion++;
         } finally {
             lock.unlock();
         }
@@ -1955,6 +2090,7 @@ public final class PrefillState {
                     "terminal request is not canonical request_id="
                             + entry.requestId);
         }
+        mutationVersion++;
         if (lease != null) {
             closeOwnedLeaseUnderLock(lease);
         }
@@ -2168,20 +2304,24 @@ public final class PrefillState {
                     "Prefill lease rollback cannot run under queueLock");
         }
         EndpointGenerationLifecycle.HandoffPermit generationHandoff = null;
+        boolean capacityReleased = false;
         lock.lock();
         try {
             if (lease.state == LeaseState.OPEN) {
                 generationHandoff = closeOpenLeaseUnderLock(lease);
+                capacityReleased = true;
             }
         } finally {
             lock.unlock();
         }
-        if (generationHandoff == null) {
+        if (!capacityReleased) {
             return;
         }
         Throwable failure = null;
         try {
-            generationHandoff.close();
+            if (generationHandoff != null) {
+                generationHandoff.close();
+            }
         } catch (Throwable handoffFailure) {
             failure = handoffFailure;
         } finally {
@@ -2209,14 +2349,14 @@ public final class PrefillState {
     }
 
     private EndpointGenerationLifecycle.HandoffPermit openGenerationHandoff(
-            Reservation lease) {
+            BatchReservation lease) {
         requireLock();
         return lease.generationHandoff;
     }
 
     /** Move the exact handoff out of the OPEN admission before commit publishes. */
     private void moveGenerationHandoffToOwnedUnderLock(
-            Reservation lease,
+            BatchReservation lease,
             CommittedHandoff committedHandoff) {
         requireLock();
         if (lease.state != LeaseState.OPEN
@@ -2230,23 +2370,30 @@ public final class PrefillState {
         lease.state = LeaseState.OWNED;
     }
 
-    /** OPEN rollback closes both quota and the still-admission-owned handoff. */
+    /** OPEN rollback closes quota and any batch-owned generation handoff. */
     private EndpointGenerationLifecycle.HandoffPermit
             closeOpenLeaseUnderLock(Reservation lease) {
         requireLock();
-        if (lease.state != LeaseState.OPEN
-                || lease.generationHandoff == null) {
+        if (lease.state != LeaseState.OPEN) {
             throw new IllegalStateException(
-                    "Prefill OPEN rollback lost its generation handoff");
+                    "Prefill OPEN rollback lost its exact lease");
         }
         RequestEntry owner = openLeaseOwnerUnderLock(lease);
-        if (owner != null && !owner.isActive()) {
+        if (owner != null
+                && !owner.isActive()
+                && !owner.stopTerminalPending) {
             throw new IllegalStateException(
                     "OPEN Prefill lease has a non-ACTIVE canonical owner");
         }
-        EndpointGenerationLifecycle.HandoffPermit generationHandoff =
-                lease.generationHandoff;
-        lease.generationHandoff = null;
+        EndpointGenerationLifecycle.HandoffPermit generationHandoff = null;
+        if (lease instanceof BatchReservation batch) {
+            generationHandoff = batch.generationHandoff;
+            if (generationHandoff == null) {
+                throw new IllegalStateException(
+                        "Prefill batch rollback lost its generation handoff");
+            }
+            batch.generationHandoff = null;
+        }
         lease.state = LeaseState.CLOSED;
         decrementLeaseCapacityUnderLock(lease);
         if (owner != null) {
@@ -2259,7 +2406,8 @@ public final class PrefillState {
     private void closeOwnedLeaseUnderLock(Reservation lease) {
         requireLock();
         if (lease.state != LeaseState.OWNED
-                || lease.generationHandoff != null) {
+                || lease instanceof BatchReservation batch
+                && batch.generationHandoff != null) {
             throw new IllegalStateException(
                     "Prefill OWNED terminal still owns an admission handoff");
         }

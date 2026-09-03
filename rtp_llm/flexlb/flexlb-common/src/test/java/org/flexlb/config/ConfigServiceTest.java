@@ -91,7 +91,6 @@ class ConfigServiceTest {
                     },
                     "roles": {
                       "prefill": {
-                        "availability": {"maxPendingRequests": 32},
                         "executionTimeEstimator": {
                           "type": "FORMULA",
                           "expression": "sum(computeTokens)"
@@ -207,6 +206,16 @@ class ConfigServiceTest {
                   "dispatcher":{"type":"NON_BATCH","maxRequests":8}
                 }
                 """));
+        ConfigValidationException removedPrefillAvailability = assertThrows(
+                ConfigValidationException.class, () -> ConfigService.parse("""
+                {
+                  "router":{"roles":{"prefill":{
+                    "availability":{"maxPendingRequests":32}
+                  }}}
+                }
+                """));
+        assertTrue(removedPrefillAvailability.getMessage()
+                .contains("availability"));
     }
 
     @Test

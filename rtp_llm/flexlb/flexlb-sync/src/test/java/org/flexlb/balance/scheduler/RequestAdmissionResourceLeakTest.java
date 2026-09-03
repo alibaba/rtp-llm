@@ -90,7 +90,8 @@ class RequestAdmissionResourceLeakTest {
                 mock(EndpointRegistry.class),
                 batchReporter,
                 mock(EvictionManager.class),
-                lifecycle);
+                lifecycle,
+                new PlacementAvailability());
 
         Response response = scheduler.submit(context).join();
 

@@ -53,16 +53,17 @@ Core load balancing logic, scheduling strategies, and worker status synchronizat
 Key concepts:
 - **Router pattern**: `Router` interface + `DefaultRouter` implementation for multi-role request routing
 - **LoadBalanceStrategy pattern**: Strategy interface for worker selection (`RandomStrategy`, cost-based Prefill/Decode, and `ShortestTTFTStrategy`)
-- **Queue-based scheduling**: `RequestScheduler` facade + `RequestLifecycleCoordinator` owner + per-generation `PrefillGenerationRuntime`
+- **Queue-based scheduling**: `RequestScheduler` facade + `GlobalQueueCoordinator` ordered placement owner + per-generation `WorkerBatcher` delivery runtime
 - **Resource measurement**: Endpoint resource views used by routing strategies
 - **Worker synchronization**: Periodic gRPC-based status sync (`GrpcWorkerStatusRunner`)
 - **Master election**: ZooKeeper-based leader election (`ZookeeperMasterElectService`)
 - **Graceful lifecycle**: Hook-based online/shutdown management
 
 Queue scheduling components:
-- `RequestScheduler`: Public submission/cancellation/query facade with no request-state ownership
-- `RequestLifecycleCoordinator`: Canonical owner of request generations, deadlines, cancellation, delivery claims, and publication
-- `PrefillGenerationRuntime`: Endpoint-facing queue/runtime contract; `WorkerBatcher` is its package-private implementation
+- `RequestScheduler`: Public QUEUE submission/cancellation/query facade with no request-state ownership
+- `GlobalQueueCoordinator`: One ordered placement owner per model; bounded planning and endpoint-conflict-aware commit
+- `RequestRegistry`: Canonical owner of request generations, deadlines, cancellation, delivery claims, and publication
+- `WorkerBatcher`: Endpoint-facing decision-window and delivery runtime after placement
 - `RouteService`: High-level service that delegates queued work to `RequestScheduler`
 
 Capacity management components:
@@ -192,18 +193,19 @@ Cache affinity is enabled only by including `router.roles.prefill.cacheAffinity`
 Scheduling and dispatch are independent tagged choices in `FLEXLB_CONFIG`:
 
 - `scheduler.type=DIRECT`: Routes immediately through `DefaultRouter`.
-- `scheduler.type=QUEUE`: Uses `RequestScheduler` and its lifecycle coordinator for capacity, cancellation, and timeout ownership. Queue ordering is `FIFO` or `PRIORITY`.
+- `scheduler.type=QUEUE`: Uses `RequestScheduler` and `GlobalQueueCoordinator` for ordered placement; `RequestRegistry` owns capacity, cancellation, and timeout lifecycle. Queue ordering is `FIFO` or `PRIORITY`.
 - `scheduler.decision.type=SINGLE`: Forms one-request decision groups.
 - `scheduler.decision.type=FIXED_WINDOW`: Forms groups bounded by request count, collection window, and an optional predicted-execution cap.
 - `dispatcher.type=NON_BATCH`: The frontend delivers requests from the formed group.
 - `dispatcher.type=BATCH`: Master delivers the formed group with `EnqueueBatch`.
 
 Every QUEUE combination follows the same lifecycle: `RouteService` submits to
-`RequestScheduler`, the scheduler selects a prefill endpoint, and that endpoint's
-`PrefillGenerationRuntime` performs the configured delivery. There is no secondary routing queue or
-resource-unavailable retry loop. Decision algorithms return typed outcomes and never
-sleep or poll: the worker waits on the exact capacity event, queue/status generation,
-prediction-model generation, or absolute deadline named by that outcome.
+`RequestScheduler`, `GlobalQueueCoordinator` selects and commits all required
+endpoints once, and the selected Prefill `WorkerBatcher` performs the configured
+  decision-window and delivery. There is no secondary routing queue, earlier-entry
+  scan, or multi-stage placement retry loop. The global decision thread waits only
+on an exact capacity event or queue mutation; endpoint workers independently wait
+on their delivery-capacity, window, and deadline predicates.
 
 ### Worker Status Synchronization
 
@@ -312,8 +314,8 @@ routing threads. Readers use immutable snapshots and exact generation-fenced
 captures; writers publish status through the endpoint lifecycle transaction.
 
 ### Queue Concurrency
-`RequestLifecycleCoordinator` owns request lifecycle and global capacity. Each prefill
-generation owns a bounded `PrefillGenerationRuntime`. Reservation and release paths must remain idempotent across
+`RequestRegistry` owns request lifecycle and global capacity. Each prefill
+generation owns a bounded `WorkerBatcher` delivery runtime. Reservation and release paths must remain idempotent across
 completion, timeout, and cancellation races.
 
 ### BalanceContext Extensions
@@ -323,7 +325,7 @@ completion, timeout, and cancellation races.
 - `schedulingMetadata`: Immutable request id, priority, and absolute expiration metadata
 
 Methods:
-- Cancellation and lifecycle state are owned by `RequestLifecycleCoordinator`, keyed by exact request generation rather than request id alone.
+- Cancellation and lifecycle state are owned by `RequestRegistry`, keyed by exact request generation rather than request id alone.
 
 ### Reactive Programming
 The flexlb-api module uses Spring WebFlux for non-blocking reactive request handling. All HTTP endpoints return `Mono` or `Flux` types.

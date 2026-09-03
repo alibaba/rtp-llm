@@ -11,6 +11,7 @@ import java.util.Comparator;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.OptionalDouble;
 import java.util.OptionalLong;
 import java.util.PriorityQueue;
 
@@ -40,8 +41,9 @@ final class RouteTimelineProjector {
             QueueSnapshot queue,
             WorkSnapshot committed,
             PrefillTimePredictor.Evaluator evaluator,
-            RouteProjection.DeliveryProjection deliveryProjection) {
-        long projectionAtMs = queue.capturedAtMs();
+            RouteProjection.DeliveryProjection deliveryProjection,
+            long planningAtMs) {
+        long projectionAtMs = Math.max(queue.capturedAtMs(), planningAtMs);
         if (evaluator == null) {
             return unavailable("PREDICTOR_MISSING");
         }
@@ -69,6 +71,7 @@ final class RouteTimelineProjector {
         if (containsCommittedRequest(committed, incoming.requestId())) {
             return unavailable("INCOMING_ALREADY_COMMITTED");
         }
+        GroupPlanner.Item probe = incoming.asItem();
 
         final long incomingPrefillMs;
         try {
@@ -98,6 +101,24 @@ final class RouteTimelineProjector {
 
         long committedMs = knownRemainingWorkMsAt(committed, projectionAtMs);
 
+        /*
+         * With no active endpoint queue, known committed work only advances
+         * the serial engine cursor. The incoming request is still a singleton
+         * decision, so the generic ProjectedQueue/readiness machinery is
+         * exactly equivalent to committedMs + singleton completion offset.
+         */
+        if (queue.queueScheduling() && queue.activeItems().isEmpty()) {
+            long collectionDeadline = GroupPlanner.collectionDeadlineMs(
+                    probe.enqueuedAtMs(),
+                    queue.constraints().collectionWindowMs());
+            if (probe.expiresAtMs() <= collectionDeadline) {
+                return unavailable("INCOMING_EXPIRED_BEFORE_DISPATCH");
+            }
+            return projectIdleSingleton(
+                    queue, deliveryProjection, predictions, incoming,
+                    incomingPrefillMs, committedMs);
+        }
+
         if (!queue.queueScheduling()) {
             long completionMs = saturatedAdd(committedMs, incomingPrefillMs);
             return candidate(
@@ -110,7 +131,6 @@ final class RouteTimelineProjector {
                     RouteProjection.Candidate.InitialHeadDisposition.NONE,
                     "SERIAL_FROZEN_DIRECT");
         }
-        GroupPlanner.Item probe = incoming.asItem();
         GroupPlanner.Item initialActiveHead =
                 queue.activeItems().isEmpty() ? null : queue.activeItems().getFirst();
         RouteProjection.Candidate.InitialHeadDisposition initialHeadDisposition =
@@ -275,6 +295,51 @@ final class RouteTimelineProjector {
                 incomingPrefillMs,
                 initialHeadDisposition,
                 drainDetail);
+    }
+
+    private RouteProjection.Candidate projectIdleSingleton(
+            QueueSnapshot queue,
+            RouteProjection.DeliveryProjection deliveryProjection,
+            PredictionBoundary predictions,
+            RouteProjection.Probe probe,
+            long incomingPrefillMs,
+            long committedMs) {
+        GroupPlanner.Item item = probe.asItem();
+        List<GroupPlanner.Item> singleton = List.of(item);
+        try {
+            deliveryProjection.planning(predictions)
+                    .durationMs(singleton, 0);
+        } catch (PredictionFailure predictionFailure) {
+            return unavailable(
+                    predictionFailure.detail("BATCH_PREDICTION_FAILED"));
+        }
+        GroupPlanner.Plan<GroupPlanner.Item> plan = new GroupPlanner.Plan<>(
+                singleton,
+                GroupPlanner.Shape.empty().add(item.seqLen()),
+                queue.capturedAtMs(),
+                queue.capturedAtMs(),
+                false,
+                OptionalDouble.empty(),
+                GroupPlanner.FIXED_WINDOW_TIMEOUT);
+        final long completionMs;
+        try {
+            completionMs = saturatedAdd(
+                    committedMs,
+                    deliveryProjection.service(plan, predictions)
+                            .completionOffsetMs(0));
+        } catch (PredictionFailure predictionFailure) {
+            return unavailable(
+                    predictionFailure.detail("SERVICE_PREDICTION_FAILED"));
+        }
+        return candidate(
+                RouteProjection.Candidate.State.MODELED,
+                OptionalLong.of(completionMs),
+                probe.demand().drainRequired()
+                        ? OptionalLong.of(completionMs)
+                        : OptionalLong.empty(),
+                incomingPrefillMs,
+                RouteProjection.Candidate.InitialHeadDisposition.NONE,
+                "EMPTY_ACTIVE_QUEUE_SINGLETON");
     }
 
     private RouteProjection.Candidate modeledTtftOnly(
@@ -580,15 +645,25 @@ final class RouteTimelineProjector {
             implements RouteProjection.Predictions {
 
         private final PrefillTimePredictor.Evaluator evaluator;
+        private long cachedSeqLen = -1L;
+        private long cachedHitCache = -1L;
+        private long cachedSingleMs;
 
         private PredictionBoundary(PrefillTimePredictor.Evaluator evaluator) {
             this.evaluator = evaluator;
         }
 
         private long singleMs(long seqLen, long hitCache) {
+            if (cachedSeqLen == seqLen && cachedHitCache == hitCache) {
+                return cachedSingleMs;
+            }
             try {
-                return PrefillPredictionBoundary.predictSingleRequestMs(
+                long predicted = PrefillPredictionBoundary.predictSingleRequestMs(
                         evaluator, seqLen, hitCache);
+                cachedSeqLen = seqLen;
+                cachedHitCache = hitCache;
+                cachedSingleMs = predicted;
+                return predicted;
             } catch (InvalidPrefillPredictionException invalidPrediction) {
                 throw PredictionFailure.invalid(invalidPrediction);
             } catch (RuntimeException predictionFailure) {

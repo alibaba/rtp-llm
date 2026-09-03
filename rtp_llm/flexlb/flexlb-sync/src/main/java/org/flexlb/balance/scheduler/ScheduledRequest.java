@@ -2,8 +2,10 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.strategy.SelectedRole;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
@@ -52,6 +54,14 @@ public final class ScheduledRequest implements Prioritized {
     private final long maxDecodeEngineRequests;
     private final long maxDecodeKvUsagePercent;
     private final int maxInflightDeliveriesPerPrefillWorker;
+    private final boolean routeDelivery;
+    /**
+     * Publish-time NON_BATCH credit. It has exactly one downstream owner:
+     * this ACTIVE item until RouteDeliveryStrategy takes it, then the route
+     * transaction. ACTIVE terminal paths take and close the same capability.
+     */
+    private final AtomicReference<PrefillState.RouteReservation>
+            publishedRouteReservation = new AtomicReference<>();
 
     public ScheduledRequest(BalanceContext ctx,
                      CompletableFuture<Response> future,
@@ -118,6 +128,8 @@ public final class ScheduledRequest implements Prioritized {
                 .maxInflightDeliveriesPerPrefillWorker();
         this.maxInflightDeliveriesPerPrefillWorker =
                 configuredDeliveryLimit == null ? 0 : configuredDeliveryLimit;
+        this.routeDelivery = schedulingConfig.getDispatcher().getType()
+                == DispatcherConfig.Type.NON_BATCH;
     }
 
     // -- accessors --
@@ -165,6 +177,42 @@ public final class ScheduledRequest implements Prioritized {
     public long maxDecodeKvUsagePercent() { return maxDecodeKvUsagePercent; }
     public int maxInflightDeliveriesPerPrefillWorker() {
         return maxInflightDeliveriesPerPrefillWorker;
+    }
+
+    /** Whether ACTIVE publication must atomically own one request credit. */
+    public boolean requiresRouteReservation() {
+        return routeDelivery;
+    }
+
+    /** Bind the sole publish-time route credit before ACTIVE becomes visible. */
+    boolean bindPublishedRouteReservation(
+            PrefillState.RouteReservation reservation) {
+        return publishedRouteReservation.compareAndSet(
+                null, Objects.requireNonNull(reservation, "reservation"));
+    }
+
+    /** Transfer the sole uncommitted route credit to delivery or cleanup. */
+    PrefillState.RouteReservation takePublishedRouteReservation() {
+        return publishedRouteReservation.getAndSet(null);
+    }
+
+    /** Observe without transferring; optimistic preparation owns no credit. */
+    PrefillState.RouteReservation publishedRouteReservation() {
+        return publishedRouteReservation.get();
+    }
+
+    /** Transfer only the reservation validated during optimistic preparation. */
+    boolean takePublishedRouteReservation(
+            PrefillState.RouteReservation expected) {
+        return publishedRouteReservation.compareAndSet(
+                Objects.requireNonNull(expected, "expected"), null);
+    }
+
+    /** Restore ownership after a pre-commit operation made no state change. */
+    boolean restorePublishedRouteReservation(
+            PrefillState.RouteReservation reservation) {
+        return publishedRouteReservation.compareAndSet(
+                null, Objects.requireNonNull(reservation, "reservation"));
     }
 
     /**

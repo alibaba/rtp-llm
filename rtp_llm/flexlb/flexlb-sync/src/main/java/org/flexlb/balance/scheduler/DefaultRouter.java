@@ -116,6 +116,11 @@ public class DefaultRouter {
         }
     }
 
+    /** The immutable role topology used by both direct and queue routing. */
+    List<RoleType> requiredRoles() {
+        return requiredRoles;
+    }
+
     private Response validateRequest(BalanceContext context) {
         if (context == null || context.getRequest() == null) {
             Logger.error("masterRequest is null");
@@ -213,7 +218,9 @@ public class DefaultRouter {
     }
 
     private PlacementResult<SelectedRole, RoleType> queueSelection(
-            BalanceContext context, RoleType role, String group) {
+            BalanceContext context,
+            RoleType role,
+            String group) {
         return switch (role) {
             case PREFILL, PDFUSION ->
                     prefillSelector.selectForQueue(context, role, group);

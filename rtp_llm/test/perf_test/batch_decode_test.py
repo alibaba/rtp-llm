@@ -4,8 +4,9 @@ import json
 import logging
 import os
 import shutil
+import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from rtp_llm.test.perf_test.dataset import KNOWN_DATASETS, extract_arg
 from rtp_llm.test.perf_test.distribution_runner import DistributionRunner
@@ -46,7 +47,7 @@ def run_single(
     ).run()
 
 
-def parse_args():
+def parse_args(argv: Optional[List[str]] = None):
     parser = argparse.ArgumentParser(
         description="RTP-LLM batch decode performance test runner. "
         "Unrecognized arguments are forwarded to the engine server.",
@@ -106,6 +107,26 @@ def parse_args():
         default=os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "./perf_results"),
     )
     perf.add_argument("--decode_test_length", type=int, default=10)
+    perf.add_argument(
+        "--warmup_runs", type=int, default=None,
+        help="Override PERF_FORMAL_WARMUP_RUNS for every case.",
+    )
+    perf.add_argument(
+        "--measure_runs", type=int, default=None,
+        help="Override PERF_MEASURE_RUNS for every case.",
+    )
+    perf.add_argument(
+        "--profile_runs", type=int, default=None,
+        help="Override PERF_PROFILE_RUNS for every case.",
+    )
+    perf.add_argument(
+        "--engine_arg", action="append", default=[], metavar="NAME=VALUE",
+        help="Repeatable engine argument shorthand, e.g. tp_size=8.",
+    )
+    perf.add_argument(
+        "--engine_env", action="append", default=[], metavar="NAME=VALUE",
+        help="Repeatable engine environment default; --test_env wins.",
+    )
 
     engine = parser.add_argument_group(
         "engine args consumed by perf test (also forwarded to server)"
@@ -114,8 +135,82 @@ def parse_args():
     engine.add_argument("--max_seq_len", type=int, default=8192)
     engine.add_argument("--concurrency_limit", type=int, default=64)
 
-    args, remaining = parser.parse_known_args()
+    args, remaining = parser.parse_known_args(argv)
     return args, remaining
+
+
+def _parse_name_value(value: str, option: str) -> Tuple[str, str]:
+    """Parse NAME=VALUE options used by the generic Bazel entrypoint."""
+    if "=" not in value:
+        raise ValueError(f"{option} expects NAME=VALUE, got {value!r}")
+    name, parsed = value.split("=", 1)
+    name = name.strip().lstrip("-")
+    if not name or any(ch.isspace() for ch in name):
+        raise ValueError(f"{option} has invalid name in {value!r}")
+    return name, parsed
+
+
+def _engine_arg_argv(engine_args: List[str]) -> List[str]:
+    """Convert repeatable ``--engine_arg NAME=VALUE`` options to engine argv."""
+    result: List[str] = []
+    for item in engine_args:
+        name, value = _parse_name_value(item, "--engine_arg")
+        result.extend([f"--{name}", value])
+    return result
+
+
+def _apply_engine_env(engine_env: List[str]) -> List[str]:
+    """Apply engine env defaults without overriding Bazel ``--test_env`` values."""
+    names: List[str] = []
+    for item in engine_env:
+        name, value = _parse_name_value(item, "--engine_env")
+        if name not in os.environ:
+            os.environ[name] = value
+        names.append(name)
+    return sorted(set(names))
+
+
+def _apply_run_overrides(args: argparse.Namespace) -> None:
+    """Map explicit perf run controls to the legacy environment contract."""
+    for option, env_name in (
+        ("warmup_runs", "PERF_FORMAL_WARMUP_RUNS"),
+        ("measure_runs", "PERF_MEASURE_RUNS"),
+        ("profile_runs", "PERF_PROFILE_RUNS"),
+    ):
+        value = getattr(args, option)
+        if value is None:
+            continue
+        if value < 0:
+            raise ValueError(f"--{option} must be >= 0, got {value}")
+        os.environ[env_name] = str(value)
+
+
+def _redact_argv(argv: List[str]) -> List[str]:
+    """Redact likely credentials before persisting invocation metadata."""
+    redacted: List[str] = []
+    redact_next = False
+    for item in argv:
+        if redact_next:
+            redacted.append("***")
+            redact_next = False
+            continue
+        key = item.split("=", 1)[0].lstrip("-").lower()
+        embedded_key = ""
+        if key in ("engine_arg", "engine_env") and "=" in item:
+            embedded_key = item.split("=", 1)[1].split("=", 1)[0].lower()
+        sensitive = any(
+            token in key or token in embedded_key
+            for token in ("password", "secret", "access_key", "token")
+        )
+        if sensitive:
+            if "=" in item:
+                redacted.append(item.split("=", 1)[0] + "=***")
+            else:
+                redacted.append(item)
+                redact_next = True
+        else:
+            redacted.append(item)
+    return redacted
 
 
 def _replace_cli_value(argv: List[str], key: str, new_value: str) -> None:
@@ -172,19 +267,42 @@ def _collect_timeline_files(result_dir: str) -> None:
         logging.info("No timeline files found in %s", result_dir)
 
 
-def _write_test_info(args: argparse.Namespace, remaining_args: List[str]) -> None:
-    """Persist test configuration to result_dir for downstream consumers."""
+def _write_test_info(
+    args: argparse.Namespace,
+    remaining_args: List[str],
+    engine_env_names: Optional[List[str]] = None,
+    status: str = "completed",
+) -> None:
+    """Persist a reproducible, credential-safe test configuration."""
+    model_type = extract_arg(remaining_args, "model_type") or os.environ.get(
+        "MODEL_TYPE"
+    )
+    checkpoint_path = extract_arg(remaining_args, "checkpoint_path") or os.environ.get(
+        "CHECKPOINT_PATH"
+    )
+    tokenizer_path = extract_arg(remaining_args, "tokenizer_path") or os.environ.get(
+        "TOKENIZER_PATH"
+    )
     info = {
-        "model_type": os.environ.get("MODEL_TYPE"),
-        "checkpoint_path": os.environ.get("CHECKPOINT_PATH"),
-        "tokenizer_path": os.environ.get("TOKENIZER_PATH"),
+        "schema_version": 2,
+        "status": status,
+        "model_type": model_type,
+        "checkpoint_path": checkpoint_path,
+        "tokenizer_path": tokenizer_path,
         "tp_size": extract_arg(remaining_args, "tp_size", "1"),
         "dp_size": args.dp_size,
         "max_seq_len": args.max_seq_len,
         "concurrency_limit": args.concurrency_limit,
         "decode_test_length": args.decode_test_length,
+        "partial": args.partial,
+        "warmup_runs": int(os.environ.get("PERF_FORMAL_WARMUP_RUNS", "1")),
+        "measure_runs": int(os.environ.get("PERF_MEASURE_RUNS", "1")),
+        "profile_runs": int(os.environ.get("PERF_PROFILE_RUNS", "1")),
         "dataset_name": args.dataset_name or None,
         "dataset_path": args.dataset_path or args.dataset or None,
+        "engine_args": _redact_argv(remaining_args),
+        "engine_env_names": sorted(engine_env_names or []),
+        "argv": _redact_argv(sys.argv),
     }
     path = os.path.join(args.result_dir, "test_info.json")
     with open(path, "w") as f:
@@ -205,9 +323,18 @@ def main() -> str:
     setup_logging()
 
     args, remaining = parse_args()
+    engine_env_names = _apply_engine_env(args.engine_env)
+    _apply_run_overrides(args)
+    # Model/parallelism-specific flags are intentionally not hard-coded in
+    # this runner.  The generic target can forward any engine flag through
+    # repeatable --engine_arg=NAME=VALUE options; raw unknown args remain
+    # supported for backwards compatibility.
+    remaining.extend(_engine_arg_argv(args.engine_arg))
     remaining = resolve_perf_engine_paths(remaining)
     generate_config = json.loads(args.generate_config)
     os.makedirs(args.result_dir, exist_ok=True)
+    # Leave a reproduction manifest even if server startup or a request fails.
+    _write_test_info(args, remaining, engine_env_names, status="running")
     EngineServer.propagate_engine_env(remaining)
 
     logging.info(f"Result directory: {args.result_dir}")
@@ -300,7 +427,7 @@ def main() -> str:
         _collect_timeline_files(args.result_dir)
         server.stop()
 
-    _write_test_info(args, remaining)
+    _write_test_info(args, remaining, engine_env_names, status="completed")
     return args.result_dir
 
 

@@ -28,7 +28,7 @@ class ProductionRoutingDeadlineE2ETest {
         // The first request's deadline is shorter than an unfilled collection
         // window. Endpoint selection must still publish it: the second request
         // immediately completes the batch, and the real mock engine can serve
-        // both well before that deadline. The lifecycle coordinator, not route
+        // both well before that deadline. The request registry, not route
         // projection, is the sole owner of terminal request deadlines.
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
                 BASE_PORT, 1, 1, "1", 1.0,

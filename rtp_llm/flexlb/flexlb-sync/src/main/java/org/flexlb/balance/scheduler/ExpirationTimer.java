@@ -20,7 +20,7 @@ import java.util.function.LongSupplier;
  * Semantic owner of request deadlines and lifecycle-retention maintenance.
  *
  * <p>The timer never keeps a request map. Exact request generations remain in
- * the lifecycle coordinator; a slot stores the opaque registration returned
+ * the request registry; a slot stores the opaque registration returned
  * by this class.
  *
  * <p>Maintenance always completes its three phases in this order:

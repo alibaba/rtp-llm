@@ -12,9 +12,10 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * Versioned, O(1) notification edge for logical placement capacity.
  *
- * <p>It never owns or iterates requests. Exact-group changes also advance the
- * role-wide key used by requests whose routing policy has not selected a
- * group yet.</p>
+ * <p>It never owns or iterates requests. Exact-endpoint changes also advance
+ * their group and role-wide keys, while exact waiters consume only the exact
+ * edge. This prevents one worker's release from waking requests parked on
+ * every worker in the same group.</p>
  */
 @Component
 public final class PlacementAvailability {
@@ -44,14 +45,36 @@ public final class PlacementAvailability {
     /** Notify that a fresh placement in this domain may now succeed. */
     public void capacityChanged(PlacementKey key) {
         Objects.requireNonNull(key, "key");
-        publish(key);
+        long next = sequence.incrementAndGet();
+        lastChanged.put(key, next);
+        if (key.endpoint() != null) {
+            lastChanged.put(new PlacementKey(key.role(), key.group()), next);
+        }
         if (key.group() != null) {
-            publish(PlacementKey.anyGroup(key.role()));
+            lastChanged.put(PlacementKey.anyGroup(key.role()), next);
+        }
+        // One physical capacity edge produces one callback. The exact key is
+        // sufficient for group/role waiters through their relevance match and
+        // avoids three global-lock acquisitions for every endpoint release.
+        for (Listener listener : listeners.keySet()) {
+            try {
+                listener.onCapacityChanged(key, next);
+            } catch (Throwable failure) {
+                Logger.warn(
+                        "Placement availability listener failed", failure);
+            }
         }
     }
 
     public void capacityChanged(RoleType role, String group) {
         capacityChanged(new PlacementKey(role, group));
+    }
+
+    public void capacityChanged(
+            RoleType role,
+            String group,
+            String endpoint) {
+        capacityChanged(PlacementKey.exact(role, group, endpoint));
     }
 
     long sequence() {
@@ -62,16 +85,4 @@ public final class PlacementAvailability {
         return lastChanged.getOrDefault(key, 0L);
     }
 
-    private void publish(PlacementKey key) {
-        long next = sequence.incrementAndGet();
-        lastChanged.put(key, next);
-        for (Listener listener : listeners.keySet()) {
-            try {
-                listener.onCapacityChanged(key, next);
-            } catch (Throwable failure) {
-                Logger.warn(
-                        "Placement availability listener failed", failure);
-            }
-        }
-    }
 }

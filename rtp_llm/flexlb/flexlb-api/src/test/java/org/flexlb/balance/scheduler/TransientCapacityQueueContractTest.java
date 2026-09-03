@@ -6,7 +6,6 @@ import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
-import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -145,8 +144,6 @@ class TransientCapacityQueueContractTest {
         config.queueScheduler().getCapacity()
                 .setMaxWaitingRequestsPerPrefillWorker(
                         INCIDENT_PENDING_REQUESTS + 1);
-        config.getRouter().getRoles().getPrefill().getAvailability()
-                .setMaxPendingRequests((long) INCIDENT_PENDING_REQUESTS + 1L);
         config.getRouter().getRoles().getDecode().getAvailability()
                 .setMaxEngineRequests((long) INCIDENT_DECODE_MAX_CONCURRENCY);
         ((QueueOrderingConfig) config.queueScheduler().getOrdering())
@@ -183,9 +180,11 @@ class TransientCapacityQueueContractTest {
                 futures.add(fixture.runtime.scheduler().submit(context));
             }
 
+            awaitCondition(() -> fixture.runtime.scheduler().getQueuedRequestCount()
+                    == INCIDENT_PENDING_REQUESTS, 10_000L);
             assertEquals(INCIDENT_PENDING_REQUESTS,
                     fixture.runtime.scheduler().getQueuedRequestCount());
-            assertEquals(INCIDENT_PENDING_REQUESTS,
+            assertEquals(1,
                     fixture.metrics.totalPlacementAttempts());
             assertEquals(0, fixture.totalPrefillQueuedRequests(),
                     "P-success/D-failure must not retain a Prefill queue seat");
@@ -278,14 +277,21 @@ class TransientCapacityQueueContractTest {
             assertSame(futures.get(index),
                     fixture.runtime.requestFuture(context.getRequestId()),
                     "waiting must retain the canonical future");
-            assertSame(context, fixture.metrics.context(context.getRequestId()),
-                    "placement retry replaced the BalanceContext");
-            assertEquals(absoluteDeadline,
-                    context.schedulingMetadata().expiresAtMs(),
-                    "placement retry changed the absolute deadline");
-            assertEquals(absoluteDeadline,
-                    fixture.metrics.deadline(context.getRequestId()),
-                    "placement observed a different absolute deadline");
+            // Strict global ordering deliberately plans only the current head.
+            // Requests behind it have not reached the planner yet, so there is
+            // no placement observation to compare for those entries.
+            BalanceContext observed =
+                    fixture.metrics.context(context.getRequestId());
+            if (observed != null) {
+                assertSame(context, observed,
+                        "placement retry replaced the BalanceContext");
+                assertEquals(absoluteDeadline,
+                        context.schedulingMetadata().expiresAtMs(),
+                        "placement retry changed the absolute deadline");
+                assertEquals(absoluteDeadline,
+                        fixture.metrics.deadline(context.getRequestId()),
+                        "placement observed a different absolute deadline");
+            }
         }
     }
 
@@ -364,6 +370,8 @@ class TransientCapacityQueueContractTest {
     @Timeout(20)
     void releasedSeatPreservesFifoAtTheSamePriority() throws Exception {
         try (Fixture fixture = new Fixture(RoleType.PREFILL)) {
+            fixture.config.fixedWindowDecision().setMaxRequests(2);
+            fixture.config.fixedWindowDecision().setMaxCollectionWaitMs(50L);
             fixture.submission.holdCompletions();
             CompletableFuture<Response> older =
                     fixture.runtime.scheduler().submit(
@@ -372,6 +380,8 @@ class TransientCapacityQueueContractTest {
                     fixture.runtime.scheduler().submit(
                             fixture.context(252L, 50));
 
+            awaitCondition(() -> fixture.runtime.scheduler()
+                    .getQueuedRequestCount() >= 2, 2_000L);
             assertFalse(older.isDone());
             assertFalse(later.isDone());
             fixture.releaseCapacity();
@@ -389,10 +399,14 @@ class TransientCapacityQueueContractTest {
     void releasedSeatUsesPriorityOrderingBeforeArrivalOrder()
             throws Exception {
         try (Fixture fixture = new Fixture(RoleType.PREFILL)) {
+            fixture.config.fixedWindowDecision().setMaxRequests(2);
+            fixture.config.fixedWindowDecision().setMaxCollectionWaitMs(50L);
             fixture.submission.holdCompletions();
             fixture.runtime.scheduler().submit(fixture.context(261L, 50));
             fixture.runtime.scheduler().submit(fixture.context(262L, 80));
 
+            awaitCondition(() -> fixture.runtime.scheduler()
+                    .getQueuedRequestCount() >= 2, 2_000L);
             fixture.releaseCapacity();
 
             assertTrue(fixture.submission.awaitCommands(
@@ -453,8 +467,6 @@ class TransientCapacityQueueContractTest {
                 .setMaxOutstandingRequestsGlobal(64);
         config.queueScheduler().getCapacity()
                 .setMaxWaitingRequestsPerPrefillWorker(64);
-        config.getRouter().getRoles().getPrefill().getAvailability()
-                .setMaxPendingRequests(64L);
 
         try (Fixture fixture = new Fixture(RoleType.DECODE, config)) {
             List<CompletableFuture<Response>> waiting = LongStream
@@ -464,13 +476,25 @@ class TransientCapacityQueueContractTest {
                     .toList();
 
             assertTrue(waiting.stream().noneMatch(CompletableFuture::isDone));
+            awaitCondition(() -> fixture.decodeEndpoint.layeredAdmissionView()
+                    .queuedCount() == 32, 2_000L);
             assertEquals(32,
                     fixture.decodeEndpoint.layeredAdmissionView().queuedCount(),
                     "a singleton Prefill has no alternative placement to compare;"
                             + " its authoritative queue admission owns the backlog");
             assertEquals(32, fixture.metrics.totalPlacementAttempts(),
-                    "overflow waits in the placement registry without replay");
+                    "overflow waits in the global queue without replay");
             assertEquals(List.of(), fixture.submission.requestIds());
+        }
+    }
+
+    private static void awaitCondition(
+            java.util.function.BooleanSupplier condition,
+            long timeoutMs) throws InterruptedException {
+        long deadline = System.nanoTime()
+                + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        while (!condition.getAsBoolean() && System.nanoTime() < deadline) {
+            Thread.sleep(5L);
         }
     }
 
@@ -486,8 +510,6 @@ class TransientCapacityQueueContractTest {
                 .setMaxWaitingRequestsPerPrefillWorker(64);
         // The fixture's external PENDING sentinel consumes one Prefill
         // admission count; keep room for the production-local bound of 64.
-        config.getRouter().getRoles().getPrefill().getAvailability()
-                .setMaxPendingRequests(65L);
         config.getRouter().getRoles().getDecode().getAvailability()
                 .setMaxEngineRequests(64L);
         assertTrue(config.defersDecodeCapacityUntilDispatch());
@@ -516,6 +538,8 @@ class TransientCapacityQueueContractTest {
                     .toList();
 
             assertTrue(waiting.stream().noneMatch(CompletableFuture::isDone));
+            awaitCondition(() -> spareEndpoint.layeredAdmissionView()
+                    .reserved().size() == 64, 2_000L);
             assertEquals(0,
                     fixture.decodeEndpoint.layeredAdmissionView().reserved().size(),
                     "the incident's full Decode must not own a Prefill queue head");
@@ -599,8 +623,6 @@ class TransientCapacityQueueContractTest {
                 .setMaxOutstandingRequestsGlobal(32);
         config.queueScheduler().getCapacity()
                 .setMaxWaitingRequestsPerPrefillWorker(32);
-        config.getRouter().getRoles().getPrefill().getAvailability()
-                .setMaxPendingRequests(32L);
         config.getRouter().getRoles().getDecode().getAvailability()
                 .setMaxEngineRequests(32L);
 
@@ -652,8 +674,6 @@ class TransientCapacityQueueContractTest {
                 .setMaxOutstandingRequestsGlobal(32);
         config.queueScheduler().getCapacity()
                 .setMaxWaitingRequestsPerPrefillWorker(32);
-        config.getRouter().getRoles().getPrefill().getAvailability()
-                .setMaxPendingRequests(32L);
         config.getRouter().getRoles().getDecode().getAvailability()
                 .setMaxEngineRequests(32L);
 
@@ -1068,6 +1088,7 @@ class TransientCapacityQueueContractTest {
                 metrics.placementFinished(startedAt);
             }
         }
+
     }
 
     private static final class PlacementMetrics {
@@ -1236,8 +1257,6 @@ class TransientCapacityQueueContractTest {
                 .setMaxWaitingRequestsPerPrefillWorker(8);
         ((DispatcherConfig) config.getDispatcher())
                 .setMaxInflightBatchesPerPrefillWorker(2);
-        config.getRouter().getRoles().getPrefill().getAvailability()
-                .setMaxPendingRequests(1L);
         config.getRouter().getRoles().getDecode().getAvailability()
                 .setMaxEngineRequests(1L);
         config.getRouter().getRoles().getDecode().getAvailability()

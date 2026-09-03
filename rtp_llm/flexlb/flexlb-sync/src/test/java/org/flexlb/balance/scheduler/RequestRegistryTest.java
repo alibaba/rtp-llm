@@ -17,16 +17,19 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.awaitCondition;
 import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.commitRoute;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -37,7 +40,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** Canonical request-generation ownership tests, independent of the facade. */
-class RequestLifecycleCoordinatorTest {
+class RequestRegistryTest {
 
     private FlexlbConfig config;
     private RequestRegistry lifecycle;
@@ -172,6 +175,25 @@ class RequestLifecycleCoordinatorTest {
                 future.join().getCode());
         assertEquals(RequestState.Phase.CANCELLED,
                 lifecycle.getRequestState(301L, 0L).state());
+    }
+
+    @Test
+    void queueDecisionResponsePublishesOutsideTheDecisionCaller() throws Exception {
+        CompletableFuture<Response> future = lifecycle.register(context(302L), 4);
+        CountDownLatch published = new CountDownLatch(1);
+        AtomicReference<String> callbackThread = new AtomicReference<>();
+        future.thenAccept(response -> {
+            callbackThread.set(Thread.currentThread().getName());
+            published.countDown();
+        });
+
+        Response rejection = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
+        assertTrue(lifecycle.publishQueueDecisionResponseAsync(
+                302L, future, rejection));
+        assertTrue(published.await(5, TimeUnit.SECONDS));
+        assertNotEquals(Thread.currentThread().getName(), callbackThread.get());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
+                future.get(5, TimeUnit.SECONDS).getCode());
     }
 
     @Test

@@ -110,8 +110,7 @@ final class FlexlbConfigValidator {
                 "scheduler.capacity.maxWaitingRequestsPerPrefillWorker");
         DecisionPolicyConfig decision = queue.getDecision();
         if (decision.getType() == DecisionPolicyConfig.Type.FIXED_WINDOW) {
-            range(decision.getMaxRequests(), 1,
-                    DecisionPolicyConfig.MAX_REQUESTS,
+            positive(decision.getMaxRequests(),
                     "scheduler.decision.maxRequests");
             nonNegative(decision.getMaxCollectionWaitMs(),
                     "scheduler.decision.maxCollectionWaitMs");
@@ -120,8 +119,9 @@ final class FlexlbConfigValidator {
                         "scheduler.decision.maxPredictedExecutionMs");
             }
         } else {
-            require(decision.getMaxRequests() == 8
-                            && decision.getMaxCollectionWaitMs() == 300
+            require(decision.getMaxRequests() == DecisionPolicyConfig.DEFAULT_MAX_REQUESTS
+                            && decision.getMaxCollectionWaitMs()
+                            == DecisionPolicyConfig.DEFAULT_MAX_COLLECTION_WAIT_MS
                             && decision.getMaxPredictedExecutionMs() == null,
                     "scheduler.decision",
                     "fixed-window fields are supported only with FIXED_WINDOW");
@@ -172,10 +172,6 @@ final class FlexlbConfigValidator {
         require(routing.getRoles() != null, "router.roles", "is required");
         PrefillConfig prefill = routing.getRoles().getPrefill();
         require(prefill != null, "router.roles.prefill", "is required");
-        require(prefill.getAvailability() != null,
-                "router.roles.prefill.availability", "is required");
-        positive(prefill.getAvailability().getMaxPendingRequests(),
-                "router.roles.prefill.availability.maxPendingRequests");
         require(prefill.getExecutionTimeEstimator() != null,
                 "router.roles.prefill.executionTimeEstimator", "is required");
         require(prefill.getExecutionTimeEstimator().getType() != null,

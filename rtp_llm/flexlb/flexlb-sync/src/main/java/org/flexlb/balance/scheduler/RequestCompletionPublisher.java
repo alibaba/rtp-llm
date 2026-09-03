@@ -4,7 +4,7 @@ import org.flexlb.dao.loadbalance.Response;
 
 import java.util.ArrayDeque;
 import java.util.Objects;
-import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -25,6 +25,8 @@ import java.util.function.Supplier;
  */
 final class RequestCompletionPublisher implements AutoCloseable {
 
+    private static final int DEFAULT_PUBLISHER_WORKERS = 8;
+
     private final RequestRegistry lifecycle;
     private final ThreadPoolExecutor executor;
     private final Object lifecycleMonitor = new Object();
@@ -36,17 +38,22 @@ final class RequestCompletionPublisher implements AutoCloseable {
     private int inFlightPublications;
     private Throwable closeFailure;
 
-    RequestCompletionPublisher(RequestRegistry lifecycle) {
+    RequestCompletionPublisher(RequestRegistry lifecycle, int configuredWorkers) {
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
-        int workers = Math.max(2, Math.min(
-                8, Runtime.getRuntime().availableProcessors()));
+        int workers = configuredWorkers > 0
+                ? configuredWorkers : DEFAULT_PUBLISHER_WORKERS;
         AtomicInteger workerSequence = new AtomicInteger();
         executor = new ThreadPoolExecutor(
                 workers,
                 workers,
                 0L,
                 TimeUnit.MILLISECONDS,
-                new ArrayBlockingQueue<>(workers * 1024),
+                // Accepted requests are already bounded by RequestRegistry's
+                // outstanding-admission permit. An unbounded handoff queue
+                // therefore cannot grow independently of admitted work, and
+                // guarantees that a decision thread never runs a completion
+                // inline merely because the publisher is busy.
+                new LinkedBlockingQueue<>(),
                 runnable -> {
                     Thread thread = new Thread(
                             runnable,
@@ -55,17 +62,7 @@ final class RequestCompletionPublisher implements AutoCloseable {
                     thread.setDaemon(true);
                     return thread;
                 },
-                (publication, saturated) -> {
-                    if (saturated.isShutdown()) {
-                        throw new RejectedExecutionException(
-                                "completion publisher is closed");
-                    }
-                    // Every asynchronous submit is required to happen outside
-                    // the RequestSlot lock. On saturation, execute the exact
-                    // completion synchronously instead of retaining unbounded
-                    // responses or silently dropping a terminal publication.
-                    publication.run();
-                });
+                new ThreadPoolExecutor.AbortPolicy());
         executor.prestartAllCoreThreads();
     }
 

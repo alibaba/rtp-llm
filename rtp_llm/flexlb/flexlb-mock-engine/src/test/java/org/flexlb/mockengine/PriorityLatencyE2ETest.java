@@ -63,8 +63,12 @@ class PriorityLatencyE2ETest {
             }
             int total = PER_PRIORITY * PRIORITIES.length;
             assertEquals(total, futures.size());
-            assertEquals(total, h.prefillEndpoint(0).queuedRequestCount(),
-                    "all requests must be committed into the priority queue before release");
+            AutoTpmE2EHarness.await(
+                    () -> h.scheduler.getQueuedRequestCount() == total,
+                    10_000,
+                    "all requests must be committed into the scheduler queue");
+            assertEquals(total, h.scheduler.getQueuedRequestCount(),
+                    "all requests must be committed into the global priority queue before release");
 
             // flip：小批次 + 短 fixedWait 放行派发，持续饱和下由优先级序主导
             h.fixedWindowDecision().setMaxRequests(2);

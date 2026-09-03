@@ -54,14 +54,14 @@ class RouteDeliveryStrategyTest {
                 org.mockito.ArgumentMatchers.same(second),
                 org.mockito.ArgumentMatchers.eq(90L),
                 org.mockito.ArgumentMatchers.anyInt());
-        verify(fixture.capabilities.routeReservation(first)).commitGroup(
+        verify(fixture.capabilities.routeCommit()).commit(
                 org.mockito.ArgumentMatchers.eq(List.of(first, second)),
                 org.mockito.ArgumentMatchers.eq(List.of(
                         fixture.capabilities.routeReservation(first),
                         fixture.capabilities.routeReservation(second))));
         verify(fixture.capabilities.permit(first)).transferToEngineLifecycle();
         verify(fixture.capabilities.permit(second)).transferToEngineLifecycle();
-        assertEquals(2, fixture.capabilities.handoffs().size());
+        assertEquals(1, fixture.capabilities.handoffs().size());
         fixture.capabilities.handoffs().forEach(handoff -> verify(handoff).close());
     }
 

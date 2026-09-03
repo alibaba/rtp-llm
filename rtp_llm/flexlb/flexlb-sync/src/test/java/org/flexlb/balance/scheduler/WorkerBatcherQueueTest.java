@@ -33,8 +33,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Canonical queue-order contract exposed by {@link WorkerBatcher}. */
-class PrefillGenerationQueueTest {
+/** Canonical endpoint-queue contract exposed by {@link WorkerBatcher}. */
+class WorkerBatcherQueueTest {
 
     private final List<WorkerBatcher> runtimes = new ArrayList<>();
     private FlexlbConfig config;

@@ -1,10 +1,8 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.dao.BalanceContext;
@@ -20,10 +18,11 @@ import java.util.function.BooleanSupplier;
 /**
  * Sole owner of a selected queue route before ACTIVE publication.
  *
- * <p>The object is thread-confined to the routing/scheduling call.  It owns
- * both endpoint-generation pins. Exact Decode capacity is acquired only in
- * the short publication transaction. A successful commit moves ownership to
- * the canonical RequestSlot / ScheduledRequest; closing rolls back local ownership.</p>
+ * <p>Ownership is transferred once from the planner to the commit sequencer;
+ * the object is never accessed concurrently. It owns both
+ * endpoint-generation pins. Exact Decode capacity is acquired only in the
+ * short publication transaction. A successful commit moves ownership to the
+ * canonical RequestSlot / ScheduledRequest; closing rolls back local ownership.</p>
  */
 public final class QueueRouteAdmission implements AutoCloseable {
 
@@ -32,6 +31,8 @@ public final class QueueRouteAdmission implements AutoCloseable {
     private final ScheduledRequest.DecodeReselection decodeReselection;
     private final PlacementAvailability placementAvailability;
     private OwnedRoute ownedRoute;
+    /** Exact endpoint which rejected the last publication attempt. */
+    private WorkerEndpoint blockedEndpoint;
 
     private QueueRouteAdmission(
             long requestId,
@@ -215,13 +216,35 @@ public final class QueueRouteAdmission implements AutoCloseable {
 
     /** Prefill capacity domain contended by this exact selected route. */
     PlacementKey prefillPlacementKey() {
-        return placementKey(requireOwned().prefillStatus());
+        OwnedRoute route = requireOwned();
+        return placementKey(
+                route.prefillStatus(), route.prefillEndpoint());
     }
 
     /** Decode capacity domain, or null when this model has no Decode role. */
     PlacementKey decodePlacementKey() {
         ServerStatus status = requireOwned().decodeStatus();
-        return status == null ? null : placementKey(status);
+        return status == null ? null : placementKey(
+                status, requireOwned().decodeEndpoint());
+    }
+
+    /**
+     * Returns the exact endpoint whose local capacity rejected publication.
+     * A queue coordinator may bypass this request only for a route which does
+     * not use this endpoint. A null value means the selector itself had no
+     * concrete endpoint and therefore cannot safely be bypassed.
+     */
+    WorkerEndpoint blockedEndpoint() {
+        return blockedEndpoint;
+    }
+
+    /** Whether this still-owned route contends with the supplied endpoint. */
+    boolean usesEndpoint(WorkerEndpoint endpoint) {
+        if (endpoint == null || ownedRoute == null) {
+            return false;
+        }
+        return ownedRoute.prefillEndpoint() == endpoint
+                || ownedRoute.decodeEndpoint() == endpoint;
     }
 
     public ScheduledRequest buildItem(
@@ -256,9 +279,11 @@ public final class QueueRouteAdmission implements AutoCloseable {
             CompletableFuture<Response> future,
             RequestRegistry lifecycle) {
         OwnedRoute route = requireOwned();
+        blockedEndpoint = null;
         if (!tryReserveDecode(context, route)) {
             return PlacementResult.blocked(
-                    placementKey(route.decodeStatus()));
+                    placementKey(
+                            route.decodeStatus(), route.decodeEndpoint()));
         }
         route = requireOwned();
         ScheduledRequest item = buildItem(
@@ -274,8 +299,13 @@ public final class QueueRouteAdmission implements AutoCloseable {
                         exact.prefillPin(), item));
         return switch (committed) {
             case SUCCESS -> PlacementResult.success(item);
-            case BLOCKED -> PlacementResult.blocked(
-                    placementKey(exact.prefillStatus()));
+            case BLOCKED -> {
+                blockedEndpoint = exact.prefillEndpoint();
+                yield PlacementResult.blocked(
+                        placementKey(
+                                exact.prefillStatus(),
+                                exact.prefillEndpoint()));
+            }
             case LIMIT_REACHED -> PlacementResult.limitReached();
             case CLOSED -> PlacementResult.closed();
             case REJECTED -> throw new IllegalStateException(
@@ -318,8 +348,10 @@ public final class QueueRouteAdmission implements AutoCloseable {
                     decodeCapacity(context));
         }
         if (reservation == null) {
+            blockedEndpoint = route.decodeEndpoint();
             return false;
         }
+        blockedEndpoint = null;
         ownedRoute = route.withDecodeReservation(reservation);
         return true;
     }
@@ -334,8 +366,11 @@ public final class QueueRouteAdmission implements AutoCloseable {
                 availability.getMaxKvUsagePercent());
     }
 
-    private static PlacementKey placementKey(ServerStatus status) {
-        return new PlacementKey(status.getRole(), status.getGroup());
+    private static PlacementKey placementKey(
+            ServerStatus status,
+            WorkerEndpoint endpoint) {
+        return PlacementKey.exact(
+                status.getRole(), status.getGroup(), endpoint.ipPort());
     }
 
     /**
@@ -467,7 +502,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
         try (prefillPin; decodePin) {
             if (route.decodeEndpoint() != null
                     && route.decodeReservation() != null) {
-                route.decodeEndpoint().releaseReservationExact(
+                route.decodeEndpoint().releaseReservationExactSilently(
                         route.decodeReservation());
             }
         }

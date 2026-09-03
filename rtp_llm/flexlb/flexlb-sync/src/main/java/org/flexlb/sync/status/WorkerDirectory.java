@@ -226,6 +226,15 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         return endpointRegistry.endpointAddressSnapshot(role);
     }
 
+    /**
+     * Immutable, non-owning Prefill generations for one routing traversal.
+     * The winning address must still be captured and identity-checked.
+     */
+    public List<EndpointRegistry.PrefillRoutingEntry> prefillRoutingSnapshot(
+            RoleType role) {
+        return endpointRegistry.prefillRoutingSnapshot(role);
+    }
+
     /** Capture one exact currently published endpoint generation by address. */
     public WorkerEndpoint.GenerationPin captureEndpoint(
             RoleType role, String ipPort) {

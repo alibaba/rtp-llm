@@ -49,6 +49,10 @@ class PreemptionPhasesE2ETest {
 
             CompletableFuture<Response> low1 = h.scheduler.submit(h.context(101, 30));
             CompletableFuture<Response> low2 = h.scheduler.submit(h.context(102, 40));
+            AutoTpmE2EHarness.await(
+                    () -> h.prefillEndpoint(0).queuedRequestCount() == 2,
+                    5_000,
+                    "two low-priority requests must reach the Prefill queue");
             assertEquals(2, h.prefillEndpoint(0).queuedRequestCount());
             assertFalse(low1.isDone());
             assertFalse(low2.isDone());
@@ -89,6 +93,10 @@ class PreemptionPhasesE2ETest {
             // local hard reservation still reduces real availability to 127.
             h.setDecodeKvCapacity(0, 255, 256);
             CompletableFuture<Response> low = h.scheduler.submit(h.context(201, 30));
+            AutoTpmE2EHarness.await(
+                    () -> decodeEp.layeredAdmissionView().reserved().containsKey(201L),
+                    5_000,
+                    "low-priority request must publish its Decode reservation");
             assertFalse(low.isDone());
             assertTrue(decodeEp.layeredAdmissionView().reserved().containsKey(201L));
             // victim 仍由 Master 排队持有，因此走本地 queued eviction，无需 Engine Cancel。
@@ -281,6 +289,10 @@ class PreemptionPhasesE2ETest {
             h.setDecodeKvCapacity(0, 128, 256);
             // P50 占据 decode 唯一槽位 + prefill 唯一队列位
             CompletableFuture<Response> holder = h.scheduler.submit(h.context(501, 50));
+            AutoTpmE2EHarness.await(
+                    () -> decodeEp.layeredAdmissionView().reserved().containsKey(501L),
+                    5_000,
+                    "equal-priority holder must publish its Decode reservation");
             assertFalse(holder.isDone());
             assertTrue(decodeEp.layeredAdmissionView().reserved().containsKey(501L));
 

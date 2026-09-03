@@ -109,14 +109,6 @@ public class BalanceContext {
      */
     private String scheduledPrefillEndpoint = "";
 
-    /**
-     * Prefill endpoint ("ip:httpPort") whose queue just rejected this
-     * request's offer (review P1-4): the priority scheduler sets it before a
-     * fallback re-route and the prefill strategy skips that worker for
-     * exactly one route (cleared on route entry). Null when unset.
-     */
-    private String excludedPrefillIpPort;
-
     //===================== Method ===================//
 
     public long getRequestId() {

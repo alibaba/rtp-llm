@@ -68,6 +68,10 @@ class EndpointRegistryRoleTest {
         assertSame(decode, registry.get(RoleType.DECODE, "127.0.0.1:8002"));
         assertSame(pdFusion, registry.get(RoleType.PDFUSION, "127.0.0.1:8003"));
         assertSame(vit, registry.get(RoleType.VIT, "127.0.0.1:8004"));
+        EndpointRegistry.PrefillRoutingEntry pdFusionRoute =
+                registry.prefillRoutingSnapshot(RoleType.PDFUSION).getFirst();
+        assertEquals("127.0.0.1:8003", pdFusionRoute.address());
+        assertSame(pdFusion, pdFusionRoute.endpoint());
 
         for (RoleType roleType : new RoleType[]{
                 RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION, RoleType.VIT}) {
@@ -157,7 +161,7 @@ class EndpointRegistryRoleTest {
     }
 
     @Test
-    void prefill_address_directory_tracks_membership_without_owning_generation() {
+    void prefill_routing_directory_tracks_exact_advisory_generations() {
         String firstAddress = "127.0.0.1:8001";
         String secondAddress = "127.0.0.1:8002";
         String thirdAddress = "127.0.0.1:8003";
@@ -172,13 +176,19 @@ class EndpointRegistryRoleTest {
                 thirdAddress,
                 status(RoleType.PREFILL, 8003));
 
-        List<String> originalDirectory =
-                registry.endpointAddressSnapshot(RoleType.PREFILL);
+        List<EndpointRegistry.PrefillRoutingEntry> originalDirectory =
+                registry.prefillRoutingSnapshot(RoleType.PREFILL);
         assertEquals(
                 List.of(firstAddress, secondAddress, thirdAddress),
-                originalDirectory);
+                originalDirectory.stream()
+                        .map(EndpointRegistry.PrefillRoutingEntry::address)
+                        .toList());
+        assertSame(first, originalDirectory.getFirst().endpoint());
         assertThrows(UnsupportedOperationException.class,
-                () -> originalDirectory.add("127.0.0.1:8004"));
+                () -> originalDirectory.add(
+                        new EndpointRegistry.PrefillRoutingEntry(
+                                "127.0.0.1:8004",
+                                (PrefillEndpoint) first)));
 
         retire(RoleType.PREFILL, firstAddress, firstStatus);
         WorkerEndpoint replacement = EndpointTestSupport.publishEndpoint(registry,
@@ -186,14 +196,29 @@ class EndpointRegistryRoleTest {
                 firstAddress,
                 status(RoleType.PREFILL, 8001));
         assertNotSame(first, replacement);
-        assertEquals(Set.copyOf(originalDirectory),
-                Set.copyOf(registry.endpointAddressSnapshot(RoleType.PREFILL)),
+        List<EndpointRegistry.PrefillRoutingEntry> replacementDirectory =
+                registry.prefillRoutingSnapshot(RoleType.PREFILL);
+        assertEquals(
+                originalDirectory.stream()
+                        .map(EndpointRegistry.PrefillRoutingEntry::address)
+                        .collect(java.util.stream.Collectors.toSet()),
+                replacementDirectory.stream()
+                        .map(EndpointRegistry.PrefillRoutingEntry::address)
+                        .collect(java.util.stream.Collectors.toSet()),
                 "same-address replacement must retain the address membership");
+        assertSame(first, originalDirectory.getFirst().endpoint(),
+                "an in-flight traversal keeps its advisory old generation");
+        assertSame(replacement, replacementDirectory.getFirst().endpoint());
         WorkerEndpoint.GenerationPin replacementPin =
-                registry.capture(RoleType.PREFILL, firstAddress);
+                registry.capture(
+                        RoleType.PREFILL,
+                        originalDirectory.getFirst().address());
         assertNotNull(replacementPin);
         try (replacementPin) {
             assertSame(replacement, replacementPin.endpoint());
+            assertNotSame(originalDirectory.getFirst().endpoint(),
+                    replacementPin.endpoint(),
+                    "winner identity validation must reject the stale route");
         }
 
         EndpointRegistry.DetachedGeneration detached =
@@ -202,10 +227,12 @@ class EndpointRegistryRoleTest {
         assertNotNull(detached);
         detached.retireAndAwait();
         assertEquals(Set.of(firstAddress, thirdAddress),
-                Set.copyOf(registry.endpointAddressSnapshot(RoleType.PREFILL)));
+                registry.prefillRoutingSnapshot(RoleType.PREFILL).stream()
+                        .map(EndpointRegistry.PrefillRoutingEntry::address)
+                        .collect(java.util.stream.Collectors.toSet()));
 
         registry.close();
-        assertTrue(registry.endpointAddressSnapshot(RoleType.PREFILL).isEmpty());
+        assertTrue(registry.prefillRoutingSnapshot(RoleType.PREFILL).isEmpty());
     }
 
     @Test

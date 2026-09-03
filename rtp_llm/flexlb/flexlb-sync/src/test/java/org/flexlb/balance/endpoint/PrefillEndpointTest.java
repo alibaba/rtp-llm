@@ -84,6 +84,43 @@ class PrefillEndpointTest {
     // ---- batch commit / release ----
 
     @Test
+    void nonBatchPublishAtomicallyOwnsAndReleasesRouteCredit() {
+        FlexlbConfig routeConfig = new FlexlbConfig();
+        routeConfig.setDispatcher(DispatcherConfig.nonBatch());
+        routeConfig.getDispatcher()
+                .setMaxInflightRequestsPerPrefillWorker(3);
+        assertEquals(3, endpoint.availableRouteDecisionSlots(3));
+
+        ScheduledRequest queued = createScheduledRequest(
+                endpoint, routeConfig, 1L, 500, 200);
+        assertTrue(EndpointTestSupport.offer(endpoint, queued));
+        assertEquals(2, endpoint.availableRouteDecisionSlots(3));
+
+        assertTrue(endpoint.removeQueued(queued, "test cleanup"));
+        assertEquals(3, endpoint.availableRouteDecisionSlots(3));
+    }
+
+    @Test
+    void nonBatchPublishRejectsBeforeActiveWhenRouteCreditIsFull() {
+        FlexlbConfig routeConfig = new FlexlbConfig();
+        routeConfig.setDispatcher(DispatcherConfig.nonBatch());
+        routeConfig.getDispatcher()
+                .setMaxInflightRequestsPerPrefillWorker(1);
+        ScheduledRequest first = createScheduledRequest(
+                endpoint, routeConfig, 1L, 500, 200);
+        ScheduledRequest second = createScheduledRequest(
+                endpoint, routeConfig, 2L, 500, 200);
+
+        assertTrue(EndpointTestSupport.offer(endpoint, first));
+        assertFalse(EndpointTestSupport.offer(endpoint, second));
+        assertEquals(1, endpoint.queuedRequestCount());
+        assertEquals(0, endpoint.availableRouteDecisionSlots(1));
+
+        assertTrue(endpoint.removeQueued(first, "test cleanup"));
+        assertEquals(1, endpoint.availableRouteDecisionSlots(1));
+    }
+
+    @Test
     void commitBatchIncreasesInflightCount() {
         assertEquals(0, endpoint.getInflightBatchCount());
 

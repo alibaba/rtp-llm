@@ -9,6 +9,7 @@ import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimTerminal;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Response;
@@ -38,21 +39,21 @@ import java.util.function.LongPredicate;
 import java.util.function.Supplier;
 
 /**
- * Coordinates request scheduling for FlexLB disaggregated inference.
+ * Canonical lifecycle and ownership registry for FlexLB requests.
  *
  * <p>Responsibilities:
  * <ul>
- *   <li>Request admission and routing</li>
- *   <li>Inflight lifecycle management (requestSlots map, TTL cleanup)</li>
- *   <li>Priority decision-group coordination through {@link WorkerBatcher}</li>
- *   <li>Delivery-independent lifecycle and resource ownership</li>
- *   <li>Batch enqueue or caller-owned route-decision delivery</li>
- *   <li>Exact reservation release on failure or completion</li>
+ *   <li>One canonical {@link RequestSlot} per request generation</li>
+ *   <li>Admission permits, absolute deadlines, and terminal settlement</li>
+ *   <li>Delivery claims and exact reservation/fence ownership</li>
+ *   <li>Batch enqueue and route-decision acknowledgement handling</li>
+ *   <li>Preemption, cancellation, and shutdown reduction</li>
  * </ul>
  *
- * <p>Mode-specific admission and transport ownership live in a concrete
- * delivery strategy. This class exposes only exact RequestSlot capabilities;
- * it never owns dispatcher permits, batch ids, or route handoff resources.
+ * <p>Queue ordering and route selection belong to
+ * {@link GlobalQueueCoordinator}; transport batching belongs to a concrete
+ * delivery strategy. This class exposes only exact {@link RequestSlot}
+ * capabilities and never performs endpoint selection or queue traversal.
  */
 @Component
 public class RequestRegistry {
@@ -101,7 +102,19 @@ public class RequestRegistry {
                 reporter);
         this.engineCancelChannel = Objects.requireNonNull(
                 engineCancelChannel, "engineCancelChannel");
-        this.completionPublisher = new RequestCompletionPublisher(this);
+        this.completionPublisher = new RequestCompletionPublisher(
+                this, completionPublisherWorkers(configService));
+    }
+
+    private static int completionPublisherWorkers(ConfigService configService) {
+        try {
+            FlexlbConfig config = configService.loadBalanceConfig();
+            return config == null || config.getInternalRuntime() == null
+                    ? 0 : config.getInternalRuntime()
+                            .getBatchDispatchCompletionThreads();
+        } catch (Throwable ignored) {
+            return 0;
+        }
     }
 
     /** Reserve one global request slot without a check-then-act window. */
@@ -2236,6 +2249,38 @@ public class RequestRegistry {
                         : owner -> owner.complete(detail);
         TerminalAction action = claimExternalLocalTerminal(slot, transition);
         return action == null ? null : finishTerminal(action);
+    }
+
+    /**
+     * Finish a response which was decided by the QUEUE coordinator without
+     * running the public future's continuations on that coordinator thread.
+     *
+     * <p>The lifecycle transition and local resource cleanup are still
+     * linearized synchronously at the decision point.  Only the externally
+     * visible future publication is handed to the completion publisher.  This
+     * keeps the decision thread responsible for ownership, but never for
+     * protobuf encoding, gRPC completion, or arbitrary caller continuations.</p>
+     */
+    boolean publishQueueDecisionResponseAsync(
+            long requestId,
+            CompletableFuture<Response> future,
+            Response response) {
+        RequestSlot slot = requestSlots.get(requestId);
+        if (slot == null || !slot.ownsFuture(future)) {
+            return false;
+        }
+        RequestSlot.PublicationPermit permit = publishExternalResponse(
+                slot, response);
+        if (permit == null) {
+            return false;
+        }
+        try {
+            completionPublisher.submitTerminalResponse(permit, response);
+            return true;
+        } catch (RuntimeException | Error publicationFailure) {
+            permit.abortClaimedPublication();
+            throw publicationFailure;
+        }
     }
 
     RequestSlot.PublicationPermit publishExternalFailure(

@@ -11,6 +11,7 @@ import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.QueueSnapshot.AdmissionBlock;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.config.DecisionPolicyConfig;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.util.Logger;
@@ -79,6 +80,13 @@ public final class WorkerBatcher {
         RUNNING,
         STOPPING,
         STOPPED
+    }
+
+    /** Result of one queue-lock-scoped ACTIVE publication transaction. */
+    private record EnqueueAttempt(
+            boolean accepted,
+            PrefillState.RouteReservation rollback,
+            Throwable failure) {
     }
 
     /** Exact predicate captured by one scheduling cycle. */
@@ -172,6 +180,8 @@ public final class WorkerBatcher {
                 }
             };
     private static final String SINGLE_DECISION_REASON = "single_request";
+    /** Allocation hint only; the configured queue capacity remains authoritative. */
+    private static final int INITIAL_QUEUE_CAPACITY = 16;
 
     private final String key;
     private final PrefillEndpoint prefillEndpoint;
@@ -184,7 +194,6 @@ public final class WorkerBatcher {
     private final PriorityBlockingQueue<ScheduledRequest> queue;
     private final Comparator<ScheduledRequest> queueOrder;
     private final Comparator<GroupPlanner.Item> projectionOrder;
-    private final long maximumPendingRequests;
     /**
      * Monotonic queue mutation generation, bumped on enqueue, removal,
      * delivery and drain. It is exposed in diagnostic snapshots.
@@ -192,6 +201,13 @@ public final class WorkerBatcher {
     private final AtomicLong queueVersion = new AtomicLong();
     /** Worker-status and predictor generation used by optimistic decisions. */
     private final AtomicLong schedulingInputVersion = new AtomicLong();
+    /**
+     * Immutable projection inputs reused while this endpoint's queue and
+     * scheduling inputs are unchanged. Route decisions still evaluate every
+     * live endpoint, but do not rebuild identical queue snapshots for each
+     * request in the global planner.
+     */
+    private volatile ProjectionCache projectionCache;
     /**
      * Guards queue mutations and atomic victim replacement.
      *
@@ -248,14 +264,12 @@ public final class WorkerBatcher {
                 endpointEvents, "endpointEvents");
         this.deliveryStrategy = Objects.requireNonNull(
                 deliveryStrategy, "deliveryStrategy");
-        this.maximumPendingRequests = config.getRouter().getRoles()
-                .getPrefill().getAvailability().getMaxPendingRequests();
         this.queueOrder = priorityOrdering
                 ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
         this.projectionOrder =
                 priorityOrdering
                         ? PRIORITY_PROJECTION_ORDER : FIFO_PROJECTION_ORDER;
-        this.queue = new PriorityBlockingQueue<>(11, queueOrder);
+        this.queue = new PriorityBlockingQueue<>(INITIAL_QUEUE_CAPACITY, queueOrder);
         this.prefillState = new PrefillState(
                 queueLock, queue, capacityAvailableSignal);
         this.normalStopFailure = new CancellationException(
@@ -272,7 +286,7 @@ public final class WorkerBatcher {
     public synchronized void start() {
         if (runtimeState != RuntimeState.NEW) {
             throw new IllegalStateException(
-                    "Prefill generation runtime cannot start from "
+                    "Worker batcher cannot start from "
                             + runtimeState);
         }
         runtimeState = RuntimeState.STARTING;
@@ -305,42 +319,89 @@ public final class WorkerBatcher {
         if (runtimeState != RuntimeState.RUNNING || stopped) {
             return false;
         }
-        queueLock.lock();
-        try {
-            if (maximumPendingRequests > 0L
-                    && prefillState.pendingRequestCount()
-                            >= maximumPendingRequests) {
-                return false;
-            }
-            return enqueueUnderLock(item, maxQueueCapacity());
-        } finally {
-            queueLock.unlock();
-        }
+        return enqueue(item, maxQueueCapacity());
     }
 
     private boolean enqueue(ScheduledRequest item, int maximumQueueSize) {
+        EnqueueAttempt attempt;
         queueLock.lock();
         try {
-            return enqueueUnderLock(item, maximumQueueSize);
+            attempt = enqueueUnderLock(item, maximumQueueSize);
         } finally {
             queueLock.unlock();
         }
+        Throwable failure = attempt.failure();
+        if (attempt.rollback() != null) {
+            try {
+                attempt.rollback().close();
+            } catch (Throwable rollbackFailure) {
+                failure = appendFailure(failure, rollbackFailure);
+            }
+        }
+        if (failure != null) {
+            throw propagateCommitFailure(failure);
+        }
+        return attempt.accepted();
     }
 
     /** Caller holds {@link #queueLock}. */
-    private boolean enqueueUnderLock(
-            ScheduledRequest item, int maximumQueueSize) {
+    private EnqueueAttempt enqueueUnderLock(
+            ScheduledRequest item,
+            int maximumQueueSize) {
         if (stopped) {
-            return false;
+            return new EnqueueAttempt(false, null, null);
         }
         if (maximumQueueSize > 0 && queue.size() >= maximumQueueSize) {
-            return false;
+            return new EnqueueAttempt(false, null, null);
         }
         if (!publishActiveIndexUnderLock(item)) {
-            return false;
+            return new EnqueueAttempt(false, null, null);
+        }
+        if (!item.requiresRouteReservation()) {
+            stateChanged.signal();
+            return new EnqueueAttempt(true, null, null);
+        }
+
+        PrefillState.ReservationResult<PrefillState.RouteReservation> result;
+        try {
+            // queueLock is reentrant and is also PrefillState's ownership lock,
+            // so ACTIVE publication and exact request-credit acquisition are
+            // one endpoint-local transaction.
+            result = prefillEndpoint.reservePublishedRouteCredit(
+                    item,
+                    0L,
+                    item.maxInflightDeliveriesPerPrefillWorker());
+        } catch (Throwable failure) {
+            rollbackFreshActiveUnderLock(item);
+            return new EnqueueAttempt(false, null, failure);
+        }
+        if (result.status() != PrefillState.CapacityStatus.ACQUIRED) {
+            rollbackFreshActiveUnderLock(item);
+            return new EnqueueAttempt(false, null, null);
+        }
+
+        PrefillState.RouteReservation reservation = result.reservation();
+        if (!item.bindPublishedRouteReservation(reservation)) {
+            rollbackFreshActiveUnderLock(item);
+            return new EnqueueAttempt(
+                    false,
+                    reservation,
+                    new IllegalStateException(
+                            "ACTIVE request already owns a route reservation: request_id="
+                                    + item.requestId()));
         }
         stateChanged.signal();
-        return true;
+        return new EnqueueAttempt(true, null, null);
+    }
+
+    /** Undo an ACTIVE publication which never escaped queueLock. */
+    private void rollbackFreshActiveUnderLock(ScheduledRequest item) {
+        if (!prefillState.terminalizeActiveUnderLock(item)) {
+            throw new IllegalStateException(
+                    "fresh ACTIVE publication could not roll back: request_id="
+                            + item.requestId());
+        }
+        queueVersion.incrementAndGet();
     }
 
     public int queueSize() {
@@ -528,6 +589,12 @@ public final class WorkerBatcher {
                     break;
                 }
                 try {
+                    releaseUnconsumedRouteReservation(item);
+                } catch (Throwable reservationFailure) {
+                    cleanupFailure = appendCleanupFailure(
+                            cleanupFailure, reservationFailure);
+                }
+                try {
                     endpointEvents.onQueueOfferFailure(
                             item, terminalFailure);
                 } catch (Throwable callbackFailure) {
@@ -577,14 +644,15 @@ public final class WorkerBatcher {
      * entry is acknowledged or carried into generation retirement.
      */
     private ScheduledRequest detachNextStoppedItem() {
+        ScheduledRequest item;
         queueLock.lock();
         try {
-            ScheduledRequest item = detachNextStopTerminalUnderLock();
+            item = detachNextStopTerminalUnderLock();
             stateChanged.signalAll();
-            return item;
         } finally {
             queueLock.unlock();
         }
+        return item;
     }
 
     /** Acknowledge only the retained owner whose terminal callback returned. */
@@ -621,7 +689,7 @@ public final class WorkerBatcher {
         }
     }
 
-    // ==================== priority scheduling queue operations ====================
+    // ==================== endpoint queue operations ====================
 
     public boolean removeQueued(
             ScheduledRequest exactItem,
@@ -641,6 +709,7 @@ public final class WorkerBatcher {
             queueLock.unlock();
         }
         if (removed) {
+            releaseUnconsumedRouteReservation(item);
             prefillEndpoint.signalPlacementCapacityChanged();
             try {
                 Logger.debug(
@@ -664,6 +733,10 @@ public final class WorkerBatcher {
     public QueueReplacementStatus replaceQueued(
             List<ScheduledRequest> exactVictims,
             ScheduledRequest incoming) {
+        requireExactEndpoint(incoming, "replacement item");
+        if (incoming.requiresRouteReservation()) {
+            return replaceQueuedWithRouteReservation(exactVictims, incoming);
+        }
         queueLock.lock();
         try {
             if (runtimeState != RuntimeState.RUNNING || stopped) {
@@ -694,6 +767,141 @@ public final class WorkerBatcher {
         }
     }
 
+    /** Atomic PRIORITY replacement with one net publish-time route credit. */
+    private QueueReplacementStatus replaceQueuedWithRouteReservation(
+            List<ScheduledRequest> exactVictims,
+            ScheduledRequest incoming) {
+        List<PrefillState.RouteReservation> victimReservations =
+                new ArrayList<>(exactVictims.size());
+        PrefillState.RouteReservation rollbackIncoming = null;
+        boolean routeCapacityReleased = false;
+        QueueReplacementStatus status = QueueReplacementStatus.CONFLICT;
+        Throwable failure = null;
+        queueLock.lock();
+        try {
+                QueueReplacementStatus precondition =
+                        replacementPreconditionUnderLock(exactVictims);
+                if (precondition != null) {
+                    status = precondition;
+                } else if (!takeVictimRouteReservations(
+                        exactVictims, victimReservations)) {
+                    restoreVictimRouteReservations(
+                            exactVictims, victimReservations);
+                    status = QueueReplacementStatus.CONFLICT;
+                } else if (!prefillState
+                        .routeCapacityAvailableAfterReleasingUnderLock(
+                                victimReservations,
+                                incoming.maxInflightDeliveriesPerPrefillWorker())) {
+                    restoreVictimRouteReservations(
+                            exactVictims, victimReservations);
+                    status = QueueReplacementStatus.DECLINED;
+                } else if (!prefillState.replaceActiveExact(
+                        exactVictims, incoming)) {
+                    restoreVictimRouteReservations(
+                            exactVictims, victimReservations);
+                    status = QueueReplacementStatus.CONFLICT;
+                } else {
+                    for (PrefillState.RouteReservation reservation
+                            : victimReservations) {
+                        prefillState.releaseOpenRouteReservationUnderLock(
+                                reservation);
+                    }
+                    routeCapacityReleased = !victimReservations.isEmpty();
+                    PrefillState.ReservationResult<
+                            PrefillState.RouteReservation> acquisition =
+                            prefillEndpoint.reservePublishedRouteCredit(
+                                    incoming,
+                                    0L,
+                                    incoming.maxInflightDeliveriesPerPrefillWorker());
+                    if (acquisition.status()
+                            != PrefillState.CapacityStatus.ACQUIRED) {
+                        throw new IllegalStateException(
+                                "replacement lost its reserved route credit: request_id="
+                                        + incoming.requestId());
+                    }
+                    rollbackIncoming = acquisition.reservation();
+                    if (!incoming.bindPublishedRouteReservation(
+                            rollbackIncoming)) {
+                        prefillState.terminalizeActiveUnderLock(incoming);
+                        throw new IllegalStateException(
+                                "replacement could not bind its route credit: request_id="
+                                        + incoming.requestId());
+                    }
+                    rollbackIncoming = null;
+                    queueVersion.incrementAndGet();
+                    stateChanged.signal();
+                    status = QueueReplacementStatus.SUCCESS;
+                }
+        } catch (Throwable replacementFailure) {
+            failure = replacementFailure;
+        } finally {
+            queueLock.unlock();
+        }
+        if (rollbackIncoming != null) {
+            try {
+                rollbackIncoming.close();
+            } catch (Throwable cleanupFailure) {
+                failure = appendFailure(failure, cleanupFailure);
+            }
+        }
+        if (routeCapacityReleased) {
+            prefillEndpoint.signalPlacementCapacityChanged();
+        }
+        if (failure != null) {
+            throw propagateCommitFailure(failure);
+        }
+        return status;
+    }
+
+    /** Null means the exact replacement may proceed. Caller holds queueLock. */
+    private QueueReplacementStatus replacementPreconditionUnderLock(
+            List<ScheduledRequest> exactVictims) {
+        if (runtimeState != RuntimeState.RUNNING || stopped) {
+            return QueueReplacementStatus.DECLINED;
+        }
+        int maximumQueueSize = maxQueueCapacity();
+        int victimsRequiredNow = maximumQueueSize <= 0
+                ? 0 : Math.max(0, queue.size() + 1 - maximumQueueSize);
+        if (victimsRequiredNow == 0
+                || exactVictims.size() != victimsRequiredNow) {
+            return QueueReplacementStatus.DECLINED;
+        }
+        int postSwapSize = queue.size() - exactVictims.size() + 1;
+        if (postSwapSize < 0 || maximumQueueSize > 0
+                && postSwapSize > maximumQueueSize) {
+            return QueueReplacementStatus.DECLINED;
+        }
+        return null;
+    }
+
+    private static boolean takeVictimRouteReservations(
+            List<ScheduledRequest> victims,
+            List<PrefillState.RouteReservation> reservations) {
+        for (ScheduledRequest victim : victims) {
+            PrefillState.RouteReservation reservation =
+                    victim.takePublishedRouteReservation();
+            if (reservation == null) {
+                return false;
+            }
+            reservations.add(reservation);
+        }
+        return true;
+    }
+
+    private static void restoreVictimRouteReservations(
+            List<ScheduledRequest> victims,
+            List<PrefillState.RouteReservation> reservations) {
+        for (int index = 0; index < reservations.size(); index++) {
+            if (!victims.get(index).restorePublishedRouteReservation(
+                    reservations.get(index))) {
+                throw new IllegalStateException(
+                        "victim route credit changed during replacement: request_id="
+                                + victims.get(index).requestId());
+            }
+        }
+        reservations.clear();
+    }
+
     public QueueSnapshot captureQueueSnapshot() {
         queueLock.lock();
         try {
@@ -716,7 +924,23 @@ public final class WorkerBatcher {
 
     private int maxDecisionRequests() {
         return fixedWindowDecision == null
-                ? 1 : Math.max(1, fixedWindowDecision.getMaxRequests());
+                ? 1 : fixedWindowDecision.resolveMaxRequests();
+    }
+
+    /**
+     * Endpoint-local delivery credits exposed to the global planning pump.
+     * Decision grouping remains local and never limits planner concurrency.
+     */
+    public int availableDeliveryCredits() {
+        DispatcherConfig dispatcher = config.getDispatcher();
+        if (dispatcher.getType() == DispatcherConfig.Type.NON_BATCH) {
+            Integer maximum = dispatcher
+                    .getMaxInflightRequestsPerPrefillWorker();
+            return prefillState.availableRouteDecisionSlots(
+                    maximum == null ? 0 : maximum);
+        }
+        return prefillState.availableBatchDecisionSlots(
+                maxDecisionRequests());
     }
 
     private long collectionWindowMs() {
@@ -832,10 +1056,41 @@ public final class WorkerBatcher {
         }
     }
 
+    private record ProjectionCache(
+            long queueVersion,
+            long schedulingInputVersion,
+            long ownershipVersion,
+            RouteProjection.Inputs inputs) {
+    }
+
     private RouteProjection.Inputs captureRouteProjectionInputs(
             Supplier<AdmissionBlock> admissionBlockSnapshot) {
+        long observedQueueVersion = queueVersion.get();
+        long observedInputVersion = schedulingInputVersion.get();
+        long observedOwnershipVersion = prefillState.mutationVersion();
+        ProjectionCache observed = projectionCache;
+        if (observed != null
+                && observed.queueVersion() == observedQueueVersion
+                && observed.schedulingInputVersion() == observedInputVersion
+                && observed.ownershipVersion() == observedOwnershipVersion) {
+            return observed.inputs();
+        }
         queueLock.lock();
         try {
+            long currentQueueVersion = queueVersion.get();
+            long currentSchedulingInputVersion =
+                    schedulingInputVersion.get();
+            long currentOwnershipVersion =
+                    prefillState.mutationVersionUnderLock();
+            ProjectionCache cached = projectionCache;
+            if (cached != null
+                    && cached.queueVersion() == currentQueueVersion
+                    && cached.schedulingInputVersion()
+                            == currentSchedulingInputVersion
+                    && cached.ownershipVersion()
+                            == currentOwnershipVersion) {
+                return cached.inputs();
+            }
             BatchCapacitySnapshot capacity = batchCapacitySnapshot();
             PrefillState.Snapshot ownership =
                     prefillState.snapshotUnderLock(queueOrder);
@@ -856,10 +1111,16 @@ public final class WorkerBatcher {
                             items,
                             items.isEmpty()
                                     ? null : admissionBlockSnapshot.get());
-            return new RouteProjection.Inputs(
+            RouteProjection.Inputs captured = new RouteProjection.Inputs(
                     queueSnapshot,
                     ownership.committedWork(),
                     ownership.pendingRequestCount());
+            projectionCache = new ProjectionCache(
+                    currentQueueVersion,
+                    currentSchedulingInputVersion,
+                    currentOwnershipVersion,
+                    captured);
+            return captured;
         } finally {
             queueLock.unlock();
         }
@@ -1044,6 +1305,14 @@ public final class WorkerBatcher {
 
         if (postCommitFailure != null) {
             Throwable failure = postCommitFailure;
+            if (removedTerminalBoundary) {
+                try {
+                    releaseUnconsumedRouteReservation(
+                            transaction.blockedItem());
+                } catch (Throwable cleanupFailure) {
+                    failure = appendFailure(failure, cleanupFailure);
+                }
+            }
             try {
                 notifyTerminalAdmissionFailure(
                         removedTerminalBoundary,
@@ -1058,6 +1327,9 @@ public final class WorkerBatcher {
                 failure = appendFailure(failure, ownerFailure);
             }
             throw propagateCommitFailure(failure);
+        }
+        if (removedTerminalBoundary) {
+            releaseUnconsumedRouteReservation(transaction.blockedItem());
         }
         notifyTerminalAdmissionFailure(
                 removedTerminalBoundary,
@@ -1092,6 +1364,9 @@ public final class WorkerBatcher {
             }
         } finally {
             queueLock.unlock();
+        }
+        if (removedTerminalBoundary) {
+            releaseUnconsumedRouteReservation(blockedItem);
         }
         notifyTerminalAdmissionFailure(
                 removedTerminalBoundary, blockedItem, blockedResult);
@@ -1170,6 +1445,7 @@ public final class WorkerBatcher {
         if (!removed) {
             return;
         }
+        releaseUnconsumedRouteReservation(head);
         try {
             endpointEvents.onQueuedItemExpired(head);
         } catch (Throwable callbackFailure) {
@@ -1190,6 +1466,19 @@ public final class WorkerBatcher {
             first.addSuppressed(next);
         }
         return first;
+    }
+
+    /** Release the publish-time credit only while it is still item-owned. */
+    private static void releaseUnconsumedRouteReservation(
+            ScheduledRequest item) {
+        if (item == null) {
+            return;
+        }
+        PrefillState.RouteReservation reservation =
+                item.takePublishedRouteReservation();
+        if (reservation != null) {
+            reservation.close();
+        }
     }
 
     private static RuntimeException propagateCommitFailure(

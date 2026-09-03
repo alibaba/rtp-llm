@@ -203,14 +203,11 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         // the default fixed_window algorithm reads fixedWaitMs (not windowMs):
         // hold dispatch by default so scenarios can assert stable queue state
         config.queueScheduler().getCapacity().setMaxWaitingRequestsPerPrefillWorker(1024);
-        config.getRouter().getRoles().getPrefill().getAvailability()
-                .setMaxPendingRequests(1024);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         routeFn = this::defaultRoute;
         when(router.routeForQueue(any(BalanceContext.class)))
                 .thenAnswer(inv -> routeResult(inv.getArgument(0)));
-
         // ---- E2E bridge: mocked gRPC transport → real in-process mock engine ----
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(),
                 any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))

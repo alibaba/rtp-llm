@@ -39,6 +39,22 @@ public class EndpointRegistry {
     }
 
     /**
+     * One non-owning Prefill generation exposed to routing.
+     *
+     * <p>The endpoint identity is advisory: a caller must capture the address
+     * and verify that the pinned endpoint is still this exact instance before
+     * transferring generation ownership to a request.</p>
+     */
+    public record PrefillRoutingEntry(
+            String address,
+            PrefillEndpoint endpoint) {
+        public PrefillRoutingEntry {
+            java.util.Objects.requireNonNull(address, "address");
+            java.util.Objects.requireNonNull(endpoint, "endpoint");
+        }
+    }
+
+    /**
      * One exact endpoint generation moved out of the routing registry.
      *
      * <p>The capability is the sole completion token for the registry's
@@ -95,15 +111,10 @@ public class EndpointRegistry {
 
     private final EnumMap<RoleType, ConcurrentHashMap<String, WorkerEndpoint>>
             endpointsByRole = endpointMaps();
-    /**
-     * Immutable, generation-neutral Prefill address directory.
-     *
-     * <p>Structural Prefill writers prebuild the next directory while holding
-     * {@link #lifecycleGate}, publish the exact map mutation, and only then
-     * release the immutable address view with one volatile write. Readers must
-     * still exact-capture an endpoint generation by address.</p>
-     */
-    private volatile List<String> prefillAddressDirectory = List.of();
+    /** Advisory Prefill generations, atomically replaced after each map write. */
+    private volatile List<PrefillRoutingEntry> prefillDirectory = List.of();
+    /** PDFusion uses the same Prefill planning path but a distinct role map. */
+    private volatile List<PrefillRoutingEntry> pdFusionDirectory = List.of();
     /**
      * Advisory Decode routing directory. Writers publish a complete immutable
      * replacement after changing the endpoint map. A racing reader may finish
@@ -218,12 +229,38 @@ public class EndpointRegistry {
      * remains linearized by the address key's remapping critical section.</p>
      */
     public List<String> endpointAddressSnapshot(RoleType roleType) {
-        if (roleType == RoleType.PREFILL) {
-            return prefillAddressDirectory;
+        if (isPrefillRole(roleType)) {
+            List<PrefillRoutingEntry> directory = prefillRoutingSnapshot(roleType);
+            return new AbstractList<>() {
+                @Override
+                public String get(int index) {
+                    return directory.get(index).address();
+                }
+
+                @Override
+                public int size() {
+                    return directory.size();
+                }
+            };
         }
         Map<String, WorkerEndpoint> endpoints = endpoints(roleType);
         return endpoints == null
                 ? List.of() : List.copyOf(endpoints.keySet());
+    }
+
+    /**
+     * Return the immutable Prefill routing directory observed at one instant.
+     *
+     * <p>This removes per-request registry lookups while deliberately avoiding
+     * fleet-wide generation pins. A selected entry remains advisory until its
+     * address is captured and the endpoint identity is revalidated.</p>
+     */
+    public List<PrefillRoutingEntry> prefillRoutingSnapshot(RoleType roleType) {
+        return switch (roleType) {
+            case PREFILL -> prefillDirectory;
+            case PDFUSION -> pdFusionDirectory;
+            default -> List.of();
+        };
     }
 
     /**
@@ -447,7 +484,7 @@ public class EndpointRegistry {
             ConcurrentHashMap<String, WorkerEndpoint> endpoints,
             String address,
             BiFunction<String, WorkerEndpoint, WorkerEndpoint> mutation) {
-        boolean updatesPrefillDirectory = role == RoleType.PREFILL;
+        boolean updatesPrefillDirectory = isPrefillRole(role);
         boolean updatesDecodeDirectory = role == RoleType.DECODE;
         if (!updatesPrefillDirectory && !updatesDecodeDirectory) {
             return endpoints.compute(address, mutation);
@@ -458,13 +495,12 @@ public class EndpointRegistry {
             if (next == exactCurrent) {
                 return exactCurrent;
             }
-            List<String> nextPrefillDirectory = updatesPrefillDirectory
+            List<PrefillRoutingEntry> nextPrefillDirectory = updatesPrefillDirectory
                     ? registryPhase == RegistryPhase.OPEN
                             ? prefillDirectoryAfterMutationLocked(
-                                    prefillAddressDirectory,
+                                    prefillDirectory(role),
                                     address,
-                                    exactCurrent,
-                                    next)
+                                    (PrefillEndpoint) next)
                             : List.of()
                     : null;
             List<Map.Entry<String, DecodeEndpoint>> nextDecodeDirectory =
@@ -484,7 +520,7 @@ public class EndpointRegistry {
                 return next;
             });
             if (updatesPrefillDirectory) {
-                prefillAddressDirectory = nextPrefillDirectory;
+                publishPrefillDirectory(role, nextPrefillDirectory);
             } else {
                 this.decodeDirectory = nextDecodeDirectory;
             }
@@ -492,26 +528,50 @@ public class EndpointRegistry {
         }
     }
 
-    /** Build the next immutable Prefill address view before its CHM write. */
-    private List<String> prefillDirectoryAfterMutationLocked(
-            List<String> previous,
+    /** Build the exact post-mutation Prefill directory before its CHM write. */
+    private List<PrefillRoutingEntry> prefillDirectoryAfterMutationLocked(
+            List<PrefillRoutingEntry> previous,
             String address,
-            WorkerEndpoint exactCurrent,
-            WorkerEndpoint next) {
-        boolean wasPresent = exactCurrent != null;
-        boolean willBePresent = next != null;
-        if (wasPresent == willBePresent) {
-            return previous;
+            PrefillEndpoint next) {
+        List<PrefillRoutingEntry> updated = new ArrayList<>(
+                previous.size() + (next == null ? 0 : 1));
+        boolean replaced = false;
+        for (PrefillRoutingEntry entry : previous) {
+            if (!entry.address().equals(address)) {
+                updated.add(entry);
+                continue;
+            }
+            replaced = true;
+            if (next != null) {
+                updated.add(new PrefillRoutingEntry(address, next));
+            }
         }
-        List<String> updated = new ArrayList<>(
-                previous.size() + (willBePresent ? 1 : 0));
-        updated.addAll(previous);
-        if (willBePresent) {
-            updated.add(address);
-        } else {
-            updated.remove(address);
+        if (!replaced && next != null) {
+            updated.add(new PrefillRoutingEntry(address, next));
         }
         return List.copyOf(updated);
+    }
+
+    private static boolean isPrefillRole(RoleType role) {
+        return role == RoleType.PREFILL || role == RoleType.PDFUSION;
+    }
+
+    private List<PrefillRoutingEntry> prefillDirectory(RoleType role) {
+        return role == RoleType.PREFILL
+                ? prefillDirectory : pdFusionDirectory;
+    }
+
+    private void publishPrefillDirectory(
+            RoleType role,
+            List<PrefillRoutingEntry> directory) {
+        if (role == RoleType.PREFILL) {
+            prefillDirectory = directory;
+        } else if (role == RoleType.PDFUSION) {
+            pdFusionDirectory = directory;
+        } else {
+            throw new IllegalArgumentException(
+                    "Not a Prefill routing role: " + role);
+        }
     }
 
     /** Build the exact post-mutation directory before the CHM write. */
@@ -733,7 +793,8 @@ public class EndpointRegistry {
         synchronized (lifecycleGate) {
             if (registryPhase == RegistryPhase.OPEN) {
                 registryPhase = RegistryPhase.CLOSING;
-                prefillAddressDirectory = List.of();
+                prefillDirectory = List.of();
+                pdFusionDirectory = List.of();
                 decodeDirectory = List.of();
                 closeOwner = true;
             }
@@ -910,6 +971,29 @@ public class EndpointRegistry {
     public int getEndpointCount(RoleType roleType) {
         Map<String, WorkerEndpoint> endpoints = endpoints(roleType);
         return endpoints == null ? 0 : endpoints.size();
+    }
+
+    /**
+     * Sum the currently available delivery credits across one endpoint role.
+     * Endpoint-local admission remains authoritative; this aggregate is only
+     * an advisory budget for deciding how many independent requests to release
+     * from the model-wide queue in one pass.
+     */
+    public long availablePrefillDeliveryCredits(RoleType role) {
+        if (role != RoleType.PREFILL && role != RoleType.PDFUSION) {
+            return 0L;
+        }
+        long total = 0L;
+        for (WorkerEndpoint worker : endpoints(role).values()) {
+            if (worker instanceof PrefillEndpoint prefill) {
+                long available = prefill.availableDeliveryCredits();
+                if (Long.MAX_VALUE - total < available) {
+                    return Long.MAX_VALUE;
+                }
+                total += available;
+            }
+        }
+        return total;
     }
 
     /**

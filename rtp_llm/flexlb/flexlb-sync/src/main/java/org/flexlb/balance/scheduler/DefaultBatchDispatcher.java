@@ -68,6 +68,7 @@ public class DefaultBatchDispatcher {
     private final EngineGrpcClient grpcClient;
     private final ConfigService configService;
     private final ThreadPoolExecutor dispatchExecutor;
+    private final ThreadPoolExecutor completionExecutor;
     private final int admissionCapacity;
     private final Semaphore admissionPermits;
     // Admission ends at RPC handoff; this separate count keeps the callback
@@ -131,6 +132,15 @@ public class DefaultBatchDispatcher {
                 60L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(),
                 new NamedThreadFactory("flexlb-dispatch-executor"),
+                new ThreadPoolExecutor.AbortPolicy());
+        int completionThreads = Math.max(1,
+                configService.loadBalanceConfig().getInternalRuntime()
+                        .getBatchDispatchCompletionThreads());
+        this.completionExecutor = new ThreadPoolExecutor(
+                completionThreads, completionThreads,
+                60L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(),
+                new NamedThreadFactory("flexlb-dispatch-completion"),
                 new ThreadPoolExecutor.AbortPolicy());
         registerMetrics();
     }
@@ -237,6 +247,7 @@ public class DefaultBatchDispatcher {
                 == admissionCapacity
                 && pendingCompletions.get() == 0) {
             dispatchExecutor.shutdown();
+            completionExecutor.shutdown();
         }
     }
 
@@ -454,7 +465,7 @@ public class DefaultBatchDispatcher {
                             markUncertain(items, batchId, completionFailure, observer);
                         }
                         return null;
-                    }, dispatchExecutor);
+                    }, completionExecutor);
             completionObserver.whenComplete((ignored, observerFailure) -> {
                 try {
                     if (observerFailure != null) {

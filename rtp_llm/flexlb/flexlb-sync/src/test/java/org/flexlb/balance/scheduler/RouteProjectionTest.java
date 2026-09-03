@@ -48,7 +48,7 @@ class RouteProjectionTest {
                 BATCH);
 
         assertModeled(result, 120L, 120L);
-        assertEquals("SERIAL_FROZEN_QUEUE", result.detail());
+        assertEquals("EMPTY_ACTIVE_QUEUE_SINGLETON", result.detail());
     }
 
     @Test

@@ -791,7 +791,24 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * that owner must consume an authoritative terminal instead.</p>
      */
     public void releaseReservationExact(ReservationHandle reservation) {
-        if (releaseLocalReservationExact(reservation)) {
+        releaseReservationExact(reservation, true);
+    }
+
+    /**
+     * Roll back a reservation created by an admission attempt which never
+     * became visible to the delivery queue. The state returns to its previous
+     * capacity; publishing a placement edge here would make the same blocked
+     * head immediately retry itself without any external progress.
+     */
+    public void releaseReservationExactSilently(ReservationHandle reservation) {
+        releaseReservationExact(reservation, false);
+    }
+
+    private void releaseReservationExact(
+            ReservationHandle reservation,
+            boolean publishPlacementEdge) {
+        if (releaseLocalReservationExact(reservation)
+                && publishPlacementEdge) {
             signalPlacementCapacityChanged();
         }
     }
@@ -2306,7 +2323,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         WorkerStatus.TopologySnapshot topology =
                 getStatus().topologySnapshot();
         placementAvailability.capacityChanged(
-                RoleType.DECODE, topology.group());
+                RoleType.DECODE, topology.group(), ipPort());
     }
 
     @Override

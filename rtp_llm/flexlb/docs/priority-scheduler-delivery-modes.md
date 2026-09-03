@@ -20,10 +20,9 @@ requires `NON_BATCH` and cannot configure a decision policy. Every
 ordering/decision/dispatcher combination is valid under `QUEUE`.
 
 `RequestScheduler` is the public QUEUE facade for both FIFO and PRIORITY.
-`RequestLifecycleCoordinator` owns the exact request lifecycle, while the
-ordering-specific admission and preemption ports stay behind that facade. The
-Java type names therefore match the configuration model; there is no separate
-"priority scheduler" service.
+`GlobalQueueCoordinator` owns ordered placement and commit, while
+`RequestRegistry` owns the exact request lifecycle. The Java type names therefore
+match the configuration model; there is no separate "priority scheduler" service.
 
 ## Class model
 
@@ -35,7 +34,8 @@ classDiagram
     class RequestScheduler {
         +submit(context) Future~Response~
     }
-    class RequestLifecycleCoordinator
+    class GlobalQueueCoordinator
+    class RequestRegistry
     class EvictionManager
     class WorkerBatcher {
         -processSingleRequest()
@@ -50,16 +50,17 @@ classDiagram
     RouteService --> DefaultRouter : DIRECT
     RouteService --> RequestScheduler : QUEUE
     DefaultRouter --> ConfiguredLoadBalanceSelector : exactly-one selector
-    RequestScheduler --> RequestLifecycleCoordinator : lifecycle
-    RequestScheduler --> DefaultRouter : ordinary placement
-    RequestScheduler --> EvictionManager : priority fallback
-    RequestLifecycleCoordinator --> WorkerBatcher : per-generation queue
-    WorkerBatcher --> WorkerBatcher : SINGLE / FIXED_WINDOW decision
+    RequestScheduler --> GlobalQueueCoordinator : ordered placement
+    GlobalQueueCoordinator --> RequestRegistry : lifecycle/admission
+    GlobalQueueCoordinator --> DefaultRouter : ordinary placement
+    GlobalQueueCoordinator --> EvictionManager : priority rescue
+    GlobalQueueCoordinator --> WorkerBatcher : committed endpoint work
+    WorkerBatcher --> WorkerBatcher : endpoint-local delivery grouping
     WorkerBatcher --> RouteDeliveryStrategy : NON_BATCH
     WorkerBatcher --> BatchDeliveryStrategy : BATCH
     BatchDeliveryStrategy --> DefaultBatchDispatcher : prepared EnqueueBatch
-    RequestLifecycleCoordinator --> PrefillEndpoint : exact accounting
-    RequestLifecycleCoordinator --> DecodeEndpoint : exact reservation/accounting
+    RequestRegistry --> PrefillEndpoint : exact accounting
+    RequestRegistry --> DecodeEndpoint : exact reservation/accounting
 ```
 
 `DIRECT` skips QUEUE admission and the per-generation queue runtime, but it uses the same
@@ -82,15 +83,10 @@ sequenceDiagram
         F->>E: GenerateStream(request)
     else scheduler.type = QUEUE
         R->>S: submit(context)
-        S->>S: admit, order, and place
+        S->>S: register, order, select P/D, and commit exact placement
         S->>W: enqueue selected Prefill work
-        alt scheduler.decision.type = SINGLE
-            W->>W: propose one request
-        else scheduler.decision.type = FIXED_WINDOW
-            W->>W: propose bounded ordered candidates
-        end
-        W->>W: reserve hard capacity in order
-        W-->>S: capacity-admitted prefix
+        W->>W: form endpoint-local delivery group
+        W->>W: reserve delivery capacity in order
         alt dispatcher.type = NON_BATCH
             S-->>F: route decision, enqueued_by_master=false
             F->>E: GenerateStream(request)
@@ -104,21 +100,27 @@ sequenceDiagram
     end
 ```
 
-The decision policy and dispatcher answer different questions. `SINGLE`
-proposes one request. `FIXED_WINDOW` grows an ordered homogeneous candidate
-group up to
-`scheduler.decision.maxRequests`, waits at most
-`scheduler.decision.maxCollectionWaitMs`, and optionally refuses to add another
+The decision policy and dispatcher answer different questions. The global queue
+owns ordering and one authoritative placement/commit per request. Its planning
+frontier is only a capacity-bounded execution pipeline: it does not collect a
+logical group and never waits to fill one. After placement, the selected
+Prefill endpoint is the sole decision-group owner. `SINGLE` forms a one-request
+group. `FIXED_WINDOW` collects up to
+`scheduler.decision.maxRequests` locally selected requests and waits at most
+`scheduler.decision.maxCollectionWaitMs`; it never reselects a machine. The
+decision optionally refuses to add another
 request when the resulting group's prediction would exceed the strict
 `scheduler.decision.maxPredictedExecutionMs` growth cap. A request is
 indivisible, so a singleton whose own prediction exceeds the cap is still a
 valid candidate. Reaching the prediction cap stops collection immediately
 instead of waiting for the collection window.
 
-Candidates are not a final decision. The worker reserves hard capacity from the
-front in order. Only the largest successfully reserved prefix becomes a
-committed delivery group; the unreserved suffix remains `ACTIVE` with its
-original ordering key. The delivery strategy then chooses who sends the group:
+For `BATCH`, every request independently selects its Prefill
+and Decode generations from the complete live candidate fleet before the
+ordered commit. The endpoint runtime then groups committed requests by their
+already-selected Prefill endpoint and performs the final exact queue/capacity
+check, so one planning frontier may produce several `EnqueueBatch` calls. The
+delivery strategy then chooses who sends those endpoint-local groups:
 the frontend calls `GenerateStream` for `NON_BATCH`, while the Master calls
 `EnqueueBatch` for `BATCH`.
 
@@ -144,22 +146,25 @@ FIFO orders by enqueue sequence. PRIORITY orders by normalized priority
 (1–100, higher first) and then by enqueue sequence. `defaultPriority` is used
 only when the caller did not supply a priority.
 
-Ordering is scoped to one Prefill generation runtime. Its ordered snapshot is the
-selection boundary for one decision. A queue insertion that linearizes after
-that snapshot belongs to the next decision and does not revoke the captured
-group. Removal or expiration of a member that would enter the admitted prefix,
-or replacement of the predictor generation, revokes that prefix before
-admission. After the reservation scan has fixed a valid prefix, changes limited
-to its unreserved suffix do not revoke that prefix. Delivery callbacks
-are serialized by the one worker thread; asynchronous Engine ACK/completion
-order is not a FIFO or priority guarantee.
+Ordering is global to one model's `GlobalQueueCoordinator`. Its ordered snapshot
+is the placement boundary for one decision. A queue insertion that linearizes
+after that snapshot belongs to the next decision and does not revoke the
+captured route. A generation or exact-capacity conflict closes the stale plan
+before publication and retries from the current queue head. Delivery callbacks
+are serialized by the endpoint worker thread; asynchronous Engine
+ACK/completion order is not a FIFO or priority guarantee.
 
-For example, suppose the captured order is `[A, B, C]` and exact capacity can be
-reserved for `A` and `B`, but not `C`. The final callback receives `[A, B]`; `C`
-never leaves `ACTIVE`. If `A` itself cannot reserve capacity, there is no
-decision and no callback: the worker waits for `A`'s exact resource event, so
-`B` and `C` do not bypass it. An admitted callback already owns its exact hard
-capacity and never returns a request to `ACTIVE`.
+For example, suppose the global order is `[A, B, C]`. The coordinator commits
+each independently selected route in that order. In `BATCH` mode a fixed window
+is only a decision boundary: `[A, B]` may become one endpoint-local batch or
+two batches if the requests choose different Prefill endpoints. The endpoint
+runtime can still split either group if an exact capacity or deadline check
+requires it. If `A` is rejected by the local capacity of endpoint `E1`, `B` may
+commit first when its independently selected route does not use `E1`; requests
+which use `E1` remain parked with `A` until an availability event. A selector
+miss without a concrete endpoint still blocks the frontier. Once a route is
+committed, delivery backpressure can delay the group but cannot trigger a
+second route selection.
 
 PRIORITY does not create a separate request TTL. QUEUE resolves one absolute
 scheduling expiration from the public configuration:
@@ -373,9 +378,10 @@ any of these valid modes. Role algorithms themselves are fixed.
 7. The absolute request expiration remains unchanged through queueing,
    preemption, delivery, and reconciliation.
 8. The decision policy produces candidates, not a capacity-free intermediate
-   state. Capacity admission reserves the largest ordered prefix. A head whose
-   hard capacity is unavailable remains `ACTIVE` with its original FIFO/priority
-   key; no callback is invoked and no suffix member bypasses it.
+   state. Capacity admission reserves the ordered frontier independently for
+   each exact endpoint. A request whose hard capacity is unavailable remains
+   queued with its original FIFO/priority key and parks on that endpoint; a
+   suffix member may bypass only when its route does not use the parked endpoint.
 9. A request enters the delivery callback only after all of its hard capacity
    is reserved. The typed callback payload transfers that exact reservation to
    endpoint lifecycle ownership without another capacity check. A transferred
@@ -415,12 +421,12 @@ any of these valid modes. Role algorithms themselves are fixed.
 | `DIRECT` | — | — | `NON_BATCH` | Immediate route response; frontend sends |
 | `QUEUE` | `FIFO` | `SINGLE` | `NON_BATCH` | FIFO singleton route response; frontend sends |
 | `QUEUE` | `FIFO` | `SINGLE` | `BATCH` | FIFO singleton `EnqueueBatch`; Master sends |
-| `QUEUE` | `FIFO` | `FIXED_WINDOW` | `NON_BATCH` | FIFO grouped decisions; frontend sends each request |
-| `QUEUE` | `FIFO` | `FIXED_WINDOW` | `BATCH` | FIFO grouped `EnqueueBatch`; Master sends |
+| `QUEUE` | `FIFO` | `FIXED_WINDOW` | `NON_BATCH` | FIFO-ordered independent route decisions; frontend sends each request |
+| `QUEUE` | `FIFO` | `FIXED_WINDOW` | `BATCH` | FIFO-ordered independent route decisions; each selected endpoint batches locally |
 | `QUEUE` | `PRIORITY` | `SINGLE` | `NON_BATCH` | Priority singleton route response; frontend sends |
 | `QUEUE` | `PRIORITY` | `SINGLE` | `BATCH` | Priority singleton `EnqueueBatch`; Master sends |
-| `QUEUE` | `PRIORITY` | `FIXED_WINDOW` | `NON_BATCH` | Priority grouped decisions; frontend sends each request |
-| `QUEUE` | `PRIORITY` | `FIXED_WINDOW` | `BATCH` | Priority grouped `EnqueueBatch`; Master sends |
+| `QUEUE` | `PRIORITY` | `FIXED_WINDOW` | `NON_BATCH` | Priority-ordered independent route decisions; frontend sends each request |
+| `QUEUE` | `PRIORITY` | `FIXED_WINDOW` | `BATCH` | Priority-ordered independent route decisions; each selected endpoint batches locally |
 
 `DIRECT + BATCH` and `DIRECT + decision` are rejected during strict
 configuration parsing/validation.
@@ -469,9 +475,10 @@ per second were rejected before entering Prefill, so success QPS fell to 89.7.
 
 ### Why the FIFO NON_BATCH tuning failed
 
-The deployed ordinary FIFO path selected a Prefill before putting the request
-into its worker queue. `router.roles.prefill.availability.maxPendingRequests`
-therefore acted as a routing-time hard gate:
+The deployed schema-v1 FIFO path selected a Prefill before putting the request
+into its worker queue. Its legacy Prefill pending bound therefore acted as a
+routing-time hard gate; schema v2 replaces that field with the explicit
+`scheduler.capacity.maxWaitingRequestsPerPrefillWorker` queue bound:
 
 1. Bounds `64` and `128` produced roughly the same `8402` rejection rate.
 2. Opening the Prefill bound and setting global outstanding capacity to `128`

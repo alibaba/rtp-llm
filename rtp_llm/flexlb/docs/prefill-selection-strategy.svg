@@ -1,0 +1,355 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1720" height="3020" viewBox="0 0 1720 3020" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif">
+<defs>
+  <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="#475569"/>
+  </marker>
+  <marker id="ahr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="#dc2626"/>
+  </marker>
+  <marker id="ahg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="#16a34a"/>
+  </marker>
+  <style>
+    .band{fill:#f8fafc;stroke:#cbd5e1;stroke-width:1.5}
+    .bt{font-size:19px;font-weight:700;fill:#0f172a}
+    .proc{fill:#e0f2fe;stroke:#0284c7;stroke-width:2}
+    .pin{fill:#ede9fe;stroke:#7c3aed;stroke-width:2}
+    .ok{fill:#dcfce7;stroke:#16a34a;stroke-width:2}
+    .bad{fill:#fee2e2;stroke:#dc2626;stroke-width:2}
+    .note{fill:#f1f5f9;stroke:#94a3b8;stroke-width:1.5}
+    .bug{fill:#fff1f2;stroke:#e11d48;stroke-width:2.5;stroke-dasharray:7 4}
+    .cfg{fill:#fffbeb;stroke:#d97706;stroke-width:2}
+    .h{font-size:14px;font-weight:700;fill:#0f172a}
+    .t{font-size:13px;fill:#1e293b}
+    .c{font-size:12px;font-family:ui-monospace,Menlo,Consolas,monospace;fill:#0f172a}
+    .cs{font-size:11.5px;font-family:ui-monospace,Menlo,Consolas,monospace;fill:#334155}
+    .bh{font-size:13px;font-weight:700;fill:#9f1239}
+    .bx{font-size:12px;fill:#9f1239}
+    .ah{font-size:13px;font-weight:700;fill:#14532d}
+    .rh{font-size:13px;font-weight:700;fill:#7f1d1d}
+    .lbl{font-size:12px;fill:#475569}
+    .lblr{font-size:12px;font-weight:700;fill:#b91c1c}
+    .lblg{font-size:12px;font-weight:700;fill:#15803d}
+    .a{stroke:#475569;stroke-width:2;fill:none;marker-end:url(#ah)}
+    .ar{stroke:#dc2626;stroke-width:2;fill:none;marker-end:url(#ahr)}
+    .ag{stroke:#16a34a;stroke-width:2;fill:none;marker-end:url(#ahg)}
+    .ad{stroke:#7c3aed;stroke-width:2;fill:none;marker-end:url(#ah);stroke-dasharray:6 4}
+  </style>
+</defs>
+
+<rect width="1720" height="3020" fill="#ffffff"/>
+<text x="50" y="42" font-size="25" font-weight="700" fill="#0f172a">Prefill 选点策略全流程</text>
+<text x="50" y="66" class="t" fill="#475569">CostBasedPrefillStrategy · 当前工作区版本（全量候选）</text>
+
+<!-- ================= BAND A : 入口 ================= -->
+<rect class="band" x="40" y="86" width="1640" height="152" rx="10"/>
+<text x="60" y="112" class="bt">① 入口 · 两种调用形态</text>
+
+<rect class="proc" x="120" y="124" width="640" height="98" rx="8"/>
+<text x="138" y="146" class="h">自由选点（默认）</text>
+<text x="138" y="167" class="c">selectForQueue(ctx, role, group)</text>
+<text x="138" y="186" class="t">preferredIpPort = null，可在全 fleet 内挑选</text>
+<text x="138" y="207" class="t">来源：SINGLE 模式，或 FIXED_WINDOW 窗口的第一个成员</text>
+
+<rect class="pin" x="800" y="124" width="600" height="98" rx="8"/>
+<text x="818" y="146" class="h" fill="#5b21b6">硬绑选点（BATCH 窗口后续成员）</text>
+<text x="818" y="167" class="c">selectForQueueOnEndpoint(ctx, role, group, ipPort)</text>
+<text x="818" y="186" class="t">候选被钉死为这一台</text>
+<text x="818" y="207" class="t">group 亦被 groupForEndpoint(ipPort) 提前钉住</text>
+
+<rect class="note" x="1430" y="124" width="230" height="98" rx="6"/>
+<text x="1444" y="145" class="cs">谁决定走哪条：</text>
+<text x="1444" y="163" class="cs">GlobalQueueCoordinator</text>
+<text x="1444" y="180" class="cs">  .planBatchWindow()</text>
+<text x="1444" y="199" class="cs">仅当 dispatcher=BATCH</text>
+<text x="1444" y="215" class="cs">且窗口 size &gt; 1</text>
+
+<!-- ================= BAND B : 候选发现 ================= -->
+<rect class="band" x="40" y="256" width="1640" height="392" rx="10"/>
+<text x="60" y="282" class="bt">② 候选发现 · discoverAliveEndpoints()</text>
+
+<path class="a" d="M 440 222 L 440 296"/>
+<path class="ad" d="M 1100 222 L 1100 296"/>
+
+<rect class="proc" x="120" y="296" width="640" height="222" rx="8"/>
+<text x="138" y="318" class="h">遍历 endpointAddressSnapshot(role) 的全部地址</text>
+<text x="138" y="341" class="c">for (String address : addresses)</text>
+<text x="138" y="364" class="t" fill="#7f1d1d">逐个 captureEndpoint，以下情况跳过（不计入 registeredCount）：</text>
+<text x="138" y="385" class="t">✗ pin == null —— 已下线 / generation 变更</text>
+<text x="138" y="406" class="t">✗ 不是 PrefillEndpoint 实例</text>
+<text x="138" y="427" class="t">✗ topology.group() 与目标 group 不符</text>
+<text x="138" y="452" class="t" fill="#15803d">✓ 通过 → registeredCount++</text>
+<text x="138" y="475" class="t">命中 excludedIpPort（上一轮被拒的那台）</text>
+<text x="138" y="494" class="t">　　→ 暂存为 excludedPin，先不进候选集</text>
+<text x="138" y="513" class="cs">全程持有 GenerationPin，对象不会被并发替换</text>
+
+<rect class="pin" x="800" y="296" width="600" height="222" rx="8"/>
+<text x="818" y="318" class="h" fill="#5b21b6">只 capture(preferredIpPort) 这一台，随后立即 return</text>
+<text x="818" y="343" class="t">✗ pin == null / 非 Prefill → registeredCount = 0</text>
+<text x="818" y="366" class="t">✗ group 不符，或 == excludedIpPort</text>
+<text x="818" y="385" class="cs">　　rejections += PREFERRED_ENDPOINT_UNAVAILABLE</text>
+<text x="818" y="404" class="cs">　　registeredCount = 1</text>
+<text x="818" y="429" class="t" fill="#15803d">✓ 通过 → 候选集 = { 这一台 }</text>
+<rect class="bug" x="818" y="444" width="562" height="60" rx="6"/>
+<text x="832" y="465" class="bh">⚠ 硬绑的代价</text>
+<text x="832" y="484" class="bx">不参与全量扫描，也拿不到 excludedPin 兜底。</text>
+<text x="832" y="500" class="bx">这一台满了就直接 BLOCKED，即使其余机器全空闲。</text>
+
+<rect class="ok" x="120" y="534" width="640" height="46" rx="8"/>
+<text x="138" y="563" class="ah">候选集 = group 内全部存活 Prefill（N 台）</text>
+
+<rect class="ok" x="800" y="534" width="600" height="46" rx="8"/>
+<text x="818" y="563" class="ah">候选集 = 恰好 1 台</text>
+
+<rect class="note" x="1430" y="296" width="230" height="222" rx="6"/>
+<text x="1444" y="317" class="h" font-size="13">registeredCount 的意义</text>
+<text x="1444" y="339" class="cs">它是「本 group 内存活</text>
+<text x="1444" y="355" class="cs">总数」，供后续</text>
+<text x="1444" y="374" class="cs">provenPoolWideBlocker</text>
+<text x="1444" y="390" class="cs">判定阻塞是否全局。</text>
+<text x="1444" y="414" class="cs" fill="#15803d">改为全量扫描后这个</text>
+<text x="1444" y="430" class="cs" fill="#15803d">语义才成立；旧版</text>
+<text x="1444" y="446" class="cs" fill="#15803d">只有 2 个样本，会把</text>
+<text x="1444" y="462" class="cs" fill="#15803d">「抽中的 2 台都不行」</text>
+<text x="1444" y="478" class="cs" fill="#15803d">误报成「全池不行」。</text>
+
+<!-- ================= BAND C : 单候选快路 ================= -->
+<rect class="band" x="40" y="666" width="1640" height="286" rx="10"/>
+<text x="60" y="692" class="bt">③ 单候选快路 · selectOnlyEndpoint()　（size == 1 且无 excludedPin 时才进入）</text>
+
+<path class="a" d="M 440 580 L 440 706"/>
+<path class="ad" d="M 1100 580 L 1100 668 L 440 668"/>
+
+<rect class="proc" x="120" y="706" width="780" height="222" rx="8"/>
+<text x="138" y="728" class="h">只做稳定的物理检查，不做 TTFT 投影、不做离群剔除</text>
+<text x="138" y="753" class="c">pending = endpoint.admissionPendingRequestCount()</text>
+<text x="138" y="778" class="t">① pending &lt; 0　→ BLOCKED</text>
+<text x="138" y="801" class="t">② pending == 0　→ return null，回落到完整路径（走 ④）</text>
+<text x="138" y="824" class="t">③ seqLen 超过 maxBatchTokensSize / fallbackBatchTokenCapacity</text>
+<text x="138" y="843" class="t">　 / totalKvCacheTokens　→ BLOCKED</text>
+<text x="138" y="866" class="t">④ predictor == null　→ return null，回落到完整路径</text>
+<text x="138" y="891" class="t" fill="#15803d">⑤ 以上都通过 → SUCCESS，projectedTtftMs = OptionalLong.empty()</text>
+<text x="138" y="914" class="cs">注：改为全量候选后，自由路径几乎不再进这里（要求整个 group 只剩 1 台）；</text>
+
+<rect class="bad" x="1000" y="712" width="660" height="46" rx="8"/>
+<text x="1018" y="741" class="rh">PlacementResult.blocked(roleType)</text>
+<path class="ar" d="M 900 780 L 1000 758"/>
+
+<rect class="note" x="1000" y="782" width="660" height="146" rx="6"/>
+<text x="1014" y="803" class="h" font-size="13">为什么要有这条快路</text>
+<text x="1014" y="825" class="cs">整个 group 只有一台机器时，没有「选择」可言。</text>
+<text x="1014" y="843" class="cs">跑完整投影只是白烧 CPU，而且投影里的 pending</text>
+<text x="1014" y="861" class="cs">/ 离群阈值在单机时必然自比自，毫无意义。</text>
+<text x="1014" y="885" class="cs">真正的并发准入判定在后面的 QueueRouteAdmission</text>
+<text x="1014" y="903" class="cs">.tryPublish()，这里只需过物理上限。</text>
+<text x="1014" y="921" class="cs" fill="#5b21b6">硬绑成员总是走这条路（候选恒为 1 台）。</text>
+
+<!-- ================= BAND D : 投影 + 硬过滤 ================= -->
+<rect class="band" x="40" y="970" width="1640" height="450" rx="10"/>
+<text x="60" y="996" class="bt">④ 投影 + 硬过滤 · evaluateCandidates()　—— 唯一产生 projectedTtftMs 的地方</text>
+
+<path class="a" d="M 440 928 L 440 1010"/>
+
+<rect class="proc" x="120" y="1010" width="780" height="196" rx="8"/>
+<text x="138" y="1032" class="h">对每个候选依次做三件事</text>
+<text x="138" y="1056" class="c">① calculateCacheMatch(ep, addr, cacheMatchResults, req)</text>
+<text x="152" y="1075" class="t">→ cacheHit（有效命中 token）、routingHitTokens</text>
+<text x="138" y="1099" class="c">② ep.captureRouteProjectionInputs()</text>
+<text x="152" y="1118" class="t">→ 该 endpoint 队列 + 已提交 work 的一致性快照</text>
+<text x="138" y="1142" class="c">③ RouteProjection.project(inputs, probe, evaluator, delivery)</text>
+<text x="152" y="1161" class="t">→ projectedTtftMs、requiredPendingCount、blockerRole</text>
+<text x="152" y="1182" class="cs">probe 的 deadline 传 Long.MAX_VALUE：选点只评估机器负载，</text>
+<text x="152" y="1198" class="cs">请求过期由 RequestRegistry 负责，不能算成容量阻塞。</text>
+
+<rect class="cfg" x="940" y="1010" width="720" height="196" rx="8"/>
+<text x="958" y="1032" class="h" fill="#78350f">投影硬过滤（淘汰即出局，不参与后续任何比较）</text>
+<text x="958" y="1058" class="t">A. 投影既非 selectable 也非 engineWorkUnmodeled</text>
+<text x="972" y="1077" class="cs">rejections += PROJECTION_&lt;state&gt;_&lt;detail&gt;</text>
+<text x="972" y="1094" class="cs">poolWideBlockers.merge(blockerRole, 1, sum)　← 记账，供 ⑤</text>
+<text x="958" y="1120" class="t">B. Prefill 等待队列不在 route projection 阶段提前拒绝</text>
+<text x="972" y="1139" class="cs">精确队列容量由 QueueRouteAdmission commit 校验</text>
+<text x="958" y="1165" class="t" fill="#7f1d1d">队列满时请求保持在全局队列，等待容量事件</text>
+<text x="958" y="1184" class="t" fill="#7f1d1d">不再由 router 层伪装成 NO_PREFILL_WORKER。</text>
+<text x="958" y="1200" class="cs">配置：scheduler.capacity.maxWaitingRequestsPerPrefillWorker</text>
+
+<rect class="proc" x="120" y="1222" width="780" height="88" rx="8"/>
+<text x="138" y="1244" class="h">分流：modeled（有完整时间模型） / unmodeled（引擎已有工作，无诚实时长）</text>
+<text x="138" y="1267" class="c">modeled.size() != 0 ? rejectOutliers(modeled) : unmodeled</text>
+<text x="138" y="1290" class="t">只要有一个能建模，整个 unmodeled 集合被直接丢弃</text>
+
+<rect class="cfg" x="940" y="1222" width="720" height="88" rx="8"/>
+<text x="958" y="1244" class="h" fill="#78350f">rejectOutliers —— 剔除离群机器</text>
+<text x="958" y="1267" class="cs">maxPendingVsAverageMultiplier（默认 3.0）：pending 远超均值</text>
+<text x="958" y="1288" class="cs">maxProjectedDrainVsAverageMultiplier（默认 3.0）：排空时间远超均值</text>
+<text x="958" y="1304" class="cs">两者都 ≤ 0 时整段跳过；LEAST_RECENTLY_USED_IN_POOL 下恒为 null</text>
+
+<rect class="proc" x="120" y="1326" width="1540" height="76" rx="8"/>
+<text x="138" y="1348" class="h">excludedPin 兜底（仅自由选点享有）</text>
+<text x="138" y="1371" class="c">if (preferredIpPort == null &amp;&amp; survivors.size() == 0 &amp;&amp; discovery.hasExcludedEndpoint())</text>
+<text x="138" y="1393" class="t">所有其他机器都证明不可用后，才把「上一轮拒过本请求的那台」重新投影一次。硬绑成员没有这一步。</text>
+
+<!-- ================= BAND E : 空集判定 ================= -->
+<rect class="band" x="40" y="1438" width="1640" height="176" rx="10"/>
+<text x="60" y="1464" class="bt">⑤ 候选全灭 · 阻塞原因归因</text>
+
+<path class="a" d="M 440 1402 L 440 1478"/>
+
+<polygon fill="#fef3c7" stroke="#d97706" stroke-width="2" points="440,1478 620,1528 440,1578 260,1528"/>
+<text x="440" y="1523" class="h" text-anchor="middle">survivors.size()</text>
+<text x="440" y="1542" class="h" text-anchor="middle">== 0 ?</text>
+
+<rect class="bad" x="700" y="1478" width="960" height="60" rx="8"/>
+<text x="718" y="1500" class="rh">provenPoolWideBlocker(poolWideBlockers, registeredCount)</text>
+<text x="718" y="1522" class="cs">某个 blockerRole 的计数 ≥ registeredCount → blocked(该 role)，否则 blocked(roleType)</text>
+<path class="ar" d="M 620 1508 L 700 1508"/>
+<text x="632" y="1500" class="lblr">是</text>
+
+<rect class="note" x="700" y="1550" width="960" height="56" rx="6"/>
+<text x="714" y="1571" class="cs">这个 PlacementKey 会被 GlobalQueueCoordinator 用来 park 全局队头（blockedHead），等待 PlacementAvailability</text>
+<text x="714" y="1591" class="cs">上该 key 的容量变化事件。所以归因错了，队头就会睡在错误的条件上 —— 这是 registeredCount 必须是全量的原因。</text>
+
+<text x="452" y="1600" class="lblg">否</text>
+
+<!-- ================= BAND F : 建模分流 ================= -->
+<rect class="band" x="40" y="1632" width="1640" height="196" rx="10"/>
+<text x="60" y="1658" class="bt">⑥ 建模分流 · 决定用哪一族策略</text>
+
+<path class="ag" d="M 440 1578 L 440 1672"/>
+
+<polygon fill="#fef3c7" stroke="#d97706" stroke-width="2" points="440,1672 640,1732 440,1792 240,1732"/>
+<text x="440" y="1727" class="h" text-anchor="middle">candidate(0)</text>
+<text x="440" y="1746" class="h" text-anchor="middle">.selectable() ?</text>
+
+<rect class="proc" x="720" y="1666" width="940" height="70" rx="8"/>
+<text x="738" y="1688" class="h">false → selectUnmodeledCandidate()　【兜底族】</text>
+<text x="738" y="1710" class="t">排序键：requiredPendingCount 升序 → lastSelectedTime 升序（LRU）</text>
+<text x="738" y="1729" class="cs">完全不看 TTFT、不看 cache —— 注释：never invents a TTFT or passes through TTFT/cache policy</text>
+<path class="ar" d="M 640 1700 L 720 1700"/>
+
+<rect class="proc" x="720" y="1748" width="940" height="70" rx="8"/>
+<text x="738" y="1770" class="h">true → 先求 minProjectedTtftMs，再进 selectBestCandidate()　【正式族】</text>
+<text x="738" y="1792" class="c">minProjectedTtftMs = min over survivors of projectedTtftMs(i)</text>
+<text x="738" y="1811" class="cs">这个值是后面所有策略的公共基准线</text>
+<path class="ag" d="M 640 1772 L 720 1780"/>
+
+<!-- ================= BAND G : 最终挑选 ================= -->
+<rect class="band" x="40" y="1846" width="1640" height="576" rx="10"/>
+<text x="60" y="1872" class="bt">⑦ 最终挑选 · selectBestCandidate() 的三条互斥分支</text>
+
+<path class="ag" d="M 440 1818 L 440 1886"/>
+
+<rect class="cfg" x="80" y="1886" width="1560" height="132" rx="8"/>
+<text x="98" y="1908" class="h" fill="#78350f">第 1 步（可选）：cache 亲和打标 —— 仅当 router.roles.prefill.cacheAffinity 被配置（默认 null，整段跳过）</text>
+<text x="98" y="1932" class="cs">扫一遍求 minHitTokens / maxHitTokens / referenceHitTokens（= 在 TTFT 等于 minProjectedTtftMs 的候选中取最大 cacheHit）</text>
+<text x="98" y="1952" class="c">affinityCutoffMs = minProjectedTtftMs + max(0, cacheAffinity.maxExtraTtftMs)　　← 允许为 cache 命中多付的 TTFT 预算</text>
+<text x="98" y="1975" class="t">仅当 maxHitTokens &gt; minHitTokens（候选之间命中确有差异）才逐个判定，四条同时满足才 preferredCandidates.set(i)：</text>
+<text x="112" y="1996" class="cs">hit &gt; minHit　∧　hit ≥ referenceHit　∧　hit×100/seqLen ≥ minPrefixHitPercent　∧　projectedTtftMs ≤ affinityCutoffMs</text>
+<text x="112" y="2012" class="cs">上报 reason：CACHE_LEADER（有入选） / OVER_CAP（命中率够但 TTFT 超预算） / LOW_CACHE_HIT（命中率不够） / NO_CACHE_LEAD（无差异）</text>
+
+<text x="98" y="2050" class="h">第 2 步：按 router.roles.prefill.candidateChoice.type 分派</text>
+
+<rect class="proc" x="80" y="2064" width="490" height="340" rx="8"/>
+<text x="98" y="2088" class="h">分支 A · selectCacheLeader()</text>
+<text x="98" y="2110" class="cs">进入条件：type ≠ LRU_IN_POOL</text>
+<text x="98" y="2128" class="cs">　　　　　且 preferredCandidates 非空</text>
+<rect fill="#ffffff" stroke="#0284c7" stroke-width="1.2" x="98" y="2144" width="454" height="106" rx="6"/>
+<text x="112" y="2166" class="h" font-size="13">排序键（逐层）</text>
+<text x="112" y="2188" class="t">1. cacheHit 降序</text>
+<text x="112" y="2210" class="t">2. projectedTtftMs 升序</text>
+<text x="112" y="2232" class="t">3. 两者完全并列 → 蓄水池均匀随机</text>
+<text x="98" y="2276" class="cs">只在打了 preferred 标记的候选里比较，</text>
+<text x="98" y="2294" class="cs">未打标的直接 continue 跳过。</text>
+<text x="98" y="2320" class="t" fill="#15803d">语义：优先复用前缀 cache，代价是</text>
+<text x="98" y="2339" class="t" fill="#15803d">最多多付 maxExtraTtftMs 的 TTFT。</text>
+<text x="98" y="2366" class="cs">蓄水池随机：nextInt(++tiedCount) == 0</text>
+<text x="98" y="2384" class="cs">避免地址顺序造成系统性偏斜。</text>
+
+<rect class="proc" x="590" y="2064" width="490" height="340" rx="8"/>
+<text x="608" y="2088" class="h">分支 B · selectBaselineCandidate()　【默认】</text>
+<text x="608" y="2110" class="cs">进入条件：type ≠ LRU_IN_POOL</text>
+<text x="608" y="2128" class="cs">　　　　　且 preferredCandidates 为空</text>
+<rect fill="#ffffff" stroke="#0284c7" stroke-width="1.2" x="608" y="2144" width="454" height="130" rx="6"/>
+<text x="622" y="2166" class="h" font-size="13">BEST_ONLY</text>
+<text x="622" y="2186" class="cs">tieThreshold = 0</text>
+<text x="622" y="2204" class="t">→ 严格等于最小 TTFT 的候选内随机</text>
+<text x="622" y="2230" class="h" font-size="13">RANDOM_WITHIN_TOLERANCE（默认）</text>
+<text x="622" y="2250" class="cs">cutoff = minTTFT + max(minTTFT×0.1, 20ms)</text>
+<text x="622" y="2268" class="t">→ 容差带内均匀随机</text>
+<text x="608" y="2300" class="c">for i: ttft(i) ≤ cutoff ∧ nextInt(++tied)==0</text>
+<text x="608" y="2320" class="t">全量扫描，无提前退出，取容差带内随机一个</text>
+<text x="608" y="2348" class="t" fill="#15803d">语义：纯负载导向。TTFT 投影已含该机当前</text>
+<text x="608" y="2367" class="t" fill="#15803d">队列深度，所以压上去 TTFT 就升，最小值</text>
+<text x="608" y="2386" class="t" fill="#15803d">自然转移 —— 反馈回路本身即负载均衡器。</text>
+
+<rect class="proc" x="1100" y="2064" width="540" height="340" rx="8"/>
+<text x="1118" y="2088" class="h">分支 C · selectLeastRecentlyUsed()</text>
+<text x="1118" y="2110" class="cs">进入条件：type == LEAST_RECENTLY_USED_IN_POOL</text>
+<text x="1118" y="2128" class="cs">（此分支优先于 cache 亲和判定，见下方 ⑧）</text>
+<rect fill="#ffffff" stroke="#0284c7" stroke-width="1.2" x="1118" y="2144" width="504" height="94" rx="6"/>
+<text x="1132" y="2166" class="h" font-size="13">委托给 claimLeastRecentlyUsed()，两层池：</text>
+<text x="1132" y="2188" class="t">pass 0 = preferredCandidates（cache leader）</text>
+<text x="1132" y="2210" class="t">pass 1 = baselinePoolMask(...)　兜底池</text>
+<text x="1132" y="2230" class="cs">preferred 为空时只跑 pass 1</text>
+<text x="1118" y="2264" class="t">核心不是「挑」而是「抢」（claim）：用每台</text>
+<text x="1118" y="2283" class="t">endpoint 的 lastSelectedTime 时钟做 CAS，</text>
+<text x="1118" y="2302" class="t">让并发的多个 planner 线程落到不同机器上。</text>
+<text x="1118" y="2328" class="t" fill="#15803d">语义：best-of-K + LRU 轮转，防止多线程</text>
+<text x="1118" y="2347" class="t" fill="#15803d">同时看到同一个「最优」而一起压上去（羊群）。</text>
+<text x="1118" y="2376" class="cs">详见 ⑧ —— 该机制当前有两处缺陷</text>
+<text x="1118" y="2394" class="cs">导致轮转与仲裁双双失效。</text>
+
+<!-- ================= BAND H : LRU claim 内部 ================= -->
+<rect class="band" x="40" y="2440" width="1640" height="410" rx="10"/>
+<text x="60" y="2466" class="bt">⑧ 分支 C 内部 · claimLeastRecentlyUsed() 与两个当前缺陷</text>
+
+<rect class="proc" x="80" y="2480" width="740" height="176" rx="8"/>
+<text x="98" y="2502" class="h">baselinePoolMask(candidates, shortestTtftCandidateCount(N))</text>
+<text x="98" y="2526" class="c">count = clamp(configuredCount, 1, N)</text>
+<text x="98" y="2549" class="t">形态 A　count == N　→ 置位 0..N-1，全部候选入池</text>
+<text x="98" y="2572" class="t">形态 B　count &lt; N 　→ clear() 后只置 min-TTFT 那一位</text>
+<text x="98" y="2600" class="cs">count 来自 candidateChoice.pool：</text>
+<text x="98" y="2618" class="cs">RATIO（默认）→ max(1, max(minimumWorkers=1, floor(N×ratio=0.3)))</text>
+<text x="98" y="2636" class="cs">FIXED　　　　→ max(1, min(workers=1, N))</text>
+
+<rect class="bug" x="840" y="2480" width="800" height="176" rx="8"/>
+<text x="858" y="2502" class="bh">⚠ 缺陷 1（P3）：pool 的 K 值从未落地</text>
+<text x="858" y="2524" class="bx">count 除了参与 count == N 这个相等判断外，没有任何用途 ——</text>
+<text x="858" y="2542" class="bx">它从不用来「取 TTFT 最优的前 K 个」。</text>
+<text x="858" y="2566" class="bx">默认 ratio = 0.3，N = 10 → count = 3 ≠ 10 → 走形态 B → 池里只有 1 台。</text>
+<text x="858" y="2584" class="bx">配置写「前 30%」，实到手「前 1 名」，LRU_IN_POOL 退化成 BEST_ONLY。</text>
+<text x="858" y="2612" class="bx">旧版轮转窗口只给 2 个候选时，「前 K 个」与「第 1 名」几乎等价，形态 B 是</text>
+<text x="858" y="2630" class="bx">无害捷径；轮转真正的发动机是 cursor。删掉 cursor 后两个轮转来源同时归零。</text>
+
+<rect class="proc" x="80" y="2672" width="740" height="164" rx="8"/>
+<text x="98" y="2694" class="h">池内扫描 + CAS 抢占</text>
+<text x="98" y="2718" class="cs">for (i = pool.nextSetBit(0); ... ; i = pool.nextSetBit(i+1))</text>
+<text x="98" y="2740" class="t">跳过 clock == Long.MAX_VALUE（该机不参与 LRU）</text>
+<text x="98" y="2762" class="t">取 clock 最小者；clock 相同则比 projectedTtftMs</text>
+<text x="98" y="2788" class="c">compareAndSet(oldClock, max(now, old+1))</text>
+<text x="98" y="2808" class="t">成功 → 抢到，返回；失败 → attempt 1 重扫一次</text>
+<text x="98" y="2828" class="cs">CAS 失败意味着别的线程刚抢走，重扫时它已不再最旧 → 自然错开</text>
+
+<rect class="bug" x="840" y="2672" width="800" height="164" rx="8"/>
+<text x="858" y="2694" class="bh">⚠ 缺陷 2（P0）：内层循环多了 selectedIndex &lt; 0 守卫</text>
+<text x="858" y="2718" class="cs" fill="#9f1239">for (i = pool.nextSetBit(0); i ≥ 0 &amp;&amp; selectedIndex &lt; 0; ...)</text>
+<text x="858" y="2740" class="bx">原版守卫在外层 pass 循环，内层完整扫描取最小 clock。</text>
+<text x="858" y="2758" class="bx">现在第一个 clock 非 MAX 的候选一旦入选，内层立即退出。</text>
+<text x="858" y="2782" class="bx">后果：LRU 比较、TTFT 平局判定全成死代码（首个析取项恒真短路），</text>
+<text x="858" y="2800" class="bx">实际语义变成「取池内索引最小者」。池为全集时 → 永远 index 0。</text>
+<text x="858" y="2824" class="bx">修法：删掉内层的 selectedIndex &lt; 0，外层守卫保持不变。</text>
+
+<!-- ================= LEGEND ================= -->
+<rect class="band" x="40" y="2868" width="1640" height="132" rx="10"/>
+<text x="60" y="2894" class="bt">图例与关键默认值</text>
+
+<rect class="proc" x="80" y="2908" width="26" height="18" rx="4"/><text x="114" y="2922" class="t">处理步骤</text>
+<rect class="pin" x="230" y="2908" width="26" height="18" rx="4"/><text x="264" y="2922" class="t">硬绑专属路径</text>
+<rect class="cfg" x="410" y="2908" width="26" height="18" rx="4"/><text x="444" y="2922" class="t">配置驱动的判定</text>
+<rect class="ok" x="610" y="2908" width="26" height="18" rx="4"/><text x="644" y="2922" class="t">成功出口</text>
+<rect class="bad" x="760" y="2908" width="26" height="18" rx="4"/><text x="794" y="2922" class="t">阻塞出口</text>
+<rect class="bug" x="910" y="2908" width="26" height="18" rx="4"/><text x="944" y="2922" class="t">当前代码缺陷</text>
+
+<text x="80" y="2954" class="cs">scheduler.decision.type = FIXED_WINDOW · maxRequests = 8 · maxCollectionWaitMs = 300　　dispatcher.type = BATCH　　（决定是否产生硬绑）</text>
+<text x="80" y="2974" class="cs">router.roles.prefill.candidateChoice.type = RANDOM_WITHIN_TOLERANCE（relativeTolerance 0.1 / minimumToleranceMs 20）　→ 默认走分支 B</text>
+<text x="80" y="2992" class="cs">router.roles.prefill.cacheAffinity = null（默认不开）→ preferredCandidates 恒空，分支 A 不可达　　maxWaitingRequestsPerPrefillWorker = 1024</text>
+</svg>

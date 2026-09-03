@@ -27,6 +27,44 @@ import java.util.function.LongPredicate;
 
 public class PrefillEndpoint extends WorkerEndpoint {
 
+    /**
+     * Short-lived generation capability for committing one NON_BATCH route
+     * group. Queued requests hold only capacity credits; they never keep an
+     * endpoint generation alive while waiting for delivery.
+     */
+    public final class RouteCommitAdmission implements AutoCloseable {
+        private EndpointGenerationLifecycle.HandoffPermit generationHandoff;
+
+        private RouteCommitAdmission(
+                EndpointGenerationLifecycle.HandoffPermit generationHandoff) {
+            this.generationHandoff = generationHandoff;
+        }
+
+        public PrefillState.CommittedHandoff commit(
+                List<ScheduledRequest> exactItems,
+                List<PrefillState.RouteReservation> exactReservations) {
+            EndpointGenerationLifecycle.HandoffPermit exact = generationHandoff;
+            if (exact == null) {
+                throw new IllegalStateException(
+                        "route commit no longer owns its generation handoff");
+            }
+            PrefillState.CommittedHandoff committed =
+                    prefillState.commitRouteGroup(
+                            exactItems, exactReservations, exact);
+            generationHandoff = null;
+            return committed;
+        }
+
+        @Override
+        public void close() {
+            EndpointGenerationLifecycle.HandoffPermit exact = generationHandoff;
+            generationHandoff = null;
+            if (exact != null) {
+                exact.close();
+            }
+        }
+    }
+
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
     private final PrefillTimePredictor predictor;
     private final WorkerBatcher runtime;
@@ -100,7 +138,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
         WorkerStatus.TopologySnapshot topology =
                 getStatus().topologySnapshot();
         placementAvailability.capacityChanged(
-                getStatus().getRole(), topology.group());
+                getStatus().getRole(), topology.group(), ipPort());
     }
 
     /** Remove only the supplied canonical ACTIVE queue identity. */
@@ -235,27 +273,33 @@ public class PrefillEndpoint extends WorkerEndpoint {
             ScheduledRequest exactItem,
             long predictedMs,
             int maximumRequests) {
-        EndpointGenerationLifecycle.HandoffPermit handoffPermit =
-                tryAcquireGenerationHandoff();
-        if (handoffPermit == null) {
+        if (isGenerationRetiringOrRetired()) {
             return new PrefillState.ReservationResult<>(
                     PrefillState.CapacityStatus.ENDPOINT_RETIRED, null);
         }
-        PrefillState.ReservationResult<PrefillState.RouteReservation> result;
-        try {
-            result = prefillState.reserveRoute(
-                    exactItem,
-                    predictedMs,
-                    maximumRequests,
-                    handoffPermit);
-        } catch (Throwable failure) {
-            handoffPermit.close();
-            throw failure;
-        }
-        if (result.reservation() == null) {
-            handoffPermit.close();
-        }
-        return result;
+        return reservePublishedRouteCredit(
+                exactItem, predictedMs, maximumRequests);
+    }
+
+    /**
+     * Reserve request capacity inside the caller's already-pinned placement
+     * transaction. The returned credit deliberately owns no generation pin.
+     */
+    public PrefillState.ReservationResult<PrefillState.RouteReservation>
+            reservePublishedRouteCredit(
+            ScheduledRequest exactItem,
+            long predictedMs,
+            int maximumRequests) {
+        return prefillState.reserveRoute(
+                exactItem, predictedMs, maximumRequests);
+    }
+
+    /** Acquire the generation capability only for the final route commit. */
+    public RouteCommitAdmission tryBeginRouteCommitAdmission() {
+        EndpointGenerationLifecycle.HandoffPermit handoffPermit =
+                tryAcquireGenerationHandoff();
+        return handoffPermit == null
+                ? null : new RouteCommitAdmission(handoffPermit);
     }
 
     /** Exact wake source for this generation's batch admission capacity. */
@@ -268,6 +312,16 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public CapacityBoundary.Availability routeAdmissionAvailability(
             int maximumRequests) {
         return prefillState.routeAvailability(maximumRequests);
+    }
+
+    /** Snapshot of requests this endpoint can accept for its bound dispatcher. */
+    public int availableDeliveryCredits() {
+        return runtime.availableDeliveryCredits();
+    }
+
+    /** Diagnostic view of one explicit NON_BATCH request limit. */
+    public int availableRouteDecisionSlots(int maximumRequests) {
+        return prefillState.availableRouteDecisionSlots(maximumRequests);
     }
 
     /**

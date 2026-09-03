@@ -147,17 +147,17 @@ class FlexlbConfigSchedulingModeTest {
     }
 
     @Test
-    void fixed_window_accepts_the_documented_maximum_group_size() {
+    void fixed_window_group_size_has_no_configured_upper_bound() {
         FlexlbConfig config = ConfigService.parse("""
                 {
                   "scheduler":{"type":"QUEUE","ordering":{"type":"FIFO"},
-                    "decision":{"type":"FIXED_WINDOW","maxRequests":1024}},
+                    "decision":{"type":"FIXED_WINDOW","maxRequests":4096}},
                   "dispatcher":{"type":"BATCH"}
                 }
                 """);
 
-        assertEquals(DecisionPolicyConfig.MAX_REQUESTS,
-                config.fixedWindowDecision().getMaxRequests());
+        assertEquals(4096, config.fixedWindowDecision().getMaxRequests());
+        assertEquals(4096, config.fixedWindowDecision().resolveMaxRequests());
     }
 
     @Test
@@ -173,13 +173,6 @@ class FlexlbConfigSchedulingModeTest {
                 {
                   "scheduler":{"type":"QUEUE","ordering":{"type":"FIFO"},
                     "decision":{"type":"FIXED_WINDOW","maxRequests":0}},
-                  "dispatcher":{"type":"NON_BATCH"}
-                }
-                """));
-        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
-                {
-                  "scheduler":{"type":"QUEUE","ordering":{"type":"FIFO"},
-                    "decision":{"type":"FIXED_WINDOW","maxRequests":1025}},
                   "dispatcher":{"type":"NON_BATCH"}
                 }
                 """));

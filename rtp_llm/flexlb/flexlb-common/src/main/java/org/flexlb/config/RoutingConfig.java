@@ -21,19 +21,11 @@ public final class RoutingConfig {
     @Getter
     @Setter
     public static final class PrefillConfig {
-        private PrefillAvailabilityConfig availability =
-                new PrefillAvailabilityConfig();
         private ExecutionTimeEstimatorConfig executionTimeEstimator =
                 new ExecutionTimeEstimatorConfig();
         private CandidateChoiceConfig candidateChoice =
                 new CandidateChoiceConfig();
         private CacheAffinityConfig cacheAffinity;
-    }
-
-    @Getter
-    @Setter
-    public static final class PrefillAvailabilityConfig {
-        private long maxPendingRequests = 64;
     }
 
     @Getter
