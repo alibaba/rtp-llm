@@ -904,7 +904,7 @@ class ModelRpcClient(object):
         self._addresses = addresses
         self._max_rpc_timeout_ms = max_rpc_timeout_ms
         self._decode_entrance = decode_entrance
-        self._trans_output_fn = trans_output_fn or trans_output
+        self._trans_output_fn = trans_output_fn
         self._options = []
         for key, value in client_config.items():
             self._options.append((key, value))
@@ -1092,7 +1092,9 @@ class ModelRpcClient(object):
                 response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
-                output_py = self._trans_output_fn(input_py, response, stream_state)
+                output_py = (self._trans_output_fn or trans_output)(
+                    input_py, response, stream_state
+                )
                 last_output = output_py
                 # Custom converters may return dicts or other application payloads.
                 # Transport completion still comes from the engine response.
@@ -1303,7 +1305,7 @@ class ModelRpcClient(object):
                         f"batch item {i} failed: {result_pb.error_info.error_message}",
                     )
                 stream_state = StreamState()
-                output = self._trans_output_fn(
+                output = (self._trans_output_fn or trans_output)(
                     inputs[i], result_pb.final_output, stream_state
                 )
                 results.append(output)
