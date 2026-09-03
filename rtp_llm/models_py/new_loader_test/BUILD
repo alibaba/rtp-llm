@@ -24,3 +24,17 @@ py_test(
         "//rtp_llm:torch",
     ],
 )
+
+py_test(
+    name = "multi_gpu_device_context_test",
+    srcs = ["multi_gpu_device_context_test.py"],
+    exec_properties = {
+        "gpu": "H20",
+        "gpu_count": "2",
+    },
+    tags = ["H20"],
+    deps = [
+        "//rtp_llm/models_py:new_weight_loader",
+        "//rtp_llm:torch",
+    ],
+)
