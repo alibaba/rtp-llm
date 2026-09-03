@@ -107,15 +107,14 @@ bool HybridPoolKVCacheAllocator::doInit() {
         const auto  group_type  = config_.typeForGroup(static_cast<size_t>(gid));
         const auto  policy      = config_.policyForGroup(static_cast<size_t>(gid));
 
-        // BlockPool::validateConfig() rejects pinned-CPU and cudaMalloc backing
-        // together, so a HOST_PINNED pool must opt out of cudaMalloc backing even
-        // when the allocator-wide flag is on.
+        // Raw device allocation only applies to DEVICE pools. Host and pinned-host
+        // pools keep their existing backing even when the allocator-wide flag is on.
         const bool use_pinned_cpu_backing = pinnedCpuBackingForPlacement(policy.memory_placement);
-        auto       group_pool =
-            std::make_shared<BlockPool>(pool_config,
-                                        allocationTypeForPlacement(policy.memory_placement, allocation_type_),
-                                        use_pinned_cpu_backing,
-                                        use_cuda_malloc_block_pool_ && !use_pinned_cpu_backing);
+        const auto pool_allocation_type = allocationTypeForPlacement(policy.memory_placement, allocation_type_);
+        const bool use_device_malloc_backing =
+            pool_allocation_type == AllocationType::DEVICE && use_device_malloc_block_pool_;
+        auto group_pool = std::make_shared<BlockPool>(
+            pool_config, pool_allocation_type, use_pinned_cpu_backing, use_device_malloc_backing);
         RTP_LLM_CHECK_WITH_INFO(
             group_pool->init(), "Failed to initialize block pool %s(group %d)", pool_config.pool_name.c_str(), gid);
 

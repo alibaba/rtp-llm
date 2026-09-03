@@ -40,7 +40,7 @@ public:
                    const SpeculativeExecutionConfig&  sp_config                  = SpeculativeExecutionConfig{},
                    const PDSepConfig&                 pd_sep_config              = PDSepConfig{},
                    const CacheStoreConfig&            cache_store_config         = CacheStoreConfig{},
-                   bool                               use_cuda_malloc_block_pool = false);
+                   bool                               use_device_malloc_block_pool = false);
     ~KVCacheManager();
 
     // 初始化和配置相关
@@ -200,7 +200,7 @@ private:
     const SpeculativeExecutionConfig   sp_config_;
     const PDSepConfig                  pd_sep_config_;
     const CacheStoreConfig             cache_store_config_;
-    const bool                         use_cuda_malloc_block_pool_;
+    const bool                         use_device_malloc_block_pool_;
     const bool                         warmup_;
 
     std::shared_ptr<CPSlotMapper>                   cp_slot_mapper_;
