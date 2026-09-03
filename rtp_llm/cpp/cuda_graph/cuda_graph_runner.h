@@ -34,6 +34,7 @@ public:
         hidden_size_(graph_params.hidden_size),
         hc_mult_(static_cast<int>(graph_params.hc_mult)),
         sp_steps_(graph_params.sp_steps),
+        sequence_parallel_size_(graph_params.sequence_parallel_size),
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         model_data_type_(graph_params.model_data_type),
@@ -141,6 +142,7 @@ private:
     // input. The post-reduce output tensor still uses hidden_size_.
     int              hc_mult_{1};
     int              sp_steps_{0};
+    int              sequence_parallel_size_{1};
     std::vector<int> capture_range_;
     std::vector<int> prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
     std::vector<int> decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python

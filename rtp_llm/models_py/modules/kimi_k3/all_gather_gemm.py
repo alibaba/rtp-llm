@@ -124,18 +124,13 @@ def all_gather_gemm(
     local_input: torch.Tensor,
     weights: Sequence[torch.Tensor],
     *,
-    logical_m: int,
     group: Group = Group.TP,
 ) -> list[torch.Tensor]:
-    """All-gather equal token shards, project, and trim padding rows."""
+    """All-gather equal physical token shards and project every row."""
 
-    if logical_m < 0:
-        raise ValueError(f"logical_m must be non-negative, got {logical_m}")
     process_group = get_process_group(group)
     world_size = int(process_group.size())
     physical_m = int(local_input.shape[0]) * world_size
-    if logical_m > physical_m:
-        raise ValueError(f"logical_m={logical_m} exceeds physical_m={physical_m}")
 
     state = None
     if local_input.is_cuda:
@@ -149,30 +144,17 @@ def all_gather_gemm(
     outputs = implementations[int(use_fused)](
         local_input,
         weights,
-        logical_m,
         physical_m,
         group,
         process_group,
         state,
     )
-
-    trimmed = []
-    for output in outputs:
-        if output.shape[0] < logical_m:
-            raise ValueError(
-                "projection output has fewer rows than logical_m: "
-                f"output={tuple(output.shape)}, logical_m={logical_m}"
-            )
-        trimmed.append(
-            output if output.shape[0] == logical_m else output.narrow(0, 0, logical_m)
-        )
-    return trimmed
+    return outputs
 
 
 def _torch_all_gather_gemm(
     local_input: torch.Tensor,
     weights: Sequence[torch.Tensor],
-    logical_m: int,
     physical_m: int,
     group: Group,
     process_group: dist.ProcessGroup,
@@ -184,7 +166,7 @@ def _torch_all_gather_gemm(
             local_input,
             local_input.new_empty((physical_m, *local_input.shape[1:])),
             group,
-        ).narrow(0, 0, logical_m)
+        )
     with torch.profiler.record_function("RTP::kimi_k3.all_gather_gemm.gemm"):
         return [torch.matmul(gathered, weight) for weight in weights]
 
@@ -192,13 +174,12 @@ def _torch_all_gather_gemm(
 def _fused_all_gather_gemm(
     local_input: torch.Tensor,
     weights: Sequence[torch.Tensor],
-    logical_m: int,
     physical_m: int,
     group: Group,
     process_group: dist.ProcessGroup,
     state: Optional[_AllGatherGemmState],
 ) -> list[torch.Tensor]:
-    del logical_m, group
+    del group
     assert state is not None
     if local_input.device != state.device:
         raise ValueError(

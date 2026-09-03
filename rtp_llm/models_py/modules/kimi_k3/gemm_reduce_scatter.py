@@ -221,10 +221,12 @@ def gemm_reduce_scatter(
     if weight.device != x.device:
         raise ValueError(f"K3 o_proj weight device {weight.device} != input {x.device}")
 
-    logical_m = int(x.shape[0])
-    physical_m = (
-        (logical_m + state.world_size - 1) // state.world_size
-    ) * state.world_size
+    physical_m = int(x.shape[0])
+    if physical_m % state.world_size:
+        raise ValueError(
+            f"GEMM/RS physical M={physical_m} must be divisible by "
+            f"TP{state.world_size}; pad once at the model boundary"
+        )
     if physical_m > state.max_m:
         raise RuntimeError(
             f"K3 GEMM/RS M={physical_m} exceeds configured max_m={state.max_m}"
@@ -245,10 +247,6 @@ def _torch_gemm_reduce_scatter(
 ) -> torch.Tensor:
     with torch.profiler.record_function("RTP::kimi_k3.gemm_reduce_scatter.torch"):
         partial = torch.mm(x, weight)
-        if physical_m != x.shape[0]:
-            padded = partial.new_zeros((physical_m, partial.shape[1]))
-            padded.narrow(0, 0, partial.shape[0]).copy_(partial)
-            partial = padded
         if state.world_size == 1:
             return partial
         output = partial.new_empty((physical_m // state.world_size, state.n))

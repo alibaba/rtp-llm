@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import logging
 import os
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Dict
 
 import torch
 import torch.nn.functional as F
@@ -106,6 +106,62 @@ class KimiK3LatentMoE(nn.Module):
         )
         self._group_topk = GroupTopK()
         self._setup_deep_gemm_mega()
+
+    def _validate_mega_preconditions(self, label: str) -> None:
+        """Validate the device and distributed topology shared by both strategies."""
+
+        import torch.distributed as dist
+
+        if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 10:
+            raise RuntimeError(f"{label} requires an SM100+ CUDA GPU")
+        if not dist.is_initialized():
+            raise RuntimeError(f"{label} requires torch.distributed initialization")
+        world_size = int(dist.get_world_size())
+        if self.attn_tp_size != self.ep_size or self.ep_size != world_size:
+            raise RuntimeError(
+                f"{label} requires attention TP, EP, and the full distributed "
+                "world to have the same size; got "
+                f"TP={self.attn_tp_size}, EP={self.ep_size}, world={world_size}"
+            )
+
+    def _validate_shared_expert_weight_layout(self, hidden_size: int) -> None:
+        intermediate = self.shared_intermediate_size
+        if self.shared_expert_weight_shard:
+            if self.ffn_tp_size <= 0 or self.ffn_tp_size % 2:
+                raise ValueError(
+                    "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD=1 requires an even FFN "
+                    f"TP size, got {self.ffn_tp_size}"
+                )
+            if intermediate % (self.ffn_tp_size // 2):
+                raise ValueError(
+                    "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD=1 requires shared "
+                    "intermediate size divisible by FFN TP/2, got "
+                    f"intermediate={intermediate} ffn_tp={self.ffn_tp_size}"
+                )
+            if intermediate % self.ffn_tp_size:
+                raise ValueError(
+                    "sharded K3 shared-down weight requires shared intermediate "
+                    "size divisible by FFN TP, got "
+                    f"intermediate={intermediate} ffn_tp={self.ffn_tp_size}"
+                )
+            gate_up_rows = 2 * intermediate // self.ffn_tp_size
+            down_rows = intermediate // self.ffn_tp_size
+        else:
+            gate_up_rows = 2 * intermediate
+            down_rows = intermediate
+
+        gate_up_shape = tuple(self.weights[K3W.MOE_SHARED_GATE_UP].shape)
+        down_shape = tuple(self.weights[K3W.MOE_SHARED_DOWN].shape)
+        expected_gate_up = (gate_up_rows, hidden_size)
+        expected_down = (down_rows, hidden_size)
+        if gate_up_shape != expected_gate_up or down_shape != expected_down:
+            raise ValueError(
+                "K3 shared-expert storage layout does not match "
+                "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD="
+                f"{int(self.shared_expert_weight_shard)}: gate_up={gate_up_shape} "
+                f"expected={expected_gate_up}, down={down_shape} "
+                f"expected={expected_down}"
+            )
 
     def _shared_expert_forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         shared_gate_up_weight = self.weights[K3W.MOE_SHARED_GATE_UP]
@@ -503,27 +559,8 @@ class KimiK3LatentMoE(nn.Module):
             routing_weights,
         )
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        *,
-        valid_token_count: Optional[int] = None,
-    ) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         expert_ids, routing_weights = self._route(hidden_states)
-        if valid_token_count is not None:
-            if valid_token_count < 0 or valid_token_count > hidden_states.shape[0]:
-                raise ValueError(
-                    "valid_token_count is outside the local token shard: "
-                    f"valid={valid_token_count}, rows={hidden_states.shape[0]}"
-                )
-            if valid_token_count < hidden_states.shape[0]:
-                expert_ids = expert_ids.clone()
-                routing_weights = routing_weights.clone()
-                # DeepGEMM validates every expert id before applying its
-                # routing weight. Padding rows still need an in-range id;
-                # zero weights and the output clear below keep them inert.
-                expert_ids[valid_token_count:] = 0
-                routing_weights[valid_token_count:] = 0
         routed_input = torch.matmul(hidden_states, self.weights[K3W.MOE_ROUTED_DOWN])
         routed_output = self._mega_expert_sum(
             routed_input,
@@ -534,11 +571,7 @@ class KimiK3LatentMoE(nn.Module):
             routed_output = self.routed_norm(routed_output.contiguous())
         routed_output = torch.matmul(routed_output, self.weights[K3W.MOE_ROUTED_UP])
         shared_output = self._shared_expert_forward(hidden_states)
-        output = routed_output + shared_output
-        if valid_token_count is not None and valid_token_count < hidden_states.shape[0]:
-            output = output.clone()
-            output[valid_token_count:] = 0
-        return output
+        return routed_output + shared_output
 
 
 __all__ = [

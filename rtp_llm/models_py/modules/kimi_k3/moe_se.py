@@ -11,7 +11,7 @@ from __future__ import annotations
 import inspect
 import logging
 import os
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Dict
 
 import torch
 
@@ -349,25 +349,8 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             routing_weights,
         )
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        *,
-        valid_token_count: Optional[int] = None,
-    ) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         expert_ids, routing_weights = self._route(hidden_states)
-        if valid_token_count is not None:
-            if valid_token_count < 0 or valid_token_count > hidden_states.shape[0]:
-                raise ValueError(
-                    "valid_token_count is outside the local token shard: "
-                    f"valid={valid_token_count}, rows={hidden_states.shape[0]}"
-                )
-            if valid_token_count < hidden_states.shape[0]:
-                expert_ids = expert_ids.clone()
-                routing_weights = routing_weights.clone()
-                expert_ids[valid_token_count:] = 0
-                routing_weights[valid_token_count:] = 0
-
         routed_input = torch.matmul(
             hidden_states,
             self.weights[K3W.MOE_ROUTED_DOWN],
@@ -384,11 +367,7 @@ class KimiK3LatentMoESE(KimiK3LatentMoE):
             routed_output,
             self.weights[K3W.MOE_ROUTED_UP],
         )
-        output = routed_output + shared_output
-        if valid_token_count is not None and valid_token_count < hidden_states.shape[0]:
-            output = output.clone()
-            output[valid_token_count:] = 0
-        return output
+        return routed_output + shared_output
 
 
 __all__ = ["KimiK3LatentMoESE"]

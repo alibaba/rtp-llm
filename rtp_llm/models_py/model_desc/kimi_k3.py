@@ -32,6 +32,11 @@ from rtp_llm.models_py.distributed.collective_torch import (
     barrier,
     get_process_group,
 )
+from rtp_llm.models_py.distributed.sequence_parallel import (
+    SequenceParallelLayout,
+    sequence_parallel_layout,
+    shard_physical_tokens,
+)
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.base import RMSNorm
@@ -88,11 +93,6 @@ from rtp_llm.models_py.modules.kimi_k3.mla import KimiK3MLA
 from rtp_llm.models_py.modules.kimi_k3.moe import KimiK3LatentMoE
 from rtp_llm.models_py.modules.kimi_k3.moe_se import KimiK3LatentMoESE
 from rtp_llm.models_py.modules.kimi_k3.residual import KimiK3AttentionResidual
-from rtp_llm.models_py.modules.kimi_k3.token_parallel import (
-    K3TokenLayout,
-    make_k3_token_layout,
-    shard_k3_tokens,
-)
 from rtp_llm.models_py.modules.kimi_k3.utils import (
     collective_gemm_workspace_global_tokens,
     mask_multimodal_token_ids,
@@ -115,13 +115,67 @@ def resolve_kimi_k3_moe_strategy(moe_config: Optional[Any]) -> str:
     return strategy
 
 
+def _sequence_parallel_layout(
+    attention_inputs: PyAttentionInputs,
+    input_ids: torch.Tensor,
+    *,
+    tp_size: int,
+    tp_rank: int,
+) -> SequenceParallelLayout:
+    """Resolve the generic model-boundary layout published by PyWrappedModel."""
+
+    is_target_verify = bool(
+        getattr(attention_inputs, "is_target_verify", False)
+    )
+    if is_target_verify:
+        mode = "target_verify"
+    elif attention_inputs.is_prefill:
+        mode = "prefill"
+    else:
+        mode = "decode"
+
+    physical_tokens = int(input_ids.numel())
+    physical_requests = int(attention_inputs.input_lengths.numel())
+    logical_tokens = int(
+        getattr(attention_inputs, "logical_token_count", 0) or physical_tokens
+    )
+    logical_requests = int(
+        getattr(attention_inputs, "logical_request_count", 0)
+        or physical_requests
+    )
+    tokens_per_request = 0
+    if mode != "prefill":
+        if physical_requests <= 0 or physical_tokens % physical_requests:
+            raise ValueError(
+                f"{mode} physical tokens must be uniform by request: "
+                f"tokens={physical_tokens}, requests={physical_requests}"
+            )
+        tokens_per_request = physical_tokens // physical_requests
+
+    return sequence_parallel_layout(
+        mode=mode,
+        logical_requests=logical_requests,
+        physical_requests=physical_requests,
+        tokens_per_request=tokens_per_request,
+        logical_tokens=logical_tokens,
+        physical_tokens=physical_tokens,
+        world_size=tp_size,
+        rank=tp_rank,
+        graph_batch_size=(
+            physical_requests
+            if bool(getattr(attention_inputs, "is_cuda_graph", False))
+            else 0
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class KimiK3DecoderMetadata:
     """Request-scoped execution state shared by every decoder layer."""
 
     cu_seqlens: torch.Tensor
     mode: KDAExecutionMode
-    token_layout: K3TokenLayout
+    token_layout: SequenceParallelLayout
     kda_prefill_metadata: Optional[KimiKDAPrefillMetadata] = None
     kda_current_state_registry: Optional[KimiKDACurrentStateRegistry] = None
 
@@ -255,8 +309,6 @@ class KimiK3DecoderLayer(nn.Module):
         cu_seqlens = attn_meta.cu_seqlens
         mode = attn_meta.mode
         token_layout = attn_meta.token_layout
-        logical_tokens = token_layout.logical_tokens
-        local_valid_tokens: Optional[int] = token_layout.local_valid_tokens
         prefix_sum: Optional[torch.Tensor] = hidden_states
         expected_previous_blocks = (
             self.layer_idx + self.attn_res_block_size - 1
@@ -292,7 +344,6 @@ class KimiK3DecoderLayer(nn.Module):
                 mode=mode,
                 kv_cache=kv_cache,
                 attention_inputs=attention_inputs,
-                logical_tokens=logical_tokens,
                 prefill_metadata=attn_meta.kda_prefill_metadata,
                 current_state_registry=attn_meta.kda_current_state_registry,
             )
@@ -300,7 +351,6 @@ class KimiK3DecoderLayer(nn.Module):
             attention_output = self.self_attn(
                 attention_input,
                 fmha_impl,
-                logical_tokens=logical_tokens,
                 kv_cache=kv_cache,
                 attention_inputs=attention_inputs,
             )
@@ -319,16 +369,15 @@ class KimiK3DecoderLayer(nn.Module):
             delta=attention_delta,
             num_blocks=active_blocks,
         )
-        mlp_output = self.mlp(
-            normalized_mlp_input,
-            valid_token_count=local_valid_tokens,
-        )
+        mlp_output = self.mlp(normalized_mlp_input)
         output = prefix_sum + mlp_output
         return KimiK3DecoderOutput(output, block_residual)
 
 
 class KimiK3Model(GptModelBase):
     """Text decoder body consumed by RTP's Python model executor."""
+
+    requires_sequence_parallel_padding = True
 
     def __init__(
         self,
@@ -998,10 +1047,11 @@ class KimiK3Model(GptModelBase):
         tp_size = int(self.parallelism_config.get_attn_tp_size())
         tp_rank = int(self.parallelism_config.get_attn_tp_rank())
         is_target_verify = bool(getattr(attention_inputs, "is_target_verify", False))
-        token_layout = make_k3_token_layout(
-            int(input_ids.numel()),
-            tp_size,
-            tp_rank,
+        token_layout = _sequence_parallel_layout(
+            attention_inputs,
+            input_ids,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
         )
         cu_seqlens = resolve_cu_seqlens(attention_inputs, input_ids)
 
@@ -1014,7 +1064,7 @@ class KimiK3Model(GptModelBase):
             if attention_inputs.is_prefill and not is_target_verify
             else "decode"
         )
-        hidden_states = shard_k3_tokens(
+        hidden_states = shard_physical_tokens(
             self._embed(input_ids, inputs.multimodal_inputs),
             token_layout,
         )

@@ -93,7 +93,6 @@ class KimiK3MLA(MlaAttention):
         # the framework kernel.
         self.q_a_layernorm = RMSNorm(self._q_a_norm, _MLA_LATENT_NORM_EPS)
         self.kv_a_layernorm = RMSNorm(self._kv_a_norm, _MLA_LATENT_NORM_EPS)
-        self._logical_tokens_for_forward = 0
 
     def _project_qkv_a_input(
         self, hidden_states: torch.Tensor
@@ -101,7 +100,6 @@ class KimiK3MLA(MlaAttention):
         packed = all_gather_gemm(
             hidden_states,
             [self._packed_qkv_gate_w],
-            logical_m=self._logical_tokens_for_forward,
         )[0]
         return torch.split(
             packed,
@@ -142,17 +140,12 @@ class KimiK3MLA(MlaAttention):
         self,
         hidden_states: torch.Tensor,
         fmha_impl: Any,
-        logical_tokens: int,
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
     ) -> torch.Tensor:
         if not hidden_states.is_cuda:
             raise RuntimeError("Kimi K3 MLA requires CUDA")
-        self._logical_tokens_for_forward = logical_tokens
-        try:
-            return super().forward(hidden_states, fmha_impl, kv_cache)
-        finally:
-            self._logical_tokens_for_forward = 0
+        return super().forward(hidden_states, fmha_impl, kv_cache)
 
 
 __all__ = [

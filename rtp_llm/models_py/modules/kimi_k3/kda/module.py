@@ -128,8 +128,6 @@ class KimiK3KDA(nn.Module):
     def _project_fused_kda_inputs(
         self,
         hidden_states: torch.Tensor,
-        *,
-        logical_tokens: int,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -144,7 +142,6 @@ class KimiK3KDA(nn.Module):
         projected_fused = all_gather_gemm(
             hidden_states,
             [self.kda_fused_w],
-            logical_m=logical_tokens,
         )[0]
         (
             q_projected,
@@ -233,7 +230,6 @@ class KimiK3KDA(nn.Module):
         cu_seqlens: torch.Tensor,
         *,
         mode: KDAExecutionMode,
-        logical_tokens: int,
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         prefill_metadata: Optional[KimiKDAPrefillMetadata] = None,
@@ -253,7 +249,6 @@ class KimiK3KDA(nn.Module):
             output_gate_projected,
         ) = self._project_fused_kda_inputs(
             hidden_states,
-            logical_tokens=logical_tokens,
         )
         token_count = q_projected.shape[0]
         output_gate = output_gate_projected.reshape(

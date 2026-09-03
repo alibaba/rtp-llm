@@ -187,6 +187,25 @@ class MlaFlashInferImplBase(MlaImplBase):
             self.seq_size_per_block,
             forbid_realloc,
         )
+        # Sequence-parallel padding appends complete dummy requests at the
+        # model boundary. Keep their MLA reads on reserved block 0, but make
+        # cache writes explicit no-ops instead of racing on the same slots.
+        logical_tokens = int(getattr(attn_inputs, "logical_token_count", 0))
+        physical_tokens = int(getattr(attn_inputs, "physical_token_count", 0))
+        slot_mapping = getattr(self.fmha_params, "slot_mapping", None)
+        if (
+            slot_mapping is not None
+            and logical_tokens > 0
+            and physical_tokens > logical_tokens
+        ):
+            if int(slot_mapping.numel()) != physical_tokens:
+                raise RuntimeError(
+                    "MLA slot mapping does not match the published physical token layout: "
+                    f"slots={slot_mapping.numel()} physical={physical_tokens}"
+                )
+            slot_mapping.narrow(
+                0, logical_tokens, physical_tokens - logical_tokens
+            ).fill_(-1)
         self.fmha_impl.plan(self.fmha_params)
 
     def _device_slot_mapping(self) -> Optional[torch.Tensor]:

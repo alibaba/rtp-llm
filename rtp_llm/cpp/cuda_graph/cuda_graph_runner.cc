@@ -10,6 +10,7 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #if USING_CUDA
 #include "rtp_llm/models_py/bindings/cuda/kernels/cuda_graph_prepare.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/attention_input_metadata.h"
 #endif
 using namespace torch_ext;
 namespace rtp_llm {
@@ -260,6 +261,27 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
                            py_model_inputs_.input_hiddens,
                            inputs.input_hiddens.numel() * inputs.input_hiddens.element_size());
     }
+#if USING_CUDA
+    if (!is_prefill_cuda_graph_mode_ && py_model_inputs_.input_hiddens.defined()) {
+        const int64_t physical_tokens = state.current_real_graph_bs * num_tokens_per_bs_;
+        const int64_t logical_tokens = inputs.input_hiddens.defined() && inputs.input_hiddens.dim() > 0 ?
+                                           inputs.input_hiddens.size(0) :
+                                           0;
+        if (logical_tokens < physical_tokens) {
+            const int64_t row_bytes = py_model_inputs_.input_hiddens.stride(0)
+                                      * py_model_inputs_.input_hiddens.element_size();
+            auto* tail = static_cast<char*>(py_model_inputs_.input_hiddens.data_ptr())
+                         + logical_tokens * row_bytes;
+            const auto error = cudaMemsetAsync(tail,
+                                               0,
+                                               (physical_tokens - logical_tokens) * row_bytes,
+                                               cuda_graph::graphGetCurrentStream().stream());
+            RTP_LLM_CHECK_WITH_INFO(error == cudaSuccess,
+                                    "failed to clear CUDA graph dummy hidden rows: %s",
+                                    cudaGetErrorString(error));
+        }
+    }
+#endif
 }
 
 void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
@@ -280,6 +302,17 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
     auto& py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
     auto  attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
+    py_model_inputs_.attention_inputs.logical_request_count = state.current_batch_size;
+    py_model_inputs_.attention_inputs.logical_token_count =
+        is_prefill_cuda_graph_mode_ ? state.current_seq_len : state.seq_len_sum;
+    if (is_prefill_cuda_graph_mode_) {
+        py_model_inputs_.attention_inputs.physical_request_count = state.current_batch_size;
+        py_model_inputs_.attention_inputs.physical_token_count = state.current_real_graph_seq_len;
+    } else {
+        py_model_inputs_.attention_inputs.physical_request_count = state.current_real_graph_bs;
+        py_model_inputs_.attention_inputs.physical_token_count =
+            state.current_real_graph_bs * num_tokens_per_bs_;
+    }
 
     // Per-launch capacity contract: see fuse_copy_util.h sizing rationale.
     // Worst case here is ~8 contiguous + (1 + group_count) strided copies,
@@ -333,8 +366,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                           state.current_batch_size + 1,
                                           max_bs_ + 1,
                                           last_valid);
-        } else if (!is_target_verify_ && state.current_batch_size < state.current_real_graph_bs) {
-            // Decode may replay the next larger captured graph key. Keep its
+        } else if (state.current_batch_size < state.current_real_graph_bs) {
+            // Decode-like modes may replay the next larger captured graph key. Keep their
             // padding rows aligned with the host planner: sequence_lengths is
             // pre-append (0 for a dummy row), while plus_1 is post-append (1).
             addCudaGraphPrepareFillRegion(fill_params,
@@ -347,6 +380,21 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                           state.current_batch_size,
                                           state.current_real_graph_bs,
                                           1);
+            if (is_target_verify_) {
+                addCudaGraphPrepareFillRegion(fill_params,
+                                              py_model_inputs_.attention_inputs.prefix_lengths,
+                                              state.current_batch_size,
+                                              state.current_real_graph_bs,
+                                              0);
+            }
+        }
+        if (!is_prefill_cuda_graph_mode_) {
+            const int64_t physical_tokens = state.current_real_graph_bs * num_tokens_per_bs_;
+            addCudaGraphPrepareFillRegion(fill_params,
+                                          py_model_inputs_.input_ids,
+                                          state.seq_len_sum,
+                                          physical_tokens,
+                                          0);
         }
         invokeCudaGraphPrepareFill(fill_params, cuda_graph::graphGetCurrentStream().stream());
     }
@@ -446,6 +494,21 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(fused_d2d_copy)");
         launchFusedD2DCopies(d2d_copies, strided_d2d_copies);
     }
+#if USING_CUDA
+    if (is_target_verify_) {
+        // Target Verify pads complete q_len-wide requests. Rebuild the
+        // cumulative query/KV metadata after the real rows are copied and
+        // dummy prefixes are reset to zero; this keeps dummy attention on
+        // block 0 without inheriting the capture-time maximum prefix.
+        invokeBuildAttentionInputMetadata(
+            py_model_inputs_.attention_inputs.input_lengths,
+            py_model_inputs_.attention_inputs.prefix_lengths,
+            py_model_inputs_.attention_inputs.cu_seqlens,
+            py_model_inputs_.attention_inputs.cu_kv_seqlens,
+            py_model_inputs_.attention_inputs.padding_offset,
+            cuda_graph::graphGetCurrentStream().stream());
+    }
+#endif
 
     // NOTE: we do H2H after D2D copies to let GPU finish the D2D copies as soon as possible,
     // so that the GPU can start the kernel launch as soon as possible.
@@ -485,13 +548,18 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             optimizedCopyAsync(inputs.attention_inputs.sequence_lengths_host,
                                py_model_inputs_.attention_inputs.sequence_lengths_host,
                                state.current_batch_size * sizeof(int));
-            if (!is_prefill_cuda_graph_mode_ && !is_target_verify_
-                && state.current_batch_size < state.current_real_graph_bs) {
+            if (!is_prefill_cuda_graph_mode_ && state.current_batch_size < state.current_real_graph_bs) {
                 fillHostInt32(py_model_inputs_.attention_inputs.sequence_lengths_host,
                               state.current_batch_size,
                               state.current_real_graph_bs,
                               0);
             }
+        }
+        if (is_target_verify_ && state.current_batch_size < state.current_real_graph_bs) {
+            fillHostInt32(py_model_inputs_.attention_inputs.prefix_lengths_host,
+                          state.current_batch_size,
+                          state.current_real_graph_bs,
+                          0);
         }
 
         if (!is_prefill_cuda_graph_mode_) {
@@ -760,6 +828,13 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.is_mtp_draft_update = is_mtp_draft_update_;
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
     inputs.attention_inputs.total_tokens     = max_bs * num_tokens_per_bs;
+    // The captured model always executes the complete physical bucket. The
+    // runner retains the replay's logical batch size separately and trims the
+    // model output after replay.
+    inputs.attention_inputs.logical_request_count  = max_bs;
+    inputs.attention_inputs.physical_request_count = max_bs;
+    inputs.attention_inputs.logical_token_count    = max_bs * num_tokens_per_bs;
+    inputs.attention_inputs.physical_token_count   = max_bs * num_tokens_per_bs;
 
     // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
     inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
@@ -1114,6 +1189,10 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     inputs.attention_inputs.is_mtp_draft_update = is_mtp_draft_update_;
     inputs.attention_inputs.is_cuda_graph    = true;
     inputs.attention_inputs.total_tokens     = seq_len_or_tokens;
+    inputs.attention_inputs.logical_request_count  = batch_size;
+    inputs.attention_inputs.physical_request_count = batch_size;
+    inputs.attention_inputs.logical_token_count    = seq_len_or_tokens;
+    inputs.attention_inputs.physical_token_count   = seq_len_or_tokens;
     // Draft prefill cudagraph mode (num_tokens_per_bs_ > 1 and
     // is_prefill_cuda_graph_mode_) must keep input_ids / input_hiddens at
     // full capacity (max_bs_ * num_tokens_per_bs_).  The downstream Python

@@ -385,6 +385,12 @@ struct PyAttentionInputs {
     torch::Tensor decode_cu_seqlens_host;
     int           context_total_kv_length = 0;
     int           total_tokens            = 0;
+    // Sequence-parallel model-boundary layout. Zero means legacy callers did
+    // not publish an explicit logical/physical split.
+    int logical_request_count  = 0;
+    int physical_request_count = 0;
+    int logical_token_count    = 0;
+    int physical_token_count   = 0;
     torch::Tensor padding_offset;
     torch::Tensor combo_position_ids;
 

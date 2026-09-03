@@ -1,4 +1,3 @@
-from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import patch
 
@@ -28,49 +27,32 @@ class KimiK3KDATargetVerifyTest(TestCase):
         }
         return module
 
-    def test_decode_sequence_parallel_shards_replicated_projection(self) -> None:
+    def test_output_projection_always_uses_reduce_scatter(self) -> None:
         module = self._projection_module()
-        output = torch.arange(4, dtype=torch.float32).reshape(1, 2, 1, 2)
+        output = torch.arange(16, dtype=torch.float32).reshape(1, 8, 1, 2)
         output_gate = torch.zeros_like(output)
+        expected = torch.arange(2, dtype=torch.float32).reshape(1, 2)
 
-        with patch.object(
-            kda_module,
-            "all_reduce",
-            side_effect=lambda tensor, *, group: tensor,
-        ) as all_reduce:
+        process_group = object()
+        with (
+            patch.object(kda_module, "get_process_group", return_value=process_group),
+            patch.object(
+                kda_module,
+                "gemm_reduce_scatter",
+                return_value=expected,
+            ) as reduce_scatter,
+        ):
             projected = module._project_output(
                 output,
                 output_gate,
-                is_target_verify=False,
-                sequence_parallel=True,
-                hidden_states=SimpleNamespace(is_cuda=True),
-                mode="decode",
             )
 
-        self.assertEqual(tuple(projected.shape), (1, 2))
-        all_reduce.assert_called_once()
-
-    def test_target_verify_keeps_replicated_projection(self) -> None:
-        module = self._projection_module()
-        output = torch.arange(4, dtype=torch.float32).reshape(1, 2, 1, 2)
-        output_gate = torch.zeros_like(output)
-
-        with patch.object(
-            kda_module,
-            "all_reduce",
-            side_effect=lambda tensor, *, group: tensor,
-        ) as all_reduce:
-            projected = module._project_output(
-                output,
-                output_gate,
-                is_target_verify=True,
-                sequence_parallel=True,
-                hidden_states=SimpleNamespace(is_cuda=True),
-                mode="decode",
-            )
-
-        self.assertEqual(tuple(projected.shape), (2, 2))
-        all_reduce.assert_called_once()
+        self.assertIs(projected, expected)
+        reduce_scatter.assert_called_once()
+        projection_input, weight, _ = reduce_scatter.call_args.args
+        self.assertEqual(tuple(projection_input.shape), (8, 2))
+        self.assertIs(weight, module.weights[W.linear_attn_out_w])
+        self.assertIs(reduce_scatter.call_args.args[2], process_group)
 
     def test_target_verify_dispatches_one_fused_conv_and_recurrence(self) -> None:
         batch = 2
