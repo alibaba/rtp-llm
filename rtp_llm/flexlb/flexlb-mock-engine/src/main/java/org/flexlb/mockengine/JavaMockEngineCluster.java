@@ -639,13 +639,19 @@ public final class JavaMockEngineCluster {
         // the LRU on completion, returned to free on cancel). Occupied tokens
         // are derived from the pool — never tracked as an independent counter.
         private final Map<Long, MockLruBlockCache.BlockLease> activeBlockLeases = new ConcurrentHashMap<>();
-        /** Decode requests that ran un-pooled because admission/growth failed (overflow observability). */
+        /** Decode-side KV admission/growth failures (LACK_MEM, production-aligned
+         *  20260903): every bump is a REQUEST TERMINAL FAILURE — P-enqueue
+         *  decode-block reservation rejects, hand-off admission failures and
+         *  in-step growth failures (the former un-pooled degradation path is
+         *  retired). Distinct from prefillLackMemRejects: the reservation-reject
+         *  surface is a 602 in the P-side ack too, but the counter lives on the
+         *  DECODE engine whose pool ran dry (D-side rejection accounting). */
         private final LongAdder kvAdmissionFails = new LongAdder();
         /** Prefill requests synchronously rejected with LACK_MEM 602 (the
          *  enqueue-batch Phase-1.5 gate + the direct generate_stream gate —
-         *  distinct from kvAdmissionFails, which counts DECODE degradations:
-         *  prefill rejects, decode degrades). /metrics carries it as
-         *  mock_engine_lack_mem_rejects_total. */
+         *  distinct from kvAdmissionFails, which counts DECODE-side terminal
+         *  KV failures: prefill rejects, decode terminates). /metrics carries
+         *  it as mock_engine_lack_mem_rejects_total. */
         private final LongAdder prefillLackMemRejects = new LongAdder();
         /** Decode prefix-reuse blocks accumulated (KV v2 fix #5): every
          *  acquireWithReuse hit key — the net-demand deduction the decode
@@ -808,6 +814,17 @@ public final class JavaMockEngineCluster {
 
         /** rid -> insertion time (System.nanoTime); consumed by completion callbacks. */
         private final Map<Long, Long> cancelledRequests = new ConcurrentHashMap<>();
+        /** Decode-side KV reservation ownership (P-enqueue pre-alignment,
+         *  20260903): on THIS prefill engine, rid -> the DECODE engine whose
+         *  pool already holds the request's decode block lease, provisioned at
+         *  EnqueueBatch Phase 1 (the mock counterpart of the production prepare
+         *  stage sending the ALLOCATE RPC to the FlexLB-selected D while the
+         *  prefill itself is still executing). The entry is removed when the
+         *  reservation is CONSUMED by startDecode (the lease becomes the
+         *  running stream's lease, owned by the decode lifecycle) or RELEASED
+         *  by cancel / prefill-completion alreadyCancelled / a rejected
+         *  hand-off. Absent entry = no live reservation (idempotent release). */
+        private final Map<Long, FastRpcService> decodeReservationOwners = new ConcurrentHashMap<>();
 
         private volatile FaultInjectionConfig faultConfig = FaultInjectionConfig.builder().build();
         private final AtomicInteger enqueueCount = new AtomicInteger();
@@ -1022,6 +1039,47 @@ public final class JavaMockEngineCluster {
                                             .build());
                             requestStates.put(requestId, "rejected");
                             continue;
+                        }
+                        // Phase 1.6 (P-enqueue decode-KV pre-alignment, 20260903):
+                        // production's prepare stage sends the ALLOCATE RPC to
+                        // the FlexLB-selected decode engine AT ENQUEUE TIME, so
+                        // the D pool is already reserved while the prefill
+                        // itself executes. Reserve the request's decode blocks
+                        // (net-demand caliber: ceil(il/spb) − own-LRU hits) on
+                        // the target D located from role_addrs — the same
+                        // routing source startDecode uses at hand-off. A
+                        // reservation reject is the ALLOCATE-rejection surface:
+                        // a request-level synchronous 602 in THIS ack (message
+                        // marks it decode-side), with the P lease released and
+                        // zero residue. The D-side failure is counted on the
+                        // DECODE engine (kvAdmissionFails — D-side rejection
+                        // accounting), never in prefillLackMemRejects (that
+                        // counter stays the P-POOL 602 surface).
+                        // D not resolvable from role_addrs (single-engine /
+                        // no DECODE addr / D == self): no reservation — the
+                        // hand-off semantics are unchanged for such topologies.
+                        FastRpcService decodeEngine = findDecodeEngine(input.getInput());
+                        if (decodeEngine != null
+                                && !decodeEngine.reserveDecodeLease(requestId, shape)) {
+                            releaseBlockLease(requestId);
+                            int decodeNeedBlocks =
+                                    (shape.inputLen() + seqSizePerBlock - 1) / seqSizePerBlock;
+                            String message = String.format(
+                                    "LACK_MEM: decode-side KV allocation rejected by D engine port=%d "
+                                            + "(need=%d blocks, avail=%d tokens, spb=%d)",
+                                    decodeEngine.getGrpcPort(), decodeNeedBlocks,
+                                    decodeEngine.getAvailableKvTokens(), seqSizePerBlock);
+                            response.addErrorsBuilder()
+                                    .setRequestId(requestId)
+                                    .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                                            .setErrorCode(LACK_MEM_ERROR_CODE)
+                                            .setErrorMessage(message)
+                                            .build());
+                            requestStates.put(requestId, "rejected");
+                            continue;
+                        }
+                        if (decodeEngine != null) {
+                            decodeReservationOwners.put(requestId, decodeEngine);
                         }
                         shapes.add(shape);
                         responseQueues.computeIfAbsent(requestId, k -> new LinkedBlockingQueue<>());
@@ -1383,13 +1441,39 @@ public final class JavaMockEngineCluster {
                             needBlocks(shape), cache.availableBlocks(), seqSizePerBlock)));
                     return;
                 }
+                // P-enqueue decode-KV pre-alignment (direct path, same as the
+                // EnqueueBatch Phase 1.6 reservation): reserve decode blocks on
+                // the role_addrs target D before this prefill starts executing.
+                // Reservation reject = the ALLOCATE-rejection surface: the
+                // stream fails synchronously (LACK_MEM 602 semantics, message
+                // marked decode-side), the P lease is released, no residue.
+                FastRpcService decodeEngine = findDecodeEngine(request);
+                if (decodeEngine != null
+                        && !decodeEngine.reserveDecodeLease(requestId, shape)) {
+                    releaseBlockLease(requestId);
+                    responseQueues.remove(requestId);
+                    requestStates.put(requestId, "rejected");
+                    int decodeNeedBlocks =
+                            (shape.inputLen() + seqSizePerBlock - 1) / seqSizePerBlock;
+                    observer.onError(new RuntimeException(String.format(
+                            "LACK_MEM: decode-side KV allocation rejected by D engine port=%d "
+                                    + "(need=%d blocks, avail=%d tokens, spb=%d)",
+                            decodeEngine.getGrpcPort(), decodeNeedBlocks,
+                            decodeEngine.getAvailableKvTokens(), seqSizePerBlock)));
+                    return;
+                }
+                if (decodeEngine != null) {
+                    decodeReservationOwners.put(requestId, decodeEngine);
+                }
                 if (!admitDirectPrefill(shape)) {
                     // Backpressure: direct waiting-queue cap hit — reject so the
                     // caller (client/master) perceives prefill overload. Clean up
                     // the per-request state set up above; the cap check rejects
                     // before claiming any counter. The lease provisioned above
-                    // returns to the pool too.
+                    // returns to the pool too — and so does the decode-side
+                    // reservation made just above (release loop closure).
                     releaseBlockLease(requestId);
+                    releaseReservedDecode(requestId);
                     responseQueues.remove(requestId);
                     requestStates.put(requestId, "rejected");
                     observer.onError(new RuntimeException(String.format(
@@ -1667,13 +1751,31 @@ public final class JavaMockEngineCluster {
                             decodeRunning.remove(requestId);
                             topUpDecodeRunningLocked();
                             scheduleDecodeStepLocked();
-                        } else if (performance.reportQueuedAsKvAllocated()) {
-                            // Opt-in KV fidelity (P2-5): the queued request's block
-                            // lease was claimed at enqueue — release it here.
-                            // Default OFF queued entries never claimed a lease;
-                            // nothing to release.
+                        } else {
+                            // Queued at cancel time. Two lease sources must both
+                            // be covered: the opt-in accepted-layer mode claims
+                            // its lease at park time (P2-5), and — regardless of
+                            // the mode — a P-enqueue decode-KV reservation
+                            // (20260903) may already hold the lease in
+                            // activeBlockLeases, waiting for run-start adoption
+                            // (the reservation survives the park because
+                            // startDecode consumed only the P-side ownership
+                            // bookkeeping, not the D-side lease).
+                            // releaseBlockLease is idempotent (no lease = no-op),
+                            // so release unconditionally: a queued request's
+                            // lease, whatever provisioned it, must never survive
+                            // the cancel (drain-time held-blocks leak).
                             releaseBlockLease(requestId);
                         }
+                    } else {
+                        // P-enqueue decode-KV pre-alignment (20260903): a cancel
+                        // arriving BEFORE this engine accepted the request can
+                        // still hold a reservation lease provisioned by the
+                        // upstream prefill (the hand-off never ran, so no
+                        // runningTasks entry exists). Release it here — the
+                        // queued-vs-running discrimination above only covers
+                        // accepted requests. Idempotent: no lease = no-op.
+                        releaseBlockLease(requestId);
                     }
                 }
             } else {
@@ -1690,6 +1792,12 @@ public final class JavaMockEngineCluster {
                     cancelledPhase = removed.getPhase();
                     pendingRequests.decrementAndGet();
                     releaseBlockLease(requestId);
+                    // P-enqueue decode-KV pre-alignment (20260903): a prefill
+                    // member cancelled mid-prefill still holds its D-side
+                    // decode reservation — release it in the same atomic
+                    // section (cancel-loop closure; the completion callback's
+                    // alreadyCancelled release is idempotent against this).
+                    releaseReservedDecode(requestId);
                 }
             }
             requestStates.put(requestId, "cancelled");
@@ -2398,6 +2506,11 @@ public final class JavaMockEngineCluster {
                         // Cancelled member: blocks return to the pool directly
                         // (no LRU handover — a cancelled request leaves no cache).
                         releaseBlockLease(requestId);
+                        // P-enqueue decode-KV pre-alignment (20260903): the
+                        // cancelled member's D-side reservation goes back too
+                        // (idempotent against the cancel branch's release —
+                        // the reservation-owner map remove wins exactly once).
+                        releaseReservedDecode(requestId);
                     } else if (admitBlockLease(requestId, shape)) {
                         cacheVersion.incrementAndGet();
                     }
@@ -2489,10 +2602,16 @@ public final class JavaMockEngineCluster {
             }
         }
 
-        private boolean startDecode(MockPerformanceModel.RequestShape shape, long batchId) {
-            EngineRpcService.GenerateInputPB input = shape.input();
-            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
-                    responseQueues.get(input.getRequestId());
+        /**
+         * Locate the DECODE engine a request's role_addrs route to (the same
+         * routing source the EnqueueBatch Phase-1.6 reservation uses — one
+         * resolver, one answer, so the reserved D is by construction the D the
+         * hand-off targets). Returns null when no DECODE addr is present, the
+         * addr's service is unknown to the cluster, or it resolves to THIS
+         * engine (P/D co-located topologies route decode in-process and get no
+         * cross-engine reservation).
+         */
+        private FastRpcService findDecodeEngine(EngineRpcService.GenerateInputPB input) {
             for (EngineRpcService.RoleAddrPB addr : input.getGenerateConfig().getRoleAddrsList()) {
                 if (RoleTypeProtoConverter.fromRoleAddr(addr)
                         != RoleType.DECODE) {
@@ -2500,20 +2619,60 @@ public final class JavaMockEngineCluster {
                 }
                 FastRpcService decode = services.get(addr.getGrpcPort());
                 if (decode != null && decode.grpcPort != grpcPort) {
-                    // Propagate the decode admission result: true = admitted/queued,
-                    // false = backpressure (decode pending queue full). On false the
-                    // caller treats decodeStarted=false and delivers the finished
-                    // output from the prefill side (degraded but no request lost).
-                    registerDecodeOwnership(input.getRequestId(), decode);
-                    boolean accepted = decode.scheduleDecodeCompletion(shape, batchId, queue);
-                    if (!accepted) {
-                        clearDecodeOwnership(input.getRequestId(), decode);
-                    }
-                    return accepted;
+                    return decode;
                 }
+                return null;
+            }
+            return null;
+        }
+
+        /**
+         * Release this engine's bookkeeping for a request's decode-side KV
+         * reservation, returning the reserved blocks to the owning D pool
+         * (idempotent: no recorded reservation = no-op). Called from the
+         * prefill cancel branch, the completion callback's alreadyCancelled
+         * branch, a rejected hand-off, and the direct-path backpressure
+         * reject — the full release-loop closure for pre-reservations that
+         * never became running streams.
+         */
+        private void releaseReservedDecode(long requestId) {
+            FastRpcService decode = decodeReservationOwners.remove(requestId);
+            if (decode != null) {
+                decode.releaseBlockLease(requestId);
+            }
+        }
+
+        private boolean startDecode(MockPerformanceModel.RequestShape shape, long batchId) {
+            EngineRpcService.GenerateInputPB input = shape.input();
+            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
+                    responseQueues.get(input.getRequestId());
+            FastRpcService decode = findDecodeEngine(input);
+            if (decode == null) {
+                // No routable decode engine — the reservation phase (if any)
+                // found no D either, so nothing to release here.
                 return false;
             }
-            return false;
+            // Propagate the decode admission result: true = admitted/queued,
+            // false = backpressure (decode pending queue full). On false the
+            // caller treats decodeStarted=false and delivers the finished
+            // output from the prefill side (degraded but no request lost);
+            // the P-enqueue reservation must be released here — the D-side
+            // lease has no lifecycle owner once the hand-off is rejected.
+            registerDecodeOwnership(input.getRequestId(), decode);
+            boolean accepted = decode.scheduleDecodeCompletion(shape, batchId, queue);
+            if (!accepted) {
+                clearDecodeOwnership(input.getRequestId(), decode);
+                releaseReservedDecode(input.getRequestId());
+            } else {
+                // Reservation consumed: the pre-allocated lease (if this
+                // request carried one) transfers into the decode lifecycle —
+                // scheduleDecodeCompletion's admission found it in
+                // activeBlockLeases and adopted it without re-charging the D
+                // pool. Drop the P-side bookkeeping; release paths from here
+                // on are the decode engine's own cancel/terminal flows.
+                decodeReservationOwners.remove(input.getRequestId());
+            }
+            return accepted;
         }
 
         /**
@@ -2583,16 +2742,34 @@ public final class JavaMockEngineCluster {
                     // KV capacity model v2: run start provisions the request's
                     // blocks from the pool (default mode counts KV at run start,
                     // the opt-in accepted-layer mode counts it at admission — both
-                    // funnel through the same lease). Admission failure degrades
-                    // to un-pooled execution (the request is NOT rejected here:
-                    // the decode engine parks/retries, never rejects) and bumps
-                    // kvAdmissionFails for overflow observability.
+                    // funnel through the same lease). Production-aligned KV
+                    // failure semantics (20260903): admission failure is a
+                    // REQUEST TERMINAL FAILURE (production first-block ALLOCATE
+                    // rejection / LACK_MEM) — the former un-pooled degradation
+                    // path is retired. kvAdmissionFails keeps counting the event
+                    // (D-side admission-rejection accounting).
                     // Fix #5: the decode engine re-matches the request's keys
                     // against its OWN LRU here — net demand
                     // ceil(il/spb) − hitBlocks, reused blocks referenced not
                     // re-allocated (production reuse_block_size semantics).
+                    // A P-enqueue reservation (if the request carried one) is
+                    // adopted here without re-charging the pool.
                     if (acquireDecodeBlockLease(requestId, shape) == null) {
                         kvAdmissionFails.increment();
+                        // Roll back every claim this branch made (slot,
+                        // pendingRequests, the runningTasks admission entry and
+                        // the P->D ownership) and publish the terminal failure.
+                        // The request IS accepted-and-terminal from the caller's
+                        // perspective: production rejects at ALLOCATE and the
+                        // master may retry — the mock terminal is final (README
+                        // documents the retry-semantics divergence).
+                        activeDecodeRequests.decrementAndGet();
+                        pendingRequests.decrementAndGet();
+                        runningTasks.remove(requestId);
+                        clearUpstreamOwnership(requestId);
+                        publishDecodeKvFailure(requestId, shape, batchId,
+                                0, responseQueue, "admission");
+                        return true;
                     }
                     // awaitsFirstStep: if a step tick is already pending (another
                     // stream is running), this stream joins MID-step and first
@@ -2623,13 +2800,23 @@ public final class JavaMockEngineCluster {
                         // Opt-in KV fidelity (P2-5): a queued request holds its
                         // KV reservation from ENQUEUE — modeled as a real block
                         // lease claimed at park time (exactly once; the drain into
-                        // a running slot must not claim it again). Failure degrades
-                        // to un-pooled (kvAdmissionFails). Default OFF queued
-                        // entries stay uncounted until run start — zero behavior
-                        // change. Fix #5: decode-side reuse deduction applies here
-                        // too (own-LRU re-match, net demand, referenced reuse).
+                        // a running slot must not claim it again). Production-
+                        // aligned failure semantics (20260903): a claim failure
+                        // here is a REQUEST TERMINAL FAILURE, same as the
+                        // immediate-admission path above (the entry claimed by
+                        // putIfAbsent is rolled back and the request never parks).
+                        // Default OFF queued entries stay uncounted until run
+                        // start — zero behavior change. Fix #5: decode-side reuse
+                        // deduction applies here too (own-LRU re-match, net
+                        // demand, referenced reuse). A P-enqueue reservation is
+                        // adopted without re-charging the pool.
                         if (acquireDecodeBlockLease(requestId, shape) == null) {
                             kvAdmissionFails.increment();
+                            runningTasks.remove(requestId);
+                            clearUpstreamOwnership(requestId);
+                            publishDecodeKvFailure(requestId, shape, batchId,
+                                    0, responseQueue, "admission");
+                            return true;
                         }
                     }
                     decodePendingQueue.addLast(new DecodePendingTask(shape, batchId, responseQueue));
@@ -2668,6 +2855,7 @@ public final class JavaMockEngineCluster {
          */
         private void runDecodeStep() {
             List<DecodeStream> finished = new ArrayList<>();
+            List<DecodeStream> kvFailed = new ArrayList<>();
             synchronized (decodeQueueLock) {
                 decodeStepScheduled = false;
                 if (shuttingDown || decodeRunning.isEmpty()) {
@@ -2698,9 +2886,18 @@ public final class JavaMockEngineCluster {
                     // lease toward ceil((inputLen + generated)/spb) blocks — a
                     // no-op except at spb/tokensPerStep step boundaries. Runs
                     // under decodeQueueLock (lock order: queue -> cache).
-                    growDecodeLeaseLocked(stream.shape.input().getRequestId(),
+                    // Production-aligned failure semantics (20260903): a growth
+                    // failure is a REQUEST TERMINAL FAILURE (production
+                    // incrKVBlock LACK_MEM terminates the request) — the former
+                    // stall-and-continue degradation is retired.
+                    if (!growDecodeLeaseLocked(stream.shape.input().getRequestId(),
                             stream.shape.inputLen() + (int) Math.ceil(
-                                    performance.tokensPerStep() * (stream.totalSteps - stream.remainingSteps)));
+                                    performance.tokensPerStep() * (stream.totalSteps - stream.remainingSteps)))) {
+                        kvAdmissionFails.increment();
+                        it.remove();
+                        kvFailed.add(stream);
+                        continue;
+                    }
                     if (stream.remainingSteps <= 0) {
                         it.remove();
                         finished.add(stream);
@@ -2709,12 +2906,26 @@ public final class JavaMockEngineCluster {
                 for (DecodeStream stream : finished) {
                     claimDecodeTerminalLocked(stream);
                 }
+                // KV-failure streams claim the SAME terminal machinery (slot /
+                // pendingRequests / runningTasks / ownership) as exhausted
+                // streams — only the post-lock publish differs.
+                for (DecodeStream stream : kvFailed) {
+                    claimDecodeTerminalLocked(stream);
+                }
                 topUpDecodeRunningLocked();
                 scheduleDecodeStepLocked();
             }
             for (DecodeStream stream : finished) {
                 if (stream.owned) {
                     publishDecodeCompletion(stream);
+                }
+            }
+            for (DecodeStream stream : kvFailed) {
+                if (stream.owned) {
+                    publishDecodeKvFailure(
+                            stream.shape.input().getRequestId(), stream.shape,
+                            stream.batchId, stream.terminalBatchSize,
+                            stream.responseQueue, "growth");
                 }
             }
         }
@@ -2765,12 +2976,27 @@ public final class JavaMockEngineCluster {
                 // Run-start bookkeeping, mirroring the immediate-admission path:
                 // default mode provisions blocks at run start; the opt-in
                 // accepted-layer mode claimed them at enqueue and only needs the
-                // phase flip. A queued request whose opt-in claim degraded takes
-                // its second chance here. Fix #5: decode-side reuse deduction
-                // (own-LRU re-match at run start, net demand, referenced reuse).
+                // phase flip. A P-enqueue reservation is adopted without
+                // re-charging the pool (the outer get() guard skips the claim).
+                // Production-aligned failure semantics (20260903): a run-start
+                // admission failure is a REQUEST TERMINAL FAILURE — the former
+                // second-chance un-pooled degradation is retired. Fix #5:
+                // decode-side reuse deduction (own-LRU re-match at run start,
+                // net demand, referenced reuse).
                 if (activeBlockLeases.get(candidateId) == null) {
                     if (acquireDecodeBlockLease(candidateId, candidate.shape()) == null) {
                         kvAdmissionFails.increment();
+                        // Roll back the slot claim, drop the admission entry and
+                        // the enqueue-time pendingRequests claim, release the
+                        // P->D ownership, and publish the terminal failure. The
+                        // freed slot loops to the NEXT queued candidate.
+                        activeDecodeRequests.decrementAndGet();
+                        pendingRequests.decrementAndGet();
+                        runningTasks.remove(candidateId);
+                        clearUpstreamOwnership(candidateId);
+                        publishDecodeKvFailure(candidateId, candidate.shape(),
+                                candidate.batchId(), 0, candidate.responseQueue(), "admission");
+                        continue;
                     }
                 }
                 if (performance.reportQueuedAsKvAllocated()) {
@@ -2889,6 +3115,107 @@ public final class JavaMockEngineCluster {
             } else if (admitBlockLease(requestId, shape)) {
                 cacheVersion.incrementAndGet();
             }
+        }
+
+        /**
+         * Publish the TERMINAL FAILURE of a decode request whose KV could not
+         * be provisioned or grown (production-aligned semantics, 20260903):
+         * production decode KV failure is terminal — first-block allocation
+         * failure rejects with ALLOCATE (retryable upstream), in-step
+         * incremental failure terminates the request with LACK_MEM. The mock
+         * surfaces both stages as a terminal LACK_MEM (602) failure on the
+         * request's lifecycle:
+         * <ul>
+         *   <li>typed terminal TaskInfoPB (ErrorDetailsPB code 602, message
+         *       marks the failing stage) through the SAME completions queue
+         *       the normal completion and cancel terminals ride — the master's
+         *       reconcile sees the request finish with an error. NOTE: unlike
+         *       production (where a first-block ALLOCATE reject may be retried
+         *       via decode_retry_times), the mock terminal is FINAL — README
+         *       documents this divergence.</li>
+         *   <li>engine_events.jsonl decode_done row with cancelled=false and
+         *       an extra error_code key (602) so downstream joins can exclude
+         *       failed requests from latency calibers (aggregate skips
+         *       error-carrying rows, mirroring the cancelled skip).</li>
+         *   <li>an error frame (RpcErrorPB) on the response queue — the
+         *       prefill-side pump terminates the client stream on error
+         *       frames, same channel a cancel travels. RpcErrorPB's error
+         *       code is an enum with no LACK_MEM face, so the frame carries
+         *       UNKNOWN_ERROR + a "LACK_MEM (602)" message; the numeric 602
+         *       contract lives on the typed terminal / ack surfaces.</li>
+         *   <li>the (partial) lease, on the growth stage, returns to the pool
+         *       WITHOUT LRU handover — a failed request leaves no cache,
+         *       mirroring the cancel path.</li>
+         * </ul>
+         *
+         * <p>Safe to call while HOLDING decodeQueueLock (the admission-failure
+         * paths do): every touch below is either a different monitor
+         * (completionLock / cache / requestLifecycles) or a lock-free
+         * structure, and the standard queue -> cache order is respected.
+         *
+         * @param stage "admission" (hand-off / run-start / opt-in-enqueue claim
+         *             failure) or "growth" (in-step incrKVBlock failure)
+         */
+        private void publishDecodeKvFailure(
+                long requestId,
+                MockPerformanceModel.RequestShape shape,
+                long batchId,
+                int terminalBatchSize,
+                LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue,
+                String stage) {
+            EngineRpcService.TaskInfoPB.Builder task = EngineRpcService.TaskInfoPB.newBuilder()
+                    .setRequestId(requestId)
+                    .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
+                    .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                            .setErrorCode(LACK_MEM_ERROR_CODE)
+                            .setErrorMessage(String.format(
+                                    "decode KV %s failure: LACK_MEM (request terminated)", stage))
+                            .build())
+                    .setEndTimeMs(System.currentTimeMillis())
+                    .setDpRank(0);
+            // Same batch-identity discipline as the cancel terminals: the
+            // master's reconcile correlates the failure with the EnqueueBatch
+            // it dispatched or the inflight slot leaks.
+            long lifecycleBatchId = positiveLifecycleBatchId(requestId);
+            if (lifecycleBatchId > 0L) {
+                task.setBatchId(lifecycleBatchId);
+            }
+            publishCompletion(task.build());
+            statusVersion.incrementAndGet();
+            // engine_events.jsonl failure row (error_code key present →
+            // aggregate/canvas joins exclude it from latency calibers).
+            writeDecodeDoneEventCore(shape, batchId, terminalBatchSize, false,
+                    LACK_MEM_ERROR_CODE);
+            // Lifecycle: the failure may predate the admission-path lifecycle
+            // entry (immediate-admission failures return before
+            // recordLifecycleStart) — backfill an arrival row in that case so
+            // the "failed" terminal is observable in /requests; queued/topUp
+            // paths already hold an entry (only the terminal state is set).
+            synchronized (requestLifecycles) {
+                if (!requestLifecycles.containsKey(requestId)) {
+                    recordLifecycleStart(requestId, batchId,
+                            batchId >= 0 ? "enqueue_batch" : "generate_stream");
+                }
+            }
+            recordLifecycleEnd(requestId, "failed");
+            requestStates.put(requestId, "failed");
+            if (responseQueue != null) {
+                responseQueue.offer(EngineRpcService.GenerateOutputsPB.newBuilder()
+                        .setRequestId(requestId)
+                        .setErrorInfo(EngineRpcService.RpcErrorPB.newBuilder()
+                                .setErrorCode(EngineRpcService.ErrorCodePB.UNKNOWN_ERROR)
+                                .setErrorMessage(String.format(
+                                        "LACK_MEM (602): decode KV %s failed — request terminated",
+                                        stage))
+                                .build())
+                        .build());
+            }
+            responseQueues.remove(requestId);
+            cancelledRequests.remove(requestId);
+            // Growth failures hold a (partial) lease — return it to the pool
+            // without LRU handover (a failed request leaves no cache, same as
+            // cancel). Admission failures hold nothing: idempotent no-op.
+            releaseBlockLease(requestId);
         }
 
         /** Snapshot size of the decode pending queue (for waitingQueryLen reporting). */
@@ -3046,8 +3373,8 @@ public final class JavaMockEngineCluster {
          * gate + LRU-tail eviction coupling). On success the lease is registered in
          * {@code activeBlockLeases} so completion/cancel can hand it back.
          *
-         * @return the lease, or null = LACK_MEM (nothing claimed — callers either
-         *         reject the request or degrade with a kvAdmissionFails bump)
+         * @return the lease, or null = LACK_MEM (nothing claimed — the prefill
+         *         caller rejects the request with a synchronous 602)
          */
         private MockLruBlockCache.BlockLease acquireBlockLease(long requestId,
                                                                 MockPerformanceModel.RequestShape shape) {
@@ -3085,10 +3412,20 @@ public final class JavaMockEngineCluster {
          * boundary, diluting the deduction whenever the pool ran dry).
          *
          * @return the lease (registered in {@code activeBlockLeases}), or null
-         *         = LACK_MEM (caller degrades to un-pooled + kvAdmissionFails)
+         *         = LACK_MEM (caller terminates the request — production-
+         *         aligned semantics, 20260903)
          */
         private MockLruBlockCache.BlockLease acquireDecodeBlockLease(
                 long requestId, MockPerformanceModel.RequestShape shape) {
+            // P-enqueue decode-KV pre-alignment (20260903): a request whose
+            // decode blocks were RESERVED on this engine at prefill ENQUEUE
+            // time already holds its lease in activeBlockLeases — consume it
+            // (adoption): the pool is NOT re-charged and decodeReuseBlocks was
+            // already booked at reservation time, exactly once.
+            MockLruBlockCache.BlockLease reserved = activeBlockLeases.get(requestId);
+            if (reserved != null) {
+                return reserved;
+            }
             int totalDemand = (shape.inputLen() + seqSizePerBlock - 1) / seqSizePerBlock;
             MockLruBlockCache.BlockLease lease =
                     cache.acquireWithReuse(totalDemand, shape.blockKeys());
@@ -3101,6 +3438,36 @@ public final class JavaMockEngineCluster {
             decodeReuseBlocks.add(lease.hitKeys.size());
             activeBlockLeases.put(requestId, lease);
             return lease;
+        }
+
+        /**
+         * P-enqueue decode-KV reservation (20260903) — the mock counterpart of
+         * production's prepare-stage ALLOCATE RPC: called by an UPSTREAM
+         * PREFILL engine at EnqueueBatch Phase 1.6 (and on the direct
+         * generate_stream path) to pre-allocate this decode engine's blocks
+         * for a request while the prefill itself is still executing. The lease
+         * registers in {@code activeBlockLeases} under the request id and is
+         * consumed at hand-off (adoption in {@link #acquireDecodeBlockLease})
+         * or released through the upstream's cancel/alreadyCancelled/rejected-
+         * hand-off closure.
+         *
+         * <p>Three-state accounting while the reservation is live: net-new
+         * blocks are held (keyless, not available), reused keys are referenced
+         * (pinned, matchable, not available) — the same classification a
+         * running stream's lease gets, which is exactly the production
+         * semantics of a pre-allocated-but-not-yet-generating request.
+         *
+         * @return false = the D pool cannot serve the net demand (the caller
+         *         rejects the request with a synchronous decode-side 602);
+         *         the failure is counted HERE on the decode engine
+         *         (kvAdmissionFails — D-side admission-rejection accounting)
+         */
+        boolean reserveDecodeLease(long requestId, MockPerformanceModel.RequestShape shape) {
+            if (acquireDecodeBlockLease(requestId, shape) == null) {
+                kvAdmissionFails.increment();
+                return false;
+            }
+            return true;
         }
 
         /**
@@ -3129,21 +3496,31 @@ public final class JavaMockEngineCluster {
          * Per-step decode growth (production incrMalloc): extend the running
          * request's allocation toward ceil((inputLen+grown)/spb) blocks. Free
          * blocks first, LRU-tail eviction second; on exhaustion the growth
-         * stalls (counted in kvAdmissionFails) — the request keeps running with
-         * its current allocation rather than being aborted.
+         * FAILS (counted in kvAdmissionFails by the caller) — production-
+         * aligned semantics (20260903): the request is TERMINATED with LACK_MEM
+         * (production incrKVBlock failure aborts the stream), never left
+         * running with a stalled allocation.
+         *
+         * @return false when the pool cannot satisfy the growth (caller
+         *         terminates the request); true otherwise
          */
-        private void growDecodeLeaseLocked(long requestId, int totalTokensSoFar) {
+        private boolean growDecodeLeaseLocked(long requestId, int totalTokensSoFar) {
             MockLruBlockCache.BlockLease lease = activeBlockLeases.get(requestId);
             if (lease == null) {
-                return; // un-pooled degraded request (admission failed earlier)
+                // Defensive: with the un-pooled degradation retired every
+                // running stream holds a lease (immediate admission, top-up and
+                // reservation-consumption all provision one). A missing lease
+                // here is a bookkeeping bug — keep the stream running rather
+                // than failing it on a defensive path.
+                return true;
             }
             int targetBlocks = (totalTokensSoFar + seqSizePerBlock - 1) / seqSizePerBlock;
             while (lease.totalBlocks() < targetBlocks) {
                 if (!cache.grow(lease)) {
-                    kvAdmissionFails.increment();
-                    return;
+                    return false;
                 }
             }
+            return true;
         }
 
         /** Tokens pinned by in-flight requests: (held + referenced key blocks) x spb. */
@@ -3437,6 +3814,16 @@ public final class JavaMockEngineCluster {
             }
             downstreamDecodeOwners.clear();
             upstreamPrefillOwners.clear();
+            // P-enqueue decode-KV pre-alignment (20260903): every reservation
+            // THIS prefill placed on peer decode engines is returned before the
+            // simulated death — a real process death would strand them until
+            // the D-side TTL/restart, but the mock's crash tests keep engines
+            // serving afterwards and a stranded reservation would poison
+            // subsequent pool assertions.
+            for (Map.Entry<Long, FastRpcService> entry : decodeReservationOwners.entrySet()) {
+                entry.getValue().releaseBlockLease(entry.getKey());
+            }
+            decodeReservationOwners.clear();
             // Admission gauges: nothing is queued or running on a dead process.
             pendingRequests.set(0);
             waitingPrefillRequests.set(0);
@@ -3528,7 +3915,9 @@ public final class JavaMockEngineCluster {
         int getCacheBlocks() { return cache.totalBlocks(); }
         /** spb — the pool's token<->block conversion factor (reported as block_size). */
         int getSeqSizePerBlock() { return seqSizePerBlock; }
-        /** Count of KV admission/growth failures (LACK_MEM degradations + stalls). */
+        /** Count of decode-side KV admission/growth failures — each a request
+         *  TERMINAL LACK_MEM (reservation rejects + admission failures + growth
+         *  failures; the un-pooled degradation era is retired). */
         long getKvAdmissionFails() { return kvAdmissionFails.sum(); }
         boolean isLeakDetected() { return leakDetected.get(); }
         boolean isShuttingDown() { return shuttingDown; }
@@ -3671,11 +4060,20 @@ public final class JavaMockEngineCluster {
         }
 
         private void recordLifecycleEnd(long requestId, boolean cancelled) {
+            recordLifecycleEnd(requestId, cancelled ? "cancelled" : "completed");
+        }
+
+        /**
+         * String-state variant (20260903): decode KV terminal failures record
+         * end_state "failed" — distinct from both "completed" and "cancelled"
+         * in the /requests view; the existing boolean callers are unchanged.
+         */
+        private void recordLifecycleEnd(long requestId, String endState) {
             synchronized (requestLifecycles) {
                 Map<String, Object> lifecycle = requestLifecycles.get(requestId);
                 if (lifecycle != null && "running".equals(lifecycle.get("end_state"))) {
                     lifecycle.put("end_ms", System.currentTimeMillis());
-                    lifecycle.put("end_state", cancelled ? "cancelled" : "completed");
+                    lifecycle.put("end_state", endState);
                 }
             }
         }
@@ -3786,7 +4184,21 @@ public final class JavaMockEngineCluster {
          * only AFTER this row, on the normal path).
          */
         private void writeDecodeDoneEvent(DecodeStream stream, boolean cancelled) {
-            MockPerformanceModel.RequestShape shape = stream.shape;
+            writeDecodeDoneEventCore(stream.shape, stream.batchId,
+                    stream.terminalBatchSize, cancelled, 0L);
+        }
+
+        /**
+         * Core decode_done row writer. {@code errorCode} != 0 marks a KV
+         * terminal-failure row (production-aligned decode LACK_MEM, 20260903):
+         * the row carries an extra error_code key so downstream joins
+         * (aggregate_canvas_run.py) can exclude failed requests from latency
+         * calibers exactly like cancelled ones; normal completion rows keep
+         * the 12-key schema unchanged.
+         */
+        private void writeDecodeDoneEventCore(
+                MockPerformanceModel.RequestShape shape, long batchId,
+                int terminalBatchSize, boolean cancelled, long errorCode) {
             long requestId = shape.input().getRequestId();
             EngineEventLog log = engineEventLog;
             long arrivalMs = orZero(eventArrivalMs.remove(requestId));
@@ -3799,19 +4211,22 @@ public final class JavaMockEngineCluster {
             row.put("event", "decode_done");
             row.put("rid", requestId);
             row.put("engine_name", engineName);
-            row.put("batch_id", stream.batchId);
+            row.put("batch_id", batchId);
             row.put("engine_arrival_ms", arrivalMs);
             row.put("decode_start_ms", startMs);
             row.put("decode_done_ms", doneMs);
             // Missing start stamps (log injected mid-run) serialize as 0,
             // mirroring the prefill ttft_ms guard — never a fabricated span.
             row.put("exec_ms", startMs > 0 ? Math.max(0L, doneMs - startMs) : 0L);
-            row.put("batch_size", stream.terminalBatchSize);
+            row.put("batch_size", terminalBatchSize);
             row.put("output_len", shape.outputLen());
             MockLruBlockCache.BlockLease lease = activeBlockLeases.get(requestId);
             row.put("kv_used_tokens",
                     lease != null ? (long) lease.totalBlocks() * seqSizePerBlock : 0L);
             row.put("cancelled", cancelled);
+            if (errorCode != 0L) {
+                row.put("error_code", errorCode);
+            }
             log.write(row);
         }
 

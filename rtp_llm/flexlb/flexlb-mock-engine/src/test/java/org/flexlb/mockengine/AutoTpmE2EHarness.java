@@ -179,11 +179,18 @@ final class AutoTpmE2EHarness implements AutoCloseable {
             throw new UncheckedIOException(e);
         }
         MockPerformanceModel model = model(prefillFormulaMs, decodeStepMs);
+        // Sizable pools: master-dispatched traffic routes P->D through
+        // role_addrs, so since the P-enqueue decode-KV reservation (20260903)
+        // every in-flight request holds its D-side lease AT ENQUEUE — a
+        // 100-block pool rejects past ~95 concurrent requests on the 5%
+        // reserve watermark. These behavioral E2E tests treat KV capacity as
+        // a non-constraint (the KV-rejection surface has dedicated tests).
+        final int poolBlocks = 6144;
         for (int i = 0; i < nPrefill; i++) {
             int port = basePort + i;
             JavaMockEngineCluster.FastRpcService svc = new JavaMockEngineCluster.FastRpcService(
                     "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                    port, services, engineScheduler, model, 100,
+                    port, services, engineScheduler, model, poolBlocks,
                     new JavaMockEngineCluster.ClusterStats());
             services.put(port, svc);
             prefillEngines.add(svc);
@@ -192,7 +199,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
             int port = basePort + nPrefill + i;
             JavaMockEngineCluster.FastRpcService svc = new JavaMockEngineCluster.FastRpcService(
                     "decode", EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                    port, services, engineScheduler, model, 100,
+                    port, services, engineScheduler, model, poolBlocks,
                     new JavaMockEngineCluster.ClusterStats());
             services.put(port, svc);
             decodeEngines.add(svc);
