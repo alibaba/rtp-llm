@@ -176,6 +176,10 @@ def _prefill_cp_async_workspace_reads_enabled() -> bool:
 _CP_POST_GATHER_STREAMS: Dict[int, torch.cuda.Stream] = {}
 _CP_GATHER_STREAMS: Dict[int, torch.cuda.Stream] = {}
 _CP_STREAM_CACHE_LOCK = threading.Lock()
+# S4-t2 (Sep 3): stack the SWA-workspace host scalars into one DtoH and pass
+# host hints to the suffix builders / byte compaction (default off = the
+# per-site .item()/DtoH behavior).
+_S4_GATHER_FIX = int(os.environ.get("DSV4_S4_GATHER_FIX", "0"))
 
 
 def _cuda_device_index(device: torch.device) -> int:
@@ -223,6 +227,7 @@ def _build_suffix_pool_slot_mapping(
     entries_per_block: int,
     tokens_per_block_for_block_table: int,
     ring_entries: int,
+    max_gather_hint: Optional[int] = None,
 ) -> torch.Tensor:
     """Build request-major flat slots for a suffix gather.
 
@@ -244,7 +249,11 @@ def _build_suffix_pool_slot_mapping(
     assert int(gather_lens_l.numel()) == B
     # P1b: host-side sources take the max on the host (free) instead of
     # syncing the just-uploaded device copy (a deep-queue D2H drain).
-    if gather_lens.device.type == "cpu" and gather_lens.numel():
+    # S4-t2: a host hint from the stacked workspace sync skips the drain
+    # entirely (identical value — max over the same per-request lens).
+    if max_gather_hint is not None:
+        max_gather = int(max_gather_hint)
+    elif gather_lens.device.type == "cpu" and gather_lens.numel():
         max_gather = int(gather_lens.reshape(-1).max().item())
     else:
         max_gather = int(gather_lens_l.max().item()) if gather_lens_l.numel() else 0
@@ -293,6 +302,7 @@ def _build_suffix_cp_sliced_slot_mapping(
     tokens_per_block_for_block_table: int,
     cp_rank: int,
     cp_size: int,
+    max_gather_hint: Optional[int] = None,
 ) -> torch.Tensor:
     """Build suffix slots for CP-sliced SWA_KV local blocks.
 
@@ -311,8 +321,10 @@ def _build_suffix_cp_sliced_slot_mapping(
     gather_lens_l = gather_lens.to(device=device, dtype=torch.long).reshape(-1)
     seq_lens_l = seq_lens.to(device=device, dtype=torch.long).reshape(-1)
     # P1b: host-side sources take the max on the host (free) — see the
-    # sibling builder above.
-    if gather_lens.device.type == "cpu" and gather_lens.numel():
+    # sibling builder above. S4-t2: host hint skips the drain entirely.
+    if max_gather_hint is not None:
+        max_gather = int(max_gather_hint)
+    elif gather_lens.device.type == "cpu" and gather_lens.numel():
         max_gather = int(gather_lens.reshape(-1).max().item())
     else:
         max_gather = int(gather_lens_l.max().item()) if gather_lens_l.numel() else 0
@@ -1373,6 +1385,7 @@ class AttentionFP8(nn.Module):
         validation_site: str,
         negative_mode: str,
         gather_lens: Optional[torch.Tensor] = None,
+        gather_lens_cpu_hint: Optional[Tuple[int, ...]] = None,
     ) -> Optional[CPByteSlicedSlotCompaction]:
         from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
 
@@ -1400,6 +1413,7 @@ class AttentionFP8(nn.Module):
             validation_site=validation_site,
             negative_mode=negative_mode,
             gather_lens=gather_lens,
+            gather_lens_cpu_hint=gather_lens_cpu_hint,
         )
 
     def _pool_entries_per_block(self, attn_type: int) -> int:
@@ -4616,9 +4630,47 @@ class AttentionFP8(nn.Module):
             P_per_req = torch.clamp_max(sp_i32, win - 1)  # [B]
             gather_len_per_req = S_i32 + P_per_req  # [B]
 
-            # Single .item() sync — stack two scalars then one D2H tolist().
-            maxes = torch.stack([N_per_req.max(), gather_len_per_req.max()])
-            N_max, gather_len_max = (int(v) for v in maxes.tolist())
+            # S4-t2 (Sep 3, DSV4_S4_GATHER_FIX): ONE stacked host-scalar sync
+            # for the whole SWA workspace prepare. The raw-Q-merge gate below
+            # needs the prefix/input sums; the suffix builders need P_max
+            # (their max_gather); the byte compaction needs the per-request
+            # gather lens on the host. Stacking all of them into one D2H
+            # tolist() replaces ~5 separate pipeline drains (the 4 B DtoH
+            # class in the census). Values are identical to the per-site
+            # reads (max/sum over the same tensors) — buffers, compaction
+            # and gate decisions are unchanged.
+            prefix_src = (
+                cp_ctx_local.prefix_lengths
+                if cp_ctx_local.prefix_lengths is not None
+                else prefix_lengths
+            )
+            input_src = (
+                cp_ctx_local.input_lengths_global
+                if cp_ctx_local.input_lengths_global is not None
+                else input_lengths
+            )
+            if _S4_GATHER_FIX:
+                host_scalars = torch.cat(
+                    [
+                        N_per_req.max().view(1),
+                        gather_len_per_req.max().view(1),
+                        P_per_req.max().view(1),
+                        prefix_src.to(torch.long).sum().view(1),
+                        input_src.to(torch.long).sum().view(1),
+                        P_per_req.to(torch.long),
+                    ]
+                )
+                host_v = [int(v) for v in host_scalars.tolist()]
+                N_max, gather_len_max, p_max = host_v[0], host_v[1], host_v[2]
+                prefix_sum, input_sum = host_v[3], host_v[4]
+                gather_lens_cpu_hint = tuple(host_v[5:])
+            else:
+                # Single .item() sync — stack two scalars then one D2H tolist().
+                maxes = torch.stack([N_per_req.max(), gather_len_per_req.max()])
+                N_max, gather_len_max = (int(v) for v in maxes.tolist())
+                p_max = None
+                prefix_sum = input_sum = None
+                gather_lens_cpu_hint = None
             N = N_max
             M = N_max + gather_len_max
 
@@ -4742,7 +4794,23 @@ class AttentionFP8(nn.Module):
                 if cp_ctx_local.input_lengths_global is not None
                 else input_lengths
             )
-            if _force_all_cp_raw_q_merge():
+            if _S4_GATHER_FIX:
+                # S4-t2: the prefix/input sums rode the stacked host-scalar
+                # sync at the workspace-sizing block above — same values.
+                if _force_all_cp_raw_q_merge():
+                    use_cp_raw_q_merge = input_sum > 0
+                else:
+                    use_cp_raw_q_merge = (
+                        prefix_sum > 0
+                        and input_sum > 0
+                        and prefer_raw_q_merge_attention_conservative(
+                            prefix_len=prefix_sum,
+                            input_len=input_sum,
+                            compress_ratio=int(self.compress_ratio),
+                            include_topk_gather=(int(self.compress_ratio) == 4),
+                        )
+                    )
+            elif _force_all_cp_raw_q_merge():
                 use_cp_raw_q_merge = int(input_src.to(torch.long).sum().item()) > 0
             else:
                 prefix_src = (
@@ -4777,6 +4845,7 @@ class AttentionFP8(nn.Module):
             entries_per_block=swa_eb,
             tokens_per_block_for_block_table=swa_tokens_per_block,
             ring_entries=swa_eb,
+            max_gather_hint=(p_max if _S4_GATHER_FIX else None),
         )
         swa_cache_compaction = self._build_swa_cp_byte_compaction(
             swa_cache_slot_mapping,
@@ -4784,6 +4853,7 @@ class AttentionFP8(nn.Module):
             validation_site="swa.gather_cp_byte.slot_indices",
             negative_mode="skip_any",
             gather_lens=swa_cache_gather_lens,
+            gather_lens_cpu_hint=(gather_lens_cpu_hint if _S4_GATHER_FIX else None),
         )
 
         return WorkspaceMeta(

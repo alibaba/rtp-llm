@@ -22,6 +22,7 @@ def build_cp_byte_sliced_slot_compaction(
     validation_site: str,
     negative_mode: str,
     gather_lens: Optional[torch.Tensor] = None,
+    gather_lens_cpu_hint: Optional[Tuple[int, ...]] = None,
 ) -> CPByteSlicedSlotCompaction:
     """Precompute the block compaction used by CP byte-sliced SWA kernels."""
     full_entries_per_block = int(full_entries_per_block)
@@ -39,7 +40,10 @@ def build_cp_byte_sliced_slot_compaction(
     )
 
     gather_lens_cpu: Tuple[int, ...] = ()
-    if gather_lens is not None:
+    if gather_lens_cpu_hint is not None:
+        # S4-t2: host values rode the stacked workspace sync — no DtoH here.
+        gather_lens_cpu = tuple(int(v) for v in gather_lens_cpu_hint)
+    elif gather_lens is not None:
         gather_lens_cpu = tuple(
             int(v)
             for v in gather_lens.to(device="cpu", dtype=torch.int32)
