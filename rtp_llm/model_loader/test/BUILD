@@ -27,3 +27,9 @@ py_test(
         'gpu': 'H20',
     },
 )
+
+py_test(
+    name = "test_loader_eplb",
+    srcs = ["test_loader_eplb.py"],
+    deps = py_test_deps,
+)

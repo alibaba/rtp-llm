@@ -69,6 +69,7 @@ class CkptDatabase(BaseDatabase):
         self.pretrain_file_list = []
         self.finetune_file_list = []
         self.lora_ckpt = LoraCkpt()
+        self._hf_index_data: Optional[Dict[str, Any]] = None
 
         if os.path.isfile(path):
             raise Exception(f"CkptDatabase needs directory contains checkpoint files")
@@ -82,10 +83,16 @@ class CkptDatabase(BaseDatabase):
         self._ft_weight_params = (
             self._parse_ft_weight_params(path) if self._is_ft_style else None
         )
+        # The shard objects now own the key references needed for loading.
+        # Release the full JSON weight_map after extracting the
+        # one-time FT-style fields so cleanup does not retain a duplicate map.
+        self._hf_index_data = None
 
-        logging.debug(
-            f"CkptDatabase all tensor names = {self.get_pretrain_tensor_names()}"
-        )
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(
+                "CkptDatabase all tensor names = %s",
+                self.get_pretrain_tensor_names(),
+            )
 
         # Build tensor_name -> CkptFileInfo index for O(1) lookup.
         # If a tensor name appears in multiple files, the last file wins.
@@ -93,10 +100,10 @@ class CkptDatabase(BaseDatabase):
         # exactly one shard, so duplicates should not occur.
         self._tensor_index: Dict[str, CkptFileInfo] = {}
         for ckpt_file in self.pretrain_file_list:
-            for tname in ckpt_file.metadata.keys():
+            for tname in ckpt_file.get_tensor_names():
                 self._tensor_index[tname] = ckpt_file
         for ckpt_file in self.finetune_file_list:
-            for tname in ckpt_file.metadata.keys():
+            for tname in ckpt_file.get_tensor_names():
                 self._tensor_index[tname] = ckpt_file
 
     @property
@@ -146,6 +153,9 @@ class CkptDatabase(BaseDatabase):
             return
 
         self.pretrain_file_list = filtered_file_list
+        # Keep _tensor_index complete. pretrain_file_list limits the shards fed
+        # to the bulk AutoLoader, while late-bound/misc weights may still use
+        # load_tensor() as a targeted fallback from a filtered-out shard.
         logging.info(
             f"filter_by_tensor_name_regexes: {original_count} -> {len(self.pretrain_file_list)} files"
         )
@@ -154,9 +164,17 @@ class CkptDatabase(BaseDatabase):
         # avoid consolidated.safetensors in Mistral-Nemo-Instruct-2407
         index = os.path.join(path, "model.safetensors.index.json")
         if os.path.exists(index):
-            files = set(json.load(open(index))["weight_map"].values())
-            for f in files:
-                ckpt = CkptFileInfo(file_name=os.path.join(path, f))
+            with open(index, "r") as reader:
+                self._hf_index_data = json.load(reader)
+            weight_map = self._hf_index_data["weight_map"]
+            shard_to_tensor_names: Dict[str, List[str]] = {}
+            for tensor_name, shard_name in weight_map.items():
+                shard_to_tensor_names.setdefault(shard_name, []).append(tensor_name)
+            for shard_name, tensor_names in shard_to_tensor_names.items():
+                ckpt = CkptFileInfo(
+                    file_name=os.path.join(path, shard_name),
+                    tensor_names=tensor_names,
+                )
                 self.pretrain_file_list.append(ckpt)
             return
 
@@ -216,7 +234,10 @@ class CkptDatabase(BaseDatabase):
         return name in self._tensor_index
 
     def get_tensor_type(self, name: str) -> torch.dtype:
-        return self.pretrain_file_list[0].get_tensor_type(name)
+        ckpt_file = self._tensor_index.get(name)
+        if ckpt_file is None:
+            raise KeyError(f"Tensor '{name}' not found in checkpoint")
+        return ckpt_file.get_tensor_type(name)
 
     def get_tensor_order(self, name: str) -> List[int]:
         orders = []
@@ -337,6 +358,12 @@ class CkptDatabase(BaseDatabase):
         self.lora_ckpt.dump_lora_info()
 
     def _parse_weight_style(self, ckpt_path: str):
+        if self._hf_index_data is not None:
+            logging.info(
+                "read weight style from: %s",
+                os.path.join(ckpt_path, "model.safetensors.index.json"),
+            )
+            return self._hf_index_data.get("is_ft_style_weight", False)
         if ckpt_path and os.path.exists(
             os.path.join(ckpt_path, "model.safetensors.index.json")
         ):
@@ -349,6 +376,8 @@ class CkptDatabase(BaseDatabase):
             return False
 
     def _parse_ft_weight_params(self, ckpt_path: str):
+        if self._hf_index_data is not None:
+            return self._hf_index_data.get("__env__params__", None)
         meta_file = os.path.join(ckpt_path, "model.safetensors.index.json")
         with open(meta_file, "r") as reader:
             meta_json = json.loads(reader.read())
