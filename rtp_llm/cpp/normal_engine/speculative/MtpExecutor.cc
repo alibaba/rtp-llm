@@ -856,9 +856,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // release model input before forward
     releaseAllModelBuffers();
 
-    // CP+MTP: PyWrappedModel's CP processor (handleInputs) MUTATES
-    // ``model_input.combo_tokens`` and ``model_input.input_lengths`` in
-    // place to the rank-local zigzag chunk layout for the target forward.
+    // CP+MTP: PyWrappedModel's CP processor (handleInputs) rewrites
+    // ``model_input.combo_tokens`` and ``model_input.input_lengths`` to the
+    // rank-local zigzag chunk layout for the target forward.
     // The post-target MTP pipeline (updatePrefillPostDraftModelInput +
     // draft re-CP-slice) needs the FULL/global view, so snapshot both
     // tensors here while they still hold the global sequence and restore
@@ -866,11 +866,26 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // restored full view to every rank for the draft pass).
     torch::Tensor saved_combo_tokens;
     torch::Tensor saved_input_lengths;
+    // Under prefix reuse handleInputs also *replaces* combo_position_ids with
+    // a rank-local absolute vector; the draft pass divides that count by the
+    // global token count, so it has to go back to its pre-target state too
+    // (usually undefined, which lets handleInputs rebuild it).
+    torch::Tensor saved_combo_position_ids;
     // Only rank 0 restores; non-root ranks get the restored view from the
     // second tpSync, so skip the snapshot copies there.
     if (cp_enabled && isTpRank0()) {
-        saved_combo_tokens  = toCudaWithHostHold(model_input.combo_tokens, buffer_holder_);
-        saved_input_lengths = toCudaWithHostHold(model_input.input_lengths, buffer_holder_);
+        // Materialize both copies now: an async H2D of a live host buffer could
+        // land after handleInputs rewrote it to the rank-local chunk, which
+        // would capture the split lengths and make the restore below a no-op.
+        auto snapshot = [](const torch::Tensor& tensor) {
+            if (!tensor.defined()) {
+                return tensor;
+            }
+            return tensor.is_cuda() ? tensor.clone() : tensor.to(torch::kCUDA, /*non_blocking=*/false);
+        };
+        saved_combo_tokens       = snapshot(model_input.combo_tokens);
+        saved_input_lengths      = snapshot(model_input.input_lengths);
+        saved_combo_position_ids = model_input.combo_position_ids;
     }
 
     // target model prefill
@@ -908,8 +923,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         // the contiguous full sequence; the tpSync below then publishes the
         // restored view to every draft rank (fake/warmup streams included).
         if (cp_enabled) {
-            model_input.combo_tokens  = saved_combo_tokens;
-            model_input.input_lengths = saved_input_lengths;
+            model_input.combo_tokens       = saved_combo_tokens;
+            model_input.input_lengths      = saved_input_lengths;
+            model_input.combo_position_ids = saved_combo_position_ids;
         }
         if (!is_dspark_ && model_input.is_fake_stream) {
             model_input.last_hidden_states = model_output.all_hidden_states;

@@ -225,6 +225,14 @@ class DSparkProposerMixin:
         input_lengths = optional_tensor(
             getattr(attention_inputs, "input_lengths", None)
         )
+        # The device mirror feeds the tensor math below; the host field stays
+        # the batch-size probe. Copying the pinned host buffer to the device is
+        # a blocking H2D transfer, which CUDA rejects mid graph capture.
+        lengths_source = optional_tensor(
+            getattr(attention_inputs, "input_lengths_device", None)
+        )
+        if lengths_source is None:
+            lengths_source = input_lengths
         batch_size = int(input_lengths.numel()) if input_lengths is not None else 0
         hidden = optional_tensor(getattr(inputs, "input_hiddens", None))
 
@@ -249,13 +257,17 @@ class DSparkProposerMixin:
         features = hidden.reshape(-1, aux_dim).to(device=device)
         row_count = int(features.shape[0])
 
-        prefix = optional_tensor(getattr(attention_inputs, "prefix_lengths", None))
+        prefix = optional_tensor(
+            getattr(attention_inputs, "prefix_lengths_device", None)
+        )
+        if prefix is None:
+            prefix = optional_tensor(getattr(attention_inputs, "prefix_lengths", None))
         if prefix is None or int(prefix.numel()) < batch_size:
             raise RuntimeError(
                 "DSpark commit requires prefix_lengths with one value per request"
             )
         prefix_lengths = prefix[:batch_size].to(device=device, dtype=torch.long)
-        lengths = input_lengths[:batch_size].to(device=device, dtype=torch.long)
+        lengths = lengths_source[:batch_size].to(device=device, dtype=torch.long)
         starts = lengths.cumsum(0) - lengths
 
         # Under prefill CP the framework rewrites input_lengths to rank-local
@@ -324,7 +336,14 @@ class DSparkProposerMixin:
                 f"gamma={width}"
             )
 
-        prefix = optional_tensor(getattr(attention_inputs, "prefix_lengths", None))
+        # Read the CUDA-resident mirror: copying the pinned host field to the
+        # device is a blocking H2D transfer, which CUDA rejects while the decode
+        # graph is capturing.
+        prefix = optional_tensor(
+            getattr(attention_inputs, "prefix_lengths_device", None)
+        )
+        if prefix is None:
+            prefix = optional_tensor(getattr(attention_inputs, "prefix_lengths", None))
         if batch_size > 0 and (prefix is None or int(prefix.numel()) < batch_size):
             raise RuntimeError(
                 "DSpark requires prefix_lengths with one value per request"

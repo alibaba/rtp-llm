@@ -1,3 +1,4 @@
+import inspect
 import unittest
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -78,6 +79,7 @@ class _FakeV4:
         self.calls = []
         self.fp8_kv_cache = True
         self.hc_mult = 1
+        self.capture_aux_hidden_layer_ids = ()
         self.layers = [_FakeLayer(0, self.calls), _FakeLayer(1, self.calls)]
         self._cp_info = None
         self._cp_size = 1
@@ -434,6 +436,71 @@ class PrefillFastPathTest(unittest.TestCase):
             out,
             torch.tensor([[124.0, 124.5], [125.0, 125.5]]),
         )
+
+    def _run_forward_prefill_with(self, attn):
+        inputs = SimpleNamespace(
+            attention_inputs=attn,
+            input_ids=torch.tensor([3, 4, 5, 6], dtype=torch.long),
+        )
+        with patch.object(prefill_forward, "set_cp_info"), patch.object(
+            prefill_forward, "primary_attention_inputs", return_value=attn
+        ), patch.object(
+            prefill_forward, "build_block_tables_batched", return_value={}
+        ), patch.object(
+            prefill_forward, "forward_layers", return_value=torch.zeros(4, 2)
+        ) as forward_layers:
+            prefill_forward.forward_prefill(
+                _FakeV4(),
+                None,
+                None,
+                inputs,
+            )
+        return forward_layers
+
+    def _forwarded_cu_seqlens(self, forward_layers):
+        bound = inspect.signature(prefill_forward.forward_layers).bind(
+            *forward_layers.call_args.args, **forward_layers.call_args.kwargs
+        )
+        return bound.arguments["cu_seqlens"]
+
+    def test_forward_prefill_recovers_cu_seqlens_from_device_mirror(self):
+        attn = SimpleNamespace(
+            cu_seqlens=torch.empty(0, dtype=torch.int32),
+            cu_seqlens_device=torch.tensor([0, 2, 4], dtype=torch.int32),
+            combo_position_ids=torch.tensor([0, 1, 0, 1], dtype=torch.long),
+        )
+
+        forwarded = self._forwarded_cu_seqlens(self._run_forward_prefill_with(attn))
+        self.assertEqual(forwarded.numel(), 3)
+        # block.py gates its dense-layout fast path on host residency.
+        self.assertEqual(forwarded.device.type, "cpu")
+        torch.testing.assert_close(
+            forwarded, torch.tensor([0, 2, 4], dtype=torch.int32)
+        )
+
+    @unittest.skipIf(not torch.cuda.is_available(), "needs CUDA")
+    def test_forward_prefill_moves_cuda_cu_seqlens_to_host(self):
+        attn = SimpleNamespace(
+            cu_seqlens=torch.tensor([0, 2, 4], dtype=torch.int32, device="cuda"),
+            cu_seqlens_device=None,
+            combo_position_ids=torch.tensor([0, 1, 0, 1], dtype=torch.long),
+        )
+
+        forwarded = self._forwarded_cu_seqlens(self._run_forward_prefill_with(attn))
+        self.assertEqual(forwarded.device.type, "cpu")
+        torch.testing.assert_close(
+            forwarded, torch.tensor([0, 2, 4], dtype=torch.int32)
+        )
+
+    def test_forward_prefill_fails_closed_without_usable_cu_seqlens(self):
+        attn = SimpleNamespace(
+            cu_seqlens=torch.empty(0, dtype=torch.int32),
+            cu_seqlens_device=torch.empty(0, dtype=torch.int32),
+            combo_position_ids=torch.tensor([0, 1, 0, 1], dtype=torch.long),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "no usable cu_seqlens"):
+            self._run_forward_prefill_with(attn)
 
 
 if __name__ == "__main__":
