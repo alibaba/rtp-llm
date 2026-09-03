@@ -389,7 +389,7 @@ cc_library(
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + torch_deps() + select({
         "//:using_remote_kv_cache": [
-            "//rtp_llm/cpp/cache/connector/remote_connector:kvc_m_storage_backend",
+            "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:kvcm_storage_backend",
         ],
         "//conditions:default": [],
     }),

@@ -1,12 +1,12 @@
 load("//:def.bzl", "copts")
 
 config_setting(
-    name = "RECO_INTERNAL",
-    values = {"copt": "-DRECO_INTERNAL=1"},
+    name = "KVCM_INTERNAL",
+    values = {"copt": "-DKVCM_INTERNAL=1"},
 )
 
 cc_library(
-    name = "kvc_m_storage_backend",
+    name = "kvcm_storage_backend",
     srcs = ["KVCMStorageBackend.cc"],
     hdrs = ["KVCMStorageBackend.h"],
     copts = copts(),
@@ -42,8 +42,8 @@ cc_library(
 
 cc_library(
     name = "config",
-    srcs = ["RemoteConnectorConfig.cc"],
-    hdrs = ["RemoteConnectorConfig.h"],
+    srcs = ["KVCMConfig.cc"],
+    hdrs = ["KVCMConfig.h"],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = ["@havenask//aios/autil:json"],
@@ -58,10 +58,10 @@ cc_library(
     hdrs = [
         "ClientFactory.h",
         "ClientWrapper.h",
-        "RemoteConnectorConfig.h",
+        "KVCMConfig.h",
     ],
     copts = copts(),
-    visibility = ["//rtp_llm/cpp/cache/connector/remote_connector:__subpackages__"],
+    visibility = ["//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:__subpackages__"],
     deps = [
         ":config",
         ":subscriber",
@@ -80,13 +80,13 @@ cc_library(
         "VIPServerSubscriber.h",
     ],
     copts = copts(),
-    visibility = ["//rtp_llm/cpp/cache/connector/remote_connector:__subpackages__"],
+    visibility = ["//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:__subpackages__"],
     deps = [
         "//rtp_llm/cpp/utils:core_utils",
         "@havenask//aios/autil:env_util",
         "@havenask//aios/autil:lock_free",
     ] + select({
-        ":RECO_INTERNAL": ["@vipserver"],
+        ":KVCM_INTERNAL": ["@vipserver"],
         "//conditions:default": [],
     }),
 )

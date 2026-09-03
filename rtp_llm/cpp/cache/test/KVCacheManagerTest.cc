@@ -1033,8 +1033,8 @@ TEST_F(KVCacheManagerTest, InitRejectsInvalidRemoteExecutorConfigurationBeforeAl
         SCOPED_TRACE(::testing::Message() << "thread_count=" << thread_count << " queue_size=" << queue_size);
         KVCacheConfig kv_cache_config;
         kv_cache_config.enable_remote_cache          = true;
-        kv_cache_config.reco_asyncwrapper_thread_num = thread_count;
-        kv_cache_config.reco_asyncwrapper_queue_size = queue_size;
+        kv_cache_config.kvcm_asyncwrapper_thread_num = thread_count;
+        kv_cache_config.kvcm_asyncwrapper_queue_size = queue_size;
         auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
         EXPECT_FALSE(manager->init());
         EXPECT_EQ(manager->blockTreeCache(), nullptr);

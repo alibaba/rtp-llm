@@ -1,5 +1,5 @@
 #include "ClientWrapper.h"
-#include "rtp_llm/cpp/cache/connector/remote_connector/Subscriber.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/Subscriber.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include <algorithm>
@@ -10,7 +10,7 @@
 #include <chrono>
 
 namespace rtp_llm {
-namespace remote_connector {
+namespace kvcm {
 
 namespace {
 
@@ -127,7 +127,7 @@ void ClientWrapper::shutdown() noexcept {
     }
 }
 
-bool ClientWrapper::initMetaClient(const std::string& unique_id, RemoteConnectorConfigPtr config) {
+bool ClientWrapper::initMetaClient(const std::string& unique_id, KVCMConfigPtr config) {
     RTP_LLM_LOG_INFO(
         "kvcm unique_id [%s], init config [%s]", unique_id.c_str(), autil::legacy::ToJsonString(config).c_str());
     const bool enable_vipserver = config->enable_vipserver();
@@ -444,5 +444,5 @@ ClientWrapper::saveKvCaches(const kv_cache_manager::UriStrVec&                  
     return {true, std::move(result)};
 }
 
-}  // namespace remote_connector
+}  // namespace kvcm
 }  // namespace rtp_llm

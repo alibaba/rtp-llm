@@ -487,26 +487,26 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("dsv4_fixed_pool_blocks", &KVCacheConfig::dsv4_fixed_pool_blocks)
         .def_readwrite("dsv4_hca_state_pool_blocks", &KVCacheConfig::dsv4_hca_state_pool_blocks)
         .def_readwrite("dsv4_fixed_pool_use_memory", &KVCacheConfig::dsv4_fixed_pool_use_memory)
-        .def_readwrite("reco_enable_vipserver", &KVCacheConfig::reco_enable_vipserver)
-        .def_readwrite("reco_vipserver_domain", &KVCacheConfig::reco_vipserver_domain)
-        .def_readwrite("reco_server_address", &KVCacheConfig::reco_server_address)
-        .def_readwrite("reco_instance_group", &KVCacheConfig::reco_instance_group)
-        .def_readwrite("reco_meta_channel_retry_time", &KVCacheConfig::reco_meta_channel_retry_time)
-        .def_readwrite("reco_meta_channel_connection_timeout", &KVCacheConfig::reco_meta_channel_connection_timeout)
-        .def_readwrite("reco_meta_channel_call_timeout", &KVCacheConfig::reco_meta_channel_call_timeout)
-        .def_readwrite("reco_storage_thread_num", &KVCacheConfig::reco_storage_thread_num)
-        .def_readwrite("reco_storage_queue_size", &KVCacheConfig::reco_storage_queue_size)
-        .def_readwrite("reco_put_timeout_ms", &KVCacheConfig::reco_put_timeout_ms)
-        .def_readwrite("reco_get_timeout_ms", &KVCacheConfig::reco_get_timeout_ms)
-        .def_readwrite("reco_model_sdk_config", &KVCacheConfig::reco_model_sdk_config)
-        .def_readwrite("reco_model_user_data", &KVCacheConfig::reco_model_user_data)
-        .def_readwrite("reco_model_extra_info", &KVCacheConfig::reco_model_extra_info)
-        .def_readwrite("reco_instance_id_salt", &KVCacheConfig::reco_instance_id_salt)
-        .def_readwrite("reco_asyncwrapper_thread_num", &KVCacheConfig::reco_asyncwrapper_thread_num)
-        .def_readwrite("reco_asyncwrapper_queue_size", &KVCacheConfig::reco_asyncwrapper_queue_size)
-        .def_readwrite("reco_get_broadcast_timeout", &KVCacheConfig::reco_get_broadcast_timeout)
-        .def_readwrite("reco_put_broadcast_timeout", &KVCacheConfig::reco_put_broadcast_timeout)
-        .def_readwrite("reco_client_config", &KVCacheConfig::reco_client_config)
+        .def_readwrite("kvcm_enable_vipserver", &KVCacheConfig::kvcm_enable_vipserver)
+        .def_readwrite("kvcm_vipserver_domain", &KVCacheConfig::kvcm_vipserver_domain)
+        .def_readwrite("kvcm_server_address", &KVCacheConfig::kvcm_server_address)
+        .def_readwrite("kvcm_instance_group", &KVCacheConfig::kvcm_instance_group)
+        .def_readwrite("kvcm_meta_channel_retry_time", &KVCacheConfig::kvcm_meta_channel_retry_time)
+        .def_readwrite("kvcm_meta_channel_connection_timeout", &KVCacheConfig::kvcm_meta_channel_connection_timeout)
+        .def_readwrite("kvcm_meta_channel_call_timeout", &KVCacheConfig::kvcm_meta_channel_call_timeout)
+        .def_readwrite("kvcm_storage_thread_num", &KVCacheConfig::kvcm_storage_thread_num)
+        .def_readwrite("kvcm_storage_queue_size", &KVCacheConfig::kvcm_storage_queue_size)
+        .def_readwrite("kvcm_put_timeout_ms", &KVCacheConfig::kvcm_put_timeout_ms)
+        .def_readwrite("kvcm_get_timeout_ms", &KVCacheConfig::kvcm_get_timeout_ms)
+        .def_readwrite("kvcm_model_sdk_config", &KVCacheConfig::kvcm_model_sdk_config)
+        .def_readwrite("kvcm_model_user_data", &KVCacheConfig::kvcm_model_user_data)
+        .def_readwrite("kvcm_model_extra_info", &KVCacheConfig::kvcm_model_extra_info)
+        .def_readwrite("kvcm_instance_id_salt", &KVCacheConfig::kvcm_instance_id_salt)
+        .def_readwrite("kvcm_asyncwrapper_thread_num", &KVCacheConfig::kvcm_asyncwrapper_thread_num)
+        .def_readwrite("kvcm_asyncwrapper_queue_size", &KVCacheConfig::kvcm_asyncwrapper_queue_size)
+        .def_readwrite("kvcm_get_broadcast_timeout", &KVCacheConfig::kvcm_get_broadcast_timeout)
+        .def_readwrite("kvcm_put_broadcast_timeout", &KVCacheConfig::kvcm_put_broadcast_timeout)
+        .def_readwrite("kvcm_client_config", &KVCacheConfig::kvcm_client_config)
         .def_readwrite("block_tree_full_prefix_scan_interval_ms",
                        &KVCacheConfig::block_tree_full_prefix_scan_interval_ms)
         .def("insertMultiTaskPromptTokens", &KVCacheConfig::insertMultiTaskPromptTokens)
@@ -544,26 +544,26 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.device_eviction_policy,
                                       self.host_eviction_policy,
                                       self.disk_eviction_policy,
-                                      self.reco_enable_vipserver,
-                                      self.reco_vipserver_domain,
-                                      self.reco_server_address,
-                                      self.reco_instance_group,
-                                      self.reco_meta_channel_retry_time,
-                                      self.reco_meta_channel_connection_timeout,
-                                      self.reco_meta_channel_call_timeout,
-                                      self.reco_storage_thread_num,
-                                      self.reco_storage_queue_size,
-                                      self.reco_put_timeout_ms,
-                                      self.reco_get_timeout_ms,
-                                      self.reco_model_sdk_config,
-                                      self.reco_model_user_data,
-                                      self.reco_model_extra_info,
-                                      self.reco_instance_id_salt,
-                                      self.reco_asyncwrapper_thread_num,
-                                      self.reco_asyncwrapper_queue_size,
-                                      self.reco_get_broadcast_timeout,
-                                      self.reco_put_broadcast_timeout,
-                                      self.reco_client_config,
+                                      self.kvcm_enable_vipserver,
+                                      self.kvcm_vipserver_domain,
+                                      self.kvcm_server_address,
+                                      self.kvcm_instance_group,
+                                      self.kvcm_meta_channel_retry_time,
+                                      self.kvcm_meta_channel_connection_timeout,
+                                      self.kvcm_meta_channel_call_timeout,
+                                      self.kvcm_storage_thread_num,
+                                      self.kvcm_storage_queue_size,
+                                      self.kvcm_put_timeout_ms,
+                                      self.kvcm_get_timeout_ms,
+                                      self.kvcm_model_sdk_config,
+                                      self.kvcm_model_user_data,
+                                      self.kvcm_model_extra_info,
+                                      self.kvcm_instance_id_salt,
+                                      self.kvcm_asyncwrapper_thread_num,
+                                      self.kvcm_asyncwrapper_queue_size,
+                                      self.kvcm_get_broadcast_timeout,
+                                      self.kvcm_put_broadcast_timeout,
+                                      self.kvcm_client_config,
                                       self.device_cache_min_free_blocks,
                                       self.memory_cache_max_descriptors_per_transfer_batch,
                                       self.dsv4_fixed_pool_blocks,
@@ -610,26 +610,26 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.device_eviction_policy               = value(26).cast<std::string>();
                 c.host_eviction_policy                 = value(27).cast<std::string>();
                 c.disk_eviction_policy                 = value(28).cast<std::string>();
-                c.reco_enable_vipserver                = value(29).cast<bool>();
-                c.reco_vipserver_domain                = value(30).cast<std::string>();
-                c.reco_server_address                  = value(31).cast<std::string>();
-                c.reco_instance_group                  = value(32).cast<std::string>();
-                c.reco_meta_channel_retry_time         = value(33).cast<uint32_t>();
-                c.reco_meta_channel_connection_timeout = value(34).cast<uint32_t>();
-                c.reco_meta_channel_call_timeout       = value(35).cast<uint32_t>();
-                c.reco_storage_thread_num              = value(36).cast<uint32_t>();
-                c.reco_storage_queue_size              = value(37).cast<uint32_t>();
-                c.reco_put_timeout_ms                  = value(38).cast<int>();
-                c.reco_get_timeout_ms                  = value(39).cast<int>();
-                c.reco_model_sdk_config                = value(40).cast<std::string>();
-                c.reco_model_user_data                 = value(41).cast<std::string>();
-                c.reco_model_extra_info                = value(42).cast<std::string>();
-                c.reco_instance_id_salt                = value(43).cast<std::string>();
-                c.reco_asyncwrapper_thread_num         = value(44).cast<size_t>();
-                c.reco_asyncwrapper_queue_size         = value(45).cast<size_t>();
-                c.reco_get_broadcast_timeout           = value(46).cast<int>();
-                c.reco_put_broadcast_timeout           = value(47).cast<int>();
-                c.reco_client_config                   = value(48).cast<std::string>();
+                c.kvcm_enable_vipserver                = value(29).cast<bool>();
+                c.kvcm_vipserver_domain                = value(30).cast<std::string>();
+                c.kvcm_server_address                  = value(31).cast<std::string>();
+                c.kvcm_instance_group                  = value(32).cast<std::string>();
+                c.kvcm_meta_channel_retry_time         = value(33).cast<uint32_t>();
+                c.kvcm_meta_channel_connection_timeout = value(34).cast<uint32_t>();
+                c.kvcm_meta_channel_call_timeout       = value(35).cast<uint32_t>();
+                c.kvcm_storage_thread_num              = value(36).cast<uint32_t>();
+                c.kvcm_storage_queue_size              = value(37).cast<uint32_t>();
+                c.kvcm_put_timeout_ms                  = value(38).cast<int>();
+                c.kvcm_get_timeout_ms                  = value(39).cast<int>();
+                c.kvcm_model_sdk_config                = value(40).cast<std::string>();
+                c.kvcm_model_user_data                 = value(41).cast<std::string>();
+                c.kvcm_model_extra_info                = value(42).cast<std::string>();
+                c.kvcm_instance_id_salt                = value(43).cast<std::string>();
+                c.kvcm_asyncwrapper_thread_num         = value(44).cast<size_t>();
+                c.kvcm_asyncwrapper_queue_size         = value(45).cast<size_t>();
+                c.kvcm_get_broadcast_timeout           = value(46).cast<int>();
+                c.kvcm_put_broadcast_timeout           = value(47).cast<int>();
+                c.kvcm_client_config                   = value(48).cast<std::string>();
                 c.device_cache_min_free_blocks         = value(49).cast<int64_t>();
                 c.memory_cache_max_descriptors_per_transfer_batch = value(50).cast<int64_t>();
                 c.dsv4_fixed_pool_blocks                          = value(51).cast<uint32_t>();

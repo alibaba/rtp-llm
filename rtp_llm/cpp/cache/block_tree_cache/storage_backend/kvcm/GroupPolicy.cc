@@ -2,13 +2,13 @@
 #include <bitset>
 #include <algorithm>
 #include <typeinfo>
-#include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/GroupPolicy.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
-namespace remote_connector {
+namespace kvcm {
 
 namespace {
 
@@ -102,8 +102,64 @@ bool GroupPolicy::buildLocationSpecGroups(int tp_size, LocationSpecGroups& locat
     }
     location_spec_group_map_ = std::move(new_location_spec_group_map);
     spec_name_to_info_       = std::move(new_spec_name_to_info);
+    all_spec_names_.clear();
+    all_spec_names_.reserve(spec_name_to_info_.size());
+    for (const auto& [spec_name, spec_info] : spec_name_to_info_) {
+        (void)spec_info;
+        all_spec_names_.push_back(spec_name);
+    }
     rebuildDerivedSpecInfo();
     location_spec_groups = std::move(new_location_spec_groups);
+    return true;
+}
+
+bool GroupPolicy::validateLocationSpecs(const kv_cache_manager::Location& location,
+                                        const SpecNames&                  expected_specs,
+                                        const char*                       kind) const {
+    if (location.size() != expected_specs.size()) {
+        RTP_LLM_LOG_WARNING(
+            "invalid KVCM %s spec count: expected=%zu actual=%zu", kind, expected_specs.size(), location.size());
+        return false;
+    }
+    std::vector<std::string_view> actual_specs;
+    actual_specs.reserve(location.size());
+    for (const auto& unit : location) {
+        actual_specs.emplace_back(unit.spec_name);
+    }
+    std::sort(actual_specs.begin(), actual_specs.end());
+    for (size_t index = 0; index < expected_specs.size(); ++index) {
+        if (actual_specs[index] != expected_specs[index]) {
+            RTP_LLM_LOG_WARNING("invalid KVCM %s spec set at index=%zu: expected=%s actual=%.*s",
+                                kind,
+                                index,
+                                expected_specs[index].c_str(),
+                                static_cast<int>(actual_specs[index].size()),
+                                actual_specs[index].data());
+            return false;
+        }
+    }
+    return true;
+}
+
+bool GroupPolicy::setLocationView(const kv_cache_manager::Location& location,
+                                  const SpecNames&                  expected_specs,
+                                  const SpecNames&                  selected_specs,
+                                  const char*                       kind,
+                                  LocationView&                     location_view) const {
+    if (!validateLocationSpecs(location, expected_specs, kind)) {
+        return false;
+    }
+    location_view.reserve(selected_specs.size());
+    for (const auto& unit : location) {
+        if (std::binary_search(selected_specs.begin(), selected_specs.end(), unit.spec_name)) {
+            location_view.emplace_back(unit);
+        }
+    }
+    RTP_LLM_CHECK_WITH_INFO(location_view.size() == selected_specs.size(),
+                            "validated KVCM %s location selected %zu specs, expected %zu",
+                            kind,
+                            location_view.size(),
+                            selected_specs.size());
     return true;
 }
 
@@ -201,14 +257,13 @@ bool DefaultLayerGroupPolicy::init() {
 bool DefaultLayerGroupPolicy::filterNeedLoadLocations(const kv_cache_manager::Locations& locations,
                                                       LocationsView&                     locations_view,
                                                       kv_cache_manager::BlockMaskOffset  block_mask) const {
-    //  just copy
-    locations_view.resize(locations.size(), {});
+    LocationsView filtered_locations(locations.size());
     for (size_t i = block_mask; i < locations.size(); i++) {
-        locations_view[i].reserve(locations[i].size());
-        for (const auto& unit : locations[i]) {
-            locations_view[i].emplace_back(unit);
+        if (!setLocationView(locations[i], all_spec_names_, all_spec_names_, "full", filtered_locations[i])) {
+            return false;
         }
     }
+    locations_view = std::move(filtered_locations);
     return true;
 }
 
@@ -445,8 +500,8 @@ bool FullOtherGroupPolicy::getNeedWriteGroups(const StorageRequest&     request,
 }
 
 void FullOtherGroupPolicy::rebuildDerivedSpecInfo() {
-    full_spec_name_bithash_.clear();
-    full_other_spec_name_bithash_.clear();
+    full_spec_names_.clear();
+    full_other_spec_names_.clear();
     for (const auto& [spec_name, spec_info] : spec_name_to_info_) {
         const auto group_it = groups_.find(spec_info.group_id);
         RTP_LLM_CHECK_WITH_INFO(group_it != groups_.end(),
@@ -454,9 +509,9 @@ void FullOtherGroupPolicy::rebuildDerivedSpecInfo() {
                                 spec_name.c_str(),
                                 spec_info.group_id);
         if (group_it->second.is_full) {
-            full_spec_name_bithash_[spec_name] = group_it->second.group_name_bithash;
+            full_spec_names_.push_back(spec_name);
         }
-        full_other_spec_name_bithash_[spec_name] = group_it->second.group_name_bithash;
+        full_other_spec_names_.push_back(spec_name);
     }
 }
 
@@ -473,128 +528,64 @@ std::string FullOtherGroupPolicy::debugString() const {
     debug_ss << "write_interval : " << write_interval_ << '\n';
     debug_ss << "valid_full_bithash : " << getBitHashStr(valid_full_bithash_, gs) << '\n';
     debug_ss << "valid_full_other_bithash : " << getBitHashStr(valid_full_other_bithash_, gs) << '\n';
-    debug_ss << "full_spec_name_bithash : ";
-    for (const auto& entry : full_spec_name_bithash_) {
-        debug_ss << '[' << entry.first << ":" << getBitHashStr(entry.second, gs) << ']';
+    debug_ss << "full_spec_names : ";
+    for (const auto& spec_name : full_spec_names_) {
+        debug_ss << '[' << spec_name << ']';
     }
     debug_ss << '\n';
-    debug_ss << "full_other_spec_name_bithash : ";
-    for (const auto& entry : full_other_spec_name_bithash_) {
-        debug_ss << '[' << entry.first << ":" << getBitHashStr(entry.second, gs) << ']';
+    debug_ss << "full_other_spec_names : ";
+    for (const auto& spec_name : full_other_spec_names_) {
+        debug_ss << '[' << spec_name << ']';
     }
     debug_ss << '\n';
     return debug_ss.str();
 }
 
-bool FullOtherGroupPolicy::IsValidFullLocation(const kv_cache_manager::Location& location) const {
-    uint64_t full_bithash = 0;
-    for (const auto& unit : location) {
-        const auto iter = full_spec_name_bithash_.find(unit.spec_name);
-        if (iter == full_spec_name_bithash_.end()) {
-            RTP_LLM_LOG_WARNING("not find full spec name [%s]", unit.spec_name.c_str());
-            return false;
-        }
-        full_bithash |= iter->second;
-    }
-    if (full_bithash != valid_full_bithash_) {
-        RTP_LLM_LOG_WARNING("invalid full bithash [%lu], expect [%lu]", full_bithash, valid_full_bithash_);
-        return false;
-    }
-    return true;
-}
-
-#define CEHCK_AND_SET_LOCATIONS_VIEW(attention_name)                                                                   \
-    location_view.reserve(location.size());                                                                            \
-    uint64_t attention_name##_bithash = 0;                                                                             \
-    for (const auto& unit : location) {                                                                                \
-        const auto iter = attention_name##_spec_name_bithash_.find(unit.spec_name);                                    \
-        if (iter == attention_name##_spec_name_bithash_.end()) {                                                       \
-            RTP_LLM_LOG_WARNING("not find " #attention_name " spec name [%s]", unit.spec_name.c_str());                \
-            return false;                                                                                              \
-        }                                                                                                              \
-        attention_name##_bithash |= iter->second;                                                                      \
-        location_view.emplace_back(unit);                                                                              \
-    }                                                                                                                  \
-    if (attention_name##_bithash != valid_##attention_name##_bithash_) {                                               \
-        RTP_LLM_LOG_WARNING("invalid " #attention_name " bithash [%lu], expect [%lu]",                                 \
-                            attention_name##_bithash,                                                                  \
-                            valid_##attention_name##_bithash_);                                                        \
-        return false;                                                                                                  \
-    }
-
-bool FullOtherGroupPolicy::CheckInvalidFullLocationAndSetView(const kv_cache_manager::Location& location,
-                                                              LocationView&                     location_view) const {
-    CEHCK_AND_SET_LOCATIONS_VIEW(full);
-    return true;
-}
-
-bool FullOtherGroupPolicy::CheckInvalidFullOtherLocationAndSetView(const kv_cache_manager::Location& location,
-                                                                   LocationView& location_view) const {
-    CEHCK_AND_SET_LOCATIONS_VIEW(full_other);
-    return true;
-}
-
-#undef CEHCK_AND_SET_LOCATIONS_VIEW
-
-bool FullOtherGroupPolicy::SkipOtherSpecAndSetView(const kv_cache_manager::Location& location,
-                                                   LocationView&                     location_view) const {
-    location_view.reserve(full_spec_name_bithash_.size());
-    uint64_t full_bithash = 0;
-    for (const auto& unit : location) {
-        const auto iter = full_spec_name_bithash_.find(unit.spec_name);
-        if (iter == full_spec_name_bithash_.end()) {
-            RTP_LLM_LOG_DEBUG("skip spec_name [%s]", unit.spec_name.c_str());
-            continue;
-        }
-        full_bithash |= iter->second;
-        location_view.emplace_back(unit);
-    }
-    if (full_bithash != valid_full_bithash_) {
-        RTP_LLM_LOG_WARNING("invalid full bithash [%lu], expect [%lu]", full_bithash, valid_full_bithash_);
-        return false;
-    }
-    return true;
-}
-
 bool FullLinearLayerGroupPolicy::filterNeedLoadLocations(const kv_cache_manager::Locations& locations,
                                                          LocationsView&                     locations_view,
                                                          kv_cache_manager::BlockMaskOffset  block_mask) const {
-    bool exist_linear_location = false;
+    LocationsView filtered_locations;
+    bool          exist_linear_location = false;
     for (size_t i = locations.size(); i-- > block_mask;) {
         const auto& location = locations[i];
-        if (location.size() == full_spec_name_bithash_.size()) {
+        if (location.size() == full_spec_names_.size()) {
             if (exist_linear_location) {
-                if (!CheckInvalidFullLocationAndSetView(location, locations_view[i])) {
+                if (!setLocationView(location, full_spec_names_, full_spec_names_, "full", filtered_locations[i])) {
                     return false;
                 }
             } else {
-                // only do check
-                if (!IsValidFullLocation(location)) {
+                if (!validateLocationSpecs(location, full_spec_names_, "full")) {
                     return false;
                 }
             }
-        } else if (location.size() == full_other_spec_name_bithash_.size()) {
+        } else if (location.size() == full_other_spec_names_.size()) {
             if (!exist_linear_location) {
-                locations_view.resize(i + 1, {});
-                if (!CheckInvalidFullOtherLocationAndSetView(location, locations_view[i])) {
+                filtered_locations.resize(i + 1);
+                if (!setLocationView(location,
+                                     full_other_spec_names_,
+                                     full_other_spec_names_,
+                                     "full+linear",
+                                     filtered_locations[i])) {
                     return false;
                 }
                 exist_linear_location = true;
             } else {
-                if (!SkipOtherSpecAndSetView(location, locations_view[i])) {
+                if (!setLocationView(
+                        location, full_other_spec_names_, full_spec_names_, "full+linear", filtered_locations[i])) {
                     return false;
                 }
             }
         } else {
             RTP_LLM_LOG_WARNING("invalid spec size, full [%lu], linear [%lu], real [%lu]",
-                                full_spec_name_bithash_.size(),
-                                full_other_spec_name_bithash_.size(),
+                                full_spec_names_.size(),
+                                full_other_spec_names_.size(),
                                 location.size());
             return false;
         }
     }
+    locations_view = std::move(filtered_locations);
     return true;
 }
 
-}  // namespace remote_connector
+}  // namespace kvcm
 }  // namespace rtp_llm

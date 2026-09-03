@@ -4,7 +4,7 @@
 #include <string>
 
 namespace rtp_llm {
-namespace remote_connector {
+namespace kvcm {
 
 class Subscriber {
 public:
@@ -13,5 +13,5 @@ public:
     virtual bool getAddresses(std::vector<std::string>& addresses) const = 0;
 };
 
-}  // namespace remote_connector
+}  // namespace kvcm
 }  // namespace rtp_llm

@@ -32,7 +32,7 @@ TEST(BlockTreeTaskPoolTest, SubmitAndWaitForIdleTrackAcceptedTasks) {
     EXPECT_EQ(pool.pending_tasks_.load(), 0);
 }
 
-TEST(BlockTreeTaskPoolTest, WaitForIdleOnlyTracksTaskBodyNotExternalAsyncCompletion) {
+TEST(BlockTreeTaskPoolTest, ExternalAsyncCompletionNeedsAnExplicitWorkflowCredit) {
     BlockTreeTaskPool pool(1, 8, "BlockTreeTaskPoolTest");
     ASSERT_TRUE(pool.start());
 
@@ -51,6 +51,37 @@ TEST(BlockTreeTaskPoolTest, WaitForIdleOnlyTracksTaskBodyNotExternalAsyncComplet
 
     finish_transfer();
     EXPECT_TRUE(transfer_done.load());
+}
+
+TEST(BlockTreeTaskPoolTest, WorkflowCreditKeepsIdleBlockedUntilCompletionSettlement) {
+    BlockTreeTaskPool pool(1, 1, "BlockTreeTaskPoolTest");
+    ASSERT_TRUE(pool.start());
+    ASSERT_TRUE(pool.acquireWorkflowCredit());
+    EXPECT_FALSE(pool.acquireWorkflowCredit());
+
+    std::promise<void>    transfer_registered;
+    std::future<void>     registered = transfer_registered.get_future();
+    std::function<void()> finish_transfer;
+    std::atomic<bool>     settled{false};
+    ASSERT_TRUE(pool.submit([&] {
+        finish_transfer = [&] {
+            ASSERT_TRUE(pool.submitCompletion([&] {
+                settled.store(true);
+                pool.releaseWorkflowCredit();
+            }));
+        };
+        transfer_registered.set_value();
+    }));
+    ASSERT_EQ(registered.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+
+    pool.stopAdmission();
+    auto idle = std::async(std::launch::async, [&pool] { pool.waitForIdle(); });
+    EXPECT_EQ(idle.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+    ASSERT_TRUE(finish_transfer);
+    finish_transfer();
+    EXPECT_EQ(idle.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_TRUE(settled.load());
+    EXPECT_EQ(pool.workflow_credits_.load(), 0u);
 }
 
 TEST(BlockTreeTaskPoolTest, ThrowingTaskStillSettlesPendingCount) {

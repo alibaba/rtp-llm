@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/connector/remote_connector/KVCMStorageBackend.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/KVCMStorageBackend.h"
 
 #include <algorithm>
 #include <atomic>
@@ -11,8 +11,8 @@
 
 #include "autil/EnvUtil.h"
 #include "autil/legacy/jsonizable.h"
-#include "rtp_llm/cpp/cache/connector/remote_connector/ClientWrapper.h"
-#include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientWrapper.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/GroupPolicy.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -48,18 +48,20 @@ class KVCMStorageBackend::Impl {
 public:
     using ActualUriGather = std::vector<std::vector<kv_cache_manager::LocationSpecUnit*>>;
 
-    Impl(const CacheConfig&                cache_config,
-         const KVCacheConfig&              kv_cache_config,
-         const RuntimeConfig&              runtime_config,
-         const ParallelismConfig&          parallelism_config,
-         const SpeculativeExecutionConfig& sp_config,
-         std::shared_ptr<BroadcastManager> broadcast_manager):
+    Impl(const CacheConfig&                   cache_config,
+         const KVCacheConfig&                 kv_cache_config,
+         const RuntimeConfig&                 runtime_config,
+         const ParallelismConfig&             parallelism_config,
+         const SpeculativeExecutionConfig&    sp_config,
+         std::shared_ptr<BroadcastManager>    broadcast_manager,
+         std::shared_ptr<kvcm::ClientWrapper> client_wrapper):
         cache_config_(cache_config),
         kv_cache_config_(kv_cache_config),
         runtime_config_(runtime_config),
         parallelism_config_(parallelism_config),
         sp_config_(sp_config),
-        broadcast_manager_(std::move(broadcast_manager)) {}
+        broadcast_manager_(std::move(broadcast_manager)),
+        client_wrapper_(std::move(client_wrapper)) {}
 
     bool init(const CacheTopology&                   topology,
               StorageBackend::BufferResolver         buffer_resolver,
@@ -67,6 +69,11 @@ public:
         RTP_LLM_LOG_INFO("start init BlockTree KVCM storage backend");
         if (cache_config_.use_independent_block_pools) {
             RTP_LLM_LOG_ERROR("BlockTree KVCM does not support independent device block pools");
+            return false;
+        }
+        if (parallelism_config_.tp_rank == 0 && parallelism_config_.tp_size > 1 && !broadcast_manager_) {
+            RTP_LLM_LOG_ERROR("BlockTree KVCM rank 0 requires a broadcast manager for tp_size=%ld",
+                              parallelism_config_.tp_size);
             return false;
         }
         std::vector<int32_t> full_group_ids;
@@ -79,29 +86,29 @@ public:
             }
         }
         if (other_group_ids.empty()) {
-            group_policy_ = std::make_unique<remote_connector::FullLayerGroupPolicy>(
+            group_policy_ = std::make_unique<kvcm::FullLayerGroupPolicy>(
                 topology, buffer_resolver, full_group_ids, other_group_ids);
         } else {
-            group_policy_ = std::make_unique<remote_connector::FullLinearLayerGroupPolicy>(
+            group_policy_ = std::make_unique<kvcm::FullLinearLayerGroupPolicy>(
                 topology, buffer_resolver, full_group_ids, other_group_ids, std::max(1, cache_config_.linear_step));
         }
         if (!group_policy_->init()) {
             RTP_LLM_LOG_ERROR("BlockTree KVCM group policy init failed");
             return false;
         }
-        remote_connector::ClientWrapper::ConfigMap client_config_map;
+        kvcm::ClientWrapper::ConfigMap client_config_map;
         try {
-            if (!kv_cache_config_.reco_client_config.empty()) {
+            if (!kv_cache_config_.kvcm_client_config.empty()) {
                 // Custom client JSON owns the serialized location specs, while
                 // the runtime policy still needs the same deterministic spec
                 // name-to-group/rank mapping for payload routing.
                 (void)genLocationSpecs();
-                autil::legacy::FromJsonString(client_config_map, kv_cache_config_.reco_client_config);
+                autil::legacy::FromJsonString(client_config_map, kv_cache_config_.kvcm_client_config);
             } else {
                 client_config_map = genClientConfig();
             }
         } catch (const autil::legacy::ExceptionBase& error) {
-            RTP_LLM_LOG_ERROR("parse RECO_CLIENT_CONFIG failed: %s", error.what());
+            RTP_LLM_LOG_ERROR("parse KVCM_CLIENT_CONFIG failed: %s", error.what());
             return false;
         } catch (const std::exception& error) {
             RTP_LLM_LOG_ERROR("initialize BlockTree KVCM client config failed: %s", error.what());
@@ -125,15 +132,12 @@ public:
         kv_cache_manager::InitParams client_init_params{
             tp_rank == 0 ? kv_cache_manager::RoleType::HYBRID : kv_cache_manager::RoleType::WORKER,
             &regist_span,
-            remote_connector::genLocationSpecName(static_cast<int>(tp_rank), registration_group->second.group_name)};
-        client_wrapper_ = std::make_shared<remote_connector::ClientWrapper>();
+            kvcm::genLocationSpecName(static_cast<int>(tp_rank), registration_group->second.group_name)};
+        if (!client_wrapper_) {
+            client_wrapper_ = std::make_shared<kvcm::ClientWrapper>();
+        }
         if (!client_wrapper_->init(client_config_map, client_init_params)) {
             RTP_LLM_LOG_ERROR("create BlockTree KVCM client failed");
-            return false;
-        }
-        if (tp_rank == 0 && parallelism_config_.tp_size > 1 && !broadcast_manager_) {
-            RTP_LLM_LOG_ERROR("BlockTree KVCM rank 0 requires a broadcast manager for tp_size=%ld",
-                              parallelism_config_.tp_size);
             return false;
         }
         RTP_LLM_LOG_INFO("BlockTree KVCM storage backend initialized, tp_rank=%ld tp_size=%ld policy={%s}",
@@ -160,7 +164,7 @@ public:
         if (!success) {
             return {request.local_matched_blocks_num, nullptr};
         }
-        remote_connector::LocationsView locations_view;
+        kvcm::LocationsView locations_view;
         if (!group_policy_->filterNeedLoadLocations(locations, locations_view, /*block_mask=*/0)) {
             throw std::runtime_error("KVCM returned an invalid location shape");
         }
@@ -178,7 +182,7 @@ public:
                                 parallelism_config_.tp_rank);
         const auto meta = std::dynamic_pointer_cast<KVCMMatchMeta>(match_meta);
         RTP_LLM_CHECK_WITH_INFO(meta != nullptr, "KVCM read received invalid match metadata");
-        remote_connector::LocationsView locations_view;
+        kvcm::LocationsView locations_view;
         RTP_LLM_CHECK_WITH_INFO(
             group_policy_->filterNeedLoadLocations(meta->locations, locations_view, /*block_mask=*/0),
             "KVCM read location filtering failed");
@@ -209,7 +213,7 @@ public:
                 remote->add_uris(std::string(location_spec.uri));
             }
         }
-        (void)dispatchRequests(requests, kv_cache_config_.reco_get_broadcast_timeout);
+        (void)dispatchRequests(requests, kv_cache_config_.kvcm_get_broadcast_timeout);
     }
 
     void write(const StorageRequest& request) {
@@ -265,7 +269,7 @@ public:
                 }
             }
 
-            const auto responses      = dispatchRequests(requests, kv_cache_config_.reco_put_broadcast_timeout);
+            const auto responses      = dispatchRequests(requests, kv_cache_config_.kvcm_put_broadcast_timeout);
             bool       has_actual_uri = false;
             for (size_t rank = 0; rank < responses.size(); ++rank) {
                 const auto& actual_uris = responses[rank].remote_response().actual_uris();
@@ -345,41 +349,41 @@ public:
     }
 
 private:
-    std::pair<std::shared_ptr<RemoteConnectorConfig::LocationSpecInfoMap>,
-              std::shared_ptr<RemoteConnectorConfig::LocationSpecGroups>>
+    std::pair<std::shared_ptr<kvcm::KVCMConfig::LocationSpecInfoMap>,
+              std::shared_ptr<kvcm::KVCMConfig::LocationSpecGroups>>
     genLocationSpecs() {
-        auto infos  = std::make_shared<RemoteConnectorConfig::LocationSpecInfoMap>();
-        auto groups = std::make_shared<RemoteConnectorConfig::LocationSpecGroups>();
+        auto infos  = std::make_shared<kvcm::KVCMConfig::LocationSpecInfoMap>();
+        auto groups = std::make_shared<kvcm::KVCMConfig::LocationSpecGroups>();
         RTP_LLM_CHECK_WITH_INFO(
             group_policy_->buildLocationSpecGroups(static_cast<int>(parallelism_config_.tp_size), *groups),
             "failed to build KVCM location spec groups");
         for (const auto& [group_id, group] : group_policy_->groups()) {
             for (int rank = 0; rank < parallelism_config_.tp_size; ++rank) {
-                const std::string spec_name = remote_connector::genLocationSpecName(rank, group.group_name);
+                const std::string spec_name = kvcm::genLocationSpecName(rank, group.group_name);
                 infos->emplace(spec_name, cache_config_.blockSizeBytesForGroup(static_cast<size_t>(group_id)));
             }
         }
         return {std::move(infos), std::move(groups)};
     }
 
-    remote_connector::ClientWrapper::ConfigMap genClientConfig() {
+    kvcm::ClientWrapper::ConfigMap genClientConfig() {
         std::vector<std::string> addresses;
-        if (!kv_cache_config_.reco_server_address.empty()) {
-            addresses.push_back(kv_cache_config_.reco_server_address);
+        if (!kv_cache_config_.kvcm_server_address.empty()) {
+            addresses.push_back(kv_cache_config_.kvcm_server_address);
         }
-        auto channel = std::make_shared<MetaChannelConfig>(kv_cache_config_.reco_meta_channel_retry_time,
-                                                           kv_cache_config_.reco_meta_channel_connection_timeout,
-                                                           kv_cache_config_.reco_meta_channel_call_timeout);
-        auto sdk     = std::make_shared<SdkWrapperConfig>(kv_cache_config_.reco_storage_thread_num,
-                                                      kv_cache_config_.reco_storage_queue_size,
-                                                      kv_cache_config_.reco_put_timeout_ms,
-                                                      kv_cache_config_.reco_get_timeout_ms);
-        autil::legacy::FromJsonString(sdk->sdk_backend_configs(), kv_cache_config_.reco_model_sdk_config);
+        auto channel = std::make_shared<kvcm::MetaChannelConfig>(kv_cache_config_.kvcm_meta_channel_retry_time,
+                                                                 kv_cache_config_.kvcm_meta_channel_connection_timeout,
+                                                                 kv_cache_config_.kvcm_meta_channel_call_timeout);
+        auto sdk     = std::make_shared<kvcm::SdkWrapperConfig>(kv_cache_config_.kvcm_storage_thread_num,
+                                                            kv_cache_config_.kvcm_storage_queue_size,
+                                                            kv_cache_config_.kvcm_put_timeout_ms,
+                                                            kv_cache_config_.kvcm_get_timeout_ms);
+        autil::legacy::FromJsonString(sdk->sdk_backend_configs(), kv_cache_config_.kvcm_model_sdk_config);
         auto [location_infos, location_groups] = genLocationSpecs();
 
         const std::string model_name = runtime_config_.model_name;
         const std::string dtype      = getDataTypeStr(cache_config_.dtype);
-        std::string       extra      = kv_cache_config_.reco_model_extra_info;
+        std::string       extra      = kv_cache_config_.kvcm_model_extra_info;
         extra += '/' + autil::EnvUtil::getEnv("BIZ_NAME", std::string("")) + '/'
                  + std::to_string(hashString(autil::EnvUtil::getEnv("CHECKPOINT_PATH", std::string(""))));
         std::string draft_info;
@@ -387,38 +391,38 @@ private:
             draft_info = '{' + sp_config_.to_string() + '}';
         }
         std::stringstream identity;
-        identity << "instance_group: " << kv_cache_config_.reco_instance_group
+        identity << "instance_group: " << kv_cache_config_.kvcm_instance_group
                  << ";block_size:" << cache_config_.seq_size_per_block << ";model_name:" << model_name
                  << ";dtype_str:" << dtype << ";use_mla:" << cache_config_.use_mla
                  << ";fp8_kv_cache:" << kv_cache_config_.fp8_kv_cache << ";tp_size:" << parallelism_config_.tp_size
                  << ";dp_size:" << parallelism_config_.dp_size << ";extra_info:" << extra
                  << ";location_spec_info:" << autil::legacy::ToJsonString(location_infos, true)
                  << ";draft_model_info:" << draft_info;
-        std::string instance_id = kv_cache_config_.reco_instance_id_salt;
+        std::string instance_id = kv_cache_config_.kvcm_instance_id_salt;
         if (!instance_id.empty()) {
             instance_id += '_';
         }
         instance_id += std::to_string(hashString(identity.str()));
 
         auto config =
-            std::make_shared<RemoteConnectorConfig>(kv_cache_config_.reco_enable_vipserver,
-                                                    kv_cache_config_.reco_vipserver_domain,
-                                                    static_cast<int32_t>(cache_config_.seq_size_per_block),
-                                                    kv_cache_config_.reco_instance_group,
-                                                    instance_id,
-                                                    addresses,
-                                                    location_infos,
-                                                    channel,
-                                                    sdk,
-                                                    location_groups,
-                                                    ModelDeployment(model_name,
-                                                                    dtype,
-                                                                    cache_config_.use_mla,
-                                                                    static_cast<int32_t>(parallelism_config_.tp_size),
-                                                                    static_cast<int32_t>(parallelism_config_.dp_size),
-                                                                    1,
-                                                                    extra,
-                                                                    kv_cache_config_.reco_model_user_data));
+            std::make_shared<kvcm::KVCMConfig>(kv_cache_config_.kvcm_enable_vipserver,
+                                               kv_cache_config_.kvcm_vipserver_domain,
+                                               static_cast<int32_t>(cache_config_.seq_size_per_block),
+                                               kv_cache_config_.kvcm_instance_group,
+                                               instance_id,
+                                               addresses,
+                                               location_infos,
+                                               channel,
+                                               sdk,
+                                               location_groups,
+                                               kvcm::ModelDeployment(model_name,
+                                                                     dtype,
+                                                                     cache_config_.use_mla,
+                                                                     static_cast<int32_t>(parallelism_config_.tp_size),
+                                                                     static_cast<int32_t>(parallelism_config_.dp_size),
+                                                                     1,
+                                                                     extra,
+                                                                     kv_cache_config_.kvcm_model_user_data));
         return {{"", std::move(config)}};
     }
 
@@ -502,15 +506,15 @@ private:
     }
 
 private:
-    CacheConfig                                      cache_config_;
-    KVCacheConfig                                    kv_cache_config_;
-    RuntimeConfig                                    runtime_config_;
-    ParallelismConfig                                parallelism_config_;
-    SpeculativeExecutionConfig                       sp_config_;
-    std::shared_ptr<BroadcastManager>                broadcast_manager_;
-    std::unique_ptr<remote_connector::GroupPolicy>   group_policy_;
-    std::shared_ptr<remote_connector::ClientWrapper> client_wrapper_;
-    // Preserve the legacy connector's operation-local, one-based request
+    CacheConfig                          cache_config_;
+    KVCacheConfig                        kv_cache_config_;
+    RuntimeConfig                        runtime_config_;
+    ParallelismConfig                    parallelism_config_;
+    SpeculativeExecutionConfig           sp_config_;
+    std::shared_ptr<BroadcastManager>    broadcast_manager_;
+    std::unique_ptr<kvcm::GroupPolicy>   group_policy_;
+    std::shared_ptr<kvcm::ClientWrapper> client_wrapper_;
+    // Preserve KVCM's operation-local, one-based request
     // order. Abort and finish share a sequence because both call FinishWrite.
     std::atomic<uint64_t> match_trace_sequence_{1};
     std::atomic<uint64_t> read_trace_sequence_{1};
@@ -518,16 +522,22 @@ private:
     std::atomic<uint64_t> finish_write_trace_sequence_{1};
 };
 
-KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                cache_config,
-                                       const KVCacheConfig&              kv_cache_config,
-                                       const RuntimeConfig&              runtime_config,
-                                       const ParallelismConfig&          parallelism_config,
-                                       const SpeculativeExecutionConfig& sp_config,
-                                       std::shared_ptr<BroadcastManager> broadcast_manager):
-    StorageBackend(makeStorageBackendExecutor(kv_cache_config.reco_asyncwrapper_thread_num,
-                                              kv_cache_config.reco_asyncwrapper_queue_size)),
-    impl_(std::make_unique<Impl>(
-        cache_config, kv_cache_config, runtime_config, parallelism_config, sp_config, std::move(broadcast_manager))) {}
+KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                   cache_config,
+                                       const KVCacheConfig&                 kv_cache_config,
+                                       const RuntimeConfig&                 runtime_config,
+                                       const ParallelismConfig&             parallelism_config,
+                                       const SpeculativeExecutionConfig&    sp_config,
+                                       std::shared_ptr<BroadcastManager>    broadcast_manager,
+                                       std::shared_ptr<kvcm::ClientWrapper> client_wrapper):
+    StorageBackend(makeStorageBackendExecutor(kv_cache_config.kvcm_asyncwrapper_thread_num,
+                                              kv_cache_config.kvcm_asyncwrapper_queue_size)),
+    impl_(std::make_unique<Impl>(cache_config,
+                                 kv_cache_config,
+                                 runtime_config,
+                                 parallelism_config,
+                                 sp_config,
+                                 std::move(broadcast_manager),
+                                 std::move(client_wrapper))) {}
 
 KVCMStorageBackend::~KVCMStorageBackend() = default;
 

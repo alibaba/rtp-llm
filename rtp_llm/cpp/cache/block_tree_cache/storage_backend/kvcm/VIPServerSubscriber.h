@@ -4,7 +4,7 @@
 #include "Subscriber.h"
 
 namespace rtp_llm {
-namespace remote_connector {
+namespace kvcm {
 
 class VIPServerSubscriber: public Subscriber {
 public:
@@ -20,5 +20,5 @@ private:
     std::vector<std::string>             domains_;
 };
 
-}  // namespace remote_connector
+}  // namespace kvcm
 }  // namespace rtp_llm

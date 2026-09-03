@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 
+#include <cassert>
 #include <utility>
 
 #include "autil/LambdaWorkItem.h"
@@ -87,6 +88,23 @@ bool BlockTreeTaskPool::submitCompletion(std::function<void()> task) {
     return true;
 }
 
+bool BlockTreeTaskPool::acquireWorkflowCredit() {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    if (!started_ || admission_stopped_ || shutdown_ || (queue_size_ != 0 && workflow_credits_.load() >= queue_size_)) {
+        return false;
+    }
+    workflow_credits_.fetch_add(1);
+    return true;
+}
+
+void BlockTreeTaskPool::releaseWorkflowCredit() {
+    const size_t previous = workflow_credits_.fetch_sub(1);
+    assert(previous > 0);
+    (void)previous;
+    std::lock_guard<std::mutex> lock(wait_mutex_);
+    wait_cv_.notify_all();
+}
+
 void BlockTreeTaskPool::stopAdmission() {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
     admission_stopped_ = true;
@@ -129,14 +147,14 @@ void BlockTreeTaskPool::waitForIdle() {
     bool                         wait_observer_invoked = false;
     wait_cv_.wait(lock, [this, &wait_observer_invoked] {
         const int pending_tasks = pending_tasks_.load();
-        if (pending_tasks > 0 && !wait_observer_invoked) {
+        if ((pending_tasks > 0 || workflow_credits_.load() > 0) && !wait_observer_invoked) {
             wait_observer_invoked = true;
             const auto observer   = pending_task_wait_observer_for_test_;
             if (observer) {
                 observer();
             }
         }
-        return pending_tasks <= 0;
+        return pending_tasks <= 0 && workflow_credits_.load() == 0;
     });
 }
 

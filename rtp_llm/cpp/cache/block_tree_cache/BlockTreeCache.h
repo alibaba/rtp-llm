@@ -27,7 +27,7 @@ struct CacheStats {
     size_t disk_heap_total_size{0};
 };
 struct BlockTreeKeySnapshot {
-    int64_t                   version{0};
+    int64_t                   version{-1};
     std::vector<CacheKeyType> keys;
 };
 // Unified configuration for BlockTreeCache behavior and pool sizing.
@@ -183,16 +183,18 @@ private:
     // Caller holds mutex_.
     void onWorkflowSettledLocked(bool tree_data_mutated, bool check_watermark);
 
-    BlockTreeCacheConfig                        config_;
-    std::unique_ptr<BlockTree>                  tree_;
-    std::shared_ptr<StorageBackend>             storage_backend_;
-    std::unique_ptr<BlockTransferDispatcher>    transfer_dispatcher_;
-    std::unique_ptr<BlockTreeTaskPool>          task_pool_;
-    BlockTreeCacheMetricsReporter               metrics_reporter_;
-    mutable std::mutex                          mutex_;
-    BlockTreeEvictor                            evictor_;
-    bool                                        initialized_{false};
-    int64_t                                     mutation_version_{0};
+    BlockTreeCacheConfig                     config_;
+    std::unique_ptr<BlockTree>               tree_;
+    std::shared_ptr<StorageBackend>          storage_backend_;
+    std::unique_ptr<BlockTransferDispatcher> transfer_dispatcher_;
+    std::unique_ptr<BlockTreeTaskPool>       task_pool_;
+    BlockTreeCacheMetricsReporter            metrics_reporter_;
+    mutable std::mutex                       mutex_;
+    BlockTreeEvictor                         evictor_;
+    bool                                     initialized_{false};
+    // Preserve the historical empty-cache wire value. The first successful
+    // topology mutation advances the version to zero.
+    int64_t                                     mutation_version_{-1};
     BlockTreeLoader                             loader_;
     BlockTreeStorer                             storer_;
     std::unique_ptr<FullPrefixInvariantScanner> full_prefix_scanner_;

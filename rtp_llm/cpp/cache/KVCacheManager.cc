@@ -17,7 +17,7 @@
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
-#include "rtp_llm/cpp/cache/connector/remote_connector/KVCMStorageBackend.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/KVCMStorageBackend.h"
 #endif
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
@@ -244,10 +244,10 @@ bool KVCacheManager::init() {
         return false;
     }
     if (kv_cache_config_.enable_remote_cache
-        && (kv_cache_config_.reco_asyncwrapper_thread_num == 0 || kv_cache_config_.reco_asyncwrapper_queue_size == 0)) {
+        && (kv_cache_config_.kvcm_asyncwrapper_thread_num == 0 || kv_cache_config_.kvcm_asyncwrapper_queue_size == 0)) {
         RTP_LLM_LOG_ERROR("remote cache executor thread count and queue size must be positive, got %zu/%zu",
-                          kv_cache_config_.reco_asyncwrapper_thread_num,
-                          kv_cache_config_.reco_asyncwrapper_queue_size);
+                          kv_cache_config_.kvcm_asyncwrapper_thread_num,
+                          kv_cache_config_.kvcm_asyncwrapper_queue_size);
         return false;
     }
 

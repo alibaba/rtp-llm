@@ -13,7 +13,7 @@
 
 namespace rtp_llm {
 
-namespace remote_connector {
+namespace kvcm {
 
 std::string genLocationSpecName(int tp_rank, const std::string& group_name);
 
@@ -53,6 +53,7 @@ public:
         std::string tag;
     };
     using SpecInfoMap        = std::map<std::string, SpecInfo, std::less<>>;
+    using SpecNames          = std::vector<std::string>;
     using LocationSpecGroups = std::map<std::string, std::vector<std::string>>;
 
     GroupPolicy(const CacheTopology&           topology,
@@ -87,7 +88,7 @@ public:
     }
 
     // Aggregate group masks that getNeedWriteGroups() can actually emit.
-    // Singleton specs are registered independently by RemoteConnector.
+    // Singleton specs are registered independently by KVCM.
     virtual std::vector<uint64_t> reachableAggregateMasks() const {
         return {};
     }
@@ -103,6 +104,14 @@ public:
 
 protected:
     virtual void rebuildDerivedSpecInfo() {}
+    bool         validateLocationSpecs(const kv_cache_manager::Location& location,
+                                       const SpecNames&                  expected_specs,
+                                       const char*                       kind) const;
+    bool         setLocationView(const kv_cache_manager::Location& location,
+                                 const SpecNames&                  expected_specs,
+                                 const SpecNames&                  selected_specs,
+                                 const char*                       kind,
+                                 LocationView&                     location_view) const;
 
     const CacheTopology&           topology_;
     StorageBackend::BufferResolver buffer_resolver_;
@@ -117,6 +126,8 @@ protected:
     std::unordered_map<uint64_t, std::string> location_spec_group_map_;
     // spec_name -> spec_info
     SpecInfoMap spec_name_to_info_;
+    // Canonically sorted exact set expected in a complete location.
+    SpecNames all_spec_names_;
 };
 
 class DefaultLayerGroupPolicy: public GroupPolicy {
@@ -189,18 +200,10 @@ protected:
                          uint32_t                       write_interval):
         DefaultLayerGroupPolicy(topology, std::move(buffer_resolver), full_group_ids, other_group_ids),
         write_interval_(write_interval) {}
-    bool IsValidFullLocation(const kv_cache_manager::Location& location) const;
-    bool CheckInvalidFullLocationAndSetView(const kv_cache_manager::Location& location,
-                                            LocationView&                     location_view) const;
-    bool CheckInvalidFullOtherLocationAndSetView(const kv_cache_manager::Location& location,
-                                                 LocationView&                     location_view) const;
-    bool SkipOtherSpecAndSetView(const kv_cache_manager::Location& location, LocationView& location_view) const;
-
-protected:
-    uint64_t                        valid_full_bithash_       = 0;
-    uint64_t                        valid_full_other_bithash_ = 0;
-    std::map<std::string, uint64_t> full_spec_name_bithash_;
-    std::map<std::string, uint64_t> full_other_spec_name_bithash_;
+    uint64_t  valid_full_bithash_       = 0;
+    uint64_t  valid_full_other_bithash_ = 0;
+    SpecNames full_spec_names_;
+    SpecNames full_other_spec_names_;
     /*
         interval == 0 :         only write last key's other attention
         interval == n (n > 0) : every n keys, write a other attention
@@ -228,5 +231,5 @@ private:
     }
 };
 
-}  // namespace remote_connector
+}  // namespace kvcm
 }  // namespace rtp_llm

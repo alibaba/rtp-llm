@@ -180,7 +180,7 @@ TEST_F(LoadJoinRegistryTest, InstallDecisionAggregatesActiveContexts) {
     EXPECT_TRUE(registry.installTargetInCache(&node, 0));
     EXPECT_TRUE(registry.eraseForContext(&node, 0, device_joiner->contextId()));
     EXPECT_FALSE(registry.installTargetInCache(&node, 0));
-    EXPECT_TRUE(registry.finish(&node, 0, true));
+    EXPECT_TRUE(finishAndNotifyJoinedContexts(registry, &node, 0, true));
 }
 
 TEST_F(LoadJoinRegistryTest, ExpiredJoinedContextIsNotKeptAlive) {

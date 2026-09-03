@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <csignal>
+#include <condition_variable>
 #include <future>
 #include <mutex>
 #include <sys/resource.h>
@@ -26,6 +27,7 @@ using namespace block_tree_cache_test;
 
 struct MultiRankBlockTransferRpcState {
     std::mutex                            mutex;
+    std::condition_variable               cv;
     std::vector<MemoryOperationRequestPB> requests;
 };
 
@@ -43,12 +45,15 @@ public:
 
     grpc::Status
     ExecuteFunction(grpc::ServerContext*, const FunctionRequestPB* request, FunctionResponsePB* response) override {
+        if (config_.state != nullptr && request->has_mem_request()) {
+            {
+                std::lock_guard<std::mutex> lock(config_.state->mutex);
+                config_.state->requests.push_back(request->mem_request());
+            }
+            config_.state->cv.notify_all();
+        }
         if (config_.sleep_millis > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(config_.sleep_millis));
-        }
-        if (config_.state != nullptr && request->has_mem_request()) {
-            std::lock_guard<std::mutex> lock(config_.state->mutex);
-            config_.state->requests.push_back(request->mem_request());
         }
         if (config_.has_mem_response) {
             response->mutable_mem_response()->set_code(config_.mem_response_code);
@@ -186,6 +191,19 @@ static void waitForEvictionSettlement(BlockTreeCache& cache) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     ASSERT_EQ(BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(cache), 0u);
+}
+
+static bool waitForRpcRequests(const std::shared_ptr<MultiRankBlockTransferRpcState>& state,
+                               size_t                                                 count,
+                               std::chrono::milliseconds                              timeout) {
+    std::unique_lock<std::mutex> lock(state->mutex);
+    return state->cv.wait_for(lock, timeout, [&state, count] { return state->requests.size() >= count; });
+}
+
+static bool waitForBusinessTasksToReturn(BlockTreeCache& cache, std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lock(cache.task_pool_->wait_mutex_);
+    return cache.task_pool_->wait_cv_.wait_for(
+        lock, timeout, [&cache] { return cache.task_pool_->pending_tasks_.load() == 0; });
 }
 
 class MultiRankBlockTransferEngineTest: public ::testing::Test {
@@ -732,6 +750,61 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsTask) {
         EXPECT_EQ(worker_request.copy_items(0).mem_block(), host_block);
         EXPECT_EQ(worker_request.copy_items(0).disk_block(), disk_block);
         EXPECT_EQ(worker_request.copy_items(0).group_set_id(), 0u);
+    }
+}
+
+TEST_F(MultiRankBlockTransferEngineTest, CacheShutdownWaitsForLateMultiRankEvictionSettlement) {
+    for (bool transfer_success : {true, false}) {
+        SCOPED_TRACE(transfer_success ? "success" : "failure");
+        auto                                  state = std::make_shared<MultiRankBlockTransferRpcState>();
+        const MemoryOperationResponsePB::Code second_response =
+            transfer_success ? MemoryOperationResponsePB::OK : MemoryOperationResponsePB::FAILED;
+        const std::vector<MultiRankBlockTransferRpcConfig> configs = {
+            {true, MemoryOperationResponsePB::OK, grpc::Status::OK, state, /*sleep_millis=*/500},
+            {true, second_response, grpc::Status::OK, state, /*sleep_millis=*/500},
+        };
+        std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
+        auto broadcast_manager = makeBroadcastManager(configs, servers);
+        ASSERT_NE(broadcast_manager, nullptr);
+
+        constexpr size_t kPoolSize = 8;
+        auto             host_pool = makeHostPool(256, kPoolSize);
+        auto             disk_pool = makeDiskPool(256, kPoolSize, std::make_unique<MemoryDiskBlockIO>());
+        auto             full      = makeBroadcastGroup("broadcast_eviction_late_shutdown", host_pool, disk_pool);
+        initializeBroadcastGroups({full});
+        const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+        ASSERT_NE(host_block, NULL_BLOCK_IDX);
+
+        BlockTreeCacheConfig config;
+        config.enable_device_cache      = false;
+        config.enable_host_cache        = true;
+        config.enable_disk_cache        = true;
+        std::vector<GroupSetPtr> groups = {full};
+        auto                     cache  = makeBlockTreeCacheForTest(
+            std::move(groups), std::move(config), /*storage_backend=*/nullptr, broadcast_manager);
+        std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+        resources[0][0].host_block = host_block;
+        ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
+
+        BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.01);
+        BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
+        ASSERT_TRUE(waitForRpcRequests(state, 2, std::chrono::seconds(5)));
+        ASSERT_TRUE(waitForBusinessTasksToReturn(*cache, std::chrono::seconds(5)));
+        ASSERT_EQ(cache->task_pool_->pending_tasks_.load(), 0);
+        ASSERT_EQ(cache->task_pool_->workflow_credits_.load(), 1u);
+        ASSERT_EQ(host_pool->freeBlocksNum(), kPoolSize - 1);
+        ASSERT_EQ(disk_pool->freeBlocksNum(), kPoolSize - 1);
+
+        auto destroy = std::async(std::launch::async, [cache = std::move(cache)]() mutable { cache.reset(); });
+        EXPECT_EQ(destroy.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+        const bool destroyed = destroy.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+        EXPECT_TRUE(destroyed);
+        destroy.get();
+
+        EXPECT_EQ(host_pool->freeBlocksNum(), kPoolSize);
+        EXPECT_EQ(disk_pool->freeBlocksNum(), kPoolSize);
+        std::lock_guard<std::mutex> lock(state->mutex);
+        EXPECT_EQ(state->requests.size(), 2u);
     }
 }
 

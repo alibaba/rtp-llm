@@ -304,12 +304,12 @@ private:
 
 class RtpLLMSchedulerMetricsCollector final {
 public:
-    int64_t wait_stream_size           = 0;
-    int64_t running_stream_size        = 0;
-    int64_t remote_running_stream_size = 0;
-    int64_t loading_cache_stream_size  = 0;
-    int64_t pending_decode_stream_size = 0;
-    int64_t decode_since_prefill       = 0;
+    int64_t wait_stream_size            = 0;
+    int64_t running_stream_size         = 0;
+    int64_t remote_running_stream_size  = 0;
+    int64_t loading_cache_stream_size   = 0;
+    int64_t pending_decode_stream_size  = 0;
+    int64_t decode_since_prefill        = 0;
     int64_t admitted_context_batch_size = 0;
     int64_t admitted_context_token_size = 0;
     int64_t waiting_oldest_age_us       = 0;
@@ -322,12 +322,12 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMSchedulerMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* wait_stream_size_metric           = nullptr;
-    kmonitor::MutableMetric* running_stream_size_metric        = nullptr;
-    kmonitor::MutableMetric* remote_running_stream_size_metric = nullptr;
-    kmonitor::MutableMetric* loading_cache_stream_size_metric  = nullptr;
-    kmonitor::MutableMetric* pending_decode_stream_size_metric = nullptr;
-    kmonitor::MutableMetric* decode_since_prefill_metric       = nullptr;
+    kmonitor::MutableMetric* wait_stream_size_metric            = nullptr;
+    kmonitor::MutableMetric* running_stream_size_metric         = nullptr;
+    kmonitor::MutableMetric* remote_running_stream_size_metric  = nullptr;
+    kmonitor::MutableMetric* loading_cache_stream_size_metric   = nullptr;
+    kmonitor::MutableMetric* pending_decode_stream_size_metric  = nullptr;
+    kmonitor::MutableMetric* decode_since_prefill_metric        = nullptr;
     kmonitor::MutableMetric* admitted_context_batch_size_metric = nullptr;
     kmonitor::MutableMetric* admitted_context_token_size_metric = nullptr;
     kmonitor::MutableMetric* waiting_oldest_age_us_metric       = nullptr;
@@ -935,6 +935,8 @@ public:
     kmonitor::MutableMetric* block_cache_ref_blocks_metric     = nullptr;
     kmonitor::MutableMetric* load_ref_blocks_metric            = nullptr;
     kmonitor::MutableMetric* eviction_target_ref_blocks_metric = nullptr;
+    // Compatibility alias retained while dashboards migrate to the clarified name.
+    kmonitor::MutableMetric* eviction_ref_blocks_compat_metric = nullptr;
     kmonitor::MutableMetric* store_ref_blocks_metric           = nullptr;
     kmonitor::MutableMetric* used_ratio_metric                 = nullptr;
 
@@ -971,9 +973,11 @@ private:
     kmonitor::MutableMetric* transfer_qps_metric             = nullptr;
     kmonitor::MutableMetric* transfer_failed_qps_metric      = nullptr;
     kmonitor::MutableMetric* descriptors_per_transfer_metric = nullptr;
-    kmonitor::MutableMetric* transfer_latency_us_metric      = nullptr;
-    kmonitor::MutableMetric* transfer_in_flight_metric       = nullptr;
-    kmonitor::MutableMetric* transfer_bytes_metric           = nullptr;
+    // Compatibility alias retained while dashboards migrate to the clarified name.
+    kmonitor::MutableMetric* transfer_descriptor_count_compat_metric = nullptr;
+    kmonitor::MutableMetric* transfer_latency_us_metric              = nullptr;
+    kmonitor::MutableMetric* transfer_in_flight_metric               = nullptr;
+    kmonitor::MutableMetric* transfer_bytes_metric                   = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -1042,10 +1046,10 @@ public:
     int64_t host_reuse_length          = 0;
     int64_t disk_reuse_length          = 0;
     int64_t remote_reuse_length        = 0;
-    float   kv_cache_hit_rate           = 0;
-    float   device_hit_rate             = 0;
-    float   host_hit_rate               = 0;
-    float   disk_hit_rate               = 0;
+    float   kv_cache_hit_rate          = 0;
+    float   device_hit_rate            = 0;
+    float   host_hit_rate              = 0;
+    float   disk_hit_rate              = 0;
 
     int64_t reuse_interval_avg_ms = 0;
     int64_t reuse_interval_max_ms = 0;

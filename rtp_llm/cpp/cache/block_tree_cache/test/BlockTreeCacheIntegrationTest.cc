@@ -4,6 +4,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <functional>
+#include <future>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -264,6 +265,7 @@ public:
                 ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "manual transfer test exited before completion"));
         }
         auto context = std::make_shared<ManuallyCompletedAsyncContext>();
+        descriptors_.insert(descriptors_.end(), descriptors.begin(), descriptors.end());
         contexts_.push_back(context);
         lock.unlock();
         cv_.notify_all();
@@ -294,6 +296,11 @@ public:
         return context->completeIfPending(std::move(error));
     }
 
+    std::vector<TransferDescriptor> descriptors() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return descriptors_;
+    }
+
     void failPendingAndFutureSubmissions() {
         std::vector<std::shared_ptr<ManuallyCompletedAsyncContext>> contexts;
         {
@@ -308,10 +315,11 @@ public:
     }
 
 private:
-    std::mutex                                                  mutex_;
+    mutable std::mutex                                          mutex_;
     std::condition_variable                                     cv_;
     bool                                                        manual_completion_enabled_{false};
     bool                                                        cleanup_requested_{false};
+    std::vector<TransferDescriptor>                             descriptors_;
     std::vector<std::shared_ptr<ManuallyCompletedAsyncContext>> contexts_;
 };
 
@@ -389,6 +397,11 @@ public:
         cv_.wait(lock, [this] { return entered_; });
     }
 
+    bool waitUntilEnteredFor(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, timeout, [this] { return entered_; });
+    }
+
     void markFinished() {
         std::lock_guard<std::mutex> lock(mutex_);
         finished_ = true;
@@ -398,6 +411,11 @@ public:
     bool finished() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return finished_;
+    }
+
+    bool waitUntilFinishedFor(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, timeout, [this] { return finished_; });
     }
 
 private:
@@ -787,8 +805,78 @@ TEST_F(BlockTreeCacheIntegrationTest, UncommittedLoadContextReleasesSourceRefere
     environment->expectFullyReclaimed();
 }
 
-// C006-T03: shutdown waits for committed copy settlement before draining every tree hold.
-TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettlement) {
+TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForSubmitReturnedStoreContextSettlement) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
+    for (bool copy_success : {true, false}) {
+        SCOPED_TRACE(copy_success ? "copy_success" : "copy_failure");
+        constexpr size_t kBlockBytes = 16;
+        constexpr size_t kPoolSize   = 2;
+        auto             device_pool = makeDevicePool(
+            {{kBlockBytes, 0}}, kPoolSize, copy_success ? "shutdown_store_success" : "shutdown_store_failure");
+        auto host_pool = makeHostPool(kBlockBytes, kPoolSize);
+        auto full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
+        auto topology = block_transfer_engine_test::makeTestTopology({block_transfer_engine_test::makeTestGroupBase(
+            defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, kBlockBytes)});
+        full->initialize(0, topology, {0});
+
+        BlockTreeCacheConfig config;
+        config.enable_device_cache = false;
+        config.enable_host_cache   = true;
+        auto cache                 = makeBlockTreeCacheForTest({full}, config);
+        auto manual_transfer_engine =
+            std::make_shared<ManuallyCompletedPerRankBlockTransferEngine>(std::vector<GroupSetPtr>{full});
+        manual_transfer_engine->enableManualCompletion();
+        ManualTransferCleanupGuard cleanup_guard(manual_transfer_engine);
+        BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, manual_transfer_engine);
+
+        const MultiNodeBlocks request_blocks = allocateDeviceBlocksForTest(*full, 1);
+        ASSERT_EQ(request_blocks.size(), 1u);
+        ASSERT_EQ(request_blocks.front().size(), 1u);
+        std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+        resources[0][0].device_blocks = request_blocks.front();
+        cache->insert({100}, resources, Tier::HOST);
+        ASSERT_TRUE(manual_transfer_engine->waitUntilSubmitted(1, kRaceWaitTimeout));
+        waitForCacheTasksToDrain(*cache);
+        EXPECT_EQ(cache->task_pool_->pending_tasks_.load(), 0);
+        EXPECT_EQ(cache->task_pool_->workflow_credits_.load(), 1u);
+        EXPECT_EQ(host_pool->freeBlocksNum(), kPoolSize - 1);
+
+        std::promise<void> wait_started;
+        auto               wait_started_future = wait_started.get_future();
+        LoadShutdownTestPeer::setPendingTaskWaitObserver(*cache, [&wait_started] { wait_started.set_value(); });
+        auto       destroy = std::async(std::launch::async, [cache = std::move(cache)]() mutable { cache.reset(); });
+        const bool wait_observed = wait_started_future.wait_for(kRaceWaitTimeout) == std::future_status::ready;
+        EXPECT_TRUE(wait_observed);
+        EXPECT_EQ(destroy.wait_for(std::chrono::milliseconds(100)), std::future_status::timeout);
+
+        const ErrorInfo transfer_result =
+            copy_success ? ErrorInfo::OkStatus() :
+                           ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected unresolved store failure");
+        const bool completed = manual_transfer_engine->complete(0, transfer_result);
+        EXPECT_TRUE(completed);
+        if (!completed) {
+            manual_transfer_engine->failPendingAndFutureSubmissions();
+        }
+        const bool destroyed = destroy.wait_for(kRaceWaitTimeout) == std::future_status::ready;
+        EXPECT_TRUE(destroyed);
+        if (!destroyed) {
+            manual_transfer_engine->failPendingAndFutureSubmissions();
+        }
+        destroy.get();
+        EXPECT_FALSE(manual_transfer_engine->complete(0, ErrorInfo::OkStatus()));
+        EXPECT_EQ(host_pool->freeBlocksNum(), kPoolSize);
+        EXPECT_TRUE(device_pool->isAllocated(request_blocks.front().front()));
+        device_pool->decRef(request_blocks.front());
+        EXPECT_EQ(device_pool->freeBlocksNum(), kPoolSize);
+    }
+}
+
+// C006-T03: a transfer submit may return an unresolved context. Shutdown must
+// still wait for its completion settlement before draining every tree hold.
+TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForSubmitReturnedLoadContextSettlement) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -818,9 +906,11 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
         auto cache                 = makeBlockTreeCacheForTest(std::move(groups), std::move(config));
         ASSERT_NE(cache, nullptr);
 
-        auto pausable_per_rank_transfer_engine =
-            std::make_shared<PausablePerRankBlockTransferEngine>(std::vector<GroupSetPtr>{full}, copy_success);
-        BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, pausable_per_rank_transfer_engine);
+        auto manual_transfer_engine =
+            std::make_shared<ManuallyCompletedPerRankBlockTransferEngine>(std::vector<GroupSetPtr>{full});
+        manual_transfer_engine->enableManualCompletion();
+        ManualTransferCleanupGuard cleanup_guard(manual_transfer_engine);
+        BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, manual_transfer_engine);
 
         const BlockIdxType source_block = full->allocateSingleBlock(Tier::DISK, BlockTreeRefType::CACHE);
         ASSERT_NE(source_block, NULL_BLOCK_IDX);
@@ -844,8 +934,10 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
         context->setTargetBlocks(0, {target_block});
 
         ASSERT_TRUE(context->commit());
-        pausable_per_rank_transfer_engine->waitUntilEntered();
-        EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), 1u);
+        ASSERT_TRUE(manual_transfer_engine->waitUntilSubmitted(1, kRaceWaitTimeout));
+        waitForCacheTasksToDrain(*cache);
+        EXPECT_EQ(cache->task_pool_->pending_tasks_.load(), 0);
+        EXPECT_EQ(cache->task_pool_->workflow_credits_.load(), 1u);
         EXPECT_EQ(disk_pool->treeRefCount(source_block), 2u);
         // The request and the tree umbrella keep two outer references while LOAD protects the target internally.
         EXPECT_EQ(device_pool->refCount(target_block), 2u);
@@ -855,27 +947,32 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
         EXPECT_EQ(disk_pool->freeBlocksNum(), disk_free_before - 1);
         EXPECT_FALSE(context->commit());
 
+        const std::vector<BlockIdxType> device_blocks_before_shutdown = allocatedBlocksSnapshot(*device_pool);
+        const std::vector<BlockIdxType> host_blocks_before_shutdown   = allocatedBlocksSnapshot(*host_pool);
+        const std::vector<BlockIdxType> disk_blocks_before_shutdown   = allocatedBlocksSnapshot(*disk_pool);
+        ASSERT_EQ(device_blocks_before_shutdown, (std::vector<BlockIdxType>{target_block}));
+        EXPECT_TRUE(host_blocks_before_shutdown.empty());
+        ASSERT_EQ(disk_blocks_before_shutdown, (std::vector<BlockIdxType>{source_block}));
+        const std::vector<TransferDescriptor> submitted_descriptors = manual_transfer_engine->descriptors();
+        ASSERT_EQ(submitted_descriptors.size(), 1u);
+        EXPECT_EQ(submitted_descriptors[0].group_set_id, 0);
+        EXPECT_EQ(submitted_descriptors[0].source_tier, Tier::DISK);
+        EXPECT_EQ(submitted_descriptors[0].target_tier, Tier::DEVICE);
+        EXPECT_EQ(submitted_descriptors[0].singleBlockAt(Tier::DISK), source_block);
+        EXPECT_EQ(submitted_descriptors[0].target_blocks, (std::vector<BlockIdxType>{target_block}));
+
         ThreadCompletion destruction;
         LoadShutdownTestPeer::setPendingTaskWaitObserver(*cache, [&destruction] { destruction.markEntered(); });
         std::thread destroy_thread([cache = std::move(cache), &destruction]() mutable {
             cache.reset();
             destruction.markFinished();
         });
-        destruction.waitUntilEntered();
+        const bool  wait_observed = destruction.waitUntilEnteredFor(kRaceWaitTimeout);
+        EXPECT_TRUE(wait_observed);
+        if (!wait_observed) {
+            manual_transfer_engine->failPendingAndFutureSubmissions();
+        }
         EXPECT_FALSE(destruction.finished());
-        const std::vector<BlockIdxType> device_blocks_after_wait = allocatedBlocksSnapshot(*device_pool);
-        const std::vector<BlockIdxType> host_blocks_after_wait   = allocatedBlocksSnapshot(*host_pool);
-        const std::vector<BlockIdxType> disk_blocks_after_wait   = allocatedBlocksSnapshot(*disk_pool);
-        ASSERT_EQ(device_blocks_after_wait, (std::vector<BlockIdxType>{target_block}));
-        EXPECT_TRUE(host_blocks_after_wait.empty());
-        ASSERT_EQ(disk_blocks_after_wait, (std::vector<BlockIdxType>{source_block}));
-        const std::vector<TransferDescriptor> descriptors_after_wait = pausable_per_rank_transfer_engine->descriptors();
-        ASSERT_EQ(descriptors_after_wait.size(), 1u);
-        EXPECT_EQ(descriptors_after_wait[0].group_set_id, 0);
-        EXPECT_EQ(descriptors_after_wait[0].source_tier, Tier::DISK);
-        EXPECT_EQ(descriptors_after_wait[0].target_tier, Tier::DEVICE);
-        EXPECT_EQ(descriptors_after_wait[0].singleBlockAt(Tier::DISK), source_block);
-        EXPECT_EQ(descriptors_after_wait[0].target_blocks, (std::vector<BlockIdxType>{target_block}));
         EXPECT_TRUE(device_pool->isAllocated(target_block));
         EXPECT_TRUE(disk_pool->isAllocated(source_block));
         EXPECT_EQ(device_pool->refCount(target_block), 2u);
@@ -884,13 +981,21 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
         EXPECT_EQ(host_pool->freeBlocksNum(), host_free_before);
         EXPECT_EQ(disk_pool->freeBlocksNum(), disk_free_before - 1);
 
-        pausable_per_rank_transfer_engine->release();
+        const ErrorInfo transfer_result =
+            copy_success ? ErrorInfo::OkStatus() :
+                           ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected unresolved load failure");
+        const bool completed = manual_transfer_engine->complete(0, transfer_result);
+        EXPECT_TRUE(completed);
+        if (!completed) {
+            manual_transfer_engine->failPendingAndFutureSubmissions();
+        }
+        EXPECT_TRUE(destruction.waitUntilFinishedFor(kRaceWaitTimeout));
         destroy_thread.join();
         EXPECT_TRUE(destruction.finished());
         context->waitDone();
         EXPECT_TRUE(context->done());
         EXPECT_EQ(context->success(), copy_success);
-        EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), 1u);
+        EXPECT_EQ(manual_transfer_engine->descriptors().size(), 1u);
         EXPECT_FALSE(disk_pool->isAllocated(source_block));
         EXPECT_EQ(host_pool->freeBlocksNum(), host_free_before);
         EXPECT_EQ(disk_pool->freeBlocksNum(), disk_free_before);

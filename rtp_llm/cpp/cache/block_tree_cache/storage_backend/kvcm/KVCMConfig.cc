@@ -1,8 +1,9 @@
-#include "RemoteConnectorConfig.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/KVCMConfig.h"
 
 using namespace autil::legacy;
 
 namespace rtp_llm {
+namespace kvcm {
 namespace {
 DataStorageType DataStorageTypeFromString(const std::string& type) {
     if (type == "local") {
@@ -178,7 +179,7 @@ void MetaChannelConfig::Jsonize(Jsonizable::JsonWrapper& json) {
     json.Jsonize("call_timeout", call_timeout_, call_timeout_);
 }
 
-void RemoteConnectorConfig::Jsonize(Jsonizable::JsonWrapper& json) {
+void KVCMConfig::Jsonize(Jsonizable::JsonWrapper& json) {
     json.Jsonize("enable_vipserver", enable_vipserver_, false);
     json.Jsonize("vipserver_domain", vipserver_domain_, "");
     json.Jsonize("instance_group", instance_group_);
@@ -191,4 +192,5 @@ void RemoteConnectorConfig::Jsonize(Jsonizable::JsonWrapper& json) {
     json.Jsonize("model_deployment", model_deployment_);
     json.Jsonize("location_spec_groups", location_spec_groups_, {});
 }
+}  // namespace kvcm
 }  // namespace rtp_llm
