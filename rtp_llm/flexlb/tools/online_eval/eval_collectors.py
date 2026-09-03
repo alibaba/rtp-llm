@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """Background collectors extracted from run_online_eval.sh's heredoc pollers.
 
-Stage 2 of the unified-python-entry refactor: the five python3 heredoc
-pollers that run_online_eval.sh used to spawn as independent background
-processes now live here as threads of one stdlib-only process.
+The python3 heredoc pollers that run_online_eval.sh used to spawn as
+independent background processes live here as threads of one stdlib-only
+process; the master counter poller (G6) runs in that same process as the
+secondary collectors, so one invocation covers every 1s series.
 
-Groups (run_online_eval.sh starts one process per group):
-  --group counter   : 1 thread — master arrival/completion counter poller
-                      (GET {addr}/rtp_llm/server_latency ->
-                       master_counters_timeseries.txt).
-  --group secondary : up to 4 threads —
+--group secondary (the only group; run_online_eval.sh starts one process
+per run):
+  up to 5 threads —
                       G1 mock per-engine prometheus (mock control port),
                       G3 master business prometheus (management port),
                       G4 master inflight snapshot,
-                      G5 process CPU/RSS sampling.
+                      G5 process CPU/RSS sampling,
+                      G6 master arrival/completion counter poller
+                      (GET {addr}/rtp_llm/server_latency ->
+                       master_counters_timeseries.txt).
 
 Each thread is a line-by-line port of the original heredoc: same URL
 construction, same parsing/whitelisting, same output line format, same
@@ -95,7 +97,23 @@ _SHUTDOWN_GRACE_S = 3.0
 
 
 def _request_stop(signum, frame):
-    _STOP.set()
+    # Re-entry guard: Event.set() acquires the Event's underlying Condition
+    # lock, which is NOT reentrant — a second signal delivered while the
+    # handler sits inside that critical section re-enters the handler and
+    # self-deadlocks the whole process (observed as one leaked frozen
+    # collector per run when the shell stop loop sent 5 rapid SIGTERMs to
+    # the unified process; py-spy showed 3-level recursive handler frames).
+    # Mask BOTH stop signals on entry so neither a same-signal burst nor a
+    # SIGTERM/SIGINT cross can nest — the process is on its way out, so
+    # ignoring further stop signals is the intended semantics. The
+    # try/except is a last-resort belt: even if set() were ever to raise,
+    # the handler must return, never hang.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        _STOP.set()
+    except Exception:
+        pass
 
 
 def _sleep_remaining(started, interval_s):
@@ -108,7 +126,8 @@ def _sleep_remaining(started, interval_s):
 
 
 def run_master_counter_poller(http_addr, out_path, interval_s):
-    """Counter poller (was: start_master_counter_poller heredoc).
+    """G6: master arrival/completion counter poller (was: the standalone
+    --group counter process, before that a heredoc).
 
     GET http://{addr}/rtp_llm/server_latency -> cumulative arrival/completion
     counters, one kv line per round."""
@@ -290,22 +309,9 @@ def main():
     parser.add_argument(
         "--group",
         required=True,
-        choices=("counter", "secondary"),
-        help="counter = master counter poller thread; "
-        "secondary = up to 4 collector threads (G1/G3/G4/G5)",
-    )
-    parser.add_argument(
-        "--counter-http-addr",
-        help="master HTTP addr (host:port) for the counter poller",
-    )
-    parser.add_argument(
-        "--counter-out", help="master_counters_timeseries.txt output path"
-    )
-    parser.add_argument(
-        "--counter-interval",
-        type=float,
-        default=1.0,
-        help="MASTER_COUNTER_POLL_INTERVAL_S (default: 1)",
+        choices=("secondary",),
+        help="the single unified collector group: up to 5 threads "
+        "(G1/G3/G4/G5 + G6 master counter poller)",
     )
     parser.add_argument(
         "--secondary-interval",
@@ -337,14 +343,85 @@ def main():
     parser.add_argument(
         "--process-out", help="process_usage_timeseries.txt output path"
     )
+    parser.add_argument(
+        "--counter-http-addr",
+        help="master HTTP addr (host:port) for G6 (server_latency counters)",
+    )
+    parser.add_argument(
+        "--counter-out", help="master_counters_timeseries.txt output path (G6)"
+    )
+    parser.add_argument(
+        "--counter-interval",
+        type=float,
+        default=1.0,
+        help="MASTER_COUNTER_POLL_INTERVAL_S for G6 (default: 1)",
+    )
     args = parser.parse_args()
 
     threads = []
-    if args.group == "counter":
-        if not args.counter_http_addr or not args.counter_out:
-            parser.error(
-                "--group counter requires --counter-http-addr and --counter-out"
+    if bool(args.mock_port) != bool(args.mock_out):
+        parser.error("--mock-port and --mock-out must be passed together")
+    if bool(args.prometheus_port) != bool(args.prometheus_out):
+        parser.error("--prometheus-port and --prometheus-out must be passed together")
+    if bool(args.inflight_http_addr) != bool(args.inflight_out):
+        parser.error("--inflight-http-addr and --inflight-out must be passed together")
+    if bool(args.pid_file) != bool(args.process_out):
+        parser.error("--pid-file and --process-out must be passed together")
+    if bool(args.counter_http_addr) != bool(args.counter_out):
+        parser.error("--counter-http-addr and --counter-out must be passed together")
+    if args.mock_port:
+        mock_interval = (
+            args.mock_interval
+            if args.mock_interval is not None
+            else args.secondary_interval
+        )
+        threads.append(
+            threading.Thread(
+                target=run_mock_per_engine_poller,
+                args=(args.mock_port, args.mock_out, mock_interval),
+                name="mock-per-engine-poller",
+                daemon=True,
             )
+        )
+    if args.prometheus_port:
+        threads.append(
+            threading.Thread(
+                target=run_master_prometheus_poller,
+                args=(
+                    args.prometheus_port,
+                    args.prometheus_out,
+                    args.secondary_interval,
+                ),
+                name="master-prometheus-poller",
+                daemon=True,
+            )
+        )
+    if args.inflight_http_addr:
+        threads.append(
+            threading.Thread(
+                target=run_master_inflight_poller,
+                args=(
+                    args.inflight_http_addr,
+                    args.inflight_out,
+                    args.secondary_interval,
+                ),
+                name="master-inflight-poller",
+                daemon=True,
+            )
+        )
+    if args.pid_file:
+        threads.append(
+            threading.Thread(
+                target=run_process_usage_poller,
+                args=(args.pid_file, args.process_out, args.secondary_interval),
+                name="process-usage-poller",
+                daemon=True,
+            )
+        )
+    if args.counter_http_addr:
+        # G6: own interval knob so MASTER_COUNTER_POLL_INTERVAL_S keeps
+        # working independently of SECONDARY_POLL_INTERVAL_S (pre-G6: the
+        # standalone --group counter process took the same argv).
         threads.append(
             threading.Thread(
                 target=run_master_counter_poller,
@@ -353,75 +430,13 @@ def main():
                 daemon=True,
             )
         )
-    else:
-        if bool(args.mock_port) != bool(args.mock_out):
-            parser.error("--mock-port and --mock-out must be passed together")
-        if bool(args.prometheus_port) != bool(args.prometheus_out):
-            parser.error(
-                "--prometheus-port and --prometheus-out must be passed together"
-            )
-        if bool(args.inflight_http_addr) != bool(args.inflight_out):
-            parser.error(
-                "--inflight-http-addr and --inflight-out must be passed together"
-            )
-        if bool(args.pid_file) != bool(args.process_out):
-            parser.error("--pid-file and --process-out must be passed together")
-        if args.mock_port:
-            mock_interval = (
-                args.mock_interval
-                if args.mock_interval is not None
-                else args.secondary_interval
-            )
-            threads.append(
-                threading.Thread(
-                    target=run_mock_per_engine_poller,
-                    args=(args.mock_port, args.mock_out, mock_interval),
-                    name="mock-per-engine-poller",
-                    daemon=True,
-                )
-            )
-        if args.prometheus_port:
-            threads.append(
-                threading.Thread(
-                    target=run_master_prometheus_poller,
-                    args=(
-                        args.prometheus_port,
-                        args.prometheus_out,
-                        args.secondary_interval,
-                    ),
-                    name="master-prometheus-poller",
-                    daemon=True,
-                )
-            )
-        if args.inflight_http_addr:
-            threads.append(
-                threading.Thread(
-                    target=run_master_inflight_poller,
-                    args=(
-                        args.inflight_http_addr,
-                        args.inflight_out,
-                        args.secondary_interval,
-                    ),
-                    name="master-inflight-poller",
-                    daemon=True,
-                )
-            )
-        if args.pid_file:
-            threads.append(
-                threading.Thread(
-                    target=run_process_usage_poller,
-                    args=(args.pid_file, args.process_out, args.secondary_interval),
-                    name="process-usage-poller",
-                    daemon=True,
-                )
-            )
-        if not threads:
-            print(
-                "eval_collectors: no secondary collector enabled "
-                "(all START_* guards off)",
-                file=sys.stderr,
-            )
-            return 0
+    if not threads:
+        print(
+            "eval_collectors: no secondary collector enabled "
+            "(all START_* guards off)",
+            file=sys.stderr,
+        )
+        return 0
 
     signal.signal(signal.SIGTERM, _request_stop)
     signal.signal(signal.SIGINT, _request_stop)

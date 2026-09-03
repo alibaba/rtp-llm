@@ -257,7 +257,10 @@ MOCK_PID=""
 FLEXLB_PID=""
 MASTER_COUNTER_POLLER_PID=""
 # Secondary 1s collectors (see start_secondary_pollers below): mock per-engine
-# prometheus, master prometheus/inflight time series, process CPU/RSS sampling.
+# prometheus, master prometheus/inflight time series, process CPU/RSS sampling
+# and the master arrival/completion counter poller (G6) — all threads of one
+# eval_collectors.py process, so every *POLLER_PID below captures that single
+# process pid.
 MOCK_PER_ENGINE_POLLER_PID=""
 MASTER_PROMETHEUS_POLLER_PID=""
 MASTER_INFLIGHT_POLLER_PID=""
@@ -288,7 +291,8 @@ if [[ -n "${JAVA21_HOME_DETECTED}" ]]; then
 fi
 
 cleanup() {
-  stop_master_counter_poller
+  # G6 (master counters) lives in the secondary collector process; one stop
+  # covers all five threads (G1/G3/G4/G5/G6).
   stop_secondary_pollers
   for pid in "${CLIENT_PIDS[@]}"; do
     kill "${pid}" >/dev/null 2>&1 || true
@@ -361,6 +365,9 @@ consolidate_run_outputs_now() {
   # output files and deletes them, so no writer may still be appending (a
   # writer holding an unlinked fd would keep writing into the void). The
   # stop is idempotent — also called at the load-client stop point / cleanup.
+  # Since the G6 unification the master counter poller runs in this same
+  # process, so it stops here too (previously it outlived consolidation on
+  # the failure path, harmlessly writing into the void until cleanup).
   stop_secondary_pollers
   local consolidate_mock_port_args=()
   if [[ "${START_MOCK}" == "1" ]]; then
@@ -572,12 +579,13 @@ save_master_prometheus() {
   return 1
 }
 
-# Per-second master arrival/completion counter time series. The management
-# Prometheus endpoint has no arrival/completion counters, but the master
-# already exposes cumulative arrival_count/completion_count on the existing
-# GET /rtp_llm/server_latency endpoint — poll that (no master code change).
-# Counters are cumulative within the recorder window; the multi-worker path
-# resets the window right after the poller starts, visible as a counter drop.
+# Per-second master arrival/completion counter time series (G6). The
+# management Prometheus endpoint has no arrival/completion counters, but the
+# master already exposes cumulative arrival_count/completion_count on the
+# existing GET /rtp_llm/server_latency endpoint — poll that (no master code
+# change). Counters are cumulative within the recorder window; the
+# multi-worker path resets the window right after the poller starts, visible
+# as a counter drop.
 MASTER_COUNTERS_FILE="${RUN_DIR}/master_counters_timeseries.txt"
 MASTER_COUNTER_POLL_INTERVAL_S="${MASTER_COUNTER_POLL_INTERVAL_S:-1}"
 
@@ -585,32 +593,34 @@ start_master_counter_poller() {
   if [[ "${START_FLEXLB}" != "1" ]]; then
     return 0
   fi
-  # Stage 2 (unified py entry): the heredoc body moved to
+  # G6 (unified collection entry): the poller body lives in
   # eval_collectors.py run_master_counter_poller (same URL/parsing/output
-  # line format/interval semantics); this thin wrapper just starts it.
-  python3 "${SCRIPT_DIR}/eval_collectors.py" --group counter \
-    --counter-http-addr "${FLEXLB_HTTP_ADDR}" \
-    --counter-out "${MASTER_COUNTERS_FILE}" \
-    --counter-interval "${MASTER_COUNTER_POLL_INTERVAL_S}" &
-  MASTER_COUNTER_POLLER_PID="$!"
+  # line format/interval semantics) and runs as a thread of the single
+  # secondary collector process started by start_secondary_pollers below —
+  # this wrapper only registers the group argv. NOT gated by
+  # FLEXLB_SECONDARY_POLLERS_ENABLED: the counter series feeds aggregate
+  # master_arrivals_ts / KPI consistency, so A/B-off baselines keep
+  # collecting it (pre-G6 behavior: a standalone --group counter process
+  # with the same exemption).
+  SECONDARY_COLLECTOR_ARGS+=(
+    --counter-http-addr "${FLEXLB_HTTP_ADDR}"
+    --counter-out "${MASTER_COUNTERS_FILE}"
+    --counter-interval "${MASTER_COUNTER_POLL_INTERVAL_S}"
+  )
 }
 
-stop_master_counter_poller() {
-  if [[ -n "${MASTER_COUNTER_POLLER_PID}" ]]; then
-    kill "${MASTER_COUNTER_POLLER_PID}" >/dev/null 2>&1 || true
-    MASTER_COUNTER_POLLER_PID=""
-  fi
-}
-
-# ---- Secondary 1s collectors (unified-analysis data audit G1/G3/G4/G5) ----
-# All four pollers follow the master counter poller pattern: collector
-# threads inside the single eval_collectors.py background process started
-# by start_secondary_pollers below, each appending to a one-shot file under
-# RUN_DIR, *POLLER_PID bookkeeping variables, best-effort semantics (a
-# failed sample or a missing dependency — e.g. no `ps` binary — is a
-# WARNING, never a load-test blocker), and a stop path wired into the
+# ---- Secondary 1s collectors (unified-analysis data audit G1/G3/G4/G5/G6) ----
+# All five pollers are collector threads inside the single
+# eval_collectors.py background process started by start_secondary_pollers
+# below, each appending to a one-shot file under RUN_DIR, *POLLER_PID
+# bookkeeping variables (all capture the same process pid), best-effort
+# semantics (a failed sample or a missing dependency — e.g. no `ps` binary —
+# is a WARNING, never a load-test blocker), and a stop path wired into the
 # load-client stop point, consolidate_run_outputs_now and the EXIT trap.
-# None of them needs curl: urllib covers both HTTP planes.
+# None of them needs curl: urllib covers both HTTP planes. G6 (master
+# server_latency counters) registers via start_master_counter_poller above
+# and is exempt from the M7 A/B switch (it feeds aggregate master_arrivals_ts
+# / KPI consistency, so A/B-off baselines keep collecting it).
 # Consolidation later merges each file into its component JSON and deletes it
 # (same one-shot-source treatment as master_counters_timeseries.txt).
 
@@ -743,32 +753,39 @@ append_process_poll_pid() {
 }
 
 start_secondary_pollers() {
-  # M7: FLEXLB_SECONDARY_POLLERS_ENABLED=0 skips all four pollers — zero
-  # observation overhead for A/B comparisons.
-  if [[ "${FLEXLB_SECONDARY_POLLERS_ENABLED}" != "1" ]]; then
-    echo "Secondary pollers disabled (FLEXLB_SECONDARY_POLLERS_ENABLED=${FLEXLB_SECONDARY_POLLERS_ENABLED})"
-    return 0
-  fi
-  write_process_poll_pids
-  # Stage 2: the four start_*_poller calls below only accumulate group argv
-  # (see SECONDARY_COLLECTOR_ARGS); re-registered from scratch here so a
+  # The start_*_poller calls below only accumulate group argv (see
+  # SECONDARY_COLLECTOR_ARGS); re-registered from scratch here so a
   # hypothetical second call never inherits stale arguments.
   SECONDARY_COLLECTOR_ARGS=()
-  start_mock_per_engine_poller
-  start_master_prometheus_poller
-  start_master_inflight_poller
-  start_process_usage_poller
+  # G6 first: the master counter poller is NOT covered by the M7 A/B switch
+  # below — its series feeds aggregate master_arrivals_ts / KPI consistency,
+  # so A/B-off baselines keep collecting it, exactly like the pre-G6
+  # standalone --group counter process did.
+  start_master_counter_poller
+  # M7: FLEXLB_SECONDARY_POLLERS_ENABLED=0 skips the four observation
+  # pollers — zero observation overhead for A/B comparisons. G6 (when
+  # START_FLEXLB=1) still runs in the process started below.
+  if [[ "${FLEXLB_SECONDARY_POLLERS_ENABLED}" != "1" ]]; then
+    echo "Secondary pollers disabled (FLEXLB_SECONDARY_POLLERS_ENABLED=${FLEXLB_SECONDARY_POLLERS_ENABLED}); G6 counter poller unaffected"
+  else
+    write_process_poll_pids
+    start_mock_per_engine_poller
+    start_master_prometheus_poller
+    start_master_inflight_poller
+    start_process_usage_poller
+  fi
   if [[ "${#SECONDARY_COLLECTOR_ARGS[@]}" -eq 0 ]]; then
     return 0
   fi
-  # One process, four collector threads (G1/G3/G4/G5). The four legacy PID
-  # variables all capture this single pid: stop_secondary_pollers' kill
-  # loop stays unchanged (idempotent SIGTERM x4 on the same pid is
-  # harmless).
+  # One process, up to five collector threads (G1/G3/G4/G5/G6). The five
+  # legacy PID variables all capture this single pid; stop_secondary_pollers
+  # sends exactly ONE SIGTERM to it (a rapid same-pid SIGTERM burst deadlocked
+  # the collector's Python signal handler — see the stop function).
   python3 "${SCRIPT_DIR}/eval_collectors.py" --group secondary \
     --secondary-interval "${SECONDARY_POLL_INTERVAL_S}" \
     "${SECONDARY_COLLECTOR_ARGS[@]}" &
   local group_pid="$!"
+  MASTER_COUNTER_POLLER_PID="${group_pid}"
   MOCK_PER_ENGINE_POLLER_PID="${group_pid}"
   MASTER_PROMETHEUS_POLLER_PID="${group_pid}"
   MASTER_INFLIGHT_POLLER_PID="${group_pid}"
@@ -776,13 +793,38 @@ start_secondary_pollers() {
 }
 
 stop_secondary_pollers() {
+  # All five legacy PID variables capture the SAME unified collector pid
+  # (one process, up to 5 threads). The former loop sent one SIGTERM per
+  # variable — up to 5 rapid SIGTERMs to one process — and the collector's
+  # Python handler deadlocked when a second signal landed inside
+  # Event.set()'s non-reentrant lock window (py-spy: recursive handler
+  # frames; every run leaked one frozen process). Now: exactly ONE SIGTERM
+  # per distinct pid, wait up to ~5s for the graceful exit (in-flight round
+  # is bounded by the 2s HTTP timeout, shutdown grace 3s), then SIGKILL as
+  # the fallback. Idempotent: a gone/reaped pid is not an error. The EXIT
+  # trap cleanup path calls this too and benefits from the same fix.
   local pid
-  for pid in "${MOCK_PER_ENGINE_POLLER_PID}" "${MASTER_PROMETHEUS_POLLER_PID}" \
-    "${MASTER_INFLIGHT_POLLER_PID}" "${PROCESS_USAGE_POLLER_PID}"; do
-    if [[ -n "${pid}" ]]; then
-      kill "${pid}" >/dev/null 2>&1 || true
+  local unique_pids=()
+  for pid in "${MASTER_COUNTER_POLLER_PID}" "${MOCK_PER_ENGINE_POLLER_PID}" \
+    "${MASTER_PROMETHEUS_POLLER_PID}" "${MASTER_INFLIGHT_POLLER_PID}" \
+    "${PROCESS_USAGE_POLLER_PID}"; do
+    if [[ -n "${pid}" ]] && [[ " ${unique_pids[*]:-} " != *" ${pid} "* ]]; then
+      unique_pids+=("${pid}")
     fi
   done
+  for pid in ${unique_pids[@]+"${unique_pids[@]}"}; do
+    kill "${pid}" >/dev/null 2>&1 || true
+    local waited=0
+    while kill -0 "${pid}" >/dev/null 2>&1 && (( waited < 50 )); do
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    if kill -0 "${pid}" >/dev/null 2>&1; then
+      echo "secondary collector pid=${pid} still alive after 5s; sending SIGKILL" >&2
+      kill -9 "${pid}" >/dev/null 2>&1 || true
+    fi
+  done
+  MASTER_COUNTER_POLLER_PID=""
   MOCK_PER_ENGINE_POLLER_PID=""
   MASTER_PROMETHEUS_POLLER_PID=""
   MASTER_INFLIGHT_POLLER_PID=""
@@ -1106,14 +1148,13 @@ echo "Load clients will start at epoch_ms=${CLIENT_START_EPOCH_MS}"
 echo "Send mode: ${SEND_MODE:-replay} (SEND_MODE_QPS=${SEND_MODE_QPS:-0})"
 echo "warmup(prepare)=${FLEXLB_WARMUP_SECONDS:-10}s before any traffic; ramp-up=${RAMP_UP_SECONDS}s linear QPS climb (uniform mode)"
 
-# Capture the master arrival/completion counter time series for the whole load
-# window (stopped right after all clients finish; also killed by cleanup).
-start_master_counter_poller
-
-# Secondary 1s collectors (mock per-engine prometheus, master prometheus /
-# inflight time series, process CPU/RSS) run over the same load window and
-# stop at the same point as the counter poller above; consolidation merges
-# their files afterwards.
+# Unified 1s collectors (single eval_collectors.py process): G6 master
+# arrival/completion counter time series plus — unless
+# FLEXLB_SECONDARY_POLLERS_ENABLED=0 — the mock per-engine prometheus,
+# master prometheus / inflight time series and process CPU/RSS pollers.
+# All of them run over the whole load window (stopped right after all
+# clients finish; also killed by cleanup); consolidation merges their files
+# afterwards.
 start_secondary_pollers
 
 # JavaLoadClient reads its configuration exclusively from environment
@@ -1296,7 +1337,6 @@ if [[ "${CLIENT_EXIT:-0}" -ne 0 ]]; then
   exit "${CLIENT_EXIT}"
 fi
 
-stop_master_counter_poller
 stop_secondary_pollers
 assert_mock_engine_healthy
 
