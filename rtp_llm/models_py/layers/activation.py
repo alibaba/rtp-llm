@@ -23,6 +23,7 @@ def silu_and_mul(gate_up: torch.Tensor) -> torch.Tensor:
         try:
             if getattr(torch.version, "hip", None) is not None:
                 import aiter
+
                 fused_op = aiter.silu_and_mul
             else:
                 from rtp_llm.ops.compute_ops import rtp_llm_ops
@@ -39,8 +40,13 @@ def silu_and_mul(gate_up: torch.Tensor) -> torch.Tensor:
             if getattr(torch.version, "hip", None) is not None:
                 fused_op(output, gate_up)
             else:
-                stream_id = torch.cuda.current_stream().cuda_stream
-                fused_op(output, gate_up, stream_id)
+                # The caller may keep a different CUDA device current while
+                # loading or executing multiple model replicas. Native kernels
+                # must launch in the input device context and receive the
+                # stream that owns the input tensor.
+                with torch.cuda.device(gate_up.device):
+                    stream_id = torch.cuda.current_stream(gate_up.device).cuda_stream
+                    fused_op(output, gate_up, stream_id)
             return output
 
     gate, up = gate_up.chunk(2, dim=-1)
