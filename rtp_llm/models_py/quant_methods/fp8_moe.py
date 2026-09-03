@@ -12,6 +12,7 @@ from typing import Any, Dict, List
 
 import torch
 import torch.nn as nn
+
 from rtp_llm.models_py.quant_methods.base import (
     FusedMoEMethodBase,
     register_moe_quant_method,
@@ -232,6 +233,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         BS = layer._FP8_BLOCK_SIZE
         block_n, block_k = self._weight_block_size(layer)
 
+        if qf in ("fp8_per_block", "fp8_per_block_online"):
+            self._validate_block_layout(layer, M_tp, block_n, block_k)
+
         if qf == "fp8_per_tensor":
             layer.w13 = nn.Parameter(
                 torch.empty(E, 2 * M_tp, H, dtype=dt), requires_grad=False
@@ -273,15 +277,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2 = nn.Parameter(
                 torch.empty(E, H, M_tp, dtype=dt), requires_grad=False
             )
-            if layer.moe_expert_tp_size > 1 and (
-                M_tp % block_n != 0 or M_tp % block_k != 0
-            ):
-                raise ValueError(
-                    f"MoE FP8 block scale TP shard requires block-aligned "
-                    f"moe_intermediate per rank, got moe_inter_tp={M_tp}, "
-                    f"block_n={block_n}, block_k={block_k}, "
-                    f"tp_size={layer.moe_expert_tp_size}"
-                )
             nb = self._ceil_div(M_tp, block_n)
             hb = self._ceil_div(H, block_k)
             h_nb = self._ceil_div(H, block_n)
@@ -493,6 +488,20 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 )
             sliced = tensor.narrow(1, start_block, k_nb).contiguous()
             layer.w2_scale.data[expert_id].copy_(sliced)
+
+    @staticmethod
+    def _validate_block_layout(layer, intermediate_size, block_n, block_k):
+        if intermediate_size % block_n != 0:
+            raise ValueError(
+                "MoE FP8 fused gate/up boundary must be block-aligned, got "
+                f"moe_inter_tp={intermediate_size}, block_n={block_n}"
+            )
+        if layer.moe_expert_tp_size > 1 and intermediate_size % block_k != 0:
+            raise ValueError(
+                "MoE FP8 down_proj TP shard must be block-aligned, got "
+                f"moe_inter_tp={intermediate_size}, block_k={block_k}, "
+                f"tp_size={layer.moe_expert_tp_size}"
+            )
 
     @staticmethod
     def _check_block_aligned(start: int, size: int, block: int, what: str):

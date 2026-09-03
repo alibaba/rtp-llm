@@ -505,6 +505,29 @@ class MoEWeightDispatchTest(unittest.TestCase):
 
 
 class MoEQuantizedDispatchTest(unittest.TestCase):
+    def test_fp8_block_families_reject_non_aligned_fused_boundary(self):
+        for quant_type in ("fp8_block", "fp8_block_online"):
+            with self.subTest(quant_type=quant_type), self.assertRaisesRegex(
+                ValueError, "fused gate/up boundary must be block-aligned"
+            ):
+                _make_experts(
+                    num_experts=1,
+                    hidden_size=128,
+                    moe_intermediate_size=192,
+                    quant_config=QuantizationConfig(quant_type),
+                )
+
+    def test_fp8_block_families_accept_aligned_fused_boundary(self):
+        for quant_type in ("fp8_block", "fp8_block_online"):
+            with self.subTest(quant_type=quant_type):
+                layer = _make_experts(
+                    num_experts=1,
+                    hidden_size=128,
+                    moe_intermediate_size=256,
+                    quant_config=QuantizationConfig(quant_type),
+                )
+                self.assertEqual(tuple(layer.w13_scale.shape), (1, 4, 1))
+
     def test_prequantized_fp8_rejects_unquantized_weight_dtype(self):
         layer = _make_experts(
             num_experts=1,
@@ -699,9 +722,7 @@ class MoEQuantizedDispatchTest(unittest.TestCase):
         with mock.patch.dict(
             "sys.modules", {"rtp_kernel.w4a8_group_gemm": fake_kernel}
         ):
-            _, repacked_scale = repack_compressed_int4_to_cutlass(
-                packed, scale, 128
-            )
+            _, repacked_scale = repack_compressed_int4_to_cutlass(packed, scale, 128)
 
         self.assertEqual(repacked_scale.dtype, torch.float8_e4m3fn)
         self.assertEqual(repacked_scale.item(), 0.0)
@@ -782,25 +803,20 @@ class MoEQuantizedDispatchTest(unittest.TestCase):
         torch.testing.assert_close(layer.w13_scale[0, :2], up_global[2:4])
         torch.testing.assert_close(layer.w13_scale[0, 2:], gate_global[2:4])
 
-    def test_single_tp_allows_partial_final_fp8_block(self):
+    def test_single_tp_rejects_partial_final_fp8_block(self):
         quant = QuantizationConfig(
             "fp8_block",
             source_config=types.SimpleNamespace(weight_block_size=[4, 4]),
         )
-        layer = _make_experts(
-            num_experts=1,
-            hidden_size=8,
-            moe_intermediate_size=10,
-            quant_config=quant,
-        )
-        layer.load_weights(
-            {
-                "0.gate_proj.weight_scale_inv": torch.ones(3, 2),
-                "0.up_proj.weight_scale_inv": torch.ones(3, 2),
-                "0.down_proj.weight_scale_inv": torch.ones(2, 3),
-            }
-        )
-        self.assertEqual(len(layer._loaded_aux_keys), 3)
+        with self.assertRaisesRegex(
+            ValueError, "fused gate/up boundary must be block-aligned"
+        ):
+            _make_experts(
+                num_experts=1,
+                hidden_size=8,
+                moe_intermediate_size=10,
+                quant_config=quant,
+            )
 
     def test_non_aligned_fp8_block_tp_is_rejected(self):
         quant = QuantizationConfig(
@@ -1264,6 +1280,7 @@ class Qwen3MoeModelTest(unittest.TestCase):
             modules_to_not_convert=[],
         )
         config = self._config()
+        config.moe_inter_size = 128
         config.quant_config = source_quant
         load_config = self._load_config()
         load_config = types.SimpleNamespace(
