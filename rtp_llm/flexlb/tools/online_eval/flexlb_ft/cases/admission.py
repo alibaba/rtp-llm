@@ -4,7 +4,7 @@ Theme: requests the gates REFUSE must fail fast, loudly and typed — never
 hang, never vanish, never leak inflight state — and once the pressure is
 lifted the system must recover.  Conversely, gates that are WAIT
 conditions must park (never silently drop or reject under queue
-pressure).  One gate per case (admission wave-2, 2026-09):
+pressure).  One gate per case (admission wave-2 + wave-3, 2026-09):
 
   admission_queue_depth_reject    engine-side queue_depth gate
                                   (EnqueueBatch entry): fast per-request
@@ -62,6 +62,24 @@ pressure).  One gate per case (admission wave-2, 2026-09):
                                   second arrival parks until the pool
                                   occupant terminates, then retries
                                   successfully — strictly after it.
+  admission_engine_waiting_batch_cap_reject
+                                  engine waiting-batch cap gate
+                                  (prefill.max_waiting_batches=1 via
+                                  /set_perf): with the cap saturated
+                                  (1 running + 1 queued) the next batch
+                                  is whole-batch REJECTED with the
+                                  backpressure error — fast reject, not
+                                  a park; relaxing the cap admits the
+                                  next batch under the same pressure.
+  admission_engine_kv_lack_mem_fast_reject
+                                  engine prefill KV block-pool gate
+                                  (KV v2 BlockLease admission): on a
+                                  17-block pool two 8-block leases
+                                  saturate it and the third 8-block
+                                  request is synchronously rejected
+                                  602 LACK_MEM in the EnqueueBatch ack
+                                  — no park; lease hand-back on
+                                  completion restores the pool.
 """
 
 from __future__ import annotations
@@ -1550,6 +1568,459 @@ def admission_placement_pool_wait(ctx: CaseContext):
             f"b_after_a={b_after_a} (gap={end_b - end_a:.2f}s), "
             f"b_parked_long={b_parked_long}, "
             f"master_side_parked_max={parked_max} ({parked_detail}), "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"engine_clean={engine_clean}({engine_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        try:
+            for n in names:
+                ops.set_perf(n, prefill_fixed_ms=100.0)
+        except Exception:
+            pass
+
+
+# ===========================================================================
+# Engine waiting-batch cap gate (admission wave-3 B3)
+# ============================================================================
+
+
+def _waiting_cap_spec(ctx: CaseContext) -> EnvSpec:
+    """B3 env: 1 prefill (every batch lands on one engine, so the cap
+    pressure is concentrated), the legacy fault axes and default
+    admission knobs — the waiting-queue cap itself is applied at RUNTIME
+    via /set_perf max_waiting_batches (ef76751553), so the env shape is
+    the plain W1 one."""
+    return EnvSpec(
+        label=f"admit_wcap_{ctx.profile}",
+        n_prefill=1,
+        n_decode=2,
+        perf=default_perf(),
+        master_profile=ctx.profile,
+        master_env={"FLEXLB_CONFIG": admission_config()},
+    )
+
+
+@case(
+    "admission_engine_waiting_batch_cap_reject",
+    profiles=["batch-window"],
+    requires=["enqueue_batch"],
+    source=(
+        "admission wave-3 B3: engine prefill waiting-queue cap "
+        "(max_waiting_batches whole-batch backpressure reject — the "
+        "non-waitable complement of W1's unbounded park)"
+    ),
+)
+def admission_engine_waiting_batch_cap_reject(ctx: CaseContext):
+    """Engine waiting-batch cap gate: the cap is NOT a wait condition.
+
+    Scenario: dedicated 1P+2D env (the W1 shape); prefill_fixed_ms=3000
+    stretches each batch's execution window and /set_perf applies the
+    runtime cap max_waiting_batches=1 (>0 = queued-batch ceiling, 0 =
+    unbounded — the default).  Three requests are fired 0.4s apart (each
+    its own batch, 40x the 10ms collection window): batch #1 is admitted
+    running, batch #2 parks in prefillPendingQueue (waiting = 1 = cap —
+    a snapshot poll proves the saturated state BEFORE the probe fires),
+    and batch #3 finds waiting >= cap at schedulePrefillCompletion.
+
+    Behaviour: the cap hit is a WHOLE-BATCH backpressure reject, not a
+    park — schedulePrefillCompletion returns false before claiming any
+    counter, every member of batch #3 is rolled back and the
+    EnqueueBatch ack carries the batch-level error "prefill waiting
+    queue full (backpressure): waiting=1 cap=1"; DefaultBatchDispatcher
+    wraps it as EngineRejectedException ("EnqueueBatch rejected request
+    N: prefill waiting queue full ...") and the master completes the
+    request terminal — synchronous, typed, no queueing.  The cap counts
+    QUEUED batches only (running is not charged), so the two in-flight
+    occupants are untouched.
+
+    Expected (contract): the probe terminates FAST (< 3s from fire,
+    no park residence) with the backpressure error family ("prefill
+    waiting queue full" + "backpressure") in its terminal error; the
+    occupants (1 running + 1 queued) complete normally; the gate
+    RECOVERS UNDER THE SAME PRESSURE — with batches #1/#2 still
+    occupying the engine, /set_perf max_waiting_batches=0 (unbounded)
+    lets a fourth fire park in the queue and run to completion; after
+    the drain the engine park is empty, the master inflight ledger is
+    clean and a fresh request succeeds (recovery).
+
+    Prediction: expected to pass — the runtime override, the cap check
+    (waiting >= cap rejects before claiming any counter) and the
+    ack-error surface are covered by SetPerfMaxWaitingBatchesTest (4/4
+    green); the only novel wiring is the master's
+    EngineRejectedException-to-terminal path, already exercised by the
+    enqueue-ack fault family.  Risk: batch coalescing collapsing the
+    fires into fewer batches — mitigated by the 0.4s inter-fire gap and
+    the pre-probe waiting>=1 observation (the case fails loudly rather
+    than probing an unsaturated cap).
+    """
+    env = ctx.env_manager.ensure(_waiting_cap_spec(ctx))
+    ops = ctx.engine_ops(env)
+    base = rid_base(ctx, "admission")
+    names = _prefill_names(ops)
+    if not names:
+        return False, "no prefill engines found"
+    fired: list = []
+    try:
+        for n in names:
+            ops.set_perf(n, prefill_fixed_ms=3000.0, max_waiting_batches=1)
+
+        # Occupants: batch #1 running (3s window), batch #2 queued —
+        # together they saturate waiting=1=cap.
+        fire_errors = []
+        for _ in range(2):
+            rid = ops.next_request_id(base)
+            err = _fire_tracked(ops, rid, fired, input_len=512, output_len=2)
+            if err is not None:
+                fire_errors.append((rid, err))
+            time.sleep(0.4)  # >> maxCollectionWaitMs: one batch per fire
+        if fire_errors:
+            return False, f"occupant fire failed: {fire_errors[:1]}"
+
+        # Cap-state proof BEFORE the probe: batch #2 sits in
+        # prefillPendingQueue (waiting=1=cap).
+        def cap_saturated() -> bool:
+            snap = ops.snapshot_by_name()
+            return all(
+                int(snap.get(n, {}).get("prefill_waiting_batches", 0)) >= 1
+                for n in names
+            )
+
+        cap_observed = wait_for(cap_saturated, 8.0, 0.1)
+        if not cap_observed:
+            return (
+                False,
+                "batch #2 never reached the waiting queue (cap never saturated)",
+            )
+
+        # Probe batch #3: whole-batch backpressure reject.
+        rid3 = ops.next_request_id(base)
+        fire_err3 = _fire_tracked(ops, rid3, fired, input_len=512, output_len=2)
+        if fire_err3 is not None:
+            return False, f"probe fire failed: {fire_err3}"
+        _, r3_handle, r3_t0 = fired[-1]
+        r3_ended = r3_handle.wait_end(10.0)
+        r3_err = str(r3_handle.snap.error or "") if r3_ended else "no terminal"
+        reject_latency = time.monotonic() - r3_t0
+        rejected = (
+            "prefill waiting queue full" in r3_err.lower()
+            and "backpressure" in r3_err.lower()
+            and reject_latency < 3.0
+        )
+
+        # Gate recovery UNDER THE SAME PRESSURE: relax the cap while
+        # batch #1 still runs and batch #2 still queues — the next fire
+        # must park in the (now unbounded) queue and complete.
+        for n in names:
+            ops.set_perf(n, max_waiting_batches=0)
+        snap_at_r4 = ops.snapshot_by_name()
+        waiting_at_r4 = max(
+            int(snap_at_r4.get(n, {}).get("prefill_waiting_batches", 0)) for n in names
+        )
+        rid4 = ops.next_request_id(base)
+        fire_err4 = _fire_tracked(ops, rid4, fired, input_len=512, output_len=2)
+
+        outcomes = _await_tracked(fired, wait_s=45.0)
+        occupant_ok = len(outcomes) >= 2 and all(
+            ok and err is None for _, _, _, ok, err in outcomes[:2]
+        )
+        recovers_ok = (
+            fire_err4 is None
+            and len(outcomes) == 4
+            and outcomes[3][3]
+            and outcomes[3][4] is None
+        )
+
+        def park_empty() -> bool:
+            snap = ops.snapshot_by_name()
+            return all(
+                int(snap.get(n, {}).get("prefill_waiting_batches", 0)) == 0
+                and int(snap.get(n, {}).get("waiting", 0)) == 0
+                for n in names
+            )
+
+        settled = wait_for(park_empty, 10.0, 0.2)
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 30.0
+        )
+        recovery_ok, recovery_msg = ops.verify_recovery()
+
+        passed = (
+            cap_observed
+            and rejected
+            and occupant_ok
+            and recovers_ok
+            and settled
+            and inflight_ok
+            and recovery_ok
+        )
+        return passed, (
+            f"cap_observed={cap_observed}, "
+            f"probe_rejected={rejected} "
+            f"(latency={reject_latency:.2f}s, err={r3_err[:80]}), "
+            f"occupants_completed={occupant_ok}, "
+            f"gate_recovers_under_pressure={recovers_ok} "
+            f"(waiting_at_r4={waiting_at_r4}, fire_err4={fire_err4}), "
+            f"park_settled_empty={settled}, "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        try:
+            for n in names:
+                ops.set_perf(n, prefill_fixed_ms=100.0, max_waiting_batches=0)
+        except Exception:
+            pass
+
+
+# ===========================================================================
+# Engine prefill KV block-pool gate (admission wave-3 B2)
+# ============================================================================
+
+
+LACKMEM_POOL_BLOCKS = 17  # reserve=ceil(5% x 17)=1: two 8-block leases fit
+LACKMEM_KEYS_PER_REQUEST = 8  # per-request block_cache_keys count (= need)
+
+
+def _lack_mem_spec(ctx: CaseContext) -> EnvSpec:
+    """B2 env: 1 prefill with a 17-block KV pool (KV v2 block pool:
+    reserve = ceil(5% x 17) = 1 block).  Two 8-block leases fill the
+    pool (8+8 = 16 held of 17 — the remaining free block sits below the
+    reserve margin), so a THIRD 8-block request fails the
+    TOTAL_AND_AVAILABLE gate.  The decode pool stays at the harness
+    default: decode-side admission (ceil(512/1024) = 1 block) must
+    never interfere with the prefill gate."""
+    return EnvSpec(
+        label=f"admit_lackmem_{ctx.profile}",
+        n_prefill=1,
+        n_decode=2,
+        perf=default_perf(),
+        master_profile=ctx.profile,
+        master_env={"FLEXLB_CONFIG": admission_config()},
+        prefill_cache_blocks=LACKMEM_POOL_BLOCKS,
+    )
+
+
+def _lease_keys(rid: int) -> list:
+    """Per-request block keys derived from the rid — disjoint key spaces
+    (no shared prefix), so every lease is a fresh LACKMEM_KEYS_PER_REQUEST
+    block allocation with zero prefix reuse."""
+    return [rid * 100 + i for i in range(1, LACKMEM_KEYS_PER_REQUEST + 1)]
+
+
+@case(
+    "admission_engine_kv_lack_mem_fast_reject",
+    profiles=["batch-window"],
+    requires=["enqueue_batch"],
+    source=(
+        "admission wave-3 B2: engine prefill KV block-pool gate "
+        "(KV v2 BlockLease admission — 602 LACK_MEM synchronous fast "
+        "reject, the non-waitable engine-side complement of the "
+        "master KV squeeze in admission_slo_queue_deadline)"
+    ),
+)
+def admission_engine_kv_lack_mem_fast_reject(ctx: CaseContext):
+    """Engine prefill KV block-pool gate: 602 LACK_MEM fast reject.
+
+    Scenario: dedicated 1P+2D env with a 17-block prefill KV pool
+    (EnvSpec prefill_cache_blocks=17; reserve = ceil(5% x 17) = 1 block
+    — the KV v2 TOTAL_AND_AVAILABLE gate).  Every request carries 8
+    per-request block_cache_keys with input_len=512 — the engine-side
+    need caliber is the KEY COUNT (8 blocks), while the master-side KV
+    gate compares the request's seqLen (512 tokens) against the
+    engine-reported available tokens (>= 1 block = 1024 even at peak
+    occupancy), so the master gate never intercepts: the ENGINE gate
+    is the only admission edge in play.  prefill_fixed_ms=3000 holds
+    batch #1 running while batch #2 queues; both leases are
+    provisioned at enqueue (the KV v2 admission-lease semantics), so
+    after two fires held_blocks = 16 of 17 — a snapshot poll proves
+    the pool-full state BEFORE the probe fires.
+
+    Behaviour: the third 8-block request fails acquireBlockLease at
+    EnqueueBatch Phase-1.5 — the ack carries the per-request error
+    code 602 (MALLOC_FAILED, never the master's 8431) with "LACK_MEM:
+    insufficient KV cache blocks (need=8, avail=1, spb=1024)";
+    DefaultBatchDispatcher wraps it as EngineRejectedException
+    ("EnqueueBatch rejected request N: LACK_MEM: ...") and the master
+    completes the request terminal — synchronous, typed, no park, no
+    queue (the non-waitable complement of admission_slo_queue_deadline,
+    where the SAME master KV surface parks because that squeeze is a
+    WAIT condition).  The rejected request leaves no residue (lease
+    acquisition rolled back, requestStates -> "rejected").
+
+    Expected (contract): the probe terminates FAST (< 3s from fire,
+    no park residence) with the LACK_MEM family in its terminal error
+    ("lack_mem" + "insufficient kv cache" + the master's
+    "enqueuebatch rejected" wrapper — the actual ack-to-terminal
+    transparent path); the two occupants complete normally and their
+    leases hand back to the LRU on completion (pool recovery —
+    pure-LRU blocks count as available again); a fresh 8-block
+    request on the recovered pool succeeds; the master inflight and
+    engine ledgers drain clean and recovery holds.
+
+    Prediction: expected to pass — the 602 ack surface is
+    BlockPoolCapacityTest's master-visible contract (11 hash-channel
+    blocks vs a 10-block pool) and the EngineRejectedException
+    terminal path is the enqueue-ack fault family's.  The 17-block
+    sizing makes the arithmetic exact: 8+8 admitted with the reserve
+    to spare, the third 8-block need denied outright by the available
+    check (8 > 1) — no borderline rounding.  Risk: the two occupancy
+    fires coalescing into ONE batch — both leases still provision at
+    enqueue, so the pool still saturates (only the "third request"
+    ordinal shifts); the 0.4s inter-fire gap keeps them separate
+    anyway.
+    """
+    env = ctx.env_manager.ensure(_lack_mem_spec(ctx))
+    ops = ctx.engine_ops(env)
+    base = rid_base(ctx, "admission")
+    names = _prefill_names(ops)
+    if not names:
+        return False, "no prefill engines found"
+    fired: list = []
+    try:
+        for n in names:
+            ops.set_perf(n, prefill_fixed_ms=3000.0)
+
+        # Occupants: batch #1 running (lease taken at enqueue), batch #2
+        # queued (lease ALSO taken at enqueue — KV v2 admission leases).
+        fire_errors = []
+        for _ in range(2):
+            rid = ops.next_request_id(base)
+            err = _fire_tracked(
+                ops,
+                rid,
+                fired,
+                input_len=512,
+                output_len=2,
+                block_keys=_lease_keys(rid),
+            )
+            if err is not None:
+                fire_errors.append((rid, err))
+            time.sleep(0.4)  # >> maxCollectionWaitMs: one batch per fire
+        if fire_errors:
+            return False, f"occupant fire failed: {fire_errors[:1]}"
+
+        # Pool-full proof BEFORE the probe: held = 16 of 17 blocks.
+        held_seen = 0
+
+        def pool_full() -> bool:
+            snap = ops.snapshot_by_name()
+            nonlocal held_seen
+            held_seen = max(
+                held_seen,
+                max(int(snap.get(n, {}).get("held_blocks", 0)) for n in names),
+            )
+            return all(
+                int(snap.get(n, {}).get("held_blocks", 0))
+                >= 2 * LACKMEM_KEYS_PER_REQUEST
+                for n in names
+            )
+
+        pool_observed = wait_for(pool_full, 8.0, 0.1)
+        if not pool_observed:
+            return False, (
+                f"occupancy leases never saturated the pool "
+                f"(held_max={held_seen}/{LACKMEM_POOL_BLOCKS})"
+            )
+
+        # Probe: 602 LACK_MEM synchronous fast reject (no park, no queue).
+        rid3 = ops.next_request_id(base)
+        fire_err3 = _fire_tracked(
+            ops,
+            rid3,
+            fired,
+            input_len=512,
+            output_len=2,
+            block_keys=_lease_keys(rid3),
+        )
+        if fire_err3 is not None:
+            return False, f"probe fire failed: {fire_err3}"
+        _, r3_handle, r3_t0 = fired[-1]
+        r3_ended = r3_handle.wait_end(10.0)
+        r3_err = str(r3_handle.snap.error or "") if r3_ended else "no terminal"
+        reject_latency = time.monotonic() - r3_t0
+        err_low = r3_err.lower()
+        rejected = (
+            "lack_mem" in err_low
+            and "insufficient kv cache" in err_low
+            and "enqueuebatch rejected" in err_low
+            and reject_latency < 3.0
+        )
+
+        # Occupants complete; their leases hand back to the LRU on
+        # completion — the pool recovers (pure-LRU counts as available).
+        outcomes = _await_tracked(fired, wait_s=45.0)
+        occupant_ok = len(outcomes) >= 2 and all(
+            ok and err is None for _, _, _, ok, err in outcomes[:2]
+        )
+
+        avail_seen = 0
+
+        def pool_recovered() -> bool:
+            snap = ops.snapshot_by_name()
+            nonlocal avail_seen
+            avail_seen = max(
+                avail_seen,
+                max(int(snap.get(n, {}).get("available_blocks", 0)) for n in names),
+            )
+            return all(
+                int(snap.get(n, {}).get("available_blocks", 0))
+                >= LACKMEM_KEYS_PER_REQUEST
+                for n in names
+            )
+
+        recovered_seen = wait_for(pool_recovered, 10.0, 0.2)
+
+        # Post-release probe: a fresh 8-block lease on the recovered pool.
+        fired4: list = []
+        rid4 = ops.next_request_id(base)
+        fire_err4 = _fire_tracked(
+            ops,
+            rid4,
+            fired4,
+            input_len=512,
+            output_len=2,
+            block_keys=_lease_keys(rid4),
+        )
+        outcomes4 = _await_tracked(fired4, wait_s=STREAM_TIMEOUT_S)
+        lease4_ok = (
+            fire_err4 is None
+            and len(outcomes4) == 1
+            and outcomes4[0][3]
+            and outcomes4[0][4] is None
+        )
+
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 30.0
+        )
+        engine_clean, engine_detail = engine_inflight_clean(
+            ops, names + _decode_names(ops), 15.0
+        )
+        recovery_ok, recovery_msg = ops.verify_recovery()
+
+        passed = (
+            pool_observed
+            and rejected
+            and occupant_ok
+            and recovered_seen
+            and lease4_ok
+            and inflight_ok
+            and engine_clean
+            and recovery_ok
+        )
+        return passed, (
+            f"pool_observed={pool_observed} "
+            f"(held={held_seen}/{LACKMEM_POOL_BLOCKS}), "
+            f"probe_rejected={rejected} "
+            f"(latency={reject_latency:.2f}s, err={r3_err[:80]}), "
+            f"occupants_completed={occupant_ok}, "
+            f"pool_recovers={recovered_seen} "
+            f"(avail={avail_seen}/{LACKMEM_POOL_BLOCKS}), "
+            f"fresh_lease_succeeds={lease4_ok} (fire_err4={fire_err4}), "
             f"inflight_clean={inflight_ok}({inflight_detail}), "
             f"engine_clean={engine_clean}({engine_detail}), "
             f"recovery={recovery_msg}"
