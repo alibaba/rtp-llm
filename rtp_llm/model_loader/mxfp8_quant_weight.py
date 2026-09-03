@@ -71,9 +71,11 @@ def _dequantize_mxfp8(weight: torch.Tensor, scale_exponents: torch.Tensor) -> to
 def _dequantize_mxfp8_then_merge(
     ts: List[torch.Tensor],
     merge_fun: Callable[[List[torch.Tensor]], torch.Tensor],
+    process_fun: Callable[[List[torch.Tensor]], torch.Tensor],
 ) -> torch.Tensor:
-    """Dequantize an MXFP8 linear weight, then apply its model layout adapter."""
-    return merge_fun([_dequantize_mxfp8(ts[0], ts[1])])
+    """Dequantize WK, adapt checkpoint rows, then build RTP's linear layout."""
+    merged = merge_fun([_dequantize_mxfp8(ts[0], ts[1])])
+    return process_fun([merged])
 
 
 def _dequantize_mxfp8_split_k(
@@ -289,6 +291,7 @@ class Mxfp8Weight(PerBlockFp8Weight):
             functools.partial(
                 _dequantize_mxfp8_then_merge,
                 merge_fun=source.merge_fun,
+                process_fun=src_weight_info.process_fun,
             ),
             data_type=torch.bfloat16,
             config=src_weight_info.config,

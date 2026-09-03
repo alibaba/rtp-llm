@@ -25,7 +25,7 @@ from rtp_llm.models.hy_v4 import (
     _move_indexer_rope_to_front,
     _transpose_stacked_gate_up,
 )
-from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, stack_
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, stack_, transpose
 
 
 class Hy4ConfigTest(unittest.TestCase):
@@ -398,7 +398,7 @@ class Hy4Mxfp8WeightTest(unittest.TestCase):
         src = MlaAttnAtomicWeight(
             W.mla_indexer_k_w,
             [CkptWeightInfo(f"{prefix}.weight", merge)],
-            identity,
+            transpose,
             config=self.mla_config,
         )
         self.assertTrue(Mxfp8Weight.support(self.quant_config, src))
@@ -415,9 +415,13 @@ class Hy4Mxfp8WeightTest(unittest.TestCase):
         weight = (weight.remainder(31) - 15).to(torch.float8_e4m3fn)
         scale_exponents = torch.full((128, 1), 125.0)
         dequantized = (weight.float() * 0.25).bfloat16()
-        expected = merge([dequantized])
+        # RTP stores Linear kernels as [in_features, out_features].  The
+        # checkpoint row permutation must therefore happen before the normal
+        # descriptor transpose, exactly as it does for non-quantized weights.
+        expected = transpose([merge([dequantized])])
         actual = wrapped.kernel.process_fun([weight, scale_exponents])
         torch.testing.assert_close(actual, expected)
+        self.assertEqual(tuple(actual.shape), (32, 128))
 
     def test_mla_and_indexer_mappings(self):
         prefix = "model.layers.{i}.self_attn"
