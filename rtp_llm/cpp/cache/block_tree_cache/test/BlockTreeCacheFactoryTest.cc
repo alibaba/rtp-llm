@@ -1665,6 +1665,44 @@ TEST_F(BlockTreeCacheFactoryTest, TransferBatchLimitPropagatesAndValidates) {
     }
 }
 
+TEST_F(BlockTreeCacheFactoryTest, TransferQueueConfigurationPropagatesAndValidates) {
+    const auto config = makeSingleConfig();
+    {
+        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.block_tree_transfer_worker_count   = 7;
+        kv_cache_config.block_tree_business_queue_max_size = 211;
+        kv_cache_config.block_tree_transfer_queue_max_size = 307;
+        auto cache                                         = createBlockTreeCache(config, kv_cache_config, allocator);
+        ASSERT_NE(cache, nullptr);
+        EXPECT_EQ(cache->config().transfer_worker_count, 7u);
+        EXPECT_EQ(cache->config().business_queue_max_size, 211u);
+        EXPECT_EQ(cache->config().transfer_queue_max_size, 307u);
+    }
+    {
+        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.block_tree_business_queue_max_size = 0;
+        kv_cache_config.block_tree_transfer_queue_max_size = 0;
+        auto cache                                         = createBlockTreeCache(config, kv_cache_config, allocator);
+        ASSERT_NE(cache, nullptr);
+        EXPECT_EQ(cache->config().business_queue_max_size, 0u);
+        EXPECT_EQ(cache->config().transfer_queue_max_size, 0u);
+    }
+    for (const auto invalid_field : {std::string("worker"), std::string("business"), std::string("transfer")}) {
+        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        KVCacheConfig kv_cache_config;
+        if (invalid_field == "worker") {
+            kv_cache_config.block_tree_transfer_worker_count = 0;
+        } else if (invalid_field == "business") {
+            kv_cache_config.block_tree_business_queue_max_size = -1;
+        } else {
+            kv_cache_config.block_tree_transfer_queue_max_size = -1;
+        }
+        expectFactoryRejects(config, allocator, kv_cache_config);
+    }
+}
+
 TEST_F(BlockTreeCacheFactoryTest, TierWatermarksPropagateAndInvalidCombinationsAreRejected) {
     const auto                               config    = makeSingleConfig();
     auto                                     allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
