@@ -1749,9 +1749,10 @@ TEST_F(BlockTreeEvictorTest, BatchQueueTimeoutRollsBackEveryPlannedDescriptorOnc
     bool deadline_rewound = false;
     {
         std::lock_guard<std::mutex> lock(task_pool.lifecycle_mutex_);
-        if (task_pool.normal_queue_.size() == 1) {
-            task_pool.normal_queue_.front().deadline = std::chrono::steady_clock::now() - std::chrono::milliseconds(1);
-            deadline_rewound                         = true;
+        if (task_pool.background_queue_.size() == 1) {
+            task_pool.background_queue_.front().deadline =
+                std::chrono::steady_clock::now() - std::chrono::milliseconds(1);
+            deadline_rewound = true;
         }
     }
     release_worker.set_value();

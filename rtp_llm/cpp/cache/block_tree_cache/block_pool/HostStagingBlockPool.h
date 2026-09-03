@@ -1,9 +1,6 @@
 #pragma once
 
-#include <atomic>
-#include <chrono>
 #include <cstddef>
-#include <cstdint>
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -22,12 +19,10 @@ public:
 
     class HostStagingBlockLease {
     public:
-        HostStagingBlockLease() = default;
         HostStagingBlockLease(HostStagingBlockPool* pool, size_t block_id): pool_(pool), block_id_(block_id) {}
         HostStagingBlockLease(const HostStagingBlockLease&)            = delete;
         HostStagingBlockLease& operator=(const HostStagingBlockLease&) = delete;
-        HostStagingBlockLease(HostStagingBlockLease&& other) noexcept:
-            pool_(other.pool_), block_id_(other.block_id_) {
+        HostStagingBlockLease(HostStagingBlockLease&& other) noexcept: pool_(other.pool_), block_id_(other.block_id_) {
             other.pool_ = nullptr;
         }
         HostStagingBlockLease& operator=(HostStagingBlockLease&& other) noexcept {
@@ -57,32 +52,24 @@ public:
     };
 
     using HostStagingBlockBatch = std::vector<HostStagingBlockLease>;
-    using BatchReadyCallback = std::function<void(std::optional<HostStagingBlockBatch>)>;
-    using BatchWaiterId = uint64_t;
+    using BatchReadyCallback    = std::function<void(std::optional<HostStagingBlockBatch>)>;
 
     // try_pin_memory=false is a test seam to force pageable backing.
     HostStagingBlockPool(size_t block_count, size_t stride_bytes, bool try_pin_memory = true);
 
-    std::optional<HostStagingBlockLease> malloc();
-
-    // Fair, all-or-nothing allocation. Existing async waiters are never bypassed.
+    // Test seam: no production caller; lets tests occupy staging blocks atomically.
     std::optional<HostStagingBlockBatch> tryMallocBatch(size_t count);
 
+    // Fair, all-or-nothing allocation; existing async waiters are never bypassed.
     // Invokes callback outside mutex_. A null result means cancellation or an invalid request.
-    // Returns zero when the callback was satisfied immediately; otherwise returns a waiter id.
-    BatchWaiterId requestBatch(size_t count, BatchReadyCallback callback);
+    void requestBatch(size_t count, BatchReadyCallback callback);
 
-    bool cancelBatchWaiter(BatchWaiterId waiter_id);
     void cancelAllBatchWaiters();
-
-    // Exponential backoff with deadline; never sleeps while holding mutex_.
-    std::optional<HostStagingBlockLease> mallocWithBackoff(std::chrono::milliseconds timeout);
 
 private:
     friend class HostStagingBlockLease;
 
     struct BatchWaiter {
-        BatchWaiterId      id{0};
         size_t             count{0};
         BatchReadyCallback callback;
     };
@@ -92,11 +79,9 @@ private:
         HostStagingBlockBatch leases;
     };
 
-    HostStagingBlockBatch allocateBatchLocked(size_t count);
+    HostStagingBlockBatch   allocateBatchLocked(size_t count);
     std::vector<ReadyBatch> collectReadyBatchesLocked();
-    static void dispatchReadyBatches(std::vector<ReadyBatch> ready_batches);
-
-    void reportAcquireTimeout(std::chrono::steady_clock::time_point wait_start);
+    static void             dispatchReadyBatches(std::vector<ReadyBatch> ready_batches);
 
     void free(size_t block_id);
 
@@ -107,10 +92,7 @@ private:
     AlignedHostMemory       backing_;
     std::vector<size_t>     free_id_list_;
     std::deque<BatchWaiter> batch_waiters_;
-    BatchWaiterId           next_waiter_id_{1};
-    mutable std::mutex      mutex_;
-    std::atomic<size_t>     timeout_count_{0};
-    std::atomic<int64_t>    last_timeout_log_ns_{0};
+    std::mutex              mutex_;
 };
 
 }  // namespace rtp_llm

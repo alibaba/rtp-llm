@@ -4,8 +4,10 @@
 #include <chrono>
 #include <functional>
 #include <future>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
@@ -24,7 +26,7 @@ TEST(BlockTreeTaskPoolTest, SubmitAndWaitForIdleTrackAcceptedTasks) {
     ASSERT_TRUE(pool.start());
 
     std::atomic<int> completed{0};
-    ASSERT_TRUE(pool.submit([&completed] { completed.fetch_add(1); }));
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [&completed] { completed.fetch_add(1); }));
     ASSERT_TRUE(pool.submit([&completed] { completed.fetch_add(1); }));
     pool.waitForIdle();
 
@@ -72,6 +74,60 @@ TEST(BlockTreeTaskPoolTest, ShutdownRejectsNewTasksAndIsIdempotent) {
     EXPECT_EQ(pool.pending_tasks_.load(), 0);
 }
 
+TEST(BlockTreeTaskPoolTest, ShutdownClearsPopulatedQueuesAndReclaimsPending) {
+    BlockTreeTaskPool pool(1, 8, "BlockTreeTaskPoolTest");
+    ASSERT_TRUE(pool.start());
+
+    std::promise<void> worker_ready;
+    std::promise<void> release_worker;
+    auto               ready_future   = worker_ready.get_future();
+    auto               release_future = release_worker.get_future();
+    std::atomic<bool>  worker_released{false};
+    auto               release = [&] {
+        if (!worker_released.exchange(true)) {
+            release_worker.set_value();
+        }
+    };
+    [[maybe_unused]] auto release_guard = std::shared_ptr<void>(nullptr, [&](void*) { release(); });
+    ASSERT_TRUE(pool.submit([&] {
+        worker_ready.set_value();
+        release_future.wait();
+    }));
+    if (ready_future.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+        release();
+        pool.shutdown();
+        FAIL() << "blocking task did not occupy the worker";
+    }
+
+    // Populate all three queues while the only worker stays busy.
+    std::atomic<bool> load_ran{false};
+    std::atomic<bool> background_ran{false};
+    std::atomic<bool> completion_ran{false};
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [&load_ran] { load_ran.store(true); }));
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&background_ran] { background_ran.store(true); }));
+    ASSERT_TRUE(pool.submitCompletion([&completion_ran] { completion_ran.store(true); }));
+    EXPECT_EQ(pool.pending_tasks_.load(), 4);
+
+    // shutdown() clears the queues under the lock, then joins the worker, so run
+    // it on another thread and release the worker only after the clear is
+    // observable via shutdown_ (set inside the same critical section).
+    std::thread shutdown_thread([&pool] { pool.shutdown(); });
+    auto        shutdown_started = [&pool] {
+        std::lock_guard<std::mutex> lock(pool.lifecycle_mutex_);
+        return pool.shutdown_;
+    };
+    while (!shutdown_started()) {
+        std::this_thread::yield();
+    }
+    release();
+    shutdown_thread.join();
+
+    EXPECT_FALSE(load_ran.load());
+    EXPECT_FALSE(background_ran.load());
+    EXPECT_FALSE(completion_ran.load());
+    EXPECT_EQ(pool.pending_tasks_.load(), 0);
+}
+
 TEST(BlockTreeTaskPoolTest, CompletionTasksPreemptQueuedNormalTasksAndRemainFifo) {
     BlockTreeTaskPool pool(1, 8, "BlockTreeTaskPoolTest");
     ASSERT_TRUE(pool.start());
@@ -80,8 +136,8 @@ TEST(BlockTreeTaskPoolTest, CompletionTasksPreemptQueuedNormalTasksAndRemainFifo
     std::promise<void> release_worker;
     auto               ready_future   = worker_ready.get_future();
     auto               release_future = release_worker.get_future();
-    std::mutex          events_mutex;
-    std::vector<int>    events;
+    std::mutex         events_mutex;
+    std::vector<int>   events;
     ASSERT_TRUE(pool.submit([&] {
         worker_ready.set_value();
         release_future.wait();
@@ -110,6 +166,51 @@ TEST(BlockTreeTaskPoolTest, CompletionTasksPreemptQueuedNormalTasksAndRemainFifo
     EXPECT_EQ(events, (std::vector<int>{1, 2, 3, 4}));
 }
 
+TEST(BlockTreeTaskPoolTest, LoadPriorityIsBoundedAndPreservesFifoAcrossClasses) {
+    BlockTreeTaskPool pool(1, 16, "BlockTreeTaskPoolTest");
+    ASSERT_TRUE(pool.start());
+
+    std::promise<void> worker_ready;
+    std::promise<void> release_worker;
+    auto               ready_future   = worker_ready.get_future();
+    auto               release_future = release_worker.get_future();
+    std::atomic<bool>  worker_released{false};
+    auto               release = [&] {
+        if (!worker_released.exchange(true)) {
+            release_worker.set_value();
+        }
+    };
+    [[maybe_unused]] auto release_guard = std::shared_ptr<void>(nullptr, [&](void*) { release(); });
+    ASSERT_TRUE(pool.submit([&] {
+        worker_ready.set_value();
+        release_future.wait();
+    }));
+    if (ready_future.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+        release();
+        pool.shutdown();
+        FAIL() << "blocking task did not occupy the worker";
+    }
+
+    std::vector<int>  events;
+    std::atomic<bool> completion_accepted{false};
+    ASSERT_TRUE(pool.submit([&events] { events.push_back(1); }));
+    ASSERT_TRUE(pool.submit([&events] { events.push_back(2); }));
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [&events] { events.push_back(10); }));
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [&] {
+        events.push_back(11);
+        completion_accepted.store(pool.submitCompletion([&events] { events.push_back(100); }));
+    }));
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [&events] { events.push_back(12); }));
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [&events] { events.push_back(13); }));
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [&events] { events.push_back(14); }));
+
+    release();
+    pool.waitForIdle();
+
+    EXPECT_TRUE(completion_accepted.load());
+    EXPECT_EQ(events, (std::vector<int>{10, 11, 100, 12, 13, 1, 14, 2}));
+}
+
 TEST(BlockTreeTaskPoolTest, StopAdmissionKeepsUnboundedCompletionQueueOpen) {
     BlockTreeTaskPool pool(1, 1, "BlockTreeTaskPoolTest");
     ASSERT_TRUE(pool.start());
@@ -123,47 +224,114 @@ TEST(BlockTreeTaskPoolTest, StopAdmissionKeepsUnboundedCompletionQueueOpen) {
     EXPECT_EQ(completions.load(), 2);
 }
 
-TEST(BlockTreeTaskPoolTest, FullQueueRejectsSubmissionWithoutBlockingAndRestoresPendingCount) {
-    // The public queue bound applies only to normal tasks waiting in the local
-    // FIFO. The task already running on the worker does not consume a queue slot.
-    BlockTreeTaskPool pool(1, 1, "BlockTreeTaskPoolTest");
+TEST(BlockTreeTaskPoolTest, ReservedSlotsRejectBackgroundButRemainAvailableToLoad) {
+    const size_t      queue_size       = BlockTreeTaskPool::kLoadReservedSlots + 2;
+    const size_t      background_limit = queue_size - BlockTreeTaskPool::kLoadReservedSlots;
+    BlockTreeTaskPool pool(1, queue_size, "BlockTreeTaskPoolTest");
     ASSERT_TRUE(pool.start());
 
     std::promise<void> worker_ready;
     std::promise<void> release_worker;
     auto               ready_future   = worker_ready.get_future();
     auto               release_future = release_worker.get_future();
-
-    std::atomic<int>  executed{0};
-    std::atomic<bool> rejected_task_ran{false};
-    const auto        worker_task = [&] {
+    std::atomic<bool>  worker_released{false};
+    auto               release = [&] {
+        if (!worker_released.exchange(true)) {
+            release_worker.set_value();
+        }
+    };
+    [[maybe_unused]] auto release_guard = std::shared_ptr<void>(nullptr, [&](void*) { release(); });
+    ASSERT_TRUE(pool.submit([&] {
         worker_ready.set_value();
         release_future.wait();
-        executed.fetch_add(1);
-    };
+    }));
+    if (ready_future.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+        release();
+        pool.shutdown();
+        FAIL() << "blocking task did not occupy the worker";
+    }
 
-    // Occupy the only worker.
-    ASSERT_TRUE(pool.submit(worker_task));
-    ASSERT_EQ(ready_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    std::atomic<bool> rejected_task_ran{false};
+    // Background may fill only the non-reserved slots.
+    for (size_t index = 0; index < background_limit; ++index) {
+        ASSERT_TRUE(pool.submit([] {}));
+    }
+    EXPECT_FALSE(pool.submit([&rejected_task_ran] { rejected_task_ran.store(true); }));
 
-    // Fill the only normal queue slot; the busy worker cannot consume it yet.
-    ASSERT_TRUE(pool.submit([&executed] { executed.fetch_add(1); }));
+    // Load may also use the reserved slots, up to the shared total capacity.
+    for (size_t index = 0; index < BlockTreeTaskPool::kLoadReservedSlots; ++index) {
+        ASSERT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [] {}));
+    }
+    EXPECT_FALSE(pool.submit(BlockTreeTaskClass::LOAD, [&rejected_task_ran] { rejected_task_ran.store(true); }));
+    EXPECT_EQ(pool.pending_tasks_.load(), static_cast<int>(1 + queue_size));
 
-    // A further submit must fail fast instead of blocking forever.
-    auto rejected = std::async(std::launch::async, [&pool, &rejected_task_ran] {
-        return pool.submit([&rejected_task_ran] { rejected_task_ran.store(true); });
-    });
-    ASSERT_EQ(rejected.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-    EXPECT_FALSE(rejected.get());
-    EXPECT_FALSE(rejected_task_ran.load());
-
-    // Unblock the worker; all accepted tasks must still run.
-    release_worker.set_value();
+    release();
     pool.waitForIdle();
 
-    EXPECT_EQ(executed.load(), 2);
     EXPECT_FALSE(rejected_task_ran.load());
     EXPECT_EQ(pool.pending_tasks_.load(), 0);
+}
+
+TEST(BlockTreeTaskPoolTest, SmallPoolsSkipReserveAndUnboundedQueuesStayUnlimited) {
+    // A pool no larger than the reserve must not starve Background.
+    {
+        BlockTreeTaskPool pool(1, 1, "BlockTreeTaskPoolTest");
+        ASSERT_TRUE(pool.start());
+
+        std::promise<void> worker_ready;
+        std::promise<void> release_worker;
+        auto               ready_future   = worker_ready.get_future();
+        auto               release_future = release_worker.get_future();
+        std::atomic<bool>  worker_released{false};
+        auto               release = [&] {
+            if (!worker_released.exchange(true)) {
+                release_worker.set_value();
+            }
+        };
+        [[maybe_unused]] auto release_guard = std::shared_ptr<void>(nullptr, [&](void*) { release(); });
+        ASSERT_TRUE(pool.submit([&] {
+            worker_ready.set_value();
+            release_future.wait();
+        }));
+        ASSERT_EQ(ready_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+
+        // The single slot is available to Background despite the reserve.
+        EXPECT_TRUE(pool.submit([] {}));
+        EXPECT_FALSE(pool.submit([] {}));
+        EXPECT_FALSE(pool.submit(BlockTreeTaskClass::LOAD, [] {}));
+
+        release();
+        pool.waitForIdle();
+    }
+
+    // An unbounded pool applies no capacity limit to either class.
+    {
+        BlockTreeTaskPool pool(1, 0, "BlockTreeTaskPoolTest");
+        ASSERT_TRUE(pool.start());
+
+        std::promise<void> worker_ready;
+        std::promise<void> release_worker;
+        auto               ready_future   = worker_ready.get_future();
+        auto               release_future = release_worker.get_future();
+        std::atomic<bool>  worker_released{false};
+        auto               release = [&] {
+            if (!worker_released.exchange(true)) {
+                release_worker.set_value();
+            }
+        };
+        [[maybe_unused]] auto release_guard = std::shared_ptr<void>(nullptr, [&](void*) { release(); });
+        ASSERT_TRUE(pool.submit([&] {
+            worker_ready.set_value();
+            release_future.wait();
+        }));
+        ASSERT_EQ(ready_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+
+        EXPECT_TRUE(pool.submit([] {}));
+        EXPECT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [] {}));
+
+        release();
+        pool.waitForIdle();
+    }
 }
 
 }  // namespace

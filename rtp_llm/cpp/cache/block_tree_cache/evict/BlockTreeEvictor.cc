@@ -926,16 +926,6 @@ EvictionDropTask BlockTreeEvictor::createDropTask(TransferDescriptor eviction_de
     for (const auto& [node, group_set_id] : detached_resources) {
         node->group_set_resources[group_set_id].transfer_detached = true;
     }
-    if (task.hasFullPrune()) {
-        RTP_LLM_LOG_WARNING("event=block_tree_full_prune root_key=%ld trigger_group_set_id=%zu source_tier=%s "
-                            "closure_nodes=%zu dependent_resources=%zu detached_resources=%zu",
-                            task.primary_desc.node->cache_key,
-                            task.primary_desc.group_set_id,
-                            tierName(task.primary_desc.source_tier),
-                            task.full_prune_nodes_bottom_up.size(),
-                            task.dependent_prune_descs.size(),
-                            detached_resources.size());
-    }
     return task;
 }
 
