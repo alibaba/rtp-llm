@@ -195,7 +195,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     ) -> Any:
         """Build the per-graph DSpARK metadata owner.
 
-        DSpARK does not use the regular ``DSv4DecodeFmhaImpl`` metadata: its
+        DSpARK does not use the regular ``DSv4DecodeFmhaImplFP8`` metadata: its
         attention indices include the whole non-causal query block.  It only
         needs a persistent owner for FlashMLA's scheduler tensors.  The first
         call made while the stream is capturing recreates the scheduler inside
