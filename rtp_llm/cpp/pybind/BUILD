@@ -34,6 +34,18 @@ cc_library(
 )
 
 cc_library(
+    name = "config_extract",
+    hdrs = ["ConfigExtract.h"],
+    deps = [
+        "//rtp_llm/cpp/config:config_modules",
+        "//rtp_llm/cpp/config:mm_transport_mode",
+        "//:rtp_compute_ops",
+    ],
+    visibility = ["//visibility:public"],
+    copts = copts(),
+)
+
+cc_library(
     name = "th_transformer_config_lib",
     srcs = [
         "common/blockUtil.cc",
@@ -94,6 +106,17 @@ cc_library(
 )
 
 cc_library(
+    name = "mm_rdma_exporter_pybind",
+    srcs = ["MMRdmaExporterInit.cc"],
+    deps = [
+        "//rtp_llm/cpp/multimodal_processor/transport/rdma:mm_rdma_exporter",
+    ] + torch_deps(),
+    copts = copts(),
+    alwayslink = True,
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "th_transformer_lib",
     srcs = [
         "init.cc",
@@ -113,6 +136,8 @@ cc_library(
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/telemetry",
+        "//rtp_llm/cpp/multimodal_processor:multimodal_processor",
+        ":config_extract",
         "//rtp_llm/cpp/utils:signal_utils",
         "//:rtp_compute_ops",
         "@xgrammar//:xgrammar",

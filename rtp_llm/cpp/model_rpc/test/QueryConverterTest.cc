@@ -276,6 +276,15 @@ TEST_F(QueryConverterTest, TransTensorPB_ScalarShape) {
     EXPECT_EQ(tensor_pb.shape_size(), 0);
 }
 
+TEST_F(QueryConverterTest, TransTensorRejectsMismatchedPayloadSize) {
+    TensorPB tensor_pb;
+    tensor_pb.set_data_type(TensorPB::FP32);
+    tensor_pb.add_shape(2);
+    tensor_pb.set_fp32_data(std::string(sizeof(float), '\0'));
+
+    EXPECT_THROW(QueryConverter::transTensor(tensor_pb), std::runtime_error);
+}
+
 TEST_F(QueryConverterTest, TransTensorPB_NonContiguous) {
     torch::Tensor tensor = torch::rand({3, 4}, torch::kFloat32).transpose(0, 1);
     TensorPB      tensor_pb;
