@@ -87,6 +87,8 @@ class BatchedTritonExperts(FusedMoeExpertExecutor):
             expert_x.dim() != 3
             or expert_x.size(0) != E
             or expert_x.size(2) != self.w1.size(2)
+            or expert_x.size(2) != self.w2.size(1)
+            or expert_x.dtype != self.w2.dtype
             or expert_num_tokens.shape != (E,)
         ):
             raise ValueError(
@@ -113,11 +115,6 @@ class BatchedTritonExperts(FusedMoeExpertExecutor):
             device=expert_x.device,
             dtype=expert_x.dtype,
         )
-        output = torch.empty(
-            (E, num_rows, self.w2.size(1)),
-            device=expert_x.device,
-            dtype=self.w2.dtype,
-        )
 
         invoke_moe_batched_triton_kernel(
             A=expert_x,
@@ -135,9 +132,9 @@ class BatchedTritonExperts(FusedMoeExpertExecutor):
         invoke_moe_batched_triton_kernel(
             A=intermediate_cache2,
             B=self.w2,
-            C=output,
+            C=expert_x,
             expert_num_tokens=expert_num_tokens,
             compute_type=compute_type,
         )
 
-        return CombineForwardPayload(fused_expert_output=output)
+        return CombineForwardPayload(fused_expert_output=expert_x)

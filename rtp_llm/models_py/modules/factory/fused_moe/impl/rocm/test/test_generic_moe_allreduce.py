@@ -435,6 +435,13 @@ def _configured_gpu_count():
     "requires a ROCm build of PyTorch",
 )
 class GenericMoeRealAllreduceTest(TestCase):
+    def test_select_topk_rejects_non_int32_ids(self):
+        config = ModelConfig()
+        config.moe_k = 2
+        x = torch.empty(1, 2, device="cuda")
+        with self.assertRaisesRegex(TypeError, "expect int32"):
+            SelectTopk(config)(torch.empty(1, 8, device="cuda"), x.long(), x)
+
     def test_two_gpu_real_layer_matches_legacy_for_gated_and_ungated(self):
         if _configured_gpu_count() < 2:
             self.fail(
