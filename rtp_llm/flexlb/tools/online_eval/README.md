@@ -97,10 +97,12 @@ section below for the full table):
   divide by the engine count for the per-engine average via the same
   three-level chain as the TPS charts and render the counter columns as
   adjacent-bucket cumulative diffs ÷ bucket gap with counter resets
-  clamped to zero — the prefill-602-rejection vs decode-degradation split,
-  decode reuse as the fix #5 net-demand deduction readout, evictions as
-  the allocation-coupled LRU pressure readout; healthy runs keep both
-  admission surfaces at zero, non-zero = overload signal; old aggregates
+  clamped to zero — the prefill-602-rejection vs decode-terminal-failure
+  split (kv_admission_fails counts D-side terminal LACK_MEM since 20260903,
+  including P-enqueue reservation rejects), decode reuse as the fix #5
+  net-demand deduction readout, evictions as the allocation-coupled LRU
+  pressure readout; healthy runs keep both admission surfaces at zero,
+  non-zero = overload signal; old aggregates
   without the series → the whole panel group silently omitted); since
   20260903 also the run-level batch-decision analysis `batch_decisions`
   (dispatch-reason counts — `master.json` `prometheus_after` counters as

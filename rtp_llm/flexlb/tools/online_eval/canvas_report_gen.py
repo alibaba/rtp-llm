@@ -3500,7 +3500,7 @@ def main():
 
         _RAXIS = const("kvPoolRT", str_arr(sparse_cats(_kvp_union)))
         reg_time(_RAXIS, _kvp_union)
-        # 准入失败面板：prefill 同步 602 拒绝与 decode 降级分线记账
+        # 准入失败面板：prefill 同步 602 拒绝与 decode 侧准入/增长终态拒绝分线记账
         # （正常健康档全零——过载档才非零）。
         _adm_lines = []
         _adm_scopes = []
@@ -3527,8 +3527,8 @@ def main():
             _adm_max = max(_adm_max, max(_vals) if _vals else 0)
             _adm_lines.append(
                 (
-                    "dDeg",
-                    "D·decode 降级（un-pooled）"
+                    "dKvFail",
+                    "D·decode KV 拒绝（终态 LACK_MEM）"
                     + ("（÷N）" if tps_d_engines else "（集群和）"),
                     const("kvPoolDegD", num_arr(_vals)),
                     "warning",
@@ -3546,7 +3546,8 @@ def main():
                     "x = 压测时间（s，1s 采样）；y = 次/s，相邻有效桶累计差分 ÷ 桶间隔；"
                     + "；".join(_adm_scopes)
                     + "；prefill 同步拒绝（enqueue 602 LACK_MEM，请求直接失败）与"
-                    " decode 降级（un-pooled 继续跑 + kv_admission_fails 计数）分线"
+                    " decode 侧 KV 准入/增长拒绝（终态 LACK_MEM，请求终止 + "
+                    "kv_admission_fails 计数，含 P 入队预租被拒）分线"
                     "记账互不混线；正常健康档全零——非零即 KV 池过载信号",
                     emit_chart(
                         "LineChart",

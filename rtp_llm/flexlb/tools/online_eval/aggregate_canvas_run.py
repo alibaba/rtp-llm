@@ -18,9 +18,11 @@ Reads (consolidated run-root layout, the only supported form):
   mock_engine.log or mock.json (stats + final_snapshot; comparison source
   alongside the jsonl streams — the per-rid data itself is jsonl-only),
   flexlb_logs/flexlb.log* or master.log (dispatch lines + server-schedule-latency rows),
-  master.json (inflight_timeseries G4 / prometheus_timeseries G3 /
-  counters_timeseries master per-second arrival/completion rates;
-  comparison source),
+  master.json (prometheus_timeseries G3 — the sole master-plane collector
+  since the G6/G4 collapse: queue/KV/age gauges plus the arrival/
+  completion counters and inflight gauges feeding master_arrivals_ts /
+  inflight_ts; the legacy inflight_timeseries / counters_timeseries keys
+  from older runs still take precedence when present),
   run_meta.json (process_usage G5).
 client_events rows are the sole per-request metrics source; the engine-side
 event rows are rid-joined onto them (the same join full_e2e always used).
@@ -31,15 +33,18 @@ Outputs meta/summary/batch (mock_last)/batch_decisions (run-level batch
 dispatch-reason + prediction-gap analysis, merged 20260903 from the
 removed analyze_slo_batch.py)/per_second (schedule + e2e/ttft percentiles)/
 master_arrivals_ts (master-side per-second arrival/completion rates, the
-send-series source of record) /queue_timeseries/engine_dist (requests / tokens / busy-time utilization,
+send-series source of record — differenced from the G3 request-count
+counter, or the legacy counters_timeseries key on old runs)
+/queue_timeseries/engine_dist (requests / tokens / busy-time utilization,
 per-engine Gini/CV/Lorenz/window Gini) plus compact time series:
 stage_latency_ts (master 10s stage p95 rows), engine_exec_ts (mock
 prefill/decode execution windows), per_second prefill_exec_* /
 decode_exec_* (engine exec percentiles joined by request_id onto the
 request-BIRTH second — same axis as e2e/full_e2e, unlike the
 completion-window engine_exec_ts), process_ts (mock/master/client CPU+RSS),
-inflight_ts (G4 scheduler/prefill batches+requests/decode reserved+
-confirmed_running), inflight_age_ts / kv_ts /
+inflight_ts (scheduler/prefill batches+requests/decode reserved+
+confirmed_running — summed from the G3 prometheus gauges, or the legacy
+inflight_timeseries key on old runs), inflight_age_ts / kv_ts /
 batcher_ts / dispatch_reason_ts (G3 master prometheus; the reason series is
 per-second dispatch rate derived from the dispatch_reason_total counters).
 cancel_qps_ts additionally carries master/prefill/decode cancel split rates
@@ -405,7 +410,10 @@ for _evf in _engine_events_candidates:
                     f"ERROR: engine event row missing/invalid rid in {_evf}: "
                     f"{line[:200]!r}"
                 )
-            if ev.get("cancelled"):
+            if ev.get("cancelled") or ev.get("error_code"):
+                # cancelled 行与 KV 终态失败行（error_code=602，20260903 decode
+                # LACK_MEM 对齐改造）都不进延迟 join：生产口径失败请求不进
+                # 延迟分布，只有成功终态才计入 full_e2e/exec 口径。
                 continue
             _ev_kind = ev.get("event")
             try:
@@ -1887,7 +1895,15 @@ if proc_entries:
             process_ts.append(row)
 
 # G4 inflight snapshots: scheduler in-flight plus per-endpoint batch/request
-# counts summed cluster-wide.
+# counts summed cluster-wide. Dual source since the G6/G4 collapse (G3 is
+# the sole master-plane collector): the legacy inflight_timeseries key
+# (old runs) takes precedence when present; when absent the same five
+# fields are rebuilt from the G3 prometheus gauges — scheduler_inflight_size
+# direct, per-engine prefill batch/request counts and per-endpoint decode
+# reserved/running counts summed across label variants. SchedulerRuntime
+# sets those gauges every 2s, so the rebuilt series naturally runs at the
+# 2s cadence the samples carry (vs the retired poller's 1s). Output keys
+# unchanged (canvas/compare_twin consume them as-is).
 # decode 侧 schema 已随 G4 分层准入改版（HttpLoadBalanceServer
 # .inflightStatus）：decode_endpoints 旧 inflight_requests 字段已不存在
 # （旧键读取恒 0 的 bug 根因），现读 reserved_total（master 预约未
@@ -1922,6 +1938,22 @@ for grp in master_json.get("inflight_timeseries") or []:
     except (TypeError, ValueError):
         continue
     inflight_pts.append((ts, (sched, p_batches, p_reqs, d_reserved, d_running)))
+if not inflight_pts:
+    # G6/G4 collapse fallback: rebuild the same five fields from the G3
+    # prometheus timeline (label variants summed per sample; a series not
+    # yet present at a ts leaves that field 0).
+    _inflight_gauges = (
+        ("flexlb_app_flexlb_scheduler_inflight_size", 0),
+        ("flexlb_app_flexlb_inflight_batch_count", 1),
+        ("flexlb_app_flexlb_inflight_request_count", 2),
+        ("flexlb_auto_tpm_decode_reserved_count", 3),
+        ("flexlb_auto_tpm_decode_running_count", 4),
+    )
+    _inflight_by_ts = {}
+    for _base, _idx in _inflight_gauges:
+        for _ts, _v in prom_ts_extract(_base, agg="sum"):
+            _inflight_by_ts.setdefault(int(_ts), [0, 0, 0, 0, 0])[_idx] = int(round(_v))
+    inflight_pts = [(_ts, tuple(_row)) for _ts, _row in sorted(_inflight_by_ts.items())]
 inflight_ts = [
     {
         "t": t,
@@ -1934,7 +1966,14 @@ inflight_ts = [
     for t, (s, pb, pr, drv, drn) in rel_axis(inflight_pts)
 ]
 
-# master 每秒到达/完成速率（counters_timeseries 累计计数器差分）。
+# master 每秒到达/完成速率（累计计数器差分）。双源（G6/G4 收缩后 G3
+# 是唯一 master 采集路）：旧 counters_timeseries 键（老 run）存在则优先
+# （老 run 重聚合不坏）；缺席时从 G3 prometheus counter 重建累计序列——
+# 每 ts 对 flexlb_auto_tpm_request_count 系列按 priority 标签求和、
+# flexlb_app_engine_balancing_master_all_qps 按 code 标签求和（跨标签
+# 求和 = cluster 累计值；系列首次 increment 前不出现，缺席即 0）。
+# master 每 run 重启，counter 天然从 0 起（对齐旧 server_latency/reset
+# 起点语义）。
 # arrival_count / completion_count 是 master 侧单调累计计数器（1s 采样，
 # 间隔 ~1001ms）；相邻样本正差分 ÷ 间隔秒 = 每秒速率（计数器重置的
 # 负差分区间丢弃，不造峰）。这是 QPS 图表发送序列的权威数据源：
@@ -1957,6 +1996,29 @@ for _row in master_json.get("counters_timeseries") or []:
     if not _ts:
         continue
     _counter_pts.append((_ts, _arr, _cmp))
+if not _counter_pts:
+    # G6/G4 collapse fallback: derive the cumulative counters from the G3
+    # prometheus timeline. prom_ts_extract folds the label variants
+    # (priority / code) per sample; the _total suffix is the counter
+    # exposition form micrometer adds on the prometheus endpoint.
+    _arr_by_ts = {
+        int(_ts): _v
+        for _ts, _v in prom_ts_extract("flexlb_auto_tpm_request_count_total", agg="sum")
+    }
+    _cmp_by_ts = {
+        int(_ts): _v
+        for _ts, _v in prom_ts_extract(
+            "flexlb_app_engine_balancing_master_all_qps_total", agg="sum"
+        )
+    }
+    for _ts in sorted(set(_arr_by_ts) | set(_cmp_by_ts)):
+        _counter_pts.append(
+            (
+                _ts,
+                int(round(_arr_by_ts.get(_ts, 0.0))),
+                int(round(_cmp_by_ts.get(_ts, 0.0))),
+            )
+        )
 _arrival_rate_pts = []
 for (_ts0, _a0, _c0), (_ts1, _a1, _c1) in zip(_counter_pts, _counter_pts[1:]):
     _dt_s = (_ts1 - _ts0) / 1000.0
@@ -2216,8 +2278,9 @@ mock_tps_ts = [{"t": t, **vals} for t, vals in rel_axis(sorted(_tps_by_ts.items(
 #     available = free + 纯 LRU；held = 运行中裸块；referenced =
 #     在途请求引用的 key 块）；
 #   cache_evictions —— LRU 淘汰累计（容量 + 强制 /cache_evict）；
-#   kv_admission_fails —— decode 降级/增长失速累计（prefill 同步拒绝
-#     不在此列，另计 lack_mem_rejects）；
+#   kv_admission_fails —— D 侧 decode KV 终态失败累计（准入/步内增长
+#     失败 + P 入队预租被拒；每个计数 = 请求终态 LACK_MEM，20260903
+#     对齐生产；prefill 自身池的同步拒绝不在此列，另计 lack_mem_rejects）；
 #   lack_mem_rejects —— prefill 同步 602 拒绝累计（生产 MALLOC_FAILED
 #     同码，enqueue ack 直接拒）；
 #   decode_reuse_blocks —— decode 接手自身 LRU 重算命中的复用块累计
