@@ -366,23 +366,29 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
             return false;
         }
         workflow_credit_acquired = true;
-        auto on_timeout          = [this, task]() {
+        task->enqueue_time_us = metrics_reporter_.reportBusinessQueueWaitStarted(CacheTransferOperation::LOAD, false);
+        auto on_timeout       = [this, task]() {
+            metrics_reporter_.reportBusinessQueueWaitFinished(
+                CacheTransferOperation::LOAD, false, task->enqueue_time_us);
             RTP_LLM_LOG_WARNING("load expired in business queue, descriptor_count=%zu", task->load_descs.size());
             if (!task->context->completeTransfers(task->load_descs.size(), false)) {
                 RTP_LLM_LOG_WARNING("failed to record expired load, descriptor_count=%zu", task->load_descs.size());
             }
-            metrics_reporter_.reportTransferTaskQueueWait(CacheTransferOperation::LOAD,
-                                                          currentTimeUs() - task->enqueue_time_us);
         };
-        task->enqueue_time_us = currentTimeUs();
-        const bool uses_disk  = std::any_of(task->load_descs.begin(), task->load_descs.end(), [](const auto& desc) {
+        const bool uses_disk = std::any_of(task->load_descs.begin(), task->load_descs.end(), [](const auto& desc) {
             return desc.source_tier == Tier::DISK || desc.target_tier == Tier::DISK;
         });
         if (!task_pool_->submit(
                 BlockTreeTaskClass::LOAD,
-                [this, task]() { runLoadTask(task); },
+                [this, task]() {
+                    metrics_reporter_.reportBusinessQueueWaitFinished(
+                        CacheTransferOperation::LOAD, false, task->enqueue_time_us);
+                    runLoadTask(task);
+                },
                 std::chrono::milliseconds(uses_disk ? disk_timeout_ms_ : host_timeout_ms_),
                 std::move(on_timeout))) {
+            metrics_reporter_.reportBusinessQueueWaitFinished(
+                CacheTransferOperation::LOAD, false, task->enqueue_time_us, false);
             return false;
         }
     }
@@ -462,8 +468,6 @@ void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
         }
     };
     try {
-        metrics_reporter_.reportTransferTaskQueueWait(CacheTransferOperation::LOAD,
-                                                      currentTimeUs() - task->enqueue_time_us);
         load_task_runner_.runTransfer(
             task, *transfer_dispatcher_, metrics_reporter_, disk_timeout_ms_, host_timeout_ms_, complete);
     } catch (const std::exception& error) {
@@ -501,7 +505,12 @@ void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&  
             RTP_LLM_LOG_WARNING("failed to publish load context settlement, context_id=%lu", context->contextId());
         }
     };
-    if (!task_pool_->submitCompletion(settle)) {
+    const int64_t queue_begin = metrics_reporter_.reportBusinessQueueWaitStarted(CacheTransferOperation::LOAD, true);
+    if (!task_pool_->submitCompletion([this, settle, queue_begin]() mutable {
+            metrics_reporter_.reportBusinessQueueWaitFinished(CacheTransferOperation::LOAD, true, queue_begin);
+            settle();
+        })) {
+        metrics_reporter_.reportBusinessQueueWaitFinished(CacheTransferOperation::LOAD, true, queue_begin, false);
         RTP_LLM_LOG_WARNING("load completion queue is closed; settling context inline");
         settle();
     }
