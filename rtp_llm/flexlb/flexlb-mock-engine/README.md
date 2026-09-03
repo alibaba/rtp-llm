@@ -10,7 +10,7 @@ A Java-based mock engine for FlexLB load balancing testing. Simulates real GPU i
 - **HTTP control**: 14 endpoints for runtime control (/snapshot, /inject, /clear_inject, /health, /requests, /set_perf, /set_kv_pressure, /set_queue_depth, /stop_engine, /start_engine, /cancel_request, /add_engine, /remove_engine, /metrics)
 - **Inflight leak detection**: 30s periodic check with 60s grace period
 - **KV cache modeling**: block-pool capacity model v2 — heterogeneous prefill/decode pools, LRU-coupled admission/eviction (LACK_MEM), per-step decode KV growth, pressure simulation
-- **Concurrency modeling**: Prefill batch-level wait queue (inflight capped by `max_prefill_concurrency`, default 1 per DP rank; queued batches capped by `prefill.max_waiting_batches`, default 0 = zero-waiting fail-fast, with backpressure rejection), decode wait queue + hard concurrency gate (`decode_max_concurrency`, default 132) with backpressure rejection when the pending queue is full
+- **Concurrency modeling**: Prefill batch-level wait queue (inflight capped by `max_prefill_concurrency`, default 1 per DP rank; queued batches capped by `prefill.max_waiting_batches` only when > 0 — default 0 = unbounded, production-aligned P-side queueing with backpressure left to the master), decode wait queue + hard concurrency gate (`decode_max_concurrency`, default 132) with backpressure rejection when the pending queue is full
 
 ## Quick Start
 
@@ -32,7 +32,7 @@ bash run_online_eval.sh
 | prefill.fixed_ms | null | Fixed prefill latency (bypasses formula) |
 | prefill.min_ms | null | Floor for the final (post-scale) prefill sleep in ms; guards against sleep_scale making prefill unrealistically fast |
 | prefill.scale | 1.0 | Prefill-specific multiplier |
-| prefill.max_waiting_batches | 0 | Cap on queued (not-running) prefill batches per engine; excess enqueues are rejected (backpressure). `0` (shipped default) = zero-waiting fail-fast: a batch is accepted only when the engine is idle (a `max_prefill_concurrency` slot is free), otherwise rejected immediately. Positive n allows up to n queued batches — rule of thumb: n ≈ SLO_ms / batch_ms − 1 (e.g. SLO 1000 ms, batch 150 ms → 4, deepest wait 600 ms + 150 ms execution leaves ~25% headroom); for 1x-scale runs where a batch takes ~330–400 ms, use 1–2. Absent field or negative = unbounded queue (legacy behavior) |
+| prefill.max_waiting_batches | 0 | Cap on queued (not-running) prefill batches per engine. Default `0` / absent / negative = unbounded queue — production-aligned: the real engine's P side (`waiting_group_queue_` / `waiting_streams_`) enqueues unconditionally and never rejects on queue depth; backpressure lives in the master (inflight / maxEngineRequests gates), not the engine. A positive cap introduces an engine-side rejection surface (excess enqueues rejected with backpressure) — a front-loaded simulation of the master gate, hence a different rejection-attribution path than production (capped profiles such as the online_eval dsv4 profile's explicit 4 reject at the engine; production would reject at the master — read such tiers' conclusions with that difference in mind). Rule of thumb when capping: n ≈ SLO_ms / batch_ms − 1 (e.g. SLO 1000 ms, batch 150 ms → 4, deepest wait 600 ms + 150 ms execution leaves ~25% headroom); for 1x-scale runs where a batch takes ~330–400 ms, use 1–2 |
 | decode.scale | 1.0 | Decode-specific multiplier |
 | decode.step_base_ms | 19.5 | Per-step decode latency intercept of the linear production fit: step_ms = step_base_ms + step_per_running_ms × running (production DSv4 fit, task #68). Applies when no `step_ms_by_batch` curve is declared |
 | decode.step_per_running_ms | 0.175 | Per-step decode latency slope per running stream (production DSv4 fit) |
@@ -49,7 +49,7 @@ bash run_online_eval.sh
 | /metrics | GET | Prometheus-format metrics |
 | /inject | POST | Inject fault (type, delay_ms, n, etc.) |
 | /clear_inject | POST | Clear all fault injections |
-| /set_perf | POST | Override prefill_fixed_ms, decode_scale, max_prefill_concurrency |
+| /set_perf | POST | Override prefill_fixed_ms, decode_scale, max_prefill_concurrency, max_waiting_batches |
 | /set_kv_pressure | POST | Set KV pressure (`active_kv_tokens` absolute) |
 | /set_queue_depth | POST | Set queue depth limit (real enqueue rejection) |
 | /stop_engine | POST | Stop engine (simulate crash) |
@@ -76,10 +76,19 @@ abrupt teardown and reports `drained=false`). Optional body fields:
 
 **Prefill waiting-queue cap**: `prefill.max_waiting_batches` bounds the
 number of QUEUED prefill batches per engine — running batches never count toward the
-cap. Semantics: `cap >= 0` is enforced; the shipped default `0` is zero-queue
-fail-fast mode — the engine accepts a batch only when it is idle (a concurrency
-slot is free) and rejects immediately otherwise, so requests never wait in the
-engine; absent field or negative = unbounded (legacy). When the queue is full,
+cap, and the cap is enforced only when positive. Default `0` / absent /
+negative = unbounded queue — production-aligned: the real engine's P side
+(`waiting_group_queue_` / `waiting_streams_`) enqueues unconditionally and never
+rejects on queue depth; backpressure lives in the master (inflight /
+maxEngineRequests gates), not the engine. A positive cap introduces an
+engine-side rejection surface — semantically a front-loaded simulation of the
+master gate, so rejections in capped profiles (e.g. the online_eval dsv4
+profile's explicit 4) are attributed to the engine while production attributes
+them to the master; read overload conclusions from capped tiers with that
+difference in mind. The cap can also be changed at runtime per engine via
+`POST /set_perf {"engine": ..., "max_waiting_batches": N}` (same semantics as
+the JSON field, 0 = unbounded; negative values are a 400) — the runtime value
+beats the JSON-configured one. When the queue is full,
 `enqueueBatch` returns a per-request error
 (`prefill waiting queue full (backpressure): waiting=N cap=M`) and `generateStreamCall`
 fails the stream, so the master sees an explicit rejection instead of a silent
@@ -415,8 +424,11 @@ master-side curves are indistinguishable from production:
   hotter the cache while requests run, the lower available drops — the
   scheduling-pressure shape the previous model could not express.
 - **Decode never rejects**: on pool exhaustion a decode request degrades to un-pooled
-  execution and bumps the `kv_admission_fails` counter (production
-  `waiting_streams_` semantics — parking, not rejecting).
+  execution and bumps the `kv_admission_fails` counter. Known divergence
+  (alignment ruling pending): production decode KV failure is terminal —
+  first-block allocation failure rejects with ALLOCATE (retryable), in-step
+  incremental failure terminates the request with LACK_MEM — whereas the mock
+  degrades and continues, so overload-tier error-rate readings skew optimistic.
 - **Flag semantics change**: `--prefill-cache-blocks` / `--decode-cache-blocks` have
   RETIRED their old meaning ("max cached key count") and now override the pool
   block count (default `0` = derive from token capacity). The 6000/3000 defaults
@@ -472,16 +484,16 @@ which stays disabled until explicitly injected.
 
 ### Prefill waiting-queue cap — semantic difference (IMPORTANT)
 
-The v2 baseline text above (`prefill.max_waiting_batches`: "0 = zero-waiting
-fail-fast … absent or negative = unbounded") describes the
-`feat/flexlb_mock_engine_v2` semantics. **This branch keeps a different,
-opt-in semantic and does not adopt the v2 fail-fast default**:
+The `feat/flexlb_mock_engine_v2` baseline README once documented `0` as a
+"zero-waiting fail-fast" default; that semantic never shipped on this branch —
+the description above is the actual (and only) behavior:
 
 - `max_waiting_batches > 0`: cap enabled — excess queued batches are
   rejected with backpressure (`prefill waiting queue full (backpressure):
   waiting=N cap=M`);
 - `0` / absent (default `DEFAULT_MAX_WAITING_PREFILL_BATCHES = 0`):
-  **unbounded** queue (legacy behavior, `<= 0` disables the cap).
+  **unbounded** queue (`<= 0` disables the cap) — production-aligned, see the
+  cap paragraph above.
 
 The opt-in default is deliberate: Auto-TPM queue-eviction E2E scenarios need
 deep engine-side queues, so the cap must be explicitly requested. Do not

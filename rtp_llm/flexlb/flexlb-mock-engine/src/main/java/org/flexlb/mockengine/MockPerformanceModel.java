@@ -148,6 +148,12 @@ final class MockPerformanceModel {
     // Python /set_perf compatibility: decode_scale overrides the config-file
     // decode scale (Python-compat /set_perf -> performance.decode_scale).
     private volatile Double overrideDecodeScale;
+    // Python /set_perf compatibility: max_waiting_batches overrides the
+    // config-file prefill waiting-queue cap (Python-compat /set_perf ->
+    // performance prefill.max_waiting_batches). Null = not overridden;
+    // the override value follows the same semantics as the JSON field
+    // (0 = unbounded, > 0 = cap on queued prefill batches).
+    private volatile Integer overrideMaxWaitingPrefillBatches;
 
     private MockPerformanceModel(int blockSize,
                                  double sleepScale,
@@ -378,6 +384,15 @@ final class MockPerformanceModel {
         this.overrideDecodeScale = scale;
     }
 
+    /**
+     * Python /set_perf {@code max_waiting_batches}: replace the prefill
+     * waiting-queue cap (same semantics as the JSON field: 0 = unbounded,
+     * > 0 = cap on queued batches). Null restores the JSON-configured value.
+     */
+    void setOverrideMaxWaitingPrefillBatches(Integer cap) {
+        this.overrideMaxWaitingPrefillBatches = cap;
+    }
+
     /** Python launcher {@code --block-size}: override the block size from the perf config. */
     void setBlockSize(int blockSize) {
         this.blockSize = blockSize;
@@ -386,9 +401,12 @@ final class MockPerformanceModel {
     /**
      * Cap on queued (not running) prefill batches per engine
      * (JSON "prefill.max_waiting_batches", default 0 = unbounded).
+     * Runtime /set_perf override (max_waiting_batches) beats the JSON value,
+     * same priority chain as prefillMs (runtime > JSON).
      */
     int maxWaitingPrefillBatches() {
-        return maxWaitingPrefillBatches;
+        return overrideMaxWaitingPrefillBatches != null
+                ? overrideMaxWaitingPrefillBatches : maxWaitingPrefillBatches;
     }
 
     /**

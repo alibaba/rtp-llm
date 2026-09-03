@@ -366,6 +366,19 @@ final class MockControlServer {
             if (body.has("max_prefill_concurrency")) {
                 service.setMaxPrefillConcurrency(body.get("max_prefill_concurrency").asInt());
             }
+            if (body.has("max_waiting_batches")) {
+                // Runtime override of the prefill waiting-queue cap
+                // (performance JSON "prefill.max_waiting_batches"), same
+                // semantics as the JSON field: 0 = unbounded, > 0 = cap on
+                // queued prefill batches. Negative values are meaningless
+                // (neither a cap nor the explicit unbounded 0) -> 400.
+                int cap = body.get("max_waiting_batches").asInt();
+                if (cap < 0) {
+                    throw new ApiException(400,
+                            "max_waiting_batches must be >= 0 (0 = unbounded), got: " + cap);
+                }
+                perf.setOverrideMaxWaitingPrefillBatches(cap);
+            }
             return successResponse(service);
         });
     }
