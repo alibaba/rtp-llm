@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -24,7 +25,7 @@ struct MultiNodeResource {
 
 class MatchValidator {
 public:
-    virtual ~MatchValidator() = default;
+    virtual ~MatchValidator()                               = default;
     virtual bool validate(const GroupSetResource& resource) = 0;
 };
 
@@ -36,9 +37,7 @@ public:
 
     virtual ~GroupSet() = default;
 
-    void initialize(size_t                               group_set_id,
-                    std::shared_ptr<const CacheTopology> topology,
-                    std::vector<size_t>                  group_ids);
+    void initialize(size_t group_set_id, std::shared_ptr<const CacheTopology> topology, std::vector<size_t> group_ids);
 
     size_t groupSetId() const {
         return group_set_id_;
@@ -79,8 +78,10 @@ public:
     void referenceBlocks(const MultiNodeResource& resource, BlockTreeRefType ref_type) const;
     void unreferenceBlocks(const MultiNodeResource& resource, BlockTreeRefType ref_type) const;
 
-    BlockIdxType allocateSingleBlock(Tier tier, BlockTreeRefType ref_type);
-    void         releaseSingleBlock(Tier tier, BlockIdxType block, BlockTreeRefType ref_type) const;
+    BlockIdxType               allocateSingleBlock(Tier tier, BlockTreeRefType ref_type);
+    std::optional<BlockIdList> allocateBlocks(size_t n, Tier tier, BlockTreeRefType ref_type);
+    void                       releaseBlocks(Tier tier, const BlockIdList& blocks, BlockTreeRefType ref_type) const;
+    void                       releaseSingleBlock(Tier tier, BlockIdxType block, BlockTreeRefType ref_type) const;
 
 private:
     std::vector<DeviceBlockPoolPtr>         device_pools_;

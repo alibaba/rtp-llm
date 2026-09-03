@@ -154,9 +154,12 @@ struct FMHAConfig {
     std::string to_string() const;
 };
 
-constexpr double kDefaultDeviceWatermarkRatio = 0.9;
-constexpr double kDefaultHostWatermarkRatio   = 0.9;
-constexpr double kDefaultDiskWatermarkRatio   = 0.9;
+constexpr double kDefaultDeviceLowWatermarkRatio  = 0.82;
+constexpr double kDefaultDeviceHighWatermarkRatio = 0.90;
+constexpr double kDefaultHostLowWatermarkRatio    = 0.90;
+constexpr double kDefaultHostHighWatermarkRatio   = 0.94;
+constexpr double kDefaultDiskLowWatermarkRatio    = 0.92;
+constexpr double kDefaultDiskHighWatermarkRatio   = 0.97;
 
 struct KVCacheConfig {
     bool                                    reuse_cache           = false;

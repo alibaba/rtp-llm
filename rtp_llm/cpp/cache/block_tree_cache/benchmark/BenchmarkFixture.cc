@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/benchmark/BenchmarkFixture.h"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 
 #include <cuda_runtime.h>
@@ -196,10 +197,10 @@ std::unique_ptr<BlockTreeCache> BenchmarkFixture::createCache(std::vector<GroupS
     // Event-driven eviction: insert commits trigger checkWatermark, which
     // demotes overflow down to the per-tier ratio watermark (0.0 = disabled).
     if (device_watermark_ratio > 0.0) {
-        config.watermark_device.ratio = device_watermark_ratio;
+        config.watermark_device = {device_watermark_ratio, std::nextafter(device_watermark_ratio, 1.0)};
     }
     if (host_watermark_ratio > 0.0) {
-        config.watermark_host.ratio = host_watermark_ratio;
+        config.watermark_host = {host_watermark_ratio, std::nextafter(host_watermark_ratio, 1.0)};
     }
 
     auto engine =
