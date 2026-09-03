@@ -941,11 +941,135 @@ DSV4_PREFILL_EXPRESSION = (
 )
 
 
+# scheduler.ordering.preemption.allowedVictimStages enum values
+# (flexlb-common VictimStage.java; see _build_preemption_cfg).
+VICTIM_STAGES = ("PREFILL_QUEUED", "DECODE_RESERVED", "DECODE_ENGINE_OWNED")
+
+
+def _build_preemption_cfg(preemption: dict) -> dict:
+    """snake_case preemption spec → strict schema-v2 preemption JSON block.
+
+    Schema (docs/priority-scheduler-delivery-modes.md lines 206-213):
+
+        {
+            "allowedVictimStages": ["PREFILL_QUEUED", ..., "DECODE_ENGINE_OWNED"],
+            "engineCancellation": {        # required iff DECODE_ENGINE_OWNED
+                "ackTimeoutMs": 50,        #     is allowed; rejected
+                "completionTimeoutMs": 1000 #     otherwise
+            },
+        }
+
+    Input keys (snake_case, mirroring the generator's parameter style):
+    ``allowed_victim_stages`` (list of VICTIM_STAGES values) and optional
+    ``engine_cancellation`` ``{"ack_timeout_ms": int, "completion_timeout_ms": int}``.
+    The Java-side cross-field contract (FlexlbConfigValidator.validateQueue)
+    is mirrored here so a malformed block fails fast in Python instead of
+    aborting master startup:
+
+      * allowedVictimStages must be a non-empty subset of VICTIM_STAGES;
+      * engineCancellation is REQUIRED when DECODE_ENGINE_OWNED is allowed
+        and REJECTED otherwise (both timeouts positive integers);
+      * no JSON nulls are ever emitted (ConfigService.rejectJsonNull).
+    """
+    stages = list(preemption.get("allowed_victim_stages") or [])
+    unknown = [s for s in stages if s not in VICTIM_STAGES]
+    if unknown:
+        raise ValueError(
+            f"preemption.allowed_victim_stages: unknown stages {unknown}; "
+            f"valid values: {list(VICTIM_STAGES)}"
+        )
+    if not stages:
+        raise ValueError(
+            "preemption.allowed_victim_stages must be a non-empty subset of "
+            f"{list(VICTIM_STAGES)} when preemption is configured"
+        )
+    cancellation = preemption.get("engine_cancellation")
+    if "DECODE_ENGINE_OWNED" not in stages:
+        if cancellation is not None:
+            raise ValueError(
+                "preemption.engine_cancellation is allowed only when "
+                "DECODE_ENGINE_OWNED is an allowed victim stage"
+            )
+        return {"allowedVictimStages": stages}
+    if cancellation is None:
+        raise ValueError(
+            "preemption.engine_cancellation is required when "
+            "DECODE_ENGINE_OWNED is an allowed victim stage"
+        )
+    ack_ms = cancellation.get("ack_timeout_ms")
+    completion_ms = cancellation.get("completion_timeout_ms")
+    for name, value in (
+        ("ack_timeout_ms", ack_ms),
+        ("completion_timeout_ms", completion_ms),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(
+                f"preemption.engine_cancellation.{name} must be a positive "
+                "integer (ms)"
+            )
+    return {
+        "allowedVictimStages": stages,
+        "engineCancellation": {
+            "ackTimeoutMs": ack_ms,
+            "completionTimeoutMs": completion_ms,
+        },
+    }
+
+
+def _build_ordering_cfg(
+    ordering: str,
+    default_priority: Optional[int],
+    preemption: Optional[dict],
+) -> dict:
+    """scheduler.ordering block (strict schema-v2).
+
+    FIFO carries only ``{"type": "FIFO"}`` — FifoOrderingConfig has no other
+    fields and the strict parser (ConfigService STRICT_MAPPER enables
+    FAIL_ON_UNKNOWN_PROPERTIES) rejects defaultPriority / preemption under
+    it, so passing them with ordering="fifo" raises here instead of failing
+    at master startup.  Under PRIORITY both keys are optional: omitted
+    defaultPriority keeps the Java default (50); an omitted preemption block
+    disables preemption (the designed off-switch, doc line 213).
+    """
+    # B3 (Daniel P3-3): normalize case at the entry — parallel sessions
+    # have been observed passing the legacy uppercase convention
+    # ("FIFO"/"PRIORITY"); a non-str value falls through to the check
+    # below unchanged (same error as before).
+    if isinstance(ordering, str):
+        ordering = ordering.lower()
+    if ordering not in ("fifo", "priority"):
+        raise ValueError(f"ordering must be 'fifo' or 'priority', got {ordering!r}")
+    if ordering == "fifo":
+        if default_priority is not None or preemption is not None:
+            raise ValueError(
+                "default_priority/preemption apply only to ordering='priority' "
+                "(the strict FLEXLB_CONFIG parser rejects them under FIFO)"
+            )
+        return {"type": "FIFO"}
+    if default_priority is not None and not 1 <= default_priority <= 100:
+        raise ValueError(
+            f"default_priority must be in [1, 100], got {default_priority}"
+        )
+    cfg: dict = {"type": "PRIORITY"}
+    if default_priority is not None:
+        cfg["defaultPriority"] = default_priority
+    if preemption is not None:
+        cfg["preemption"] = _build_preemption_cfg(preemption)
+    return cfg
+
+
 def build_flexlb_config(
     *,
     ordering: str = "fifo",  # fifo | priority
     decision: str = "fixed_window",  # fixed_window | single
     dispatcher: str = "batch",  # batch | non_batch
+    # scheduler.ordering (PRIORITY only — the strict parser rejects these
+    # keys under FIFO; see _build_ordering_cfg):
+    #   scheduler.ordering.defaultPriority (None → keep the Java default 50)
+    default_priority: Optional[int] = None,
+    #   scheduler.ordering.preemption block (None → omit the whole block =
+    #   preemption disabled); snake_case shape: see _build_preemption_cfg
+    preemption: Optional[dict] = None,
     # scheduler.decision (FIXED_WINDOW only; ignored for SINGLE)
     max_requests: int = 32,
     max_collection_wait_ms: int = 10,
@@ -984,6 +1108,14 @@ def build_flexlb_config(
     stable prediction cap for FIXED_WINDOW + NON_BATCH requires FORMULA —
     and the test line must not depend on the Java code default, which is the
     upstream legacy 1 ms/token expression.
+
+    Priority ordering: *default_priority* maps to
+    ``scheduler.ordering.defaultPriority`` and *preemption* to
+    ``scheduler.ordering.preemption`` — both PRIORITY-only (schema reference:
+    docs/priority-scheduler-delivery-modes.md lines 191-213; Java parsing:
+    PriorityOrderingConfig/PreemptionConfig/EngineCancellationConfig in
+    flexlb-common).  ``ordering="priority"`` with ``preemption=None`` emits
+    no preemption block — preemption disabled by omission.
     """
     if decision == "single":
         decision_cfg: dict = {"type": "SINGLE"}
@@ -1014,7 +1146,7 @@ def build_flexlb_config(
         )
     scheduler_cfg: dict = {
         "type": "QUEUE",
-        "ordering": {"type": ordering.upper()},
+        "ordering": _build_ordering_cfg(ordering, default_priority, preemption),
         "decision": decision_cfg,
         "capacity": capacity_cfg,
         "lifecycle": {
@@ -1508,18 +1640,94 @@ class EnvManager:
         ]
         if spec.master_debug_log:
             argv.append("--logging.level.org.flexlb=DEBUG")
+            # flexlbLogger (org.flexlb.util.Logger's slf4j name —
+            # logback-spring.xml pins it at INFO with the FLEXLB file
+            # appender) carries the [priority-scheduler] DEBUG lines into
+            # ~/ai-whale/logs/flexlb.log; the org.flexlb switch alone never
+            # reaches it (logger-name mismatch, round-2 O1 finding).
+            argv.append("--logging.level.flexlbLogger=DEBUG")
         argv.extend(spec.master_extra_args)
+        # The JVM's stdout redirection (flexlb_master.log) captures only
+        # the console appender's first buffered lines — implementation-
+        # period finding: a config-rejected master leaves ~11 stdout
+        # lines with NO strict-parser message.  The full Spring startup
+        # and ConfigValidationException stacks land in the logback file
+        # appender at ~/ai-whale/logs/application.log (shared across
+        # every master start in the container), so capture its size now
+        # and append the bytes written by THIS start to the failure
+        # diagnostics.
+        app_log = Path.home() / "ai-whale" / "logs" / "application.log"
+        try:
+            app_log_offset = app_log.stat().st_size
+        except OSError:
+            app_log_offset = 0
+        # Same offset discipline for the flexlbLogger file appender
+        # (~/ai-whale/logs/flexlb.log — shared across every master in the
+        # container): cases read "the bytes THIS master wrote" via
+        # env.flexlb_log_offset (see cases/priority.py _master_log_text).
+        flexlb_log = Path.home() / "ai-whale" / "logs" / "flexlb.log"
+        try:
+            env.flexlb_log_offset = flexlb_log.stat().st_size
+        except OSError:
+            env.flexlb_log_offset = 0
+        # A8 (Daniel P2-3): same offset discipline for the pv.log request
+        # journal (~/ai-whale/logs/pv.log — shared across every master in
+        # the container): cases read only THIS master's rows via
+        # env.pv_log_offset (see cases/priority.py _pv_log_tail), with an
+        # additional per-case requestId filter on top.
+        pv_log = Path.home() / "ai-whale" / "logs" / "pv.log"
+        try:
+            env.pv_log_offset = pv_log.stat().st_size
+        except OSError:
+            env.pv_log_offset = 0
         proc = ProcessOps.start(argv, self._master_env(env), env.run_dir / log_name)
         env.master = proc
-        if not wait_for_port("127.0.0.1", env.master_http_port, 90):
-            raise RuntimeError(f"master failed to start:\n{proc.tail_log()}")
+
+        def _app_log_tail_this_start(lines: int = 60) -> str:
+            try:
+                with open(app_log, "rb") as fh:
+                    fh.seek(app_log_offset)
+                    chunk = fh.read().decode("utf-8", errors="replace")
+                return "\n".join(chunk.splitlines()[-lines:])
+            except OSError:
+                return ""
+
+        # B2 (Daniel P3-2): poll readiness AND liveness — the strict-
+        # config startup-failure variants (atpm_config_strict_reject) die
+        # within seconds of launch, so waiting the full 90s port window
+        # there only delays the failure report; the early exit mirrors
+        # the mock-start polling above.  Only the process-dead branch
+        # short-circuits — a live master keeps the full window.
+        master_up = False
+        master_deadline = time.monotonic() + 90
+        while time.monotonic() < master_deadline:
+            if port_in_use(env.master_http_port):
+                master_up = True
+                break
+            if not proc.alive():
+                break
+            time.sleep(1.0)
+        if not master_up:
+            app_tail = _app_log_tail_this_start()
+            extra = (
+                "\n--- ~/ai-whale/logs/application.log (this start) ---\n" + app_tail
+                if app_tail
+                else ""
+            )
+            raise RuntimeError(f"master failed to start:\n{proc.tail_log()}{extra}")
         # Guard against a foreign master squatting on the HTTP port: if our own
         # JVM died on BindException, the port probe above may still succeed
         # against the foreign process. Re-check our own pid.
         if not proc.alive():
+            app_tail = _app_log_tail_this_start()
+            extra = (
+                "\n--- ~/ai-whale/logs/application.log (this start) ---\n" + app_tail
+                if app_tail
+                else ""
+            )
             raise RuntimeError(
                 f"master process exited during startup (port conflict?):\n"
-                f"{proc.tail_log()}"
+                f"{proc.tail_log()}{extra}"
             )
 
         def _master_info() -> Optional[dict]:
