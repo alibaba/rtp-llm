@@ -25,6 +25,7 @@ from rtp_llm.config.py_config_modules import (
 )
 from rtp_llm.model_factory_register import _model_factory, ensure_model_registered
 from rtp_llm.ops import (
+    HybridAttentionType,
     ProfilingDebugLoggingConfig,
     SpeculativeType,
     TaskType,
@@ -32,6 +33,29 @@ from rtp_llm.ops import (
 )
 from rtp_llm.utils.util import check_with_info
 from rtp_llm.utils.warmup import configure_warmup
+
+
+def _retype_pp_hybrid_spec_tags(kv_cache_spec_descs, hybrid_attention_types) -> None:
+    """Rename positional hybrid tags (linear0/linear1/...) to type tags.
+
+    With PP + independent pools each tag becomes one physical pool per stage.
+    Positional tags give every stage a different tag SUBSET that needs
+    cross-stage reconciliation; one tag per attention type (full / linear)
+    keeps all stage topologies identical.
+    """
+    check_with_info(
+        len(kv_cache_spec_descs) == len(hybrid_attention_types),
+        "hybrid spec desc count %d != hybrid_attention_types count %d"
+        % (len(kv_cache_spec_descs), len(hybrid_attention_types)),
+    )
+    for layer_idx, layer_descs in enumerate(kv_cache_spec_descs):
+        tag = (
+            "linear"
+            if hybrid_attention_types[layer_idx] == HybridAttentionType.LINEAR
+            else "full"
+        )
+        for desc in layer_descs:
+            desc.tag = tag
 
 
 class ModelFactory:
@@ -422,6 +446,29 @@ class ModelFactory:
                 model_config.num_layers,
                 parallelism_config.pp_size,
                 counts,
+            )
+
+        # PP retires the positional hybrid grouping: the cache gate requires
+        # independent pools when pp_size > 1. Enable them here (scoped to PP,
+        # pp=1 keeps its existing pool layout) and rename linear0/linear1/...
+        # to a single "linear" tag so every stage sees identical tag sets.
+        # Models that already enable independent pools (e.g. DSV4) keep their
+        # own tags untouched.
+        hybrid_config = model_config.hybrid_attention_config
+        if (
+            parallelism_config.pp_size > 1
+            and hybrid_config.enable_hybrid_attention
+            and not hybrid_config.enable_independent_kv_cache_pools
+        ):
+            hybrid_config.enable_independent_kv_cache_pools = True
+            _retype_pp_hybrid_spec_tags(
+                model_config.kv_cache_spec_descs,
+                hybrid_config.hybrid_attention_types,
+            )
+            logging.info(
+                "PP hybrid cache switched to independent type pools: num_layers=%d pp_size=%d",
+                model_config.num_layers,
+                parallelism_config.pp_size,
             )
 
     @staticmethod
