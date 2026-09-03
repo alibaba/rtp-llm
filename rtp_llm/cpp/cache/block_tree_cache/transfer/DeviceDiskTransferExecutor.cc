@@ -145,6 +145,7 @@ std::shared_ptr<AsyncContext> DeviceDiskTransferExecutor::execute(const std::vec
                                                              + ")"));
                 };
                 const bool accepted = transfer_task_pool_.submit(
+                    BlockTreeTaskClass::LOAD,
                     [this,
                      stage_state,
                      sub_descriptors = std::move(sub_descriptors),
@@ -217,6 +218,7 @@ std::shared_ptr<AsyncContext> DeviceDiskTransferExecutor::executeDeviceToDisk(co
                 context->complete(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "device-to-disk expired in TE worker queue"));
             };
             const bool accepted = transfer_task_pool_.submit(
+                BlockTreeTaskClass::BACKGROUND,
                 [this, context, descriptor, group_set_ptr, batch_leases] {
                     try {
                         const std::vector<HostBufferView> hosts{
