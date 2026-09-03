@@ -1837,6 +1837,10 @@ def main():
     # 反馈 2：多延迟合一（full_e2e / ttft / schedule / prefill exec /
     # decode exec，全部 p95；e2e 系列已于 20260831 删除——与
     # full_e2e 口径重叠且易误读，只保留 full_e2e）。
+    # ttft（20260903 换血 engine 口径）：per_second.ttft_* 键名不变、
+    # 数据源换为发出 → prefill 批完成（rid join）；FETCH=0 下 client
+    # 首帧恒 0 导致的「ttft 线消失」随之修复，但与历史 client 口径
+    # ttft 断代不可比（caption 注记）。
     # full_e2e（20260830）：client 发出 → 引擎 decode 正常终态，按
     # request_id 关联的跨两侧全链路口径——schedule-only（FETCH=0）下
     # 覆盖调度+prefill+传输+decode 完整链路；旧 aggregate 无该字段
@@ -1875,7 +1879,7 @@ def main():
                 five_series.append(
                     (
                         "ttft",
-                        "ttft（p95）",
+                        "ttft（p95·engine）",
                         const(
                             "ttftP95",
                             num_arr(
@@ -1985,8 +1989,11 @@ def main():
             )
             five_cap = (
                 "x = 压测时间（s，1s 采样）；y = 延迟 p95（ms）。口径："
-                "ttft = 成功请求按发送秒的分位（幸存者口径，过载下慢"
-                "请求已转为错误被排除）"
+                "ttft(engine) = 发出 → prefill 批完成（引擎 prefill_done"
+                " 终态行按 rid 关联回成功请求、按出生秒分桶，含 "
+                "schedule+dispatch+引擎排队+prefill 执行；幸存者口径）；"
+                "20260903 断代：ttft 键已由 client 首帧口径换血为 engine "
+                "口径，与历史 run 的 ttft 不可比；每秒样本量见 ttft_n"
             )
             # exec 线口径段：出生轴与完成轴分别标注（可能混合——如旧引擎
             # build 有 decode_done 无 prefill_done 时 decode 出生轴 +
@@ -2047,6 +2054,108 @@ def main():
                         five_series,
                         suffix=" ms",
                         domain="[0, " + num(nice_max(five_max * 1.15)) + "]",
+                    ),
+                )
+            )
+        # P/D 引擎内等待（20260903）：rid join 引擎终态行派生的引擎内
+        # 等待时序（出生轴，与五延迟图同轴）；fail-closed——按样本量
+        # 键（prefill_wait_n / decode_wait_n）判有数据才注册面板，
+        # 不许空面板；旧 aggregate 无该键时整体省略。
+        has_pw = any((p.get("prefill_wait_n", 0) or 0) for p in per_second)
+        has_dw = any((p.get("decode_wait_n", 0) or 0) for p in per_second)
+        if has_pw or has_dw:
+            wait_series = []
+            if has_pw:
+                wait_series.append(
+                    (
+                        "pw95",
+                        "prefill wait（p95）",
+                        const(
+                            "pwP95",
+                            num_arr(
+                                [
+                                    (ps_by_t.get(t) or {}).get("prefill_wait_p95", 0)
+                                    for t in tsec_vals
+                                ]
+                            ),
+                        ),
+                        "danger",
+                    )
+                )
+                wait_series.append(
+                    (
+                        "pw50",
+                        "prefill wait（p50）",
+                        const(
+                            "pwP50",
+                            num_arr(
+                                [
+                                    (ps_by_t.get(t) or {}).get("prefill_wait_p50", 0)
+                                    for t in tsec_vals
+                                ]
+                            ),
+                        ),
+                        "neutral",
+                    )
+                )
+            if has_dw:
+                wait_series.append(
+                    (
+                        "dw95",
+                        "decode wait（p95）",
+                        const(
+                            "dwP95",
+                            num_arr(
+                                [
+                                    (ps_by_t.get(t) or {}).get("decode_wait_p95", 0)
+                                    for t in tsec_vals
+                                ]
+                            ),
+                        ),
+                        "success",
+                    )
+                )
+                wait_series.append(
+                    (
+                        "dw50",
+                        "decode wait（p50）",
+                        const(
+                            "dwP50",
+                            num_arr(
+                                [
+                                    (ps_by_t.get(t) or {}).get("decode_wait_p50", 0)
+                                    for t in tsec_vals
+                                ]
+                            ),
+                        ),
+                        "neutral",
+                    )
+                )
+            wait_max = max(
+                max((p.get("prefill_wait_p95", 0) or 0) for p in per_second),
+                max((p.get("decode_wait_p95", 0) or 0) for p in per_second),
+                1,
+            )
+            wait_cap = (
+                "x = 压测时间（s，1s 采样）；y = 引擎内等待（ms，出生秒"
+                "分桶）。prefill_wait = prefill_start − engine_arrival"
+                "（EnqueueBatch 准入 → 批开始执行，含 lane 排队）；"
+                "decode_wait = decode_start − engine_arrival（hand-off "
+                "到达 → 进 running slot）；ok 行按 rid join 引擎终态行"
+                "派生（幸存者口径），负值样本（时钟异常）已跳过；每秒"
+                "样本量见 prefill_wait_n / decode_wait_n"
+            )
+            latency_containers.append(
+                emit_container(
+                    "引擎内等待：prefill / decode（p50 / p95，出生轴）",
+                    wait_cap,
+                    emit_chart(
+                        "LineChart",
+                        TSEC,
+                        230,
+                        wait_series,
+                        suffix=" ms",
+                        domain="[0, " + num(nice_max(wait_max * 1.15)) + "]",
                     ),
                 )
             )
@@ -3916,8 +4025,13 @@ def main():
     # ttft/e2e 全程分位（聚合层自算，幸存者口径 = ok 行带值样本；
     # 与 per_second 图的每秒分位互补）：单键直读，缺失整行不显示
     # （full_e2e 行同例；no-backward-compat：ttft_ms / total_ms 旧键回退已删）。
+    # ttft（20260903 换血 engine 口径）：发出 → prefill 批完成（rid
+    # join）；ttft_latency_source 标记口径（新 aggregate 恒 "engine"，
+    # 照 schedule 双源标记模式）；无样本 None 或旧 client 口径全零
+    # dict（FETCH=0 下 latency_summary([]) 陷阱）均显示 "——零样本
+    # ≠ 真实 0；与历史 client 口径 ttft 断代不可比。
     ttft_sum = sm.get("ttft_latency_ms")
-    if ttft_sum:
+    if ttft_sum and ttft_sum.get("count"):
         _ttft_cell = (
             "p50 "
             + fmt_ms(ttft_sum.get("p50"))
@@ -3925,9 +4039,13 @@ def main():
             + fmt_ms(ttft_sum.get("p99"))
             + " ms"
         )
-        if ttft_sum.get("count"):
-            _ttft_cell += " · n=" + fmt_int_trunc(ttft_sum.get("count"))
+        _ttft_cell += " · n=" + fmt_int_trunc(ttft_sum.get("count"))
+        _ttft_src = sm.get("ttft_latency_source")
+        if _ttft_src:
+            _ttft_cell += " · 口径 " + str(_ttft_src)
         rows.append(["TTFT（全程）", _ttft_cell])
+    else:
+        rows.append(["TTFT（全程）", "—"])
     e2e_sum = sm.get("e2e_latency_ms")
     if e2e_sum:
         _e2e_cell = (
@@ -3957,6 +4075,36 @@ def main():
                 " · n=" + fmt_int_trunc(full_e2e_sum.get("count")) + "（按 rid 关联）"
             )
         rows.append(["全链路延迟（发出→decode 结束）", _fe_cell])
+    # P/D 引擎内等待全程分位（20260903）：prefill_wait = prefill_start
+    # − engine_arrival / decode_wait = decode_start − engine_arrival
+    # （rid join 派生，负值样本已跳过）。新 aggregate 才有；无样本
+    # /无键整行不显示（照 full_e2e 模式，不占位）。
+    pw_sum = sm.get("prefill_wait_latency_ms")
+    if pw_sum and pw_sum.get("count"):
+        rows.append(
+            [
+                "prefill 引擎内等待（全程）",
+                "p50 "
+                + fmt_ms(pw_sum.get("p50"))
+                + " / p99 "
+                + fmt_ms(pw_sum.get("p99"))
+                + " ms · n="
+                + fmt_int_trunc(pw_sum.get("count")),
+            ]
+        )
+    dw_sum = sm.get("decode_wait_latency_ms")
+    if dw_sum and dw_sum.get("count"):
+        rows.append(
+            [
+                "decode 引擎内等待（全程）",
+                "p50 "
+                + fmt_ms(dw_sum.get("p50"))
+                + " / p99 "
+                + fmt_ms(dw_sum.get("p99"))
+                + " ms · n="
+                + fmt_int_trunc(dw_sum.get("count")),
+            ]
+        )
     pcv = (ed.get("prefill") or {}).get("cv") if ed else None
     dcv = (ed.get("decode") or {}).get("cv") if ed else None
     p_tg = ed_p.get("tokens_gini_cum")

@@ -424,7 +424,10 @@ class DeviationFixtureTests(unittest.TestCase):
             run, real_dir = self._prepare(tmp)
             ce = real_dir / "client_events.jsonl"
             self._scale_client_events(ce, "total_ms", 2.0)
-            self._scale_client_events(ce, "ttft_ms", 3.0)
+            # 20260903 ttft 口径换血：ttft 样本源从 client 首帧 ttft_ms
+            # （合成行中恒 0 占位）换为 engine 口径 ttft_engine_ms——
+            # 偏差注入须缩放新键才能触发 ttft_dist 偏离。
+            self._scale_client_events(ce, "ttft_engine_ms", 3.0)
             r = run_cli(
                 "--mock-aggregate",
                 str(run),

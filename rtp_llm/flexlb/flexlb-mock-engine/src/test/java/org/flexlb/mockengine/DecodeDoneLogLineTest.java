@@ -182,15 +182,15 @@ class DecodeDoneLogLineTest {
                     "arrival <= start <= done must hold: " + row);
 
             long execMs = row.get("exec_ms").asLong();
-            // exec_ms caliber: the summed BOOKED step durations — each step
-            // prices at model step_ms × sleep_scale (decodeModel() runs
-            // sleep_scale=0.1, so one 20ms step books 2ms), and steps fold
-            // tokens_per_step tokens (MTP), e.g. output_len=4 → 2 steps × 2ms
-            // = 4ms. Assert only the one-booked-step lower bound; the exact
-            // sum depends on tokens_per_step and is not the contract here.
-            assertTrue(execMs >= 2,
-                    "exec_ms must be the summed booked step durations "
-                            + "(>= one 20ms*0.1 step), got " + execMs);
+            // 20260903 exec_ms caliber: decode_done_ms − decode_start_ms
+            // WALL-SPAN, symmetric with the prefill batch's done−start
+            // semantics (the former summed-booked-step-durations stream
+            // caliber is retired). In-row self-consistency is exact — the
+            // strongest possible contract (decodeModel() runs sleep_scale=0.1
+            // so the wall span of e.g. 2 booked 2ms steps is a few ms,
+            // covered by the [beforeMs, afterMs] window assertions above).
+            assertEquals(doneMs - startMs, execMs,
+                    "exec_ms must be the done−start wall span: " + row);
 
             assertTrue(row.get("batch_size").asInt() >= 1,
                     "batch_size must count this stream at the terminal step, got "

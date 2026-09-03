@@ -331,7 +331,6 @@ if not isinstance(server_latency, dict) or not server_latency:
     server_latency = dict(_embedded_sl) if isinstance(_embedded_sl, dict) else {}
 rpc_start_ms = []  # stamped 行 send_start（actual_send_qps 轴）
 pacing_lag_samples = []  # stamped 行 pacing_lag（Java 同规则：仅 send_start>0）
-ttft_samples = []  # is_ok 行 ttft_ms>0（全程分位，全量口径）
 e2e_samples = []  # is_ok 行 total_ms>0
 sched_client_samples = []  # is_ok 行 schedule_ms（schedule 双源的 client 口径）
 ok_count = 0  # is_ok 行数（success_count 自算口径）
@@ -347,17 +346,26 @@ wall_clock_vals = []  # wall_clock_ts（秒）——elapsed_s 主口径窗口
 # engine_arrival_ms / decode_start_ms / decode_done_ms / exec_ms /
 # batch_size / output_len / kv_used_tokens / cancelled; event=prefill_done
 # carries the prefill twin set (prefill_start_ms / prefill_done_ms / ttft_ms
-# / input_len / cache_hit_tokens; exec_ms = BATCH duration — prefill runs
-# whole batches). Client, master and the mock engine all run in the same
+# / input_len / cache_hit_tokens). exec_ms 口径（20260903 起 P/D 对称
+# 批口径）：prefill = BATCH duration（整批执行时长，同批成员同值）；
+# decode = decode_done_ms − decode_start_ms 墙钟跨度（原 Σ步长流口径
+# 退役——步边界准入下 wall-span ≈ Σ步长，误差仅入界量化与调度抖动）。
+# Client, master and the mock engine all run in the same
 # container, so decode_done_ms / prefill_done_ms and the client's
 # send_start_epoch_ms share one wall clock — no domain conversion needed.
 # cancelled=true rows are non-normal terminals and are skipped (they never
 # join; the row lands in the join-miss integrity markers instead of being
-# fabricated). Two consumers share one pass over the engine stream:
+# fabricated). Three consumers share one pass over the engine stream:
 #   * full_e2e (schedule-only full path): decode_done_ms - send_start
 #   * birth-axis engine exec percentiles: exec_ms bucketed by the request's
 #     BIRTH second (send_start) — same axis as e2e/full_e2e, unlike the
 #     legacy engine_exec_ts completion-window snapshot (kept unchanged).
+#   * engine-caliber ttft (20260903, REPLACES the client first-frame
+#     ttft_ms semantics of ttft_*/ttft_latency_ms): prefill_done_ms -
+#     send_start via the prefill join; the same joins also derive in-engine
+#     waits (prefill_wait = prefill_start_ms - engine_arrival_ms,
+#     decode_wait = decode_start_ms - engine_arrival_ms; negative diffs =
+#     clock anomaly, the sample is skipped, not fabricated).
 # fail-closed: this stream is a peer of client_events.jsonl — a missing
 # file, a malformed row, an unknown event kind, or a row missing rid /
 # terminal ts / exec_ms is a hard error, never a silent empty full_e2e
@@ -367,6 +375,7 @@ decode_done_map = {}
 prefill_done_map = {}
 full_e2e_join_miss = 0
 prefill_exec_join_miss = 0
+ttft_engine_join_miss = 0
 _engine_events_candidates = [
     n for n in ("engine_events.jsonl", "engine_events.jsonl.gz") if os.path.isfile(n)
 ]
@@ -398,15 +407,23 @@ for _evf in _engine_events_candidates:
                 continue
             _ev_kind = ev.get("event")
             try:
+                # 元组布局（20260903 扩展）：[0] 终态时刻 / [1] exec_ms
+                # ——既有消费索引不变；[2] engine_arrival_ms / [3] start_ms
+                # 供 ttft_engine 与引擎内等待派生（绝对时戳同容器共时钟，
+                # 见流头注释；引擎侧三时戳已在产，缺失/非法硬错）。
                 if _ev_kind == "decode_done":
                     decode_done_map[_ev_rid] = (
                         int(ev["decode_done_ms"]),
                         int(ev["exec_ms"]),
+                        int(ev["engine_arrival_ms"]),
+                        int(ev["decode_start_ms"]),
                     )
                 elif _ev_kind == "prefill_done":
                     prefill_done_map[_ev_rid] = (
                         int(ev["prefill_done_ms"]),
                         int(ev["exec_ms"]),
+                        int(ev["engine_arrival_ms"]),
+                        int(ev["prefill_start_ms"]),
                     )
                 else:
                     sys.exit(
@@ -415,8 +432,8 @@ for _evf in _engine_events_candidates:
                     )
             except (KeyError, TypeError, ValueError):
                 sys.exit(
-                    f"ERROR: {_ev_kind} row missing/invalid terminal ts or exec_ms "
-                    f"in {_evf}: {line[:200]!r}"
+                    f"ERROR: {_ev_kind} row missing/invalid terminal ts / "
+                    f"exec_ms / arrival / start ts in {_evf}: {line[:200]!r}"
                 )
 per_sec = defaultdict(
     lambda: {
@@ -442,10 +459,16 @@ per_sec = defaultdict(
         "err_other": 0,
         "sched": [],
         "e2e": [],
+        # ttft（20260903 换血 engine 口径）：发出 → prefill 批完成
+        # （rid join 派生，见 ok 分支 join 注释）；client 首帧样本退役
+        # 不再进桶。prefill_wait / decode_wait = 引擎内等待（start_ms −
+        # engine_arrival_ms，同 join 派生）。
         "ttft": [],
         "full_e2e": [],
         "prefill_exec": [],
         "decode_exec": [],
+        "prefill_wait": [],
+        "decode_wait": [],
         "input_len": [],
         "output_len": [],
         "input_tokens": 0,
@@ -483,8 +506,6 @@ for d in rows:
         sched_client_samples.append(d.get("schedule_ms", 0))
         if d.get("total_ms"):
             e2e_samples.append(d["total_ms"])
-        if d.get("ttft_ms"):
-            ttft_samples.append(d["ttft_ms"])
     if d.get("wall_clock_ts"):
         wall_clock_vals.append(d["wall_clock_ts"])
     if not _send_ts:
@@ -526,8 +547,6 @@ for d in rows:
         b["sched"].append(d.get("schedule_ms", 0))
         if d.get("total_ms"):
             b["e2e"].append(d["total_ms"])
-        if d.get("ttft_ms"):
-            b["ttft"].append(d["ttft_ms"])
         # full_e2e（schedule-only 全链路）：client 发出 → 引擎侧 decode
         # 正常终态，按 request_id（引擎 GenerateInputPB.requestId 原样
         # 回传的数值字段）关联。ok 行 join 不到终态行（run 结束仍在
@@ -536,7 +555,9 @@ for d in rows:
         # （map 空，理论上仅极端场景）时整列不产出、也不计 miss。
         # 同一 join 顺带产出出生轴 decode_exec：终态行 exec_ms 归入该
         # 请求的出生秒桶（与 e2e/full_e2e 同轴可比；旧完成轴快照见
-        # engine_exec_ts，字段保留）。decode 侧 join miss 与 full_e2e
+        # engine_exec_ts，字段保留）。decode exec_ms 自 20260903 起为
+        # done − start 墙钟跨度（P/D 对称批口径，见文件头注释）。
+        # decode 侧 join miss 与 full_e2e
         # 同源同数（full_e2e_join_miss），不重复计数。
         _rid = d.get("request_id")
         try:
@@ -548,18 +569,35 @@ for d in rows:
             if _done is not None and _done[0] >= _send_ts:
                 b["full_e2e"].append(_done[0] - _send_ts)
                 b["decode_exec"].append(_done[1])
+                # decode_wait（引擎内等待，同 join 顺带派生）：decode_start
+                # − engine_arrival（hand-off 到达 → 进 running slot）。负值
+                # = 时钟异常，跳过该样本不编造（与 join miss 卫兵同风格；
+                # miss 计数与 full_e2e 同源同数，不重复计）。
+                if _done[3] >= _done[2]:
+                    b["decode_wait"].append(_done[3] - _done[2])
             else:
                 full_e2e_join_miss += 1
         # prefill_exec（出生轴）：ok 行按 rid join 引擎侧 prefill 批完成
         # 行（exec_ms = 批执行时长，同批成员同值）。join 不到（cancelled
         # 批成员/jsonl 截断/时钟异常）计 prefill_exec_join_miss 不编造；
-        # 全部终态行均 cancelled（map 空）时不产出不计 miss。
+        # 全部终态行均 cancelled（map 空）时不产出不计 miss。同一次 join
+        # 顺带派生：ttft = prefill_done_ms − send_start（用户发出
+        # → 首 token 就绪，含 schedule+dispatch+引擎排队+prefill 执行；
+        # 20260903 起 ttft 键统一为此 engine 口径，client 首帧样本退役）与
+        # prefill_wait = prefill_start − engine_arrival（EnqueueBatch 准入
+        # → 批开始执行，含 lane 排队；负值 = 时钟异常跳过不编造）。
+        # ttft join miss 与 prefill_exec 同源同数（同一 map 同一
+        # 卫兵），独立计数仅为 integrity 标记语义清晰。
         if prefill_done_map:
             _pf = prefill_done_map.get(_rid) if _rid is not None else None
             if _pf is not None and _pf[0] >= _send_ts:
                 b["prefill_exec"].append(_pf[1])
+                b["ttft"].append(_pf[0] - _send_ts)
+                if _pf[3] >= _pf[2]:
+                    b["prefill_wait"].append(_pf[3] - _pf[2])
             else:
                 prefill_exec_join_miss += 1
+                ttft_engine_join_miss += 1
     else:
         b["errors"] += 1
         b[_bucket_key] += 1
@@ -604,6 +642,11 @@ for t in sorted(per_sec):
             "e2e_n": len(b["e2e"]),
             "e2e_p50": pct(b["e2e"], 0.5),
             "e2e_p95": pct(b["e2e"], 0.95),
+            # ttft（20260903 换血 engine 口径）：发出 → prefill 批完成
+            # （ok 行 rid join prefill_done 行，按 send_start 出生秒分桶，
+            # 幸存者口径）；client 首帧样本退役，与历史 client 口径 ttft
+            # 不可比（断代）。
+            "ttft_n": len(b["ttft"]),
             "ttft_p50": pct(b["ttft"], 0.5),
             "ttft_p95": pct(b["ttft"], 0.95),
             # full_e2e：跨两侧全链路（发出→decode 结束）分位，样本为
@@ -614,7 +657,9 @@ for t in sorted(per_sec):
             # 引擎执行分位（出生轴，20260830）：ok 行按 rid join 引擎终态行
             # （engine_events.jsonl 的 prefill_done / decode_done）的
             # exec_ms，按 send_start 出生秒分桶——与 e2e/full_e2e 同轴可比
-            # （幸存者口径）；旧完成轴窗口快照见 engine_exec_ts（字段保留，
+            # （幸存者口径）；decode exec_ms 自 20260903 起为 done − start
+            # 墙窗（P/D 对称批口径，与 prefill 批时长语义对称）。
+            # 旧完成轴窗口快照见 engine_exec_ts（字段保留，
             # 口径不同：完成流含 cancel、按完成秒分桶）。终态流全
             # cancelled（map 空）时这些键恒为 0/n=0，报告层按全零回退完成轴。
             "prefill_exec_n": len(b["prefill_exec"]),
@@ -623,6 +668,15 @@ for t in sorted(per_sec):
             "decode_exec_n": len(b["decode_exec"]),
             "decode_exec_p50": pct(b["decode_exec"], 0.5),
             "decode_exec_p95": pct(b["decode_exec"], 0.95),
+            # 引擎内等待分位（20260903）：同 rid join 派生的差值
+            # （start − arrival），按出生秒分桶；负值样本（时钟异常）
+            # 已跳过不编造（见桶化处注释）。
+            "prefill_wait_n": len(b["prefill_wait"]),
+            "prefill_wait_p50": pct(b["prefill_wait"], 0.5),
+            "prefill_wait_p95": pct(b["prefill_wait"], 0.95),
+            "decode_wait_n": len(b["decode_wait"]),
+            "decode_wait_p50": pct(b["decode_wait"], 0.5),
+            "decode_wait_p95": pct(b["decode_wait"], 0.95),
             # token 长度时序（出生秒分桶，全部带时间戳行）：replay run
             # 的长度组成随 trace loop 周期变化，供报告层与 batch size
             # 时序对照（输入侧驱动识别）。旧 run 无字段时桶为空 -> n=0。
@@ -660,6 +714,22 @@ if full_e2e_all:
         "p99": pct(full_e2e_all, 0.99),
     }
 
+# ttft 全程分位（20260903 换血 engine 口径，跨桶合并样本）与引擎内
+# 等待全程分位；无样本（join 全 miss / 终态流全 cancelled）时为 None
+# ——零样本与真实 0 可区分（client 口径旧实现的全零 dict 陷阱）。
+ttft_all = []
+prefill_wait_all = []
+decode_wait_all = []
+for _t in sorted(per_sec):
+    ttft_all.extend(per_sec[_t]["ttft"])
+    prefill_wait_all.extend(per_sec[_t]["prefill_wait"])
+    decode_wait_all.extend(per_sec[_t]["decode_wait"])
+ttft_latency_ms_calc = latency_summary(ttft_all) if ttft_all else None
+prefill_wait_latency_ms = (
+    latency_summary(prefill_wait_all) if prefill_wait_all else None
+)
+decode_wait_latency_ms = latency_summary(decode_wait_all) if decode_wait_all else None
+
 # ---- Phase A 派生统计：validity / quick-stats / 全程分位（统一聚合侧） ----
 # 公式逐字搬 run_online_eval.sh 多 worker 合并段（L1253-1362）。rows 是
 # 唯一指标源（no-backward-compat；client_events.jsonl 已 fail-closed，
@@ -688,7 +758,6 @@ _error_count_calc = len(rows) - ok_count  # 与 error_breakdown 同口径（全�
 _success_count_calc = ok_count
 # pacing 分布：sh distribution 的 round 3 精度（p99 与 limit 比较保真）。
 _pacing_dist = latency_summary(pacing_lag_samples, nd=3)
-_ttft_summary_calc = latency_summary(ttft_samples)
 _e2e_summary_calc = latency_summary(e2e_samples)
 
 # pacing limit：client_env 快照（run_meta.client_env，字符串值）；缺省
@@ -2450,6 +2519,12 @@ if full_e2e_join_miss:
 # no miss counted).
 if prefill_exec_join_miss:
     integrity["prefill_exec_join_miss"] = prefill_exec_join_miss
+# Degradation marker (engine-caliber ttft, 20260903): scheduled-ok rows
+# with no normal engine-side prefill batch-completion row to join against —
+# same source and count as prefill_exec_join_miss (one map, one guard);
+# counted separately so each metric's miss surface stays self-describing.
+if ttft_engine_join_miss:
+    integrity["ttft_engine_join_miss"] = ttft_engine_join_miss
 # cancel 按角色拆分的降级标记：cancelled_rids 里无法在 master 终态行
 # 定位时刻的 rid 数（这些 tracked cancel 事件被丢弃、不计入
 # prefill/decode cancel 线，不编造时刻）。
@@ -2572,9 +2647,20 @@ out = {
         # 关联，schedule-only（FETCH=0）下也覆盖完整链路。
         "full_e2e_latency_ms": full_e2e_latency_ms,
         "server_stage_latency_ms": _server_stage_calc,
-        # ttft/e2e 全程分位（聚合层自算，幸存者口径）；rows 缺失即 None。
-        "ttft_latency_ms": _ttft_summary_calc if _have_rows else None,
+        # ttft 全程分位（20260903 换血 engine 口径）：发出 → prefill 批
+        # 完成（ok 行 rid join prefill_done 行，幸存者口径）；client 首帧
+        # 样本退役，与历史 client 口径 ttft 不可比（断代）。无样本
+        # （join 全 miss / 终态流全 cancelled）为 None——零样本与真实 0
+        # 可区分。source 恒 engine，供报告层口径标注与断代识别。
+        "ttft_latency_ms": ttft_latency_ms_calc,
+        "ttft_latency_source": "engine" if _have_rows else None,
+        # e2e 全程分位（client total_ms 口径，幸存者）；rows 缺失即 None。
         "e2e_latency_ms": _e2e_summary_calc if _have_rows else None,
+        # 引擎内等待全程分位（20260903）：prefill_wait = prefill_start −
+        # engine_arrival / decode_wait = decode_start − engine_arrival
+        # （ok 行 rid join 引擎终态行派生，负值样本已跳过）；无样本 None。
+        "prefill_wait_latency_ms": prefill_wait_latency_ms,
+        "decode_wait_latency_ms": decode_wait_latency_ms,
         "validity_checks": validity_checks_calc,
         "test_valid": test_valid_calc,
     },

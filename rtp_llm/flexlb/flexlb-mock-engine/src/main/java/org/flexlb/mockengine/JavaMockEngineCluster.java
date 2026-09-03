@@ -965,6 +965,20 @@ public final class JavaMockEngineCluster {
                     // missing response queue.
                     for (EngineRpcService.EnqueueBatchExternalInputPB input : slot.getRequestsList()) {
                         long requestId = input.getInput().getRequestId();
+                        // Arrival stamp at the batch-ingress point, BEFORE any
+                        // admission/scheduling decision (Phase 1.5 KV gate,
+                        // Phase 2 waiting cap, and the immediate-admission
+                        // runPrefillBatch that stamps start in this same call
+                        // stack a few frames below): arrival means "the request
+                        // reached the engine", so it must never land after
+                        // start. The former Phase-3 bookkeeping point stamped
+                        // arrival only after admission, so on the
+                        // immediately-admitted path start preceded arrival —
+                        // under load that inversion grew to a constant +2ms
+                        // and blew the engine_events arrival<=start<=done
+                        // invariant. First-arrival-wins (putIfAbsent) keeps a
+                        // master retry on the same requestId from re-booking.
+                        recordEventArrival(requestId);
                         MockPerformanceModel.RequestShape shape = performance.shape(input.getInput(), cache);
                         // Key-level cache-hit accounting at the admission hit
                         // computation point (recorded whether or not the request
@@ -1029,7 +1043,9 @@ public final class JavaMockEngineCluster {
                         long requestId = input.getInput().getRequestId();
                         response.addSuccessesBuilder().setRequestId(requestId);
                         recordLifecycleStart(requestId, request.getBatchId(), "enqueue_batch");
-                        recordEventArrival(requestId);
+                        // Arrival was already stamped at the Phase-1 ingress
+                        // above (recordEventArrival) — before admission, so it
+                        // can never trail the immediate-admission start stamp.
                     }
                 }
                 // ── EnqueueBatch ack fault injections: all phases above ran

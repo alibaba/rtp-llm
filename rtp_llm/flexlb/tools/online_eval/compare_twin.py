@@ -23,7 +23,10 @@ Five layers:
                 fewer runs the empirical defaults (compare_ab.py category
                 thresholds) apply, flagged "经验地板非实测".
   3. Compare   — twelve metrics, distance-first (pure stdlib):
-                Wasserstein-1 for TTFT/e2e/schedule-latency distributions,
+                Wasserstein-1 for TTFT/e2e/schedule-latency distributions
+                (TTFT unified to the engine caliber on 20260903: 发出 →
+                prefill 批完成 via the rid join; the client first-frame
+                ttft_ms semantics is retired),
                 KS statistic for batch-size and KV-level distributions,
                 share-diff (pp) for dispatch reasons / cache hit / success /
                 error rates, relative diff for TPS, gini reserved behind a
@@ -54,6 +57,7 @@ Outputs (prefix defaults to "twin"):
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import math
 import os
@@ -155,6 +159,9 @@ PER_REQUEST_ALIASES = {
     "send_start": ("send_start_epoch_ms", "send_start_ms", "send_start"),
     "sched_done": ("sched_done_epoch_ms", "sched_done_ms", "sched_done"),
     "ttft_ms": ("ttft_ms", "ttftMs"),
+    # engine 口径 ttft（20260903 统一）：加载层 rid join 引擎 prefill
+    # 终态行注入（见 _inject_ttft_engine_ms）；合成 round-trip 行自带。
+    "ttft_engine_ms": ("ttft_engine_ms",),
     "total_ms": ("total_ms", "totalMs"),
     "input_len": ("input_len", "il"),
     "output_len": ("output_len", "ol"),
@@ -340,9 +347,12 @@ class SideData:
 
     * per_request: dicts with internal field names from PER_REQUEST_ALIASES
       (rid/ts/send_start/sched_done/ttft_ms/total_ms/input_len/output_len/
-      status/priority/schedule_ms/error/prefill/decode).
+      status/priority/schedule_ms/error/prefill/decode) plus the
+      engine-caliber ttft_engine_ms injected at load time (20260903).
     * summary: total/error_count/error_rate/success_rate + latency families
-      ("ttft"/"e2e"/"schedule" in latency_summary shape) + cache_hit_token_pct
+      ("ttft"/"e2e"/"schedule" in latency_summary shape; ttft is the engine
+      caliber — 发出 → prefill 批完成 — since 20260903)
+      + cache_hit_token_pct
       + gini_prefill/gini_decode (None when unavailable).
     * series: internal key -> [(t_seconds_relative, v)] sorted by t.
     * approx_modes: internal field -> "quantile-approx" when the mock side's
@@ -389,13 +399,21 @@ class SideData:
     def latency_samples(self, family):
         """Per-request samples for a latency family, aggregate-caliber:
 
-        ttft/e2e: ok rows with value > 0; schedule: ok rows, 0 allowed
-        (same rule as sched_client_samples). Empty when no raw rows exist —
-        quantile-approx samples live in self.approx and are NOT returned here.
+        ttft: ENGINE caliber (20260903 unified) — the injected
+        ttft_engine_ms rows (rid join against engine_events.jsonl,
+        prefill_done_ms − send_start; the client first-frame ttft_ms is
+        retired and no longer sampled); e2e: ok rows with value > 0;
+        schedule: ok rows, 0 allowed (same rule as sched_client_samples).
+        Empty when no raw rows exist — quantile-approx samples live in
+        self.approx and are NOT returned here.
         """
         if not self.per_request:
             return []
-        key = {"ttft": "ttft_ms", "e2e": "total_ms", "schedule": "schedule_ms"}[family]
+        key = {
+            "ttft": "ttft_engine_ms",
+            "e2e": "total_ms",
+            "schedule": "schedule_ms",
+        }[family]
         vals = []
         for d in self.ok_rows():
             v = _num(d.get(key))
@@ -434,6 +452,58 @@ def _normalize_request_row(raw):
                 row[internal] = raw[alias]
                 break
     return row
+
+
+def _inject_ttft_engine_ms(raw_rows, run_dir):
+    """Inject the engine-caliber ttft onto RAW client rows (20260903).
+
+    ttft_engine_ms = prefill_done_ms − send_start_epoch_ms via the rid join
+    against same-dir engine_events.jsonl(.gz) — the same caliber the
+    aggregate layer now emits as ttft_*/ttft_latency_ms (client first-frame
+    ttft_ms is retired). cancelled terminal rows are skipped; join misses
+    (no prefill_done row / unparsable request_id) and negative diffs (clock
+    anomaly) leave the row WITHOUT the key — never fabricated. Rows that
+    already carry ttft_engine_ms (the synthesize round-trip writes it back)
+    keep theirs when no engine stream sits next to them.
+    """
+    ev_path = None
+    for _name in ("engine_events.jsonl", "engine_events.jsonl.gz"):
+        _p = os.path.join(run_dir, _name)
+        if os.path.isfile(_p):
+            ev_path = _p
+            break
+    pf_done = {}
+    if ev_path:
+        _opener = gzip.open if ev_path.endswith(".gz") else open
+        with _opener(ev_path, "rt", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if ev.get("cancelled") or ev.get("event") != "prefill_done":
+                    continue
+                try:
+                    pf_done[int(ev["rid"])] = int(ev["prefill_done_ms"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+    if not pf_done:
+        return
+    for raw in raw_rows:
+        if raw.get("ttft_engine_ms") is not None:
+            continue
+        try:
+            _rid = int(raw.get("request_id"))
+        except (TypeError, ValueError):
+            continue
+        _send = _num(raw.get("send_start_epoch_ms"))
+        _done = pf_done.get(_rid)
+        if _done is None or _send is None or _done < _send:
+            continue
+        raw["ttft_engine_ms"] = _done - _send
 
 
 def _load_jsonl_rows(path, limit_bytes=None):
@@ -502,13 +572,18 @@ def load_mock_side(path):
         os.path.dirname(os.path.abspath(agg_path)), "client_events.jsonl"
     )
     if os.path.isfile(ce_path):
-        side.per_request = [
-            _normalize_request_row(r) for r in _load_jsonl_rows(ce_path)
-        ]
+        raw_rows = _load_jsonl_rows(ce_path)
+        # ttft 统一 engine 口径（20260903）：rid join 引擎 prefill 终态行
+        # 注入行级 ttft_engine_ms；原始 ttft_ms（client 首帧）保留在行上
+        # 但不再进 ttft 族样本（见 latency_samples）。
+        _inject_ttft_engine_ms(raw_rows, os.path.dirname(os.path.abspath(ce_path)))
+        side.per_request = [_normalize_request_row(r) for r in raw_rows]
         side.per_request_source = ce_path
     else:
         # quantile-approx fallback for the latency families the summary
-        # still carries; ttft is all-zero on non-streaming mock fixtures.
+        # still carries; ttft_latency_ms is the ENGINE caliber since 20260903
+        # (client first-frame samples retired), so the fallback aligns with
+        # the row-level engine-join path.
         for family, agg_key in (
             ("ttft", "ttft_latency_ms"),
             ("e2e", "e2e_latency_ms"),
@@ -637,9 +712,14 @@ def load_real_side(client_events_path, prom_path=None):
         raise InputError(f"{client_events_path}: no such file")
     side = SideData(os.path.basename(os.path.dirname(client_events_path)), "real")
     side.warnings.append(f"client_events: {client_events_path}")
-    side.per_request = [
-        _normalize_request_row(r) for r in _load_jsonl_rows(client_events_path)
-    ]
+    _raw_rows = _load_jsonl_rows(client_events_path)
+    # ttft 统一 engine 口径（20260903）：同 mock 侧，rid join 注入行级
+    # ttft_engine_ms（同目录 engine_events.jsonl 缺失时行保持无该键，
+    # ttft 族样本回退 quantile-approx/absent，不编造）。
+    _inject_ttft_engine_ms(
+        _raw_rows, os.path.dirname(os.path.abspath(client_events_path))
+    )
+    side.per_request = [_normalize_request_row(r) for r in _raw_rows]
     side.per_request_source = client_events_path
     if not side.per_request:
         raise InputError(f"{client_events_path}: no parsable rows")
@@ -1036,7 +1116,11 @@ def synthesize_real_inputs(side, out_dir):
                     "send_start_epoch_ms": send,
                     "sched_done_epoch_ms": send + pick("schedule", i),
                     "schedule_ms": pick("schedule", i),
-                    "ttft_ms": pick("ttft", i),
+                    # ttft 统一 engine 口径（20260903）：合成行无 client
+                    # 首帧源，ttft_ms 占 0；engine 口径值写进
+                    # ttft_engine_ms（round-trip 再次加载时行级直读）。
+                    "ttft_ms": 0.0,
+                    "ttft_engine_ms": pick("ttft", i),
                     "total_ms": pick("e2e", i),
                     "enqueued_by_master": True,
                     "prefill": pre_names[i],
@@ -1203,6 +1287,7 @@ def _denormalize_request_row(d):
         "schedule_ms": d.get("schedule_ms"),
         "sched_done_epoch_ms": d.get("sched_done"),
         "ttft_ms": d.get("ttft_ms"),
+        "ttft_engine_ms": d.get("ttft_engine_ms"),
         "total_ms": d.get("total_ms"),
         "enqueued_by_master": True,
         "prefill": d.get("prefill"),
