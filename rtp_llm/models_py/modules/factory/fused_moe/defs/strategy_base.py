@@ -58,8 +58,14 @@ class MoeStrategy(ABC):
         try:
             attrs = self.get_attributes()
         except ImportError as import_error:
-            logger.debug(
-                f"[{self.__class__.__name__}] Skipped due to missing dependency: {import_error}"
+            # Warn, not debug: this is the only trace that the strategy was
+            # dropped, and the no-quant strategies now refuse quantized configs,
+            # so no fallback candidate remains to mask an unimportable
+            # router/executor. Without this the caller only sees "no suitable MOE
+            # strategy found" and goes looking at quant_config and parallelism.
+            self.skip_reason = f"missing dependency: {import_error}"
+            logger.warning(
+                f"[{self.__class__.__name__}] Skipped due to {self.skip_reason}"
             )
             return False
 
