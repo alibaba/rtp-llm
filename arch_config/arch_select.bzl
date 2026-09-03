@@ -84,7 +84,8 @@ def whl_deps():
         "@rtp_llm//:using_cuda13_x86": [
             "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
             "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
-            "deep_gemm@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_b200/4af4ac732eae77acb57ab3ac59e3ceb796b797b5/deep_gemm-2.5.0%2Blocal-cp310-cp310-linux_x86_64.whl",
+            # DeepGEMM ee6161b: nv_dev 2642b32 plus wheel CI, with native SM120 kernels.
+            "deep_gemm@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_sm120/ee6161be60445ec248cf63fced4215ba78ff9b39/deep_gemm-2.6.1%2Bee6161b.cu132-cp310-cp310-linux_x86_64.whl",
             "flash-mla@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl",
             "rtp-kernel@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/cu13/rtp_kernel_260902/rtp_kernel-0.1.0%2B3bc0ca45.cu13-cp310-cp310-linux_x86_64.whl",
             "fast-safetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl",
