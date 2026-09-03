@@ -176,9 +176,11 @@ class _A2DeferredHalves:
         main = torch.cuda.current_stream(self.result.device)
         main.wait_event(self._ev_c1)
         self._ret1.record_stream(main)
-        from rtp_llm.models_py.modules.dsv4.fp8._nccl_ep_combine_triton import (
-            mxfp8_dequant_peer_sum,
-        )
+        # NOTE: relative import — the module lives in the moe package. The
+        # first X1' boot died here on an absolute path pointing at fp8/
+        # (ModuleNotFoundError, swallowed by the engine's forward handler
+        # and masked by CacheStore re-init asserts on every re-step).
+        from .._nccl_ep_combine_triton import mxfp8_dequant_peer_sum
         self.result[self.th:] = mxfp8_dequant_peer_sum(
             self._ret1, self.th, self._dim, self._world, out_dtype=self._dtype)
         self._done = True
