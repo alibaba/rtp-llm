@@ -144,20 +144,25 @@ class MoeDeferredHalves:
     combine.
     """
 
-    def __init__(self, y0, deferred, shared_y, th, out):
+    def __init__(self, y0, deferred, shared_y, th, out, T):
         self.y0 = y0
         self.th = th
         self._deferred = deferred
         self._shared_y = shared_y
         self._out = out
+        # The out buffer is sized max_tokens_per_rank (>= T); the h1 rows
+        # live in [th:T] — NOT [th:] (the first X1' retry passed the whole
+        # buffer tail and tripped combine_routed_and_shared's validation).
+        self._T = T
 
     def finish(self) -> torch.Tensor:
         full = self._deferred.finish()
         y1 = combine_routed_and_shared(
-            full[self.th :],
-            self._shared_y[self.th :],
+            full[self.th : self._T],
+            self._shared_y[self.th : self._T],
             self.y0.dtype,
-            out=self._out[self.th :] if self._out is not None else None,
+            out=self._out[self.th : self._T]
+            if self._out is not None else None,
         )
         return y1
 
@@ -727,6 +732,7 @@ class MoE(nn.Module):
                     shared_y=shared_y,
                     th=y.th,
                     out=out,
+                    T=T,
                 )
             if isinstance(y, _a2_deferred_cls()):
                 # X1' flush rule (reviewer addendum, results_20260903_x1_c1):
