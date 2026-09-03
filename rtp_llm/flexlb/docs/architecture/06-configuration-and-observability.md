@@ -2,47 +2,103 @@
 
 ## 配置边界
 
-FlexLB 保留两个职责独立的环境文档：
+FlexLB 保留两个职责独立的配置文档：
 
 - `FLEXLB_CONFIG`：唯一的 FlexLB 行为配置，包含调度、分发、路由、worker registry、
   observability、服务发现运行参数、cache matching、Optimizer 和一致性/主选举。
 - `MODEL_SERVICE_CONFIG`：只保存模型、endpoint、KVCM、Optimizer 的地址和服务发现定位信息。
 
-`MODEL_SERVICE_CONFIG` 不属于动态 `FlexlbConfig` 快照，也不会被 Nacos 覆盖。Nacos
-连接、部署标识、日志路径、Spring/OTEL 等基础设施环境变量仍各自独立；它们不构成
+`MODEL_SERVICE_CONFIG` 不属于动态 `FlexlbConfig` 快照，也不会被 UniConfig 或 Nacos
+的动态更新覆盖。UniConfig 开关、Nacos 连接、部署标识、日志路径、Spring/OTEL 等
+基础设施环境变量仍各自独立；它们不构成
 FlexLB 行为配置的别名。
 
 ## FlexlbConfig 加载与动态更新
 
-`ConfigService` 是统一读取入口。Spring 启动时先初始化两个 `ConfigSource`：
+`ConfigService` 是统一读取入口。`ConfigSourceSelection` 在启动时根据 FlexLB 进程的
+环境变量选择唯一的行为配置字符串来源，先判断 UniConfig，再判断 Nacos：
 
-1. `EnvironmentConfigSource`（priority 1）读取严格的 `FLEXLB_CONFIG` 基线。
-2. 若配置了 Nacos，`NacosConfigSource`（priority 2）读取初始配置并注册 listener。
+| 条件（按顺序判断） | 字符串来源 | 动态更新方式 |
+|---|---|---|
+| `FLEXLB_UNICONF_ENABLE=true` | `UniConfigConfigSource` | 轮询本机 Turbo UniConfig HTTP 接口 |
+| 否则，`FLEXLB_NACOS_SERVER_ADDR` 非空 | `NacosConfigSource` | Nacos listener |
+| 否则 | `EnvironmentConfigSource` | 启动时读取 `FLEXLB_CONFIG` |
 
-来源按 priority 从低到高合并。Nacos 内容是 `FlexlbConfig` 的递归部分 JSON：
-对象字段递归覆盖，未出现或从 Nacos 删除的字段保留当前内存值，数组和标量整体替换；
-tagged union 的 `type` 变化会替换整个分支。空字符串和 `{}` 都是合法 no-op。每次合并后都使用与
-`FLEXLB_CONFIG` 相同的严格解析和跨字段校验：
+`true` 忽略大小写和两端空白。开启 UniConfig 后，即使配置了 Nacos 地址，也不会
+创建 Nacos 客户端或 listener。使用外部来源时，环境变量中的 `FLEXLB_CONFIG` 不参与
+校验或合并；初始文档中省略的行为字段使用对应格式解析器和 `FlexlbConfig` 的默认值。
+`EnvironmentConfigSource` 仍负责读取独立的 `MODEL_SERVICE_CONFIG` 启动拓扑。
+来源选择和连接参数在启动时确定，修改它们需要重启进程。
+
+三种来源都返回原始字符串，复用 `ConfigDocumentParserResolver` 和原有 v0/v1 解析器：
+优先使用文档内的 `schemaVersion`，否则使用 `FLEXLB_CONFIG_SCHEMA_VERSION`（默认 `0`）。
+UniConfig 和 Nacos 的内容直接使用同一种配置 JSON，不增加包装层。
+
+格式归一化后，由现有 `FlexlbConfigMerger` 执行递归部分更新：
+对象字段递归覆盖，未出现或从外部配置删除的字段保留当前内存值，数组和标量整体替换；
+tagged union 的 `type` 变化会替换整个分支。v1 文档 `{"schemaVersion":1}` 是 no-op；
+没有显式版本的 `{}` 则按版本选择规则解析，默认走 v0 兼容转换。
+每次合并后都使用与 `FLEXLB_CONFIG` 相同的严格解析和跨字段校验：
 
 - 拒绝重复 key、未知字段、`null`、标量 coercion、数值枚举和尾随 JSON；
 - 拒绝 tagged union 非活动分支的字段；
 - 拒绝违反 scheduler / dispatcher / router 等组合约束的配置。
 
-非空初始来源读取或校验失败会阻止应用启动。运行时非法推送不会替换当前
-last-known-good 快照；合法推送原子替换 `FlexlbConfig`，随后通知监听器。
+选定的外部来源初次读取或校验失败会阻止应用启动，不会自动切换到低优先级来源。
+运行时读取失败或非法更新不会替换当前 last-known-good 快照，后续更新恢复正常后
+继续应用；合法更新原子替换 `FlexlbConfig`，随后通知监听器。
 
-Nacos 层不区分“热生效”与“重启生效”：它只发布最新有效快照。业务组件每次读取快照，
+配置来源层不区分“热生效”与“重启生效”：它只发布最新有效快照。业务组件每次读取快照，
 就可以热生效；在 Bean 初始化时缓存的值，则在重启后生效。
 
 旧的字段级行为变量 `BLOCK_HASH_STRATEGY`、`FLEXLB_LOG_LEVEL`、
 `ENABLE_STDOUT_LOG`、`ENABLE_FALLBACK` 不再覆盖 JSON。行为配置只认
-`FLEXLB_CONFIG`，避免嵌套字段到环境变量名的隐式转换。
+所选来源的 `FLEXLB_CONFIG` 文档，避免嵌套字段到环境变量名的隐式转换。
+
+### UniConfig 连接
+
+Spectrum 部署的扩展配置中启用 Turbo UniConfig：
+
+```json
+{
+  "turbo": {
+    "env": {
+      "UNICONF_ENABLE": "true"
+    }
+  }
+}
+```
+
+同时需要在部署的 worker 环境变量中显式配置，让 FlexLB Java 进程读取到：
+
+```text
+FLEXLB_UNICONF_ENABLE=true
+```
+
+两个开关分别控制不同进程，启用 UniConfig 时需要同时配置：Turbo 的
+`turbo.env.UNICONF_ENABLE=true` 开启本机配置服务；Java 的
+`FLEXLB_UNICONF_ENABLE=true` 选择 UniConfig 配置来源。Java 只读取带 `FLEXLB_` 前缀的
+开关，未设置或不为 `true` 时继续按 Nacos 地址、环境变量的顺序选择来源。
+部署标识沿用 `DeploymentIdentity`，要求设置 `SPECTRUM_WORKSPACE_ID`、
+`SPECTRUM_APPLICATION_NAME` 和 `SPECTRUM_DEPLOYMENT_NAME`。
+
+`UniConfigConfigSource` 读取以下部署级 key 的 HTTP 响应正文：
+
+```text
+GET http://127.0.0.1:18080/v2/configs/modelstudio.spectrum.deployment.<workspace>.<deployment>.runtime.meta
+```
+
+正文就是完整的配置 JSON 字符串，与 Nacos 文档格式一致。连接和读取超时各为 3 秒，
+每 10 秒轮询一次，仅在正文变化时发布更新。Turbo 侧通常有约 1 分钟缓存，因此控制台
+提交后会有分钟级传播延迟，不能视为提交后立即生效。
+初次读取遇到连接失败、非 HTTP 200（包括 key 不存在时的 404）或非法配置会启动失败；
+启动前应先在部署 UniConfig 页面保存合法配置。运行时 HTTP 异常保留有效快照并继续重试。
 
 ### Nacos 连接
 
 | 环境变量 | 默认值 | 说明 |
 |---|---|---|
-| `FLEXLB_NACOS_SERVER_ADDR` | 无 | 未配置时禁用 Nacos |
+| `FLEXLB_NACOS_SERVER_ADDR` | 无 | 仅在 UniConfig 未开启且地址非空时启用 Nacos |
 | `FLEXLB_NACOS_DATA_ID` | 部署标识 | 显式 DataId |
 | `FLEXLB_NACOS_GROUP` | `DEFAULT_GROUP` | Nacos group |
 | `FLEXLB_NACOS_NAMESPACE` | 空 | Nacos namespace |
@@ -52,10 +108,11 @@ Nacos 层不区分“热生效”与“重启生效”：它只发布最新有�
 `SPECTRUM_DEPLOYMENT_NAME` 组成
 `spectrum:<workspace>:<application>:<deployment>`；旧环境回退 `HIPPO_ROLE`。
 
-Nacos 部分更新示例：
+UniConfig / Nacos 的 v1 部分更新示例：
 
 ```json
 {
+  "schemaVersion": 1,
   "router": {
     "availabilityHysteresisPercent": 12
   },

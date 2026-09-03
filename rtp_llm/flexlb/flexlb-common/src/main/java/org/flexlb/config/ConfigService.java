@@ -23,7 +23,7 @@ import java.util.function.Consumer;
  */
 @Slf4j
 @Component
-@DependsOn({"environmentConfigSource", "nacosConfigSource"})
+@DependsOn({"environmentConfigSource", "nacosConfigSource", "uniConfigConfigSource"})
 public class ConfigService {
 
     private static final List<ConfigSource> CONFIG_SOURCES = new ArrayList<>();

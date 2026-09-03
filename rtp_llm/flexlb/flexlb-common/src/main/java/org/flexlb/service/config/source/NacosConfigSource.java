@@ -35,12 +35,12 @@ final class NacosConfigSource implements ConfigSource {
     private volatile String configContent;
 
     NacosConfigSource(DeploymentIdentity deploymentIdentity) {
-        String serverAddr = StringUtils.trimToNull(System.getenv(NACOS_SERVER_ADDR));
-        if (serverAddr == null) {
+        if (ConfigSourceSelection.fromEnvironment() != ConfigSourceSelection.NACOS) {
             this.config = null;
             return;
         }
 
+        String serverAddr = StringUtils.trimToNull(System.getenv(NACOS_SERVER_ADDR));
         String dataId = StringUtils.trimToNull(System.getenv(NACOS_DATA_ID));
         if (dataId == null) {
             dataId = deploymentIdentity.getDeploymentId();

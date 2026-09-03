@@ -33,9 +33,12 @@ final class EnvironmentConfigSource implements ConfigSource {
 
     @PostConstruct
     void initialize() {
-        String document = System.getenv(FLEXLB_CONFIG_ENV);
-        log.info("Loading FLEXLB_CONFIG from environment: configured={}", document != null);
-        configContent = document;
+        ConfigSourceSelection selection = ConfigSourceSelection.fromEnvironment();
+        configContent = selection == ConfigSourceSelection.ENVIRONMENT
+                ? System.getenv(FLEXLB_CONFIG_ENV) : null;
+        log.info("Selected FlexLB configuration source: {}; environment document configured={}",
+                selection, configContent != null);
+        // Model topology remains an independent startup document for every behavior source.
         modelServiceConfigContent = System.getenv(MODEL_SERVICE_CONFIG_ENV);
         ConfigService.register(this);
     }
