@@ -19,7 +19,10 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -77,11 +80,11 @@ class AdmissionGateCancellationTest {
     void cancelBeforeInflightRegistrationClosesTheExistingGeneration()
             throws Exception {
         long requestId = 20_001L;
-        BalanceContext context = context(requestId);
+        BalanceContext context = context(String.valueOf(requestId));
         CompletableFuture<Response> scheduleResult = scheduler.submit(context);
 
         RequestLifecycleSnapshot cancelled = scheduler.cancelRequest(
-                requestId, 0, CancelReason.CLIENT_CANCELLED);
+                String.valueOf(requestId), 0, CancelReason.CLIENT_CANCELLED);
 
         assertNotNull(cancelled);
         assertEquals(RequestLifecycleState.CANCELLED, cancelled.state());
@@ -92,15 +95,15 @@ class AdmissionGateCancellationTest {
                 "a cancel-owned admission gate must reject a later commit");
         assertEquals(cancelled,
                 scheduler.cancelRequest(
-                        requestId, 0, CancelReason.CLIENT_CANCELLED));
+                        String.valueOf(requestId), 0, CancelReason.CLIENT_CANCELLED));
         verify(admissionScheduler).schedule(context, scheduleResult, scheduler);
-        verify(cancelChannel, never()).cancel(any(), anyLong(), anyLong());
+        verify(cancelChannel, never()).cancel(any(), ArgumentMatchers.anyString(), anyLong());
     }
 
     @Test
     void cancelAndRegistrationShareOneLatchLinearization() throws Exception {
         long requestId = 20_002L;
-        BalanceContext context = context(requestId);
+        BalanceContext context = context(String.valueOf(requestId));
         CompletableFuture<Response> scheduleResult = scheduler.submit(context);
         BatchItem item = item(context, scheduleResult);
         CountDownLatch start = new CountDownLatch(1);
@@ -113,7 +116,7 @@ class AdmissionGateCancellationTest {
                 CompletableFuture.supplyAsync(() -> {
                     await(start);
                     return scheduler.cancelRequest(
-                            requestId, 0, CancelReason.CLIENT_CANCELLED);
+                            String.valueOf(requestId), 0, CancelReason.CLIENT_CANCELLED);
                 });
 
         start.countDown();
@@ -124,51 +127,51 @@ class AdmissionGateCancellationTest {
         assertEquals(8504, scheduleResult.get(1, TimeUnit.SECONDS).getCode());
         assertEquals(0, scheduler.getInflightSize());
         assertEquals(RequestLifecycleState.CANCELLED,
-                scheduler.getRequestState(requestId, 0).state());
-        verify(cancelChannel, never()).cancel(any(), anyLong(), anyLong());
+                scheduler.getRequestState(String.valueOf(requestId), 0).state());
+        verify(cancelChannel, never()).cancel(any(), ArgumentMatchers.anyString(), anyLong());
     }
 
     @Test
     void admissionDeadlineTombstoneRejectsLateRegistrationAfterGateRemoval()
             throws Exception {
         long requestId = 20_003L;
-        BalanceContext context = context(requestId);
+        BalanceContext context = context(String.valueOf(requestId));
         CompletableFuture<Response> scheduleResult = scheduler.submit(context);
 
-        scheduler.onRequestExpired(requestId, scheduleResult);
+        scheduler.onRequestExpired(String.valueOf(requestId), scheduleResult);
 
         Response response = scheduleResult.get(1, TimeUnit.SECONDS);
         assertEquals(8511, response.getCode());
         assertEquals(RequestLifecycleState.TIMED_OUT,
-                scheduler.getRequestState(requestId, 0).state());
+                scheduler.getRequestState(String.valueOf(requestId), 0).state());
         assertEquals(0, scheduler.generationGateCount());
         assertFalse(scheduler.registerInflight(item(context, scheduleResult)),
                 "a removed gate must not let its timed-out generation resurrect");
         assertEquals(RequestLifecycleState.TIMED_OUT,
                 scheduler.cancelRequest(
-                        requestId, 0, CancelReason.CLIENT_CANCELLED).state());
+                        String.valueOf(requestId), 0, CancelReason.CLIENT_CANCELLED).state());
     }
 
     @Test
     void clientCancelWinsAgainstQueuedAdmissionDeadline() throws Exception {
         long requestId = 20_004L;
-        BalanceContext context = context(requestId);
+        BalanceContext context = context(String.valueOf(requestId));
         CompletableFuture<Response> scheduleResult = scheduler.submit(context);
 
         RequestLifecycleSnapshot cancelled = scheduler.cancelRequest(
-                requestId, 0, CancelReason.CLIENT_CANCELLED);
-        scheduler.onRequestExpired(requestId, scheduleResult);
+                String.valueOf(requestId), 0, CancelReason.CLIENT_CANCELLED);
+        scheduler.onRequestExpired(String.valueOf(requestId), scheduleResult);
 
         assertEquals(RequestLifecycleState.CANCELLED, cancelled.state());
         assertEquals(8504, scheduleResult.get(1, TimeUnit.SECONDS).getCode());
         assertEquals(RequestLifecycleState.CANCELLED,
-                scheduler.getRequestState(requestId, 0).state());
+                scheduler.getRequestState(String.valueOf(requestId), 0).state());
     }
 
     @Test
     void activeGenerationCannotBeOverlaidByDuplicateSubmit() throws Exception {
         long requestId = 20_005L;
-        BalanceContext context = context(requestId);
+        BalanceContext context = context(String.valueOf(requestId));
         CompletableFuture<Response> original = scheduler.submit(context);
         assertTrue(scheduler.registerInflight(item(context, original)));
 
@@ -178,7 +181,7 @@ class AdmissionGateCancellationTest {
         assertEquals(1, scheduler.generationGateCount());
         assertEquals(RequestLifecycleState.CANCELLED,
                 scheduler.cancelRequest(
-                        requestId, 0, CancelReason.CLIENT_CANCELLED).state());
+                        String.valueOf(requestId), 0, CancelReason.CLIENT_CANCELLED).state());
         assertEquals(8504, original.get(1, TimeUnit.SECONDS).getCode());
         assertEquals(0, scheduler.generationGateCount());
     }
@@ -186,7 +189,7 @@ class AdmissionGateCancellationTest {
     @Test
     void externalFutureCleanupRemovesExactGenerationGate() {
         long requestId = 20_006L;
-        BalanceContext context = context(requestId);
+        BalanceContext context = context(String.valueOf(requestId));
         CompletableFuture<Response> result = scheduler.submit(context);
         BatchItem item = item(context, result);
         assertTrue(scheduler.registerInflight(item));
@@ -201,7 +204,7 @@ class AdmissionGateCancellationTest {
         assertEquals(0, scheduler.generationGateCount());
         CompletableFuture<Response> reused = scheduler.submit(context);
         assertFalse(reused.isDone(), "the detached non-tombstoned id is reusable");
-        scheduler.cancelRequest(requestId, 0, CancelReason.CLIENT_CANCELLED);
+        scheduler.cancelRequest(String.valueOf(requestId), 0, CancelReason.CLIENT_CANCELLED);
     }
 
     @Test
@@ -215,14 +218,14 @@ class AdmissionGateCancellationTest {
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         WorkerBatcher batcher = mock(WorkerBatcher.class);
-        Response route = item(context(20_007L), new CompletableFuture<>()).routeResponse();
+        Response route = item(context("20007"), new CompletableFuture<>()).routeResponse();
         ServerStatus decodeStatus = new ServerStatus();
         decodeStatus.setSuccess(true);
         decodeStatus.setRole(RoleType.DECODE);
         decodeStatus.setServerIp("10.0.0.2");
         decodeStatus.setHttpPort(8081);
-        decodeStatus.setRequestId(20_007L);
-        route.setServerStatus(new java.util.ArrayList<>(route.getServerStatus()));
+        decodeStatus.setRequestId("20007");
+        route.setServerStatus(new ArrayList<>(route.getServerStatus()));
         route.getServerStatus().add(decodeStatus);
         AtomicBoolean decodeReserved = new AtomicBoolean();
         when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
@@ -237,29 +240,29 @@ class AdmissionGateCancellationTest {
         doAnswer(invocation -> {
             decodeReserved.set(false);
             return null;
-        }).when(decode).release(20_007L);
+        }).when(decode).release("20007");
         scheduler = new PriorityScheduler(
                 configService, router, registry, mock(BatchDispatcher.class),
                 mock(BatchSchedulerReporter.class), admissionScheduler, null, cancelChannel);
-        BalanceContext context = context(20_007L);
+        BalanceContext context = context("20007");
 
         CompletableFuture<CompletableFuture<Response>> submission =
                 CompletableFuture.supplyAsync(() -> scheduler.submit(context));
         assertTrue(routing.await(1, TimeUnit.SECONDS));
         RequestLifecycleSnapshot cancelled = scheduler.cancelRequest(
-                20_007L, 0, CancelReason.CLIENT_CANCELLED);
+                "20007", 0, CancelReason.CLIENT_CANCELLED);
         assertEquals(RequestLifecycleState.CANCEL_REQUESTED, cancelled.state());
-        assertEquals(cancelled, scheduler.getRequestState(20_007L, 0));
+        assertEquals(cancelled, scheduler.getRequestState("20007", 0));
         assertTrue(decodeReserved.get());
         finishRouting.countDown();
         CompletableFuture<Response> result = submission.get(1, TimeUnit.SECONDS);
 
         assertEquals(8504, result.get(1, TimeUnit.SECONDS).getCode());
         assertEquals(RequestLifecycleState.CANCELLED,
-                scheduler.getRequestState(20_007L, 0).state());
+                scheduler.getRequestState("20007", 0).state());
         assertFalse(decodeReserved.get(),
                 "Cancel must not become terminal before route reservation cleanup");
-        verify(decode).release(20_007L);
+        verify(decode).release("20007");
         verify(batcher, never()).tryOffer(any());
         assertEquals(0, scheduler.getInflightSize());
         assertEquals(0, scheduler.generationGateCount());
@@ -276,14 +279,14 @@ class AdmissionGateCancellationTest {
         WorkerBatcher batcher = mock(WorkerBatcher.class);
         PrefillQueueManager queueManager = mock(PrefillQueueManager.class);
         long requestId = 20_008L;
-        Response route = item(context(requestId), new CompletableFuture<>()).routeResponse();
+        Response route = item(context(String.valueOf(requestId)), new CompletableFuture<>()).routeResponse();
         ServerStatus decodeStatus = new ServerStatus();
         decodeStatus.setSuccess(true);
         decodeStatus.setRole(RoleType.DECODE);
         decodeStatus.setServerIp("10.0.0.2");
         decodeStatus.setHttpPort(8081);
-        decodeStatus.setRequestId(requestId);
-        route.setServerStatus(new java.util.ArrayList<>(route.getServerStatus()));
+        decodeStatus.setRequestId(String.valueOf(requestId));
+        route.setServerStatus(new ArrayList<>(route.getServerStatus()));
         route.getServerStatus().add(decodeStatus);
         when(router.route(any(BalanceContext.class))).thenReturn(route);
         when(registry.getPrefill("10.0.0.1:8080")).thenReturn(prefill);
@@ -295,15 +298,15 @@ class AdmissionGateCancellationTest {
                 configService, router, registry, mock(BatchDispatcher.class),
                 mock(BatchSchedulerReporter.class), admissionScheduler, null, cancelChannel);
 
-        CompletableFuture<Response> result = scheduler.submit(context(requestId));
+        CompletableFuture<Response> result = scheduler.submit(context(String.valueOf(requestId)));
         assertEquals(1, scheduler.getInflightSize());
 
         assertTrue(result.cancel(false));
 
-        verify(decode).release(requestId);
+        verify(decode).release(String.valueOf(requestId));
         assertEquals(0, scheduler.getInflightSize());
         assertEquals(0, scheduler.generationGateCount());
-        verify(cancelChannel, never()).cancel(any(), anyLong(), anyLong());
+        verify(cancelChannel, never()).cancel(any(), ArgumentMatchers.anyString(), anyLong());
     }
 
     @Test
@@ -318,14 +321,14 @@ class AdmissionGateCancellationTest {
         WorkerBatcher batcher = mock(WorkerBatcher.class);
         PrefillQueueManager queueManager = mock(PrefillQueueManager.class);
         long requestId = 20_009L;
-        Response route = item(context(requestId), new CompletableFuture<>()).routeResponse();
+        Response route = item(context(String.valueOf(requestId)), new CompletableFuture<>()).routeResponse();
         ServerStatus decodeStatus = new ServerStatus();
         decodeStatus.setSuccess(true);
         decodeStatus.setRole(RoleType.DECODE);
         decodeStatus.setServerIp("10.0.0.2");
         decodeStatus.setHttpPort(8081);
-        decodeStatus.setRequestId(requestId);
-        route.setServerStatus(new java.util.ArrayList<>(route.getServerStatus()));
+        decodeStatus.setRequestId(String.valueOf(requestId));
+        route.setServerStatus(new ArrayList<>(route.getServerStatus()));
         route.getServerStatus().add(decodeStatus);
         when(router.route(any(BalanceContext.class))).thenReturn(route);
         when(registry.getPrefill("10.0.0.1:8080")).thenReturn(prefill);
@@ -339,17 +342,17 @@ class AdmissionGateCancellationTest {
             cleanupStarted.countDown();
             await(releaseCleanup);
             return null;
-        }).when(queueManager).tryRemove(requestId, "TERMINAL_RELEASE");
+        }).when(queueManager).tryRemove(String.valueOf(requestId), "TERMINAL_RELEASE");
         scheduler = new PriorityScheduler(
                 configService, router, registry, mock(BatchDispatcher.class),
                 mock(BatchSchedulerReporter.class), admissionScheduler, null, cancelChannel);
 
         CompletableFuture<CompletableFuture<Response>> submission =
-                CompletableFuture.supplyAsync(() -> scheduler.submit(context(requestId)));
+                CompletableFuture.supplyAsync(() -> scheduler.submit(context(String.valueOf(requestId))));
         assertTrue(cleanupStarted.await(1, TimeUnit.SECONDS));
 
         RequestLifecycleSnapshot observed = scheduler.cancelRequest(
-                requestId, 0, CancelReason.CLIENT_CANCELLED);
+                String.valueOf(requestId), 0, CancelReason.CLIENT_CANCELLED);
         assertEquals(RequestLifecycleState.QUEUED, observed.state(),
                 "the earlier offer failure owns terminal publication");
 
@@ -357,8 +360,8 @@ class AdmissionGateCancellationTest {
         CompletableFuture<Response> result = submission.get(1, TimeUnit.SECONDS);
         assertEquals(8510, result.get(1, TimeUnit.SECONDS).getCode());
         assertEquals(RequestLifecycleState.FAILED,
-                scheduler.getRequestState(requestId, 0).state());
-        verify(decode).release(requestId);
+                scheduler.getRequestState(String.valueOf(requestId), 0).state());
+        verify(decode).release(String.valueOf(requestId));
         assertEquals(0, scheduler.getInflightSize());
         assertEquals(0, scheduler.generationGateCount());
     }
@@ -374,14 +377,14 @@ class AdmissionGateCancellationTest {
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         WorkerBatcher batcher = mock(WorkerBatcher.class);
         long requestId = 20_010L;
-        Response route = item(context(requestId), new CompletableFuture<>()).routeResponse();
+        Response route = item(context(String.valueOf(requestId)), new CompletableFuture<>()).routeResponse();
         ServerStatus decodeStatus = new ServerStatus();
         decodeStatus.setSuccess(true);
         decodeStatus.setRole(RoleType.DECODE);
         decodeStatus.setServerIp("10.0.0.2");
         decodeStatus.setHttpPort(8081);
-        decodeStatus.setRequestId(requestId);
-        route.setServerStatus(new java.util.ArrayList<>(route.getServerStatus()));
+        decodeStatus.setRequestId(String.valueOf(requestId));
+        route.setServerStatus(new ArrayList<>(route.getServerStatus()));
         route.getServerStatus().add(decodeStatus);
         CountDownLatch routeReserved = new CountDownLatch(1);
         CountDownLatch releaseRoute = new CountDownLatch(1);
@@ -398,13 +401,13 @@ class AdmissionGateCancellationTest {
         doAnswer(invocation -> {
             decodeReserved.set(false);
             return null;
-        }).when(decode).release(requestId);
+        }).when(decode).release(String.valueOf(requestId));
         scheduler = new PriorityScheduler(
                 configService, router, registry, mock(BatchDispatcher.class),
                 mock(BatchSchedulerReporter.class), admissionScheduler, null, cancelChannel);
 
         CompletableFuture<CompletableFuture<Response>> submission =
-                CompletableFuture.supplyAsync(() -> scheduler.submit(context(requestId)));
+                CompletableFuture.supplyAsync(() -> scheduler.submit(context(String.valueOf(requestId))));
         assertTrue(routeReserved.await(1, TimeUnit.SECONDS));
 
         scheduler.shutdown();
@@ -413,7 +416,7 @@ class AdmissionGateCancellationTest {
 
         assertEquals(8510, result.get(1, TimeUnit.SECONDS).getCode());
         assertFalse(decodeReserved.get());
-        verify(decode).release(requestId);
+        verify(decode).release(String.valueOf(requestId));
         verify(batcher, never()).tryOffer(any());
         assertEquals(0, scheduler.getInflightSize());
         assertEquals(0, scheduler.generationGateCount());
@@ -430,23 +433,23 @@ class AdmissionGateCancellationTest {
                 System.currentTimeMillis() - 1_000,
                 50,
                 DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN);
-        when(decode.reservedView()).thenReturn(Map.of(requestId, reservation));
-        when(decode.releaseReservationIfCurrent(requestId, reservation))
+        when(decode.reservedView()).thenReturn(Map.of(String.valueOf(requestId), reservation));
+        when(decode.releaseReservationIfCurrent(String.valueOf(requestId), reservation))
                 .thenReturn(true);
         when(endpointRegistry.getDecodeEndpoints())
                 .thenReturn(new ConcurrentHashMap<>(
                         Map.of("10.0.0.2:8081", decode)));
 
-        CompletableFuture<Response> result = scheduler.submit(context(requestId));
-        assertTrue(scheduler.claimAdmissionMutation(requestId, result));
+        CompletableFuture<Response> result = scheduler.submit(context(String.valueOf(requestId)));
+        assertTrue(scheduler.claimAdmissionMutation(String.valueOf(requestId), result));
 
         scheduler.cleanupInflight();
 
         verify(decode, never()).releaseReservationIfCurrent(
-                requestId, reservation);
-        scheduler.completeAdmissionMutation(requestId, result);
+                String.valueOf(requestId), reservation);
+        scheduler.completeAdmissionMutation(String.valueOf(requestId), result);
         scheduler.cleanupInflight();
-        verify(decode).releaseReservationIfCurrent(requestId, reservation);
+        verify(decode).releaseReservationIfCurrent(String.valueOf(requestId), reservation);
         result.cancel(false);
     }
 
@@ -466,33 +469,33 @@ class AdmissionGateCancellationTest {
         when(decode.reservedView()).thenAnswer(invocation -> {
             snapshotCaptured.countDown();
             await(continueCleanup);
-            return Map.of(requestId, reservation);
+            return Map.of(String.valueOf(requestId), reservation);
         });
         when(endpointRegistry.getDecodeEndpoints())
                 .thenReturn(new ConcurrentHashMap<>(
                         Map.of("10.0.0.2:8081", decode)));
-        BalanceContext context = context(requestId);
+        BalanceContext context = context(String.valueOf(requestId));
         CompletableFuture<Response> result = scheduler.submit(context);
-        assertTrue(scheduler.claimAdmissionMutation(requestId, result));
+        assertTrue(scheduler.claimAdmissionMutation(String.valueOf(requestId), result));
 
         CompletableFuture<Void> cleanup = CompletableFuture.runAsync(
                 scheduler::cleanupInflight);
         assertTrue(snapshotCaptured.await(1, TimeUnit.SECONDS));
         assertTrue(scheduler.registerInflight(item(context, result)));
-        scheduler.completeAdmissionMutation(requestId, result);
+        scheduler.completeAdmissionMutation(String.valueOf(requestId), result);
         continueCleanup.countDown();
         cleanup.get(1, TimeUnit.SECONDS);
 
         verify(decode, never()).releaseReservationIfCurrent(
-                requestId, reservation);
+                String.valueOf(requestId), reservation);
         assertEquals(1, scheduler.getInflightSize());
         result.cancel(false);
         assertEquals(0, scheduler.getInflightSize());
     }
 
-    private static BalanceContext context(long requestId) {
+    private static BalanceContext context(String requestId) {
         Request request = new Request();
-        request.setRequestId(requestId);
+        request.setRequestId(String.valueOf(requestId));
         request.setPriority(50);
         request.setSeqLen(128);
         request.setMaxNewTokens(8);
@@ -513,7 +516,7 @@ class AdmissionGateCancellationTest {
         prefill.setServerIp("10.0.0.1");
         prefill.setHttpPort(8080);
         prefill.setGrpcPort(8081);
-        route.setServerStatus(java.util.List.of(prefill));
+        route.setServerStatus(List.of(prefill));
         return new BatchItem(
                 context,
                 future,

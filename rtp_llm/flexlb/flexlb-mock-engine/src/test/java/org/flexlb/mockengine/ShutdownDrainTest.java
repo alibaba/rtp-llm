@@ -180,14 +180,14 @@ class ShutdownDrainTest {
         // enqueueBatch on a stopped engine returns an empty response (no
         // successes, nothing admitted) — existing /stop_engine semantics.
         EngineRpcService.EnqueueBatchResponsePB response =
-                enqueue(prefill, batch(9200, slot(0, inputWithDecode(100, 10, decode.getGrpcPort()))));
+                enqueue(prefill, batch(9200, slot(0, inputWithDecode("100", 10, decode.getGrpcPort()))));
         assertEquals(0, response.getSuccessesCount(), "stopped engine must not admit requests");
         assertEquals(0, prefill.getInflightCount(), "no residue after rejected enqueue");
 
         // generateStreamCall on a stopped engine errors out.
         AtomicReference<Throwable> streamError = new AtomicReference<>();
         CountDownLatch latch = new CountDownLatch(1);
-        decode.generateStreamCall(input(101, 10), new StreamObserver<>() {
+        decode.generateStreamCall(input("101", 10), new StreamObserver<>() {
             @Override
             public void onNext(EngineRpcService.GenerateOutputsPB value) {
             }
@@ -217,7 +217,7 @@ class ShutdownDrainTest {
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
 
         // Prefill-only requests (no decode routing) stay in-flight.
-        enqueue(prefill, batch(9300, slot(0, input(1, 10), input(2, 10))));
+        enqueue(prefill, batch(9300, slot(0, input("1", 10), input("2", 10))));
         await(() -> prefill.getInflightCount() > 0, 1_000, "requests never got in-flight");
 
         // NOT shutting down + grace expired → the real leak check still trips.
@@ -282,7 +282,7 @@ class ShutdownDrainTest {
         EngineRpcService.GenerateInputPB[] inputs = new EngineRpcService.GenerateInputPB[count];
         for (int i = 0; i < count; i++) {
             int decodePort = decodeEngines.get(i % decodeEngines.size()).getGrpcPort();
-            inputs[i] = inputWithDecode(startRequestId + i, 10, decodePort);
+            inputs[i] = inputWithDecode(String.valueOf(startRequestId + i), 10, decodePort);
         }
         enqueue(prefill, batch(batchId, slot(0, inputs)));
     }
@@ -307,9 +307,8 @@ class ShutdownDrainTest {
 
     // ──────────── Protobuf builders ────────────
 
-    private static EngineRpcService.GenerateInputPB input(long requestId, int inputTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+    private static EngineRpcService.GenerateInputPB input(String requestId, int inputTokens) {
+        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(1)
                         .build());
@@ -320,9 +319,8 @@ class ShutdownDrainTest {
     }
 
     private static EngineRpcService.GenerateInputPB inputWithDecode(
-            long requestId, int inputTokens, int decodePort) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+            String requestId, int inputTokens, int decodePort) {
+        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(1)
                         .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()

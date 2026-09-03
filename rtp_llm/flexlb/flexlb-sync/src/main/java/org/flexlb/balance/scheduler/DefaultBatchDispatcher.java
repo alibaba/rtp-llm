@@ -13,6 +13,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -294,13 +295,13 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
             markUncertain(items, batchId, mismatch, callback);
             return;
         }
-        Map<Long, EngineRpcService.EnqueueBatchErrorPB> errorByRequestId = new HashMap<>();
+        Map<String, EngineRpcService.EnqueueBatchErrorPB> errorByRequestId = new HashMap<>();
         for (EngineRpcService.EnqueueBatchErrorPB error : response.getErrorsList()) {
-            errorByRequestId.put(error.getRequestId(), error);
+            errorByRequestId.put(RequestId.parse(error), error);
         }
-        Set<Long> successIds = new HashSet<>();
+        Set<String> successIds = new HashSet<>();
         for (EngineRpcService.EnqueueBatchSuccessPB success : response.getSuccessesList()) {
-            successIds.add(success.getRequestId());
+            successIds.add(RequestId.parse(success));
         }
 
         for (BatchItem item : items) {
@@ -387,7 +388,7 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         }
         EngineRpcService.GenerateInputPB.Builder input =
                 EngineRpcService.GenerateInputPB.parseFrom(bytes).toBuilder();
-        if (input.getRequestId() != item.requestId()) {
+        if (!RequestId.parse(input).equals(item.requestId())) {
             throw new IllegalArgumentException("request_id mismatch between schedule request and GenerateInputPB");
         }
         EngineRpcService.GenerateConfigPB.Builder config = input.getGenerateConfigBuilder();

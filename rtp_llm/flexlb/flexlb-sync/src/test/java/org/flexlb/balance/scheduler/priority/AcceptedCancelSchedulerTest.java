@@ -12,6 +12,7 @@ import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
@@ -31,17 +32,22 @@ import org.flexlb.service.monitor.PrioritySchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiFunction;
+import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -87,8 +93,8 @@ class AcceptedCancelSchedulerTest {
         SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10_000);
         SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(16);
         SchedulingTestConfig.usePriorityQueue(config);
-        SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.DECODE_RESERVED);
-        SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.DECODE_ENGINE_OWNED);
+        SchedulingTestConfig.allowVictim(config, VictimStage.DECODE_RESERVED);
+        SchedulingTestConfig.allowVictim(config, VictimStage.DECODE_ENGINE_OWNED);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (1));
         when(configService.loadBalanceConfig()).thenReturn(config);
 
@@ -134,33 +140,33 @@ class AcceptedCancelSchedulerTest {
 
     @Test
     void acceptedAckRetainsVictimUntilTypedPrefillCanceled() throws Exception {
-        BatchItem victim = registerConfirmedVictim(1L, 30, TaskPhase.KV_ALLOCATED);
+        BatchItem victim = registerConfirmedVictim("1", 30, TaskPhase.KV_ALLOCATED);
         cancelChannel.handler = (ignored, requestId) ->
                 CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.accepted());
 
         CompletableFuture<DecodePreemptionCoordinator.ExecutionResult> result =
-                execute(2L, 70, 500, 500, () -> true);
+                execute("2", 70, 500, 500, () -> true);
 
-        await(() -> decodeEndpoint.reservedView().containsKey(2L));
-        assertTrue(decodeEndpoint.isConfirmedTracked(1L));
+        await(() -> decodeEndpoint.reservedView().containsKey("2"));
+        assertTrue(decodeEndpoint.isConfirmedTracked("1"));
         assertFalse(result.isDone());
         assertEquals(128, decodeEndpoint.inflightHardKvReserved(),
                 "the complete incoming demand is held provisionally");
 
-        scheduler.onWorkerStatusUpdate(prefillCanceled(1L));
+        scheduler.onWorkerStatusUpdate(prefillCanceled("1"));
 
         assertEquals(DecodePreemptionCoordinator.ResultCode.COMMITTED,
                 result.get(1, TimeUnit.SECONDS).code());
         assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(),
                 victim.future().get(1, TimeUnit.SECONDS).getCode());
-        assertFalse(decodeEndpoint.isConfirmedTracked(1L));
-        assertTrue(decodeEndpoint.reservedView().containsKey(2L));
+        assertFalse(decodeEndpoint.isConfirmedTracked("1"));
+        assertTrue(decodeEndpoint.reservedView().containsKey("2"));
     }
 
     @Test
     void lateEnqueueSuccessDuringCancelRequestedWaitsForTypedCanceled() throws Exception {
-        BatchItem victim = registerDispatchedShadowVictim(11L, 30);
-        RequestLifecycleSnapshot dispatched = scheduler.getRequestState(11L, 0);
+        BatchItem victim = registerDispatchedShadowVictim("11", 30);
+        RequestLifecycleSnapshot dispatched = scheduler.getRequestState("11", 0);
         long batchId = dispatched.batchId();
         assertEquals(RequestLifecycleState.DISPATCHING, dispatched.state());
         assertEquals(1, endpointRegistry.getPrefill(PREFILL_IP_PORT).getInflightBatchCount());
@@ -168,70 +174,70 @@ class AcceptedCancelSchedulerTest {
         cancelChannel.handler = (ignored, requestId) ->
                 CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.accepted());
         CompletableFuture<DecodePreemptionCoordinator.ExecutionResult> result =
-                execute(12L, 70, 500, 500, () -> true);
-        await(() -> scheduler.getRequestState(11L, batchId).state()
+                execute("12", 70, 500, 500, () -> true);
+        await(() -> scheduler.getRequestState("11", batchId).state()
                 == RequestLifecycleState.CANCEL_REQUESTED);
 
         assertDoesNotThrow(() -> scheduler.onDelivered(victim));
         assertFalse(victim.future().isDone(),
                 "late EnqueueBatch ACK must not publish success after Cancel ACCEPTED");
         assertEquals(RequestLifecycleState.CANCEL_REQUESTED,
-                scheduler.getRequestState(11L, batchId).state());
-        assertTrue(decodeEndpoint.reservedView().containsKey(11L),
+                scheduler.getRequestState("11", batchId).state());
+        assertTrue(decodeEndpoint.reservedView().containsKey("11"),
                 "weak ACK retains victim accounting");
 
-        scheduler.onWorkerStatusUpdate(prefillCanceled(11L));
+        scheduler.onWorkerStatusUpdate(prefillCanceled("11"));
 
         assertEquals(DecodePreemptionCoordinator.ResultCode.COMMITTED,
                 result.get(1, TimeUnit.SECONDS).code());
         assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(),
                 victim.future().get(1, TimeUnit.SECONDS).getCode());
-        assertFalse(decodeEndpoint.reservedView().containsKey(11L));
+        assertFalse(decodeEndpoint.reservedView().containsKey("11"));
         assertEquals(0, endpointRegistry.getPrefill(PREFILL_IP_PORT).getInflightBatchCount(),
                 "typed cancel must retire the real Prefill batch even when WorkerStatus omits batch_id");
     }
 
     @Test
     void acceptedCancelDefersAdmissionDeadlineUntilTypedCanceled() throws Exception {
-        BatchItem victim = registerDispatchedShadowVictim(13L, 30);
+        BatchItem victim = registerDispatchedShadowVictim("13", 30);
         cancelChannel.handler = (ignored, requestId) ->
                 CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.accepted());
 
         CompletableFuture<DecodePreemptionCoordinator.ExecutionResult> result =
-                execute(14L, 70, 500, 500, () -> true);
-        await(() -> scheduler.getRequestState(13L, 0).state()
+                execute("14", 70, 500, 500, () -> true);
+        await(() -> scheduler.getRequestState("13", 0).state()
                 == RequestLifecycleState.CANCEL_REQUESTED);
 
         // Deterministically deliver the same reducer event used by the
         // scheduled admission deadline. The Cancel claim already owns the
         // entry, so this must be retained instead of completing the future.
         scheduler.onTimeout(victim,
-                new java.util.concurrent.TimeoutException("admission deadline exceeded"));
+                new TimeoutException("admission deadline exceeded"));
 
         assertFalse(victim.future().isDone(),
                 "deadline must not overwrite an accepted priority Cancel");
-        assertTrue(decodeEndpoint.reservedView().containsKey(13L),
+        assertTrue(decodeEndpoint.reservedView().containsKey("13"),
                 "deadline must not release claimed Decode accounting");
 
-        scheduler.onWorkerStatusUpdate(prefillCanceled(13L));
+        scheduler.onWorkerStatusUpdate(prefillCanceled("13"));
 
         assertEquals(DecodePreemptionCoordinator.ResultCode.COMMITTED,
                 result.get(1, TimeUnit.SECONDS).code());
         assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(),
                 victim.future().get(1, TimeUnit.SECONDS).getCode());
-        assertFalse(decodeEndpoint.reservedView().containsKey(13L));
+        assertFalse(decodeEndpoint.reservedView().containsKey("13"));
     }
 
     @Test
     void runningVictimUsesTheSameOriginalPrefillCancelPath() throws Exception {
-        BatchItem victim = registerConfirmedVictim(1L, 30, TaskPhase.RUNNING);
+        BatchItem victim = registerConfirmedVictim("1", 30, TaskPhase.RUNNING);
         cancelChannel.handler = (ignored, requestId) -> {
             scheduler.onWorkerStatusUpdate(prefillCanceled(requestId));
             return CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.accepted());
         };
 
         DecodePreemptionCoordinator.ExecutionResult result =
-                execute(2L, 70, 500, 500, () -> true).get(1, TimeUnit.SECONDS);
+                execute("2", 70, 500, 500, () -> true).get(1, TimeUnit.SECONDS);
 
         assertEquals(DecodePreemptionCoordinator.ResultCode.COMMITTED, result.code());
         assertEquals("10.0.0.1", cancelChannel.lastTarget.prefillIp());
@@ -242,58 +248,58 @@ class AcceptedCancelSchedulerTest {
 
     @Test
     void tombstonedVictimSettlesImmediatelyAndCommitsIncoming() throws Exception {
-        BatchItem victim = registerConfirmedVictim(1L, 30, TaskPhase.RUNNING);
+        BatchItem victim = registerConfirmedVictim("1", 30, TaskPhase.RUNNING);
         cancelChannel.handler = (ignored, requestId) ->
                 CompletableFuture.completedFuture(
                         EngineCancelChannel.CancelOutcome.tombstoned());
 
         DecodePreemptionCoordinator.ExecutionResult result =
-                execute(2L, 70, 500, 500, () -> true)
+                execute("2", 70, 500, 500, () -> true)
                         .get(1, TimeUnit.SECONDS);
 
         assertEquals(DecodePreemptionCoordinator.ResultCode.COMMITTED, result.code());
         assertEquals(PreemptionAttempt.State.COMMITTED, result.attempt().state());
         assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(),
                 victim.future().get(1, TimeUnit.SECONDS).getCode());
-        assertFalse(decodeEndpoint.isConfirmedTracked(1L));
-        assertTrue(decodeEndpoint.reservedView().containsKey(2L),
+        assertFalse(decodeEndpoint.isConfirmedTracked("1"));
+        assertTrue(decodeEndpoint.reservedView().containsKey("2"),
                 "TOMBSTONED capacity belongs to the committed incoming request");
         assertEquals(RequestLifecycleState.CANCELLED,
-                scheduler.getRequestState(1L, 0).state());
+                scheduler.getRequestState("1", 0).state());
     }
 
     @Test
     void notFoundReplaysGenericTerminalCapturedDuringCancelInFlight() throws Exception {
-        BatchItem victim = registerConfirmedVictim(1L, 30, TaskPhase.RUNNING);
+        BatchItem victim = registerConfirmedVictim("1", 30, TaskPhase.RUNNING);
         cancelChannel.handler = (ignored, requestId) -> {
-            scheduler.onWorkerStatusUpdate(decodeFinished(requestId, 9001));
+            scheduler.onWorkerStatusUpdate(decodeFinished(String.valueOf(requestId), 9001));
             return CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.notFound());
         };
 
         DecodePreemptionCoordinator.ExecutionResult result =
-                execute(2L, 70, 500, 500, () -> true).get(1, TimeUnit.SECONDS);
+                execute("2", 70, 500, 500, () -> true).get(1, TimeUnit.SECONDS);
 
         assertEquals(DecodePreemptionCoordinator.ResultCode.REPLAN_NOT_FOUND, result.code());
         assertEquals(StrategyErrorType.WORKER_EXECUTION_FAILED.getErrorCode(),
                 victim.future().get(1, TimeUnit.SECONDS).getCode());
-        assertFalse(decodeEndpoint.isConfirmedTracked(1L));
-        assertFalse(decodeEndpoint.reservedView().containsKey(2L));
+        assertFalse(decodeEndpoint.isConfirmedTracked("1"));
+        assertFalse(decodeEndpoint.reservedView().containsKey("2"));
     }
 
     @Test
     void notFoundReplaysDispatchTimeoutWithoutEarlyAccountingRelease() throws Exception {
-        BatchItem victim = registerConfirmedVictim(1L, 30, TaskPhase.RUNNING);
+        BatchItem victim = registerConfirmedVictim("1", 30, TaskPhase.RUNNING);
         AtomicBoolean retainedDuringRpc = new AtomicBoolean();
         cancelChannel.handler = (ignored, requestId) -> {
-            scheduler.onTimeout(victim, new java.util.concurrent.TimeoutException("late stage2"));
-            retainedDuringRpc.set(decodeEndpoint.isConfirmedTracked(requestId)
-                    && scheduler.getRequestState(requestId, 0) != null
+            scheduler.onTimeout(victim, new TimeoutException("late stage2"));
+            retainedDuringRpc.set(decodeEndpoint.isConfirmedTracked(String.valueOf(requestId))
+                    && scheduler.getRequestState(String.valueOf(requestId), 0) != null
                     && !victim.future().isDone());
             return CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.notFound());
         };
 
         DecodePreemptionCoordinator.ExecutionResult result =
-                execute(2L, 70, 500, 500, () -> true).get(1, TimeUnit.SECONDS);
+                execute("2", 70, 500, 500, () -> true).get(1, TimeUnit.SECONDS);
 
         assertTrue(retainedDuringRpc.get(),
                 "dispatch timeout must defer while the preemption claim owns cleanup");
@@ -303,77 +309,77 @@ class AcceptedCancelSchedulerTest {
                 response.getCode());
         assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
                 response.getAdmissionRejectReason());
-        assertFalse(decodeEndpoint.isConfirmedTracked(1L));
+        assertFalse(decodeEndpoint.isConfirmedTracked("1"));
     }
 
     @Test
     void transportUnknownRetainsLocalFailureUntilAuthoritativeWorkerTerminal() throws Exception {
-        BatchItem victim = registerConfirmedVictim(1L, 30, TaskPhase.RUNNING);
+        BatchItem victim = registerConfirmedVictim("1", 30, TaskPhase.RUNNING);
         cancelChannel.handler = (ignored, requestId) -> {
             scheduler.onFailure(victim, new IllegalStateException("natural enqueue failure"));
-            assertTrue(decodeEndpoint.isConfirmedTracked(requestId));
+            assertTrue(decodeEndpoint.isConfirmedTracked(String.valueOf(requestId)));
             assertFalse(victim.future().isDone());
             return CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.failed());
         };
 
         DecodePreemptionCoordinator.ExecutionResult result =
-                execute(2L, 70, 500, 100, () -> true).get(1, TimeUnit.SECONDS);
+                execute("2", 70, 500, 100, () -> true).get(1, TimeUnit.SECONDS);
 
         assertEquals(DecodePreemptionCoordinator.ResultCode.CONTROL_FAILED, result.code());
         assertFalse(victim.future().isDone(),
                 "transport UNKNOWN must not treat a local failure as release proof");
-        assertTrue(decodeEndpoint.isConfirmedTracked(1L));
+        assertTrue(decodeEndpoint.isConfirmedTracked("1"));
 
-        scheduler.onWorkerStatusUpdate(decodeFinished(1L, 9001));
+        scheduler.onWorkerStatusUpdate(decodeFinished("1", 9001));
 
         assertEquals(StrategyErrorType.WORKER_EXECUTION_FAILED.getErrorCode(),
                 victim.future().get(1, TimeUnit.SECONDS).getCode());
-        assertFalse(decodeEndpoint.isConfirmedTracked(1L));
+        assertFalse(decodeEndpoint.isConfirmedTracked("1"));
     }
 
     @Test
     void transportUnknownRetainsLocalTimeoutUntilLateTypedCanceled() throws Exception {
-        BatchItem victim = registerConfirmedVictim(3L, 30, TaskPhase.RUNNING);
+        BatchItem victim = registerConfirmedVictim("3", 30, TaskPhase.RUNNING);
         cancelChannel.handler = (ignored, requestId) -> {
             scheduler.onTimeout(victim,
-                    new java.util.concurrent.TimeoutException("local admission timeout"));
+                    new TimeoutException("local admission timeout"));
             return CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.failed());
         };
 
         DecodePreemptionCoordinator.ExecutionResult result =
-                execute(4L, 70, 500, 100, () -> true).get(1, TimeUnit.SECONDS);
+                execute("4", 70, 500, 100, () -> true).get(1, TimeUnit.SECONDS);
 
         assertEquals(DecodePreemptionCoordinator.ResultCode.CONTROL_FAILED, result.code());
         assertFalse(victim.future().isDone(),
                 "transport UNKNOWN must retain a local timeout for typed Cancel reconciliation");
-        assertTrue(decodeEndpoint.isConfirmedTracked(3L));
+        assertTrue(decodeEndpoint.isConfirmedTracked("3"));
 
-        scheduler.onWorkerStatusUpdate(prefillCanceled(3L));
+        scheduler.onWorkerStatusUpdate(prefillCanceled("3"));
 
         assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(),
                 victim.future().get(1, TimeUnit.SECONDS).getCode());
-        assertFalse(decodeEndpoint.isConfirmedTracked(3L));
-        scheduler.onWorkerStatusUpdate(prefillCanceled(3L));
+        assertFalse(decodeEndpoint.isConfirmedTracked("3"));
+        scheduler.onWorkerStatusUpdate(prefillCanceled("3"));
         assertEquals(0, decodeEndpoint.getTotalLoad(),
                 "late duplicate typed status must not release resources twice");
     }
 
     @Test
     void acceptedCancelIgnoresYieldedTerminalUntilTypedCanceled() throws Exception {
-        BatchItem victim = registerConfirmedVictim(1L, 30, TaskPhase.RUNNING);
+        BatchItem victim = registerConfirmedVictim("1", 30, TaskPhase.RUNNING);
         cancelChannel.handler = (ignored, requestId) -> {
             scheduler.finishYielded(victim, "ordinary yielded race");
-            assertTrue(decodeEndpoint.isConfirmedTracked(requestId));
+            assertTrue(decodeEndpoint.isConfirmedTracked(String.valueOf(requestId)));
             assertFalse(victim.future().isDone());
             return CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.accepted());
         };
 
         CompletableFuture<DecodePreemptionCoordinator.ExecutionResult> result =
-                execute(2L, 70, 500, 500, () -> true);
+                execute("2", 70, 500, 500, () -> true);
         await(() -> cancelChannel.cancelCount.get() == 1);
         assertFalse(victim.future().isDone());
 
-        scheduler.onWorkerStatusUpdate(prefillCanceled(1L));
+        scheduler.onWorkerStatusUpdate(prefillCanceled("1"));
 
         assertEquals(DecodePreemptionCoordinator.ResultCode.COMMITTED,
                 result.get(1, TimeUnit.SECONDS).code());
@@ -385,14 +391,14 @@ class AcceptedCancelSchedulerTest {
     void mixedCanceledAndNotFoundCannotReplanAfterCancellationSideEffect() throws Exception {
         List<BatchItem> victims = registerTwoConfirmedVictims();
         cancelChannel.handler = (ignored, requestId) -> CompletableFuture.completedFuture(
-                requestId == 1L
+                requestId.equals("1")
                         ? EngineCancelChannel.CancelOutcome.accepted()
                         : EngineCancelChannel.CancelOutcome.notFound());
 
         CompletableFuture<DecodePreemptionCoordinator.ExecutionResult> result =
-                executeAllVictims(3L, 70, 500, 500, () -> true);
+                executeAllVictims("3", 70, 500, 500, () -> true);
         await(() -> cancelChannel.cancelCount.get() == 2);
-        scheduler.onWorkerStatusUpdate(prefillCanceled(1L));
+        scheduler.onWorkerStatusUpdate(prefillCanceled("1"));
 
         DecodePreemptionCoordinator.ExecutionResult outcome =
                 result.get(1, TimeUnit.SECONDS);
@@ -402,10 +408,10 @@ class AcceptedCancelSchedulerTest {
                 victims.get(0).future().get(1, TimeUnit.SECONDS).getCode());
         assertFalse(victims.get(1).future().isDone(),
                 "NOT_FOUND sibling remains live and must not be rescheduled as a new request");
-        assertFalse(decodeEndpoint.reservedView().containsKey(3L),
+        assertFalse(decodeEndpoint.reservedView().containsKey("3"),
                 "partial cancellation must release the provisional incoming reservation");
-        assertFalse(decodeEndpoint.isConfirmedTracked(1L));
-        assertTrue(decodeEndpoint.isConfirmedTracked(2L));
+        assertFalse(decodeEndpoint.isConfirmedTracked("1"));
+        assertTrue(decodeEndpoint.isConfirmedTracked("2"));
     }
 
     @Test
@@ -415,7 +421,7 @@ class AcceptedCancelSchedulerTest {
                 CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.accepted());
 
         CompletableFuture<DecodePreemptionCoordinator.ExecutionResult> result =
-                executeAllVictims(100L, 70, 500, 500, () -> true);
+                executeAllVictims("100", 70, 500, 500, () -> true);
         await(() -> cancelChannel.cancelCount.get() == victims.size());
         for (BatchItem victim : victims) {
             await(() -> scheduler.getRequestState(victim.requestId(), 0).state()
@@ -454,16 +460,16 @@ class AcceptedCancelSchedulerTest {
         // Engine Cancel is enabled independently, while Master-local reserved
         // eviction stays disabled. Fourteen confirmed requests against a
         // concurrency limit of five require ten victims before P70 can fit.
-        SchedulingTestConfig.disallowVictim(config, org.flexlb.config.VictimStage.DECODE_RESERVED);
-        SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.DECODE_ENGINE_OWNED);
+        SchedulingTestConfig.disallowVictim(config, VictimStage.DECODE_RESERVED);
+        SchedulingTestConfig.allowVictim(config, VictimStage.DECODE_ENGINE_OWNED);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (5));
         SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(3_600_000);
         SchedulingTestConfig.engineCancellation(config).setAckTimeoutMs(500);
         SchedulingTestConfig.engineCancellation(config).setCompletionTimeoutMs(1_000);
 
         List<BatchItem> victims = registerConfirmedVictims(14);
-        List<Long> cancelRoutes = java.util.Collections.synchronizedList(
-                new java.util.ArrayList<>());
+        List<String> cancelRoutes = Collections.synchronizedList(
+                new ArrayList<>());
         cancelChannel.handler = (target, requestId) -> {
             assertEquals("10.0.0.1", target.prefillIp());
             assertEquals(8081, target.prefillGrpcPort());
@@ -471,10 +477,10 @@ class AcceptedCancelSchedulerTest {
             return CompletableFuture.completedFuture(
                     EngineCancelChannel.CancelOutcome.accepted());
         };
-        when(router.route(org.mockito.ArgumentMatchers.any(BalanceContext.class)))
+        when(router.route(ArgumentMatchers.any(BalanceContext.class)))
                 .thenReturn(Response.error(StrategyErrorType.NO_DECODE_WORKER));
 
-        BalanceContext incoming = context(100L, 70);
+        BalanceContext incoming = context("100", 70);
         long now = System.currentTimeMillis();
         incoming.setSchedulingMetadata(SchedulingMetadata.explicit(70, now + 5_000));
         CompletableFuture<Response> incomingResponse = scheduler.submit(incoming);
@@ -482,10 +488,10 @@ class AcceptedCancelSchedulerTest {
         await(() -> cancelChannel.cancelCount.get() == 10 && cancelRoutes.size() == 10);
         assertEquals(10, cancelRoutes.size());
         assertEquals(10, cancelRoutes.stream().distinct().count());
-        assertTrue(cancelRoutes.stream().allMatch(requestId -> requestId >= 1 && requestId <= 14));
+        assertTrue(cancelRoutes.stream().allMatch(requestId -> Integer.parseInt(requestId) >= 1 && Integer.parseInt(requestId) <= 14));
         DecodeEndpointSnapshot canceling = DecodeEndpointSnapshot.capture(decodeEndpoint, 5);
         assertEquals(1, canceling.reserved().stream()
-                .filter(victim -> victim.requestId() == 100L).count(),
+                .filter(victim -> victim.requestId().equals(String.valueOf(100L))).count(),
                 "incoming reservation is provisional and cannot be dispatched yet");
         assertEquals(4, canceling.running().size(),
                 "ten RUNNING victims must be hidden from the plannable layer while Cancel waits");
@@ -493,7 +499,7 @@ class AcceptedCancelSchedulerTest {
                 .allMatch(victim -> victim.phase() == DecodeTaskPhase.RUNNING));
         assertTrue(endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher()
                 .queueManager().snapshot().items().stream()
-                .noneMatch(item -> item.requestId() == 100L),
+                .noneMatch(item -> item.requestId().equals(String.valueOf(100L))),
                 "weak Cancel ACK must not dispatch or queue the incoming request");
         assertFalse(incomingResponse.isDone());
         assertEquals(15, decodeEndpoint.getTotalLoad(),
@@ -503,7 +509,7 @@ class AcceptedCancelSchedulerTest {
 
         await(() -> endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher()
                 .queueManager().snapshot().items().stream()
-                .anyMatch(item -> item.requestId() == 100L));
+                .anyMatch(item -> item.requestId().equals(String.valueOf(100L))));
         assertFalse(incomingResponse.isDone(),
                 "successful admission remains live in the Prefill queue");
         assertEquals("decode_evict", incoming.getPlanType());
@@ -511,11 +517,11 @@ class AcceptedCancelSchedulerTest {
         assertEquals(5, decodeEndpoint.getTotalLoad(),
                 "four unselected RUNNING requests plus P70 consume exactly five slots");
         assertEquals(128, decodeEndpoint.inflightHardKvReserved());
-        for (long requestId : cancelRoutes) {
-            BatchItem victim = victims.get((int) requestId - 1);
+        for (String requestId : cancelRoutes) {
+            BatchItem victim = victims.get(Integer.parseInt(requestId) - 1);
             assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(),
                     victim.future().get(1, TimeUnit.SECONDS).getCode());
-            assertFalse(decodeEndpoint.isConfirmedTracked(requestId));
+            assertFalse(decodeEndpoint.isConfirmedTracked(String.valueOf(requestId)));
         }
         assertEquals(4, victims.stream()
                 .filter(victim -> !victim.future().isDone()).count());
@@ -533,14 +539,14 @@ class AcceptedCancelSchedulerTest {
     @Test
     void tenVictimsWithOneNotFoundRemainAPartialFailure() throws Exception {
         List<BatchItem> victims = registerConfirmedVictims(10);
-        long notFoundId = victims.getLast().requestId();
+        String notFoundId = victims.getLast().requestId();
         cancelChannel.handler = (ignored, requestId) -> CompletableFuture.completedFuture(
-                requestId == notFoundId
+                requestId.equals(notFoundId)
                         ? EngineCancelChannel.CancelOutcome.notFound()
                         : EngineCancelChannel.CancelOutcome.accepted());
 
         CompletableFuture<DecodePreemptionCoordinator.ExecutionResult> result =
-                executeAllVictims(100L, 70, 500, 500, () -> true);
+                executeAllVictims("100", 70, 500, 500, () -> true);
         await(() -> cancelChannel.cancelCount.get() == victims.size());
         scheduler.onWorkerStatusUpdate(prefillCanceled(victims.stream()
                 .map(BatchItem::requestId)
@@ -551,7 +557,7 @@ class AcceptedCancelSchedulerTest {
                 result.get(1, TimeUnit.SECONDS);
         assertEquals(DecodePreemptionCoordinator.ResultCode.CONTROL_FAILED, outcome.code());
         assertEquals("cancel_partial_not_found", outcome.detail());
-        assertFalse(decodeEndpoint.reservedView().containsKey(100L),
+        assertFalse(decodeEndpoint.reservedView().containsKey("100"),
                 "partial cancellation must release the provisional incoming reservation");
         assertEquals(1, decodeEndpoint.getTotalLoad(),
                 "the NOT_FOUND victim remains charged while nine canceled siblings settle");
@@ -578,120 +584,120 @@ class AcceptedCancelSchedulerTest {
                 CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.notFound());
 
         DecodePreemptionCoordinator.ExecutionResult outcome =
-                executeAllVictims(3L, 70, 500, 500, () -> true)
+                executeAllVictims("3", 70, 500, 500, () -> true)
                         .get(1, TimeUnit.SECONDS);
 
         assertEquals(DecodePreemptionCoordinator.ResultCode.CONTROL_FAILED, outcome.code());
-        assertFalse(decodeEndpoint.reservedView().containsKey(3L));
-        assertTrue(decodeEndpoint.isConfirmedTracked(1L));
-        assertTrue(decodeEndpoint.isConfirmedTracked(2L));
+        assertFalse(decodeEndpoint.reservedView().containsKey("3"));
+        assertTrue(decodeEndpoint.isConfirmedTracked("1"));
+        assertTrue(decodeEndpoint.isConfirmedTracked("2"));
     }
 
     @Test
     void failedAckDoesNotHoldARequestThatNaturallyFinishes() throws Exception {
-        BatchItem victim = registerConfirmedVictim(1L, 30, TaskPhase.RUNNING);
+        BatchItem victim = registerConfirmedVictim("1", 30, TaskPhase.RUNNING);
         cancelChannel.handler = (ignored, requestId) ->
                 CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.failed());
 
         CompletableFuture<DecodePreemptionCoordinator.ExecutionResult> result =
-                execute(2L, 70, 500, 80, () -> true);
+                execute("2", 70, 500, 80, () -> true);
         await(() -> cancelChannel.cancelCount.get() == 1);
-        scheduler.onWorkerStatusUpdate(decodeFinished(1L, 9001));
+        scheduler.onWorkerStatusUpdate(decodeFinished("1", 9001));
 
         assertEquals(DecodePreemptionCoordinator.ResultCode.CONTROL_FAILED,
                 result.get(1, TimeUnit.SECONDS).code());
         assertEquals(StrategyErrorType.WORKER_EXECUTION_FAILED.getErrorCode(),
                 victim.future().get(1, TimeUnit.SECONDS).getCode());
-        assertFalse(decodeEndpoint.isConfirmedTracked(1L));
-        assertFalse(decodeEndpoint.reservedView().containsKey(2L));
+        assertFalse(decodeEndpoint.isConfirmedTracked("1"));
+        assertFalse(decodeEndpoint.reservedView().containsKey("2"));
     }
 
     @Test
     void failedAckLateTypedCanceledStillSettlesAfterCompletionTimeout() throws Exception {
-        BatchItem victim = registerConfirmedVictim(1L, 30, TaskPhase.RUNNING);
+        BatchItem victim = registerConfirmedVictim("1", 30, TaskPhase.RUNNING);
         cancelChannel.handler = (ignored, requestId) ->
                 CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.failed());
 
         DecodePreemptionCoordinator.ExecutionResult result =
-                execute(2L, 70, 500, 20, () -> true).get(1, TimeUnit.SECONDS);
+                execute("2", 70, 500, 20, () -> true).get(1, TimeUnit.SECONDS);
         assertEquals(DecodePreemptionCoordinator.ResultCode.CONTROL_FAILED, result.code());
-        assertTrue(decodeEndpoint.isConfirmedTracked(1L));
-        assertFalse(decodeEndpoint.reservedView().containsKey(2L));
+        assertTrue(decodeEndpoint.isConfirmedTracked("1"));
+        assertFalse(decodeEndpoint.reservedView().containsKey("2"));
 
-        scheduler.onWorkerStatusUpdate(prefillCanceled(1L));
+        scheduler.onWorkerStatusUpdate(prefillCanceled("1"));
         assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(),
                 victim.future().get(1, TimeUnit.SECONDS).getCode());
-        assertFalse(decodeEndpoint.isConfirmedTracked(1L));
+        assertFalse(decodeEndpoint.isConfirmedTracked("1"));
 
         // Duplicate typed status is fenced and cannot decrement again.
-        scheduler.onWorkerStatusUpdate(prefillCanceled(1L));
+        scheduler.onWorkerStatusUpdate(prefillCanceled("1"));
         assertEquals(0, decodeEndpoint.getTotalLoad());
     }
 
     @Test
     void acceptedAckKeepsPriorityCauseAcrossGenericTerminalAndCompletionTimeout() throws Exception {
-        BatchItem victim = registerConfirmedVictim(1L, 30, TaskPhase.RUNNING);
+        BatchItem victim = registerConfirmedVictim("1", 30, TaskPhase.RUNNING);
         cancelChannel.handler = (ignored, requestId) ->
                 CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.accepted());
 
         CompletableFuture<DecodePreemptionCoordinator.ExecutionResult> result =
-                execute(2L, 70, 500, 20, () -> true);
+                execute("2", 70, 500, 20, () -> true);
         await(() -> cancelChannel.cancelCount.get() == 1);
-        scheduler.onWorkerStatusUpdate(decodeFinished(1L, 9001));
+        scheduler.onWorkerStatusUpdate(decodeFinished("1", 9001));
 
         assertEquals(DecodePreemptionCoordinator.ResultCode.CONTROL_FAILED,
                 result.get(1, TimeUnit.SECONDS).code());
         assertFalse(victim.future().isDone(),
                 "ordinary Decode terminal is deferred after an accepted Cancel");
-        assertTrue(decodeEndpoint.isConfirmedTracked(1L));
-        assertFalse(decodeEndpoint.reservedView().containsKey(2L));
+        assertTrue(decodeEndpoint.isConfirmedTracked("1"));
+        assertFalse(decodeEndpoint.reservedView().containsKey("2"));
 
-        scheduler.onWorkerStatusUpdate(prefillCanceled(1L));
+        scheduler.onWorkerStatusUpdate(prefillCanceled("1"));
         assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(),
                 victim.future().get(1, TimeUnit.SECONDS).getCode());
-        assertFalse(decodeEndpoint.isConfirmedTracked(1L));
+        assertFalse(decodeEndpoint.isConfirmedTracked("1"));
 
-        scheduler.onWorkerStatusUpdate(prefillCanceled(1L));
+        scheduler.onWorkerStatusUpdate(prefillCanceled("1"));
         assertEquals(0, decodeEndpoint.getTotalLoad(),
                 "late duplicate typed status must not settle resources twice");
     }
 
     @Test
     void closedAdmissionGateAbortsIncomingAfterVictimSettlement() throws Exception {
-        registerConfirmedVictim(1L, 30, TaskPhase.RUNNING);
+        registerConfirmedVictim("1", 30, TaskPhase.RUNNING);
         AtomicBoolean admissionOpen = new AtomicBoolean(true);
         cancelChannel.handler = (ignored, requestId) ->
                 CompletableFuture.completedFuture(EngineCancelChannel.CancelOutcome.accepted());
 
         CompletableFuture<DecodePreemptionCoordinator.ExecutionResult> result =
-                execute(2L, 70, 500, 500, admissionOpen::get);
-        await(() -> decodeEndpoint.reservedView().containsKey(2L));
+                execute("2", 70, 500, 500, admissionOpen::get);
+        await(() -> decodeEndpoint.reservedView().containsKey("2"));
         admissionOpen.set(false);
-        scheduler.onWorkerStatusUpdate(prefillCanceled(1L));
+        scheduler.onWorkerStatusUpdate(prefillCanceled("1"));
 
         assertEquals(DecodePreemptionCoordinator.ResultCode.CONTROL_FAILED,
                 result.get(1, TimeUnit.SECONDS).code());
-        assertFalse(decodeEndpoint.reservedView().containsKey(2L),
+        assertFalse(decodeEndpoint.reservedView().containsKey("2"),
                 "an admission timeout must not leave an orphan incoming reservation");
     }
 
     @Test
     void admissionDeadlineClosesAsyncCancelBeforeInflightRegistration() throws Exception {
-        BatchItem victim = registerConfirmedVictim(51L, 30, TaskPhase.RUNNING);
+        BatchItem victim = registerConfirmedVictim("51", 30, TaskPhase.RUNNING);
         CompletableFuture<EngineCancelChannel.CancelOutcome> ack = new CompletableFuture<>();
         cancelChannel.handler = (ignored, requestId) -> ack;
-        when(router.route(org.mockito.ArgumentMatchers.any(BalanceContext.class)))
+        when(router.route(ArgumentMatchers.any(BalanceContext.class)))
                 .thenReturn(Response.error(StrategyErrorType.NO_DECODE_WORKER));
 
-        BalanceContext incoming = context(52L, 70);
+        BalanceContext incoming = context("52", 70);
         long now = System.currentTimeMillis();
         incoming.setSchedulingMetadata(SchedulingMetadata.explicit(70, now + 100));
         CompletableFuture<Response> responseFuture = scheduler.submit(incoming);
 
         await(() -> cancelChannel.cancelCount.get() == 1
-                && decodeEndpoint.reservedView().containsKey(52L));
+                && decodeEndpoint.reservedView().containsKey("52"));
         await(() -> {
-            RequestLifecycleSnapshot state = scheduler.getRequestState(52L, 0);
+            RequestLifecycleSnapshot state = scheduler.getRequestState("52", 0);
             return state != null
                     && state.state() == RequestLifecycleState.CANCEL_REQUESTED;
         });
@@ -699,58 +705,58 @@ class AcceptedCancelSchedulerTest {
                 "deadline settlement waits for admission-mutation cleanup");
 
         ack.complete(EngineCancelChannel.CancelOutcome.accepted());
-        await(() -> scheduler.getRequestState(51L, 0).state()
+        await(() -> scheduler.getRequestState("51", 0).state()
                 == RequestLifecycleState.CANCEL_REQUESTED);
-        scheduler.onWorkerStatusUpdate(prefillCanceled(51L));
+        scheduler.onWorkerStatusUpdate(prefillCanceled("51"));
 
         Response response = responseFuture.get(2, TimeUnit.SECONDS);
         assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
         assertEquals(RequestLifecycleState.TIMED_OUT,
-                scheduler.getRequestState(52L, 0).state());
+                scheduler.getRequestState("52", 0).state());
 
-        await(() -> !decodeEndpoint.reservedView().containsKey(52L));
+        await(() -> !decodeEndpoint.reservedView().containsKey("52"));
         assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(),
                 victim.future().get(1, TimeUnit.SECONDS).getCode());
         assertTrue(endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher()
                 .queueManager().snapshot().items().stream()
-                .noneMatch(item -> item.requestId() == 52L));
+                .noneMatch(item -> item.requestId().equals(String.valueOf(52L))));
     }
 
     @Test
     void asyncCancelHandoffBeforeAdmissionDeadlineUsesInflightReducer() throws Exception {
         SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(3_600_000);
-        BatchItem victim = registerConfirmedVictim(61L, 30, TaskPhase.RUNNING);
+        BatchItem victim = registerConfirmedVictim("61", 30, TaskPhase.RUNNING);
         CompletableFuture<EngineCancelChannel.CancelOutcome> ack = new CompletableFuture<>();
         cancelChannel.handler = (ignored, requestId) -> ack;
-        when(router.route(org.mockito.ArgumentMatchers.any(BalanceContext.class)))
+        when(router.route(ArgumentMatchers.any(BalanceContext.class)))
                 .thenReturn(Response.error(StrategyErrorType.NO_DECODE_WORKER));
 
-        BalanceContext incoming = context(62L, 70);
+        BalanceContext incoming = context("62", 70);
         long now = System.currentTimeMillis();
         incoming.setSchedulingMetadata(SchedulingMetadata.explicit(70, now + 500));
         CompletableFuture<Response> responseFuture = scheduler.submit(incoming);
 
         await(() -> cancelChannel.cancelCount.get() == 1
-                && decodeEndpoint.reservedView().containsKey(62L));
+                && decodeEndpoint.reservedView().containsKey("62"));
         ack.complete(EngineCancelChannel.CancelOutcome.accepted());
-        await(() -> scheduler.getRequestState(61L, 0).state()
+        await(() -> scheduler.getRequestState("61", 0).state()
                 == RequestLifecycleState.CANCEL_REQUESTED);
-        scheduler.onWorkerStatusUpdate(prefillCanceled(61L));
+        scheduler.onWorkerStatusUpdate(prefillCanceled("61"));
 
         await(() -> endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher()
                 .queueManager().snapshot().items().stream()
-                .anyMatch(item -> item.requestId() == 62L));
+                .anyMatch(item -> item.requestId().equals(String.valueOf(62L))));
         assertFalse(responseFuture.isDone(),
                 "a committed delivery remains live until the admission deadline reducer runs");
 
         Response response = responseFuture.get(2, TimeUnit.SECONDS);
         assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode());
         assertEquals(RequestLifecycleState.TIMED_OUT,
-                scheduler.getRequestState(62L, 0).state());
-        assertFalse(decodeEndpoint.reservedView().containsKey(62L));
+                scheduler.getRequestState("62", 0).state());
+        assertFalse(decodeEndpoint.reservedView().containsKey("62"));
         assertTrue(endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher()
                 .queueManager().snapshot().items().stream()
-                .noneMatch(item -> item.requestId() == 62L));
+                .noneMatch(item -> item.requestId().equals(String.valueOf(62L))));
         assertEquals(StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(),
                 victim.future().get(1, TimeUnit.SECONDS).getCode());
     }
@@ -758,11 +764,11 @@ class AcceptedCancelSchedulerTest {
     @Test
     void committedEnginePreemptionIgnoresTelemetryFailure() throws Exception {
         SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(3_600_000);
-        registerConfirmedVictim(63L, 30, TaskPhase.RUNNING);
+        registerConfirmedVictim("63", 30, TaskPhase.RUNNING);
         cancelChannel.handler = (ignored, requestId) ->
                 CompletableFuture.completedFuture(
                         EngineCancelChannel.CancelOutcome.accepted());
-        when(router.route(org.mockito.ArgumentMatchers.any(BalanceContext.class)))
+        when(router.route(ArgumentMatchers.any(BalanceContext.class)))
                 .thenReturn(Response.error(StrategyErrorType.NO_DECODE_WORKER));
         doThrow(new IllegalStateException("metrics unavailable"))
                 .when(priorityReporter)
@@ -771,26 +777,26 @@ class AcceptedCancelSchedulerTest {
                 .when(priorityReporter)
                 .reportCancelRequest(eq(DECODE_IP_PORT), eq(30));
 
-        CompletableFuture<Response> response = scheduler.submit(context(64L, 70));
+        CompletableFuture<Response> response = scheduler.submit(context("64", 70));
         await(() -> cancelChannel.cancelCount.get() == 1
-                && decodeEndpoint.reservedView().containsKey(64L));
-        scheduler.onWorkerStatusUpdate(prefillCanceled(63L));
+                && decodeEndpoint.reservedView().containsKey("64"));
+        scheduler.onWorkerStatusUpdate(prefillCanceled("63"));
 
         await(() -> endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher()
                 .queueManager().snapshot().items().stream()
-                .anyMatch(item -> item.requestId() == 64L));
+                .anyMatch(item -> item.requestId().equals(String.valueOf(64L))));
         assertFalse(response.isDone(),
                 "telemetry failure must not reverse a committed admission");
-        assertTrue(decodeEndpoint.reservedView().containsKey(64L));
+        assertTrue(decodeEndpoint.reservedView().containsKey("64"));
 
         assertTrue(response.cancel(false));
-        await(() -> !decodeEndpoint.reservedView().containsKey(64L));
-        assertFalse(scheduler.ownsRequestGeneration(64L));
+        await(() -> !decodeEndpoint.reservedView().containsKey("64"));
+        assertFalse(scheduler.ownsRequestGeneration("64"));
     }
 
     @Test
     void completionDeadlineStartsAfterSlowAckPhase() throws Exception {
-        registerConfirmedVictim(1L, 30, TaskPhase.RUNNING);
+        registerConfirmedVictim("1", 30, TaskPhase.RUNNING);
         cancelChannel.handler = (ignored, requestId) -> CompletableFuture.supplyAsync(() -> {
             sleep(60);
             CompletableFuture.runAsync(() -> {
@@ -801,16 +807,16 @@ class AcceptedCancelSchedulerTest {
         });
 
         DecodePreemptionCoordinator.ExecutionResult result =
-                execute(2L, 70, 100, 80, () -> true).get(1, TimeUnit.SECONDS);
+                execute("2", 70, 100, 80, () -> true).get(1, TimeUnit.SECONDS);
 
         assertEquals(DecodePreemptionCoordinator.ResultCode.COMMITTED, result.code());
     }
 
     @Test
     void admissionLeaseCleanupWinningFirstPreventsCoordinatorMutation() throws Exception {
-        BatchItem victim = dummyItem(21L, 30);
+        BatchItem victim = dummyItem("21", 30);
         assertTrue(scheduler.registerInflight(victim));
-        decodeEndpoint.reserve(21L, 128, 136, 30);
+        decodeEndpoint.reserve("21", 128, 136, 30);
         DecodeRequestSnapshot staleVictim = DecodeEndpointSnapshot
                 .capture(decodeEndpoint, 1).reserved().getFirst();
 
@@ -819,13 +825,13 @@ class AcceptedCancelSchedulerTest {
         lease.close();
 
         DecodePreemptionCoordinator.ExecutionResult result = coordinator.execute(
-                request(decodeEndpoint, 22L, staleVictim, () -> true), scheduler)
+                request(decodeEndpoint, "22", staleVictim, () -> true), scheduler)
                 .get(1, TimeUnit.SECONDS);
 
         assertEquals(DecodePreemptionCoordinator.ResultCode.CONTROL_FAILED, result.code());
         assertEquals(0, cancelChannel.cancelCount.get());
-        assertFalse(decodeEndpoint.reservedView().containsKey(21L));
-        assertFalse(decodeEndpoint.reservedView().containsKey(22L),
+        assertFalse(decodeEndpoint.reservedView().containsKey("21"));
+        assertFalse(decodeEndpoint.reservedView().containsKey("22"),
                 "failed cleanup-vs-claim race must not provision the incoming request");
     }
 
@@ -834,9 +840,9 @@ class AcceptedCancelSchedulerTest {
         for (int i = 0; i < 50; i++) {
             long requestId = 1_000L + i;
             long token = 10_000L + i;
-            BatchItem victim = dummyItem(requestId, 30);
+            BatchItem victim = dummyItem(String.valueOf(requestId), 30);
             assertTrue(scheduler.registerInflight(victim));
-            decodeEndpoint.reserve(requestId, 32, 40, 30);
+            decodeEndpoint.reserve(String.valueOf(requestId), 32, 40, 30);
             AdmissionLease lease = new AdmissionLease(
                     victim, decodeEndpoint, null, scheduler, 0, null, null);
 
@@ -845,7 +851,7 @@ class AcceptedCancelSchedulerTest {
             CompletableFuture<Void> claim = CompletableFuture.runAsync(() -> {
                 awaitLatch(start);
                 claimWon.set(scheduler.claimForPreemption(
-                        requestId, token, "deterministic ownership race"));
+                        String.valueOf(requestId), token, "deterministic ownership race"));
             });
             CompletableFuture<Void> cleanup = CompletableFuture.runAsync(() -> {
                 awaitLatch(start);
@@ -855,19 +861,19 @@ class AcceptedCancelSchedulerTest {
             CompletableFuture.allOf(claim, cleanup).get(1, TimeUnit.SECONDS);
 
             if (claimWon.get()) {
-                assertTrue(decodeEndpoint.reservedView().containsKey(requestId),
+                assertTrue(decodeEndpoint.reservedView().containsKey(String.valueOf(requestId)),
                         "claim winner must retain Decode accounting");
-                assertTrue(scheduler.releasePreemptionClaim(requestId, token));
+                assertTrue(scheduler.releasePreemptionClaim(String.valueOf(requestId), token));
             }
-            assertFalse(decodeEndpoint.reservedView().containsKey(requestId));
-            assertTrue(scheduler.getRequestState(requestId, 0) == null);
+            assertFalse(decodeEndpoint.reservedView().containsKey(String.valueOf(requestId)));
+            assertTrue(scheduler.getRequestState(String.valueOf(requestId), 0) == null);
         }
     }
 
     @Test
     void softTimeoutTransfersNotFoundPreemptionToEngineFenceUntilTombstoned()
             throws Exception {
-        BatchItem victim = registerDispatchedShadowVictim(31L, 30);
+        BatchItem victim = registerDispatchedShadowVictim("31", 30);
         AdmissionLease lease = new AdmissionLease(
                 victim, decodeEndpoint, null, scheduler, 0, null, null);
         lease.bindTo(victim.future());
@@ -881,12 +887,12 @@ class AcceptedCancelSchedulerTest {
                 : CompletableFuture.completedFuture(
                         EngineCancelChannel.CancelOutcome.tombstoned());
         CompletableFuture<DecodePreemptionCoordinator.ExecutionResult> result =
-                execute(32L, 70, 500, 500, () -> true);
+                execute("32", 70, 500, 500, () -> true);
         await(() -> cancelChannel.cancelCount.get() == 1);
 
         lease.reconcileAfterDeliveryTimeout();
-        assertTrue(decodeEndpoint.reservedView().containsKey(31L));
-        assertTrue(scheduler.getRequestState(31L, 0) != null,
+        assertTrue(decodeEndpoint.reservedView().containsKey("31"));
+        assertTrue(scheduler.getRequestState("31", 0) != null,
                 "claim owns both Decode accounting and inflight registration");
 
         ack.complete(EngineCancelChannel.CancelOutcome.notFound());
@@ -894,11 +900,11 @@ class AcceptedCancelSchedulerTest {
         assertEquals(DecodePreemptionCoordinator.ResultCode.REPLAN_NOT_FOUND,
                 result.get(1, TimeUnit.SECONDS).code());
         await(() -> cancelChannel.cancelCount.get() >= 2);
-        await(() -> !decodeEndpoint.reservedView().containsKey(31L));
+        await(() -> !decodeEndpoint.reservedView().containsKey("31"));
         await(() -> scheduler.getInflightSize() == 0);
-        assertFalse(decodeEndpoint.reservedView().containsKey(31L));
+        assertFalse(decodeEndpoint.reservedView().containsKey("31"));
         assertEquals(RequestLifecycleState.TIMED_OUT,
-                scheduler.getRequestState(31L, 0).state(),
+                scheduler.getRequestState("31", 0).state(),
                 "TOMBSTONED releases inflight ownership but keeps a bounded terminal tombstone");
     }
 
@@ -911,36 +917,36 @@ class AcceptedCancelSchedulerTest {
         status.setTotalKvCacheTokens(new AtomicLong(20_000));
         AbortOnBeginDecodeEndpoint endpoint = new AbortOnBeginDecodeEndpoint(status);
 
-        BatchItem victim = dummyItem(41L, 30, endpoint);
+        BatchItem victim = dummyItem("41", 30, endpoint);
         assertTrue(scheduler.registerInflight(victim));
-        endpoint.reserve(41L, 128, 136, 30);
+        endpoint.reserve("41", 128, 136, 30);
         DecodeRequestSnapshot victimSnapshot = DecodeEndpointSnapshot
                 .capture(endpoint, 1).reserved().getFirst();
         AdmissionLease lease = new AdmissionLease(victim, endpoint, null, scheduler,
                 0, null, null);
         lease.bindTo(victim.future());
         endpoint.beforeBegin = () -> victim.future().completeExceptionally(
-                new java.util.concurrent.TimeoutException("public admission timeout"));
+                new TimeoutException("public admission timeout"));
 
         DecodePreemptionCoordinator.ExecutionResult result = coordinator.execute(
-                request(endpoint, 42L, victimSnapshot, () -> true), scheduler)
+                request(endpoint, "42", victimSnapshot, () -> true), scheduler)
                 .get(1, TimeUnit.SECONDS);
 
         assertEquals(DecodePreemptionCoordinator.ResultCode.CONFLICT, result.code());
         assertEquals(0, cancelChannel.cancelCount.get(),
                 "pre-RPC abort must not invoke the Cancel channel");
-        assertFalse(endpoint.reservedView().containsKey(41L));
-        assertFalse(endpoint.reservedView().containsKey(42L));
-        assertTrue(scheduler.getRequestState(41L, 0) == null,
+        assertFalse(endpoint.reservedView().containsKey("41"));
+        assertFalse(endpoint.reservedView().containsKey("42"));
+        assertTrue(scheduler.getRequestState("41", 0) == null,
                 "releasePreemptionClaim must replay, not drop, deferred lease cleanup");
     }
 
     private CompletableFuture<DecodePreemptionCoordinator.ExecutionResult> execute(
-            long incomingRequestId,
+            String incomingRequestId,
             int incomingPriority,
             long ackTimeoutMs,
             long completionTimeoutMs,
-            java.util.function.BooleanSupplier admissionOpen) {
+            BooleanSupplier admissionOpen) {
         DecodeEndpointSnapshot snapshot = DecodeEndpointSnapshot.capture(decodeEndpoint, 1);
         List<DecodeRequestSnapshot> victims = victims(snapshot);
         DecodePreemptionCoordinator.Request request =
@@ -954,9 +960,9 @@ class AcceptedCancelSchedulerTest {
 
     private DecodePreemptionCoordinator.Request request(
             DecodeEndpoint endpoint,
-            long incomingRequestId,
+            String incomingRequestId,
             DecodeRequestSnapshot victim,
-            java.util.function.BooleanSupplier admissionOpen) {
+            BooleanSupplier admissionOpen) {
         return new DecodePreemptionCoordinator.Request(
                 endpoint, endpoint.admissionVersion(), false,
                 incomingRequestId, 128, 136, 70,
@@ -965,11 +971,11 @@ class AcceptedCancelSchedulerTest {
     }
 
     private CompletableFuture<DecodePreemptionCoordinator.ExecutionResult> executeAllVictims(
-            long incomingRequestId,
+            String incomingRequestId,
             int incomingPriority,
             long ackTimeoutMs,
             long completionTimeoutMs,
-            java.util.function.BooleanSupplier admissionOpen) {
+            BooleanSupplier admissionOpen) {
         DecodeEndpointSnapshot snapshot = DecodeEndpointSnapshot.capture(decodeEndpoint, 1);
         List<DecodeRequestSnapshot> victims = victims(snapshot);
         DecodePreemptionCoordinator.Request request =
@@ -982,7 +988,7 @@ class AcceptedCancelSchedulerTest {
         return coordinator.execute(request, scheduler);
     }
 
-    private BatchItem registerConfirmedVictim(long requestId, int priority, TaskPhase phase) {
+    private BatchItem registerConfirmedVictim(String requestId, int priority, TaskPhase phase) {
         BatchItem item = dummyItem(requestId, priority);
         assertTrue(scheduler.registerInflight(item));
         decodeEndpoint.reserve(requestId, 128, 136, priority);
@@ -994,7 +1000,7 @@ class AcceptedCancelSchedulerTest {
         return item;
     }
 
-    private BatchItem registerDispatchedShadowVictim(long requestId, int priority) {
+    private BatchItem registerDispatchedShadowVictim(String requestId, int priority) {
         BatchItem item = dummyItem(requestId, priority);
         assertTrue(scheduler.registerInflight(item));
         decodeEndpoint.reserve(requestId, 128, 136, priority);
@@ -1013,19 +1019,19 @@ class AcceptedCancelSchedulerTest {
     }
 
     private List<BatchItem> registerTwoConfirmedVictims() {
-        BatchItem first = dummyItem(1L, 30);
-        BatchItem second = dummyItem(2L, 30);
+        BatchItem first = dummyItem("1", 30);
+        BatchItem second = dummyItem("2", 30);
         assertTrue(scheduler.registerInflight(first));
         assertTrue(scheduler.registerInflight(second));
-        decodeEndpoint.reserve(1L, 128, 136, 30);
-        decodeEndpoint.reserve(2L, 128, 136, 30);
+        decodeEndpoint.reserve("1", 128, 136, 30);
+        decodeEndpoint.reserve("2", 128, 136, 30);
 
         TaskInfo firstTask = new TaskInfo();
-        firstTask.setRequestId(1L);
+        firstTask.setRequestId("1");
         firstTask.setPhase(TaskPhase.RUNNING);
         firstTask.setInputLength(128);
         TaskInfo secondTask = new TaskInfo();
-        secondTask.setRequestId(2L);
+        secondTask.setRequestId("2");
         secondTask.setPhase(TaskPhase.RUNNING);
         secondTask.setInputLength(128);
         updateDecode(Map.of("1", firstTask, "2", secondTask), null);
@@ -1033,15 +1039,15 @@ class AcceptedCancelSchedulerTest {
     }
 
     private List<BatchItem> registerConfirmedVictims(int count) {
-        List<BatchItem> victims = new java.util.ArrayList<>(count);
+        List<BatchItem> victims = new ArrayList<>(count);
         Map<String, TaskInfo> tasks = new LinkedHashMap<>();
         for (int i = 1; i <= count; i++) {
             long requestId = i;
-            BatchItem victim = dummyItem(requestId, 30);
+            BatchItem victim = dummyItem(String.valueOf(requestId), 30);
             assertTrue(scheduler.registerInflight(victim));
-            decodeEndpoint.reserve(requestId, 128, 136, 30);
+            decodeEndpoint.reserve(String.valueOf(requestId), 128, 136, 30);
             TaskInfo task = new TaskInfo();
-            task.setRequestId(requestId);
+            task.setRequestId(String.valueOf(requestId));
             task.setPhase(TaskPhase.RUNNING);
             task.setInputLength(128);
             tasks.put(String.valueOf(requestId), task);
@@ -1059,15 +1065,15 @@ class AcceptedCancelSchedulerTest {
         decodeEndpoint.onWorkerStatusUpdate(decodeStatus, response);
     }
 
-    private static WorkerStatusResponse prefillCanceled(long requestId) {
+    private static WorkerStatusResponse prefillCanceled(String requestId) {
         return prefillCanceled(List.of(requestId));
     }
 
-    private static WorkerStatusResponse prefillCanceled(List<Long> requestIds) {
+    private static WorkerStatusResponse prefillCanceled(List<String> requestIds) {
         Map<String, TaskInfo> finished = new LinkedHashMap<>();
-        for (Long requestId : requestIds) {
+        for (String requestId : requestIds) {
             TaskInfo task = new TaskInfo();
-            task.setRequestId(requestId);
+            task.setRequestId(String.valueOf(requestId));
             task.setErrorCode(PRIORITY_PREEMPTED);
             task.setPriorityPreemptionProgress(PriorityPreemptionProgress.CANCELED);
             finished.put(String.valueOf(requestId), task);
@@ -1078,7 +1084,7 @@ class AcceptedCancelSchedulerTest {
         return response;
     }
 
-    private static WorkerStatusResponse decodeFinished(long requestId, long errorCode) {
+    private static WorkerStatusResponse decodeFinished(String requestId, long errorCode) {
         TaskInfo task = new TaskInfo();
         task.setRequestId(requestId);
         task.setErrorCode(errorCode);
@@ -1088,11 +1094,11 @@ class AcceptedCancelSchedulerTest {
         return response;
     }
 
-    private BatchItem dummyItem(long requestId, int priority) {
+    private BatchItem dummyItem(String requestId, int priority) {
         return dummyItem(requestId, priority, decodeEndpoint);
     }
 
-    private BatchItem dummyItem(long requestId, int priority, DecodeEndpoint endpoint) {
+    private BatchItem dummyItem(String requestId, int priority, DecodeEndpoint endpoint) {
         Response route = successRoute(requestId);
         return new BatchItem(context(requestId, priority), new CompletableFuture<>(), route,
                 PriorityScheduler.findServer(route, RoleType.PREFILL),
@@ -1101,7 +1107,7 @@ class AcceptedCancelSchedulerTest {
                 System.currentTimeMillis());
     }
 
-    private static BalanceContext context(long requestId, int priority) {
+    private static BalanceContext context(String requestId, int priority) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(128);
@@ -1115,7 +1121,7 @@ class AcceptedCancelSchedulerTest {
         return context;
     }
 
-    private static Response successRoute(long requestId) {
+    private static Response successRoute(String requestId) {
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(List.of(
@@ -1125,7 +1131,7 @@ class AcceptedCancelSchedulerTest {
     }
 
     private static ServerStatus server(RoleType role, String ip, int httpPort,
-                                       int grpcPort, long requestId) {
+                                       int grpcPort, String requestId) {
         ServerStatus status = new ServerStatus();
         status.setSuccess(true);
         status.setRole(role);
@@ -1137,7 +1143,7 @@ class AcceptedCancelSchedulerTest {
         return status;
     }
 
-    private static void await(java.util.function.BooleanSupplier condition) throws Exception {
+    private static void await(BooleanSupplier condition) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
         while (!condition.getAsBoolean()) {
             if (System.nanoTime() >= deadline) {
@@ -1168,7 +1174,7 @@ class AcceptedCancelSchedulerTest {
     private static final class FakeCancelChannel implements EngineCancelChannel {
         private final AtomicInteger cancelCount = new AtomicInteger();
         private volatile CancelTarget lastTarget;
-        private volatile BiFunction<CancelTarget, Long, CompletableFuture<CancelOutcome>> handler =
+        private volatile BiFunction<CancelTarget, String, CompletableFuture<CancelOutcome>> handler =
                 (ignored, requestId) -> CompletableFuture.completedFuture(CancelOutcome.accepted());
 
         @Override
@@ -1178,7 +1184,7 @@ class AcceptedCancelSchedulerTest {
 
         @Override
         public CompletableFuture<CancelOutcome> cancel(CancelTarget target,
-                                                       long requestId,
+                                                       String requestId,
                                                        long timeoutMs) {
             cancelCount.incrementAndGet();
             lastTarget = target;
@@ -1196,8 +1202,8 @@ class AcceptedCancelSchedulerTest {
         @Override
         public PreemptionBeginResult beginPriorityPreemption(
                 long attemptToken,
-                List<Long> victimIds,
-                long incomingRequestId,
+                List<String> victimIds,
+                String incomingRequestId,
                 long incomingKvTokens,
                 long incomingExpectedKvTokens,
                 int incomingPriority,

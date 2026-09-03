@@ -172,7 +172,7 @@ public class OptimizerClient {
         log.warn("Optimizer trace query failed: reason={}", reason);
     }
 
-    private void reportFailed(String reason, Long requestId, URI uri, Throwable error) {
+    private void reportFailed(String reason, String requestId, URI uri, Throwable error) {
         monitor.report(MetricConstant.OPTIMIZER_TRACE_QUERY_FAILED_QPS,
                 FlexMetricTags.of("reason", reason), 1.0);
         log.warn("Optimizer trace query failed: reason={}, requestId={}, uri={}",

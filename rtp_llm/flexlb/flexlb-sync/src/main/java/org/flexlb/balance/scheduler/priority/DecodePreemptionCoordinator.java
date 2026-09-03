@@ -5,6 +5,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -40,7 +41,7 @@ public final class DecodePreemptionCoordinator {
     public record Request(DecodeEndpoint endpoint,
                           long snapshotVersion,
                           boolean requireVersionMatch,
-                          long incomingRequestId,
+                          String incomingRequestId,
                           long incomingKvTokens,
                           long incomingExpectedKvTokens,
                           int incomingPriority,
@@ -89,10 +90,10 @@ public final class DecodePreemptionCoordinator {
                 request.incomingRequestId(), request.snapshotVersion(),
                 victims);
 
-        List<Long> claimedInflight = new ArrayList<>(victims.size());
+        List<String> claimedInflight = new ArrayList<>(victims.size());
         for (PreemptionAttempt.Victim victim : victims) {
             if (!registrar.claimForPreemption(victim.requestId(), token, request.detail())) {
-                for (Long claimed : claimedInflight) {
+                for (String claimed : claimedInflight) {
                     registrar.releasePreemptionClaim(claimed, token);
                 }
                 attempt.markAborted(false);
@@ -108,7 +109,7 @@ public final class DecodePreemptionCoordinator {
                 request.incomingExpectedKvTokens(), request.incomingPriority(),
                 request.snapshotVersion(), request.requireVersionMatch());
         if (begin != DecodeEndpoint.PreemptionBeginResult.SUCCESS) {
-            for (Long claimed : claimedInflight) {
+            for (String claimed : claimedInflight) {
                 registrar.releasePreemptionClaim(claimed, token);
             }
             attempt.markAborted(false);
@@ -123,7 +124,7 @@ public final class DecodePreemptionCoordinator {
 
         if (!request.endpoint().markPriorityCancelInFlight(token)) {
             request.endpoint().abortPriorityPreemption(token);
-            for (Long claimed : claimedInflight) {
+            for (String claimed : claimedInflight) {
                 registrar.releasePreemptionClaim(claimed, token);
             }
             attempt.markAborted(true);
@@ -133,7 +134,7 @@ public final class DecodePreemptionCoordinator {
         for (PreemptionAttempt.Victim victim : victims) {
             if (!registrar.markPreemptionCancelInFlight(victim.requestId(), token)) {
                 request.endpoint().abortPriorityPreemption(token);
-                for (Long claimed : claimedInflight) {
+                for (String claimed : claimedInflight) {
                     registrar.releasePreemptionClaim(claimed, token);
                 }
                 attempt.markAborted(true);
@@ -144,7 +145,7 @@ public final class DecodePreemptionCoordinator {
         }
         if (!attempt.markCancelInFlight()) {
             request.endpoint().abortPriorityPreemption(token);
-            for (Long claimed : claimedInflight) {
+            for (String claimed : claimedInflight) {
                 registrar.releasePreemptionClaim(claimed, token);
             }
             attempt.markAborted(true);
@@ -308,7 +309,7 @@ public final class DecodePreemptionCoordinator {
             PreemptionAttempt attempt,
             PreemptionAttempt.Victim victim,
             InflightRegistrar.PriorityCanceledObservation observation) {
-        if (observation == null || observation.requestId() != victim.requestId()
+        if (observation == null || !Objects.equals(observation.requestId(), victim.requestId())
                 || observation.errorCode() != 8429) {
             return false;
         }
@@ -346,7 +347,7 @@ public final class DecodePreemptionCoordinator {
     private static void markUnknown(Request request,
                                     InflightRegistrar registrar,
                                     PreemptionAttempt attempt,
-                                    long requestId) {
+                                    String requestId) {
         attempt.recordUnknown(requestId);
         request.endpoint().markPriorityCancelUnknown(attempt.token(), requestId);
         registrar.markPreemptionUnknown(requestId, attempt.token());

@@ -30,7 +30,7 @@ class ConfigurableGroupRoutingPolicyTest {
         flexlbConfig.getRouter().setGroupSelector(trafficPolicyConfig);
 
         Request request = new Request();
-        request.setRequestId(12345L);
+        request.setRequestId("12345");
         request.setSeqLen(10000L);
 
         BalanceContext balanceContext = new BalanceContext();
@@ -60,7 +60,7 @@ class ConfigurableGroupRoutingPolicyTest {
         flexlbConfig.getRouter().setGroupSelector(trafficPolicyConfig);
 
         Request request = new Request();
-        request.setRequestId(12345L);
+        request.setRequestId("12345");
         request.setSeqLen(128L);
 
         BalanceContext balanceContext = new BalanceContext();
@@ -80,7 +80,7 @@ class ConfigurableGroupRoutingPolicyTest {
         FlexlbConfig flexlbConfig = new FlexlbConfig();
 
         Request request = new Request();
-        request.setRequestId(12345L);
+        request.setRequestId("12345");
         request.setSeqLen(128L);
 
         BalanceContext balanceContext = new BalanceContext();

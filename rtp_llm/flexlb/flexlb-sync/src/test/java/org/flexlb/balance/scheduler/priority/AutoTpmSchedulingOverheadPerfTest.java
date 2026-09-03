@@ -4,10 +4,12 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.PriorityScheduler;
+import org.flexlb.balance.scheduler.RequestIdFixtures;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
@@ -19,6 +21,7 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
@@ -28,6 +31,7 @@ import org.junit.jupiter.api.Timeout;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -79,8 +83,8 @@ class AutoTpmSchedulingOverheadPerfTest {
         for (int round = 0; round < ROUNDS; round++) {
             try (PerfHarness h = new PerfHarness(cfg -> {
                 SchedulingTestConfig.usePriorityQueue(cfg);
-                SchedulingTestConfig.allowVictim(cfg, org.flexlb.config.VictimStage.PREFILL_QUEUED);
-                SchedulingTestConfig.allowVictim(cfg, org.flexlb.config.VictimStage.DECODE_RESERVED);
+                SchedulingTestConfig.allowVictim(cfg, VictimStage.PREFILL_QUEUED);
+                SchedulingTestConfig.allowVictim(cfg, VictimStage.DECODE_RESERVED);
             })) {
                 autoTpmRounds.add(runBurst(h, "autotpm-" + round));
             }
@@ -134,8 +138,8 @@ class AutoTpmSchedulingOverheadPerfTest {
             RoundResult autoTpm;
             try (PerfHarness h = new PerfHarness(cfg -> {
                 SchedulingTestConfig.usePriorityQueue(cfg);
-                SchedulingTestConfig.allowVictim(cfg, org.flexlb.config.VictimStage.PREFILL_QUEUED);
-                SchedulingTestConfig.allowVictim(cfg, org.flexlb.config.VictimStage.DECODE_RESERVED);
+                SchedulingTestConfig.allowVictim(cfg, VictimStage.PREFILL_QUEUED);
+                SchedulingTestConfig.allowVictim(cfg, VictimStage.DECODE_RESERVED);
             })) {
                 runWarmup(h);
                 autoTpm = runRateLimited(h, requestCount, targetQps);
@@ -161,7 +165,7 @@ class AutoTpmSchedulingOverheadPerfTest {
     private RoundResult runBurst(PerfHarness h, String label) throws Exception {
         // Warmup
         for (int i = 0; i < WARMUP_REQUESTS; i++) {
-            h.submit(i, syntheticPriority(i), syntheticSeqLen(i));
+            h.submit(String.valueOf(i), syntheticPriority(i), syntheticSeqLen(i));
         }
         awaitAllDispatched(h, WARMUP_REQUESTS);
 
@@ -170,7 +174,7 @@ class AutoTpmSchedulingOverheadPerfTest {
         long startNanos = System.nanoTime();
         for (int i = 0; i < REQUEST_COUNT; i++) {
             long t0 = System.nanoTime();
-            h.submit(1_000_000L + i, syntheticPriority(i), syntheticSeqLen(i));
+            h.submit(String.valueOf(1_000_000L + i), syntheticPriority(i), syntheticSeqLen(i));
             latencies[i] = System.nanoTime() - t0;
         }
         awaitAllDispatched(h, WARMUP_REQUESTS + REQUEST_COUNT);
@@ -183,7 +187,7 @@ class AutoTpmSchedulingOverheadPerfTest {
 
     private void runWarmup(PerfHarness h) throws Exception {
         for (int i = 0; i < WARMUP_REQUESTS; i++) {
-            h.submit(i, syntheticPriority(i), syntheticSeqLen(i));
+            h.submit(String.valueOf(i), syntheticPriority(i), syntheticSeqLen(i));
         }
         awaitAllDispatched(h, WARMUP_REQUESTS);
     }
@@ -198,7 +202,7 @@ class AutoTpmSchedulingOverheadPerfTest {
                 Thread.onSpinWait();
             }
             long t0 = System.nanoTime();
-            h.submit(2_000_000L + i, syntheticPriority(i), syntheticSeqLen(i));
+            h.submit(String.valueOf(2_000_000L + i), syntheticPriority(i), syntheticSeqLen(i));
             latencies[i] = System.nanoTime() - t0;
         }
         awaitAllDispatched(h, WARMUP_REQUESTS + requestCount);
@@ -309,15 +313,14 @@ class AutoTpmSchedulingOverheadPerfTest {
                         EngineRpcService.EnqueueBatchResponsePB.Builder response =
                                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
                                         .setBatchId(req.getBatchId());
-                        List<Long> acceptedRequestIds = new ArrayList<>();
+                        List<String> acceptedRequestIds = new ArrayList<>();
                         for (EngineRpcService.EnqueueBatchDpSlotPB slot : req.getDpSlotsList()) {
                             for (EngineRpcService.EnqueueBatchExternalInputPB input
                                     : slot.getRequestsList()) {
-                                long requestId = input.getInput().getRequestId();
+                                String requestId = RequestId.parse(input.getInput());
                                 acceptedRequestIds.add(requestId);
                                 response.addSuccesses(
-                                        EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
-                                                .setRequestId(requestId));
+                                        RequestIdFixtures.write(EngineRpcService.EnqueueBatchSuccessPB.newBuilder(), requestId));
                             }
                         }
                         reportDecodeAccepted(schedulerRef.get(), endpointRegistryRef.get(),
@@ -366,11 +369,11 @@ class AutoTpmSchedulingOverheadPerfTest {
         private static void reportDecodeAccepted(PriorityScheduler scheduler,
                                                  EndpointRegistry registry,
                                                  WorkerStatus decodeStatus,
-                                                 List<Long> requestIds) {
-            Map<String, TaskInfo> running = new java.util.HashMap<>();
-            for (long requestId : requestIds) {
+                                                 List<String> requestIds) {
+            Map<String, TaskInfo> running = new HashMap<>();
+            for (String requestId : requestIds) {
                 TaskInfo task = new TaskInfo();
-                task.setRequestId(requestId);
+                task.setRequestId(String.valueOf(requestId));
                 task.setPhase(TaskPhase.KV_ALLOCATED);
                 running.put(String.valueOf(requestId), task);
             }
@@ -391,7 +394,7 @@ class AutoTpmSchedulingOverheadPerfTest {
             return status;
         }
 
-        CompletableFuture<Response> submit(long requestId, int priority, long seqLen) {
+        CompletableFuture<Response> submit(String requestId, int priority, long seqLen) {
             BalanceContext ctx = context(requestId, priority, seqLen);
             return scheduler.submit(ctx);
         }
@@ -403,7 +406,7 @@ class AutoTpmSchedulingOverheadPerfTest {
             dispatcher.shutdown();
         }
 
-        private BalanceContext context(long requestId, int priority, long seqLen) {
+        private BalanceContext context(String requestId, int priority, long seqLen) {
             Request request = new Request();
             request.setRequestId(requestId);
             request.setSeqLen(seqLen);
@@ -421,10 +424,9 @@ class AutoTpmSchedulingOverheadPerfTest {
             return ctx;
         }
 
-        private static byte[] generateInputBytes(long requestId, int tokenCount) {
+        private static byte[] generateInputBytes(String requestId, int tokenCount) {
             EngineRpcService.GenerateInputPB.Builder input =
-                    EngineRpcService.GenerateInputPB.newBuilder()
-                            .setRequestId(requestId)
+                    RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                             .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                                     .setMaxNewTokens(8)
                                     .build());
@@ -434,7 +436,7 @@ class AutoTpmSchedulingOverheadPerfTest {
             return input.build().toByteArray();
         }
 
-        private static Response successRoute(long requestId) {
+        private static Response successRoute(String requestId) {
             Response response = new Response();
             response.setSuccess(true);
             response.setServerStatus(List.of(
@@ -444,7 +446,7 @@ class AutoTpmSchedulingOverheadPerfTest {
         }
 
         private static ServerStatus server(RoleType role, String ip, int httpPort,
-                                           int grpcPort, long requestId) {
+                                           int grpcPort, String requestId) {
             ServerStatus status = new ServerStatus();
             status.setSuccess(true);
             status.setRole(role);

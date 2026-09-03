@@ -50,9 +50,9 @@ class PrefillResourceMeasureTest {
         PrefillResourceMeasure measure = new PrefillResourceMeasure(configService);
         WorkerStatus worker = createAlivePrefillWorker();
         Map<String, TaskInfo> runningTaskList = new HashMap<>();
-        runningTaskList.put("1", taskInfo(1L, TaskPhase.PENDING));
-        runningTaskList.put("2", taskInfo(2L, TaskPhase.RECEIVED));
-        runningTaskList.put("3", taskInfo(3L, TaskPhase.KV_ALLOCATED));
+        runningTaskList.put("1", taskInfo("1", TaskPhase.PENDING));
+        runningTaskList.put("2", taskInfo("2", TaskPhase.RECEIVED));
+        runningTaskList.put("3", taskInfo("3", TaskPhase.KV_ALLOCATED));
         worker.setRunningTaskList(runningTaskList);
 
         assertEquals(15.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
@@ -64,8 +64,8 @@ class PrefillResourceMeasureTest {
         PrefillResourceMeasure measure = new PrefillResourceMeasure(configService);
         WorkerStatus worker = createAlivePrefillWorker();
         Map<String, TaskInfo> runningTaskList = new HashMap<>();
-        runningTaskList.put("1", taskInfo(1L, TaskPhase.RUNNING));
-        runningTaskList.put("2", taskInfo(2L, TaskPhase.RUNNING));
+        runningTaskList.put("1", taskInfo("1", TaskPhase.RUNNING));
+        runningTaskList.put("2", taskInfo("2", TaskPhase.RUNNING));
         worker.setRunningTaskList(runningTaskList);
 
         assertEquals(0.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
@@ -79,10 +79,10 @@ class PrefillResourceMeasureTest {
         PrefillResourceMeasure measure = new PrefillResourceMeasure(configService);
         WorkerStatus worker = createAlivePrefillWorker();
         Map<String, TaskInfo> runningTaskList = new HashMap<>();
-        runningTaskList.put("1", taskInfo(1L, TaskPhase.PENDING));
-        runningTaskList.put("2", taskInfo(2L, TaskPhase.RECEIVED));
-        runningTaskList.put("3", taskInfo(3L, TaskPhase.KV_ALLOCATED));
-        runningTaskList.put("4", taskInfo(4L, TaskPhase.RUNNING));
+        runningTaskList.put("1", taskInfo("1", TaskPhase.PENDING));
+        runningTaskList.put("2", taskInfo("2", TaskPhase.RECEIVED));
+        runningTaskList.put("3", taskInfo("3", TaskPhase.KV_ALLOCATED));
+        runningTaskList.put("4", taskInfo("4", TaskPhase.RUNNING));
         worker.setRunningTaskList(runningTaskList);
 
         // 3 waiting out of the saturation point of 20 = 15%
@@ -95,7 +95,7 @@ class PrefillResourceMeasureTest {
         WorkerStatus worker = createAlivePrefillWorker();
         Map<String, TaskInfo> runningTaskList = new HashMap<>();
         for (int i = 1; i <= 24; i++) {
-            runningTaskList.put(String.valueOf(i), taskInfo(i, TaskPhase.PENDING));
+            runningTaskList.put(String.valueOf(i), taskInfo(String.valueOf(i), TaskPhase.PENDING));
         }
         worker.setRunningTaskList(runningTaskList);
 
@@ -126,9 +126,9 @@ class PrefillResourceMeasureTest {
         PrefillResourceMeasure measure = new PrefillResourceMeasure(configService);
         WorkerStatus worker = createAlivePrefillWorker();
         Map<String, TaskInfo> runningTaskList = new HashMap<>();
-        runningTaskList.put("1", taskInfo(1L, TaskPhase.RUNNING));
-        runningTaskList.put("2", taskInfo(2L, TaskPhase.RUNNING));
-        runningTaskList.put("3", taskInfo(3L, TaskPhase.RUNNING));
+        runningTaskList.put("1", taskInfo("1", TaskPhase.RUNNING));
+        runningTaskList.put("2", taskInfo("2", TaskPhase.RUNNING));
+        runningTaskList.put("3", taskInfo("3", TaskPhase.RUNNING));
         worker.setRunningTaskList(runningTaskList);
 
         assertEquals(0.0, measure.calculateAverageWaterLevel(Map.of("worker", worker)));
@@ -141,7 +141,7 @@ class PrefillResourceMeasureTest {
         return worker;
     }
 
-    private TaskInfo taskInfo(long requestId, TaskPhase phase) {
+    private TaskInfo taskInfo(String requestId, TaskPhase phase) {
         TaskInfo taskInfo = new TaskInfo();
         taskInfo.setRequestId(requestId);
         taskInfo.setPhase(phase);

@@ -27,7 +27,7 @@ import java.util.Comparator;
  * benefit. Same-priority FIFO is now the sole tie-break after priority.
  *
  * <p>Callers that need a deterministic total order (e.g. the batcher queue
- * comparator) append a final {@code .thenComparingLong(...::requestId)} to
+ * comparator) append a final {@code .thenComparing(...::requestId)} to
  * {@link #strict()}.
  */
 public final class PriorityOrdering {
@@ -61,14 +61,14 @@ public final class PriorityOrdering {
      */
     public static int compareWithRequestId(int leftPriority,
                                            long leftEnqueueSeq,
-                                           long leftRequestId,
+                                           String leftRequestId,
                                            int rightPriority,
                                            long rightEnqueueSeq,
-                                           long rightRequestId) {
+                                           String rightRequestId) {
         int strictOrder = compare(leftPriority, leftEnqueueSeq,
                 rightPriority, rightEnqueueSeq);
         return strictOrder != 0
-                ? strictOrder : Long.compare(leftRequestId, rightRequestId);
+                ? strictOrder : leftRequestId.compareTo(rightRequestId);
     }
 
     /**
@@ -76,10 +76,10 @@ public final class PriorityOrdering {
      * worker order, without allocating a temporary {@link Prioritized} view.
      */
     public static boolean comesBefore(Prioritized item,
-                                      long itemRequestId,
+                                      String itemRequestId,
                                       int probePriority,
                                       long probeEnqueueSeq,
-                                      long probeRequestId) {
+                                      String probeRequestId) {
         return compareWithRequestId(
                 item.priority(), item.enqueueSeq(), itemRequestId,
                 probePriority, probeEnqueueSeq, probeRequestId) < 0;

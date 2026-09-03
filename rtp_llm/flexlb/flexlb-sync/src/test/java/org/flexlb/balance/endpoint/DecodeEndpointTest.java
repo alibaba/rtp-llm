@@ -7,7 +7,9 @@ import org.flexlb.enums.TaskPhase;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -29,41 +31,41 @@ class DecodeEndpointTest {
     @Test
     void reserve_updatesSnapshotAndInflight() {
         updateStatus(null, null, 10000);
-        endpoint.reserve(100L, 500, 500);
+        endpoint.reserve("100", 500, 500);
         assertEquals(1, endpoint.getInflightCount());
         assertEquals(9500, endpoint.realKvAvailable());
     }
 
     @Test
     void release_decrementsInflight() {
-        endpoint.reserve(100L, 500, 500);
-        endpoint.reserve(101L, 300, 300);
-        endpoint.release(100L);
+        endpoint.reserve("100", 500, 500);
+        endpoint.reserve("101", 300, 300);
+        endpoint.release("100");
 
         assertEquals(1, endpoint.getInflightCount());
     }
 
     @Test
     void release_unknownRequestId_noEffect() {
-        endpoint.reserve(100L, 500, 500);
-        endpoint.release(999L);
+        endpoint.reserve("100", 500, 500);
+        endpoint.release("999");
         assertEquals(1, endpoint.getInflightCount());
     }
 
     @Test
     void release_neverGoesNegative() {
-        endpoint.reserve(100L, 100, 100);
-        endpoint.release(100L);
-        endpoint.release(100L);
+        endpoint.reserve("100", 100, 100);
+        endpoint.release("100");
+        endpoint.release("100");
         assertEquals(0, endpoint.getInflightCount());
         assertEquals(0, endpoint.realKvAvailable());
     }
 
     @Test
     void calibrate_kvAllocatedReleasesFromInflight() {
-        endpoint.reserve(100L, 500, 500);
+        endpoint.reserve("100", 500, 500);
 
-        TaskInfo running = task(100L);
+        TaskInfo running = task("100");
         running.setPhase(TaskPhase.KV_ALLOCATED);
         updateStatus(Map.of("100", running), null, 10000);
 
@@ -73,9 +75,9 @@ class DecodeEndpointTest {
 
     @Test
     void calibrate_finishedFailureReleasesFromInflight() {
-        endpoint.reserve(100L, 500, 500);
+        endpoint.reserve("100", 500, 500);
 
-        TaskInfo failed = task(100L);
+        TaskInfo failed = task("100");
         failed.setErrorCode(1);
         failed.setErrorMessage("timeout");
         updateStatus(null, Map.of("100", failed), 10000);
@@ -85,9 +87,9 @@ class DecodeEndpointTest {
 
     @Test
     void calibrate_finishedSuccessReleasesIfStillPresent() {
-        endpoint.reserve(100L, 500, 500);
+        endpoint.reserve("100", 500, 500);
 
-        TaskInfo success = task(100L);
+        TaskInfo success = task("100");
         success.setErrorCode(0);
         updateStatus(null, Map.of("100", success), 10000);
 
@@ -96,7 +98,7 @@ class DecodeEndpointTest {
 
     @Test
     void calibrate_updatesReportedKvAvailable() {
-        endpoint.reserve(100L, 500, 500);
+        endpoint.reserve("100", 500, 500);
         updateStatus(null, null, 10000);
 
         assertEquals(9500, endpoint.realKvAvailable());
@@ -106,8 +108,8 @@ class DecodeEndpointTest {
     void availableKvTokens_accountsForReservations() {
         updateStatus(null, null, 10000);
 
-        endpoint.reserve(100L, 3000, 3000);
-        endpoint.reserve(101L, 2000, 2000);
+        endpoint.reserve("100", 3000, 3000);
+        endpoint.reserve("101", 2000, 2000);
 
         assertEquals(5000, endpoint.realKvAvailable());
     }
@@ -122,73 +124,73 @@ class DecodeEndpointTest {
     @Test
     void getEngineLoad_o1_tracks_markQueued_and_markDispatched() {
         updateStatus(null, null, 10000);
-        endpoint.reserve(1L, 100, 100);
-        endpoint.reserve(2L, 200, 200);
-        endpoint.reserve(3L, 300, 300);
+        endpoint.reserve("1", 100, 100);
+        endpoint.reserve("2", 200, 200);
+        endpoint.reserve("3", 300, 300);
         // No queued phase: engineLoad == totalLoad == inflight(3)
         assertEquals(3, endpoint.getEngineLoad());
         assertEquals(endpoint.getTotalLoad(), endpoint.getEngineLoad());
 
         // mark req 1,2 as queued → engine-facing load drops to 1
-        endpoint.markQueuedPhase(1L);
-        endpoint.markQueuedPhase(2L);
+        endpoint.markQueuedPhase("1");
+        endpoint.markQueuedPhase("2");
         assertEquals(1, endpoint.getEngineLoad());
 
         // dispatch req 1 → back to engine load 2
-        assertTrue(endpoint.tryMarkEngineMayHaveSeen(1L));
+        assertTrue(endpoint.tryMarkEngineMayHaveSeen("1"));
         assertEquals(2, endpoint.getEngineLoad());
 
         // release req 2 (was queued) → inflight=2, queued=0
-        endpoint.release(2L);
+        endpoint.release("2");
         assertEquals(2, endpoint.getEngineLoad());
 
         // release req 1 → inflight=1
-        endpoint.release(1L);
+        endpoint.release("1");
         assertEquals(1, endpoint.getEngineLoad());
 
         // release req 3 → 0
-        endpoint.release(3L);
+        endpoint.release("3");
         assertEquals(0, endpoint.getEngineLoad());
     }
 
     @Test
     void getEngineLoad_calibrate_prunes_queued_phase_count() {
-        endpoint.reserve(1L, 100, 100);
-        endpoint.reserve(2L, 100, 100);
-        endpoint.markQueuedPhase(1L);
-        endpoint.markQueuedPhase(2L);
+        endpoint.reserve("1", 100, 100);
+        endpoint.reserve("2", 100, 100);
+        endpoint.markQueuedPhase("1");
+        endpoint.markQueuedPhase("2");
         assertEquals(0, endpoint.getEngineLoad()); // both queued
 
         // calibrate: req 1 confirmed → removed from inflight + queued
-        TaskInfo running = task(1L);
+        TaskInfo running = task("1");
         running.setPhase(TaskPhase.KV_ALLOCATED);
         updateStatus(Map.of("1", running), null, 10000);
 
         // req 2 still queued, inflight=1 (req2), confirmed=1 (req1)
-        // engineLoad = confirmed(1) + max(0, inflight(1) - queued(1)) = 1
+        // engineLoad = confirmed(1) + max(0, inflight(1) - queued("1")) = 1
         assertEquals(1, endpoint.getEngineLoad());
     }
 
     @Test
     void getEngineLoad_idempotent_markQueued_does_not_double_count() {
-        endpoint.reserve(1L, 100, 100);
-        endpoint.markQueuedPhase(1L);
-        endpoint.markQueuedPhase(1L); // idempotent: add returns false
+        endpoint.reserve("1", 100, 100);
+        endpoint.markQueuedPhase("1");
+        endpoint.markQueuedPhase("1"); // idempotent: add returns false
         assertEquals(0, endpoint.getEngineLoad());
     }
 
     @Test
     void getEngineLoad_idempotent_markDispatched_does_not_over_decrement() {
-        endpoint.reserve(1L, 100, 100);
-        endpoint.markQueuedPhase(1L);
-        assertTrue(endpoint.tryMarkEngineMayHaveSeen(1L));
-        assertTrue(endpoint.tryMarkEngineMayHaveSeen(1L)); // already engine-visible
+        endpoint.reserve("1", 100, 100);
+        endpoint.markQueuedPhase("1");
+        assertTrue(endpoint.tryMarkEngineMayHaveSeen("1"));
+        assertTrue(endpoint.tryMarkEngineMayHaveSeen("1")); // already engine-visible
         assertEquals(1, endpoint.getEngineLoad());
     }
 
     @Test
     void getEngineLoad_clamps_negative_drift_to_zero() throws Exception {
-        endpoint.reserve(1L, 100, 100);
+        endpoint.reserve("1", 100, 100);
         setQueuedPhaseCount(-5);
         // inflight=1, queued clamped from -5 to 0 → engineLoad = 0 + max(0,1-0) = 1
         assertEquals(1, endpoint.getEngineLoad());
@@ -196,8 +198,8 @@ class DecodeEndpointTest {
 
     @Test
     void getEngineLoad_clamps_overflow_drift_to_inflight() throws Exception {
-        endpoint.reserve(1L, 100, 100);
-        endpoint.reserve(2L, 100, 100);
+        endpoint.reserve("1", 100, 100);
+        endpoint.reserve("2", 100, 100);
         setQueuedPhaseCount(100);
         // inflight=2, queued clamped from 100 to 2 → engineLoad = 0 + max(0,2-2) = 0
         assertEquals(0, endpoint.getEngineLoad());
@@ -213,12 +215,12 @@ class DecodeEndpointTest {
     @Test
     void evictExpiredRequests_prunesQueuedPhase_andRestoresEngineLoad() throws InterruptedException {
         updateStatus(null, null, 10000);
-        endpoint.reserve(100L, 500, 500);
-        endpoint.reserve(101L, 500, 500);
-        endpoint.reserve(102L, 500, 500);
-        endpoint.markQueuedPhase(100L);
-        endpoint.markQueuedPhase(101L);
-        endpoint.markQueuedPhase(102L);
+        endpoint.reserve("100", 500, 500);
+        endpoint.reserve("101", 500, 500);
+        endpoint.reserve("102", 500, 500);
+        endpoint.markQueuedPhase("100");
+        endpoint.markQueuedPhase("101");
+        endpoint.markQueuedPhase("102");
 
         assertEquals(3, endpoint.getInflightCount());
         assertEquals(0, endpoint.getEngineLoad());
@@ -237,10 +239,10 @@ class DecodeEndpointTest {
 
     /** Directly mutate the private counter to simulate drift. */
     private void setQueuedPhaseCount(int value) throws Exception {
-        java.lang.reflect.Field f = DecodeEndpoint.class.getDeclaredField("queuedPhaseCount");
+        Field f = DecodeEndpoint.class.getDeclaredField("queuedPhaseCount");
         f.setAccessible(true);
-        java.util.concurrent.atomic.AtomicInteger counter =
-                (java.util.concurrent.atomic.AtomicInteger) f.get(endpoint);
+        AtomicInteger counter =
+                (AtomicInteger) f.get(endpoint);
         counter.set(value);
     }
 
@@ -253,7 +255,7 @@ class DecodeEndpointTest {
         endpoint.onWorkerStatusUpdate(status, response);
     }
 
-    private TaskInfo task(long requestId) {
+    private TaskInfo task(String requestId) {
         TaskInfo task = new TaskInfo();
         task.setRequestId(requestId);
         return task;

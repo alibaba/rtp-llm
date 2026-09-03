@@ -36,7 +36,7 @@ final class RequestLifecycle {
             RequestLifecycleState.FAILED, EnumSet.noneOf(RequestLifecycleState.class),
             RequestLifecycleState.COMPLETED, EnumSet.noneOf(RequestLifecycleState.class));
 
-    private final long requestId;
+    private final String requestId;
     private final long createdAtMs;
     private RequestLifecycleState state = RequestLifecycleState.QUEUED;
     private long updatedAtMs;
@@ -45,7 +45,7 @@ final class RequestLifecycle {
     private long batchId;
     private long batchEnqueueStartedAtMs;
 
-    RequestLifecycle(long requestId) {
+    RequestLifecycle(String requestId) {
         this.requestId = requestId;
         this.createdAtMs = System.currentTimeMillis();
         this.updatedAtMs = createdAtMs;

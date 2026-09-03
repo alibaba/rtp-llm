@@ -1,5 +1,6 @@
 package org.flexlb.mock;
 
+import com.google.protobuf.Int32Value;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
@@ -168,8 +169,8 @@ public abstract class FlexLBMockTestBase {
         prefillWs.setAlive(true);
         prefillWs.setGroup("test-group");
         prefillWs.setDpRank(0);
-        prefillWs.setAvailableKvCacheTokens(new java.util.concurrent.atomic.AtomicLong(1_000_000L));
-        prefillWs.setTotalKvCacheTokens(new java.util.concurrent.atomic.AtomicLong(2_000_000L));
+        prefillWs.setAvailableKvCacheTokens(new AtomicLong(1_000_000L));
+        prefillWs.setTotalKvCacheTokens(new AtomicLong(2_000_000L));
 
         WorkerStatus decodeWs = new WorkerStatus();
         decodeWs.setIp(decodeIp);
@@ -179,8 +180,8 @@ public abstract class FlexLBMockTestBase {
         decodeWs.setAlive(true);
         decodeWs.setGroup("test-group");
         decodeWs.setDpRank(0);
-        decodeWs.setAvailableKvCacheTokens(new java.util.concurrent.atomic.AtomicLong(1_000_000L));
-        decodeWs.setTotalKvCacheTokens(new java.util.concurrent.atomic.AtomicLong(2_000_000L));
+        decodeWs.setAvailableKvCacheTokens(new AtomicLong(1_000_000L));
+        decodeWs.setTotalKvCacheTokens(new AtomicLong(2_000_000L));
 
         // 9. Register decode endpoint (no scheduler dependency)
         endpointRegistry.ensureEndpoint(RoleType.DECODE, decodeIpPort, decodeWs);
@@ -324,14 +325,14 @@ public abstract class FlexLBMockTestBase {
     /**
      * Submit a request with the given ID and default seq_len=128.
      */
-    protected CompletableFuture<Response> submitRequest(long requestId) {
+    protected CompletableFuture<Response> submitRequest(String requestId) {
         return scheduler.submit(createBalanceContext(requestId));
     }
 
     /**
      * Submit a request with the given ID and seq_len.
      */
-    protected CompletableFuture<Response> submitRequest(long requestId, long seqLen) {
+    protected CompletableFuture<Response> submitRequest(String requestId, long seqLen) {
         return scheduler.submit(createBalanceContext(requestId, seqLen));
     }
 
@@ -443,11 +444,11 @@ public abstract class FlexLBMockTestBase {
 
     // ==================== Internal: BalanceContext construction ====================
 
-    protected BalanceContext createBalanceContext(long requestId) {
+    protected BalanceContext createBalanceContext(String requestId) {
         return createBalanceContext(requestId, 128);
     }
 
-    protected BalanceContext createBalanceContext(long requestId, long seqLen) {
+    protected BalanceContext createBalanceContext(String requestId, long seqLen) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
@@ -462,20 +463,19 @@ public abstract class FlexLBMockTestBase {
         return ctx;
     }
 
-    private static byte[] generateInputBytes(long requestId) {
-        EngineRpcService.GenerateInputPB input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+    private static byte[] generateInputBytes(String requestId) {
+        EngineRpcService.GenerateInputPB input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .addTokenIds(101)
                 .addTokenIds(102)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(8)
-                        .setGroupTimeout(com.google.protobuf.Int32Value.of(77))
+                        .setGroupTimeout(Int32Value.of(77))
                         .build())
                 .build();
         return input.toByteArray();
     }
 
-    private Response successRoute(long requestId) {
+    private Response successRoute(String requestId) {
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(List.of(
@@ -485,7 +485,7 @@ public abstract class FlexLBMockTestBase {
         return response;
     }
 
-    private static ServerStatus serverStatus(RoleType role, String ip, int httpPort, int grpcPort, long requestId) {
+    private static ServerStatus serverStatus(RoleType role, String ip, int httpPort, int grpcPort, String requestId) {
         ServerStatus status = new ServerStatus();
         status.setSuccess(true);
         status.setRole(role);

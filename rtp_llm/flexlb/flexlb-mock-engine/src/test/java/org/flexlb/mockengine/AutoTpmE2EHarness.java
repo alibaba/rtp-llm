@@ -32,6 +32,7 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -56,6 +57,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -303,12 +305,12 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         config.priorityOrdering().setPreemption(preemption);
     }
 
-    ServerStatus prefillServer(int index, long requestId) {
+    ServerStatus prefillServer(int index, String requestId) {
         int grpcPort = prefillEngines.get(index).getGrpcPort();
         return server(RoleType.PREFILL, "127.0.0.1", httpPort(grpcPort), grpcPort, requestId);
     }
 
-    ServerStatus decodeServer(int index, long requestId) {
+    ServerStatus decodeServer(int index, String requestId) {
         int grpcPort = decodeEngines.get(index).getGrpcPort();
         return server(RoleType.DECODE, "127.0.0.1", httpPort(grpcPort), grpcPort, requestId);
     }
@@ -334,7 +336,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         return response;
     }
 
-    static ServerStatus server(RoleType role, String ip, int httpPort, int grpcPort, long requestId) {
+    static ServerStatus server(RoleType role, String ip, int httpPort, int grpcPort, String requestId) {
         ServerStatus status = new ServerStatus();
         status.setSuccess(true);
         status.setRole(role);
@@ -349,11 +351,11 @@ final class AutoTpmE2EHarness implements AutoCloseable {
 
     // ==================== request construction ====================
 
-    BalanceContext context(long requestId, int priority) {
+    BalanceContext context(String requestId, int priority) {
         return context(requestId, priority, 128, 8);
     }
 
-    BalanceContext context(long requestId, int priority, long seqLen, int maxNewTokens) {
+    BalanceContext context(String requestId, int priority, long seqLen, int maxNewTokens) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
@@ -373,9 +375,8 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         return ctx;
     }
 
-    static byte[] generateInputBytes(long requestId, int inputTokens, int maxNewTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+    static byte[] generateInputBytes(String requestId, int inputTokens, int maxNewTokens) {
+        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(maxNewTokens)
                         .build());
@@ -438,7 +439,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
 
     static TaskInfo toTaskInfo(EngineRpcService.TaskInfoPB task) {
         TaskInfo info = new TaskInfo();
-        info.setRequestId(task.getRequestId());
+        info.setRequestId(RequestId.parse(task));
         info.setInputLength(task.getInputLength());
         info.setBatchId(task.getBatchId());
         info.setErrorCode(task.getErrorInfo().getErrorCode());
@@ -495,7 +496,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
 
     // ==================== misc helpers ====================
 
-    static <T> T unary(java.util.function.Consumer<StreamObserver<T>> invocation) {
+    static <T> T unary(Consumer<StreamObserver<T>> invocation) {
         AtomicReference<T> response = new AtomicReference<>();
         AtomicReference<Throwable> error = new AtomicReference<>();
         CountDownLatch latch = new CountDownLatch(1);

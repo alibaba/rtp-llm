@@ -893,7 +893,7 @@ public final class JavaMockEngineCluster {
             requestStates.put(requestId, "cancelled");
             cancelledCount.incrementAndGet();
             EngineRpcService.TaskInfoPB.Builder taskBuilder = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(requestId)
+                    .setRequestId(String.valueOf(requestId))
                     // Pass the ACTUAL phase the request was cancelled in through
                     // to the finished entry (P2-1): a queued opt-in decode
                     // request surfaces KV_ALLOCATED, a queued prefill RECEIVED.
@@ -1061,7 +1061,7 @@ public final class JavaMockEngineCluster {
                                                       EngineRpcService.TaskPhase phase) {
             addPriorityCancelTombstone(requestId);
             EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(requestId)
+                    .setRequestId(String.valueOf(requestId))
                     .setPhase(phase)
                     .setPriorityPreemptionProgress(EngineRpcService.PriorityPreemptionProgressPB
                             .PRIORITY_PREEMPTION_CANCELED)
@@ -1558,7 +1558,7 @@ public final class JavaMockEngineCluster {
                                                  int dpRank,
                                                  EngineRpcService.TaskPhase phase) {
             return EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(shape.input().getRequestId())
+                    .setRequestId(String.valueOf(shape.input().getRequestId()))
                     .setInputLength(shape.inputLen())
                     .setPrefixLength(shape.hitTokens())
                     .setBatchId(batchId)
@@ -1581,7 +1581,7 @@ public final class JavaMockEngineCluster {
                                       int dpRank) {
             recordRecentExecutionTime(executionMs);
             EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(shape.input().getRequestId())
+                    .setRequestId(String.valueOf(shape.input().getRequestId()))
                     .setInputLength(shape.inputLen())
                     .setPrefixLength(shape.hitTokens())
                     .setBatchId(batchId)

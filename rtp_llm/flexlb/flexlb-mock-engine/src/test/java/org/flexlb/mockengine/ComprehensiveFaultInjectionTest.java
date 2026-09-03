@@ -133,7 +133,7 @@ class ComprehensiveFaultInjectionTest {
             // Enqueue 5 requests — all should get errors
             for (int i = 1; i <= 5; i++) {
                 EngineRpcService.EnqueueBatchResponsePB response =
-                        enqueue(prefill, batch(1000 + i, slot(0, input(i, 10))));
+                        enqueue(prefill, batch(1000 + i, slot(0, input(String.valueOf(i), 10))));
                 assertEquals(0, response.getSuccessesCount(),
                         "request " + i + " should have 0 successes under enqueue_error");
                 assertEquals(1, response.getErrorsCount(),
@@ -148,7 +148,7 @@ class ComprehensiveFaultInjectionTest {
             // Enqueue 5 more — all should succeed
             for (int i = 6; i <= 10; i++) {
                 EngineRpcService.EnqueueBatchResponsePB response =
-                        enqueue(prefill, batch(1000 + i, slot(0, input(i, 10))));
+                        enqueue(prefill, batch(1000 + i, slot(0, input(String.valueOf(i), 10))));
                 assertEquals(1, response.getSuccessesCount(),
                         "request " + i + " should succeed after clearing enqueue_error");
                 assertEquals(0, response.getErrorsCount(),
@@ -185,7 +185,7 @@ class ComprehensiveFaultInjectionTest {
             // Call generateStreamCall 5 times — all should return error
             for (int i = 1; i <= 5; i++) {
                 GenerateResult result = generateStream(
-                        prefillServices.get(0), genInput(i, 10), 3_000);
+                        prefillServices.get(0), genInput(String.valueOf(i), 10), 3_000);
                 assertTrue(result.completed(), "generateStreamCall " + i + " should complete (onError)");
                 assertNotNull(result.error(), "generateStreamCall " + i + " should have error");
                 assertTrue(result.error().getMessage().contains("generate_error"),
@@ -200,7 +200,7 @@ class ComprehensiveFaultInjectionTest {
             // Call generateStreamCall 5 more times — all should succeed
             for (int i = 6; i <= 10; i++) {
                 GenerateResult result = generateStream(
-                        prefillServices.get(0), genInput(i, 10), 5_000);
+                        prefillServices.get(0), genInput(String.valueOf(i), 10), 5_000);
                 assertTrue(result.completed(), "generateStreamCall " + i + " should complete after clear");
                 assertNotNull(result.response(), "generateStreamCall " + i + " should have response");
                 assertEquals(i, result.response().getRequestId());
@@ -237,7 +237,7 @@ class ComprehensiveFaultInjectionTest {
             for (int i = 1; i <= 3; i++) {
                 long start = System.nanoTime();
                 GenerateResult result = generateStream(
-                        prefillServices.get(0), genInput(i, 10), 2_000);
+                        prefillServices.get(0), genInput(String.valueOf(i), 10), 2_000);
                 long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
                 assertFalse(result.completed(),
                         "generateStreamCall " + i + " should time out under no_respond");
@@ -253,7 +253,7 @@ class ComprehensiveFaultInjectionTest {
             // Call generateStreamCall 3 more times — all should succeed
             for (int i = 4; i <= 6; i++) {
                 GenerateResult result = generateStream(
-                        prefillServices.get(0), genInput(i, 10), 5_000);
+                        prefillServices.get(0), genInput(String.valueOf(i), 10), 5_000);
                 assertTrue(result.completed(), "generateStreamCall " + i + " should complete after clear");
                 assertNotNull(result.response(), "generateStreamCall " + i + " should have response");
             }
@@ -342,7 +342,7 @@ class ComprehensiveFaultInjectionTest {
             int rejected = 0;
             for (int i = 1; i <= 5; i++) {
                 EngineRpcService.EnqueueBatchResponsePB response =
-                        enqueue(prefill, batch(2000 + i, slot(0, input(i, 10))));
+                        enqueue(prefill, batch(2000 + i, slot(0, input(String.valueOf(i), 10))));
                 if (response.getSuccessesCount() > 0) {
                     accepted++;
                 } else if (response.getErrorsCount() > 0) {
@@ -366,7 +366,7 @@ class ComprehensiveFaultInjectionTest {
 
             // Enqueue after clearing — should succeed
             EngineRpcService.EnqueueBatchResponsePB response =
-                    enqueue(prefill, batch(2999, slot(0, input(99, 10))));
+                    enqueue(prefill, batch(2999, slot(0, input("99", 10))));
             assertEquals(1, response.getSuccessesCount(),
                     "enqueue should succeed after clearing queue depth limit");
 
@@ -403,7 +403,7 @@ class ComprehensiveFaultInjectionTest {
             int emptyAfter = 0;
             for (int i = 1; i <= 10; i++) {
                 EngineRpcService.EnqueueBatchResponsePB response =
-                        enqueue(prefill, batch(3000 + i, slot(0, input(i, 10))));
+                        enqueue(prefill, batch(3000 + i, slot(0, input(String.valueOf(i), 10))));
                 if (response.getSuccessesCount() > 0) {
                     succeeded++;
                 } else {
@@ -433,7 +433,7 @@ class ComprehensiveFaultInjectionTest {
 
             // Verify recovery — enqueue should succeed
             EngineRpcService.EnqueueBatchResponsePB response =
-                    enqueue(prefill, batch(3999, slot(0, input(99, 10))));
+                    enqueue(prefill, batch(3999, slot(0, input("99", 10))));
             assertEquals(1, response.getSuccessesCount(),
                     "enqueue should succeed after engine restart");
 
@@ -470,7 +470,7 @@ class ComprehensiveFaultInjectionTest {
             for (int i = 1; i <= 5; i++) {
                 long start = System.nanoTime();
                 EngineRpcService.EnqueueBatchResponsePB response =
-                        enqueue(prefill, batch(4000 + i, slot(0, input(i, 10))));
+                        enqueue(prefill, batch(4000 + i, slot(0, input(String.valueOf(i), 10))));
                 long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
                 assertEquals(1, response.getSuccessesCount(),
                         "request " + i + " should succeed despite delay");
@@ -487,7 +487,7 @@ class ComprehensiveFaultInjectionTest {
             for (int i = 6; i <= 10; i++) {
                 long start = System.nanoTime();
                 EngineRpcService.EnqueueBatchResponsePB response =
-                        enqueue(prefill, batch(4000 + i, slot(0, input(i, 10))));
+                        enqueue(prefill, batch(4000 + i, slot(0, input(String.valueOf(i), 10))));
                 long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
                 assertEquals(1, response.getSuccessesCount(),
                         "request " + i + " should succeed after clearing delay");
@@ -530,7 +530,7 @@ class ComprehensiveFaultInjectionTest {
             for (int i = 1; i <= 5; i++) {
                 long start = System.nanoTime();
                 GenerateResult result = generateStream(
-                        prefill, genInput(i, 10), 5_000);
+                        prefill, genInput(String.valueOf(i), 10), 5_000);
                 long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
                 assertTrue(result.completed(),
                         "generateStreamCall " + i + " should complete");
@@ -550,7 +550,7 @@ class ComprehensiveFaultInjectionTest {
             for (int i = 6; i <= 10; i++) {
                 long start = System.nanoTime();
                 GenerateResult result = generateStream(
-                        prefill, genInput(i, 10), 5_000);
+                        prefill, genInput(String.valueOf(i), 10), 5_000);
                 long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
                 assertTrue(result.completed(),
                         "generateStreamCall " + i + " should complete after clearing");
@@ -813,9 +813,8 @@ class ComprehensiveFaultInjectionTest {
     //  Protobuf builders
     // ════════════════════════════════════════════════════════════════
 
-    private static EngineRpcService.GenerateInputPB input(long requestId, int inputTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+    private static EngineRpcService.GenerateInputPB input(String requestId, int inputTokens) {
+        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(1)
                         .build());
@@ -825,7 +824,7 @@ class ComprehensiveFaultInjectionTest {
         return input.build();
     }
 
-    private static EngineRpcService.GenerateInputPB genInput(long requestId, int inputTokens) {
+    private static EngineRpcService.GenerateInputPB genInput(String requestId, int inputTokens) {
         return input(requestId, inputTokens);
     }
 

@@ -12,6 +12,8 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
+import org.mockito.Mockito;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -24,7 +26,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -65,7 +66,7 @@ class AdmissionLeasePostSuccessTest {
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         PrefillQueueManager queue = mock(PrefillQueueManager.class);
         CompletableFuture<Response> future = new CompletableFuture<>();
-        BatchItem item = batchItem(3_001L, future, decode);
+        BatchItem item = batchItem("3001", future, decode);
         when(registrar.fenceAfterDeliveryTimeout(item, "post_delivery_soft_timeout"))
                 .thenReturn(InflightRegistrar.PostDeliveryFenceResult.STARTED);
 
@@ -74,12 +75,12 @@ class AdmissionLeasePostSuccessTest {
         lease.bindTo(future);
         future.complete(successResponse());
 
-        verify(registrar, org.mockito.Mockito.timeout(1_000).times(1))
+        verify(registrar, Mockito.timeout(1_000).times(1))
                 .fenceAfterDeliveryTimeout(item, "post_delivery_soft_timeout");
-        verify(queue, never()).tryRemove(anyLong(), anyString());
-        verify(decode, never()).release(anyLong());
+        verify(queue, never()).tryRemove(ArgumentMatchers.anyString(), anyString());
+        verify(decode, never()).release(ArgumentMatchers.anyString());
         verify(registrar, never()).unregisterInflight(any());
-        verify(registrar, never()).finishYieldedById(anyLong(), anyString());
+        verify(registrar, never()).finishYieldedById(ArgumentMatchers.anyString(), anyString());
     }
 
     @Test
@@ -87,7 +88,7 @@ class AdmissionLeasePostSuccessTest {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         PrefillQueueManager queue = mock(PrefillQueueManager.class);
-        BatchItem item = batchItem(3_002L, new CompletableFuture<>(), decode);
+        BatchItem item = batchItem("3002", new CompletableFuture<>(), decode);
         when(registrar.fenceAfterDeliveryTimeout(item, "post_delivery_soft_timeout"))
                 .thenReturn(InflightRegistrar.PostDeliveryFenceResult.ENGINE_OWNED);
         AtomicInteger active = new AtomicInteger(1);
@@ -100,8 +101,8 @@ class AdmissionLeasePostSuccessTest {
 
         assertEquals(3, lease.leaseState());
         assertEquals(0, active.get());
-        verify(queue, never()).tryRemove(anyLong(), anyString());
-        verify(decode, never()).release(anyLong());
+        verify(queue, never()).tryRemove(ArgumentMatchers.anyString(), anyString());
+        verify(decode, never()).release(ArgumentMatchers.anyString());
         verify(registrar, never()).unregisterInflight(any());
     }
 
@@ -109,7 +110,7 @@ class AdmissionLeasePostSuccessTest {
     void successfulDeliveryWithoutDecodeClosesAdmissionImmediately() {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         CompletableFuture<Response> future = new CompletableFuture<>();
-        BatchItem item = batchItem(3_009L, future, null);
+        BatchItem item = batchItem("3009", future, null);
         AtomicInteger activeAdmissions = new AtomicInteger(1);
         AtomicInteger scheduledTimeouts = new AtomicInteger();
         AdmissionLease.SoftTimeoutScheduler scheduler =
@@ -137,7 +138,7 @@ class AdmissionLeasePostSuccessTest {
     void deliveryTimeoutReconciliationIsIdempotentAndNotifiesBackpressureExactlyOnce() {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
-        BatchItem item = batchItem(3_003L, new CompletableFuture<>(), decode);
+        BatchItem item = batchItem("3003", new CompletableFuture<>(), decode);
         when(registrar.fenceAfterDeliveryTimeout(item, "post_delivery_soft_timeout"))
                 .thenReturn(InflightRegistrar.PostDeliveryFenceResult.STARTED);
         AtomicInteger active = new AtomicInteger(1);
@@ -153,7 +154,7 @@ class AdmissionLeasePostSuccessTest {
         assertEquals(0, active.get());
         verify(registrar, times(1))
                 .fenceAfterDeliveryTimeout(item, "post_delivery_soft_timeout");
-        verify(decode, never()).release(anyLong());
+        verify(decode, never()).release(ArgumentMatchers.anyString());
     }
 
     @Test
@@ -161,7 +162,7 @@ class AdmissionLeasePostSuccessTest {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         PrefillQueueManager queue = mock(PrefillQueueManager.class);
-        BatchItem item = batchItem(3_004L, new CompletableFuture<>(), decode);
+        BatchItem item = batchItem("3004", new CompletableFuture<>(), decode);
         doThrow(new IllegalStateException("control plane failed"))
                 .when(registrar)
                 .fenceAfterDeliveryTimeout(item, "post_delivery_soft_timeout");
@@ -174,8 +175,8 @@ class AdmissionLeasePostSuccessTest {
         lease.reconcileAfterDeliveryTimeout();
 
         assertEquals(0, active.get());
-        verify(queue, never()).tryRemove(anyLong(), anyString());
-        verify(decode, never()).release(anyLong());
+        verify(queue, never()).tryRemove(ArgumentMatchers.anyString(), anyString());
+        verify(decode, never()).release(ArgumentMatchers.anyString());
         verify(registrar, never()).unregisterInflight(any());
     }
 
@@ -184,7 +185,7 @@ class AdmissionLeasePostSuccessTest {
         assertTrue(timeoutExecutor.getRemoveOnCancelPolicy());
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
-        BatchItem item = batchItem(3_005L, new CompletableFuture<>(), decode);
+        BatchItem item = batchItem("3005", new CompletableFuture<>(), decode);
         when(registrar.fenceAfterDeliveryTimeout(item, "post_delivery_soft_timeout"))
                 .thenReturn(InflightRegistrar.PostDeliveryFenceResult.STARTED);
         int before = timeoutExecutor.getQueue().size();
@@ -205,7 +206,7 @@ class AdmissionLeasePostSuccessTest {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         PrefillQueueManager queue = mock(PrefillQueueManager.class);
-        BatchItem item = batchItem(3_006L, new CompletableFuture<>(), decode);
+        BatchItem item = batchItem("3006", new CompletableFuture<>(), decode);
         AtomicInteger active = new AtomicInteger(1);
         AdmissionLease lease = new AdmissionLease(
                 item, decode, queue, registrar, 60_000,
@@ -217,8 +218,8 @@ class AdmissionLeasePostSuccessTest {
         assertEquals(3, lease.leaseState());
         assertEquals(0, active.get());
         verify(registrar, never()).fenceAfterDeliveryTimeout(any(), anyString());
-        verify(queue, never()).tryRemove(anyLong(), anyString());
-        verify(decode, never()).release(anyLong());
+        verify(queue, never()).tryRemove(ArgumentMatchers.anyString(), anyString());
+        verify(decode, never()).release(ArgumentMatchers.anyString());
     }
 
     @Test
@@ -227,7 +228,7 @@ class AdmissionLeasePostSuccessTest {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         PrefillQueueManager queue = mock(PrefillQueueManager.class);
-        BatchItem item = batchItem(3_010L, new CompletableFuture<>(), decode);
+        BatchItem item = batchItem("3010", new CompletableFuture<>(), decode);
         AtomicInteger activeAdmissions = new AtomicInteger(1);
         int baseline = timeoutExecutor.getQueue().size();
         AdmissionLease lease = new AdmissionLease(
@@ -246,8 +247,8 @@ class AdmissionLeasePostSuccessTest {
         assertEquals(baseline, timeoutExecutor.getQueue().size());
         verify(registrar, never()).fenceAfterDeliveryTimeout(any(), anyString());
         verify(registrar, never()).unregisterInflight(any());
-        verify(queue, never()).tryRemove(anyLong(), anyString());
-        verify(decode, never()).release(anyLong());
+        verify(queue, never()).tryRemove(ArgumentMatchers.anyString(), anyString());
+        verify(decode, never()).release(ArgumentMatchers.anyString());
     }
 
     @Test
@@ -255,7 +256,7 @@ class AdmissionLeasePostSuccessTest {
             throws Exception {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
-        BatchItem item = batchItem(3_008L, new CompletableFuture<>(), decode);
+        BatchItem item = batchItem("3008", new CompletableFuture<>(), decode);
         int baseline = timeoutExecutor.getQueue().size();
         CountDownLatch scheduled = new CountDownLatch(1);
         CountDownLatch allowScheduleReturn = new CountDownLatch(1);
@@ -300,15 +301,15 @@ class AdmissionLeasePostSuccessTest {
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         PrefillQueueManager queue = mock(PrefillQueueManager.class);
         CompletableFuture<Response> future = new CompletableFuture<>();
-        BatchItem item = batchItem(3_007L, future, decode);
+        BatchItem item = batchItem("3007", future, decode);
         AdmissionLease lease = new AdmissionLease(
                 item, decode, queue, registrar, 20, null, timeoutScheduler);
         lease.bindTo(future);
 
         future.complete(Response.error(StrategyErrorType.NO_AVAILABLE_WORKER));
 
-        verify(queue, times(1)).tryRemove(3_007L, "LEASE_RELEASE");
-        verify(decode, times(1)).release(3_007L);
+        verify(queue, times(1)).tryRemove("3007", "LEASE_RELEASE");
+        verify(decode, times(1)).release("3007");
         verify(registrar, times(1)).unregisterInflight(item);
         verify(registrar, never()).fenceAfterDeliveryTimeout(any(), anyString());
     }
@@ -322,7 +323,7 @@ class AdmissionLeasePostSuccessTest {
         assertEquals(expected, timeoutExecutor.getQueue().size());
     }
 
-    private static BatchItem batchItem(long requestId,
+    private static BatchItem batchItem(String requestId,
                                        CompletableFuture<Response> future,
                                        DecodeEndpoint decodeEndpoint) {
         BalanceContext context = new BalanceContext();

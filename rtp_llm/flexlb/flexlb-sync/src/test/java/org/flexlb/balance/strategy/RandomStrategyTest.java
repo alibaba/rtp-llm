@@ -88,6 +88,7 @@ class RandomStrategyTest {
     @Test
     void should_return_error_when_no_workers_available() {
         Request req = new Request();
+        req.setRequestId("random-request");
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -104,6 +105,7 @@ class RandomStrategyTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
 
         Request req = new Request();
+        req.setRequestId("random-request");
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -124,6 +126,7 @@ class RandomStrategyTest {
         registerPrefill("127.0.0.1:8080", workerStatus);
 
         Request req = new Request();
+        req.setRequestId("random-request");
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -149,6 +152,7 @@ class RandomStrategyTest {
         registerPrefill("127.0.0.3:8080", worker3);
 
         Request req = new Request();
+        req.setRequestId("random-request");
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -173,6 +177,7 @@ class RandomStrategyTest {
         registerDecode("127.0.0.2:8080", decodeWorker);
 
         Request req = new Request();
+        req.setRequestId("random-request");
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -206,6 +211,7 @@ class RandomStrategyTest {
         registerPrefill("127.0.0.1:8080", worker);
 
         Request req = new Request();
+        req.setRequestId("random-request");
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -223,6 +229,7 @@ class RandomStrategyTest {
         registerPrefill("127.0.0.1:8080", worker);
 
         Request req = new Request();
+        req.setRequestId("random-request");
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -257,6 +264,7 @@ class RandomStrategyTest {
         registerPrefill("127.0.0.3:8080", worker3);
 
         Request req = new Request();
+        req.setRequestId("random-request");
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -265,7 +273,7 @@ class RandomStrategyTest {
         Map<String, Integer> selectionCount = new HashMap<>();
 
         for (int i = 0; i < totalRuns; i++) {
-            balanceContext.getRequest().setRequestId(1000L + i);
+            balanceContext.getRequest().setRequestId(String.valueOf(1000L + i));
             ServerStatus status = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
 
             if (status.isSuccess()) {
@@ -301,6 +309,7 @@ class RandomStrategyTest {
         registerPrefill("127.0.0.2:8080", aliveWorker);
 
         Request req = new Request();
+        req.setRequestId("random-request");
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -309,7 +318,7 @@ class RandomStrategyTest {
         Map<String, Integer> selectionCount = new HashMap<>();
 
         for (int i = 0; i < totalRuns; i++) {
-            balanceContext.getRequest().setRequestId(1000L + i);
+            balanceContext.getRequest().setRequestId(String.valueOf(1000L + i));
             ServerStatus status = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
 
             if (status.isSuccess()) {
@@ -339,8 +348,9 @@ class RandomStrategyTest {
                 Mockito.argThat(ep -> ep != null && "127.0.0.2".equals(ep.getIp())))).thenReturn(true);
 
         Request req = new Request();
+        req.setRequestId("random-request");
         req.setSeqLen(1000);
-        req.setRequestId(12345L);
+        req.setRequestId("12345");
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -363,10 +373,10 @@ class RandomStrategyTest {
 
         config.setScheduler(new DirectSchedulerConfig());
         config.setDispatcher(new NonBatchDispatcherConfig());
-        assertDecodeReservation(endpoint, 41L, 73);
+        assertDecodeReservation(endpoint, "41", 73);
 
         config.setScheduler(new QueueSchedulerConfig());
-        assertDecodeReservation(endpoint, 42L, 81);
+        assertDecodeReservation(endpoint, "42", 81);
     }
 
     @Test
@@ -379,6 +389,7 @@ class RandomStrategyTest {
         registerPrefill("127.0.0.1:8080", worker);
 
         Request req = new Request();
+        req.setRequestId("random-request");
         req.setSeqLen(1000);
 
         BalanceContext balanceContext = new BalanceContext();
@@ -403,6 +414,7 @@ class RandomStrategyTest {
         registerPrefill("127.0.0.1:8080", worker);
 
         Request req = new Request();
+        req.setRequestId("random-request");
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -415,11 +427,11 @@ class RandomStrategyTest {
 
     @Test
     void should_handle_rollback_without_error() {
-        randomStrategy.rollBack(null, 0);
+        randomStrategy.rollBack(null, "0");
     }
 
     private void assertDecodeReservation(DecodeEndpoint endpoint,
-                                         long requestId,
+                                         String requestId,
                                          int priority) {
         Request request = new Request();
         request.setRequestId(requestId);

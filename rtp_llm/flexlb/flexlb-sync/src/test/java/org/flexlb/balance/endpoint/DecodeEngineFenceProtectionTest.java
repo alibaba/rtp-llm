@@ -34,17 +34,17 @@ class DecodeEngineFenceProtectionTest {
 
     @Test
     void shadowOlderThanTtlRemainsUntilFenceEnds() {
-        endpoint.reserve(1L, 500, 700);
-        assertTrue(endpoint.beginEngineFenceProtection(1L));
-        assertTrue(endpoint.beginEngineFenceProtection(1L),
+        endpoint.reserve("1", 500, 700);
+        assertTrue(endpoint.beginEngineFenceProtection("1"));
+        assertTrue(endpoint.beginEngineFenceProtection("1"),
                 "begin is idempotent for one live accounting generation");
 
         assertEquals(0, endpoint.evictExpiredRequests(-1));
         assertEquals(1, endpoint.getInflightCount());
         assertEquals(500, endpoint.inflightHardKvReserved());
 
-        assertTrue(endpoint.endEngineFenceProtection(1L));
-        assertFalse(endpoint.endEngineFenceProtection(1L));
+        assertTrue(endpoint.endEngineFenceProtection("1"));
+        assertFalse(endpoint.endEngineFenceProtection("1"));
         assertEquals(1, endpoint.evictExpiredRequests(-1));
         assertEquals(0, endpoint.getInflightCount());
         assertEquals(0, endpoint.inflightHardKvReserved());
@@ -52,45 +52,45 @@ class DecodeEngineFenceProtectionTest {
 
     @Test
     void confirmedMetadataOlderThanTtlRemainsUntilFenceEnds() {
-        endpoint.reserve(1L, 500, 700);
-        assertTrue(endpoint.beginEngineFenceProtection(1L));
-        updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
+        endpoint.reserve("1", 500, 700);
+        assertTrue(endpoint.beginEngineFenceProtection("1"));
+        updateStatus(Map.of("1", task("1", TaskPhase.RUNNING, 500)), Map.of(), 9_500);
 
         endpoint.evictExpiredRequests(-1);
-        assertTrue(endpoint.isConfirmedTracked(1L));
+        assertTrue(endpoint.isConfirmedTracked("1"));
 
-        assertTrue(endpoint.endEngineFenceProtection(1L));
+        assertTrue(endpoint.endEngineFenceProtection("1"));
         endpoint.evictExpiredRequests(-1);
-        assertFalse(endpoint.isConfirmedTracked(1L));
+        assertFalse(endpoint.isConfirmedTracked("1"));
     }
 
     @Test
     void releaseAndOrdinaryTerminalClearProtectionExactlyOnce() {
-        endpoint.reserve(1L, 500, 700);
-        assertTrue(endpoint.beginEngineFenceProtection(1L));
-        endpoint.release(1L);
-        endpoint.release(1L);
-        assertFalse(endpoint.endEngineFenceProtection(1L));
+        endpoint.reserve("1", 500, 700);
+        assertTrue(endpoint.beginEngineFenceProtection("1"));
+        endpoint.release("1");
+        endpoint.release("1");
+        assertFalse(endpoint.endEngineFenceProtection("1"));
         assertEquals(0, endpoint.getInflightCount());
 
-        endpoint.reserve(2L, 300, 450);
-        assertTrue(endpoint.beginEngineFenceProtection(2L));
-        updateStatus(Map.of(), Map.of("2", task(2L, TaskPhase.PENDING, 300)), 10_000);
+        endpoint.reserve("2", 300, 450);
+        assertTrue(endpoint.beginEngineFenceProtection("2"));
+        updateStatus(Map.of(), Map.of("2", task("2", TaskPhase.PENDING, 300)), 10_000);
 
-        assertFalse(endpoint.endEngineFenceProtection(2L));
+        assertFalse(endpoint.endEngineFenceProtection("2"));
         assertEquals(0, endpoint.getInflightCount());
         assertEquals(0, endpoint.getTotalLoad());
         assertEquals(10_000, endpoint.realKvAvailable());
         assertEquals(1, endpoint.settledTombstoneCountForTest(),
                 "a protected generation retains exactly one stale-status fence");
 
-        updateStatus(Map.of("2", task(2L, TaskPhase.RUNNING, 300)), Map.of(), 9_700);
-        assertFalse(endpoint.isConfirmedTracked(2L),
+        updateStatus(Map.of("2", task("2", TaskPhase.RUNNING, 300)), Map.of(), 9_700);
+        assertFalse(endpoint.isConfirmedTracked("2"),
                 "ordinary finished uses the same stale-status fence");
         endpoint.evictExpiredRequests(-1);
         assertEquals(0, endpoint.settledTombstoneCountForTest());
-        updateStatus(Map.of("2", task(2L, TaskPhase.RUNNING, 300)), Map.of(), 9_700);
-        assertTrue(endpoint.isConfirmedTracked(2L));
+        updateStatus(Map.of("2", task("2", TaskPhase.RUNNING, 300)), Map.of(), 9_700);
+        assertTrue(endpoint.isConfirmedTracked("2"));
     }
 
     @Test
@@ -98,9 +98,9 @@ class DecodeEngineFenceProtectionTest {
         int requestCount = 10_000;
         Map<String, TaskInfo> finished = new HashMap<>(requestCount);
         for (long requestId = 1; requestId <= requestCount; requestId++) {
-            endpoint.reserve(requestId, 1, 1);
+            endpoint.reserve(String.valueOf(requestId), 1, 1);
             finished.put(Long.toString(requestId),
-                    task(requestId, TaskPhase.PENDING, 1));
+                    task(String.valueOf(requestId), TaskPhase.PENDING, 1));
         }
 
         updateStatus(Map.of(), finished, 10_000);
@@ -109,38 +109,38 @@ class DecodeEngineFenceProtectionTest {
         assertEquals(0, endpoint.settledTombstoneCountForTest(),
                 "ordinary throughput must not be retained for the endpoint TTL");
 
-        updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 1)), Map.of(), 9_999);
-        assertTrue(endpoint.isConfirmedTracked(1L),
+        updateStatus(Map.of("1", task("1", TaskPhase.RUNNING, 1)), Map.of(), 9_999);
+        assertTrue(endpoint.isConfirmedTracked("1"),
                 "a later fresh active observation is not blocked by an ordinary completion");
     }
 
     @Test
     void priorityNotFoundOrdinaryFinishedDoesNotRetainGenerationFence() {
-        endpoint.reserve(1L, 500, 700, 30);
-        updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
+        endpoint.reserve("1", 500, 700, 30);
+        updateStatus(Map.of("1", task("1", TaskPhase.RUNNING, 500)), Map.of(), 9_500);
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
-                endpoint.beginPriorityPreemption(101L, List.of(1L),
-                        9L, 100, 120, 70,
+                endpoint.beginPriorityPreemption(101L, List.of("1"),
+                        "9", 100, 120, 70,
                         endpoint.admissionVersion(), true));
         assertTrue(endpoint.markPriorityCancelInFlight(101L));
-        assertTrue(endpoint.markPriorityCancelNotFound(101L, 1L));
+        assertTrue(endpoint.markPriorityCancelNotFound(101L, "1"));
         endpoint.abortPriorityPreemption(101L);
 
-        assertTrue(endpoint.reconcilePriorityVictimFinished(1L));
+        assertTrue(endpoint.reconcilePriorityVictimFinished("1"));
         assertEquals(0, endpoint.settledTombstoneCountForTest(),
                 "an ordinary Decode terminal is not an Engine tombstone proof");
 
-        updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
-        assertTrue(endpoint.isConfirmedTracked(1L));
+        updateStatus(Map.of("1", task("1", TaskPhase.RUNNING, 500)), Map.of(), 9_500);
+        assertTrue(endpoint.isConfirmedTracked("1"));
     }
 
     @Test
     void missingConfirmedRequestTransfersToOneSyntheticSlotAndKvOwner() {
-        moveProtectedRequestToMissingConfirmed(1L, 500, 700);
+        moveProtectedRequestToMissingConfirmed("1", 500, 700);
 
         assertEquals(1, endpoint.getConfirmedRunningCount());
         assertEquals(1, endpoint.getTotalLoad());
-        assertTrue(endpoint.isConfirmedTracked(1L));
+        assertTrue(endpoint.isConfirmedTracked("1"));
         assertEquals(9_500, endpoint.realKvAvailable());
         assertEquals(700, endpoint.realKvUsed());
 
@@ -150,58 +150,58 @@ class DecodeEngineFenceProtectionTest {
         assertEquals(9_500, endpoint.realKvAvailable());
         assertEquals(700, endpoint.realKvUsed());
 
-        assertTrue(endpoint.endEngineFenceProtection(1L));
+        assertTrue(endpoint.endEngineFenceProtection("1"));
         assertEquals(0, endpoint.getConfirmedRunningCount());
         assertEquals(0, endpoint.getTotalLoad());
         assertEquals(10_000, endpoint.realKvAvailable());
         assertEquals(0, endpoint.realKvUsed());
-        assertFalse(endpoint.endEngineFenceProtection(1L));
+        assertFalse(endpoint.endEngineFenceProtection("1"));
 
         endpoint.evictExpiredRequests(-1);
-        assertFalse(endpoint.isConfirmedTracked(1L));
+        assertFalse(endpoint.isConfirmedTracked("1"));
     }
 
     @Test
     void freshActiveObservationReturnsSyntheticOwnershipToEngine() {
-        moveProtectedRequestToMissingConfirmed(1L, 500, 700);
+        moveProtectedRequestToMissingConfirmed("1", 500, 700);
 
-        updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
+        updateStatus(Map.of("1", task("1", TaskPhase.RUNNING, 500)), Map.of(), 9_500);
         assertEquals(1, endpoint.getConfirmedRunningCount());
         assertEquals(1, endpoint.getTotalLoad());
         assertEquals(9_500, endpoint.realKvAvailable(),
                 "reported engine KV replaces, rather than stacks with, the synthetic hold");
 
-        assertTrue(endpoint.endEngineFenceProtection(1L));
+        assertTrue(endpoint.endEngineFenceProtection("1"));
         assertEquals(1, endpoint.getTotalLoad(),
                 "clearing the fence must not release a freshly confirmed engine owner");
 
-        updateStatus(Map.of(), Map.of("1", task(1L, TaskPhase.RUNNING, 500)), 10_000);
+        updateStatus(Map.of(), Map.of("1", task("1", TaskPhase.RUNNING, 500)), 10_000);
         assertEquals(0, endpoint.getTotalLoad());
         assertEquals(10_000, endpoint.realKvAvailable());
     }
 
     @Test
     void authoritativeTerminalReleasesSyntheticOwnerAndProtection() {
-        moveProtectedRequestToMissingConfirmed(1L, 500, 700);
+        moveProtectedRequestToMissingConfirmed("1", 500, 700);
 
-        updateStatus(Map.of(), Map.of("1", task(1L, TaskPhase.RUNNING, 500)), 10_000);
+        updateStatus(Map.of(), Map.of("1", task("1", TaskPhase.RUNNING, 500)), 10_000);
 
         assertEquals(0, endpoint.getConfirmedRunningCount());
         assertEquals(0, endpoint.getTotalLoad());
         assertEquals(10_000, endpoint.realKvAvailable());
         assertEquals(0, endpoint.realKvUsed());
-        assertFalse(endpoint.isConfirmedTracked(1L));
-        assertFalse(endpoint.endEngineFenceProtection(1L));
+        assertFalse(endpoint.isConfirmedTracked("1"));
+        assertFalse(endpoint.endEngineFenceProtection("1"));
     }
 
     @Test
     void tombstonedShadowAtomicallyClearsAccountingAndFencesStaleStatus() {
-        endpoint.reserve(1L, 500, 700);
-        endpoint.markQueuedPhase(1L);
-        assertTrue(endpoint.beginEngineFenceProtection(1L));
+        endpoint.reserve("1", 500, 700);
+        endpoint.markQueuedPhase("1");
+        assertTrue(endpoint.beginEngineFenceProtection("1"));
 
-        assertTrue(endpoint.settleTombstonedRequest(1L));
-        assertFalse(endpoint.settleTombstonedRequest(1L),
+        assertTrue(endpoint.settleTombstonedRequest("1"));
+        assertFalse(endpoint.settleTombstonedRequest("1"),
                 "duplicate settlement must not mutate counters twice");
         assertEquals(1, endpoint.settledTombstoneCountForTest());
         assertEquals(0, endpoint.getInflightCount());
@@ -209,33 +209,33 @@ class DecodeEngineFenceProtectionTest {
         assertEquals(0, endpoint.inflightHardKvReserved());
         assertEquals(0, endpoint.inflightExpectedKvReserved());
         assertTrue(endpoint.layeredAdmissionView().queued().isEmpty());
-        assertFalse(endpoint.endEngineFenceProtection(1L));
+        assertFalse(endpoint.endEngineFenceProtection("1"));
 
-        updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
-        assertFalse(endpoint.isConfirmedTracked(1L),
+        updateStatus(Map.of("1", task("1", TaskPhase.RUNNING, 500)), Map.of(), 9_500);
+        assertFalse(endpoint.isConfirmedTracked("1"),
                 "a delayed active sample cannot resurrect a tombstoned request");
         assertEquals(0, endpoint.getConfirmedRunningCount());
 
         endpoint.evictExpiredRequests(-1);
         assertEquals(0, endpoint.settledTombstoneCountForTest());
-        updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
-        assertTrue(endpoint.isConfirmedTracked(1L),
+        updateStatus(Map.of("1", task("1", TaskPhase.RUNNING, 500)), Map.of(), 9_500);
+        assertTrue(endpoint.isConfirmedTracked("1"),
                 "the settled fence is bounded by the configured endpoint TTL");
     }
 
     @Test
     void tombstonedConfirmedOwnerClearsTrackedSlotAndGenericFence() {
-        endpoint.reserve(1L, 500, 700);
-        updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
-        assertTrue(endpoint.beginEngineFenceProtection(1L));
+        endpoint.reserve("1", 500, 700);
+        updateStatus(Map.of("1", task("1", TaskPhase.RUNNING, 500)), Map.of(), 9_500);
+        assertTrue(endpoint.beginEngineFenceProtection("1"));
 
-        assertTrue(endpoint.settleTombstonedRequest(1L));
-        assertFalse(endpoint.isConfirmedTracked(1L));
+        assertTrue(endpoint.settleTombstonedRequest("1"));
+        assertFalse(endpoint.isConfirmedTracked("1"));
         assertEquals(0, endpoint.getConfirmedRunningCount());
         assertEquals(0, endpoint.getTotalLoad());
         assertEquals(9_500, endpoint.realKvAvailable(),
                 "local settlement must not rewrite the last engine KV sample");
-        assertFalse(endpoint.endEngineFenceProtection(1L));
+        assertFalse(endpoint.endEngineFenceProtection("1"));
 
         updateStatus(Map.of(), Map.of(), 10_000);
         assertEquals(10_000, endpoint.realKvAvailable());
@@ -243,62 +243,62 @@ class DecodeEngineFenceProtectionTest {
 
     @Test
     void tombstonedSyntheticOwnerReleasesSlotAndKvExactlyOnce() {
-        moveProtectedRequestToMissingConfirmed(1L, 500, 700);
+        moveProtectedRequestToMissingConfirmed("1", 500, 700);
         assertEquals(1, endpoint.getConfirmedRunningCount());
         assertEquals(9_500, endpoint.realKvAvailable());
         assertEquals(700, endpoint.realKvUsed());
 
-        assertTrue(endpoint.settleTombstonedRequest(1L));
-        assertFalse(endpoint.isConfirmedTracked(1L));
+        assertTrue(endpoint.settleTombstonedRequest("1"));
+        assertFalse(endpoint.isConfirmedTracked("1"));
         assertEquals(0, endpoint.getConfirmedRunningCount());
         assertEquals(0, endpoint.getTotalLoad());
         assertEquals(10_000, endpoint.realKvAvailable());
         assertEquals(0, endpoint.realKvUsed());
-        assertFalse(endpoint.settleTombstonedRequest(1L));
+        assertFalse(endpoint.settleTombstonedRequest("1"));
     }
 
     @Test
     void genericAndPriorityFenceOwnersFormOneAccountingUnion() {
-        endpoint.reserve(1L, 500, 700, 30);
-        updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
+        endpoint.reserve("1", 500, 700, 30);
+        updateStatus(Map.of("1", task("1", TaskPhase.RUNNING, 500)), Map.of(), 9_500);
         assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
-                endpoint.beginPriorityPreemption(101L, List.of(1L),
-                        9L, 100, 120, 70,
+                endpoint.beginPriorityPreemption(101L, List.of("1"),
+                        "9", 100, 120, 70,
                         endpoint.admissionVersion(), true));
         assertTrue(endpoint.markPriorityCancelInFlight(101L));
-        assertTrue(endpoint.markPriorityCancelNotFound(101L, 1L));
+        assertTrue(endpoint.markPriorityCancelNotFound(101L, "1"));
 
         updateStatus(Map.of(), Map.of(), 10_000);
-        assertTrue(endpoint.transferPriorityNotFoundClaimToEngineFence(101L, 1L));
+        assertTrue(endpoint.transferPriorityNotFoundClaimToEngineFence(101L, "1"));
         endpoint.abortPriorityPreemption(101L);
         assertEquals(1, endpoint.getTotalLoad());
         assertEquals(9_500, endpoint.realKvAvailable());
 
-        assertTrue(endpoint.beginEngineFenceProtection(1L));
-        assertTrue(endpoint.endEngineFenceProtection(1L));
+        assertTrue(endpoint.beginEngineFenceProtection("1"));
+        assertTrue(endpoint.endEngineFenceProtection("1"));
         assertEquals(1, endpoint.getTotalLoad(),
                 "ending generic ownership must not release the priority token owner");
         assertEquals(9_500, endpoint.realKvAvailable());
 
-        assertTrue(endpoint.beginEngineFenceProtection(1L));
-        assertTrue(endpoint.settleEngineFenceClaim(101L, 1L));
+        assertTrue(endpoint.beginEngineFenceProtection("1"));
+        assertTrue(endpoint.settleEngineFenceClaim(101L, "1"));
         assertEquals(1, endpoint.getTotalLoad(),
                 "priority settlement transfers the union hold to the generic owner");
         assertEquals(9_500, endpoint.realKvAvailable());
 
-        assertTrue(endpoint.settleTombstonedRequest(1L));
+        assertTrue(endpoint.settleTombstonedRequest("1"));
         assertEquals(0, endpoint.getTotalLoad());
         assertEquals(10_000, endpoint.realKvAvailable());
-        assertFalse(endpoint.endEngineFenceProtection(1L));
-        assertFalse(endpoint.settleEngineFenceClaim(101L, 1L));
+        assertFalse(endpoint.endEngineFenceProtection("1"));
+        assertFalse(endpoint.settleEngineFenceClaim(101L, "1"));
     }
 
-    private void moveProtectedRequestToMissingConfirmed(long requestId,
+    private void moveProtectedRequestToMissingConfirmed(String requestId,
                                                         long hardKvTokens,
                                                         long expectedKvTokens) {
         endpoint.reserve(requestId, hardKvTokens, expectedKvTokens);
         assertTrue(endpoint.beginEngineFenceProtection(requestId));
-        updateStatus(Map.of(Long.toString(requestId),
+        updateStatus(Map.of(String.valueOf(requestId),
                 task(requestId, TaskPhase.RUNNING, hardKvTokens)), Map.of(),
                 10_000 - hardKvTokens);
         updateStatus(Map.of(), Map.of(), 10_000);
@@ -314,7 +314,7 @@ class DecodeEngineFenceProtectionTest {
         endpoint.onWorkerStatusUpdate(status, response);
     }
 
-    private static TaskInfo task(long requestId, TaskPhase phase, long inputLength) {
+    private static TaskInfo task(String requestId, TaskPhase phase, long inputLength) {
         TaskInfo task = new TaskInfo();
         task.setRequestId(requestId);
         task.setPhase(phase);

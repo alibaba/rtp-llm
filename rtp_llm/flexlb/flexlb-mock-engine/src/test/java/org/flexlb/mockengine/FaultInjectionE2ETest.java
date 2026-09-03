@@ -47,7 +47,7 @@ class FaultInjectionE2ETest {
     }
 
     private static Response submitTo(AutoTpmE2EHarness h, int prefillIndex,
-                                     long requestId) throws Exception {
+                                     String requestId) throws Exception {
         h.prefillSelector = ctx -> prefillIndex;
         CompletableFuture<Response> future = h.scheduler.submit(h.context(requestId, 50));
         return future.get(10, TimeUnit.SECONDS);
@@ -66,7 +66,7 @@ class FaultInjectionE2ETest {
                     .enqueueErrorCode(9999)
                     .build());
 
-            Response failed = submitTo(h, 0, 9101);
+            Response failed = submitTo(h, 0, "9101");
             assertFalse(failed.isSuccess());
             assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), failed.getCode(),
                     "engine-side enqueue rejection must propagate as 8510: " + failed.getErrorMessage());
@@ -81,7 +81,7 @@ class FaultInjectionE2ETest {
             assertEquals(0, h.prefillEngines.get(0).getAcceptedCount());
 
             // 健康引擎完全不受影响
-            Response healthy = submitTo(h, 1, 9102);
+            Response healthy = submitTo(h, 1, "9102");
             assertTrue(healthy.isSuccess(),
                     "healthy engine must be unaffected: " + healthy.getErrorMessage());
         }
@@ -99,7 +99,7 @@ class FaultInjectionE2ETest {
                     .build());
 
             long start = System.nanoTime();
-            Response response = submitTo(h, 0, 9201);
+            Response response = submitTo(h, 0, "9201");
             long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
 
             assertTrue(response.isSuccess(),
@@ -123,7 +123,7 @@ class FaultInjectionE2ETest {
                     .build());
 
             long start = System.nanoTime();
-            Response response = submitTo(h, 0, 9301);
+            Response response = submitTo(h, 0, "9301");
             assertTrue(response.isSuccess(), "ack is not delayed by generateDelayMs");
 
             // prefill 执行被拉长 300ms，但最终完整排空、无泄漏
@@ -148,12 +148,12 @@ class FaultInjectionE2ETest {
                     .generateError(true)
                     .build());
 
-            Throwable error = callGenerateStream(h.prefillEngines.get(0), 9401).error();
+            Throwable error = callGenerateStream(h.prefillEngines.get(0), "9401").error();
             assertNotNull(error, "generate_stream must fail on the faulted engine");
             assertTrue(error.getMessage().contains("injected generate_error"), error.getMessage());
             assertEquals(0, h.prefillEngines.get(0).getRunningCount(), "no leak on rejected stream");
 
-            Response healthy = submitTo(h, 1, 9402);
+            Response healthy = submitTo(h, 1, "9402");
             assertTrue(healthy.isSuccess(),
                     "generate_error is data-plane only, scheduler path stays healthy");
         }
@@ -170,12 +170,12 @@ class FaultInjectionE2ETest {
                     .fetchError(true)
                     .build());
 
-            StreamResult result = callFetchResponse(h.prefillEngines.get(0), 9501);
+            StreamResult result = callFetchResponse(h.prefillEngines.get(0), "9501");
             assertNotNull(result.error(), "fetch_response must fail on the faulted engine");
             assertTrue(result.error().getMessage().contains("injected fetch_error"),
                     result.error().getMessage());
 
-            Response healthy = submitTo(h, 1, 9502);
+            Response healthy = submitTo(h, 1, "9502");
             assertTrue(healthy.isSuccess(),
                     "fetch_error is data-plane only, scheduler path stays healthy");
         }
@@ -194,12 +194,12 @@ class FaultInjectionE2ETest {
                     .build());
 
             // 控制面语义：enqueue ack 不受 noRespond 影响 → 调度器视角成功
-            Response response = submitTo(h, 0, 9601);
+            Response response = submitTo(h, 0, "9601");
             assertTrue(response.isSuccess(),
                     "noRespond does not affect the enqueue ack: " + response.getErrorMessage());
 
             // 数据面语义：流上永远没有任何事件（不完成、不报错）
-            StreamResult silent = callGenerateStream(prefill, 9602);
+            StreamResult silent = callGenerateStream(prefill, "9602");
             assertFalse(silent.completed(), "noRespond stream must never complete");
             assertNull(silent.error(), "noRespond stream must never error");
 
@@ -207,7 +207,7 @@ class FaultInjectionE2ETest {
             AutoTpmE2EHarness.await(() -> prefill.getRunningCount() == 0, 5_000,
                     "noRespond engine still settles its internal accounting");
             prefill.clearFaultConfig();
-            Response recovered = submitTo(h, 0, 9603);
+            Response recovered = submitTo(h, 0, "9603");
             assertTrue(recovered.isSuccess(), "engine recovers after clearing the fault");
         }
     }
@@ -245,20 +245,20 @@ class FaultInjectionE2ETest {
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
 
-            Response first = submitTo(h, 0, 9801);
+            Response first = submitTo(h, 0, "9801");
             assertTrue(first.isSuccess());
             assertTrue(prefill.getRunningCount() >= 1, "first request holds the queue slot");
 
             prefill.setFaultConfig(FaultInjectionConfig.builder()
                     .queueDepthLimit(1)
                     .build());
-            Response rejected = submitTo(h, 0, 9802);
+            Response rejected = submitTo(h, 0, "9802");
             assertFalse(rejected.isSuccess());
             assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), rejected.getCode());
             assertTrue(rejected.getErrorMessage().contains("queue depth limit exceeded"),
                     rejected.getErrorMessage());
 
-            Response healthy = submitTo(h, 1, 9803);
+            Response healthy = submitTo(h, 1, "9803");
             assertTrue(healthy.isSuccess(), "healthy engine keeps accepting");
         }
     }
@@ -279,7 +279,7 @@ class FaultInjectionE2ETest {
             // 首个 EnqueueBatch 触发 crash 并返回空 ACK。请求可能已经越过发送边界，
             // 因此 Master 必须保留 Future 与端点记账，直到 Engine 给出权威终态。
             h.prefillSelector = ctx -> 0;
-            CompletableFuture<Response> crashed = h.scheduler.submit(h.context(9902, 50));
+            CompletableFuture<Response> crashed = h.scheduler.submit(h.context("9902", 50));
             CountDownLatch crashedTerminal = new CountDownLatch(1);
             crashed.whenComplete((ignored, error) -> crashedTerminal.countDown());
 
@@ -297,7 +297,7 @@ class FaultInjectionE2ETest {
             assertFalse(crashed.isDone(), "the fenced request must remain incomplete");
 
             // 一个请求处于不确定性 fence 时，不得阻塞同集群的健康 Prefill。
-            Response healthy = submitTo(h, 1, 9904);
+            Response healthy = submitTo(h, 1, "9904");
             assertTrue(healthy.isSuccess(), "the crash never spreads to the healthy engine");
             assertFalse(crashed.isDone(), "healthy delivery must not settle the unrelated fence");
             assertEquals(1, prefillEndpoint.getInflightBatchCount());
@@ -312,9 +312,8 @@ class FaultInjectionE2ETest {
 
     /** 直连 generate_stream，等 500ms 观察流事件（fault 场景内即时返回或保持沉默）。 */
     private static StreamResult callGenerateStream(JavaMockEngineCluster.FastRpcService svc,
-                                                   long requestId) throws InterruptedException {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+                                                   String requestId) throws InterruptedException {
+        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(1)
                         .build());
@@ -345,11 +344,10 @@ class FaultInjectionE2ETest {
 
     /** 直连 fetch_response，等 500ms 观察流事件。 */
     private static StreamResult callFetchResponse(JavaMockEngineCluster.FastRpcService svc,
-                                                  long requestId) throws InterruptedException {
+                                                  String requestId) throws InterruptedException {
         AtomicReference<Throwable> error = new AtomicReference<>();
         CountDownLatch terminal = new CountDownLatch(1);
-        svc.fetchResponse(EngineRpcService.FetchRequestPB.newBuilder()
-                .setRequestId(requestId)
+        svc.fetchResponse(RequestIdFixtures.write(EngineRpcService.FetchRequestPB.newBuilder(), requestId)
                 .build(), new StreamObserver<>() {
             @Override
             public void onNext(EngineRpcService.GenerateOutputsPB value) {

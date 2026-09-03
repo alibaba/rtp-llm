@@ -307,7 +307,7 @@ class PythonCompatControlApiTest {
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
 
         enqueue(prefill, batch(5000, slot(0,
-                inputWithDecode(9001, 10, decodeServices.get(0).getGrpcPort()))));
+                inputWithDecode("9001", 10, decodeServices.get(0).getGrpcPort()))));
 
         JsonNode requests = MAPPER.readTree(httpGet("/requests"));
         assertTrue(requests.isObject(), "/requests must be an object keyed by engine name");
@@ -337,7 +337,7 @@ class PythonCompatControlApiTest {
 
         MockLruBlockCache probeCache = new MockLruBlockCache(16);
         MockPerformanceModel.RequestShape shape = perf.shape(
-                inputWithDecode(1, 10, BASE_PORT + 1), probeCache);
+                inputWithDecode("1", 10, BASE_PORT + 1), probeCache);
 
         assertEquals(10L, perf.prefillMs(List.of(shape)), "baseline prefill should be 10ms");
         assertEquals(1L, perf.decodeMs(1, 1), "baseline decode should be 1ms");
@@ -382,7 +382,7 @@ class PythonCompatControlApiTest {
         long startNanos = System.nanoTime();
         for (int i = 0; i < 3; i++) {
             enqueue(prefill, batch(6000 + i, slot(0,
-                    inputWithDecode(9100 + i, 10, decode.getGrpcPort()))));
+                    inputWithDecode(String.valueOf(9100 + i), 10, decode.getGrpcPort()))));
         }
         awaitCompleted(decode, 3, 10_000);
         long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
@@ -429,13 +429,13 @@ class PythonCompatControlApiTest {
         httpPost("/set_queue_depth", "{\"engine\":\"prefill-0\",\"queue_depth\":1}");
 
         EngineRpcService.EnqueueBatchResponsePB first = enqueue(prefill, batch(7000, slot(0,
-                inputWithDecode(9200, 10, decodeServices.get(0).getGrpcPort()))));
+                inputWithDecode("9200", 10, decodeServices.get(0).getGrpcPort()))));
         assertEquals(1, first.getSuccessesCount());
 
         // Second enqueue while the first is still pending -> rejected (Java semantics;
         // Python only fakes the queue depth display — divergence deferred to Phase 5).
         EngineRpcService.EnqueueBatchResponsePB second = enqueue(prefill, batch(7001, slot(0,
-                inputWithDecode(9201, 10, decodeServices.get(0).getGrpcPort()))));
+                inputWithDecode("9201", 10, decodeServices.get(0).getGrpcPort()))));
         assertEquals(0, second.getSuccessesCount());
         assertEquals(1, second.getErrorsCount());
         assertTrue(second.getErrors(0).getErrorInfo().getErrorMessage()
@@ -444,7 +444,7 @@ class PythonCompatControlApiTest {
         // Clearing the limit restores acceptance.
         httpPost("/set_queue_depth", "{\"engine\":\"prefill-0\",\"queue_depth\":0}");
         EngineRpcService.EnqueueBatchResponsePB third = enqueue(prefill, batch(7002, slot(0,
-                inputWithDecode(9202, 10, decodeServices.get(0).getGrpcPort()))));
+                inputWithDecode("9202", 10, decodeServices.get(0).getGrpcPort()))));
         assertEquals(1, third.getSuccessesCount());
     }
 
@@ -457,8 +457,8 @@ class PythonCompatControlApiTest {
         startCluster(model("10", 0.1), 2, 2);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         enqueue(prefill, batch(8000, slot(0,
-                inputWithDecode(9300, 10, decodeServices.get(0).getGrpcPort()),
-                inputWithDecode(9301, 10, decodeServices.get(1).getGrpcPort()))));
+                inputWithDecode("9300", 10, decodeServices.get(0).getGrpcPort()),
+                inputWithDecode("9301", 10, decodeServices.get(1).getGrpcPort()))));
         awaitCompleted(decodeServices.get(0), 1, 10_000);
         awaitCompleted(decodeServices.get(1), 1, 10_000);
 
@@ -493,7 +493,7 @@ class PythonCompatControlApiTest {
         startCluster(model("10", 0.1), 1, 1);
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         enqueue(prefill, batch(8100, slot(0,
-                inputWithDecode(9400, 10, decodeServices.get(0).getGrpcPort()))));
+                inputWithDecode("9400", 10, decodeServices.get(0).getGrpcPort()))));
         awaitCompleted(decodeServices.get(0), 1, 10_000);
 
         String body = httpGet("/metrics?per_engine=true");
@@ -520,8 +520,8 @@ class PythonCompatControlApiTest {
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
 
         enqueue(prefill, batch(9000, slot(0,
-                inputWithDecode(9500, 10, decodeServices.get(0).getGrpcPort()),
-                inputWithDecode(9501, 10, decodeServices.get(0).getGrpcPort()))));
+                inputWithDecode("9500", 10, decodeServices.get(0).getGrpcPort()),
+                inputWithDecode("9501", 10, decodeServices.get(0).getGrpcPort()))));
 
         prefill.cancel(9500);
 
@@ -600,9 +600,8 @@ class PythonCompatControlApiTest {
     // ──────────── Protobuf builders ────────────
 
     private static EngineRpcService.GenerateInputPB inputWithDecode(
-            long requestId, int inputTokens, int decodePort) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+            String requestId, int inputTokens, int decodePort) {
+        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(1)
                         .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()

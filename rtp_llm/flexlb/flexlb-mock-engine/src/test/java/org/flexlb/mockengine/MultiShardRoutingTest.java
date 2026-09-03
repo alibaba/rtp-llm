@@ -89,7 +89,7 @@ class MultiShardRoutingTest {
             for (int i = 0; i < requestsPerShard; i++) {
                 JavaMockEngineCluster.FastRpcService prefill = prefillEngines.get(i % prefillEngines.size());
                 int decodePort = decodeEngines.get(i % decodeEngines.size()).getGrpcPort();
-                EngineRpcService.GenerateInputPB input = inputWithDecode(requestId++, 10, decodePort);
+                EngineRpcService.GenerateInputPB input = inputWithDecode(String.valueOf(requestId++), 10, decodePort);
                 EngineRpcService.EnqueueBatchResponsePB response =
                         enqueue(prefill, batch(batchId++, slot(0, input)));
                 assertEquals(0, response.getErrorsCount(),
@@ -177,7 +177,7 @@ class MultiShardRoutingTest {
             for (int i = 0; i < requestsPerShard; i++) {
                 JavaMockEngineCluster.FastRpcService prefill = prefillEngines.get(i % prefillEngines.size());
                 int decodePort = decodeEngines.get(i % decodeEngines.size()).getGrpcPort();
-                EngineRpcService.GenerateInputPB input = inputWithDecode(requestId++, 10, decodePort);
+                EngineRpcService.GenerateInputPB input = inputWithDecode(String.valueOf(requestId++), 10, decodePort);
                 EngineRpcService.EnqueueBatchResponsePB response =
                         enqueue(prefill, batch(batchId++, slot(0, input)));
                 assertEquals(0, response.getErrorsCount(),
@@ -347,9 +347,8 @@ class MultiShardRoutingTest {
     // ──────────── Protobuf builders ────────────
 
     private static EngineRpcService.GenerateInputPB inputWithDecode(
-            long requestId, int inputTokens, int decodePort) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+            String requestId, int inputTokens, int decodePort) {
+        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(1)
                         .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()

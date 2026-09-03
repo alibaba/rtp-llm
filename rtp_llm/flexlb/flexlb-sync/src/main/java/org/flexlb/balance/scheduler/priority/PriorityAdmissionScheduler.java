@@ -93,7 +93,7 @@ public class PriorityAdmissionScheduler {
     private final BatchSchedulerReporter batchReporter;
     private final EngineCancelChannel cancelChannel;
     private final DecodePreemptionCoordinator preemptionCoordinator;
-    private final Map<Long, AtomicInteger> cancelNotFoundReplans = new ConcurrentHashMap<>();
+    private final Map<String, AtomicInteger> cancelNotFoundReplans = new ConcurrentHashMap<>();
 
     /** Bean-owned timer; no timeout task outlives this scheduler instance. */
     private final ScheduledThreadPoolExecutor softTimeoutExecutor;
@@ -708,7 +708,7 @@ public class PriorityAdmissionScheduler {
 
         PrefillEvictionPlan evictionPlan = new PrefillEvictionPlan(
                 envelope, item, plan.routeResponse(), proposal);
-        List<Long> victimIds = new ArrayList<>(proposal.victims().size());
+        List<String> victimIds = new ArrayList<>(proposal.victims().size());
         for (QueuedRequestSnapshot victim : proposal.victims()) {
             victimIds.add(victim.requestId());
         }
@@ -834,7 +834,7 @@ public class PriorityAdmissionScheduler {
 
     /** Eviction metrics are observers; they never own a committed transaction. */
     private void reportEvictionCommit(int priority,
-                                      long requestId,
+                                      String requestId,
                                       String evictionCase,
                                       String outcome) {
         try {
@@ -849,7 +849,7 @@ public class PriorityAdmissionScheduler {
     }
 
     private void reportEvictionPlan(int priority,
-                                    long requestId,
+                                    String requestId,
                                     String evictionCase,
                                     String outcome) {
         try {
@@ -992,7 +992,7 @@ public class PriorityAdmissionScheduler {
             return DecodeEvictionOutcome.PENDING;
         }
 
-        List<Long> reservedVictimIds = new ArrayList<>(proposal.victims().size());
+        List<String> reservedVictimIds = new ArrayList<>(proposal.victims().size());
         for (DecodeRequestSnapshot victim : proposal.victims()) {
             reservedVictimIds.add(victim.requestId());
         }
@@ -1097,7 +1097,7 @@ public class PriorityAdmissionScheduler {
     }
 
     private static void finishDecodeVictim(InflightRegistrar registrar,
-                                           long requestId,
+                                           String requestId,
                                            boolean accepted,
                                            String detail) {
         if (accepted) {

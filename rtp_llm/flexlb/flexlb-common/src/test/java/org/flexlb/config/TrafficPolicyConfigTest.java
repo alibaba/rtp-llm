@@ -2,6 +2,7 @@ package org.flexlb.config;
 
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.service.config.merger.FlexlbConfigMerger;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.util.Set;
@@ -33,8 +34,8 @@ class TrafficPolicyConfigTest {
                 }
                 """);
 
-        Request vip = request(1, "key-a", 8192);
-        Request regular = request(2, "key-b", 8192);
+        Request vip = request("1", "key-a", 8192);
+        Request regular = request("2", "key-b", 8192);
         assertEquals("vip-long", config.resolveTargetGroup(vip).orElseThrow());
         assertEquals("long", config.resolveTargetGroup(regular).orElseThrow());
     }
@@ -50,11 +51,11 @@ class TrafficPolicyConfigTest {
                   "rules": []
                 }
                 """);
-        Request request = request(12345, "key", 128);
+        Request request = request("12345", "key", 128);
 
         String first = config.resolveTargetGroup(request).orElseThrow();
         assertEquals(first, config.resolveTargetGroup(request).orElseThrow());
-        org.junit.jupiter.api.Assertions.assertTrue(Set.of("blue", "green").contains(first));
+        Assertions.assertTrue(Set.of("blue", "green").contains(first));
     }
 
     @Test
@@ -115,9 +116,9 @@ class TrafficPolicyConfigTest {
         return FlexlbConfigMerger.mergeWithDefaults(document).getRouter().getGroupSelector();
     }
 
-    private static Request request(long id, String apiKey, long inputTokens) {
+    private static Request request(String id, String apiKey, long inputTokens) {
         Request request = new Request();
-        request.setRequestId(id);
+        request.setRequestId(String.valueOf(id));
         request.setApiKey(apiKey);
         request.setSeqLen(inputTokens);
         return request;

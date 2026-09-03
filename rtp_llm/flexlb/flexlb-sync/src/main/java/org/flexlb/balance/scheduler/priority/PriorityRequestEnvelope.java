@@ -15,7 +15,7 @@ package org.flexlb.balance.scheduler.priority;
  * @param expectedKvTokens expected KV demand: min(seqLen + maxNewTokens, decode KV total)
  */
 public record PriorityRequestEnvelope(
-        long requestId,
+        String requestId,
         int priority,
         long seqLen,
         long maxNewTokens,

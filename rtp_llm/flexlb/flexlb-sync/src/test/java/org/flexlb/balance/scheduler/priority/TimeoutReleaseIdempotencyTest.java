@@ -10,6 +10,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -17,7 +18,6 @@ import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -53,7 +53,7 @@ class TimeoutReleaseIdempotencyTest {
         DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
         PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
         CompletableFuture<Response> future = new CompletableFuture<>();
-        BatchItem item = batchItemWithDecode(2001L, future, 2001L);
+        BatchItem item = batchItemWithDecode("2001", future, "2001");
 
         AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
                 0, null, null);
@@ -64,8 +64,8 @@ class TimeoutReleaseIdempotencyTest {
 
         awaitCallback(future);
 
-        verify(prefillQueue, times(1)).tryRemove(2001L, "LEASE_RELEASE");
-        verify(decodeEp, times(1)).release(2001L);
+        verify(prefillQueue, times(1)).tryRemove("2001", "LEASE_RELEASE");
+        verify(decodeEp, times(1)).release("2001");
         verify(registrar, times(1)).unregisterInflight(item);
     }
 
@@ -75,7 +75,7 @@ class TimeoutReleaseIdempotencyTest {
         DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
         PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
         CompletableFuture<Response> future = new CompletableFuture<>();
-        BatchItem item = batchItemWithDecode(2002L, future, 2002L);
+        BatchItem item = batchItemWithDecode("2002", future, "2002");
 
         AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
                 0, null, null);
@@ -89,8 +89,8 @@ class TimeoutReleaseIdempotencyTest {
         awaitCallback(future);
 
         // CAS: only one close() ran
-        verify(prefillQueue, times(1)).tryRemove(2002L, "LEASE_RELEASE");
-        verify(decodeEp, times(1)).release(2002L);
+        verify(prefillQueue, times(1)).tryRemove("2002", "LEASE_RELEASE");
+        verify(decodeEp, times(1)).release("2002");
         verify(registrar, times(1)).unregisterInflight(item);
     }
 
@@ -106,7 +106,7 @@ class TimeoutReleaseIdempotencyTest {
         DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
         PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
         CompletableFuture<Response> future = new CompletableFuture<>();
-        BatchItem item = batchItemWithDecode(2003L, future, 2003L);
+        BatchItem item = batchItemWithDecode("2003", future, "2003");
 
         AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
                 0, null, null);
@@ -122,8 +122,8 @@ class TimeoutReleaseIdempotencyTest {
         lease.close();
 
         // No resources released — close is a no-op from DELIVERY_PENDING
-        verify(prefillQueue, never()).tryRemove(anyLong(), anyString());
-        verify(decodeEp, never()).release(anyLong());
+        verify(prefillQueue, never()).tryRemove(ArgumentMatchers.anyString(), anyString());
+        verify(decodeEp, never()).release(ArgumentMatchers.anyString());
         verify(registrar, never()).unregisterInflight(any());
     }
 
@@ -133,7 +133,7 @@ class TimeoutReleaseIdempotencyTest {
         DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
         PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
         CompletableFuture<Response> future = new CompletableFuture<>();
-        BatchItem item = batchItemWithDecode(2004L, future, 2004L);
+        BatchItem item = batchItemWithDecode("2004", future, "2004");
 
         AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
                 0, null, null);
@@ -147,8 +147,8 @@ class TimeoutReleaseIdempotencyTest {
         lease.close();
 
         // CAS: close ran exactly once (from bindTo's err branch)
-        verify(prefillQueue, times(1)).tryRemove(2004L, "LEASE_RELEASE");
-        verify(decodeEp, times(1)).release(2004L);
+        verify(prefillQueue, times(1)).tryRemove("2004", "LEASE_RELEASE");
+        verify(decodeEp, times(1)).release("2004");
         verify(registrar, times(1)).unregisterInflight(item);
     }
 
@@ -158,7 +158,7 @@ class TimeoutReleaseIdempotencyTest {
         DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
         PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
         CompletableFuture<Response> future = new CompletableFuture<>();
-        BatchItem item = batchItemWithDecode(2005L, future, 2005L);
+        BatchItem item = batchItemWithDecode("2005", future, "2005");
 
         AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
                 0, null, null);
@@ -173,8 +173,8 @@ class TimeoutReleaseIdempotencyTest {
         assertTrue(future.isCompletedExceptionally(),
                 "orTimeout must complete exceptionally");
 
-        verify(prefillQueue, times(1)).tryRemove(2005L, "LEASE_RELEASE");
-        verify(decodeEp, times(1)).release(2005L);
+        verify(prefillQueue, times(1)).tryRemove("2005", "LEASE_RELEASE");
+        verify(decodeEp, times(1)).release("2005");
         verify(registrar, times(1)).unregisterInflight(item);
     }
 
@@ -195,9 +195,9 @@ class TimeoutReleaseIdempotencyTest {
         try { Thread.sleep(10); } catch (InterruptedException ignored) { }
     }
 
-    private static BatchItem batchItemWithDecode(long requestId,
+    private static BatchItem batchItemWithDecode(String requestId,
                                                   CompletableFuture<Response> future,
-                                                  long decodeRequestId) {
+                                                  String decodeRequestId) {
         BalanceContext ctx = new BalanceContext();
         ctx.setConfig(SchedulingTestConfig.batchConfig());
         Request request = new Request();
@@ -205,7 +205,7 @@ class TimeoutReleaseIdempotencyTest {
         ctx.setRequest(request);
 
         ServerStatus decode = null;
-        if (decodeRequestId != 0) {
+        if (!"0".equals(decodeRequestId)) {
             decode = new ServerStatus();
             decode.setRequestId(decodeRequestId);
         }

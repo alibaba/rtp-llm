@@ -1,9 +1,11 @@
 package org.flexlb.sync.worker;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.PriorityPreemptionProgress;
+import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Assertions;
@@ -17,7 +19,7 @@ class WorkerStatusResponseTest {
     @Test
     void testConfigLoader() throws Exception {
         String TEST_JSON = "{\"role\":\"PREFILL\",\"available_concurrency\":1637,\"running_task_info\":{},\"finished_task_info\":{},\"step_latency_ms\":36.636,\"iterate_count\":1,\"dp_size\":1,\"tp_size\":1,\"alive\":true,\"version\":1,\"status_version\":1752025357566,\"cache_status\":{\"available_kv_cache\":82944,\"total_kv_cache\":82944,\"block_size\":256,\"version\":-1},\"waiting_query_len\":0,\"running_query_len\":0,\"max_seq_len\":131072,\"max_batch_tokens_size\":262144}";
-        WorkerStatusResponse workerStatusResponse = JsonUtils.toObject(TEST_JSON, new com.fasterxml.jackson.core.type.TypeReference<WorkerStatusResponse>() {
+        WorkerStatusResponse workerStatusResponse = JsonUtils.toObject(TEST_JSON, new TypeReference<WorkerStatusResponse>() {
         });
         Assertions.assertEquals(RoleType.PREFILL, workerStatusResponse.getRole());
         Assertions.assertTrue(workerStatusResponse.isAlive());
@@ -44,13 +46,13 @@ class WorkerStatusResponseTest {
     @Test
     void converterReadsLegacyWorkerRoleAndTaskState() {
         EngineRpcService.TaskInfoPB oldWaiting = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(1L)
+                .setRequestId(String.valueOf(1L))
                 .setIsWaiting(true)
                 .build();
         // An old proto3 writer omits is_waiting=false from the wire. The new
         // reader must use the running_task_info container as the fallback.
         EngineRpcService.TaskInfoPB oldRunning = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(2L)
+                .setRequestId(String.valueOf(2L))
                 .build();
         EngineRpcService.WorkerStatusPB proto = EngineRpcService.WorkerStatusPB.newBuilder()
                 .setRole("RoleType.PREFILL")
@@ -61,16 +63,16 @@ class WorkerStatusResponseTest {
         WorkerStatusResponse response = EngineStatusConverter.convertToWorkerStatusResponse(proto);
 
         assertEquals(RoleType.PREFILL, response.getRole());
-        assertEquals(org.flexlb.enums.TaskPhase.PENDING,
+        assertEquals(TaskPhase.PENDING,
                 response.getRunningTaskInfo().get("1").getPhase());
-        assertEquals(org.flexlb.enums.TaskPhase.RUNNING,
+        assertEquals(TaskPhase.RUNNING,
                 response.getRunningTaskInfo().get("2").getPhase());
     }
 
     @Test
     void converterReadsAndValidatesDualWorkerStatus() {
         EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(3L)
+                .setRequestId(String.valueOf(3L))
                 .setIsWaiting(true)
                 .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED)
                 .build();
@@ -83,7 +85,7 @@ class WorkerStatusResponseTest {
         WorkerStatusResponse response = EngineStatusConverter.convertToWorkerStatusResponse(proto);
 
         assertEquals(RoleType.DECODE, response.getRole());
-        assertEquals(org.flexlb.enums.TaskPhase.KV_ALLOCATED,
+        assertEquals(TaskPhase.KV_ALLOCATED,
                 response.getRunningTaskInfo().get("3").getPhase());
     }
 
@@ -104,13 +106,13 @@ class WorkerStatusResponseTest {
         // the explicit phase carried in field 12.
         EngineRpcService.TaskInfoPB receivedFromE0 = EngineRpcService.TaskInfoPB.parseFrom(
                 EngineRpcService.TaskInfoPB.newBuilder()
-                        .setRequestId(4L)
+                        .setRequestId(String.valueOf(4L))
                         .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED)
                         .build()
                         .toByteArray());
         EngineRpcService.TaskInfoPB kvAllocatedFromE0 = EngineRpcService.TaskInfoPB.parseFrom(
                 EngineRpcService.TaskInfoPB.newBuilder()
-                        .setRequestId(5L)
+                        .setRequestId(String.valueOf(5L))
                         .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED)
                         .build()
                         .toByteArray());
@@ -122,16 +124,16 @@ class WorkerStatusResponseTest {
 
         WorkerStatusResponse response = EngineStatusConverter.convertToWorkerStatusResponse(status);
 
-        assertEquals(org.flexlb.enums.TaskPhase.RECEIVED,
+        assertEquals(TaskPhase.RECEIVED,
                 response.getRunningTaskInfo().get("4").getPhase());
-        assertEquals(org.flexlb.enums.TaskPhase.KV_ALLOCATED,
+        assertEquals(TaskPhase.KV_ALLOCATED,
                 response.getRunningTaskInfo().get("5").getPhase());
     }
 
     @Test
     void converterKeepsExplicitPhaseWhenLegacyFlagDisagrees() {
         EngineRpcService.TaskInfoPB runningButWaiting = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(6L)
+                .setRequestId(String.valueOf(6L))
                 .setIsWaiting(true)
                 .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
                 .build();
@@ -142,14 +144,14 @@ class WorkerStatusResponseTest {
 
         WorkerStatusResponse response = EngineStatusConverter.convertToWorkerStatusResponse(status);
 
-        assertEquals(org.flexlb.enums.TaskPhase.RUNNING,
+        assertEquals(TaskPhase.RUNNING,
                 response.getRunningTaskInfo().get("6").getPhase());
     }
 
     @Test
     void converterPreservesAuthoritativePriorityCanceledTerminal() {
         EngineRpcService.TaskInfoPB canceled = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(8429001L)
+                .setRequestId(String.valueOf(8429001L))
                 .setPriorityPreemptionProgress(EngineRpcService.PriorityPreemptionProgressPB
                         .PRIORITY_PREEMPTION_CANCELED)
                 .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()

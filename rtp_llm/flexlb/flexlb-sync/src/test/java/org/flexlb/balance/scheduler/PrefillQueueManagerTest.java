@@ -48,17 +48,17 @@ class PrefillQueueManagerTest {
         long now = System.currentTimeMillis();
 
         // Insertion order deliberately scrambled
-        assertTrue(batcher.tryOffer(item(1, 50, now + 5_000, now, 128)));
-        assertTrue(batcher.tryOffer(item(2, 70, now + 9_000, now + 100, 128)));
-        assertTrue(batcher.tryOffer(item(3, 50, now + 1_000, now + 200, 128)));
-        assertTrue(batcher.tryOffer(item(4, 50, now + 5_000, now - 100, 128)));
+        assertTrue(batcher.tryOffer(item("1", 50, now + 5_000, now, 128)));
+        assertTrue(batcher.tryOffer(item("2", 70, now + 9_000, now + 100, 128)));
+        assertTrue(batcher.tryOffer(item("3", 50, now + 1_000, now + 200, 128)));
+        assertTrue(batcher.tryOffer(item("4", 50, now + 5_000, now - 100, 128)));
 
         PrefillQueueSnapshot snapshot = batcher.queueManager().snapshot();
-        List<Long> order = snapshot.items().stream().map(QueuedRequestSnapshot::requestId).toList();
+        List<String> order = snapshot.items().stream().map(QueuedRequestSnapshot::requestId).toList();
 
         // P70 first (priority desc); P50s preserve offer order. Neither the
         // supplied timestamp nor expiration changes same-priority FIFO.
-        assertEquals(List.of(2L, 1L, 3L, 4L), order);
+        assertEquals(List.of("2", "1", "3", "4"), order);
         assertEquals(4, snapshot.items().size());
         assertEquals(SchedulingTestConfig.useBatchDispatcher(config).getMaxWaitingRequestsPerPrefillWorker(), snapshot.queueCapacity());
         for (QueuedRequestSnapshot item : snapshot.items()) {
@@ -74,14 +74,14 @@ class PrefillQueueManagerTest {
         // Same priority and supplied arrival timestamp still preserve the
         // actual offer sequence. requestId is only a defensive final tie-break
         // after the unique enqueue sequence.
-        assertTrue(batcher.tryOffer(item(1, 50, now + 9_000, now, 128)));
-        assertTrue(batcher.tryOffer(item(2, 50, now + 1_000, now, 128)));
-        assertTrue(batcher.tryOffer(item(4, 50, now + 9_000, now, 128)));
-        assertTrue(batcher.tryOffer(item(3, 50, now + 9_000, now, 128)));
+        assertTrue(batcher.tryOffer(item("1", 50, now + 9_000, now, 128)));
+        assertTrue(batcher.tryOffer(item("2", 50, now + 1_000, now, 128)));
+        assertTrue(batcher.tryOffer(item("4", 50, now + 9_000, now, 128)));
+        assertTrue(batcher.tryOffer(item("3", 50, now + 9_000, now, 128)));
 
-        List<Long> order = batcher.queueManager().snapshot().items().stream()
+        List<String> order = batcher.queueManager().snapshot().items().stream()
                 .map(QueuedRequestSnapshot::requestId).toList();
-        assertEquals(List.of(1L, 2L, 4L, 3L), order);
+        assertEquals(List.of("1", "2", "4", "3"), order);
     }
 
     @Test
@@ -91,13 +91,13 @@ class PrefillQueueManagerTest {
         long now = System.currentTimeMillis();
 
         // High priority arrives last: FIFO ordering must keep offer order.
-        assertTrue(batcher.tryOffer(item(1, 30, now + 1_000, now, 128)));
-        assertTrue(batcher.tryOffer(item(2, 50, now + 500, now + 100, 128)));
-        assertTrue(batcher.tryOffer(item(3, 70, now + 100, now + 200, 128)));
+        assertTrue(batcher.tryOffer(item("1", 30, now + 1_000, now, 128)));
+        assertTrue(batcher.tryOffer(item("2", 50, now + 500, now + 100, 128)));
+        assertTrue(batcher.tryOffer(item("3", 70, now + 100, now + 200, 128)));
 
-        List<Long> order = batcher.queueManager().snapshot().items().stream()
+        List<String> order = batcher.queueManager().snapshot().items().stream()
                 .map(QueuedRequestSnapshot::requestId).toList();
-        assertEquals(List.of(1L, 2L, 3L), order);
+        assertEquals(List.of("1", "2", "3"), order);
     }
 
     // ==================== 8.4 wait estimate ====================
@@ -109,13 +109,13 @@ class PrefillQueueManagerTest {
         WorkerBatcher batcher = newBatcher();
         long now = System.currentTimeMillis();
         // Ancient arrivals zero out the head's remaining window for determinism
-        assertTrue(batcher.tryOffer(item(1, 50, now, now - 100_000, 128)));
-        assertTrue(batcher.tryOffer(item(2, 50, now, now - 100_000, 128)));
+        assertTrue(batcher.tryOffer(item("1", 50, now, now - 100_000, 128)));
+        assertTrue(batcher.tryOffer(item("2", 50, now, now - 100_000, 128)));
 
         PrefillQueueManager manager = batcher.queueManager();
-        long waitP70 = manager.estimateWaitMs(70, 999);
-        long waitP50 = manager.estimateWaitMs(50, 999);
-        long waitP30 = manager.estimateWaitMs(30, 999);
+        long waitP70 = manager.estimateWaitMs(70, "999");
+        long waitP50 = manager.estimateWaitMs(50, "999");
+        long waitP30 = manager.estimateWaitMs(30, "999");
 
         // P70 jumps ahead of both P50 items: 0 cycles ahead
         assertEquals(0, waitP70);
@@ -128,10 +128,10 @@ class PrefillQueueManagerTest {
 
     // ==================== helpers ====================
 
-    private BatchItem item(long requestId, int priority, long expiresAtMs,
+    private BatchItem item(String requestId, int priority, long expiresAtMs,
                            long enqueuedAtMs, long seqLen) {
         Request request = new Request();
-        request.setRequestId(requestId);
+        request.setRequestId(String.valueOf(requestId));
         request.setSeqLen(seqLen);
         request.setPriority(priority);
         BalanceContext ctx = new BalanceContext();

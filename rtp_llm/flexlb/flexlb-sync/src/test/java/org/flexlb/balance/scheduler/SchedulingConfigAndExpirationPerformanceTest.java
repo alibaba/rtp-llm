@@ -203,7 +203,7 @@ class SchedulingConfigAndExpirationPerformanceTest {
                     + TimeUnit.MINUTES.toMillis(1);
             List<CompletableFuture<Response>> warmup = new ArrayList<>(32);
             for (int index = 0; index < 32; index++) {
-                warmup.add(scheduler.submit(context(10_000L + index, warmupExpiresAtMs)));
+                warmup.add(scheduler.submit(context(String.valueOf(10_000L + index), warmupExpiresAtMs)));
             }
             awaitCondition(() -> scheduler.requestExpirationQueueSize() == warmup.size(), 1_000);
             Response warmupSuccess = successResponse();
@@ -223,7 +223,7 @@ class SchedulingConfigAndExpirationPerformanceTest {
             AtomicLong lastExpirationNanos = new AtomicLong(Long.MIN_VALUE);
             for (int index = 0; index < TIMER_REQUEST_COUNT; index++) {
                 CompletableFuture<Response> future = scheduler.submit(
-                        context(20_000L + index, expiresAtMs));
+                        context(String.valueOf(20_000L + index), expiresAtMs));
                 if (index >= EARLY_COMPLETION_COUNT) {
                     future.whenComplete((ignored, error) -> {
                         long completedAt = System.nanoTime();
@@ -313,7 +313,7 @@ class SchedulingConfigAndExpirationPerformanceTest {
         }
     }
 
-    private static BalanceContext context(long requestId, long expiresAtMs) {
+    private static BalanceContext context(String requestId, long expiresAtMs) {
         Request request = new Request();
         request.setRequestId(requestId);
 

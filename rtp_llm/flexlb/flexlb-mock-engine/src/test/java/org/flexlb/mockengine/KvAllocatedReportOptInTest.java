@@ -85,7 +85,7 @@ class KvAllocatedReportOptInTest {
 
         // 1 running + 2 queued behind the concurrency gate.
         for (long rid = 1; rid <= 3; rid++) {
-            assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, rid, 8), -1, null));
+            assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, String.valueOf(rid), 8), -1, null));
         }
 
         EngineRpcService.WorkerStatusPB status = workerStatus(decode, 0);
@@ -119,7 +119,7 @@ class KvAllocatedReportOptInTest {
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 1);
 
         for (long rid = 1; rid <= 3; rid++) {
-            assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, rid, 8), -1, null));
+            assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, String.valueOf(rid), 8), -1, null));
         }
 
         EngineRpcService.WorkerStatusPB status = workerStatus(decode, 0);
@@ -154,8 +154,8 @@ class KvAllocatedReportOptInTest {
         MockPerformanceModel model = model(10_000.0, 3, true);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 1);
 
-        assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, 1L, 8), -1, null));
-        assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, 2L, 8), -1, null));
+        assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, "1", 8), -1, null));
+        assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, "2", 8), -1, null));
         assertEquals(16, decode.getActiveKvTokens(),
                 "opt-in: running + queued requests both hold KV before the cancel");
 
@@ -172,7 +172,7 @@ class KvAllocatedReportOptInTest {
         // Iron rule 4: CANCELLED terminal surfaces in the next WorkerStatus.
         EngineRpcService.WorkerStatusPB status = workerStatus(decode, 0);
         boolean cancelledReported = status.getFinishedTaskListList().stream()
-                .anyMatch(task -> task.getRequestId() == 2L
+                .anyMatch(task -> task.getRequestId().equals("2")
                         && task.getErrorInfo().getErrorCode()
                         == EngineRpcService.ErrorCodePB.CANCELLED.getNumber());
         assertTrue(cancelledReported,
@@ -230,9 +230,8 @@ class KvAllocatedReportOptInTest {
     }
 
     private static MockPerformanceModel.RequestShape shapeOf(
-            MockPerformanceModel model, long requestId, int inputTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+            MockPerformanceModel model, String requestId, int inputTokens) {
+        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(1)
                         .build());
