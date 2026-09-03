@@ -1452,7 +1452,15 @@ class Qwen3MoeModelTest(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as model_path:
             save_file(weights, os.path.join(model_path, "model.safetensors"))
-            model = NewModelLoader(config, load_config, model_path=model_path).load()
+            with mock.patch(
+                "rtp_llm.models_py.layers.moe_experts.get_current_device",
+                side_effect=AssertionError(
+                    "CUDA MoE postprocess must not initialize the backend device"
+                ),
+            ):
+                model = NewModelLoader(
+                    config, load_config, model_path=model_path
+                ).load()
 
         experts = model.layers[0].mlp.experts
         self.assertEqual(experts._quant_family, "fp8_per_tensor_online")
