@@ -424,7 +424,7 @@ public final class JavaMockEngineCluster {
                         + "heap_used_mb=%d heap_max_mb=%d "
                         + "generate_stream_rpcs=%d fetch_response_rpcs=%d cancel_rpcs=%d "
                         + "cancel_census_tracked=%d cancel_census_finished=%d cancel_census_unknown=%d cancel_census_tombstone=%d "
-                        + "cancel_census_client_gone=%d%n",
+                        + "cancel_census_injected=%d cancel_census_client_gone=%d%n",
                 System.currentTimeMillis(),
                 stats.enqueueRpcs.sum(), stats.enqueuedRequests.sum(),
                 stats.statusRpcs.sum(), stats.cacheRpcs.sum(),
@@ -439,7 +439,7 @@ public final class JavaMockEngineCluster {
                 stats.generateStreamRpcs.sum(), stats.fetchResponseRpcs.sum(), stats.cancelRpcs.sum(),
                 stats.cancelCensusTracked.sum(), stats.cancelCensusAlreadyFinished.sum(),
                 stats.cancelCensusUnknown.sum(), stats.cancelCensusTombstone.sum(),
-                stats.cancelCensusClientGone.sum());
+                stats.cancelCensusInjected.sum(), stats.cancelCensusClientGone.sum());
     }
 
     static void writeDiscoveryFiles(Config config) throws IOException {
@@ -2039,6 +2039,39 @@ public final class JavaMockEngineCluster {
         }
 
         /**
+         * Cancel-RPC arrival bookkeeping + fault-injection gate, shared by
+         * all three cancel surfaces (gRPC Cancel handler, HTTP
+         * {@code /cancel_request}, in-process {@link MockEngineCancelChannel}).
+         * Counts the arrival (stats.cancelRpcs + rpcCancel — exactly like
+         * statusNoRespond counts statusRpcs before hanging), then returns
+         * the armed injection kind or {@code null} for the normal path.
+         *
+         * <p>An injected cancel is an RPC-LAYER failure simulated BEFORE the
+         * engine cancel state machine is touched: no fences, no tombstones,
+         * no census branch — production semantics "RPC failed = engine state
+         * unchanged". The master's one-shot cancel contract (never retries,
+         * 50ms ack timeout) turns every injected kind into a failed future
+         * on the master side while the engine keeps its exact prior state.
+         */
+        CancelFaultKind arriveCancelRpc() {
+            stats.cancelRpcs.increment();
+            rpcCancel.incrementAndGet();
+            if (faultConfig.isCancelNoRespond()) {
+                stats.cancelCensusInjected.increment();
+                return CancelFaultKind.NO_RESPOND;
+            }
+            if (faultConfig.isCancelError()) {
+                stats.cancelCensusInjected.increment();
+                return CancelFaultKind.ERROR;
+            }
+            if (faultConfig.isCancelUnexpectedStatus()) {
+                stats.cancelCensusInjected.increment();
+                return CancelFaultKind.UNEXPECTED_STATUS;
+            }
+            return null;
+        }
+
+        /**
          * Three-branch cancel used by {@link MockEngineCancelChannel} and the
          * gRPC Cancel handler, mapped to the production C++ Prefill contract:
          * a live request (or an accepted-cancel tombstone retry) is
@@ -2056,8 +2089,13 @@ public final class JavaMockEngineCluster {
          * list.
          */
         CancelResult cancelRequest(long requestId) {
-            stats.cancelRpcs.increment();
-            rpcCancel.incrementAndGet();
+            // Arrival counting (stats.cancelRpcs + rpcCancel) lives in
+            // arriveCancelRpc() so EVERY cancel surface (gRPC handler, HTTP
+            // /cancel_request, in-process MockEngineCancelChannel) counts the
+            // arrival exactly once — including the injected short-circuit
+            // paths, mirroring statusNoRespond counting statusRpcs before
+            // hanging. Direct unit-test calls of cancelRequest skip the
+            // arrival counters; the census BRANCH counters below stay here.
             if (roleType != EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL) {
                 throw new UnsupportedOperationException(
                         "priority Cancel is only implemented by the original Prefill");
@@ -3872,7 +3910,42 @@ public final class JavaMockEngineCluster {
         @Override
         public void cancel(EngineRpcService.CancelRequestPB request,
                            StreamObserver<EngineRpcService.CancelResponsePB> observer) {
+            // Cancel-RPC fault injections (RPC-layer failures; the HTTP
+            // /cancel_request and in-process channel surfaces run the same
+            // arriveCancelRpc gate). Everything below short-circuits BEFORE
+            // cancelRequest so the engine state machine is never touched —
+            // production semantics "RPC failed = engine state unchanged"
+            // (no fences, no tombstones), and the master's one-shot cancel
+            // contract (never retries, 50ms ack timeout) is what turns
+            // these into failed futures master-side.
+            CancelFaultKind fault = arriveCancelRpc();
+            if (fault == CancelFaultKind.NO_RESPOND) {
+                // cancel_no_respond: hang the RPC — no onNext / onError /
+                // onCompleted ever, mirroring statusNoRespond's hang. The
+                // arrival was counted; the master's cancel-ack timeout
+                // fails the future with zero engine-side state change.
+                return;
+            }
             try {
+                if (fault == CancelFaultKind.ERROR) {
+                    // cancel_error: transport-layer failure (gRPC INTERNAL)
+                    // — the master's future fails; no fence is installed.
+                    observer.onError(io.grpc.Status.INTERNAL
+                            .withDescription("mock cancel error injection")
+                            .asException());
+                    return;
+                }
+                if (fault == CancelFaultKind.UNEXPECTED_STATUS) {
+                    // cancel_unexpected_status: the RPC succeeds but the ack
+                    // status sits outside the cancel contract (UNSPECIFIED)
+                    // — the master's response mapping must fail it, never
+                    // accept it.
+                    observer.onNext(EngineRpcService.CancelResponsePB.newBuilder()
+                            .setStatus(EngineRpcService.CancelStatusPB.CANCEL_STATUS_UNSPECIFIED)
+                            .build());
+                    observer.onCompleted();
+                    return;
+                }
                 CancelResult result = cancelRequest(request.getRequestId());
                 EngineRpcService.CancelStatusPB status;
                 if (result.found()) {
@@ -4802,6 +4875,22 @@ public final class JavaMockEngineCluster {
     record CancelResult(boolean found, EngineRpcService.TaskPhase phase, boolean alreadyFinished) {
     }
 
+    /**
+     * Armed cancel-RPC fault injection kind returned by
+     * {@link FastRpcService#arriveCancelRpc} — the RPC-layer failure family
+     * ({@code cancel_no_respond} / {@code cancel_error} /
+     * {@code cancel_unexpected_status}) simulated before the engine cancel
+     * state machine is touched.
+     */
+    enum CancelFaultKind {
+        /** cancel_no_respond: the RPC hangs — no response ever (mirrors statusNoRespond). */
+        NO_RESPOND,
+        /** cancel_error: transport-layer failure (gRPC INTERNAL / HTTP 500). */
+        ERROR,
+        /** cancel_unexpected_status: ack status outside the contract (UNSPECIFIED). */
+        UNEXPECTED_STATUS
+    }
+
     static final class ClusterStats {
         private final LongAdder enqueueRpcs = new LongAdder();
         private final LongAdder enqueuedRequests = new LongAdder();
@@ -4819,6 +4908,13 @@ public final class JavaMockEngineCluster {
         final LongAdder cancelCensusAlreadyFinished = new LongAdder();
         final LongAdder cancelCensusUnknown = new LongAdder();
         final LongAdder cancelCensusTombstone = new LongAdder();
+        // Cancel-RPC fault-injection census: arrivals short-circuited by an
+        // armed cancel_no_respond / cancel_error / cancel_unexpected_status
+        // injection (arriveCancelRpc). Separate from the state-machine
+        // branches so the census family stays an exhaustive split of cancel
+        // RPC arrivals — an injected cancel is neither tracked, finished,
+        // unknown nor a tombstone: the engine state never saw it.
+        final LongAdder cancelCensusInjected = new LongAdder();
         // Autonomous client-gone cancellations (broken GenerateStream /
         // FetchResponse stream): how many in-flight requests the engine
         // cleaned up by itself because the client stream died, split from the

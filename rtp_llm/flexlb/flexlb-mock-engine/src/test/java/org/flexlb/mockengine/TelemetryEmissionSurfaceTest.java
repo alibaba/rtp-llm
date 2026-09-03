@@ -45,7 +45,7 @@ class TelemetryEmissionSurfaceTest {
                 "decode_exec_max", "heap_used_mb", "heap_max_mb",
                 "generate_stream_rpcs", "fetch_response_rpcs", "cancel_rpcs",
                 "cancel_census_tracked", "cancel_census_finished", "cancel_census_unknown",
-                "cancel_census_tombstone"}) {
+                "cancel_census_tombstone", "cancel_census_injected"}) {
             assertTrue(line.contains(" " + key + "=") || line.contains("java_mock_stats " + key + "="),
                     "stats line must carry key '" + key + "': " + line);
         }
