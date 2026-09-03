@@ -23,6 +23,32 @@ struct InterleavedFeatureLayout {
     std::vector<int32_t> suffix_ids;
 };
 
+ErrorInfo pinMultimodalTensors(std::vector<torch::Tensor>& tensors, const char* tensor_name) {
+#if USING_CUDA
+    try {
+        for (auto& tensor : tensors) {
+            if (!tensor.defined() || tensor.is_pinned()) {
+                continue;
+            }
+            if (tensor.is_cuda()) {
+                auto options =
+                    torch::TensorOptions().dtype(tensor.scalar_type()).device(torch::kCPU).pinned_memory(true);
+                tensor = tensor.to(options, /*non_blocking=*/true);
+            } else {
+                tensor = tensor.pin_memory();
+            }
+        }
+    } catch (const std::exception& e) {
+        return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
+                         std::string("failed to move multimodal ") + tensor_name + " to pinned CPU: " + e.what());
+    }
+#else
+    (void)tensors;
+    (void)tensor_name;
+#endif
+    return ErrorInfo::OkStatus();
+}
+
 }  // namespace
 
 ErrorInfo MultimodalProcessor::getFeatureHash(int32_t* token_ids, const torch::Tensor& mm_emb) {
@@ -378,6 +404,10 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
         input->mm_extra_input.reset();
     } else {
         input->mm_extra_input = std::move(mm_embedding_res.mm_extra_input);
+    }
+    RETURN_IF_STATUS_ERROR(pinMultimodalTensors(input->multimodal_features.value(), "embedding"));
+    if (input->mm_extra_input.has_value()) {
+        RETURN_IF_STATUS_ERROR(pinMultimodalTensors(input->mm_extra_input.value(), "extra input"));
     }
     return ErrorInfo::OkStatus();
 }

@@ -30,6 +30,7 @@ public:
     static std::vector<RoleAddr> getRoleAddrs(const GenerateConfigPB* config_proto);
 
     static torch::Tensor transTensor(const TensorPB& tensor_pb);
+    static torch::Tensor transPinnedTensor(const TensorPB& tensor_pb);
 
     static void transTensorPB(TensorPB* tensor_pb, const torch::Tensor& tensor);
 
