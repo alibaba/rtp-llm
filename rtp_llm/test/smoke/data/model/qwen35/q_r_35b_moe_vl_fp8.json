@@ -28,25 +28,82 @@
                 "top_k": 1
             },
             "result": {
+                "id": "chat-",
+                "object": "chat.completion",
+                "created": 1788415184,
+                "model": "",
                 "choices": [
                     {
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "The user wants a description of the provided image.\n\n1.  **Identify the main subjects:** A woman and a dog.\n2.  **Identify the setting:** A sandy beach with the ocean in the background. The lighting suggests late afternoon or sunset (golden hour).\n3.  **Describe the action:** The woman is sitting on the sand. The dog is sitting opposite her. They are interacting, specifically doing a \"high five\" or \"shake\" trick. The",
-                            "partial": false
+                            "content": "The user wants a description of the provided image.\n\n1.  **Identify the main subjects:** A woman and a dog.\n2.  **Identify the setting:** A sandy beach with the ocean in the background. The lighting suggests late afternoon or sunset (golden hour).\n3.  **Describe the action:** The woman is sitting on the sand. The dog is sitting facing her. They are interacting, specifically the dog is lifting its paw and the woman is holding it (",
+                            "name": null,
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
                         },
-                        "finish_reason": "length"
+                        "finish_reason": "length",
+                        "logprobs": null
                     }
                 ],
                 "usage": {
                     "prompt_tokens": 2773,
                     "total_tokens": 2873,
                     "completion_tokens": 100,
+                    "completion_tokens_details": null,
                     "prompt_tokens_details": {
-                        "image_tokens": 2752
+                        "audio_tokens": null,
+                        "cached_tokens": null,
+                        "image_tokens": 2752,
+                        "video_tokens": null
                     }
-                }
+                },
+                "debug_info": null,
+                "aux_info": {
+                    "cost_time": 5534.161,
+                    "iter_count": 100,
+                    "prefix_len": 0,
+                    "input_len": 2773,
+                    "output_len": 100,
+                    "step_output_len": 99,
+                    "first_token_cost_time": 4635.106,
+                    "wait_time": 0.061,
+                    "pd_sep": true,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {
+                        "1": 2752
+                    },
+                    "speculative_draft_rounds": 0,
+                    "speculative_accepted_tokens_per_pos": [],
+                    "role_addrs": [
+                        {
+                            "role": "DECODE",
+                            "ip": "127.0.0.1",
+                            "http_port": 13102,
+                            "grpc_port": 13103
+                        }
+                    ],
+                    "aux_string": ""
+                },
+                "extra_outputs": null,
+                "prompt_logprobs": null
             }
         }
     ]

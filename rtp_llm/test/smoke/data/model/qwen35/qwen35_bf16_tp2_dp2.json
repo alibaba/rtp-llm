@@ -19,32 +19,42 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 1777370097,
+                "created": 1788415309,
                 "model": "",
                 "choices": [
                     {
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "嗯，用户问“你是谁”，这是一个非常基础的问题，需要明确我的身份。我是 Qwen3.5，是阿里巴巴最新推出的通义千问大语言模型。我应该简洁地介绍自己，同时突出关键升级点，但避免过于技术化的术语。\n\n首先，用户可能想知道我的基本功能，比如能做什么。需要提到我的核心能力，比如多语言支持、逻辑推理、代码生成等。但作为 Qwen3.5，应该强调相比前代的"
+                            "content": "嗯，用户问“你是谁”，这是一个非常基础的问题，需要明确我的身份。我是 Qwen3.5，是阿里巴巴最新推出的通义千问大语言模型。我应该简洁地介绍自己，同时突出关键升级点，但避免过于技术化的术语。\n\n首先，用户可能想知道我的基本功能，比如能做什么。需要提到我的核心能力，比如多语言支持、逻辑推理、代码生成等。但作为 Qwen3.5，应该强调相比前代的",
+                            "name": null,
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
                         },
-                        "finish_reason": "length"
+                        "finish_reason": "length",
+                        "logprobs": null
                     }
                 ],
                 "usage": {
                     "prompt_tokens": 11,
                     "total_tokens": 111,
-                    "completion_tokens": 100
+                    "completion_tokens": 100,
+                    "completion_tokens_details": null,
+                    "prompt_tokens_details": null
                 },
+                "debug_info": null,
                 "aux_info": {
-                    "cost_time": 6758.758,
+                    "cost_time": 9451.365,
                     "iter_count": 100,
                     "prefix_len": 0,
                     "input_len": 11,
                     "output_len": 100,
                     "step_output_len": 100,
-                    "first_token_cost_time": 243.253,
-                    "wait_time": 0.0,
+                    "first_token_cost_time": 2528.677,
+                    "wait_time": 826.915,
                     "pd_sep": false,
                     "cum_log_probs": [],
                     "beam_responses": [],
@@ -61,9 +71,14 @@
                     "decode_local_reuse_len": 0,
                     "decode_remote_reuse_len": 0,
                     "decode_memory_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "speculative_draft_rounds": 0,
+                    "speculative_accepted_tokens_per_pos": [],
                     "role_addrs": [],
                     "aux_string": ""
-                }
+                },
+                "extra_outputs": null,
+                "prompt_logprobs": null
             }
         }
     ]

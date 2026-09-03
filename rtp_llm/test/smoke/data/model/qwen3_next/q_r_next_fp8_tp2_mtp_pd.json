@@ -42,12 +42,13 @@
                     "decode_memory_reuse_len": 0,
                     "output_len": 20,
                     "step_output_len": 19,
-                    "iter_count": 7,
+                    "iter_count": 6,
                     "cum_log_probs": [],
                     "beam_responses": [],
                     "pd_sep": true,
                     "softmax_probs": []
-                }
+                },
+                "prompt_logprobs": null
             }
         },
         {
@@ -90,12 +91,13 @@
                     "decode_memory_reuse_len": 0,
                     "output_len": 20,
                     "step_output_len": 19,
-                    "iter_count": 7,
+                    "iter_count": 6,
                     "cum_log_probs": [],
                     "beam_responses": [],
                     "pd_sep": true,
                     "softmax_probs": []
-                }
+                },
+                "prompt_logprobs": null
             }
         },
         {
@@ -138,12 +140,13 @@
                     "decode_memory_reuse_len": 0,
                     "output_len": 20,
                     "step_output_len": 19,
-                    "iter_count": 7,
+                    "iter_count": 6,
                     "cum_log_probs": [],
                     "beam_responses": [],
                     "pd_sep": true,
                     "softmax_probs": []
-                }
+                },
+                "prompt_logprobs": null
             }
         }
     ]
