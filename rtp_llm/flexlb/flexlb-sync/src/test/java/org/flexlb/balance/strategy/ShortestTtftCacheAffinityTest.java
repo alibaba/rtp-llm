@@ -128,6 +128,32 @@ class ShortestTtftCacheAffinityTest {
     }
 
     @Test
+    void sessionPlacementLookupFailureUsesBaseline() {
+        SessionPlacementStore failingStore = Mockito.mock(SessionPlacementStore.class);
+        Mockito.when(failingStore.currentEpoch("kimi-k3", "session-1"))
+                .thenReturn(3L);
+        Mockito.when(failingStore.find("kimi-k3", "session-1", 1_800_000L))
+                .thenThrow(new IllegalStateException("store unavailable"));
+        strategy = new ShortestTTFTStrategy(
+                engineWorkerStatus,
+                cacheAwareService,
+                resourceMeasureFactory,
+                engineHealthReporter,
+                failingStore);
+        FlexlbConfig config = sessionAffinityConfig(100);
+        useFixedCandidatePool(config, 1);
+        addWorker("10.0.0.1", 0);
+        addWorker("10.0.0.2", 50);
+        BalanceContext context = buildContext(1000, 109L, config);
+        markEstablished(context, "kimi-k3", "session-1");
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.1", result.getServerIp());
+    }
+
+    @Test
     void sessionPlacementOverTtftCapUsesBaseline() {
         FlexlbConfig config = sessionAffinityConfig(10);
         useFixedCandidatePool(config, 1);
