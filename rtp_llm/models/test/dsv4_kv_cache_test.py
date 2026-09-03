@@ -343,6 +343,19 @@ class Dsv4PostBuildModelConfigTest(TestCase):
             configs.kv_cache_config.seq_size_per_block, DSV4_TOKENS_PER_BLOCK
         )
 
+    def test_model_args_reject_non_fp8_kv_cache(self):
+        from rtp_llm.models_py.model_desc.deepseek_v4_model import (
+            _args_from_model_config,
+        )
+
+        config = self._model_config()
+        config.attn_config.kv_cache_dtype = KvCacheDataType.BASE
+
+        with self.assertRaisesRegex(
+            ValueError, "DeepSeek-V4 currently supports only FP8 KV cache"
+        ):
+            _args_from_model_config(config)
+
     def test_post_build_keeps_explicit_block_size(self):
         config = self._model_config(tokens_per_block=128)
 

@@ -87,13 +87,9 @@ class V4Args:
     world_size: int = 1
     world_rank: int = 0
     is_decode_role: bool = False
-    # KV-cache dtype switch.  True selects ``AttentionFP8`` (paged 584B
-    # SWA/CSA/HCA pools, FlashMLA dual-pool decode); False keeps the BF16
-    # ``Attention`` path. Resolved from
-    # ``attn_config.kv_cache_dtype == KvCacheDataType.FP8`` in
-    # ``DeepSeekV4Model._args_from_model_config`` — production is FP8, so
-    # the default reflects that; the BF16 path remains supported for
-    # debugging by callers that pass ``fp8_kv_cache=False`` explicitly.
+    # DeepSeek-V4 supports only FP8 KV cache. This field remains available to
+    # gate FP8-specific warmup and prefill optimizations after configuration
+    # validation in ``DeepSeekV4Model._args_from_model_config``.
     fp8_kv_cache: bool = True
 
 
@@ -149,7 +145,6 @@ def _block_kwargs(
         ep_rank=args.ep_rank,
         max_tokens_per_rank=args.max_tokens_per_rank,
         is_decode_role=args.is_decode_role,
-        fp8_kv_cache=args.fp8_kv_cache,
     )
 
 
@@ -441,7 +436,7 @@ class V4Transformer(nn.Module):
     def forward_decode(
         self,
         input_ids: torch.Tensor,  # [T_total] int (== [B] for q_len=1)
-        attn_metadata: "DSv4DecodeAttnMetadata",  # type: ignore[name-defined]
+        attn_metadata: "DSv4DecodeAttnMetadataFP8",  # type: ignore[name-defined]
         kv_cache=None,
     ) -> torch.Tensor:
         """Decode-only forward.
