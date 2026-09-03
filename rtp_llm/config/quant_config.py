@@ -261,7 +261,48 @@ class QuantizationConfig(ABC):
         if quant_method == "modelopt":
             modelopt_quant = quant_config.get("quantization", {})
             modelopt_algo = str(modelopt_quant.get("quant_algo", "")).upper()
-            if modelopt_algo == "MXFP8":
+            if modelopt_algo in ("MXFP8", "MIXED_PRECISION"):
+                quantized_layers = modelopt_quant.get("quantized_layers", {}) or {}
+                if modelopt_algo == "MIXED_PRECISION":
+                    if not isinstance(quantized_layers, dict) or not quantized_layers:
+                        raise ValueError(
+                            "ModelOpt MIXED_PRECISION requires a non-empty "
+                            "quantized_layers mapping"
+                        )
+                    invalid_entries = [
+                        name
+                        for name, info in quantized_layers.items()
+                        if not isinstance(info, dict) or not info.get("quant_algo")
+                    ]
+                    if invalid_entries:
+                        raise ValueError(
+                            "ModelOpt MIXED_PRECISION quantized_layers entries must "
+                            "contain quant_algo, invalid entries: "
+                            f"{invalid_entries[:8]}"
+                        )
+                    layer_algos = {
+                        str(info["quant_algo"]).upper()
+                        for info in quantized_layers.values()
+                    }
+                    unsupported = layer_algos - {"MXFP8", "MXFP4"}
+                    if unsupported:
+                        raise ValueError(
+                            "RTP-LLM ModelOpt MIXED_PRECISION currently supports "
+                            "MXFP8 linears with MXFP4 routed experts, got "
+                            f"{sorted(unsupported)}"
+                        )
+                    invalid_fp4_modules = [
+                        name
+                        for name, info in quantized_layers.items()
+                        if str(info["quant_algo"]).upper() == "MXFP4"
+                        and not name.endswith(".mlp.experts")
+                    ]
+                    if invalid_fp4_modules:
+                        raise ValueError(
+                            "ModelOpt MIXED_PRECISION only supports MXFP4 on routed "
+                            "expert modules, got "
+                            f"{invalid_fp4_modules[:8]}"
+                        )
                 result = Fp8MxBlockWiseQuantConfig.from_config(
                     {
                         "bits": 8,
@@ -272,11 +313,19 @@ class QuantizationConfig(ABC):
                         # packed expert tensors use ``foo_scale``.
                         "checkpoint_scale_suffix": ".weight_scale",
                         "packed_scale_suffix": "_scale",
+                        # ModelOpt stores MX scale factors as raw UE8M0 bytes.
+                        # The MXFP8 loader materializes fp32 powers of two;
+                        # the offline MXFP4 MoE loader preserves the bit pattern.
+                        "scale_fmt": "ue8m0",
                     }
                 )
                 result.exclude_modules = set(
                     modelopt_quant.get("exclude_modules", []) or []
                 )
+                # MIXED_PRECISION is an authoritative per-module allowlist.
+                # The legacy all-MXFP8 format omits it or leaves it empty.
+                result.quantized_layers = dict(quantized_layers)
+                result.modelopt_quant_algo = modelopt_algo
                 return result
             config_groups = quant_config["config_groups"]
             weights_config = config_groups["group_0"]["weights"]
@@ -486,6 +535,8 @@ class Fp8MxBlockWiseQuantConfig(Fp8BlockWiseQuantConfig):
         self.packed_scale_suffix = kwargs.get(
             "packed_scale_suffix", "_scale_inv"
         )
+        self.quantized_layers = dict(kwargs.get("quantized_layers", {}) or {})
+        self.modelopt_quant_algo = kwargs.get("modelopt_quant_algo", "MXFP8")
 
     @classmethod
     def get_method(cls) -> str:
