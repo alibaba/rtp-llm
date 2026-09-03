@@ -39,15 +39,24 @@ void BlockTreeStorer::stopAdmissionLocked() {
 
 StorageWriteTask BlockTreeStorer::storeLocked(const CacheKeysType&                              cache_keys,
                                               const std::vector<std::vector<GroupSetResource>>& resources,
-                                              Tier                                              target_tier) {
+                                              Tier                                              target_tier,
+                                              bool                                              write_remote) {
+    RTP_LLM_CHECK_WITH_INFO(target_tier == Tier::DEVICE || target_tier == Tier::HOST || target_tier == Tier::DISK
+                                || target_tier == Tier::REMOTE,
+                            "unsupported store target tier: %s",
+                            tierName(target_tier));
+    RTP_LLM_CHECK_WITH_INFO(target_tier != Tier::REMOTE || storage_backend_ != nullptr,
+                            "remote store target requires a storage backend");
+    RTP_LLM_CHECK_WITH_INFO(target_tier != Tier::REMOTE || write_remote,
+                            "remote store target requires remote write to be enabled");
     if (target_tier == Tier::DEVICE) {
-        return publishDeviceLocked(cache_keys, resources);
-    }
-    if (target_tier == Tier::HOST || target_tier == Tier::DISK) {
+        (void)publishDeviceLocked(cache_keys, resources);
+    } else if (target_tier == Tier::HOST || target_tier == Tier::DISK) {
         submitLowerTierLocked(cache_keys, resources, target_tier);
-        return {};
     }
-    RTP_LLM_FAIL("unsupported store target tier: %s", tierName(target_tier));
+    return write_remote && storage_backend_ ?
+               storage_backend_->prepareWrite(makeStorageRequest(cache_keys, resources)) :
+               StorageWriteTask{};
 }
 
 StorageWriteTask BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                              cache_keys,
@@ -57,8 +66,7 @@ StorageWriteTask BlockTreeStorer::publishDeviceLocked(const CacheKeysType&      
         evictor_.onInserted(insert_result);
         settled_(true, true);
     }
-    return storage_backend_ ? storage_backend_->prepareWrite(makeStorageRequest(cache_keys, resources)) :
-                              StorageWriteTask{};
+    return {};
 }
 
 StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&                              cache_keys,
@@ -92,12 +100,25 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
     task->target_tier = target_tier;
     task->cache_keys  = cache_keys;
 
-    block_tree_cache_detail::ScopeRollback prepare_guard([this, &task]() { settleLocked(*task, /*publish=*/false); });
+    bool                                   workflow_credit_acquired = false;
+    block_tree_cache_detail::ScopeRollback prepare_guard([this, &task, &workflow_credit_acquired]() {
+        if (workflow_credit_acquired) {
+            task_pool_->releaseWorkflowCredit();
+        }
+        settleLocked(*task, /*publish=*/false);
+    });
 
     if (!store_task_runner_.prepareTask(*task, resources)) {
         return;
     }
-    auto on_timeout = [this, task]() {
+    if (!task_pool_->acquireWorkflowCredit()) {
+        RTP_LLM_LOG_WARNING("store aborted: workflow limit reached, target=%s blocks=%zu",
+                            tierName(target_tier),
+                            task->descriptors.size());
+        return;
+    }
+    workflow_credit_acquired = true;
+    auto on_timeout          = [this, task]() {
         RTP_LLM_LOG_WARNING("store expired in business queue, target=%s blocks=%zu",
                             tierName(task->target_tier),
                             task->descriptors.size());
@@ -140,13 +161,15 @@ void BlockTreeStorer::runStoreTask(const StoreTaskPtr& task) {
 void BlockTreeStorer::scheduleStoreSettlement(const StoreTaskPtr& task, ErrorInfo error) {
     auto settle = [this, task, error = std::move(error)]() mutable { settleTask(*task, error.ok()); };
     if (!task_pool_->submitCompletion(settle)) {
-        RTP_LLM_LOG_WARNING("store completion queue is closed; dropping settlement during shutdown");
+        RTP_LLM_LOG_WARNING("store completion queue is closed; settling inline");
+        settle();
     }
 }
 
 void BlockTreeStorer::settleTask(const StoreTask& task, bool copy_success) {
-    bool   stopping = false;
-    size_t accepted = 0;
+    block_tree_cache_detail::ScopeRollback credit_guard([this]() { task_pool_->releaseWorkflowCredit(); });
+    bool                                   stopping = false;
+    size_t                                 accepted = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         stopping = stopping_.load();
