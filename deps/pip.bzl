@@ -47,10 +47,14 @@ def pip_deps():
         extra_pip_args = PIP_EXTRA_ARGS,
         timeout = 3600,
         quiet = False,
-        # Regenerate pre-warmed CI hubs created before the grammar-admission
-        # dependencies entered this lock. The annotation only versions the
-        # xgrammar wheel repository; existing unrelated wheels stay cached.
-        annotations = {"xgrammar": package_annotation()},
+        # Regenerate optional wheel repositories in pre-warmed CI hubs created
+        # before these dependencies entered the lock. Existing unrelated wheels
+        # stay cached.
+        annotations = {
+            "watchdog": package_annotation(),
+            "xgrammar": package_annotation(),
+            "zstandard": package_annotation(),
+        },
     )
 
     pip_parse(

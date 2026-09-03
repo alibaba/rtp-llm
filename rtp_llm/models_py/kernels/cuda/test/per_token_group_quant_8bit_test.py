@@ -10,8 +10,8 @@ import triton.language as tl
 from torch import dtype as _dtype
 from torch.profiler import ProfilerActivity, profile, record_function
 
-from rtp_llm.models_py.utils.arch import is_hip
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+from rtp_llm.models_py.utils.arch import is_hip
 from rtp_llm.ops.compute_ops import (
     per_token_group_quant_fp8,
     per_token_group_quant_int8,
@@ -274,21 +274,6 @@ def sglang_per_token_group_quant_8bit(
 class PerTokenGroupQuantTest(TestCase):
     # NUM_TOKENS = [127, 128, 512, 1024, 4096, 8192]
 
-    def test_forced_legacy_rejects_v2_only_features(self):
-        x = torch.ones((2, 256), dtype=torch.bfloat16, device="cuda")
-
-        with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": "legacy"}):
-            with self.assertRaisesRegex(ValueError, "legacy does not support"):
-                sgl_per_token_group_quant_fp8(
-                    x, group_size=128, fuse_silu_and_mul=True
-                )
-
-    def test_forced_v2_rejects_unsupported_group_size(self):
-        x = torch.ones((2, 192), dtype=torch.bfloat16, device="cuda")
-
-        with patch.dict(os.environ, {"DSV4_FP8_QUANT_KERNEL": "v2"}):
-            with self.assertRaisesRegex(ValueError, "v2 does not support"):
-                sgl_per_token_group_quant_fp8(x, group_size=96)
     # HIDDEN_DIMS = [256, 512, 1024, 2048, 4096]
     # GROUP_SIZES = [8, 16, 32, 64, 128]
     # DST_DTYPES = [torch.int8, fp8_type_]

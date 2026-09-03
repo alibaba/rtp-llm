@@ -29,7 +29,12 @@ cc_library(
         "@//:using_ppu": [],
         "//conditions:default": ["@local_config_cuda//cuda:cuda_driver"],
     }),
-    copts = copts(),
+    copts = copts() + select({
+        # Keep preprocessing and driver linkage controlled by the same PPU
+        # condition so cuGetErrorName cannot survive after cuda_driver is removed.
+        "@//:using_ppu": ["-DUSE_PPU=1"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
 
