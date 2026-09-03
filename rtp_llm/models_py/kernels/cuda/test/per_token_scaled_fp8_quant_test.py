@@ -1,15 +1,12 @@
 import itertools
 from typing import Optional, Tuple
-from unittest import SkipTest, TestCase, main, mock
+from unittest import SkipTest, TestCase, main
 
 import torch
 from torch import dtype as _dtype
 
 import rtp_llm.ops  # isort:skip
 from rtp_llm.ops.compute_ops import per_token_quant_fp8  # isort:skip
-from rtp_llm.models_py.kernels.cuda.fp8_quant import (  # isort:skip
-    scaled_fp8_per_token_quant,
-)
 
 
 class PerTokenFp8QuantTest(TestCase):
@@ -59,40 +56,6 @@ class PerTokenFp8QuantTest(TestCase):
                 hidden_size=params[1],
             ):
                 self._run_per_token_fp8_quant_test(*params)
-
-    def test_empty_input_returns_empty_output_without_launching_kernel(self):
-        input = torch.empty((0, 128), dtype=torch.bfloat16, device="cuda")
-
-        with mock.patch(
-            "rtp_llm.models_py.kernels.cuda.fp8_quant._resolve_compute_op"
-        ) as resolve_op:
-            output, scale = scaled_fp8_per_token_quant(input)
-
-        self.assertEqual(output.shape, input.shape)
-        self.assertEqual(output.dtype, torch.float8_e4m3fn)
-        self.assertEqual(scale.shape, (0, 1))
-        resolve_op.assert_not_called()
-
-    def test_rejects_nonempty_batch_with_zero_width(self):
-        input = torch.empty((2, 0), dtype=torch.bfloat16, device="cuda")
-
-        with self.assertRaisesRegex(ValueError, "width must be positive"):
-            scaled_fp8_per_token_quant(input)
-
-    def test_reuses_preallocated_scale(self):
-        input = torch.ones((2, 128), dtype=torch.bfloat16, device="cuda")
-        scale = torch.empty((2, 1), dtype=torch.float32, device="cuda")
-
-        _, returned_scale = scaled_fp8_per_token_quant(input, scale)
-
-        self.assertEqual(returned_scale.data_ptr(), scale.data_ptr())
-
-    def test_rejects_scale_with_output_shape(self):
-        input = torch.ones((2, 128), dtype=torch.bfloat16, device="cuda")
-        invalid_scale = torch.empty_like(input, dtype=torch.float32)
-
-        with self.assertRaisesRegex(ValueError, "per-token scale must have shape"):
-            scaled_fp8_per_token_quant(input, invalid_scale)
 
 
 if __name__ == "__main__":

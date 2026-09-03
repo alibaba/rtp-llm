@@ -4,29 +4,6 @@ def h20_oss_suites():
     # H20 (SM9x) — Architecture-grouped suites
     # ============================================================================
 
-    # H20 MLA (GLM-4.7-Flash, GLM-5)
-    #
-    # The deleted DeepSeek V2/V3.2 cases were the only MLA carriers of the flags
-    # below. Coverage after this PR:
-    #   --enable_cuda_graph 1 / --decode_capture_config   still covered on H20 by
-    #   --reuse_cache 1                                   the dense/MoE suites in
-    #                                                     this file; lost only for
-    #                                                     the MLA kernel path.
-    #   --absorb_opt_len 1       MLA absorb path          no carrier left
-    #   --decode_entrance 1      decode-entrance routing  no carrier left
-    #   --redundant_expert 24    non-zero EPLB redundancy no carrier left
-    #   --hack_layer_num 1       truncated-layer load     no carrier left
-    # The internal cuda13 DSv4 suites exercise graph capture and cache reuse on
-    # SM100, but that is not an equivalent substitute for the MLA gap: SM100 and
-    # SM9x take different MLA/DeepGEMM kernel paths.
-    #
-    # Follow-up: issue #1342 (owner: wangyin.yx). Fold these flags onto the
-    # retained glm5 / glm4_moe_lite task_infos, same DeepSeekV2 implementation. The
-    # cheapest starting point is deepseek_v2/q_r_mla_pymodel.json, still in-repo,
-    # which used to carry mla_noquant_dp2 and mla_cudagraph_pad_reuse. Those two
-    # are not restored here because retiring the deprecated DeepSeek 2.x/3.x/R1
-    # cases is the point of this PR, and re-adding them would keep the deprecated
-    # checkpoints on the critical path.
     # Newloader production boundaries for Qwen3/Llama dense and GLM MLA/MoE variants.
     native.test_suite(
         name = "smoke_h20_newloader",
@@ -90,6 +67,29 @@ def h20_oss_suites():
         ],
     )
 
+    # H20 MLA (GLM-4.7-Flash, GLM-5)
+    #
+    # The deleted DeepSeek V2/V3.2 cases were the only MLA carriers of the flags
+    # below. Coverage after this PR:
+    #   --enable_cuda_graph 1 / --decode_capture_config   still covered on H20 by
+    #   --reuse_cache 1                                   the dense/MoE suites in
+    #                                                     this file; lost only for
+    #                                                     the MLA kernel path.
+    #   --absorb_opt_len 1       MLA absorb path          no carrier left
+    #   --decode_entrance 1      decode-entrance routing  no carrier left
+    #   --redundant_expert 24    non-zero EPLB redundancy no carrier left
+    #   --hack_layer_num 1       truncated-layer load     no carrier left
+    # The internal cuda13 DSv4 suites exercise graph capture and cache reuse on
+    # SM100, but that is not an equivalent substitute for the MLA gap: SM100 and
+    # SM9x take different MLA/DeepGEMM kernel paths.
+    #
+    # Follow-up: issue #1342 (owner: wangyin.yx). Fold these flags onto the
+    # retained glm5 / glm4_moe_lite task_infos, same DeepSeekV2 implementation. The
+    # cheapest starting point is deepseek_v2/q_r_mla_pymodel.json, still in-repo,
+    # which used to carry mla_noquant_dp2 and mla_cudagraph_pad_reuse. Those two
+    # are not restored here because retiring the deprecated DeepSeek 2.x/3.x/R1
+    # cases is the point of this PR, and re-adding them would keep the deprecated
+    # checkpoints on the critical path.
     native.test_suite(
         name = "smoke_h20_mla",
         tests = [

@@ -9,6 +9,17 @@ py_test(
     deps = py_test_deps,
 )
 
+py_test(
+    name = "fp8_quant_regression_test",
+    srcs = ["fp8_quant_regression_test.py"],
+    deps = py_test_deps,
+    tags = ["H20"],
+    exec_properties = {
+        "gpu": "H20",
+        "gpu_count": "1",
+    },
+)
+
 py_test (
     name = "per_token_group_quant_8bit_test",
     srcs = ["per_token_group_quant_8bit_test.py"],

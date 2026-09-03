@@ -25,11 +25,11 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
     BaseTokenizer,
     TokenizerFactory,
 )
+from rtp_llm.metrics import GaugeMetrics, kmonitor
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.model_loader.loader import ModelLoader, get_model_loader
 from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeights
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight
-from rtp_llm.metrics import GaugeMetrics, kmonitor
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.ops import (
@@ -197,13 +197,17 @@ class BaseModel(object):
 
         self._configure_deep_gemm_remote_cache()
 
+        # Downstream modules describe additional checkpoint weights. Build the
+        # descriptor before routing so automatic NewLoader selection can verify
+        # that the registered Python model implements the required mapping.
+        self.custom_module = self._init_custom_module()
+
         if self._use_new_loader(skip_python_model=skip_python_model):
             if skip_python_model:
                 raise ValueError("newloader requires the Python model runtime")
             self._load_with_new_loader()
             return
 
-        self.custom_module = self._init_custom_module()
         self.model_weights_loader = self.create_model_loader()
         self.py_eplb = self.model_weights_loader._py_eplb
         device_str = self._get_device_str()
@@ -506,13 +510,25 @@ class BaseModel(object):
         self, *, skip_python_model: bool = False
     ) -> Optional[str]:
         """Return why this load configuration cannot use NewLoader yet."""
-        return new_loader_unsupported_reason(
+        reason = new_loader_unsupported_reason(
             self.model_config,
             skip_python_model=skip_python_model,
             force_cpu_load_weights=self.force_cpu_load_weights,
             device_resource_config=self.device_resource_config,
             parallelism_config=self.parallelism_config,
         )
+        if reason is not None:
+            return reason
+
+        from rtp_llm.models_py.model_loader import NewLoaderLoadMethod, NewModelLoader
+
+        load_method = NewModelLoader.resolve_requested_load_method(self.load_method)
+        if load_method == NewLoaderLoadMethod.FASTSAFETENSORS:
+            return (
+                "fastsafetensors is not supported by this NewLoader version; "
+                "use scratch or the legacy loader"
+            )
+        return self._new_loader_custom_weight_unsupported_reason()
 
     def _legacy_loader_unsupported_reason(self) -> Optional[str]:
         """Return why this checkpoint cannot use the legacy loader."""
@@ -544,6 +560,13 @@ class BaseModel(object):
                     "configuration is not supported (%s); using the legacy loader",
                     self.model_config.model_type,
                     unsupported_reason,
+                )
+        if not enabled:
+            legacy_reason = self._legacy_loader_unsupported_reason()
+            if legacy_reason is not None:
+                raise ValueError(
+                    "Legacy loader is not supported for this checkpoint: "
+                    f"{legacy_reason}."
                 )
         source = (
             "explicit override"
@@ -621,12 +644,31 @@ class BaseModel(object):
             mappings.append((weight_info.name, checkpoint_weight.tensor_name(None)))
         return tuple(mappings)
 
+    def _new_loader_custom_weight_unsupported_reason(self) -> Optional[str]:
+        if self.custom_module is None:
+            return None
+        try:
+            mappings = self._new_loader_custom_weight_mappings()
+        except (TypeError, ValueError, NotImplementedError) as exc:
+            return str(exc)
+        if not mappings:
+            return None
+
+        from rtp_llm.models_py.registry import get_model_class
+
+        try:
+            model_cls = get_model_class(self.model_config.model_type)
+        except KeyError:
+            return (
+                f"model_type={self.model_config.model_type!r} is not registered "
+                "with NewLoader"
+            )
+        if not model_cls.supports_custom_weight_mappings:
+            return f"{model_cls.__name__} does not support downstream custom weights"
+        return None
+
     def _load_with_new_loader(self) -> None:
-        from rtp_llm.models_py.model_loader import (
-            NewLoaderConfig,
-            NewLoaderLoadMethod,
-            NewModelLoader,
-        )
+        from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
         from rtp_llm.models_py.quant_methods import QuantizationConfig
 
         unsupported_reason = self._new_loader_unsupported_reason()
@@ -643,11 +685,9 @@ class BaseModel(object):
             parallelism.get_ffn_tp_rank(),
         )
         physical_tp = (parallelism.tp_size, parallelism.tp_rank)
-        self.custom_module = self._init_custom_module()
         custom_weight_mappings = self._new_loader_custom_weight_mappings()
 
-        configured_method = getattr(self.load_method, "value", self.load_method)
-        load_method = NewLoaderLoadMethod(str(configured_method).lower())
+        load_method = NewModelLoader.resolve_requested_load_method(self.load_method)
         device = self._get_device_str()
         load_config = NewLoaderConfig(
             tp_size=physical_tp[0],

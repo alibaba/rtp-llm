@@ -67,6 +67,17 @@ py_test (
 )
 
 py_test(
+    name = "rocm_select_topk_test",
+    srcs = ["rocm_select_topk_test.py"],
+    deps = py_test_deps,
+    tags = ["rocm"],
+    exec_properties = {
+        "gpu": "MI308X-ROCM7",
+        "gpu_count": "1",
+    },
+)
+
+py_test(
     name = "trt_allreduce_test",
     srcs = ["trt_allreduce_test.py"],
     deps = [
@@ -103,4 +114,3 @@ py_test(
     tags = ["rocm"],
     exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'2'},
 )
-
