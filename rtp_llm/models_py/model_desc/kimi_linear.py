@@ -7,6 +7,7 @@ Hybrid architecture:
 """
 
 import logging
+import os
 from typing import Any, Dict, Optional
 
 import torch
@@ -29,10 +30,10 @@ from rtp_llm.models_py.modules import (
     RMSNorm,
     RMSResNorm,
 )
-from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
 from rtp_llm.models_py.modules.base.common.kvcache_store import (
     write_typed_aux_cache_regions,
 )
+from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
 )
@@ -69,6 +70,7 @@ from rtp_llm.ops.compute_ops import (
 )
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.util import to_torch_dtype
+
 
 class KimiLinearMetadata(object):
     def __init__(
@@ -854,6 +856,63 @@ class KimiLinearDecoderLayer(nn.Module):
         hidden_states = self.ffn_hc.post(hidden_states, residual, post, comb)
         return DecodeLayerOutput(hidden_states, hidden_states)
 
+    def forward_hc_deferred(
+        self,
+        hidden_states: torch.Tensor,
+        fmha_impl: FMHAImplBase,
+        kv_cache: Optional[LayerKVCache],
+        attention_inputs: Optional[PyAttentionInputs],
+        attn_meta: KimiLinearMetadata,
+        global_kv_cache: Optional[KVCache],
+        residual: Optional[torch.Tensor],
+        post: Optional[torch.Tensor],
+        comb: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Decode HC path with the final FFN writeback deferred.
+
+        The previous layer's FFN output is fused with this layer's attention
+        pre. Within the layer, attention writeback is fused with FFN pre. The
+        model loop materializes only the first attention pre and final FFN
+        post as standalone kernels.
+        """
+
+        if post is None:
+            residual = hidden_states
+            hidden_states, post, comb = self.attn_hc.pre(residual)
+        else:
+            if residual is None or comb is None:
+                raise RuntimeError(
+                    "deferred mHC state requires residual/post/comb together"
+                )
+            residual, hidden_states, post, comb = self.attn_hc.fused_post_pre(
+                hidden_states, residual, post, comb
+            )
+        hidden_states = self.input_layernorm(hidden_states)
+
+        if self.layer_type == HybridAttentionType.LINEAR:
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states,
+                fmha_impl=fmha_impl,
+                kv_cache=kv_cache,
+                attention_inputs=attention_inputs,
+                attn_meta=attn_meta,
+            )
+        else:
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states,
+                fmha_impl=fmha_impl,
+                kv_cache=kv_cache,
+                global_kv_cache=global_kv_cache,
+            )
+
+        assert residual is not None and post is not None and comb is not None
+        residual, hidden_states, post, comb = self.ffn_hc.fused_post_pre(
+            hidden_states, residual, post, comb
+        )
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        return hidden_states, residual, post, comb
+
 
 class KimiLinearModel(GptModelBase):
     def __init__(
@@ -977,20 +1036,50 @@ class KimiLinearModel(GptModelBase):
         else:
             residual = torch.zeros_like(hidden_states)
 
+        use_deferred_mhc = (
+            self.hc_enabled
+            and os.environ.get("DSV4_MHC_FUSED_POST_PRE", "1") != "0"
+            and (not attention_inputs.is_prefill or is_target_verify)
+            and len(self.layers) > 0
+        )
+        deferred_post = deferred_comb = None
         for i, decoder_layer in enumerate(self.layers):
             select_block_map_for_layer(attention_inputs, i)
-            output = decoder_layer(
-                hidden_states,
-                residual,
-                fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
-                attention_inputs=attention_inputs,
-                attn_meta=attn_meta,
-                global_kv_cache=self.kv_cache,
-            )
-            hidden_states = output.hidden_states
-            residual = output.residual
+            layer_kv_cache = self.kv_cache.get_layer_cache(i) if self.kv_cache else None
+            if use_deferred_mhc:
+                hidden_states, residual, deferred_post, deferred_comb = (
+                    decoder_layer.forward_hc_deferred(
+                        hidden_states,
+                        fmha_impl,
+                        layer_kv_cache,
+                        attention_inputs,
+                        attn_meta,
+                        self.kv_cache,
+                        residual,
+                        deferred_post,
+                        deferred_comb,
+                    )
+                )
+            else:
+                output = decoder_layer(
+                    hidden_states,
+                    residual,
+                    fmha_impl,
+                    kv_cache=layer_kv_cache,
+                    attention_inputs=attention_inputs,
+                    attn_meta=attn_meta,
+                    global_kv_cache=self.kv_cache,
+                )
+                hidden_states = output.hidden_states
+                residual = output.residual
             write_typed_aux_cache_regions(typed_aux_cache_store, self.kv_cache, i)
+
+        if use_deferred_mhc:
+            assert deferred_post is not None and deferred_comb is not None
+            hidden_states = self.layers[-1].ffn_hc.post(
+                hidden_states, residual, deferred_post, deferred_comb
+            )
+            residual = hidden_states
 
         if self.hc_enabled:
             hidden_states = hidden_states.mean(dim=-2)
