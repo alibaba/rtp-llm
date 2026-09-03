@@ -149,6 +149,7 @@ private:
     IsTierEnabledFn                     is_tier_enabled_;
     SettledFn                           settled_;
     std::unique_ptr<EvictionTaskRunner> task_runner_;
+    int                                 memory_timeout_ms_{0};
     int                                 disk_timeout_ms_{0};
     size_t                              max_device_host_batch_{8};
     size_t                              max_non_device_host_batch_{16};

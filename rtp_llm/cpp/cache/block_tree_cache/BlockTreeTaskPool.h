@@ -26,9 +26,10 @@ class BlockTreeTaskPool {
 public:
     static constexpr size_t                    kDefaultQueueSize = 10000;
     static constexpr std::chrono::milliseconds kDefaultQueueWaitTimeout{30000};
-    // Normal-queue slots only LOAD tasks may occupy, so loads can still enqueue
-    // when BACKGROUND transfers flood the pool. Skipped when queue_size does not
-    // exceed it, so small pools never starve BACKGROUND.
+    // Normal-queue slots and workflow credits only LOAD tasks may occupy, so
+    // loads remain admissible while BACKGROUND transfers are queued or awaiting
+    // asynchronous settlement. Skipped when queue_size does not exceed it, so
+    // small pools never starve BACKGROUND.
     static constexpr size_t kLoadReservedSlots = 64;
 
     BlockTreeTaskPool(size_t thread_count, size_t queue_size, std::string thread_name);
@@ -47,10 +48,10 @@ public:
                 std::function<void()>     on_timeout     = {});
     bool submitCompletion(std::function<void()> task);
     // A workflow credit spans business-task execution, asynchronous transfer,
-    // and final cache-state settlement. It keeps waitForIdle() blocked after
-    // the submitting task itself has returned.
-    bool acquireWorkflowCredit();
-    void releaseWorkflowCredit();
+    // and final cache-state settlement. The task class must match on release so
+    // BACKGROUND workflows cannot consume LOAD-reserved capacity.
+    bool acquireWorkflowCredit(BlockTreeTaskClass task_class);
+    void releaseWorkflowCredit(BlockTreeTaskClass task_class);
     void stopAdmission();
     void waitForIdle();
     void shutdown();
@@ -65,6 +66,7 @@ private:
     };
 
     void       workerLoop();
+    size_t     backgroundLimit() const;
     size_t     normalQueueSizeLocked() const;
     QueuedTask popNextNormalTaskLocked();
     void       taskStarted();
@@ -87,6 +89,7 @@ private:
 
     std::atomic<int>        pending_tasks_{0};
     std::atomic<size_t>     workflow_credits_{0};
+    std::atomic<size_t>     background_workflow_credits_{0};
     std::mutex              wait_mutex_;
     std::condition_variable wait_cv_;
     std::function<void()>   pending_task_wait_observer_for_test_;

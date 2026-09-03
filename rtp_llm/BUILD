@@ -1,6 +1,7 @@
 package(default_visibility = ["//visibility:public"])
 
 exports_files([
+    "ops/libth_transformer_config.pyi",
     "ops/librtp_compute_ops/__init__.pyi",
 ])
 
