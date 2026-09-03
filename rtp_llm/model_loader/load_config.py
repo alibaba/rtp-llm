@@ -54,11 +54,7 @@ class LoadConfig(BaseModel):
     bit: int = 16
     merge_lora: bool = False
 
-    # PP stage identity, fed from ParallelismConfig (see
-    # ModelWeightInfo.create_load_config). Defaults keep single-stage
-    # behavior. The layer partition rides in as materialized per-stage
-    # counts (decided once by config/pp_layout.resolve_pp_partition);
-    # capability flags are computed by config/pp_layout.py.
+    # PP stage identity; defaults keep single-stage behavior, the partition arrives as materialized per-stage counts.
     pp_size: int = 1
     pp_rank: int = 0
     pp_stage_layer_counts: Optional[List[int]] = None
@@ -201,10 +197,7 @@ class LoadConfig(BaseModel):
             for _ in range(layer_num):
                 layer_phy2log: List[int] = []
                 for ep_rank in range(ep_size):
-                    # rank_per_node floors to 0 when ep spans fewer ranks than
-                    # nodes (e.g. ep_size=1 under multi-node PP); the expert
-                    # node mapping is undefined there, and with no experts the
-                    # mapping is vacuous anyway.
+                    # rank_per_node floors to 0 when ep spans fewer ranks than nodes; the mapping is vacuous then.
                     if rank_per_node == 0:
                         break
                     node_id = ep_rank // rank_per_node

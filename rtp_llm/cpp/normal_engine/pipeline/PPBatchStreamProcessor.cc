@@ -26,9 +26,7 @@ PPSamplingPlan PPBatchStreamProcessor::gatherSamplingPlan(const StreamGroups& st
 
     for (const auto& stream : all_streams) {
         const auto& config = *stream->generateConfig();
-        /**
-         * num_return_sequences: 0 means disabled and 1 means one sequence. Both are supported by the current PP path.
-         */
+        /** num_return_sequences: 0 (disabled) and 1 are both supported by the current PP path. */
         RTP_LLM_CHECK_WITH_INFO(!stream->hasNumBeams() && stream->numReturnSequences() <= 1,
                                 "initial PP sampling does not support beam search or multiple return sequences, "
                                 "request_id=%ld",
@@ -202,10 +200,7 @@ absl::StatusOr<PPExecutionResult> PPBatchStreamProcessor::makeExecutionResult(
     if (plan.output_config.return_all_hidden_states) {
         result.all_hidden_states = model_output.all_hidden_states.to(torch::kCPU).contiguous();
     }
-    /**
-     * Each lm_output_indexes entry is the last token row of one request. Use it as the exclusive end offset when
-     * computing per-request loss.
-     */
+    /** Each lm_output_indexes entry is a request's last token row, used as the exclusive end offset for loss. */
     if (plan.output_config.calculate_loss) {
         const auto  lm_output_indexes = plan.model_input.lm_output_indexes.to(torch::kCPU, torch::kInt64).contiguous();
         const auto* indexes           = lm_output_indexes.data_ptr<int64_t>();

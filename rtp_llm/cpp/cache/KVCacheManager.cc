@@ -186,8 +186,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                       config,
         config_.finalizeBlockNums(/*global_block_num=*/1, runtime_config_);
     } else {
         allocateAndSync();
-        // PP: cap each group's logical block count at the cross-stage min,
-        // after finalizeBlockNums and before init() builds the pools.
+        // Cap each group's logical block count at the cross-stage min, before init() builds the pools.
         if (parallelism_config_.pp_size > 1) {
             RTP_LLM_CHECK_WITH_INFO(pp_logical_capacity.has_value(),
                                     "pp_size=%ld requires the PP logical capacity (validator result); "
@@ -678,10 +677,9 @@ void KVCacheManager::initConnectorCoordinator() {
 void KVCacheManager::allocateAndSync() {
     RTP_LLM_LOG_INFO("allocateAndSync start, block_num=%d", config_.block_num);
     size_t world_size = parallelism_config_.tp_size * parallelism_config_.dp_size;
-    // PP: the allgather below sizes its buffer for tp*dp ranks, but the
-    // DP_AND_TP group spans every stage under pp_size>1 (out-of-bounds
-    // writes). Cross-stage capacity is agreed by the PP topology validator
-    // instead (per-tag min), so keep the locally measured block count here.
+    /* The allgather below sizes its buffer for tp*dp ranks, but DP_AND_TP spans every stage
+       under pp_size>1; cross-stage capacity is agreed by the PP topology validator instead,
+       so keep the locally measured block count here. */
     const bool pp_active = parallelism_config_.pp_size > 1;
     if (world_size > 1 && !pp_active) {
         size_t local_rank    = parallelism_config_.tp_size * parallelism_config_.dp_rank + parallelism_config_.tp_rank;

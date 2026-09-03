@@ -26,10 +26,7 @@ class Group(Enum):
     DP = "DP"
     TP = "TP"
     PP = "PP"
-    # Legacy name from the pre-PP era: DP_AND_TP is bound to
-    # torch.distributed WORLD, so it spans ALL ranks including every PP
-    # stage. Do not "narrow" it per stage; rename to ALL/WORLD together with
-    # C++ ParallelMode the next time it is touched.
+    # Bound to torch.distributed WORLD: spans ALL ranks including every PP stage; never narrow it per stage.
     DP_AND_TP = "DP_AND_TP"
 
 
@@ -82,8 +79,7 @@ def _make_cpu_tp_broadcaster_base_path(
             os.environ.get("TMPDIR", "/tmp"), f"rtp_llm_{os.getuid()}"
         )
     os.makedirs(base_dir, mode=0o700, exist_ok=True)
-    # pp_rank disambiguates the TP groups of different PP stages (they share
-    # dp_rank under the PP gate); pp_rank is 0 when pp_size == 1.
+    # pp_rank disambiguates the TP groups of different PP stages.
     base_path = os.path.join(
         base_dir,
         f"rtp_llm_tp_{session_id}_pp{parallelism_config.pp_rank}_dp{parallelism_config.dp_rank}",
@@ -104,10 +100,7 @@ def _normalize_parallelism_ranks(parallelism_config: ParallelismConfig) -> None:
         old_tp_rank = parallelism_config.tp_rank
         old_dp_rank = parallelism_config.dp_rank
         tp_rank = parallelism_config.world_rank % parallelism_config.tp_size
-        # Layout is PP-outermost (world_rank = pp_rank*(dp*tp) + dp_rank*tp +
-        # tp_rank): the extra "% dp_size" strips the pp component so dp_rank
-        # stays correct when pp_size > 1. With pp_size == 1 it reduces to the
-        # historical (world_rank // tp_size), so non-PP behavior is unchanged.
+        # PP-outermost rank layout; "% dp_size" strips the pp component (no-op at pp_size == 1).
         dp_rank = (parallelism_config.world_rank // parallelism_config.tp_size) % max(
             parallelism_config.dp_size, 1
         )
@@ -125,10 +118,7 @@ def _normalize_parallelism_ranks(parallelism_config: ParallelismConfig) -> None:
         parallelism_config.tp_rank = tp_rank
         parallelism_config.dp_rank = dp_rank
 
-    # PP stage id: PP is the outermost dim of the world-rank layout
-    # (world_rank = pp_rank * (dp_size * tp_size) + ...), matching
-    # NormalEngine::pp_step. Under the PP gate (dp_size == 1) this is
-    # equivalent to (world_rank // tp_size) % pp_size.
+    # PP is the outermost dim of the world-rank layout, matching NormalEngine::pp_step.
     if parallelism_config.pp_size > 0:
         parallelism_config.pp_rank = parallelism_config.world_rank // (
             parallelism_config.dp_size * parallelism_config.tp_size
@@ -259,20 +249,13 @@ def _create_process_groups(
     world_size = parallelism_config.world_size
     tp_size = parallelism_config.tp_size
     dp_size = parallelism_config.dp_size
-    # PP is the outermost dim of the world-rank layout (world_rank =
-    # pp_rank*(dp*tp) + dp_rank*tp + tp_rank), matching
-    # _normalize_parallelism_ranks. Group membership must pin the pp
-    # component: a TP/DP collective under PP must stay inside one stage,
-    # otherwise stage-local collectives (e.g. tpSyncModelInputs broadcasts)
-    # would wait forever on ranks of other stages. With pp_size == 1 every
-    # formula and key reduces to the historical one.
+    """PP is the outermost dim of the world-rank layout, so TP/DP group
+    membership must pin the pp component to stay inside one PP stage."""
     pp_size = max(parallelism_config.pp_size, 1)
 
     if dp_size > 1 and world_size != dp_size:
         # Create all DP groups - all ranks must participate in creating all DP groups
-        # DP group: ranks with the same pp_rank and tp_rank.
-        # There are pp_size*tp_size DP groups; the key suffix
-        # (pp_rank*tp_size + tp_rank) reduces to tp_rank when pp_size == 1.
+        # DP group: ranks with the same (pp_rank, tp_rank).
         for pp_rank_val in range(pp_size):
             for tp_rank_val in range(tp_size):
                 dp_ranks = [
@@ -305,11 +288,7 @@ def _create_process_groups(
 
     if tp_size > 1 and world_size != tp_size:
         # Create all TP groups - all ranks must participate in creating all TP groups
-        # TP group: ranks with the same pp_rank and dp_rank.
-        # There are pp_size*dp_size TP groups; the key suffix
-        # (pp_rank*dp_size + dp_rank) equals world_rank // tp_size, so
-        # key-derivation callsites (_get_group / C++ registration) keep
-        # working unchanged.
+        # TP group: ranks with the same (pp_rank, dp_rank); key suffix == world_rank // tp_size.
         for pp_rank_val in range(pp_size):
             for dp_rank_val in range(dp_size):
                 tp_ranks = [
@@ -336,8 +315,7 @@ def _create_process_groups(
                         logging.info(
                             f"[rank: {world_rank}] Stored TP group with key: {group_key} {tp_group} with ranks: {tp_ranks}"
                         )
-                        # symm_mem fast path is per-member; only init for a
-                        # group this rank actually joins.
+                        # symm_mem init is per-member; only for groups this rank joins.
                         _get_symm_mem().init_symm_mem_communicator(tp_group)
 
                     # All ranks must wait for group creation to complete
@@ -348,9 +326,6 @@ def _create_process_groups(
 
     if pp_size > 1:
         # PP groups: ranks of the same (dp_rank, tp_rank) lane across stages.
-        # Consumed by the PP startup snapshot exchange and the PP transport
-        # P2P bootstrap; kept out of the C++ ParallelMode mapping (no mode
-        # enum change) until a C++ consumer exists.
         for dp_rank_val in range(dp_size):
             for tp_rank_val in range(tp_size):
                 pp_ranks = [
@@ -422,9 +397,7 @@ def _register_process_groups_to_cpp():
                 if _parallelism_config is not None:
                     rank = torch.distributed.get_rank()
                     tp_rank = rank % _parallelism_config.tp_size
-                    # PP-outermost layout: the DP key suffix is
-                    # pp_rank*tp_size + tp_rank (reduces to tp_rank at pp=1),
-                    # matching _create_process_groups.
+                    # DP key suffix is pp_rank*tp_size + tp_rank (reduces to tp_rank at pp=1).
                     pp_rank = rank // (
                         _parallelism_config.tp_size * _parallelism_config.dp_size
                     )
@@ -584,9 +557,7 @@ def _register_process_groups_to_cpp():
         f"Registered C++ comm ops callbacks (modes: {list(mode_to_group.keys())})"
     )
 
-    # PP communication callbacks: P2P tensor transport plus the startup
-    # snapshot exchange for the cross-stage cache geometry validator.
-    # Registered together as one lifecycle via the unified entry.
+    # PP callbacks: P2P transport + startup snapshot exchange.
     if (
         hasattr(librtp_compute_ops, "register_pp_ops")
         and _parallelism_config is not None
@@ -624,12 +595,8 @@ def register_pp_process_group(
 ) -> None:
     """Register all PP communication callbacks in one call.
 
-    - isend/irecv bind the passed group (used by the PP transport). The
-      functional torch isend/irecv take GLOBAL ranks as peer (they are
-      canonicalized against the group's global membership), so the peers
-      arriving from C++ (already global world ranks) are passed through.
-    - The snapshot exchange is always fixed to the PP lane group:
-      the all_gather must span every stage of the same lane.
+    isend/irecv bind the passed group and take global world ranks as peer;
+    the snapshot exchange is fixed to the PP lane group.
     """
     import librtp_compute_ops
 
@@ -666,10 +633,7 @@ def register_pp_process_group(
             raise RuntimeError("irecv returned no work")
         return work
 
-    # Startup snapshot exchange for the cross-stage cache geometry validator.
-    # all_gather_object preserves group-rank order; PP group members are the
-    # ascending world ranks of one (dp, tp) lane, so the returned list is
-    # indexed by pp_rank (stage order).
+    # all_gather_object preserves group-rank order, so the list is indexed by pp_rank.
     def cpp_pp_snapshot_exchange(snapshot_bytes: bytes) -> List[bytes]:
         pg = _get_group(Group.PP)
         payloads: List[bytes] = [b""] * pg.size()
@@ -816,8 +780,7 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
         pp_rank = rank // (tp_size * dp_size)
         group_key = Group.DP.name + str(pp_rank * tp_size + tp_rank)
     elif group == Group.TP and tp_size > 1 and world_size != tp_size:
-        # Key suffix == rank // tp_size == pp_rank*dp_size + dp_rank
-        # (matches _create_process_groups).
+        # Key suffix == rank // tp_size (matches _create_process_groups).
         dp_rank = rank // tp_size
         group_key = Group.TP.name + str(dp_rank)
     elif group == Group.PP and pp_size > 1:

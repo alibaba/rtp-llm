@@ -30,9 +30,8 @@ class PrefillCacheHitMetricsReporter;
 
 class KVCacheManager {
 public:
-    // pp_logical_capacity: validated cross-stage logical block counts,
-    // REQUIRED under pp_size>1 (applied right after allocateAndSync's
-    // finalizeBlockNums). Leave nullopt for pp_size<=1.
+    /* pp_logical_capacity: validated cross-stage logical block counts, required under pp_size>1
+       (applied right after allocateAndSync's finalizeBlockNums); nullopt for pp_size<=1. */
     KVCacheManager(const CacheConfig&                       config,
                    bool                                     warmup                     = false,
                    const kmonitor::MetricsReporterPtr       metrics_reporter           = nullptr,

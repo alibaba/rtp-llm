@@ -53,11 +53,8 @@ public:
                                                       const SpecBuildContext&      ctx,
                                                       int64_t                      expected_layer_num);
 
-    // PP: stage-scoped model config for cache creation. With pp_size>1
-    // returns a copy whose layer-dimension fields (num_layers,
-    // kv_cache_spec_descs, hybrid_attention_types) are sliced to this rank's
-    // layer partition, so downstream creators produce stage-local cache
-    // geometry. With pp_size=1 the copy is identical to the input.
+    /* Stage-scoped model config for cache creation: layer-dimension fields sliced to this rank's
+       partition at pp_size>1, identical to the input at pp_size=1. */
     static ModelConfig stageScopedModelConfig(const ModelConfig&       model_config,
                                               const ParallelismConfig& parallelism_config);
 

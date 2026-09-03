@@ -85,8 +85,6 @@ cc_test(
     env = {},
 )
 
-# Stage-scoped CacheConfig construction: pp=1 equivalence and per-stage
-# geometry (local layer ids, per-stage block bytes) for pp>1.
 cc_test(
     name = "pp_stage_cache_config_test",
     srcs = ["PPStageCacheConfigTest.cc"],

@@ -1,22 +1,9 @@
 #pragma once
 
-// ============================================================================
-// PP stage layout — the C++ view of the layer partition. All C++ PP
-// stage-role decisions go through this struct; new consumers must not
-// re-derive the formulas inline.
-//
-// Layout decisions encoded here:
-//   1. Stage capability flags instead of a FIRST/MIDDLE/LAST enum
-//      (pp_size=1 is both first and last; enums cannot express that):
-//        has_embedding() = pp_rank == 0
-//        has_lm_head()   = pp_rank == pp_size - 1
-//   2. Layer partition is DATA, not an algorithm: the Python side decides
-//      the partition once (default even split, optional model-level
-//      partitioner) and materializes it as ParallelismConfig.
-//      pp_stage_layer_counts; C++ consumes it by prefix-sum lookup.
-//      The even-split formula remains only as a fallback for pp_size=1,
-//      stale pickles and legacy test fixtures (empty counts).
-// ============================================================================
+/* C++ view of the PP layer partition; all stage-role decisions go through
+   this struct. The partition is data materialized by Python into
+   ParallelismConfig.pp_stage_layer_counts and consumed by prefix-sum
+   lookup; the even-split formula is only a fallback for empty counts. */
 
 #include <cstdint>
 #include <utility>
@@ -31,20 +18,15 @@ struct PPLayout {
     int64_t pp_size      = 1;
     int64_t pp_rank      = 0;
     int64_t total_layers = 0;
-    // Lane geometry, needed for adjacent-stage rank derivation; filled from
-    // ParallelismConfig.
+    // Lane geometry for adjacent-stage rank derivation.
     int64_t dp_size = 1;
     int64_t tp_size = 1;
     int64_t dp_rank = 0;
     int64_t tp_rank = 0;
 
-    // Materialized partition: layer count per stage in rank order. Empty
-    // means "not materialized" and layerRangeOf falls back to the even
-    // split formula.
+    // Materialized partition per stage; empty falls back to even split.
     std::vector<int64_t> layer_counts;
 
-    // Production constructor: carries the materialized partition over from
-    // ParallelismConfig so callers never rebuild it field by field.
     static PPLayout fromParallelismConfig(const ParallelismConfig& config, int64_t total_layers) {
         PPLayout layout;
         layout.pp_size      = config.pp_size;
@@ -58,7 +40,6 @@ struct PPLayout {
         return layout;
     }
 
-    // Stage capability flags.
     bool hasEmbedding() const {
         return pp_rank == 0;
     }
@@ -66,16 +47,12 @@ struct PPLayout {
         return pp_rank == pp_size - 1;
     }
 
-    // World-rank stride between adjacent stages of the same (dp, tp) lane
-    // under the PP-outermost layout (world_rank = pp*(dp*tp) + dp*tp + tp).
+    // World-rank stride between adjacent stages of the same lane.
     int64_t laneStride() const {
         return dp_size * tp_size;
     }
 
-    // Ring neighbors: stages wrap around (the last stage's next is stage 0,
-    // the return path for sample results). The transport keeps one send
-    // channel to next and one receive channel from prev on every stage; the
-    // pipeline protocol gates what actually flows on them.
+    // Ring topology: the last stage's next wraps to stage 0 (sample-result return path).
     int64_t prevStage() const {
         return (pp_rank + pp_size - 1) % pp_size;
     }
@@ -94,12 +71,8 @@ struct PPLayout {
         return rankOfStage(nextStage());
     }
 
-    // Half-open layer range [begin, end) assigned to `stage`. With a
-    // materialized partition this is a prefix-sum lookup; otherwise it
-    // falls back to the even split (remainder goes to earlier stages) for
-    // pp_size=1, stale pickles and legacy fixtures only — the golden
-    // values stay those of the Python default partition (even_split_counts),
-    // e.g. 65 layers, pp_size=4 -> 17/16/16/16.
+    /* Half-open layer range [begin, end) of `stage`: prefix-sum over layer_counts;
+       the even-split fallback serves pp_size=1, stale pickles and legacy fixtures only. */
     std::pair<int64_t, int64_t> layerRangeOf(int64_t stage) const {
         RTP_LLM_CHECK_WITH_INFO(stage >= 0 && stage < pp_size, "invalid pp stage %ld for pp_size %ld", stage, pp_size);
         if (!layer_counts.empty()) {
@@ -120,7 +93,6 @@ struct PPLayout {
         return {begin, begin + count};
     }
 
-    // This stage's own layer range.
     std::pair<int64_t, int64_t> myLayerRange() const {
         return layerRangeOf(pp_rank);
     }

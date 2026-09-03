@@ -1,16 +1,3 @@
-# Stage-aware model construction.
-#
-# Pins two things:
-#   1. GptModelBase's PP stage view (pp_layer_ids / capability flags /
-#      pp_rank fallback) — the partition lookup must stay equivalent to
-#      LoadConfig.pp_layer_range (weight loading) and PPLayout::layerRangeOf
-#      (C++), so loader / construction / cache always agree on stage
-#      ownership. Fixtures materialize the partition like the startup
-#      decision point does.
-#   2. Qwen3Model as the exemplar refactor: each stage builds only its own
-#      layers (global ids kept) plus the global components it owns
-#      (embedding on first stage, final norm on last stage).
-
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -37,7 +24,6 @@ def make_base(
     if pp_rank is not None:
         cfg.pp_rank = pp_rank
     if pp_size > 1:
-        # Mirror the startup decision point: pp>1 carries materialized data.
         cfg.pp_stage_layer_counts = even_split_counts(layer_num, pp_size)
     model.parallelism_config = cfg
     model.layer_num = layer_num
@@ -63,8 +49,6 @@ class PPStageViewTest(unittest.TestCase):
         self.assertTrue(stage1.pp_has_lm_head)
 
     def test_remainder_goes_to_earlier_stages(self):
-        # Mirrors the PPLayout::layerRangeOf example: 65 layers, pp=4 ->
-        # 17/16/16/16.
         ranges = [
             make_base(pp_size=4, pp_rank=r, layer_num=65).pp_layer_ids()
             for r in range(4)
@@ -74,7 +58,6 @@ class PPStageViewTest(unittest.TestCase):
         self.assertEqual(ranges[1], list(range(17, 33)))
         self.assertEqual(ranges[2], list(range(33, 49)))
         self.assertEqual(ranges[3], list(range(49, 65)))
-        # Full coverage, no overlap.
         self.assertEqual(sorted(sum(ranges, [])), list(range(65)))
 
     def test_pp_rank_read_from_config_field(self):
@@ -83,18 +66,13 @@ class PPStageViewTest(unittest.TestCase):
         self.assertEqual(model.pp_rank, 1)
 
     def test_pp_rank_fallback_derives_pp_outermost(self):
-        # Fake config without the pp_rank field: derive from world_rank
-        # (pp_rank = world_rank // (dp_size * tp_size)).
+        # No pp_rank field: derived from world_rank.
         model = make_base(pp_size=2, pp_rank=None, world_rank=5, tp_size=2, dp_size=1)
         self.assertEqual(model.pp_rank, 2)
 
 
 def make_qwen3(pp_size, pp_rank, num_layers=8):
-    """Construct Qwen3Model with heavy building blocks mocked out.
-
-    The mocks record their calls but return real (empty) nn.Modules, since
-    nn.ModuleList rejects non-Module children.
-    """
+    """Construct Qwen3Model with heavy building blocks mocked out."""
     from rtp_llm.models_py.model_desc import qwen3
 
     config = SimpleNamespace(num_layers=num_layers, vocab_size=100, layernorm_eps=1e-6)
@@ -174,15 +152,9 @@ class Qwen3StageConstructionTest(unittest.TestCase):
 
 
 class Qwen3NextPPBoundaryTest(unittest.TestCase):
-    """Stage-boundary tensors cross stages as a named map.
-
-    qwen3_next uses the fused add-norm pattern, so the stream at a stage
-    boundary is split into (branch output, accumulated residual):
-      entry: non-first stages resume `residual` from inputs.pp_intermediates
-             (first stage / pp_size=1 keeps zeros);
-      exit:  non-last stages emit {"hidden_states", "residual"} (dropping
-             the residual would corrupt the downstream stream); last stage
-             norms and returns plain hidden states.
+    """qwen3_next fuses add-norm, so the stage boundary carries both
+    hidden_states and residual: non-first stages resume both from
+    pp_intermediates; non-last stages emit both.
     """
 
     def _make_model(self, with_norm):
@@ -209,12 +181,8 @@ class Qwen3NextPPBoundaryTest(unittest.TestCase):
         return model, qn
 
     def _make_inputs(self, torch_mod, intermediates=None):
-        # Duck-typed PyModelInputs: forward() only accesses attributes, and the
-        # compiled bindings module is not in this target's runfiles.
-        # attention_inputs is read by block_map inside the layer loop; a
-        # non-empty tag mapping passes validation and with kv_cache=None the
-        # per-layer selection yields an empty list, which the echo layer
-        # ignores.
+        """Duck-typed PyModelInputs: the compiled bindings module is not in this
+        target's runfiles; attention_inputs only needs to pass validation."""
         return SimpleNamespace(
             input_hiddens=torch_mod.zeros(2, 4),
             pp_intermediates=intermediates or {},
@@ -237,7 +205,6 @@ class Qwen3NextPPBoundaryTest(unittest.TestCase):
 
         model, qn = self._make_model(with_norm=False)
         outputs = self._run_forward(model, qn, self._make_inputs(torch))
-        # hidden = zeros echoed through; residual = zeros init (no upstream).
         self.assertEqual(set(outputs.pp_intermediates), {"hidden_states", "residual"})
         torch.testing.assert_close(
             outputs.pp_intermediates["hidden_states"], torch.zeros(2, 4)
@@ -256,9 +223,7 @@ class Qwen3NextPPBoundaryTest(unittest.TestCase):
             torch, {"hidden_states": upstream_hidden, "residual": upstream_residual}
         )
         outputs = self._run_forward(model, qn, inputs)
-        # Echo layer forwards both resumed boundary tensors to the stage exit;
-        # hidden must come from the map, NOT the (zeros) input_hiddens
-        # fallback channel.
+        # hidden must come from the map, not the input_hiddens fallback.
         torch.testing.assert_close(
             outputs.pp_intermediates["hidden_states"], upstream_hidden
         )
@@ -270,7 +235,6 @@ class Qwen3NextPPBoundaryTest(unittest.TestCase):
         import torch
 
         model, qn = self._make_model(with_norm=False)
-        # No pp_intermediates (legacy/MTP-style handoff): input_hiddens is used.
         outputs = self._run_forward(model, qn, self._make_inputs(torch))
         torch.testing.assert_close(
             outputs.pp_intermediates["hidden_states"], torch.zeros(2, 4)
@@ -287,10 +251,8 @@ class Qwen3NextPPBoundaryTest(unittest.TestCase):
 
 
 class Qwen3PPBoundaryTest(unittest.TestCase):
-    """Naive add-norm models carry a SINGLE boundary tensor.
-
-    qwen3.py adds the residual inside each layer, so the stream at a stage
-    boundary is already combined: the map holds only {"hidden_states"}.
+    """qwen3 adds the residual inside each layer, so the stage boundary
+    carries a single {"hidden_states"} tensor.
     """
 
     def _make_model(self, with_norm):

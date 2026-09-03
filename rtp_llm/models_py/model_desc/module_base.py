@@ -60,12 +60,7 @@ class GptModelBase(nn.Module):
         self.kv_cache: Optional[KVCache] = None
         self.device_type: DeviceType = get_device_type()
 
-    # ------------------------------------------------------------------
-    # Pipeline-parallel stage view. pp_rank/pp_size come from
-    # ParallelismConfig; the derive_pp_rank fallback keeps fake configs
-    # (test mocks without pp fields) working. Stage layout delegates to
-    # config/pp_layout.py, shared with weight loading and cache geometry.
-    # ------------------------------------------------------------------
+    # Pipeline-parallel stage view; layout delegates to config/pp_layout.py.
     @property
     def pp_size(self) -> int:
         return max(int(getattr(self.parallelism_config, "pp_size", 1) or 1), 1)

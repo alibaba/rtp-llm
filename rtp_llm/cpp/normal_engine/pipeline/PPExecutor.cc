@@ -128,15 +128,13 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
     wall_tps_reporter_(WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
         params.parallelism_config.world_rank == 0 ? metrics_reporter_ : nullptr)),
     parallelism_config_(params.parallelism_config),
-    // Stage-role truth (hasEmbedding/hasLmHead) and the materialized layer
-    // partition, shared with cache creation and the Python mirrors.
+    // Stage-role flags and materialized partition, shared with cache creation and the Python side.
     pp_layout_(PPLayout::fromParallelismConfig(parallelism_config_, params.model_config_.num_layers)),
     profile_step_start_(std::move(profile_step_start)),
     profile_step_finish_(std::move(profile_step_finish)),
     slots_(parallelism_config_.pp_size + 1) {
 
-    // Ring transport channels: send to the next stage, receive from the
-    // previous one (both wrap around; the protocol gates actual usage).
+    // Ring channels: send to next, receive from prev (both wrap around).
     transport_ = std::make_unique<NcclPPTransport>(static_cast<int>(pp_layout_.prevRank()),
                                                    static_cast<int>(pp_layout_.nextRank()));
 

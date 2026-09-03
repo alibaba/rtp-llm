@@ -93,8 +93,7 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
                                                     int                      gen_num_per_cycle) {
     (void)is_mtp;
 
-    // PP: with pp_size>1 every stage builds cache geometry only for its own
-    // layer range; downstream helpers then operate on local layer ids.
+    // With pp_size>1 every stage builds cache geometry only for its own layer range.
     const ModelConfig stage_model_config = CacheConfigCreator::stageScopedModelConfig(model_config, parallelism_config);
 
     auto       dtype            = MemoryEvaluationHelper::getDataTypeForCache(stage_model_config);

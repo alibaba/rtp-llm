@@ -59,10 +59,8 @@ public:
     ~PyWrappedModel();
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
-    // PP: thin transport adapter — unpacks upstream PPIntermediateTensors
-    // into PyModelInputs.pp_intermediates, delegates to forward() (the only
-    // compute path), and packs the model-emitted intermediates for the
-    // downstream stage.
+    /* Transport adapter: unpacks upstream intermediates into PyModelInputs.pp_intermediates,
+       delegates to forward() (the only compute path), and packs the model-emitted ones. */
     GptModelOutputs forwardPP(const GptModelInputs&        inputs,
                               const PPIntermediateTensors* input_tensors,
                               PPIntermediateTensors*       output_tensors) override;

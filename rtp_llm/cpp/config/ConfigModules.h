@@ -82,12 +82,8 @@ struct ParallelismConfig {
     // os.environ["ROLE_TYPE"] anymore.
     RoleType role_type = RoleType::PDFUSION;
 
-    // Materialized PP layer partition: layer count of every stage in rank
-    // order (e.g. {17,16,16,16}), decided once on the Python side and
-    // shipped as data so C++ never re-derives the partition rule. Empty
-    // means "no materialized partition" and falls back to the even-split
-    // formula (pp_size=1, stale pickles and legacy test fixtures only; the
-    // Python write-back point always materializes for pp_size>1).
+    /* Materialized PP layer partition (per-stage layer counts), decided once on the Python side;
+       empty falls back to even split (pp_size=1, stale pickles and legacy fixtures only). */
     std::vector<int64_t> pp_stage_layer_counts;
 
     FfnDisAggregateConfig ffn_disaggregate_config;  // FFN disaggregate configuration

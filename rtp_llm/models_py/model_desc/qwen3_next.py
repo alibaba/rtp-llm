@@ -1065,9 +1065,7 @@ class Qwen3NextModel(GptModelBase):
             py_hw_kernel_config=py_hw_kernel_config,
             device_resource_config=device_resource_config,
         )
-        # PP : first stage owns the embedding; see Qwen3Model for the
-        # exemplar. pp_size=1 keeps today's behavior. (PP gates CP off, so the
-        # CP metadata path below never meets a non-first stage.)
+        # First stage owns the embedding; pp_size=1 keeps today's behavior.
         self.embed_tokens = (
             Embedding(
                 model_config, parallelism_config, weights.get_global_weight(W.embedding)
@@ -1179,10 +1177,7 @@ class Qwen3NextModel(GptModelBase):
         return self.embed_tokens(input_ids)
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        # First stage embeds token ids (word_embedding is overridden by
-        # multimodal subclasses); later PP stages continue from the upstream
-        # stage's activations in pp_intermediates; input_hiddens stays as the
-        # legacy/MTP fallback channel.
+        # First stage embeds; later stages resume upstream activations from pp_intermediates, falling back to input_hiddens.
         if self.embed_tokens is not None:
             hidden_states = self.word_embedding(inputs)
         else:
@@ -1195,10 +1190,7 @@ class Qwen3NextModel(GptModelBase):
                 upstream_hidden if upstream_hidden is not None else inputs.input_hiddens
             )
 
-        # PP: this model uses the fused add-norm pattern, so the stream at a
-        # stage boundary is split into (branch output, accumulated residual).
-        # The upstream stage's residual arrives in pp_intermediates; first
-        # stage / pp_size=1 starts from zeros.
+        # Fused add-norm: resume the upstream residual from pp_intermediates, or start from zeros.
         residual = torch.zeros_like(hidden_states)
         upstream_residual = (
             inputs.pp_intermediates.get("residual") if inputs.pp_intermediates else None
@@ -1247,10 +1239,7 @@ class Qwen3NextModel(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
 
-        # Cache surfaces (get_layer_cache / select_*_for_layer) are indexed by
-        # model-local layer ids: under PP the C++ layout is projected to this
-        # stage's layers. Global layer ids are only needed at construction
-        # time (weight / attention-type indexing), already baked into layers.
+        # Cache surfaces are indexed by model-local layer ids (the C++ layout is projected to this stage).
         for local_idx, decoder_layer in enumerate(self.layers):
             layer_attention_inputs = select_attention_inputs_for_layer(
                 inputs, self.kv_cache, local_idx
@@ -1274,10 +1263,7 @@ class Qwen3NextModel(GptModelBase):
         if self.norm is not None:
             hidden_states, residual = self.norm(hidden_states, residual)
             return PyModelOutputs(hidden_states)
-        # Non-last PP stage: emit the stage-boundary tensors verbatim so the
-        # downstream stage can resume the fused (branch, residual) stream.
-        # Dropping `residual` here would make the downstream stage restart
-        # from zeros and compute garbage.
+        # Non-last stage: emit both boundary tensors; dropping residual would corrupt the downstream stream.
         outputs = PyModelOutputs(hidden_states)
         outputs.pp_intermediates = {
             "hidden_states": hidden_states,

@@ -15,8 +15,7 @@
 
 namespace rtp_llm {
 
-// Sentinel meaning "canonical column not assigned": the topology fills the
-// group's own position, so canonical indices default to local group order.
+// Sentinel: canonical column not assigned; canonical indices default to local group order.
 inline constexpr size_t kCanonicalIdxUnset = static_cast<size_t>(-1);
 
 // Immutable cache-group configuration published by CacheConfig. The tag is
@@ -34,8 +33,7 @@ struct GroupBase {
     size_t   kv_block_stride_bytes     = 0;
     size_t   kv_scale_stride_bytes     = 0;
 
-    // Column of this group in the PP canonical group table (computed over the
-    // whole model, identical on every stage). Unset keeps identity mapping.
+    // Column in the PP canonical group table (identical on every stage); unset keeps identity mapping.
     size_t canonical_idx = kCanonicalIdxUnset;
 };
 

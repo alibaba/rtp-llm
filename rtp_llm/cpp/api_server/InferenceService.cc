@@ -236,9 +236,7 @@ InferenceService::fillGenerateInput(int64_t                                reque
     input->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
     input->generate_config               = generate_config;
 
-    // Tokenize before multimodal expansion: updateMultimodalFeatures reads
-    // input_ids to locate the mm placeholder tokens, so it must run after
-    // they are filled in.
+    // Tokenize before multimodal expansion: updateMultimodalFeatures reads input_ids to locate the placeholders.
     autil::ScopedTime2 timer;
     auto               vec = token_processor_->encode(text);
     if (metric_reporter_) {

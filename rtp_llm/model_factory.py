@@ -425,11 +425,7 @@ class ModelFactory:
         # Set model_name to engine_config.runtime_config.model_name (for backward compatibility)
         engine_config.runtime_config.model_name = model_config.model_name
 
-        # Materialize the PP layer partition once (model_config.num_layers is
-        # final here) and ship it as data on ParallelismConfig: every
-        # downstream consumer — weight loading, model construction, C++
-        # cache geometry — reads the counts instead of re-deriving the
-        # partition rule. pp_size=1 stays untouched (zero behavior change).
+        # Materialize the PP layer partition once; downstream consumers (loading, construction, cache) read the counts.
         parallelism_config = engine_config.parallelism_config
         if (
             parallelism_config.pp_size > 1
@@ -448,12 +444,7 @@ class ModelFactory:
                 counts,
             )
 
-        # PP retires the positional hybrid grouping: the cache gate requires
-        # independent pools when pp_size > 1. Enable them here (scoped to PP,
-        # pp=1 keeps its existing pool layout) and rename linear0/linear1/...
-        # to a single "linear" tag so every stage sees identical tag sets.
-        # Models that already enable independent pools (e.g. DSV4) keep their
-        # own tags untouched.
+        # The cache gate requires independent pools when pp_size > 1; linear tags collapse to a single "linear" tag.
         hybrid_config = model_config.hybrid_attention_config
         if (
             parallelism_config.pp_size > 1

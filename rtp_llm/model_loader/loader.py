@@ -498,8 +498,7 @@ class ModelLoader:
 
     def prepare_weights(self, device: str):
         if not self._is_attn_model:
-            # PP: only enumerate layers assigned to this stage
-            # (pp_size=1 -> full range, unchanged behavior).
+            # Only enumerate layers assigned to this stage (full range at pp_size=1).
             for id in self._load_config.pp_layer_range():
                 results = self._load_layer_weights(id, device)
                 for name, tensor in results.items():
@@ -533,8 +532,7 @@ class ModelLoader:
         tensor_to_weight_map: Dict[str, WeightInfo] = {}
         weight_info_list: List[WeightInfo] = []
         if self._model_weights_info.layer_weights != []:
-            # PP: only enumerate layers assigned to this stage
-            # (pp_size=1 -> full range, unchanged behavior).
+            # Only enumerate layers assigned to this stage (full range at pp_size=1).
             for layer_id in self._load_config.pp_layer_range():
                 layer_weights = self._model_weights_info.layer_weights[layer_id]
                 if isinstance(layer_weights, WeightModule):
@@ -585,17 +583,13 @@ class ModelLoader:
             return True
         if self._task_type != TaskType.LANGUAGE_MODEL and weight.name in [W.lm_head]:
             return True
-        # PP capability filtering (config/pp_layout.py): embedding-family
-        # weights belong to the first stage only; lm_head / final layernorm
-        # belong to the last stage only.
-        # pp_size=1: both capabilities true -> nothing skipped.
+        # PP: embedding weights load on the first stage only; lm_head/final layernorm on the last stage only.
         name = weight.name or ""
         if name in (W.embedding, W.positional_embedding):
             return not self._load_config.has_pp_embedding
         if name == W.lm_head or name.startswith("final_layernorm."):
             return not self._load_config.has_pp_lm_head
-        # TODO(PP+MTP): multi_tokens_predict_* (MTP head) weights must be
-        # restricted to the last stage once PP+MTP lands.
+        # TODO(PP+MTP): restrict multi_tokens_predict_* (MTP head) weights to the last stage.
         return False
 
     @staticmethod
@@ -759,8 +753,7 @@ class ModelLoader:
             )
 
         if self._task_type == TaskType.LANGUAGE_MODEL:
-            # PP: only the last stage owns lm_head; other stages must NOT fall
-            # back to embedding (that tie only makes sense where both exist).
+            # Only the last stage owns lm_head; other stages must not fall back to embedding.
             if self._load_config.has_pp_lm_head:
                 lm_head_w = weight.steal_global_weight(W.lm_head)
                 if lm_head_w == None:

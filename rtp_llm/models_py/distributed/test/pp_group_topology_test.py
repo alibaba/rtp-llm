@@ -1,13 +1,4 @@
-# PP-aware process group topology test.
-#
-# Pins three behaviors of collective_torch._create_process_groups:
-#  1. Under pp_size > 1, TP/DP groups stay inside one PP stage (stage-local
-#     collectives like tpSyncModelInputs must never wait on other stages).
-#  2. PP groups span the stages of one (dp_rank, tp_rank) lane and are keyed
-#     deterministically for the PP snapshot exchange / transport bootstrap.
-#  3. pp_size == 1 reproduces the historical groups exactly (keys included).
-#
-# CPU-only: runs gloo under multiprocessing spawn, no GPU required.
+# CPU-only: validates _create_process_groups topology under gloo via multiprocessing spawn.
 
 import multiprocessing as mp
 import os
@@ -40,9 +31,7 @@ def _worker(rank, world_size, pp_size, dp_size, tp_size, master_port, queue):
         cfg.local_world_size = world_size
         ct._normalize_parallelism_ranks(cfg)
         ct._parallelism_config = cfg
-        # torch.distributed is already up (gloo): mark initialized so
-        # _get_group resolves keys instead of triggering the full
-        # init_distributed_environment (which requires NCCL config).
+        # gloo is already up: mark initialized so _get_group resolves keys directly.
         ct._initialized = True
         ct._group_map.clear()
         ct._create_process_groups(cfg, "gloo", None)
@@ -109,8 +98,7 @@ def _run_topology(test, pp_size, dp_size, tp_size):
 class PPGroupTopologyTest(unittest.TestCase):
     @staticmethod
     def _merge(results):
-        # _group_map only stores the groups the observing rank belongs to,
-        # so the full topology is the union over all ranks' snapshots.
+        # Full topology is the union over all ranks' snapshots (each rank stores only its own groups).
         merged = {}
         for _, (_, _, _, membership, _) in results.items():
             for key, ranks in membership.items():
@@ -139,10 +127,8 @@ class PPGroupTopologyTest(unittest.TestCase):
         self.assertEqual(membership["PP0"], [0, 2])
         self.assertEqual(membership["PP1"], [1, 3])
         self.assertFalse(any(k.startswith("DP") for k in membership))
-        # Normalized pp_rank per world rank.
         self.assertEqual(results[0][0], 0)
         self.assertEqual(results[3][0], 1)
-        # Runtime lookup resolves each rank's own stage/lane groups.
         self.assertEqual(results[0][4]["TP"], [0, 1])
         self.assertEqual(results[0][4]["PP"], [0, 2])
         self.assertEqual(results[3][4]["TP"], [2, 3])
@@ -166,7 +152,6 @@ class PPGroupTopologyTest(unittest.TestCase):
         self.assertEqual(membership["PP1"], [1, 5])
         self.assertEqual(membership["PP2"], [2, 6])
         self.assertEqual(membership["PP3"], [3, 7])
-        # rank 0 lookups: pp0/dp0/tp0 lane.
         self.assertEqual(results[0][4]["TP"], [0, 1])
         self.assertEqual(results[0][4]["DP"], [0, 2])
         self.assertEqual(results[0][4]["PP"], [0, 4])

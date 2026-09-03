@@ -42,10 +42,7 @@ class LanguageCppEngine(BaseEngine):
             self.tokenizer, self.model.model_config.special_tokens
         )
         self.mm_process_engine = None
-        # Under PP every rank reports tp_rank == 0, so gate on the PP stage
-        # root too: only the leading stage (pp_rank == 0) admits requests and
-        # runs the multimodal processor, later stages would only duplicate the
-        # ViT weights and never use them.
+        # Gate on the leading stage too: only it admits requests and runs the multimodal processor.
         is_pp_stage_root = (
             engine_config.parallelism_config.pp_size <= 1
             or engine_config.parallelism_config.pp_rank == 0

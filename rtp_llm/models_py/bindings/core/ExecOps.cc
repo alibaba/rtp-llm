@@ -642,8 +642,7 @@ void clearCommOpsUnlocked() {
     }
 }
 
-// PP callbacks (P2P tensor transport + startup snapshot exchange) share one
-// lifecycle: registered together via register_pp_ops, cleared via clear_pp_ops.
+// PP callbacks (P2P transport + snapshot exchange) are registered together via register_pp_ops.
 void clearPPOpsUnlocked() {
     py::function isend_fn;
     py::function irecv_fn;

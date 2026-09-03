@@ -108,9 +108,7 @@ class Qwen3Model(GptModelBase):
             if self.pp_has_embedding
             else None
         )
-        # PP : only build this stage's layers; keep global layer ids so
-        # kv-cache / fmha lookups below stay global. pp_size=1 builds every
-        # layer exactly as before.
+        # Only build this stage's layers, keeping global ids so kv-cache/fmha lookups stay global.
         self.pp_layer_ids_list = self.pp_layer_ids()
         self.layers = nn.ModuleList(
             [
@@ -134,9 +132,7 @@ class Qwen3Model(GptModelBase):
         )
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
-        # First stage embeds token ids; later PP stages continue from the
-        # upstream stage's activations in pp_intermediates; input_hiddens
-        # stays as the legacy/MTP fallback channel.
+        # First stage embeds; later stages resume upstream activations from pp_intermediates, falling back to input_hiddens.
         if self.embed_tokens is not None:
             hidden_states = self.embed_tokens(inputs.input_ids)
         else:
@@ -150,8 +146,7 @@ class Qwen3Model(GptModelBase):
             )
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
-        # Cache surfaces are indexed by model-local layer ids (under PP the
-        # C++ layout is projected to this stage's layers).
+        # Cache surfaces are indexed by model-local layer ids (the C++ layout is projected to this stage).
         for local_idx, decoder_layer in enumerate(self.layers):
             layer_fmha_impl = select_fmha_impl_for_layer(
                 fmha_impl, self.kv_cache, local_idx
@@ -166,9 +161,7 @@ class Qwen3Model(GptModelBase):
         if self.norm is not None:
             hidden_states = self.norm(hidden_states)
             return PyModelOutputs(hidden_states)
-        # Non-last PP stage: emit the combined stream. Naive add-norm models
-        # carry a single boundary tensor (fused-residual models emit both
-        # hidden_states and residual, see qwen3_next).
+        # Non-last stage: emit the single boundary tensor (fused-residual models emit two, see qwen3_next).
         outputs = PyModelOutputs(hidden_states)
         outputs.pp_intermediates = {"hidden_states": hidden_states}
         return outputs

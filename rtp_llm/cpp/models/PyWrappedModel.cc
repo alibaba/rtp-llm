@@ -392,9 +392,7 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
     RTP_LLM_CHECK_WITH_INFO(!inputs.kv_cache_block_id.defined() || inputs.kv_cache_block_id.dim() == 3,
                             "physical kv_cache_block_id must be 3-D for tagged inputs");
 
-    // Plan columns are addressed by canonical index. Under pp_size=1 the
-    // canonical index equals the local position; under pp_size>1 the leading
-    // stage emits canonical-ordered columns and each stage selects its own.
+    // Plan columns are addressed by canonical index (equals the local position at pp_size=1).
     torch_ext::AttentionInputsByTag by_tag;
     for (const auto& group : groups) {
         const size_t col = group.canonical_idx;
@@ -872,10 +870,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         cache_store_write_cycle.finish();
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
-        // In-model DSpARK proposals leave the Python boundary on
-        // PyModelOutputs::draft_tokens; carry them through whichever
-        // post-layers path this forward takes. PP stage-boundary tensors ride
-        // along the same way (forwardPP packs them for the downstream stage).
+        // In-model DSpARK proposals leave on draft_tokens; pp_intermediates ride along the same way.
         auto attach_model_side_outputs = [&py_model_outputs](GptModelOutputs outputs) {
             outputs.draft_tokens     = py_model_outputs.draft_tokens;
             outputs.pp_intermediates = py_model_outputs.pp_intermediates;
@@ -1137,10 +1132,8 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     return {logits, last_hidden, last_hidden, torch::Tensor(), torch::Tensor()};
 }
 
-// PP: thin transport adapter around the single compute path. Unpacks
-// upstream PPIntermediateTensors into inputs.pp_intermediates (read by the
-// Python model) and packs the model-emitted intermediates for the
-// downstream stage. forward() remains the only compute.
+/* Transport adapter around the single compute path: unpacks upstream intermediates
+   into inputs.pp_intermediates and packs the model-emitted ones for the downstream stage. */
 GptModelOutputs PyWrappedModel::forwardPP(const GptModelInputs&        inputs,
                                           const PPIntermediateTensors* input_tensors,
                                           PPIntermediateTensors*       output_tensors) {

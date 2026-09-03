@@ -142,8 +142,7 @@ class ModelBase {
 public:
     virtual ~ModelBase()                                          = default;
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
-    // Keeps the model-defined intermediate-tensor schema outside PPExecutor. The
-    // first stage receives no input tensors, and the last stage produces none.
+    // First stage receives no input tensors; last stage produces none.
     virtual GptModelOutputs forwardPP(const GptModelInputs&        inputs,
                                       const PPIntermediateTensors* input_tensors,
                                       PPIntermediateTensors*       output_tensors);

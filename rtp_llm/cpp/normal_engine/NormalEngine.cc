@@ -143,8 +143,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                                 "pipeline parallelism does not support multi-task system prompts");
         RTP_LLM_CHECK_WITH_INFO(!deviceInputEnabled(),
                                 "pipeline parallelism does not support device-input mode (RTP_LLM_DEVICE_INPUT)");
-        // Multimodal + PP is gated python-side by BaseModel.support_pp(); the
-        // engine transport (plan broadcast) carries mm features natively.
+        // Multimodal + PP is gated python-side by BaseModel.support_pp().
     }
     if (!model_config_.output_vocab_ids.empty()) {
         RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE && !propose_params_,
@@ -523,13 +522,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
     } else {
         auto result = CacheConfigCreator::createConfig(
             model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result, sp_config);
-        // PP: fail-fast cache geometry validation at startup. Under
-        // pp_size>1 every stage exchanges its snapshot over the PP process
-        // group (registered by collective_torch at distributed init) and all
-        // stages agree on the logical (min) block count; pp_size=1 keeps the
-        // local collector. Runs after computeBlockNum (block counts are
-        // final) and before any request traffic, so it acts as a startup
-        // barrier.
+        /* Fail-fast cross-stage cache geometry validation: runs after computeBlockNum
+           (counts final) and before any request traffic, so it acts as a startup barrier. */
         PPValidationResult pp_validation;
         {
             const auto                              local_snapshot = StageCacheSnapshot::fromConfig(result);
@@ -548,12 +542,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                          result.block_num,
                          result.block_size_bytes / 1024);
         RTP_LLM_LOG_INFO("create cache manager with linear step %d", result.linear_step);
-        // The validated cross-stage logical capacity is handed to the
-        // manager, which caps per-group block counts internally (after its
-        // finalizeBlockNums, before init() builds the pools) so admission
-        // never admits a request some stage cannot serve; a richer stage
-        // simply sizes its pools to the capped counts, leaving the surplus
-        // VRAM free.
+        // The manager caps per-group block counts to the validated cross-stage min before building pools.
         resource_context_.cache_manager = make_shared<KVCacheManager>(
             result,
             false,
@@ -749,8 +738,7 @@ absl::Status NormalEngine::pp_step() {
     const int64_t pp_rank                  = parallelism_config.pp_rank;
     const bool    is_first_stage_scheduler = pp_rank == 0 && parallelism_config.tp_rank == 0;
 
-    // Pauses only new pipeline admission so other ranks can continue draining
-    // batches that have already entered the pipeline.
+    // Pauses only new admission so other ranks keep draining in-flight batches.
     if (is_first_stage_scheduler) {
         while (pause_ && running_) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -775,17 +763,14 @@ absl::Status NormalEngine::pp_step() {
             mayAddFakeStream(streams);
         }
 
-        // An empty scheduling result is a pipeline bubble. It must still enter
-        // process() so the empty plan advances through every stage and drains
-        // batches that are already in flight.
+        // An empty result must still enter process() so the empty plan drains in-flight batches.
     }
 
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = absl::OkStatus();
 
-    // Discovers request-scoped profiling where GenerateStreams are owned. The
-    // PPExecutor callbacks delimit this stage's actual forward work.
+    // Request-scoped profiling is discovered where GenerateStreams are owned.
     if (is_first_stage_scheduler && !step_profiler_.enabled()) {
         for (const auto& stream : streams) {
             if (stream && stream->genTimeline()) {
@@ -808,7 +793,6 @@ absl::Status NormalEngine::pp_step() {
         }
     }
 
-    // Reports one scheduling-side engine step for each admitted executable batch.
     if (is_first_stage_scheduler && !streams.empty()) {
         RTP_LLM_PROFILE_SCOPE("engine.normal.report_metrics_work");
         auto step_latency = autil::TimeUtility::currentTimeInMicroSeconds() - step_begin_time_us;

@@ -22,10 +22,7 @@ namespace rtp_llm {
 enum class ParallelMode {
     TP = 0,
     DP = 1,
-    // TODO(naming debt): legacy name from the pre-PP era; the actual
-    // semantics are WORLD (spans ALL ranks including every PP stage). Do not
-    // "narrow" it per stage; rename to ALL/WORLD when this enum is next
-    // touched (requires coordinated pybind/Python/callsite rename).
+    // TODO(naming debt): actually WORLD semantics (spans ALL ranks including every PP stage); never narrow per stage.
     DP_AND_TP = 2,
     FFN_TP    = 3,
     EP        = 4,
@@ -106,9 +103,7 @@ struct GptModelInputs {
     // Only interpreted by a DSpARK draft model. All other models leave NONE.
     DSparkCallPhase dspark_call_phase = DSparkCallPhase::NONE;
 
-    // PP: stage-boundary tensors received from the upstream stage, populated
-    // by PyWrappedModel::forwardPP. NOT part of shape hints / tpSync packing
-    // (tpSyncModelInputs enumerates fields explicitly). Empty under pp_size=1.
+    // PP: boundary tensors from the upstream stage, populated by forwardPP; not part of tpSync packing.
     std::map<std::string, torch::Tensor> pp_intermediates;
 
     // not sync to other tp rank
@@ -132,9 +127,7 @@ struct GptModelOutputs {
 
     std::vector<torch::Tensor> moe_gating;
 
-    // PP: stage-boundary tensors emitted by the model on a non-last stage;
-    // PyWrappedModel::forwardPP packs them for the downstream stage. Kept
-    // last so existing brace-init sites keep compiling.
+    // PP: boundary tensors emitted on a non-last stage; kept last so existing brace-init sites keep compiling.
     std::map<std::string, torch::Tensor> pp_intermediates;
 };
 

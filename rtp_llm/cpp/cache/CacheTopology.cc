@@ -92,8 +92,6 @@ void CacheTopology::validateAndBuildIndex() {
         }
     }
 
-    // Unassigned canonical columns default to the group's own position, so
-    // topologies without a PP canonical table keep identity mapping.
     std::unordered_set<size_t> canonical_seen;
     for (size_t group_id = 0; group_id < groups_.size(); ++group_id) {
         if (groups_[group_id].canonical_idx == kCanonicalIdxUnset) {

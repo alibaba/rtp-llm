@@ -181,8 +181,7 @@ LayerKVCacheSpecs CacheConfigCreator::buildLayerSpecsFromDescs(const LayerKVCach
     return layer_specs;
 }
 
-// PP grouping gate shared by every config entry: the hybrid-pool branch of
-// createConfig bypasses createBasicConfig, so both must enforce it.
+// Enforced at both entry points because the hybrid-pool branch of createConfig bypasses createBasicConfig.
 void checkPpIndependentPools(const ModelConfig& model_config, const ParallelismConfig& parallelism_config) {
     RTP_LLM_CHECK_WITH_INFO(parallelism_config.pp_size <= 1
                                 || !model_config.hybrid_attention_config.enable_hybrid_attention
@@ -192,14 +191,7 @@ void checkPpIndependentPools(const ModelConfig& model_config, const ParallelismC
                             parallelism_config.pp_size);
 }
 
-// PP gate applied right after the stage slice. Linear tags stay global
-// (assigned at config-build time): cross-stage group identity is reconciled
-// through the canonical group table at startup instead of renaming tags per
-// stage.
 void validateStageScopedDescsForPP(const ModelConfig& stage_config) {
-    // v1 scope: pipeline parallelism only supports paged pools. Opaque
-    // (state / byte-addressed KV) pools use per-stream ring and tail-block
-    // semantics that the leading stage's pools do not model yet.
     for (size_t layer_id = 0; layer_id < stage_config.kv_cache_spec_descs.size(); ++layer_id) {
         for (const auto& desc : stage_config.kv_cache_spec_descs[layer_id]) {
             RTP_LLM_CHECK_WITH_INFO(desc.cache_type != KVCacheSpecType::OpaqueKV
@@ -224,17 +216,11 @@ ModelConfig CacheConfigCreator::stageScopedModelConfig(const ModelConfig&       
                             parallelism_config.pp_rank,
                             pp_size);
 
-    // Strong contract: under pp>1 the partition is always materialized by
-    // the Python decision point (ParallelismConfig.pp_stage_layer_counts);
-    // the even-split fallback in PPLayout exists only for pp_size=1, stale
-    // pickles and legacy fixtures.
     RTP_LLM_CHECK_WITH_INFO(!parallelism_config.pp_stage_layer_counts.empty(),
                             "pp_size=%ld requires a materialized layer partition "
                             "(pp_stage_layer_counts); it must be written by the Python startup decision point",
                             pp_size);
 
-    // Layer partition: consumed as data (prefix-sum lookup over the
-    // materialized counts), never re-derived here.
     const PPLayout layout   = PPLayout::fromParallelismConfig(parallelism_config, model_config.num_layers);
     const auto [begin, end] = layout.myLayerRange();
     RTP_LLM_CHECK_WITH_INFO(end > begin,
@@ -275,8 +261,6 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
                                                   const ParallelismConfig& parallelism_config,
                                                   bool                     is_mtp,
                                                   int                      gen_num_per_cycle) {
-    // (PP) gate: pipeline parallelism follows the independent-pool grouping;
-    // the legacy hybrid positional grouping (linear0/linear1/...) is retired.
     checkPpIndependentPools(model_config, parallelism_config);
     CacheConfig config;
     if (model_config.hybrid_attention_config.enable_independent_kv_cache_pools) {
@@ -311,8 +295,6 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                              const KVCacheConfig&                             kv_cache_config,
                                              const std::optional<WarmUpResult>&               warm_up_result,
                                              const std::optional<SpeculativeExecutionConfig>& sp_config) {
-    // (PP) gate: the hybrid-pool branch below bypasses createBasicConfig, so
-    // enforce the same restriction here.
     checkPpIndependentPools(model_config, parallelism_config);
     CacheConfig config =
         model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
@@ -352,7 +334,6 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                                const std::optional<WarmUpResult>& warm_up_result,
                                                bool                               is_mtp,
                                                bool                               is_eagle) {
-    // (PP) gate: the joint main+draft cache geometry is not stage-scoped yet.
     RTP_LLM_CHECK_WITH_INFO(parallelism_config.pp_size <= 1,
                             "pipeline parallelism (pp_size=%ld) cannot be combined with speculative execution yet",
                             parallelism_config.pp_size);

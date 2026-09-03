@@ -278,9 +278,7 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
                                             const KVCacheConfig&     kv_cache_config,
                                             bool                     is_mtp,
                                             int                      gen_num_per_cycle) {
-    // (PP): with pp_size>1 every stage builds independent-pool geometry only
-    // for its own layer range. Pools stay type-tagged, so cross-stage group
-    // identity is reconciled by the canonical group table at startup.
+    // With pp_size>1 every stage builds independent-pool geometry only for its own layer range.
     const ModelConfig stage_model_config = CacheConfigCreator::stageScopedModelConfig(model_config, parallelism_config);
 
     const auto    dtype                  = MemoryEvaluationHelper::getDataTypeForCache(stage_model_config);
