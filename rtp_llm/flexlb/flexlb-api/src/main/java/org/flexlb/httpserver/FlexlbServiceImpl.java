@@ -6,6 +6,7 @@ import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
@@ -738,6 +739,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
 
         var config = configService.loadBalanceConfig();
+        initializeSessionPlacement(request, config);
         // QUEUE owns one absolute scheduling deadline, measured from FlexLB
         // admission through delivery acknowledgement. DIRECT never queues and
         // therefore has no scheduling timeout.
@@ -772,6 +774,28 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
 
         return ctx;
+    }
+
+    private void initializeSessionPlacement(Request request, FlexlbConfig config) {
+        if (request.getSessionSchemaVersion() != Request.SESSION_SCHEMA_VERSION
+                || request.getInferenceSessionId() == null
+                || request.getInferenceSessionId().isBlank()) {
+            return;
+        }
+        var affinity = config.getRouter().getRoles().getPrefill().getSessionAffinity();
+        long epoch = -1L;
+        if (request.getInferenceSessionState() == Request.SessionState.NEW) {
+            epoch = affinity == null
+                    ? sessionPlacementStore.resetIfPresent(
+                            request.getModel(), request.getInferenceSessionId())
+                    : sessionPlacementStore.reset(
+                            request.getModel(), request.getInferenceSessionId());
+        } else if (affinity != null
+                && request.getInferenceSessionState() == Request.SessionState.ESTABLISHED) {
+            epoch = sessionPlacementStore.currentEpoch(
+                    request.getModel(), request.getInferenceSessionId());
+        }
+        request.setSessionPlacementEpoch(epoch);
     }
 
     private FlexlbScheduleProtocol.FlexlbScheduleResponsePB toProtoResponse(Response response) {
