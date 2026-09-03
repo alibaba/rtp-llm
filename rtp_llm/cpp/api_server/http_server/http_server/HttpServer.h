@@ -1,12 +1,12 @@
 #ifndef HTTP_SERVER_HTTPSERVER_H
 #define HTTP_SERVER_HTTPSERVER_H
 
+#include <cstddef>
 #include <functional>
 
 #include "aios/network/anet/transport.h"
 #include "autil/Log.h"
 #include "http_server/ANetApp.h"
-#include <functional>
 #include "http_server/HttpRequest.h"
 #include "http_server/HttpResponseWriter.h"
 
@@ -27,7 +27,10 @@ const int LISTEN_BACKLOG = 256;
 
 class HttpServer {
 public:
-    HttpServer(anet::Transport* transport = nullptr, size_t threadNum = 2, size_t queueSize = 50);
+    HttpServer(anet::Transport* transport    = nullptr,
+               size_t           threadNum    = 2,
+               size_t           queueSize    = 50,
+               size_t           packageLimit = 0);
     ~HttpServer();
 
 public:

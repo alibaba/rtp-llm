@@ -25,6 +25,7 @@ class WorkerStatusService;
 class ModelStatusService;
 class SysCmdService;
 class TokenizerService;
+class ConstraintTreeService;
 
 class HttpApiServer {
 public:
@@ -86,6 +87,7 @@ private:
     bool registerModelStatusService();
     bool registerSysCmdService();
     bool registerTokenizerService();
+    bool registerConstraintTreeService();
     bool registerChatService();
     bool registerInferenceService();
     bool registerEmbedingService();
@@ -117,15 +119,16 @@ private:
     std::shared_ptr<WeightsLoader>           weights_loader_;
     std::map<std::string, std::string>       lora_infos_;
 
-    std::shared_ptr<HealthService>       health_service_;
-    std::shared_ptr<WorkerStatusService> worker_status_service_;
-    std::shared_ptr<ModelStatusService>  model_status_service_;
-    std::shared_ptr<SysCmdService>       sys_cmd_service_;
-    std::shared_ptr<TokenizerService>    tokenizer_service_;
-    std::shared_ptr<ChatService>         chat_service_;
-    std::shared_ptr<InferenceService>    inference_service_;
-    std::shared_ptr<EmbeddingService>    embedding_service_;
-    std::shared_ptr<LoraService>         lora_service_;
+    std::shared_ptr<HealthService>         health_service_;
+    std::shared_ptr<WorkerStatusService>   worker_status_service_;
+    std::shared_ptr<ModelStatusService>    model_status_service_;
+    std::shared_ptr<SysCmdService>         sys_cmd_service_;
+    std::shared_ptr<TokenizerService>      tokenizer_service_;
+    std::shared_ptr<ConstraintTreeService> constraint_tree_service_;
+    std::shared_ptr<ChatService>           chat_service_;
+    std::shared_ptr<InferenceService>      inference_service_;
+    std::shared_ptr<EmbeddingService>      embedding_service_;
+    std::shared_ptr<LoraService>           lora_service_;
 };
 
 class CounterGuard {

@@ -34,8 +34,12 @@ cc_library(
         "logits_processor/DFAUtil.h",
         "logits_processor/PrefixToCandidateTokens.h",
     ],
+    srcs = [
+        "logits_processor/PrefixToCandidateTokens.cc",
+    ],
     deps = [
-        "//:rtp_compute_ops",
+        "//rtp_llm/cpp/utils:core_utils",
+        "@havenask//aios/autil:json",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

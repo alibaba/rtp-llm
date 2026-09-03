@@ -108,6 +108,31 @@ cc_library(
     alwayslink = 1,
 )
 
+cc_test(
+    name = "constraint_tree_service_test",
+    srcs = [
+        "ConstraintTreeServiceTest.cc",
+        "mock/MockHttpResponseWriter.h",
+    ],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/api_server:http_client",
+        "//rtp_llm/cpp/api_server:constraint_tree_service",
+        "@havenask//aios/autil:net",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_binary(
+    name = "constraint_tree_test_server",
+    srcs = ["ConstraintTreeTestServer.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/api_server:constraint_tree_service",
+    ],
+)
+
 filegroup(
     name = "api_server_mock_hdrs",
     srcs = [

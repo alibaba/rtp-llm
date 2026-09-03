@@ -73,18 +73,19 @@ void TreeLogitsProcessor::updateStatus(const rtp_llm::BufferPtr& new_tokens, int
 TreeLogitsProcessorPtr TreeLogitsProcessor::fromGenerateInput(rtp_llm::DeviceBase*           device,
                                                               std::shared_ptr<GenerateInput> generate_input,
                                                               int32_t                        num) {
-    if (!PrefixToCandidateTokens::instance()->initSuccess()) {
+    const auto prefix_tree_snapshot = PrefixToCandidateTokens::instance()->snapshot();
+    if (!prefix_tree_snapshot) {
         return nullptr;
     }
 
     auto processor_ptr = std::make_shared<TreeLogitsProcessor>(rtp_llm::DeviceFactory::getDefaultDevice());
     for (size_t i = 0; i < num; i++) {
-        StreamTreeInfo              tree_info(PrefixToCandidateTokens::instance()->initSuccess(),
+        StreamTreeInfo              tree_info(true,
                                  generate_input->inputLength(),
                                  0,
                                  generate_input->generate_config->hasNumBeams()
                                      || generate_input->generate_config->num_return_sequences > 1,
-                                 std::make_shared<TreeDFA<std::string, int>>(PrefixToCandidateTokens::instance()));
+                                 std::make_shared<TreeDFA<std::string, int>>(prefix_tree_snapshot));
         std::vector<StreamTreeInfo> tree_infos       = {tree_info};
         auto                        single_processor = std::make_shared<TreeLogitsProcessor>(device, tree_infos);
 

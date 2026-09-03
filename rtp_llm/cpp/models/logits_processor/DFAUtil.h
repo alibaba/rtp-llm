@@ -3,6 +3,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 #include <cassert>
 #include <cstring>
@@ -121,9 +122,9 @@ public:
 template<typename InputType>
 class TreeDFA<std::string, InputType>: public BaseDFA<std::string, InputType> {
 public:
-    TreeDFA(PrefixToCandidateTokensPtr prefixToCandidateTokensPtr):
-        prefixToCandidateTokensPtr_(prefixToCandidateTokensPtr),
-        status_(std::to_string(prefixToCandidateTokensPtr->startTokenId())),
+    explicit TreeDFA(PrefixTreeSnapshotPtr prefix_tree_snapshot):
+        prefix_tree_snapshot_(std::move(prefix_tree_snapshot)),
+        status_(std::to_string(prefix_tree_snapshot_->startTokenId())),
         input_list_(10) {}
 
     TreeDFA(TreeDFA&)  = default;
@@ -133,7 +134,7 @@ public:
         if (input_list_.empty()) {
             return false;
         }
-        return input_list_[input_list_.size() - 1] == prefixToCandidateTokensPtr_->endTokenId();
+        return input_list_[input_list_.size() - 1] == prefix_tree_snapshot_->endTokenId();
     }
 
     std::string status() {
@@ -148,9 +149,9 @@ public:
         if (isFinished()) {
             return status_;
         }
-        std::string new_status = prefixToCandidateTokensPtr_->generateNextKey(status_, input);
-        if (prefixToCandidateTokensPtr_->isValidStatus(new_status)
-            || std::to_string(input) == std::to_string(prefixToCandidateTokensPtr_->endTokenId())) {
+        std::string new_status = prefix_tree_snapshot_->generateNextKey(status_, input);
+        if (prefix_tree_snapshot_->isValidStatus(new_status)
+            || std::to_string(input) == std::to_string(prefix_tree_snapshot_->endTokenId())) {
             input_list_.push_back(input);
             status_ = new_status;
         } else {
@@ -163,7 +164,7 @@ public:
 
     std::vector<size_t> getCandidateTokenIds() {
         std::vector<size_t> token_ids;
-        for (auto token_id : prefixToCandidateTokensPtr_->getCandidateTokens(status_)) {
+        for (auto token_id : prefix_tree_snapshot_->getCandidateTokens(status_)) {
             if (token_id >= 0) {
                 token_ids.push_back(static_cast<size_t>(token_id));
             } else {
@@ -171,15 +172,15 @@ public:
             }
         }
         if (token_ids.empty()) {
-            token_ids.push_back(prefixToCandidateTokensPtr_->endTokenId());
+            token_ids.push_back(prefix_tree_snapshot_->endTokenId());
         }
         return token_ids;
     }
 
 private:
-    PrefixToCandidateTokensPtr prefixToCandidateTokensPtr_;
-    std::string                status_;
-    std::vector<InputType>     input_list_;
+    PrefixTreeSnapshotPtr  prefix_tree_snapshot_;
+    std::string            status_;
+    std::vector<InputType> input_list_;
 };
 
 }  // namespace rtp_llm

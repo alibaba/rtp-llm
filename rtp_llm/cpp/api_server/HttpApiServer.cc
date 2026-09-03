@@ -1,11 +1,15 @@
 #include "rtp_llm/cpp/api_server/HttpApiServer.h"
-#include "rtp_llm/cpp/api_server/common/HealthService.h"
-#include "rtp_llm/cpp/api_server/WorkerStatusService.h"
+
+#include <limits>
+
+#include "rtp_llm/cpp/api_server/ConstraintTreeService.h"
+#include "rtp_llm/cpp/api_server/Exception.h"
+#include "rtp_llm/cpp/api_server/GangServer.h"
 #include "rtp_llm/cpp/api_server/ModelStatusService.h"
 #include "rtp_llm/cpp/api_server/SysCmdService.h"
 #include "rtp_llm/cpp/api_server/TokenizerService.h"
-#include "rtp_llm/cpp/api_server/Exception.h"
-#include "rtp_llm/cpp/api_server/GangServer.h"
+#include "rtp_llm/cpp/api_server/WorkerStatusService.h"
+#include "rtp_llm/cpp/api_server/common/HealthService.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -28,7 +32,11 @@ bool HttpApiServer::start(const std::string& address) {
     // TODO: queueSize may interleave with controller :(
     http_server_.reset(new http_server::HttpServer(/*transport=*/nullptr,
                                                    /*threadNum=*/controller_->get_available_concurrency(),
-                                                   /*queueSize=*/controller_->get_available_concurrency() * 5));
+                                                   /*queueSize=*/controller_->get_available_concurrency() * 5,
+                                                   // ANet defaults to 64 MiB. Runtime constraint-tree snapshots can be
+                                                   // substantially larger, so use the maximum its int-sized
+                                                   // Content-Length parser can represent.
+                                                   /*packageLimit=*/std::numeric_limits<int>::max()));
     metric_reporter_.reset(new ApiServerMetricReporter());
     if (!metric_reporter_->init()) {
         RTP_LLM_LOG_WARNING("HttpApiServer start init metric reporter failed.");
@@ -103,6 +111,12 @@ bool HttpApiServer::registerServices() {
     // POST: /tokenizer/encode
     if (!registerTokenizerService()) {
         RTP_LLM_LOG_WARNING("HttpApiServer register tokenizer service failed.");
+        return false;
+    }
+
+    // POST: /update_constraint_tree, GET: /constraint_tree_status
+    if (!is_embedding_ && !registerConstraintTreeService()) {
+        RTP_LLM_LOG_WARNING("HttpApiServer register constraint tree service failed.");
         return false;
     }
 
@@ -206,6 +220,27 @@ bool HttpApiServer::registerTokenizerService() {
         tokenizer_service->tokenizerEncode(writer, request);
     };
     return http_server_->RegisterRoute("POST", "/tokenizer/encode", tokenizer_encode_callback);
+}
+
+bool HttpApiServer::registerConstraintTreeService() {
+    if (!http_server_) {
+        RTP_LLM_LOG_WARNING("register constraint tree service failed, http server is null");
+        return false;
+    }
+
+    constraint_tree_service_.reset(new ConstraintTreeService());
+    auto update_callback = [constraint_tree_service =
+                                constraint_tree_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                          const http_server::HttpRequest& request) -> void {
+        constraint_tree_service->updateConstraintTree(writer, request);
+    };
+    auto status_callback = [constraint_tree_service =
+                                constraint_tree_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                          const http_server::HttpRequest& request) -> void {
+        constraint_tree_service->constraintTreeStatus(writer, request);
+    };
+    return http_server_->RegisterRoute("POST", "/update_constraint_tree", update_callback)
+           && http_server_->RegisterRoute("GET", "/constraint_tree_status", status_callback);
 }
 
 bool HttpApiServer::registerChatService() {

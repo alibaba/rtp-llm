@@ -3,6 +3,26 @@ load("//bazel:arch_select.bzl", "embedding_arpc_deps")
 
 embedding_arpc_deps()
 
+# Runtime constraint-tree update endpoint. Kept separate from the full API
+# server so its CPU-only update path can be compiled and tested in isolation.
+cc_library(
+    name = "constraint_tree_service",
+    srcs = [
+        "ConstraintTreeService.cc",
+    ],
+    hdrs = [
+        "ConstraintTreeService.h",
+    ],
+    copts = copts(),
+    deps = [
+        ":http_server",
+        "//rtp_llm/cpp/models:dfa_utils",
+        "//rtp_llm/cpp/utils:core_utils",
+        "@havenask//aios/autil:json",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 # Tokenizer - text tokenization component
 cc_library(
     name = "tokenizer",
@@ -47,13 +67,16 @@ cc_library(
 
 cc_library(
     name = "http_api_server",
-    srcs = glob([
-        "*.cc",
-    ]),
-    hdrs = glob([
-        "*.h",
-    ]),
+    srcs = glob(
+        ["*.cc"],
+        exclude = ["ConstraintTreeService.cc"],
+    ),
+    hdrs = glob(
+        ["*.h"],
+        exclude = ["ConstraintTreeService.h"],
+    ),
     deps = [
+        ":constraint_tree_service",
         ":openai",
         "//rtp_llm/cpp/engine_base:engine_base",
         "//rtp_llm/cpp/engine_base:weights_converter",
@@ -80,7 +103,6 @@ cc_library(
     strip_include_prefix = "http_server/http_server",
     visibility = ["//visibility:public"],
     deps = [
-        "//:rtp_compute_ops",
         "@havenask//aios/network/arpc:arpc",
     ],
 )
@@ -93,7 +115,7 @@ cc_library(
     strip_include_prefix = "http_server/http_client",
     visibility = ["//visibility:public"],
     deps = [
-        "//:rtp_compute_ops",
+        "//rtp_llm/cpp/utils:core_utils",
         "@havenask//aios/network/arpc:arpc",
     ],
 )

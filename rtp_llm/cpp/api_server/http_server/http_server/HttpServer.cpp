@@ -7,7 +7,11 @@ namespace http_server {
 
 AUTIL_LOG_SETUP(http_server, HttpServer);
 
-HttpServer::HttpServer(anet::Transport* transport, size_t threadNum, size_t queueSize): _anetApp(transport) {
+HttpServer::HttpServer(anet::Transport* transport, size_t threadNum, size_t queueSize, size_t packageLimit):
+    _anetApp(transport) {
+    if (packageLimit > 0) {
+        _anetApp.SetPackageLimit(packageLimit);
+    }
     _router        = std::make_shared<HttpRouter>();
     _serverAdapter = std::make_shared<HttpServerAdapter>(_router, threadNum, queueSize);
 }

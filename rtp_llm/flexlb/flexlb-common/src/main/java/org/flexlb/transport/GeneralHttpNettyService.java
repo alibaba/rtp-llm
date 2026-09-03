@@ -59,15 +59,40 @@ public class GeneralHttpNettyService {
     }
 
     public <Request, Result> Mono<Result> request(Request request, URI uri, String path, Class<Result> responseClz) {
-        return this.doRequest(request, uri, path, null, responseClz);
+        return this.doRequest(request, uri, path, null, responseClz, HttpMethod.POST, false);
     }
 
     public <Request, Result> Mono<Result> request(Request request, URI uri, String path, HttpHeaders headers, Class<Result> responseClz) {
-
-        return Mono.fromFuture(this.doRequest(request, uri, path, headers, responseClz).toFuture());
+        return Mono.fromFuture(this.doRequest(request, uri, path, headers, responseClz, HttpMethod.POST, false).toFuture());
     }
 
     public <Request, Result> Mono<Result> doRequest(Request request, URI uri, String path, HttpHeaders headers, Class<Result> responseClz) {
+        return doRequest(request, uri, path, headers, responseClz, HttpMethod.POST, false);
+    }
+
+    /**
+     * Sends an already serialized JSON body. This avoids serializing a large immutable
+     * payload once for every target worker.
+     */
+    public <Result> Mono<Result> requestRawJson(String requestBody, URI uri, String path, Class<Result> responseClz) {
+        return doRequest(requestBody, uri, path, null, responseClz, HttpMethod.POST, true);
+    }
+
+    public <Result> Mono<Result> requestRawJson(byte[] requestBody, URI uri, String path, Class<Result> responseClz) {
+        return doRequest(requestBody, uri, path, null, responseClz, HttpMethod.POST, true);
+    }
+
+    public <Result> Mono<Result> get(URI uri, String path, Class<Result> responseClz) {
+        return doRequest("", uri, path, null, responseClz, HttpMethod.GET, true);
+    }
+
+    private <Request, Result> Mono<Result> doRequest(Request request,
+                                                     URI uri,
+                                                     String path,
+                                                     HttpHeaders headers,
+                                                     Class<Result> responseClz,
+                                                     HttpMethod method,
+                                                     boolean rawBody) {
         return Mono.just(request)
                 .map(ctx -> HttpNettyChannelContext.<Result>builder()
                         .request(request)
@@ -79,7 +104,7 @@ public class GeneralHttpNettyService {
                         .byteDataSize(new LongAdder())
                         .build())
                 .flatMap(nettyCtx -> connectBackend(nettyCtx, uri, path).publishOn(httpRequestScheduler)
-                        .flatMap(nettyContext -> executeHttpRequest(nettyContext, uri, path, headers
+                        .flatMap(nettyContext -> executeHttpRequest(nettyContext, uri, path, headers, method, rawBody
                         )));
     }
 
@@ -111,19 +136,37 @@ public class GeneralHttpNettyService {
         return Mono.fromFuture(future);
     }
 
-    private <Result> Mono<Result> executeHttpRequest(HttpNettyChannelContext<Result> nettyCtx, URI uri, String path, HttpHeaders headers) {
+    private <Result> Mono<Result> executeHttpRequest(HttpNettyChannelContext<Result> nettyCtx,
+                                                     URI uri,
+                                                     String path,
+                                                     HttpHeaders headers,
+                                                     HttpMethod method,
+                                                     boolean rawBody) {
         return Flux.<Result>create(sink -> {
             nettyCtx.setSink(sink);
-            DefaultFullHttpRequest request = buildRequest(nettyCtx, uri, path, headers);
+            DefaultFullHttpRequest request = buildRequest(nettyCtx, uri, path, headers, method, rawBody);
             nettyCtx.getChannel().writeAndFlush(request);
         }).last();
     }
 
-    private <Result> DefaultFullHttpRequest buildRequest(HttpNettyChannelContext<Result> nettyCtx, URI uri, String path, HttpHeaders headers) {
-        DefaultFullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.POST, path);
+    private <Result> DefaultFullHttpRequest buildRequest(HttpNettyChannelContext<Result> nettyCtx,
+                                                         URI uri,
+                                                         String path,
+                                                         HttpHeaders headers,
+                                                         HttpMethod method,
+                                                         boolean rawBody) {
+        DefaultFullHttpRequest request = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, method, path);
 
-        String body = JsonUtils.toStringOrEmpty(nettyCtx.getRequest());
-        request.content().writeBytes(body.getBytes(StandardCharsets.UTF_8));
+        if (method != HttpMethod.GET) {
+            if (rawBody && nettyCtx.getRequest() instanceof byte[] bytes) {
+                request.content().writeBytes(bytes);
+            } else {
+                String body = rawBody
+                        ? Objects.toString(nettyCtx.getRequest(), "")
+                        : JsonUtils.toStringOrEmpty(nettyCtx.getRequest());
+                request.content().writeBytes(body.getBytes(StandardCharsets.UTF_8));
+            }
+        }
         if (headers == null) {
 
             request.headers().set(HttpHeaderNames.HOST, Objects.requireNonNull(uri).getHost());

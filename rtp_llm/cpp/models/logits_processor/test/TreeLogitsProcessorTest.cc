@@ -27,14 +27,11 @@ public:
         std::vector<StreamTreeInfo> tree_infos;
 
         PrefixToCandidateTokens::instance()->reloadPrefixDict(file_path);
+        const auto prefix_tree_snapshot = PrefixToCandidateTokens::instance()->snapshot();
 
         for (size_t i = 0; i < batch_size; i++) {
-            auto tree_info =
-                StreamTreeInfo(in_tree_mode,
-                               0,
-                               0,
-                               0,
-                               std::make_shared<TreeDFA<std::string, int>>(PrefixToCandidateTokens::instance()));
+            auto tree_info = StreamTreeInfo(
+                in_tree_mode, 0, 0, 0, std::make_shared<TreeDFA<std::string, int>>(prefix_tree_snapshot));
             tree_infos.push_back(tree_info);
         }
 

@@ -6,7 +6,8 @@ spring:
   main:
     web-application-type: reactive
   codec:
-    max-in-memory-size: ${MAX_IN_MEMORY_SIZE:5MB}
+    # Internal bulk-build API; resource use is observed but not rejected by an arbitrary artifact-size gate.
+    max-in-memory-size: ${MAX_IN_MEMORY_SIZE:-1}
 logging:
   level:
     root: info
