@@ -236,6 +236,16 @@ InferenceService::fillGenerateInput(int64_t                                reque
     input->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
     input->generate_config               = generate_config;
 
+    // Tokenize before multimodal expansion: updateMultimodalFeatures reads
+    // input_ids to locate the mm placeholder tokens, so it must run after
+    // they are filled in.
+    autil::ScopedTime2 timer;
+    auto               vec = token_processor_->encode(text);
+    if (metric_reporter_) {
+        metric_reporter_->reportFTPreTokenProcessorRtMetric(timer.done_ms());
+    }
+    input->input_ids = torch::from_blob(const_cast<int*>(vec.data()), {(int64_t)vec.size()}, torch::kInt32).clone();
+
     if (urls.size() > 0) {
         std::vector<MultimodalInput> mm_inputs;
         for (auto url : urls) {
@@ -254,12 +264,6 @@ InferenceService::fillGenerateInput(int64_t                                reque
         metric_reporter_->reportFTInputTokenLengthMetric(input->generate_config->select_tokens_id.size());
         metric_reporter_->reportFTNumBeansMetric(input->generate_config->maxNumBeams());
     }
-    autil::ScopedTime2 timer;
-    auto               vec = token_processor_->encode(text);
-    if (metric_reporter_) {
-        metric_reporter_->reportFTPreTokenProcessorRtMetric(timer.done_ms());
-    }
-    input->input_ids = torch::from_blob(const_cast<int*>(vec.data()), {(int64_t)vec.size()}, torch::kInt32).clone();
 
     return input;
 }
