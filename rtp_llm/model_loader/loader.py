@@ -1,6 +1,7 @@
 import gc
 import logging
 import os
+import time
 from collections import OrderedDict
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
@@ -313,34 +314,15 @@ class ModelLoader:
             local_copyout_filter=tensor_to_weight_map.__contains__,
         )
 
-        for key, loaded_tensor in all_tensors:
-            if key not in tensor_to_weight_map:
-                continue
-            weight_info = tensor_to_weight_map[key]
+        load_start = time.monotonic()
+        completed_load_units = set()
+        iterator_tensor_count = 0
+        collector_delivery_count = 0
+        materialized_count = 0
 
-            complete = weight_info.collector.store_tensor(key, loaded_tensor)
-            if complete:
-                tensors = weight_info.weight.load(
-                    tensor_source=weight_info.collector,
-                    layer_id=weight_info.layer_id,
-                    device=device,
-                    load_config=self._load_config,
-                )
-                for name, tensor in tensors.items():
-                    if weight_info.layer_id is not None:
-                        model_weights.set_layer_weight(
-                            weight_info.layer_id, name, tensor
-                        )
-                    else:
-                        model_weights.set_global_weight(name, tensor)
-                weight_info.collector.clear()
-
-        for weight_info in weight_info_list:
-            weight_info.collector.clear()
-            if weight_info.collector.is_collection_complete():
-                continue
+        def materialize(weight_info, tensor_source):
             tensors = weight_info.weight.load(
-                tensor_source=DatabaseTensorSource(self._load_config.database),
+                tensor_source=tensor_source,
                 layer_id=weight_info.layer_id,
                 device=device,
                 load_config=self._load_config,
@@ -350,6 +332,41 @@ class ModelLoader:
                     model_weights.set_layer_weight(weight_info.layer_id, name, tensor)
                 else:
                     model_weights.set_global_weight(name, tensor)
+
+        for key, loaded_tensor in all_tensors:
+            if key not in tensor_to_weight_map:
+                continue
+            iterator_tensor_count += 1
+            for weight_info in tensor_to_weight_map[key]:
+                load_unit_id = id(weight_info)
+                if load_unit_id in completed_load_units:
+                    continue
+                collector_delivery_count += 1
+                if weight_info.collector.store_tensor(key, loaded_tensor):
+                    materialize(weight_info, weight_info.collector)
+                    completed_load_units.add(load_unit_id)
+                    materialized_count += 1
+                    weight_info.collector.clear()
+
+        fallback_count = 0
+        for weight_info in weight_info_list:
+            if id(weight_info) in completed_load_units:
+                continue
+            # Drop any partial AutoLoader tensors before the database fallback
+            # so large shared tensors do not overlap a second shard read.
+            weight_info.collector.clear()
+            materialize(weight_info, DatabaseTensorSource(self._load_config.database))
+            fallback_count += 1
+        logging.info(
+            "fastsafetensors materialization: iterator_tensors=%d, "
+            "collector_deliveries=%d, loaded_units=%d, fallback_units=%d, "
+            "elapsed=%.3fs",
+            iterator_tensor_count,
+            collector_delivery_count,
+            materialized_count,
+            fallback_count,
+            time.monotonic() - load_start,
+        )
         return model_weights
 
     def prepare_weights(self, device: str):
@@ -384,45 +401,38 @@ class ModelLoader:
             for name, tensor in weights.items():
                 yield (None, name, tensor)
 
-    def _generate_weight_info(self) -> Tuple[Dict[str, WeightInfo], List[WeightInfo]]:
+    def _generate_weight_info(
+        self,
+    ) -> Tuple[Dict[str, List[WeightInfo]], List[WeightInfo]]:
         # WeightInfo = namedtuple("WeightInfo", ["weight", "layer_id", "collector"])
         WeightInfo = ModelLoader.WeightInfo
-        tensor_to_weight_map: Dict[str, WeightInfo] = {}
+        tensor_to_weight_map: Dict[str, List[WeightInfo]] = {}
         weight_info_list: List[WeightInfo] = []
+
+        def register(weight: WeightModule, layer_id: Optional[int]):
+            names = weight.get_tensor_names(layer_id, self._load_config)
+            collector = TensorCollector(names, self._load_config.database)
+            weight_info = WeightInfo(
+                weight=weight, layer_id=layer_id, collector=collector
+            )
+            for name in names:
+                tensor_to_weight_map.setdefault(name, []).append(weight_info)
+            weight_info_list.append(weight_info)
+
         if self._load_config.vit_separation != VitSeparation.VIT_SEPARATION_ROLE:
             for layer_id in range(self._load_config.num_layers):
                 layer_weights = self._model_weights_info.layer_weights[layer_id]
                 if isinstance(layer_weights, WeightModule):
-                    names = layer_weights.get_tensor_names(layer_id, self._load_config)
-                    collector = TensorCollector(names, self._load_config.database)
-                    weight_info = WeightInfo(
-                        weight=layer_weights, layer_id=layer_id, collector=collector
-                    )
-                    tensor_to_weight_map.update({k: weight_info for k in names})
-                    weight_info_list.append(weight_info)
+                    register(layer_weights, layer_id)
                 else:
                     for weight in layer_weights:
-                        names = weight.get_tensor_names(layer_id, self._load_config)
-                        collector = TensorCollector(names, self._load_config.database)
-                        weight_info = WeightInfo(
-                            weight=weight, layer_id=layer_id, collector=collector
-                        )
-                        tensor_to_weight_map.update({k: weight_info for k in names})
-                        weight_info_list.append(weight_info)
+                        register(weight, layer_id)
         for weight in self._model_weights_info.weights:
             if self._maybe_skip_weight(weight):
                 continue
-            names = weight.get_tensor_names(None, self._load_config)
-            collector = TensorCollector(names, self._load_config.database)
-            weight_info = WeightInfo(weight=weight, layer_id=None, collector=collector)
-            tensor_to_weight_map.update({k: weight_info for k in names})
-            weight_info_list.append(weight_info)
+            register(weight, None)
         for weight in self._misc_weights_info:
-            names = weight.get_tensor_names(None, self._load_config)
-            collector = TensorCollector(names, self._load_config.database)
-            weight_info = WeightInfo(weight=weight, layer_id=None, collector=collector)
-            tensor_to_weight_map.update({k: weight_info for k in names})
-            weight_info_list.append(weight_info)
+            register(weight, None)
         return tensor_to_weight_map, weight_info_list
 
     def _maybe_skip_weight(self, weight: WeightModule):
