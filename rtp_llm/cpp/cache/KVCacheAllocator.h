@@ -103,8 +103,8 @@ public:
         shared_block_cache_ = std::move(shared_block_cache);
     }
 
-    void setUseCudaMallocBlockPool(bool use_cuda_malloc_block_pool) {
-        use_cuda_malloc_block_pool_ = use_cuda_malloc_block_pool;
+    void setUseDeviceMallocBlockPool(bool use_device_malloc_block_pool) {
+        use_device_malloc_block_pool_ = use_device_malloc_block_pool;
     }
 
     void setCPSlotMapper(std::shared_ptr<CPSlotMapper> cp_slot_mapper) {
@@ -190,7 +190,7 @@ protected:
     SharedBlockCachePtr                shared_block_cache_;
     std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;
     const kmonitor::MetricsReporterPtr metrics_reporter_           = nullptr;
-    bool                               use_cuda_malloc_block_pool_ = false;
+    bool                               use_device_malloc_block_pool_ = false;
 
     size_t  reserve_block_num_{0};
     int64_t reserve_block_ratio_{0};

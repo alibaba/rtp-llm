@@ -169,7 +169,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                                const SpeculativeExecutionConfig&  sp_config,
                                const PDSepConfig&                 pd_sep_config,
                                const CacheStoreConfig&            cache_store_config,
-                               bool                               use_cuda_malloc_block_pool):
+                               bool                               use_device_malloc_block_pool):
     config_(config),
     metrics_reporter_(metrics_reporter),
     kv_cache_config_(kv_cache_config),
@@ -178,7 +178,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     sp_config_(sp_config),
     pd_sep_config_(pd_sep_config),
     cache_store_config_(cache_store_config),
-    use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool) {
+    use_device_malloc_block_pool_(use_device_malloc_block_pool) {
     if (warmup) {
         config_.finalizeBlockNums(/*global_block_num=*/1, runtime_config_);
     } else {
@@ -251,9 +251,9 @@ bool KVCacheManager::init() {
             config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
     }
 
-    if (use_cuda_malloc_block_pool_) {
-        RTP_LLM_LOG_INFO("RDMA cache store enabled for PD role, use cudaMalloc KV cache block-pool backing");
-        allocator_->setUseCudaMallocBlockPool(true);
+    if (use_device_malloc_block_pool_) {
+        RTP_LLM_LOG_INFO("RDMA cache store enabled for PD role, use raw device malloc KV cache block-pool backing");
+        allocator_->setUseDeviceMallocBlockPool(true);
     }
 
     allocator_->setCPSlotMapper(cp_slot_mapper_);

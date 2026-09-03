@@ -20,6 +20,8 @@
 
 #if USING_CUDA
 #include <cuda_runtime.h>
+#elif USING_ROCM
+#include <hip/hip_runtime.h>
 #endif
 
 namespace rtp_llm {
@@ -51,12 +53,18 @@ const char* memoryTypeName(MemoryType memory_type) {
 }
 
 const char*
-requestedBackingName(AllocationType allocation_type, bool use_pinned_cpu_backing, bool use_cuda_malloc_backing) {
+requestedBackingName(AllocationType allocation_type, bool use_pinned_cpu_backing, bool use_device_malloc_backing) {
     if (allocation_type == AllocationType::HOST) {
         return shouldPinHostBlockPool() ? "CPU_PINNED_OR_CPU_FALLBACK" : "CPU";
     }
-    if (use_cuda_malloc_backing) {
+    if (use_device_malloc_backing) {
+#if USING_CUDA
         return "GPU_CUDA_MALLOC";
+#elif USING_ROCM
+        return "GPU_HIP_MALLOC";
+#else
+        return "GPU_DEVICE_MALLOC";
+#endif
     }
     return use_pinned_cpu_backing ? "CPU_PINNED" : "GPU";
 }
@@ -120,19 +128,19 @@ void markHostBlockPoolDontDump(const char* pool_name, void* ptr, size_t size) {
 BlockPool::BlockPool(const BlockPoolConfig& config,
                      AllocationType         allocation_type,
                      bool                   use_pinned_cpu_backing,
-                     bool                   use_cuda_malloc_backing):
+                     bool                   use_device_malloc_backing):
     config_(config),
     allocation_type_(allocation_type),
     use_pinned_cpu_backing_(use_pinned_cpu_backing),
-    use_cuda_malloc_backing_(use_cuda_malloc_backing) {}
+    use_device_malloc_backing_(use_device_malloc_backing) {}
 
 BlockPool::~BlockPool() {
     cache_aligned_buffer_ = torch::Tensor();
 }
 
 void BlockPool::validateConfig() const {
-    RTP_LLM_CHECK_WITH_INFO(!(use_pinned_cpu_backing_ && use_cuda_malloc_backing_),
-                            "BlockPool cannot use both pinned CPU backing and cudaMalloc backing");
+    RTP_LLM_CHECK_WITH_INFO(!(use_pinned_cpu_backing_ && use_device_malloc_backing_),
+                            "BlockPool cannot use both pinned CPU backing and raw device malloc backing");
     RTP_LLM_CHECK_WITH_INFO(!config_.memory_layouts.empty(), "BlockPoolConfig.memory_layouts must not be empty");
     RTP_LLM_CHECK_WITH_INFO(config_.block_num > 0, "BlockPoolConfig.block_num must be > 0");
 
@@ -181,8 +189,8 @@ void BlockPool::initializeCacheBuffer() {
             config_.pool_name.c_str(), cache_aligned_buffer_.data_ptr(), config_.total_size_bytes);
     } else if (use_pinned_cpu_backing_) {
         initializePinnedCpuBuffer("device block pool pinned CPU backing");
-    } else if (use_cuda_malloc_backing_) {
-        initializeCudaMallocBuffer();
+    } else if (use_device_malloc_backing_) {
+        initializeDeviceMallocBuffer();
     } else {
         cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(config_.total_size_bytes)},
                                              torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
@@ -197,7 +205,7 @@ void BlockPool::initializeCacheBuffer() {
                      "block_num=%u memory_layouts=%zu",
                      config_.pool_name.c_str(),
                      allocationTypeName(allocation_type_),
-                     requestedBackingName(allocation_type_, use_pinned_cpu_backing_, use_cuda_malloc_backing_),
+                     requestedBackingName(allocation_type_, use_pinned_cpu_backing_, use_device_malloc_backing_),
                      memoryTypeName(where()),
                      is_cuda,
                      is_pinned,
@@ -224,11 +232,12 @@ void BlockPool::initializePinnedCpuBuffer(const char* log_context) {
     }
 }
 
-void BlockPool::initializeCudaMallocBuffer() {
+void BlockPool::initializeDeviceMallocBuffer() {
 #if USING_CUDA
     RTP_LLM_CHECK_WITH_INFO(allocation_type_ == AllocationType::DEVICE,
-                            "cudaMalloc block pool backing requires DEVICE allocation");
-    RTP_LLM_CHECK_WITH_INFO(config_.total_size_bytes > 0, "cudaMalloc block pool total_size_bytes must be > 0");
+                            "raw device malloc block pool backing requires DEVICE allocation");
+    RTP_LLM_CHECK_WITH_INFO(config_.total_size_bytes > 0,
+                            "raw device malloc block pool total_size_bytes must be > 0");
 
     int  device_id  = -1;
     auto device_err = cudaGetDevice(&device_id);
@@ -267,8 +276,51 @@ void BlockPool::initializeCudaMallocBuffer() {
                      ptr,
                      config_.total_size_bytes,
                      device_id);
+#elif USING_ROCM
+    RTP_LLM_CHECK_WITH_INFO(allocation_type_ == AllocationType::DEVICE,
+                            "raw device malloc block pool backing requires DEVICE allocation");
+    RTP_LLM_CHECK_WITH_INFO(config_.total_size_bytes > 0,
+                            "raw device malloc block pool total_size_bytes must be > 0");
+
+    int  device_id  = -1;
+    auto device_err = hipGetDevice(&device_id);
+    RTP_LLM_CHECK_WITH_INFO(device_err == hipSuccess,
+                            "hipGetDevice failed before hipMalloc block pool allocation, error=%s",
+                            hipGetErrorString(device_err));
+
+    void*      ptr = nullptr;
+    const auto err = hipMalloc(&ptr, config_.total_size_bytes);
+    RTP_LLM_CHECK_WITH_INFO(err == hipSuccess,
+                            "hipMalloc block pool failed, pool_name=%s, total_size=%zu bytes, error=%s",
+                            config_.pool_name.c_str(),
+                            config_.total_size_bytes,
+                            hipGetErrorString(err));
+
+    auto deleter = [device_id](void* p) {
+        if (p == nullptr) {
+            return;
+        }
+        int current_device = -1;
+        if (hipGetDevice(&current_device) == hipSuccess && current_device != device_id) {
+            (void)hipSetDevice(device_id);
+            (void)hipFree(p);
+            (void)hipSetDevice(current_device);
+            return;
+        }
+        (void)hipFree(p);
+    };
+    cache_aligned_buffer_ =
+        torch::from_blob(ptr,
+                         {static_cast<int64_t>(config_.total_size_bytes)},
+                         std::move(deleter),
+                         torch::TensorOptions().dtype(torch::kUInt8).device(torch::Device(torch::kCUDA, device_id)));
+    RTP_LLM_LOG_INFO("hipMalloc block pool backing allocated, pool_name=%s, ptr=%p, total_size=%zu bytes, device=%d",
+                     config_.pool_name.c_str(),
+                     ptr,
+                     config_.total_size_bytes,
+                     device_id);
 #else
-    RTP_LLM_FAIL("cudaMalloc block pool backing requested but this binary was not built with CUDA, pool_name=%s",
+    RTP_LLM_FAIL("raw device malloc block pool backing requires a CUDA or ROCm build, pool_name=%s",
                  config_.pool_name.c_str());
 #endif
 }
