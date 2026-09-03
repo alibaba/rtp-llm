@@ -77,7 +77,7 @@ public:
     }
     void           captureDecode();
     void           capturePrefill();
-    void           captureDecodeOneBatchSize(int bs);
+    void           captureDecodeOneBatchSize(int bs, bool needs_distributed_warmup);
     void           capturePrefillOneSeqLen(int seq_len);
     void           prepareInputs(const PyModelInputs& inputs, CudaGraphState& state);
     void           prepareInputData(const PyModelInputs& inputs, CudaGraphState& state);
@@ -99,7 +99,7 @@ public:
 
 private:
     // Common capture logic for both prefill and decode
-    void captureOneGraphInstance(int key, const char* key_type);
+    void captureOneGraphInstance(int key, const char* key_type, bool needs_distributed_warmup = false);
     // Common replay and sync check logic
     void replayAndSyncCheck(int key, const char* key_type);
     // Common input preparation logic for capture
