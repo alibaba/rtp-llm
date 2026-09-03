@@ -159,19 +159,14 @@ sums and the division is presentation-layer, with a cluster-sum fallback
 caption 「集群和（引擎数未知）」 + stderr warning when the engine count
 is unavailable — chain: `run_meta.json` params > `engine_dist` > mock
 final_snapshot role counts); the client-side token reconciliation is
-not a report panel but the aggregate's fail-closed validity item
-`validity_checks.token_reconciliation_ok`: per input/output side,
-`|client completed tokens − (Σ mock_tps_ts + in-flight Σ)| ≤ max(5% ×
-client, 5 × peak per-second tokens)` — the in-flight term adds the
-Σil/Σol of ok rows whose rid is absent from the engine-terminal done sets
-(`mock_prefill_done` / `mock_decode_done`, the same join full_e2e uses):
-fire-and-forget runs record ok at schedule success with the expected
-output_len, so requests still decoding at run end never feed the mock Σ
-(measured 7.1M / 15.3% of client output tokens on run 20260901_200108);
-runs without engine terminal logs degrade to in-flight = 0 (legacy
-formula). 5% absorbs scrape-window edge / clock residue and
-cancelled-request one-sided accounting, 5 × peak bounds the post-scrape
-drain tail; a missing series → `null` (no false failure).
+not a report panel either — the aggregate validity item
+`token_reconciliation_ok` was removed on 20260903 (fire-and-forget runs
+record ok at schedule success while the engine is still executing, so
+in-flight requests pollute both sides and the aggregate-time in-flight
+compensation cannot close reliably; per-request correctness verification
+is already covered by the client_events × engine_events rid join — the
+same join full_e2e / engine_exec uses — making the aggregate assertion
+redundant).
 
 **Block-pool observability series (`mock_engine_*`, 20260902)**: `/metrics`
 reports the KV v2 block-pool state as time series in BOTH emission modes

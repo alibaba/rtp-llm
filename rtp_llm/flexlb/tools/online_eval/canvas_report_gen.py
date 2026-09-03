@@ -936,8 +936,8 @@ def main():
     output_len_p50 = output_len_p95 = None
     # mock 自报 TPS 序列（20260901，同日纠偏）：2.3 节 P/D 角色主图；
     # 旧 aggregate 无 mock_tps_ts 键时保持 None -> 省略。client 侧
-    # token 对账序列不再进报告（对账降级为 aggregate validity_checks
-    # 的 token_reconciliation_ok 断言，检测能力保留但不占版面）。
+    # token 聚合对账已整体移除（20260903 用户裁决：fire-and-forget
+    # 在途污染使聚合时机有缺陷；正确性验证由逐请求 rid join 覆盖）。
     mock_ctx_tps = mock_ctx_cache_tps = mock_gen_tps = None
     if per_second:
         ps_by_t = {int(p.get("t", 0) or 0): p for p in per_second}
@@ -1077,9 +1077,11 @@ def main():
             )
         # client 侧 token 对账序列（per_second.input_tokens /
         # output_tokens / output_tokens_completed）不再构造：IO 对账
-        # 面板已移除（20260901 纠偏），对账检测能力降级为 aggregate
-        # validity_checks 的 token_reconciliation_ok 断言；
-        # per_second 上述字段本身保留（②字段不变，喂 validity 对账）。
+        # 面板已移除（20260901 纠偏）；聚合对账断言
+        # token_reconciliation_ok 也已删除（20260903，fire-and-forget
+        # 在途污染，逐请求 rid join 已覆盖正确性验证）；
+        # per_second 上述字段本身保留（聚合层 quick-stats / 长度时序
+        # 消费）。
 
     # 阶段延迟（终态分位）：取数键带 _ms 后缀，展示类目去后缀。
     # sched_lat_count：schedule 分位全终态样本量（幸存者口径阶段样本量
@@ -4601,8 +4603,9 @@ def main():
     #    mock 记账值当 GPU 算力直接对表）；P/D 主图必含角色语义标注
     #    （与生产大盘 hippo_role 切分读法对齐）；cache 复用对存在时必含
     #    复用语义标注。原 IO 对账面板相关断言（调度链路损耗/守恒）随
-    #    面板移除同步删除（对账降级为 aggregate 的
-    #    token_reconciliation_ok 断言）。
+    #    面板移除同步删除；聚合对账断言 token_reconciliation_ok
+    #    也于 20260903 移除（fire-and-forget 在途污染，逐请求 rid
+    #    join 已覆盖正确性验证）。
     #    20260901 呈现口径（per-engine average）：引擎数可得时主图必含
     #    「每引擎平均」标注与具体引擎数（集群和÷N 与生产大盘单实例
     #    series 同构读法——防集群和当单实例读数的 67 倍量级误读）；

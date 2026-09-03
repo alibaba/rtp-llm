@@ -68,28 +68,17 @@ section below for the full table):
   (standard runs always expose the count; the fallback is defensive
   only). `mock_tps_ts` itself keeps the raw cluster sums — the division
   is a presentation-layer unit choice (same class as k/M rescaling).
-  The 20260901 correction moved the client-side token
-  reconciliation from report panels into the fail-closed validity item
-  `validity_checks.token_reconciliation_ok` (detects dropped requests /
-  inflated self-reporting): per input/output side,
-  `|client completed tokens − (Σ mock_tps_ts + in-flight Σ)| ≤ max(5% ×
-  client, 5 × peak per-second tokens)` — the in-flight term reuses the
-  engine-terminal rid sets (`mock_prefill_done` / `mock_decode_done`, the
-  same join full_e2e/engine_exec uses): ok rows whose rid is absent from
-  the done set were still in flight at run end (fire-and-forget runs
-  record ok at schedule success with the expected output_len, so their
-  tokens never enter the mock Σ — measured 7.1M / 15.3% of client output
-  tokens on run 20260901_200108), and their Σil/Σol joins the mock side
-  symmetrically (input joins the prefill done set, output the decode one;
-  runs without engine terminal logs degrade to in-flight = 0, keeping the
-  legacy formula and the `null` semantics). The 5% relative term absorbs
-  scrape-window edge / clock-alignment residue and cancelled-request
-  one-sided accounting (healthy runs measure ~1%), the 5 × peak absolute
-  term bounds the post-scrape drain tail (completed after the last scrape
-  but never drained); missing mock TPS data → `null` (no false failure),
-  and `summary.test_valid` aggregates it via `all`; the per-side
-  client/mock/in-flight/residual/tolerance numbers are surfaced in
-  `summary.token_reconciliation` for forensics); since 20260902 also the
+  The client-side token reconciliation (20260901 panels → validity
+  item `token_reconciliation_ok`, 20260903 removed): the aggregate-
+  level check compared client ok-row token sums against engine-side
+  Σ sums, but fire-and-forget runs record ok at schedule success while
+  the engine is still executing — in-flight requests pollute both
+  sides and the aggregate-time in-flight compensation cannot close
+  reliably. Per-request correctness verification is already covered by
+  the rid join of client_events × engine_events (the same join
+  full_e2e / engine_exec uses), so the aggregate assertion was
+  redundant and removed outright per user verdict; validity stays at
+  its six native checks; since 20260902 also the
   engine-side KV v2 block-pool timeline `kv_blocks_ts_by_role` —
   `{role: [{t, total/available/held/referenced_blocks (three-state
   gauges), cache_evictions / kv_admission_fails / lack_mem_rejects /
