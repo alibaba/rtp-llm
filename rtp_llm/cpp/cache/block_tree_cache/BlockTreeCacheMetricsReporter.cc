@@ -172,6 +172,20 @@ void BlockTreeCacheMetricsReporter::reportEvictionTriggered(Tier           sourc
     reportEvictionTrigger(source_tier, group_type, force_drop ? "force_drop" : "watermark", 1);
 }
 
+void BlockTreeCacheMetricsReporter::reportWatermarkRequired(Tier           tier,
+                                                            CacheGroupType group_type,
+                                                            size_t         required_blocks) const {
+    if (metrics_reporter_ == nullptr) {
+        return;
+    }
+    RtpLLMCacheEvictionMetricsCollector collector;
+    collector.source_tier               = tierName(tier);
+    collector.group_type                = metricCacheGroupTypeName(group_type);
+    collector.watermark_required_blocks = static_cast<int64_t>(required_blocks);
+    collector.report_watermark_required = true;
+    metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(nullptr, &collector);
+}
+
 void BlockTreeCacheMetricsReporter::reportEvictionTrigger(Tier           source_tier,
                                                           CacheGroupType group_type,
                                                           const char*    trigger_type,
@@ -259,14 +273,14 @@ void BlockTreeCacheMetricsReporter::reportCacheReuseTimeMetrics(
 }
 
 void BlockTreeCacheMetricsReporter::reportEvictionFinished(const EvictionTransferTask&     task,
-                                                           Tier                            settled_target_tier,
                                                            const std::vector<GroupSetPtr>& group_sets) const {
     if (metrics_reporter_ == nullptr) {
         return;
     }
-    TransferDescriptor settled_desc = task.desc;
-    settled_desc.target_tier        = settled_target_tier;
-    reportEvictedDescriptor(settled_desc, task.timing, group_sets, currentTimeUs(), true);
+    const int64_t finish_time_us = currentTimeUs();
+    for (size_t desc_index = 0; desc_index < task.descs.size(); ++desc_index) {
+        reportEvictedDescriptor(task.descs[desc_index], task.timings[desc_index], group_sets, finish_time_us, true);
+    }
 }
 
 void BlockTreeCacheMetricsReporter::reportEvictionFinished(const EvictionDropTask&         task,
