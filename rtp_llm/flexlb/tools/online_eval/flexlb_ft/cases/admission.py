@@ -80,6 +80,32 @@ pressure).  One gate per case (admission wave-2 + wave-3, 2026-09):
                                   602 LACK_MEM in the EnqueueBatch ack
                                   — no park; lease hand-back on
                                   completion restores the pool.
+  engine_prefill_token_budget_split
+                                  engine-internal dual-budget prefill
+                                  regroup (#8): a master batch whose
+                                  total logical tokens (sum of
+                                  computeTokens + hitTokens) exceed
+                                  prefill.max_batch_tokens is split
+                                  prefix/tail — every member completes,
+                                  the ledger closes per request and the
+                                  executed-batch counters reflect the
+                                  regrouped shape (2 batches / 4 reqs).
+  engine_prefill_token_budget_split_fifo
+                                  the same split pinning ORDER: tail
+                                  members finish strictly after the
+                                  prefix (engine lifecycle end_ms,
+                                  >1s apart) — arrival order survives
+                                  the regroup.
+  engine_prefill_token_budget_boundary
+                                  a batch exactly AT the token budget
+                                  (==) executes verbatim — one batch,
+                                  no split, no park.
+  engine_prefill_regroup_disabled_verbatim
+                                  prefill.max_batch_tokens=0 AND
+                                  prefill.max_batch_requests=0 disable
+                                  the regroup entirely: the master
+                                  batch executes as-is (legacy pre-#8
+                                  behaviour).
 """
 
 from __future__ import annotations
@@ -100,6 +126,7 @@ from ..harness import (
     AssertUtils,
     EnvSpec,
     admission_config,
+    build_flexlb_config,
     default_perf,
     http_get_json,
     wait_for,
@@ -2195,3 +2222,530 @@ def admission_engine_kv_lack_mem_fast_reject(ctx: CaseContext):
                 ops.set_perf(n, prefill_fixed_ms=100.0)
         except Exception:
             pass
+
+
+# ===========================================================================
+# Engine-internal dual-budget prefill regroup (#8, 2026-09)
+# ===========================================================================
+#
+# The regroup axes arrive via the performance JSON (the sanctioned
+# explicit channel, same as fault_env_perf): prefill.max_batch_tokens /
+# prefill.max_batch_requests with production-aligned engine defaults
+# (WorkerStatus.max_batch_tokens_size = 1_048_576, FIXED_WINDOW
+# maxRequests = 32).  An explicit 0 disables the dimension; 0/0
+# disables the regroup entirely (verbatim master batches — the legacy
+# pre-#8 behaviour).  The four cases pin the contract: over-budget
+# split with a closed ledger, arrival-order preservation across the
+# split, the == boundary (no split) and the 0/0 legacy switch.
+
+
+def _regroup_spec(
+    ctx: CaseContext, max_batch_tokens: int, max_batch_requests: int
+) -> EnvSpec:
+    """#8 env: one prefill engine (the whole master batch lands there),
+    flat prefill.fixed_ms=3000 stretching each execution batch past the
+    observation windows, explicit regroup budget axes.  The master runs
+    a wide 100ms FIXED_WINDOW collection window so four 10ms-spaced
+    fires coalesce into ONE master batch — the split then happens
+    engine-side, never master-side."""
+    perf = default_perf()
+    perf["prefill"] = {
+        "fixed_ms": 3000.0,
+        "scale": 1.0,
+        "max_batch_tokens": max_batch_tokens,
+        "max_batch_requests": max_batch_requests,
+    }
+    return EnvSpec(
+        label=f"admit_regroup_{ctx.profile}",
+        n_prefill=1,
+        n_decode=2,
+        perf=perf,
+        master_profile=ctx.profile,
+        master_env={
+            "FLEXLB_CONFIG": build_flexlb_config(
+                ordering="priority",
+                decision="fixed_window",
+                dispatcher="batch",
+                max_collection_wait_ms=100,
+                queue_timeout_ms=60_000,
+            )
+        },
+    )
+
+
+def _fire_regroup_wave(ops, base: int, n: int = 4):
+    """Fire *n* 512-token requests 10ms apart — all inside the master's
+    100ms collection window, so they coalesce into ONE master batch.
+    Returns (rids, fired, fire_errors)."""
+    fired: list = []
+    rids: list = []
+    fire_errors: list = []
+    for _ in range(n):
+        rid = ops.next_request_id(base)
+        rids.append(rid)
+        err = _fire_request(ops, rid, fired, input_len=512, output_len=2)
+        if err is not None:
+            fire_errors.append((rid, err))
+        time.sleep(0.01)
+    return rids, fired, fire_errors
+
+
+def _prefill_batch_counters(ops, name: str):
+    """#8 observation surface — per-engine executed-prefill-batch
+    counters: (prefill_batches, prefill_batch_requests,
+    max_prefill_batch_size) from the engine snapshot."""
+    snap = ops.snapshot_by_name()
+    info = snap.get(name, {})
+    return (
+        int(info.get("prefill_batches", -1)),
+        int(info.get("prefill_batch_requests", -1)),
+        int(info.get("max_prefill_batch_size", -1)),
+    )
+
+
+def _park_settled(ops, names: list) -> bool:
+    snap = ops.snapshot_by_name()
+    return all(
+        int(snap.get(n, {}).get("prefill_waiting_batches", 0)) == 0
+        and int(snap.get(n, {}).get("waiting", 0)) == 0
+        for n in names
+    )
+
+
+def _lifecycle_rows(ops, name: str, rids: list) -> dict:
+    """Engine request_lifecycle rows for *rids* (keyed by rid)."""
+    snap = ops.snapshot_by_name()
+    lifecycle = snap.get(name, {}).get("request_lifecycle", {})
+    return {rid: lifecycle.get(str(rid)) for rid in rids}
+
+
+@case(
+    "engine_prefill_token_budget_split",
+    profiles=["batch-window"],
+    requires=["enqueue_batch"],
+    source=(
+        "engine regroup #8: in-engine dual-budget prefill regroup "
+        "(over-budget master batch split + closed ledger)"
+    ),
+)
+def engine_prefill_token_budget_split(ctx: CaseContext):
+    """Engine-internal token-budget regroup: an over-budget master batch
+    splits prefix/tail and every member still closes its ledger.
+
+    Scenario: dedicated 1P+2D env, prefill.max_batch_tokens=1024 (the
+    request dimension off), flat prefill.fixed_ms=3000.  Four
+    512-token requests fire 10ms apart — all inside the master's 100ms
+    collection window — so the engine receives ONE four-member master
+    batch whose total logical tokens (4 x 512 = 2048, sum of
+    computeTokens + hitTokens) is 2x the budget.
+
+    Behaviour: the engine-side regroup composer (production
+    FIFOScheduler.cc:371-481 semantics — the budget is a STOP, members
+    join while admitted < budget) fills the execution batch with the
+    first two arrivals, parks the tail members as one PrefillPendingBatch
+    in prefillPendingQueue and admits them FIFO when the running batch
+    drains.
+
+    Expected (contract): all four schedules succeed; a snapshot poll
+    observes prefill_waiting_batches >= 1 while the prefix executes;
+    every fired request drains to terminal COMPLETED; the executed-
+    batch counters (delta over the pre-fire baseline, captured before
+    the recovery probe adds its own batch) grow by exactly 2 batches /
+    4 requests with max size 2 — the regrouped shape, not the master's
+    verbatim 1x4; every member's request_lifecycle row still carries
+    the SAME master batch_id (ledger identity survives the split);
+    the park settles empty, the master inflight ledger is clean and a
+    fresh request succeeds (recovery).
+
+    Prediction: expected to pass — the split path is the primary #8
+    deliverable; PrefillBudgetRegroupTest pins the same shape in-JVM
+    (2 batches / 4 requests / max 2).  Risk: FIXED_WINDOW coalescing
+    flake would reshape the master batch — mitigated by the 10x margin
+    between the 10ms inter-fire gap and the 100ms collection window.
+    """
+    env = ctx.env_manager.ensure(_regroup_spec(ctx, 1024, 0))
+    ops = ctx.engine_ops(env)
+    base = rid_base(ctx, "admission")
+    names = _prefill_names(ops)
+    if not names:
+        return False, "no prefill engines found"
+    try:
+        base_counters = _prefill_batch_counters(ops, names[0])
+        rids, fired, fire_errors = _fire_regroup_wave(ops, base)
+
+        # Park: while the prefix [r1, r2] executes its 3s window the
+        # tail [r3, r4] sits in prefillPendingQueue.
+        park_max = 0
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            snap = ops.snapshot_by_name()
+            for n in names:
+                park_max = max(
+                    park_max,
+                    int(snap.get(n, {}).get("prefill_waiting_batches", 0)),
+                    int(snap.get(n, {}).get("waiting", 0)),
+                )
+            if park_max >= 1:
+                break
+            time.sleep(0.2)
+
+        outcomes = _drain_fired(ops, fired, wait_s=45.0)
+        completed = [rid for rid, ok, _ in outcomes if ok]
+        drain_errors = [(rid, err) for rid, ok, err in outcomes if not ok]
+
+        # Counters AFTER the drain, BEFORE verify_recovery's probe.
+        after_counters = _prefill_batch_counters(ops, names[0])
+        delta_batches = after_counters[0] - base_counters[0]
+        delta_requests = after_counters[1] - base_counters[1]
+        counters_ok = (
+            delta_batches == 2 and delta_requests == 4 and after_counters[2] == 2
+        )
+
+        # Ledger identity: all four members still attribute to the ONE
+        # master batch (EnqueueBatch-time batch_id is request-level —
+        # the split never rewrites it).
+        rows = _lifecycle_rows(ops, names[0], rids)
+        member_batch_ids = {
+            row.get("batch_id") if row else None for row in rows.values()
+        }
+        batch_id_ok = len(member_batch_ids) == 1 and next(
+            iter(member_batch_ids), None
+        ) not in (None, 0, -1)
+
+        settled = wait_for(lambda: _park_settled(ops, names), 10.0, 0.2)
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 30.0
+        )
+        recovery_ok, recovery_msg = ops.verify_recovery()
+
+        passed = (
+            not fire_errors
+            and park_max >= 1
+            and len(completed) == len(rids)
+            and not drain_errors
+            and counters_ok
+            and batch_id_ok
+            and settled
+            and inflight_ok
+            and recovery_ok
+        )
+        return passed, (
+            f"fired={len(rids)} (fire_errors={fire_errors[:1]}), "
+            f"park_observed_max={park_max}, "
+            f"completed={len(completed)}/{len(rids)} "
+            f"(drain_errors={drain_errors[:1]}), "
+            f"executed_delta={delta_batches}b/{delta_requests}r "
+            f"max_size={after_counters[2]} (expect 2b/4r/2), "
+            f"member_batch_ids={member_batch_ids}, "
+            f"park_settled_empty={settled}, "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+
+
+@case(
+    "engine_prefill_token_budget_split_fifo",
+    profiles=["batch-window"],
+    requires=["enqueue_batch"],
+    source=(
+        "engine regroup #8: in-engine dual-budget prefill regroup "
+        "(split preserves arrival order across execution batches)"
+    ),
+)
+def engine_prefill_token_budget_split_fifo(ctx: CaseContext):
+    """The split preserves arrival order across execution batches.
+
+    Scenario: identical config to engine_prefill_token_budget_split
+    (1024-token budget, flat 3000ms prefill, four 512-token requests
+    in one master batch) — the spec fingerprint matches, so ensure()
+    reuses the very same env; this case pins the ORDER contract on a
+    fresh wave of rids.
+
+    Behaviour: the composer admits members while admitted < budget —
+    prefix [r1, r2] forms execution batch #1, tail [r3, r4] parks
+    until the prefix drains, so execution batches run in arrival
+    order.
+
+    Expected (contract): all four requests complete; the executed-
+    batch counters grow by exactly 2 batches / 4 requests with max
+    size 2 (delta over the shared env's pre-fire baseline); each
+    fired request's engine lifecycle end_ms — written at prefill
+    completion — shows the tail finishing STRICTLY after the prefix
+    with >1s separation (each execution batch runs 3000ms; a
+    reshuffled or interleaved composition collapses the gap); the
+    master inflight ledger is clean and a fresh request succeeds.
+
+    Prediction: expected to pass — the FIFO contract is structural
+    (the composer consumes the master batch head-first, the tail
+    parks behind it).  The >1s threshold sits at 1/3 of the execution
+    window.
+    """
+    env = ctx.env_manager.ensure(_regroup_spec(ctx, 1024, 0))
+    ops = ctx.engine_ops(env)
+    base = rid_base(ctx, "admission")
+    names = _prefill_names(ops)
+    if not names:
+        return False, "no prefill engines found"
+    try:
+        base_counters = _prefill_batch_counters(ops, names[0])
+        rids, fired, fire_errors = _fire_regroup_wave(ops, base)
+
+        outcomes = _drain_fired(ops, fired, wait_s=45.0)
+        completed = [rid for rid, ok, _ in outcomes if ok]
+        drain_errors = [(rid, err) for rid, ok, err in outcomes if not ok]
+
+        after_counters = _prefill_batch_counters(ops, names[0])
+        delta_batches = after_counters[0] - base_counters[0]
+        delta_requests = after_counters[1] - base_counters[1]
+        counters_ok = (
+            delta_batches == 2 and delta_requests == 4 and after_counters[2] == 2
+        )
+
+        # ORDER: prefix members' prefill-completion timestamps must
+        # sit strictly before the tail's, with a >1s gap (the parked
+        # tail only starts after the prefix's 3s batch drains).
+        rows = _lifecycle_rows(ops, names[0], rids)
+        end_ms = {
+            rid: int(row.get("end_ms", 0)) if row else 0 for rid, row in rows.items()
+        }
+        prefix_done = max(end_ms[rids[0]], end_ms[rids[1]])
+        tail_done = min(end_ms[rids[2]], end_ms[rids[3]])
+        fifo_gap_ms = tail_done - prefix_done
+        fifo_ok = (
+            all(v > 0 for v in end_ms.values())
+            and prefix_done < tail_done
+            and fifo_gap_ms > 1000
+        )
+
+        settled = wait_for(lambda: _park_settled(ops, names), 10.0, 0.2)
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 30.0
+        )
+        recovery_ok, recovery_msg = ops.verify_recovery()
+
+        passed = (
+            not fire_errors
+            and len(completed) == len(rids)
+            and not drain_errors
+            and counters_ok
+            and fifo_ok
+            and settled
+            and inflight_ok
+            and recovery_ok
+        )
+        return passed, (
+            f"fired={len(rids)} (fire_errors={fire_errors[:1]}), "
+            f"completed={len(completed)}/{len(rids)} "
+            f"(drain_errors={drain_errors[:1]}), "
+            f"executed_delta={delta_batches}b/{delta_requests}r "
+            f"max_size={after_counters[2]} (expect 2b/4r/2), "
+            f"fifo_prefix_done={prefix_done} tail_done={tail_done} "
+            f"gap_ms={fifo_gap_ms} (expect >1000), "
+            f"park_settled_empty={settled}, "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+
+
+@case(
+    "engine_prefill_token_budget_boundary",
+    profiles=["batch-window"],
+    requires=["enqueue_batch"],
+    source=(
+        "engine regroup #8: in-engine dual-budget prefill regroup "
+        "(boundary — a batch exactly at the token budget is NOT split)"
+    ),
+)
+def engine_prefill_token_budget_boundary(ctx: CaseContext):
+    """Boundary: a batch exactly AT the token budget executes verbatim.
+
+    Scenario: prefill.max_batch_tokens=2048 — exactly the total of
+    four 512-token requests coalesced into one master batch.
+
+    Behaviour: production admission semantics (FIFOScheduler.cc:
+    371-481) — members join while admitted < budget (strict), so the
+    fourth member (admitted 1536 < 2048) still fits and the whole
+    batch executes as ONE.
+
+    Expected (contract): all four requests complete; a snapshot poll
+    through the 3s execution window observes prefill_waiting_batches
+    == 0 throughout (no park — nothing is left over); the executed-
+    batch counters grow by exactly 1 batch / 4 requests with max
+    size 4 (verbatim, the boundary is inclusive); the master inflight
+    ledger is clean and a fresh request succeeds.
+
+    Prediction: expected to pass — the boundary condition is pinned
+    in-JVM by PrefillBudgetRegroupTest.
+    boundaryExactBudgetBatchDoesNotSplit.
+    """
+    env = ctx.env_manager.ensure(_regroup_spec(ctx, 2048, 0))
+    ops = ctx.engine_ops(env)
+    base = rid_base(ctx, "admission")
+    names = _prefill_names(ops)
+    if not names:
+        return False, "no prefill engines found"
+    try:
+        base_counters = _prefill_batch_counters(ops, names[0])
+        rids, fired, fire_errors = _fire_regroup_wave(ops, base)
+
+        # No park: the single verbatim batch admits immediately —
+        # poll through its 3s execution window.
+        no_park = True
+        deadline = time.monotonic() + 2.5
+        while time.monotonic() < deadline:
+            snap = ops.snapshot_by_name()
+            if any(
+                int(snap.get(n, {}).get("prefill_waiting_batches", 0)) > 0
+                for n in names
+            ):
+                no_park = False
+                break
+            time.sleep(0.2)
+
+        outcomes = _drain_fired(ops, fired, wait_s=45.0)
+        completed = [rid for rid, ok, _ in outcomes if ok]
+        drain_errors = [(rid, err) for rid, ok, err in outcomes if not ok]
+
+        after_counters = _prefill_batch_counters(ops, names[0])
+        delta_batches = after_counters[0] - base_counters[0]
+        delta_requests = after_counters[1] - base_counters[1]
+        counters_ok = (
+            delta_batches == 1 and delta_requests == 4 and after_counters[2] == 4
+        )
+
+        settled = wait_for(lambda: _park_settled(ops, names), 10.0, 0.2)
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 30.0
+        )
+        recovery_ok, recovery_msg = ops.verify_recovery()
+
+        passed = (
+            not fire_errors
+            and no_park
+            and len(completed) == len(rids)
+            and not drain_errors
+            and counters_ok
+            and settled
+            and inflight_ok
+            and recovery_ok
+        )
+        return passed, (
+            f"fired={len(rids)} (fire_errors={fire_errors[:1]}), "
+            f"no_park_through_window={no_park}, "
+            f"completed={len(completed)}/{len(rids)} "
+            f"(drain_errors={drain_errors[:1]}), "
+            f"executed_delta={delta_batches}b/{delta_requests}r "
+            f"max_size={after_counters[2]} (expect 1b/4r/4), "
+            f"park_settled_empty={settled}, "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+
+
+@case(
+    "engine_prefill_regroup_disabled_verbatim",
+    profiles=["batch-window"],
+    requires=["enqueue_batch"],
+    source=(
+        "engine regroup #8: in-engine dual-budget prefill regroup "
+        "(0/0 disables regroup — legacy verbatim master batches)"
+    ),
+)
+def engine_prefill_regroup_disabled_verbatim(ctx: CaseContext):
+    """The 0/0 switch: regroup off, the master batch executes as-is.
+
+    Scenario: prefill.max_batch_tokens=0 AND
+    prefill.max_batch_requests=0 — the documented off switch: both
+    dimensions zero disables the in-engine regroup entirely and the
+    master batch executes verbatim (the pre-#8 behaviour).
+
+    Expected (contract): all four requests complete; no park is
+    observed (the single master batch admits immediately); the
+    executed-batch counters grow by exactly 1 batch / 4 requests with
+    max size 4 — the verbatim master shape (4x the tokens a 1024
+    budget would have split); every member's lifecycle row attributes
+    to the SAME master batch_id; the master inflight ledger is clean
+    and a fresh request succeeds.
+
+    Prediction: expected to pass — the disabled path is the preserved
+    legacy code (prefillRegroupEnabled() == false), pinned in-JVM by
+    PrefillBudgetRegroupTest.regroupOffReproducesVerbatimMasterBatch.
+    """
+    env = ctx.env_manager.ensure(_regroup_spec(ctx, 0, 0))
+    ops = ctx.engine_ops(env)
+    base = rid_base(ctx, "admission")
+    names = _prefill_names(ops)
+    if not names:
+        return False, "no prefill engines found"
+    try:
+        base_counters = _prefill_batch_counters(ops, names[0])
+        rids, fired, fire_errors = _fire_regroup_wave(ops, base)
+
+        no_park = True
+        deadline = time.monotonic() + 2.5
+        while time.monotonic() < deadline:
+            snap = ops.snapshot_by_name()
+            if any(
+                int(snap.get(n, {}).get("prefill_waiting_batches", 0)) > 0
+                for n in names
+            ):
+                no_park = False
+                break
+            time.sleep(0.2)
+
+        outcomes = _drain_fired(ops, fired, wait_s=45.0)
+        completed = [rid for rid, ok, _ in outcomes if ok]
+        drain_errors = [(rid, err) for rid, ok, err in outcomes if not ok]
+
+        after_counters = _prefill_batch_counters(ops, names[0])
+        delta_batches = after_counters[0] - base_counters[0]
+        delta_requests = after_counters[1] - base_counters[1]
+        counters_ok = (
+            delta_batches == 1 and delta_requests == 4 and after_counters[2] == 4
+        )
+
+        rows = _lifecycle_rows(ops, names[0], rids)
+        member_batch_ids = {
+            row.get("batch_id") if row else None for row in rows.values()
+        }
+        batch_id_ok = len(member_batch_ids) == 1 and next(
+            iter(member_batch_ids), None
+        ) not in (None, 0, -1)
+
+        settled = wait_for(lambda: _park_settled(ops, names), 10.0, 0.2)
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 30.0
+        )
+        recovery_ok, recovery_msg = ops.verify_recovery()
+
+        passed = (
+            not fire_errors
+            and no_park
+            and len(completed) == len(rids)
+            and not drain_errors
+            and counters_ok
+            and batch_id_ok
+            and settled
+            and inflight_ok
+            and recovery_ok
+        )
+        return passed, (
+            f"fired={len(rids)} (fire_errors={fire_errors[:1]}), "
+            f"no_park_through_window={no_park}, "
+            f"completed={len(completed)}/{len(rids)} "
+            f"(drain_errors={drain_errors[:1]}), "
+            f"executed_delta={delta_batches}b/{delta_requests}r "
+            f"max_size={after_counters[2]} (expect 1b/4r/4), "
+            f"member_batch_ids={member_batch_ids}, "
+            f"park_settled_empty={settled}, "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"

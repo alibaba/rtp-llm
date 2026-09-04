@@ -35,6 +35,39 @@ final class MockPerformanceModel {
     static final int DEFAULT_MAX_WAITING_PREFILL_BATCHES = 0;
 
     /**
+     * Default per-execution-batch prefill TOKEN budget, JSON
+     * "prefill.max_batch_tokens" (engine-internal regroup, 20260903 #8).
+     * The default mirrors the exact figure the mock reports to the master in
+     * WorkerStatus.max_batch_tokens_size (1_048_576): one number, two uses —
+     * the master clamps its decision-group token capacity against it
+     * (BatcherContext prefers the worker-reported limit), the engine's own
+     * regroup budget holds the same ceiling, so the two layers can never
+     * disagree about what the engine will accept. Production reference:
+     * FIFOScheduler.cc evaluateWaitingStreams — a token budget stops admitting
+     * new streams into the running batch once cumulative cost reaches it
+     * (mock caliber per the approved spec: sum(computeTokens + hitTokens),
+     * i.e. the FULL logical input length INCLUDING cache hits; the first
+     * member always admits, the budget binds from the second member on).
+     * 0 disables the token dimension.
+     */
+    static final int DEFAULT_MAX_BATCH_TOKENS = 1_048_576;
+
+    /**
+     * Default per-execution-batch prefill REQUEST count cap, JSON
+     * "prefill.max_batch_requests" (engine-internal regroup, 20260903 #8).
+     * Default 32 keeps the same anchor as prefill.direct_batch_size_max
+     * ("matching the master FIXED_WINDOW maxRequests") — the production
+     * max_generate_batch_size sequence-count constraint (FIFOScheduler.cc
+     * evaluateRunningBatch, inclusive: running + admitted + 1 <= cap)
+     * surfacing at the engine's own admission layer. 0 disables the
+     * request-count dimension.
+     *
+     * <p>Both dimensions at 0 = regroup fully OFF: master-composed batches
+     * execute verbatim (the legacy behavior, reproducible on demand).
+     */
+    static final int DEFAULT_MAX_BATCH_REQUESTS = 32;
+
+    /**
      * Default per-step decode latency intercept, JSON "decode.step_base_ms":
      * the production DSv4 fit step_ms = 19.5 + 0.175 x running (task #68
      * measurement, R^2 = 0.82 on the step caliber). Code default mirrors the
@@ -129,6 +162,11 @@ final class MockPerformanceModel {
     // SINGLE request, several times below production. 1 restores the legacy
     // one-request-per-batch behaviour.
     private final int directBatchSizeMax;
+    // Engine-internal regroup budget (20260903 #8): per-execution-batch token
+    // ceiling and request-count cap. Both 0 = regroup off (legacy verbatim
+    // master batches). See the DEFAULT_* constants above for the anchors.
+    private final int maxBatchTokens;
+    private final int maxBatchRequests;
     private final PrefillTimeFormula prefillFormula;
     // Decode step-latency sources, exactly one active per model:
     //   - explicit step_ms_by_batch curve (decodePoints non-empty; legacy
@@ -182,6 +220,8 @@ final class MockPerformanceModel {
                                  Double configuredFixedPrefillMs,
                                  int maxWaitingPrefillBatches,
                                  int directBatchSizeMax,
+                                 int maxBatchTokens,
+                                 int maxBatchRequests,
                                  PrefillTimeFormula prefillFormula,
                                  List<DecodePoint> decodePoints,
                                  double stepBaseMs,
@@ -198,6 +238,8 @@ final class MockPerformanceModel {
         this.configuredFixedPrefillMs = configuredFixedPrefillMs;
         this.maxWaitingPrefillBatches = maxWaitingPrefillBatches;
         this.directBatchSizeMax = Math.max(1, directBatchSizeMax);
+        this.maxBatchTokens = maxBatchTokens;
+        this.maxBatchRequests = maxBatchRequests;
         this.prefillFormula = prefillFormula;
         this.decodePoints = decodePoints;
         this.stepBaseMs = stepBaseMs;
@@ -225,6 +267,10 @@ final class MockPerformanceModel {
         int maxWaitingPrefillBatches = prefill.path("max_waiting_batches")
                 .asInt(DEFAULT_MAX_WAITING_PREFILL_BATCHES);
         int directBatchSizeMax = prefill.path("direct_batch_size_max").asInt(32);
+        int maxBatchTokens = prefill.path("max_batch_tokens")
+                .asInt(DEFAULT_MAX_BATCH_TOKENS);
+        int maxBatchRequests = prefill.path("max_batch_requests")
+                .asInt(DEFAULT_MAX_BATCH_REQUESTS);
 
         PrefillTimeFormula formula = PrefillTimeFormula.parse(loadPrefillExpression(masterConfigFile));
 
@@ -281,7 +327,8 @@ final class MockPerformanceModel {
         }
         double jitterPct = performance.path("jitter_pct").asDouble(0.0);
         return new MockPerformanceModel(blockSize, sleepScale, prefillScale,
-                prefillMinMs, prefillFixedMs, maxWaitingPrefillBatches, directBatchSizeMax, formula,
+                prefillMinMs, prefillFixedMs, maxWaitingPrefillBatches, directBatchSizeMax,
+                maxBatchTokens, maxBatchRequests, formula,
                 List.copyOf(points), stepBaseMs, stepPerRunningMs, tokensPerStep,
                 decodeReserveStep,
                 decode.path("scale").asDouble(1.0),
@@ -443,6 +490,25 @@ final class MockPerformanceModel {
      */
     int directBatchSizeMax() {
         return directBatchSizeMax;
+    }
+
+    /**
+     * Per-execution-batch prefill token budget for the engine-internal
+     * regroup (JSON "prefill.max_batch_tokens", default
+     * DEFAULT_MAX_BATCH_TOKENS; 0 = dimension disabled). Caliber:
+     * sum(computeTokens + hitTokens) over batch members.
+     */
+    int maxBatchTokens() {
+        return maxBatchTokens;
+    }
+
+    /**
+     * Per-execution-batch prefill request-count cap for the engine-internal
+     * regroup (JSON "prefill.max_batch_requests", default
+     * DEFAULT_MAX_BATCH_REQUESTS; 0 = dimension disabled).
+     */
+    int maxBatchRequests() {
+        return maxBatchRequests;
     }
 
     /**
