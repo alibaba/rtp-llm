@@ -594,13 +594,15 @@ final class MockControlServer {
                 throw new ApiException(500, "cancel_error injection");
             }
             if (fault == JavaMockEngineCluster.CancelFaultKind.UNEXPECTED_STATUS) {
+                // 200 + out-of-contract status string: return the injected
+                // body and let handleServicePost write it (a bare `return;`
+                // does not compile — ServicePostAction returns a Map).
                 Map<String, Object> injected = new LinkedHashMap<>();
                 injected.put("status", "UNEXPECTED_STATUS");
                 injected.put("engine", service.getEngineName());
                 injected.put("port", service.getGrpcPort());
                 injected.put("request_id", requestId);
-                sendJson(exchange, 200, injected);
-                return;
+                return injected;
             }
             JavaMockEngineCluster.CancelResult result;
             try {
