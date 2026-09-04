@@ -86,9 +86,14 @@ from typing import Optional
 import grpc
 
 from ..context import CaseContext, CaseDef, rid_base
-from ..engine_ops import parse_prometheus_samples
+from ..engine_ops import (
+    _fence_residue_stable,
+    engine_inflight_clean,
+    inject_type,
+    parse_prometheus_samples,
+)
 from ..grade import GradeReport
-from ..harness import AssertUtils, EnvSpec, build_flexlb_config, default_perf
+from ..harness import AssertUtils, EnvSpec, build_flexlb_config, default_perf, wait_for
 from .admission import MOCK_TOTAL_KV_TOKENS
 
 PRIORITY_CASES: list[CaseDef] = []
@@ -709,6 +714,27 @@ _PREEMPT_DECODE = {
     "allowed_victim_stages": ["DECODE_RESERVED", "DECODE_ENGINE_OWNED"],
     "engine_cancellation": {"ack_timeout_ms": 50, "completion_timeout_ms": 1000},
 }
+# All-three-stage superset (the live preemption config — cancel.py's
+# cancel_preemption_victim runs exactly this set): DECODE_ENGINE_OWNED
+# REQUIRES the engineCancellation block (FlexlbConfigValidator rejects
+# the stage set otherwise); ack 50ms / completion 1000ms mirror the
+# ft-line precedent.
+_PREEMPT_ALL_STAGES = {
+    "allowed_victim_stages": [
+        "PREFILL_QUEUED",
+        "DECODE_RESERVED",
+        "DECODE_ENGINE_OWNED",
+    ],
+    "engine_cancellation": {"ack_timeout_ms": 50, "completion_timeout_ms": 1000},
+}
+# Metric-plane exposure for the live-eviction family: the default
+# critical-only filter hides auto_tpm.* (FLEXLB_MONITOR_MODE=all is dead
+# on the v2 line — see _q3_spec), so the whitelist carries the exposure.
+# One bare prefix entry (WhitelistMetricsFilterConfig.matches is a
+# promName.startsWith) covers the whole family the eviction cases
+# assert on: auto_tpm.victim.count / auto_tpm.priority_preempt.count /
+# auto_tpm.victim.kv_tokens / auto_tpm.decode.reserved.count.
+_MONITOR_AUTO_TPM_ENV = {"FLEXLB_MONITOR_METRIC_WHITELIST": "flexlb_auto_tpm"}
 
 
 def _prio_config(
@@ -720,11 +746,14 @@ def _prio_config(
     max_outstanding: Optional[int] = None,
     max_inflight: Optional[int] = 1,
     max_waiting: Optional[int] = 8,
+    dispatcher: str = "non_batch",
+    max_inflight_batches: int = 4,
 ) -> str:
-    """Unified priority-family config (PRIORITY + SINGLE + NON_BATCH base).
+    """Unified priority-family config (PRIORITY + SINGLE + NON_BATCH base;
+    dispatcher="batch" variant for the live-eviction family, 2026-09).
 
-    Two implementation-period additions over the design's config sketch
-    (both verified against the Java code):
+    Implementation-period additions over the design's config sketch
+    (all verified against the Java code):
 
     * ``maxInflightRequestsPerPrefillWorker=1`` (build_flexlb_config kwarg
       max_inflight_requests_per_worker) is what actually creates the
@@ -737,16 +766,25 @@ def _prio_config(
       this line (the admission wave-2 passthrough, 2026-09) — on the
       source branch it had to be spliced via JSON post-processing; the
       queue-full eviction path needs the tight cap (Java default 1024).
+    * ``dispatcher="batch"`` (preemption-stage coverage, 2026-09): boots
+      the BATCH dispatcher so the master-owned enqueue path (WorkerBatcher
+      queue + the maxWaiting cap feeding AdmissionFallback's preemption
+      trigger) is reachable — the live 8400 eviction paths need it; under
+      batch the per-worker inflight cap is meaningless and
+      ``max_inflight_batches`` is the caliber instead.
     """
     return build_flexlb_config(
         ordering=ordering,
         decision="single",
-        dispatcher="non_batch",
+        dispatcher=dispatcher,
         default_priority=default_priority,
         preemption=preemption,
         queue_timeout_ms=queue_timeout_ms,
         max_outstanding=max_outstanding if max_outstanding is not None else 5_000,
-        max_inflight_requests_per_worker=max_inflight,
+        max_inflight_batches=max_inflight_batches,
+        max_inflight_requests_per_worker=(
+            None if dispatcher == "batch" else max_inflight
+        ),
         max_waiting_requests_per_prefill_worker=max_waiting,
     )
 
@@ -760,10 +798,17 @@ def _spec(
     config: str,
     master_debug_log: bool = False,
     extra_env: Optional[dict] = None,
+    decode_cache_blocks: Optional[int] = None,
 ) -> EnvSpec:
     env = {"FLEXLB_CONFIG": config}
     if extra_env:
         env.update(extra_env)
+    # decode_cache_blocks sizes the mock's decode KV pool
+    # (totalKvTokens = blocks x blockSize — the reported capacity always
+    # tracks the built pool); None keeps the harness default.
+    spec_kwargs = {}
+    if decode_cache_blocks is not None:
+        spec_kwargs["decode_cache_blocks"] = decode_cache_blocks
     return EnvSpec(
         label=f"{label}_{ctx.profile}",
         n_prefill=n_prefill,
@@ -772,6 +817,7 @@ def _spec(
         master_profile=ctx.profile,
         master_env=env,
         master_debug_log=master_debug_log,
+        **spec_kwargs,
     )
 
 
@@ -4099,3 +4145,898 @@ def atpm_observability_integrity(ctx: CaseContext):
         return False, f"exception: {exc!r}"
     finally:
         _finally_hygiene(ops, fires, prefill_names)
+
+
+# ===========================================================================
+# Preemption-stage live coverage — atpm_preempt_* live family (2026-09)
+#
+# Design input: the preemption-stages audit (Zara,
+# verdict_preemption_stages.md).  The existing atpm_preempt_prefill_queued
+# ([EV-1-FIXED]) and the decode family ([EV-2]) all assert ZERO eviction —
+# under the NON_BATCH pull model capacity blocking parks every submitter,
+# so neither 8400 path (PREFILL_QUEUED queue replacement / DECODE_RESERVED
+# shadow-reservation eviction) ever fires.  The live family boots the
+# BATCH dispatcher so the master-owned enqueue path (WorkerBatcher queue
+# + maxWaiting cap → AdmissionFallback → EvictionManager) is reachable,
+# and pins the REAL victim terminals: exactly-8400 for both master-local
+# stages, 8429 for the engine-owned tombstone settle.
+# ===========================================================================
+
+# 3-strike health demotion + restart windows (cancel.py HA-family
+# precedent — copied, not imported: cancel.py is under concurrent
+# modification by another session; these copies are small and frozen
+# by contract).
+MASTER_EVICT_S = 30.0
+ENGINE_RECOVERY_WAIT_S = 3.0
+
+
+def _cancel_rpc_total(ops) -> int:
+    """Sum of per-engine Cancel RPC counters from /snapshot."""
+    snap = ops.snapshot()
+    return sum(
+        int(e.get("rpc_counts", {}).get("cancel", 0)) for e in snap.get("engines", [])
+    )
+
+
+def _all_engine_names(ops) -> list:
+    snap = ops.snapshot()
+    return [e["name"] for e in snap.get("engines", [])]
+
+
+def _engine_saw(ops, rid: int) -> bool:
+    """True when ANY engine has a lifecycle entry for *rid* — the
+    never-delivered proof for master-local (8400) victims."""
+    return any(
+        str(rid) in e.get("request_lifecycle", {})
+        for e in ops.snapshot().get("engines", [])
+    )
+
+
+def _poll_engine_finished(ops, rid: int, timeout_s: float) -> bool:
+    """Wait until *rid* shows a NON-running end_state on a decode engine
+    (engine-side completion — the master view may be frozen behind an
+    injected status_no_respond)."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        for engine in ops.snapshot().get("engines", []):
+            if engine.get("role") != "decode":
+                continue
+            lc = engine.get("request_lifecycle", {}).get(str(rid), {})
+            end = lc.get("end_state")
+            if end and end != "running":
+                return True
+        time.sleep(0.05)
+    return False
+
+
+def _direct_enqueue(ops, addr: str, input_pb, batch_id: int):
+    """Client-side EnqueueBatch probe straight at one engine's gRPC port
+    (bypasses the master — the ABSENT_FENCE probe must observe the
+    ENGINE's admission decision, not the master's settled ledger)."""
+    stub = ops.pb2_grpc.RpcServiceStub(ops._channel(addr))
+    request = ops.pb2.EnqueueBatchRequestPB(
+        batch_id=batch_id,
+        dp_slots=[
+            ops.pb2.EnqueueBatchDpSlotPB(
+                dp_rank=0,
+                requests=[ops.pb2.EnqueueBatchExternalInputPB(input=input_pb)],
+            )
+        ],
+        fetch_attach_timeout_ms=30_000,
+    )
+    return stub.EnqueueBatch(request, timeout=10.0)
+
+
+def _fence_rejected_8429(ack, rid: int) -> tuple:
+    """True when the direct-enqueue ack carries exactly the typed 8429
+    absent-fence rejection for rid (no successes, no admission)."""
+    errors = list(ack.errors)
+    rejected = (
+        not ack.successes
+        and len(errors) == 1
+        and errors[0].request_id == rid
+        and errors[0].error_info.error_code == 8429
+    )
+    detail = (
+        f"successes={len(ack.successes)}, errors="
+        f"{[(e.request_id, e.error_info.error_code) for e in errors]}"
+    )
+    return rejected, detail
+
+
+def _crash_and_restart(ops, engine_name: str) -> tuple:
+    """True-crash + restart cycle on one engine (crash_after n=1) — the
+    per-engine memory wipe (running tasks, tombstones, absent-fence
+    records, RPC counters), so the restarted instance has never seen any
+    pre-restart rid.  The sacrificial request's own fate is the
+    empty-ack uncertain path and is deliberately not asserted."""
+    inject_type(ops, engine_name, "crash_after", n=1)
+    try:
+        sacrificial = ops.next_request_id()
+        ops.schedule(sacrificial, timeout_s=8.0)
+    except Exception:
+        # The crash may cut the RPC mid-flight — either way the port dies.
+        pass
+    dropped = wait_for(
+        lambda: ops.master_alive_count("PREFILL") <= 0, MASTER_EVICT_S, 0.5
+    )
+    ops.start_engine(engine_name)  # clears fault config + enqueue counter
+    restored = wait_for(
+        lambda: ops.master_alive_count("PREFILL") >= 1, MASTER_EVICT_S, 0.5
+    )
+    time.sleep(ENGINE_RECOVERY_WAIT_S)
+    return dropped, restored
+
+
+def _restore_engines(ops) -> None:
+    """Best-effort topology + fault restore for finally blocks."""
+    try:
+        for name, engine in ops.snapshot_by_name().items():
+            if engine.get("stopped"):
+                try:
+                    ops.start_engine(name)
+                except Exception:
+                    pass
+            try:
+                inject_type(ops, name, "crash_after", enabled=False)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _max_engine_requests_1(config: str) -> str:
+    """JSON post-processing: decode availability maxEngineRequests=1 (the
+    knob is not a build_flexlb_config generator — cancel.py's
+    cancel_preemption_victim established the splice)."""
+    parsed = json.loads(config)
+    parsed["router"]["roles"]["decode"]["availability"]["maxEngineRequests"] = 1
+    return json.dumps(parsed, separators=(",", ":"))
+
+
+def _pq_live_spec(ctx: CaseContext) -> EnvSpec:
+    """ENV for atpm_preempt_prefill_queued_live: BATCH dispatcher +
+    PREFILL_QUEUED-only preemption + maxWaiting=2, so the third submitter
+    (the P70 incoming) overflows the queue into AdmissionFallback's
+    queue-replacement path (1P+4D)."""
+    return _spec(
+        ctx,
+        "atpm_pq_live",
+        config=_prio_config(
+            dispatcher="batch",
+            preemption=_PREEMPT_PQ,
+            max_waiting=2,
+            queue_timeout_ms=60_000,
+        ),
+        extra_env=_MONITOR_AUTO_TPM_ENV,
+    )
+
+
+def _dr_live_spec(ctx: CaseContext) -> EnvSpec:
+    """ENV for atpm_preempt_decode_reserved_live: BATCH dispatcher + the
+    production-baseline stage set {PREFILL_QUEUED, DECODE_RESERVED} + a
+    4-block decode KV pool (4096 tokens at blockSize=1024) on a SINGLE
+    decode engine, so the victim's shadow reservation — not a slot
+    deficit — makes the incoming's decode placement fail."""
+    return _spec(
+        ctx,
+        "atpm_dr_live",
+        n_decode=1,
+        decode_cache_blocks=4,
+        config=_prio_config(
+            dispatcher="batch",
+            preemption={"allowed_victim_stages": ["PREFILL_QUEUED", "DECODE_RESERVED"]},
+            queue_timeout_ms=60_000,
+        ),
+        extra_env=_MONITOR_AUTO_TPM_ENV,
+    )
+
+
+def _nf_spec(ctx: CaseContext) -> EnvSpec:
+    """ENV for atpm_preempt_cancel_not_found: all-three-stage preemption
+    (engineCancellation mandatory) + decode maxEngineRequests=1, NON_BATCH
+    single-decode topology (1P+1D)."""
+    return _spec(
+        ctx,
+        "atpm_nf",
+        n_decode=1,
+        config=_max_engine_requests_1(
+            _prio_config(preemption=_PREEMPT_ALL_STAGES, queue_timeout_ms=60_000)
+        ),
+    )
+
+
+def _ts_spec(ctx: CaseContext) -> EnvSpec:
+    """ENV for atpm_preempt_cancel_tombstoned: the live preemption config
+    (all three stages + engineCancellation) + decode maxEngineRequests=1
+    on the BATCH dispatcher (1P+1D) — same shape as cancel.py's
+    cancel_preemption_victim."""
+    return _spec(
+        ctx,
+        "atpm_ts",
+        n_decode=1,
+        config=_max_engine_requests_1(
+            _prio_config(
+                dispatcher="batch",
+                preemption=_PREEMPT_ALL_STAGES,
+                queue_timeout_ms=60_000,
+            )
+        ),
+    )
+
+
+@case(
+    "atpm_preempt_prefill_queued_live",
+    profiles=["single-batch"],
+    source="preemption-stages audit (2026-09) — live PREFILL_QUEUED eviction",
+)
+def atpm_preempt_prefill_queued_live(ctx: CaseContext):
+    """LIVE PREFILL_QUEUED eviction: a higher-priority incoming replaces a
+    queued low-priority victim in the master's prefill queue — the victim
+    terminal is EXACTLY 8400 and no engine ever saw the rid.
+
+    ENV (BATCH dispatcher — the decisive knob): under NON_BATCH the
+    intake3 pull model parks every capacity-blocked submitter, so the
+    queue-full replacement path has no trigger ([EV-1-FIXED]); BATCH
+    puts the queue back in the master (WorkerBatcher + maxWaiting cap →
+    AdmissionFallback → EvictionManager.tryAdmitByPrefillEviction).
+    preemption={PREFILL_QUEUED} only, maxWaiting=2, 1P+4D, prefill
+    slowed to 4s.
+
+    Choreography: a P50 placeholder dispatches first (occupying the
+    engine's single prefill concurrency slot — the dispatch gate holds
+    everything else MASTER_QUEUED_NOT_DISPATCHED), then two P30 victims
+    queue (activeIndex=2=maxWaiting), then the P70 incoming overflows
+    the queue: queueDeficit = queued(2) + 1 − maxWaiting(2) = 1
+    (EvictionPlanner) → CANDIDATE_ORDER (priority asc, enqueuedAtMs
+    desc — latest same-priority first) picks victim_b → master-local
+    atomic replacement → 8400.
+
+    Contract:
+      * victim_b terminal is EXACTLY 8400 (yielded, retryable) and NO
+        engine ever saw the rid (master-local transaction — the
+        never-delivered proof);
+      * victim_a / placeholder / incoming all complete 200 with real
+        FetchResponse output;
+      * metric plane: auto_tpm.victim.count{stage=prefill_queued} == 1
+        with the 30←70 priority tags, and
+        auto_tpm.priority_preempt.count{stage=prefill_queued} >= 1;
+      * the ledger closes clean (master inflight + engine side) and
+        recovery works.
+    """
+    env = ctx.env_manager.ensure(_pq_live_spec(ctx))
+    ops = ctx.engine_ops(env)
+    report = GradeReport(run_grade=ctx.grade)
+    base = rid_base(ctx, "priority")
+    handles: dict = {}
+    prefill_names: list = []
+    try:
+        prefill_names = _prefill_names(ops)
+        for name in prefill_names:
+            ops.set_perf(name, prefill_fixed_ms=4000.0)
+        time.sleep(PERF_SETTLE_S)
+
+        ph = ops.next_request_id(base)
+        ph_resp = ops.schedule(
+            ph, priority=50, input_len=2048, output_len=2, timeout_s=90.0
+        )
+        if ph_resp.code != CODE_OK or not ph_resp.success:
+            return False, f"placeholder schedule failed: {ph_resp.error_message}"
+        if not _poll_engine_pending(ops, prefill_names[0], 1):
+            return False, "placeholder never dispatched"
+
+        va = ops.next_request_id(base)
+        vb = ops.next_request_id(base)
+        inc = ops.next_request_id(base)
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            a_future = pool.submit(
+                ops.schedule,
+                va,
+                priority=30,
+                input_len=2048,
+                output_len=2,
+                timeout_s=90.0,
+            )
+            time.sleep(FIRE_GAP_S)
+            b_future = pool.submit(
+                ops.schedule,
+                vb,
+                priority=30,
+                input_len=2048,
+                output_len=2,
+                timeout_s=90.0,
+            )
+            time.sleep(FIRE_GAP_S)
+            inc_future = pool.submit(
+                ops.schedule,
+                inc,
+                priority=70,
+                input_len=2048,
+                output_len=2,
+                timeout_s=90.0,
+            )
+            a_resp = a_future.result(timeout=95.0)
+            b_resp = b_future.result(timeout=95.0)
+            inc_resp = inc_future.result(timeout=95.0)
+
+        vb_evicted = b_resp.code == CODE_YIELDED and not b_resp.success
+        va_ok = a_resp.code == CODE_OK and a_resp.success
+        inc_ok = inc_resp.code == CODE_OK and inc_resp.success
+
+        # Survivors: consume the FetchResponse streams (BATCH delivery —
+        # the master owns the enqueue, the client stream is a
+        # FetchResponse against the original prefill).
+        completed = {}
+        for rid, resp in ((ph, ph_resp), (va, a_resp), (inc, inc_resp)):
+            if resp.code != CODE_OK or not resp.success:
+                continue
+            handle = ops.start_stream(resp, rid)
+            handles[rid] = handle
+            ended = handle.wait_end(45.0)
+            completed[rid] = ended and handle.snap.completed
+        survivors_completed = all(completed.get(r) for r in (ph, va, inc))
+        vb_never_seen = not _engine_saw(ops, vb)
+
+        samples = _scrape_master_metrics(ops)
+        pq_victim = _metric_sum(
+            samples, "auto_tpm_victim_count", {"stage": "prefill_queued"}
+        )
+        pq_victim_30_70 = _metric_sum(
+            samples,
+            "auto_tpm_victim_count",
+            {
+                "stage": "prefill_queued",
+                "victim_priority": "30",
+                "incoming_priority": "70",
+            },
+        )
+        pq_preempt = _metric_sum(
+            samples,
+            "auto_tpm_priority_preempt_count",
+            {"stage": "prefill_queued"},
+        )
+
+        report.invariant(
+            "PR10",
+            vb_evicted and va_ok and inc_ok and survivors_completed,
+            context="live_prefill_queued_replacement",
+            detail=(
+                f"victim_b terminal={b_resp.code} (expected exactly "
+                f"{CODE_YIELDED}), victim_a schedule={a_resp.code}, "
+                f"incoming schedule={inc_resp.code}, FetchResponse "
+                f"completed={ {r % 1_000_000: completed.get(r) for r in (ph, va, inc)} }"
+            ),
+        )
+        report.invariant(
+            "PR5",
+            vb_never_seen and vb_evicted,
+            context="live_victim_master_local_never_delivered",
+            detail=(
+                f"victim_b terminal={b_resp.code}, engine ever saw rid="
+                f"{_engine_saw(ops, vb)} (master-local atomic replacement "
+                f"— never-delivered proof; CANDIDATE_ORDER priority asc, "
+                f"enqueuedAtMs desc picks the latest same-priority "
+                f"victim_b over victim_a)"
+            ),
+        )
+        report.invariant(
+            "PR6",
+            vb_evicted and pq_victim == 1.0 and (pq_preempt or 0.0) >= 1.0,
+            context="live_prefill_queued_metrics",
+            detail=(
+                f"auto_tpm.victim.count{{stage=prefill_queued}}="
+                f"{pq_victim} (expected 1), 30<-70 tagged sample="
+                f"{pq_victim_30_70}, priority_preempt.count="
+                f"{pq_preempt} (>=1), victim samples="
+                f"{_metric_lines(samples, 'auto_tpm_victim_count')}"
+            ),
+        )
+        clean_ok, clean_detail = AssertUtils.inflight_clean(_master_http(ops), 30.0)
+        engine_clean, engine_detail = engine_inflight_clean(
+            ops, _all_engine_names(ops), 30.0
+        )
+        recovery_ok, recovery_msg = ops.verify_recovery()
+        report.invariant(
+            "P6",
+            clean_ok and engine_clean and recovery_ok,
+            detail=(
+                f"inflight={'ok' if clean_ok else clean_detail}, "
+                f"engine={'ok' if engine_clean else engine_detail}, "
+                f"recovery={recovery_msg}"
+            ),
+        )
+        return report.finish(
+            f"live prefill-queued eviction: victim_b={b_resp.code} "
+            f"(never delivered), survivors completed="
+            f"{survivors_completed}, metric victim.count={pq_victim}, "
+            f"grades: {report.summary()}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        for handle in handles.values():
+            handle.cancel()
+        _finally_hygiene(ops, [], prefill_names)
+
+
+@case(
+    "atpm_preempt_decode_reserved_live",
+    profiles=["single-batch"],
+    source="preemption-stages audit (2026-09) — live DECODE_RESERVED eviction",
+)
+def atpm_preempt_decode_reserved_live(ctx: CaseContext):
+    """LIVE DECODE_RESERVED eviction: the incoming's decode placement
+    fails on the victim's shadow reservation and the master's local
+    atomic eviction settles the victim at EXACTLY 8400 — never 8429
+    (the discriminating feature of this path: an engine-owned victim
+    would surface the typed-cancel 8429 terminal).
+
+    ENV: BATCH dispatcher + the production-baseline stage set
+    {PREFILL_QUEUED, DECODE_RESERVED} (master_fixed_window.json values —
+    no engineCancellation because no engine-owned stage is enabled), a
+    4-block decode KV pool (4096 tokens at blockSize=1024) on a SINGLE
+    decode engine, 1P+1D, prefill slowed to 4s.
+
+    Choreography (both shadows land on the one decode pool):
+      * P90 placeholder input=512 dispatches to prefill — its decode
+        shadow (512) is reserved on the single decode engine and P90
+        stands above the incoming, so it is never a candidate;
+      * P30 victim input=512 queues MASTER_QUEUED_NOT_DISPATCHED
+        (prefill slot busy) — its decode shadow (512) is ALSO reserved
+        (the precise AdmissionCapacity check runs because the stage set
+        contains a decode stage), leaving hardAvailable = 4096−1024 =
+        3072;
+      * P70 incoming input=3500 > 3072 → BLOCKED(decode) → kvDeficit =
+        428 ≤ victim freedKv = 512 → EvictionPlanner picks the P30
+        shadow → master-local atomic eviction (8400), post-eviction
+        capacity 4096−512 = 3584 ≥ 3500 → the incoming places.
+
+    Contract:
+      * victim terminal EXACTLY 8400 (asserted NOT 8429 — the stage's
+        discriminating feature) and no engine ever saw the rid;
+      * placeholder + incoming complete 200 with real FetchResponse
+        output;
+      * metric plane: auto_tpm.victim.count{stage=decode_reserved} == 1
+        and auto_tpm.victim.kv_tokens{stage=decode_reserved} >= 428
+        (the released shadow covers the incoming's kvDeficit);
+      * the ledger closes clean and recovery works.
+    """
+    env = ctx.env_manager.ensure(_dr_live_spec(ctx))
+    ops = ctx.engine_ops(env)
+    report = GradeReport(run_grade=ctx.grade)
+    base = rid_base(ctx, "priority")
+    handles: dict = {}
+    prefill_names: list = []
+    try:
+        prefill_names = _prefill_names(ops)
+        for name in prefill_names:
+            ops.set_perf(name, prefill_fixed_ms=4000.0)
+        time.sleep(PERF_SETTLE_S)
+
+        ph = ops.next_request_id(base)
+        ph_resp = ops.schedule(
+            ph, priority=90, input_len=512, output_len=2, timeout_s=90.0
+        )
+        if ph_resp.code != CODE_OK or not ph_resp.success:
+            return False, f"placeholder schedule failed: {ph_resp.error_message}"
+        if not _poll_engine_pending(ops, prefill_names[0], 1):
+            return False, "placeholder never dispatched"
+
+        victim = ops.next_request_id(base)
+        inc = ops.next_request_id(base)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            v_future = pool.submit(
+                ops.schedule,
+                victim,
+                priority=30,
+                input_len=512,
+                output_len=2,
+                timeout_s=90.0,
+            )
+            time.sleep(FIRE_GAP_S)
+            inc_future = pool.submit(
+                ops.schedule,
+                inc,
+                priority=70,
+                input_len=3500,
+                output_len=2,
+                timeout_s=90.0,
+            )
+            v_resp = v_future.result(timeout=95.0)
+            inc_resp = inc_future.result(timeout=95.0)
+
+        victim_evicted = v_resp.code == CODE_YIELDED and not v_resp.success
+        victim_not_cancelled = v_resp.code != CODE_ENGINE_CANCELLED
+        inc_ok = inc_resp.code == CODE_OK and inc_resp.success
+
+        completed = {}
+        for rid, resp in ((ph, ph_resp), (inc, inc_resp)):
+            if resp.code != CODE_OK or not resp.success:
+                continue
+            handle = ops.start_stream(resp, rid)
+            handles[rid] = handle
+            ended = handle.wait_end(45.0)
+            completed[rid] = ended and handle.snap.completed
+        survivors_completed = all(completed.get(r) for r in (ph, inc))
+        victim_never_seen = not _engine_saw(ops, victim)
+
+        samples = _scrape_master_metrics(ops)
+        dr_victim = _metric_sum(
+            samples, "auto_tpm_victim_count", {"stage": "decode_reserved"}
+        )
+        dr_kv = _metric_sum(
+            samples, "auto_tpm_victim_kv_tokens", {"stage": "decode_reserved"}
+        )
+
+        report.invariant(
+            "PR10",
+            victim_evicted and victim_not_cancelled and inc_ok and survivors_completed,
+            context="live_decode_reserved_replacement",
+            detail=(
+                f"victim terminal={v_resp.code} (expected exactly "
+                f"{CODE_YIELDED}, NEVER {CODE_ENGINE_CANCELLED} — the "
+                f"stage's discriminating feature), incoming schedule="
+                f"{inc_resp.code}, FetchResponse completed="
+                f"{ {r % 1_000_000: completed.get(r) for r in (ph, inc)} }"
+            ),
+        )
+        report.invariant(
+            "PR5",
+            victim_never_seen and victim_evicted,
+            context="live_victim_shadow_never_delivered",
+            detail=(
+                f"victim terminal={v_resp.code}, engine ever saw rid="
+                f"{_engine_saw(ops, victim)} (DECODE_RESERVED eviction is "
+                f"a master-local atomic transaction on the shadow "
+                f"reservation — the request itself was never dispatched)"
+            ),
+        )
+        report.invariant(
+            "PR6",
+            victim_evicted and dr_victim == 1.0 and (dr_kv or 0.0) >= 428.0,
+            context="live_decode_reserved_metrics",
+            detail=(
+                f"auto_tpm.victim.count{{stage=decode_reserved}}="
+                f"{dr_victim} (expected 1), victim.kv_tokens="
+                f"{dr_kv} (>=428 — the released shadow covers the "
+                f"incoming's kvDeficit), samples="
+                f"{_metric_lines(samples, 'auto_tpm_victim')}"
+            ),
+        )
+        clean_ok, clean_detail = AssertUtils.inflight_clean(_master_http(ops), 30.0)
+        engine_clean, engine_detail = engine_inflight_clean(
+            ops, _all_engine_names(ops), 30.0
+        )
+        recovery_ok, recovery_msg = ops.verify_recovery()
+        report.invariant(
+            "P6",
+            clean_ok and engine_clean and recovery_ok,
+            detail=(
+                f"inflight={'ok' if clean_ok else clean_detail}, "
+                f"engine={'ok' if engine_clean else engine_detail}, "
+                f"recovery={recovery_msg}"
+            ),
+        )
+        return report.finish(
+            f"live decode-reserved eviction: victim={v_resp.code} "
+            f"(not 8429), survivors completed={survivors_completed}, "
+            f"metric victim.count={dr_victim} kv_tokens={dr_kv}, "
+            f"grades: {report.summary()}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        for handle in handles.values():
+            handle.cancel()
+        _finally_hygiene(ops, [], prefill_names)
+
+
+@case(
+    "atpm_preempt_cancel_not_found",
+    profiles=["single-nonbatch"],
+    source="preemption-stages audit (2026-09) — Cancel NOT_FOUND branch",
+)
+def atpm_preempt_cancel_not_found(ctx: CaseContext):
+    """Preemption-chain Cancel NOT_FOUND branch: the victim has FINISHED
+    by the time the preemption Cancel reaches its original prefill, and
+    the master's consumer side closes per DecodePreemptionCoordinator's
+    NOT_FOUND semantics (cleanSingleNotFound → abort → the incoming
+    settles 8431, never a hang and never a false success).
+
+    Construction (the engine cancelRequest branch ORDER is decisive):
+    a RUNNING victim's Cancel is answered by the downstreamDecodeOwners
+    branch (P→D conduction → ACCEPTED) BEFORE the finished-check, so the
+    victim must have cleared BOTH ownership directions (decode
+    completion runs clearUpstreamOwnership) AND hold a non-running
+    prefill-side lifecycle (the prefill marks its lifecycle entry
+    finished when the prefill phase ends) — that routes the Cancel to
+    alreadyFinished → NOT_FOUND.
+
+    Choreography: victim P30 (input=512, output=200 ≈ 1.5s of decode)
+    fires and reaches RUNNING on the single decode engine; the decode
+    engine then stops answering the master's status polls
+    (status_no_respond) — the master's view freezes on victim RUNNING +
+    slot 1/1 (decode maxEngineRequests=1) while the engine-side victim
+    runs to completion; the P70 incoming then fires: its decode
+    placement BLOCKS on the frozen view → DECODE_ENGINE_OWNED eviction
+    → the tokenized Cancel reaches the original prefill with the victim
+    already finished → NOT_FOUND → the incoming settles 8431.
+
+    The frozen-view window is bounded by the master's 3-strike health
+    demotion (3 consecutive 1s status RPC timeouts ≈ 3s): the victim's
+    remaining decode (~0.7s at injection) keeps the whole choreography
+    inside it — a slow finish would let the master demote the decode
+    engine first and the incoming would surface 8403 instead (recorded
+    as a construction miss, not a contract relaxation).
+
+    Contract:
+      * the incoming settles exactly 8431 RESOURCE_EXHAUSTED (the
+        coordinator's NOT_FOUND semantics); the victim completes
+        NORMALLY (full output, never engine-cancelled);
+      * the preemption Cancel really went out (Cancel RPC delta >= 1);
+      * after the injection clears, the master ledger drains (the
+        victim's stale RUNNING settles from the resumed decode status)
+        and recovery works.
+    """
+    env = ctx.env_manager.ensure(_nf_spec(ctx))
+    ops = ctx.engine_ops(env)
+    report = GradeReport(run_grade=ctx.grade)
+    base = rid_base(ctx, "priority")
+    fires: list = []
+    decode_name = None
+    injected = False
+    try:
+        decode_name = _decode_names(ops)[0]
+        victim = ops.next_request_id(base)
+        victim_fire = _fire(ops, victim, priority=30, input_len=512, output_len=200)
+        fires.append(victim_fire)
+        if not victim_fire.ok:
+            return False, f"victim schedule failed: code={victim_fire.code}"
+        if not _poll_decode_running(ops, victim):
+            return False, "victim never reached decode running"
+        time.sleep(0.6)
+
+        baseline_cancel = _cancel_rpc_total(ops)
+        inject_type(ops, decode_name, "status_no_respond")
+        injected = True
+        # Engine-side completion — the MASTER view stays frozen on
+        # RUNNING (the stale slot the incoming will block on).
+        if not _poll_engine_finished(ops, victim, 3.0):
+            return False, "victim never finished engine-side (3s window)"
+
+        inc = ops.next_request_id(base)
+        inc_fire = _fire(ops, inc, priority=70, input_len=512, output_len=2)
+        fires.append(inc_fire)
+
+        inc_rejected = not inc_fire.ok and inc_fire.code == CODE_RESOURCE_EXHAUSTED
+        victim_completed = bool(
+            victim_fire.terminal is not None
+            and victim_fire.terminal.wait(STREAM_WAIT_S)
+            and victim_fire.terminal.completed
+        )
+        victim_cancelled, victim_cancel_detail = ops.verify_engine_cancelled(victim)
+        cancel_delta = _cancel_rpc_total(ops) - baseline_cancel
+
+        # Clear the injection: the master resumes consuming decode
+        # status, the victim's stale RUNNING settles, the ledger drains.
+        inject_type(ops, decode_name, "status_no_respond", enabled=False)
+        injected = False
+        clean_ok, clean_detail = AssertUtils.inflight_clean(_master_http(ops), 30.0)
+        engine_clean, engine_detail = engine_inflight_clean(
+            ops, _all_engine_names(ops), 20.0
+        )
+        recovery_ok, recovery_msg = ops.verify_recovery()
+
+        report.invariant(
+            "PR6",
+            inc_rejected and victim_completed and not victim_cancelled,
+            context="cancel_not_found_settlement",
+            detail=(
+                f"incoming terminal={inc_fire.code} (expected exactly "
+                f"{CODE_RESOURCE_EXHAUSTED} — cleanSingleNotFound abort), "
+                f"victim completed={victim_completed} (normal "
+                f"completion), victim engine-cancelled={victim_cancelled} "
+                f"[{victim_cancel_detail}] (expect False — the Cancel "
+                f"arrived AFTER the finish, nothing to cancel)"
+            ),
+        )
+        report.invariant(
+            "AT5",
+            cancel_delta >= 1,
+            context="cancel_rpc_went_out",
+            detail=(
+                f"Cancel RPC delta={cancel_delta} (>=1 — the preemption "
+                f"cancel reached the original prefill and was answered "
+                f"NOT_FOUND)"
+            ),
+        )
+        report.invariant(
+            "P6",
+            clean_ok and engine_clean and recovery_ok,
+            detail=(
+                f"after injection cleared: "
+                f"inflight={'ok' if clean_ok else clean_detail}, "
+                f"engine={'ok' if engine_clean else engine_detail}, "
+                f"recovery={recovery_msg}"
+            ),
+        )
+        return report.finish(
+            f"cancel-not-found: incoming={inc_fire.code}, victim completed"
+            f"={victim_completed}, cancel_delta={cancel_delta}, "
+            f"grades: {report.summary()}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        if injected and decode_name is not None:
+            try:
+                inject_type(ops, decode_name, "status_no_respond", enabled=False)
+            except Exception:
+                pass
+        _finally_hygiene(ops, fires, [])
+
+
+@case(
+    "atpm_preempt_cancel_tombstoned",
+    profiles=["single-batch"],
+    requires=["enqueue_batch"],
+    source="preemption-stages audit (2026-09) — Cancel TOMBSTONED branch",
+)
+def atpm_preempt_cancel_tombstoned(ctx: CaseContext):
+    """Preemption-chain Cancel TOMBSTONED branch: the victim's original
+    prefill TRUE-CRASHED and restarted (memory wipe) before the
+    preemption Cancel fires, so the FRESH instance has never seen the
+    rid — the engine answers TOMBSTONED, installs the ABSENT_FENCE
+    tombstone, and the master's coordinator settles the PREEMPTION
+    through it (resumeTombstoned → committed: the incoming wins the
+    freed slot and completes).
+
+    Consumer-side difference vs the client-chain twin
+    (cancel.py cancel_engine_restarted_tombstoned_settle): there the
+    trigger is a CLIENT cancel settling one stream; here the trigger is
+    the ADMISSION preemption and what must close is the preemption
+    state machine — the eviction is COMMITTED by the tombstone, the
+    victim's slot is freed for the incoming, and the victim itself
+    settles at the master as a priority terminal.
+
+    Choreography (BATCH — crash_after only arms on the EnqueueBatch
+    handler): victim P30 (input=512, output=5000 ≈ 38s of decode,
+    outliving the whole crash/restart cycle) schedules, dispatches and
+    hands off to decode (first output received — the slot lives
+    decode-side and survives the prefill generation retire); prefill-0
+    then true-crashes (crash_after n=1 via a sacrificial request — the
+    victim's FetchResponse stream, whose pump thread lives in the
+    engine JVM, is cut by the crash) and restarts as a FRESH instance
+    (same address, empty memory).  The P70 incoming then fires: the
+    master view still has the victim RUNNING on decode (decode-0 is
+    healthy and reporting) → decode placement BLOCKED
+    (maxEngineRequests=1) → DECODE_ENGINE_OWNED eviction → the
+    tokenized Cancel reaches the FRESH prefill → never-seen branch →
+    TOMBSTONED + ABSENT_FENCE.
+
+    Contract:
+      * the incoming completes 200 with real FetchResponse output
+        (tombstone-settled preemption);
+      * the victim's stream is TERMINATED not completed (cut by the
+        crash) and the victim's engine-side decode leg finishes its
+        bounded orphan computation (engine inflight drains);
+      * the Cancel really reached the fresh instance (post-restart
+        Cancel RPC counter delta >= 1);
+      * the installed ABSENT_FENCE rejects a DIRECT late Enqueue of
+        the victim rid with exactly the typed 8429 (pre-admission);
+      * the sacrificial crash request leaves only a bounded,
+        non-growing master residue; recovery works.
+    """
+    env = ctx.env_manager.ensure(_ts_spec(ctx))
+    ops = ctx.engine_ops(env)
+    report = GradeReport(run_grade=ctx.grade)
+    base = rid_base(ctx, "priority")
+    victim_handle = None
+    inc_handle = None
+    try:
+        victim = ops.next_request_id(base)
+        victim_resp = ops.schedule(
+            victim, priority=30, input_len=512, output_len=5000, timeout_s=90.0
+        )
+        if victim_resp.code != CODE_OK or not victim_resp.success:
+            return False, f"victim schedule failed: {victim_resp.error_message}"
+        victim_handle = ops.start_stream(victim_resp, victim)
+        if not victim_handle.wait_first_output():
+            return False, "no output before the crash window"
+
+        dropped, restored = _crash_and_restart(ops, "prefill-0")
+        if not (dropped and restored):
+            return False, (
+                f"crash/restart failed: dropped={dropped}, " f"restored={restored}"
+            )
+        # The crash cut the victim's FetchResponse (pump thread lived in
+        # the engine JVM): terminated, not completed.
+        victim_cut = bool(
+            victim_handle.wait_end(10.0) and not victim_handle.snap.completed
+        )
+
+        baseline_cancel = _cancel_rpc_total(ops)
+        inc = ops.next_request_id(base)
+        inc_resp = ops.schedule(
+            inc, priority=70, input_len=512, output_len=2, timeout_s=90.0
+        )
+        inc_ok = inc_resp.code == CODE_OK and inc_resp.success
+        inc_completed = False
+        if inc_ok:
+            inc_handle = ops.start_stream(inc_resp, inc)
+            inc_ended = inc_handle.wait_end(45.0)
+            inc_completed = inc_ended and inc_handle.snap.completed
+        # The engine-side Cancel forward registers on the census
+        # asynchronously — poll the counter instead of sampling a
+        # stale value (cancel.py precedent).
+        cancel_reached = wait_for(
+            lambda: _cancel_rpc_total(ops) > baseline_cancel, 15.0, 0.5
+        )
+        cancel_delta = _cancel_rpc_total(ops) - baseline_cancel
+
+        # The ABSENT_FENCE tombstone installed by the TOMBSTONED answer
+        # rejects a direct late Enqueue of the victim rid with 8429.
+        fence_ok, fence_detail = False, "no probe"
+        try:
+            probe = ops.build_generate_input(victim, output_len=2)
+            ops._copy_role_addrs(probe, victim_resp)
+            ack = _direct_enqueue(
+                ops, ops.prefill_addr(victim_resp), probe, victim * 10 + 1
+            )
+            fence_ok, fence_detail = _fence_rejected_8429(ack, victim)
+        except Exception as exc:
+            fence_detail = repr(exc)
+
+        # Victim decode (output=5000 ≈ 38s) runs its bounded orphan
+        # computation — the 60s window covers it.
+        engine_clean, engine_detail = engine_inflight_clean(
+            ops, _all_engine_names(ops), 60.0
+        )
+        residue_ok, residue_detail = _fence_residue_stable(ops, 1)
+        recovery_ok, recovery_msg = ops.verify_recovery()
+
+        report.invariant(
+            "PR10",
+            victim_cut and inc_ok and inc_completed and cancel_delta >= 1,
+            context="tombstoned_preemption_settlement",
+            detail=(
+                f"victim stream cut by crash={victim_cut} "
+                f"(terminated, completed={victim_handle.snap.completed}), "
+                f"incoming schedule={inc_resp.code} FetchResponse "
+                f"completed={inc_completed} (tombstone-settled preemption "
+                f"— the freed slot went to the incoming), "
+                f"cancel_rpc_delta={cancel_delta} (>=1 on the fresh "
+                f"instance)"
+            ),
+        )
+        report.invariant(
+            "PR6",
+            fence_ok and cancel_reached,
+            context="tombstoned_absent_fence_installed",
+            detail=(
+                f"ABSENT_FENCE direct-enqueue rejection 8429={fence_ok} "
+                f"({fence_detail}), cancel reached engine={cancel_reached}"
+            ),
+        )
+        report.invariant(
+            "P6",
+            engine_clean and residue_ok and recovery_ok,
+            detail=(
+                f"engine={'ok' if engine_clean else engine_detail}, "
+                f"master residue stable={residue_ok} "
+                f"({residue_detail}), recovery={recovery_msg}"
+            ),
+        )
+        return report.finish(
+            f"tombstoned preemption: victim cut+8429-fenced, incoming "
+            f"completed={inc_completed}, cancel_delta={cancel_delta}, "
+            f"grades: {report.summary()}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        if victim_handle is not None:
+            victim_handle.cancel()
+        if inc_handle is not None:
+            inc_handle.cancel()
+        _restore_engines(ops)

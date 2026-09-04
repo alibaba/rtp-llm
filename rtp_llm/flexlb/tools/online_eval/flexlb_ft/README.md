@@ -41,7 +41,7 @@ python3 flexlb_functional_tests.py --category kv --json results.json   # 单分�
 python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbatch   # 子串过滤
 ```
 
-`--cases` 为精确 case 名逗号列表，仍受 `--profile` 过滤，未知名报错退出（rc=2）。其余 runner 参数（`--run-root` 等）见其 `--help`；全集 **119 例**（9 分类），`--list` 按当前 profile 过滤，默认 batch-window 下 104 例（priority 14 例仅 single-nonbatch、1 例仅 NON_BATCH 投递形态适用），用例间环境按需复用 / 重建。
+`--cases` 为精确 case 名逗号列表，仍受 `--profile` 过滤，未知名报错退出（rc=2）。其余 runner 参数（`--run-root` 等）见其 `--help`；全集 **123 例**（9 分类），`--list` 按当前 profile 过滤，默认 batch-window 下 104 例（priority 14 例仅 single-nonbatch、1 例仅 NON_BATCH 投递形态适用；新增的 4 例抢占 live/分支 case 在 single-batch / single-nonbatch 形态下），用例间环境按需复用 / 重建。
 
 `--profile` / `--grade` 的取值语义（两个入口通用）：
 
@@ -71,7 +71,7 @@ python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbat
 
 实测参考（110 开发机容器，batch-window profile，共享负载）：串行单进程 wall 4918s（98 例快照）；category 级 4 路 wall 2444s（2.01x）——wall 被最重家族钳制（status 24 例实测 2104s，占串行 43%）；case 级 6 路 wall 941s（5.22x，15.7 分钟，最重路 16 例），8 路（`--mock-stride 500`，mock base 平移避开他人占用段）wall 703s（6.99x，11.7 分钟）——逐例摊平后钳制消除。等价性口径：并行 run 对串行基线逐例对照 + FINDING 集一致；实测 6 路 89/98 一致、9 例翻转全部单向好转（对翻转例同 jar 同 env 定向复跑两轮结果稳定，属快照漂移而非编排回归）；8 路对 6 路 FINDING 集完全相等。
 
-## 测试分类（119 例）
+## 测试分类（123 例）
 
 断言一律写**正确契约**而非当前实现——跑挂即 finding。表内「期望」为一句话摘要，完整断言与构造细节以各用例 docstring 为准。
 
@@ -235,9 +235,9 @@ master 自身进程级故障与冷启动行为，以及双实例 HA 链路（冻
 | `engine_prefill_token_budget_boundary` | 预算 2048 == 4×512（恰好等于） | 不拆：1 批/4 请求/最大 4 verbatim（构造 gate）；master 原子结算（inflight_batches=1、requests 4→0 无中间台阶）；TTFT 批形状中性（对单请求基线劣化 ≤50%）；执行窗口内无 park；账目干净并恢复 |
 | `engine_prefill_regroup_disabled_verbatim` | 双 0 关闭重组（复现旧行为） | master 批原样执行：1 批/4 请求/最大 4（构造 gate）；master 原子结算（1 批/4 请求、无中间台阶、scheduler 不回升）；无 park；成员同批归属；账目干净并恢复 |
 
-### priority（15 例 · 14 例固定 single-nonbatch + PRIORITY 轴 case 层注入、1 例全 profile）
+### priority（19 例 · 15 例固定 single-nonbatch + PRIORITY 轴 case 层注入、3 例固定 single-batch、1 例全 profile）
 
-优先级排序 + auto-TPM 抢占/降级契约（2026-09 自源线 `flexlb-priority-auto-tpm-ft` 迁移）。PRIORITY ordering 轴经 case 层 JSON 注入（`_prio_config` 走 `build_flexlb_config(ordering="priority", decision="single", dispatcher="non_batch")`，不扩 profile 表）；优先级双通道——proto field 14 与 `x-dashscope-inner-qos-level` header，由 PriorityNormalizer 归一（proto > header > defaultPriority）。基线标注含义：`[EV-1-FIXED]` 校准于 intake3 PendingPlacementCoordinator 线（拉式 park，6ad0315f10），`[EV-2]` 为 decode 驱逐不可达基线——两者在 intake3-rebuild Java 上的成立性待远端探针核对，断言口径迁移自源线不改。
+优先级排序 + auto-TPM 抢占/降级契约（2026-09 自源线 `flexlb-priority-auto-tpm-ft` 迁移）。PRIORITY ordering 轴经 case 层 JSON 注入（`_prio_config` 走 `build_flexlb_config(ordering="priority", decision="single", dispatcher="non_batch")`，不扩 profile 表；live 家族用 `dispatcher="batch"` 变体）；优先级双通道——proto field 14 与 `x-dashscope-inner-qos-level` header，由 PriorityNormalizer 归一（proto > header > defaultPriority）。基线标注含义：`[EV-1-FIXED]` 校准于 intake3 PendingPlacementCoordinator 线（拉式 park，6ad0315f10），`[EV-2]` 为 decode 驱逐不可达基线——两者在 intake3-rebuild Java 上的成立性待远端探针核对，断言口径迁移自源线不改。`_live`/分支 case（2026-09 抢占 stage 覆盖缺口补齐）在 BATCH 投递形态下驱动真实 8400/8429 驱逐与 Cancel 分支语义（设计输入：抢占 stage 审计报告）。
 
 | 用例 | 场景 | 期望 |
 | --- | --- | --- |
@@ -256,6 +256,16 @@ master 自身进程级故障与冷启动行为，以及双实例 HA 链路（冻
 | `atpm_config_strict_reject` | 3 个非法 FLEXLB_CONFIG 原始 JSON 变体（removed 字段 / FIFO+defaultPriority / owned 无 engineCancellation） | master 启动失败 + 严格解析器报文族命中；rejected 后 current=None（AT1） |
 | `atpm_decode_reservation_priority` | decode 面三波：30<70 / 50==50 / kvBucket 偏好（D1 共享 env，kv_pressure 注入时序纪律） | [EV-2] 三波零驱逐、victim metric delta=0；[EV-1-FIXED] incoming 8511 park 终态（AT7 跨阶段一致性） |
 | `atpm_observability_integrity` | ENV-O1 复合编排（debug 日志 + FLEXLB_MONITOR_MODE=all） | 客户面形状 + `auto_tpm.request.count` 分桶 4/3/2/1 + latency success 桶 + `[priority-scheduler]` 日志 + pv.log admissionRejectReason 全在场（AT8/AT6） |
+| `atpm_preempt_prefill_queued_live` | BATCH 投递 + PREFILL_QUEUED-only 抢占 + maxWaiting=2：P50 占位引擎、双 P30 排队（MASTER_QUEUED）、P70 溢队触发换队 | 真实换队驱逐：victim 精确 8400 且引擎从未见过 rid（master 本地原子事务）+ 幸存者全完成 + `victim.count{stage=prefill_queued}`=1（PR10/PR5/PR6/P6） |
+| `atpm_preempt_decode_reserved_live` | BATCH + 生产基线 stage 组合 {PREFILL_QUEUED, DECODE_RESERVED} + 单 decode 4 块 KV 池：P90/P30 影子各 512 占池、P70 input=3500 溢出 hardAvailable | 真实影子预留驱逐：victim 8400 且非 8429（stage 判别性特征）+ `victim.kv_tokens{stage=decode_reserved}`≥428（影子覆盖 deficit）+ 幸存者完成 |
+| `atpm_preempt_cancel_not_found` | victim 已完成（decode 侧 clearUpstreamOwnership + prefill 侧 lifecycle completed）时抢占 Cancel 才到原 prefill（status_no_respond 冻结 master 视图撑过 3s 窗口） | incoming 精确 8431（cleanSingleNotFound abort 语义）、victim 正常完成未被取消、Cancel RPC delta≥1、解除注入后账目排空 + 恢复 |
+| `atpm_preempt_cancel_tombstoned` | victim 原 prefill 真 crash 重启（内存清零，crash_after）后抢占 Cancel 到达 fresh 实例（victim 长 decode 撕过 crash 窗口） | TOMBSTONED 消费端收口：incoming 完成占用释放槽位（resumeTombstoned→committed）、victim 流被 crash 切断非完成、ABSENT_FENCE 直连重投 8429 拒绝、牺牲请求 residue 有界不增长 + 恢复 |
+
+**抢占 stage 覆盖注记（2026-09，live 家族设计输入：抢占 stage 审计报告）**：
+
+- `DECODE_ENGINE_OWNED` 的 **ENGINE_MAY_HAVE_SEEN** 子相位为已知不可覆盖缺口——连 Java 白盒 PreemptionPhasesE2ETest 都无该相位的 case；黑盒下 cancel 发出与 engine 认领之间的竞态窗口不可控，不硬造（成本 4 的低置信相位，语义上仅影响 coordinator 的 ack 等待起点）。
+- **ACCEPTED_NOT_RUNNING** 子相位在黑盒下同样不可行：该窗口要求请求已进 engine 队列但尚未 RUNNING，而 mock 的 decodeMaxConcurrency=128 无法在稳定时序下打满出队窗口，且 reportQueuedAsKvAllocated 投影需要性能 JSON 注入——构造面不可控，注记跳过。
+- `cases/cancel.py` 的 victim 终态门“非完成→精确 8429”一行硬化留待后续（该文件另一会话活跃，本轮不碰）；live 家族的 TOMBSTONED case 已在抢占协议侧钉住同一终态。
 
 ## 新增用例
 
