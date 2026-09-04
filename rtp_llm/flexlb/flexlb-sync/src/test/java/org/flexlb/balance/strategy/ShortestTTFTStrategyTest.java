@@ -7,6 +7,7 @@ import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
+import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.config.ConfigService;
@@ -74,7 +75,7 @@ class ShortestTTFTStrategyTest {
 
         strategy = new ShortestTTFTStrategy(
                 engineWorkerStatus, cacheAwareService, resourceMeasureFactory,
-                engineHealthReporter);
+                engineHealthReporter, new SessionPlacementStore());
     }
 
     // ==================== Test Cases ====================

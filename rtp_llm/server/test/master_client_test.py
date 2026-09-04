@@ -10,6 +10,8 @@ from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
     HIGHER_PRIORITY_AHEAD,
     RESOURCE_EXHAUSTED,
     SAME_PRIORITY_AHEAD,
+    SESSION_STATE_ESTABLISHED,
+    SESSION_STATE_NEW,
     SCHEDULE_FAILURE_REASON_UNSPECIFIED,
     FlexlbScheduleResponsePB,
     FlexlbServerStatusPB,
@@ -188,6 +190,68 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(client.calls[0]["request_pb"].priority, 70)
+
+    async def test_schedule_payload_contains_session_routing_hint(self):
+        for state, expected in (
+            ("new", SESSION_STATE_NEW),
+            ("established", SESSION_STATE_ESTABLISHED),
+        ):
+            with self.subTest(state=state):
+                client = _CaptureMasterClient()
+                await client.get_backend_role_addrs(
+                    block_cache_keys=[1],
+                    cache_key_block_size=1024,
+                    input=_FakeInput(
+                        headers={
+                            "x-ds-inference-session-id": "isess_v1_example",
+                            "x-ds-inference-session-state": state,
+                        }
+                    ),
+                    request_id=106,
+                    input_pb=_FakeInputPB(),
+                )
+
+                hint = client.calls[0]["request_pb"].session_routing_hint
+                self.assertEqual(hint.schema_version, 1)
+                self.assertEqual(hint.session_id, "isess_v1_example")
+                self.assertEqual(hint.state, expected)
+
+    async def test_invalid_session_routing_hint_is_omitted(self):
+        client = _CaptureMasterClient()
+        await client.get_backend_role_addrs(
+            block_cache_keys=[1],
+            cache_key_block_size=1024,
+            input=_FakeInput(
+                headers={
+                    "x-ds-inference-session-id": "isess_v1_example",
+                    "x-ds-inference-session-state": "unknown",
+                }
+            ),
+            request_id=107,
+            input_pb=_FakeInputPB(),
+        )
+
+        request_pb = client.calls[0]["request_pb"]
+        self.assertFalse(request_pb.HasField("session_routing_hint"))
+
+    async def test_non_ascii_session_routing_hint_is_omitted(self):
+        client = _CaptureMasterClient()
+        await client.get_backend_role_addrs(
+            block_cache_keys=[1],
+            cache_key_block_size=1024,
+            input=_FakeInput(
+                headers={
+                    "x-ds-inference-session-id": "isess_v1_😀",
+                    "x-ds-inference-session-state": "established",
+                }
+            ),
+            request_id=108,
+            input_pb=_FakeInputPB(),
+        )
+
+        self.assertFalse(
+            client.calls[0]["request_pb"].HasField("session_routing_hint")
+        )
 
     async def test_schedule_payload_priority_defaults_when_header_missing(self):
         client = _CaptureMasterClient()

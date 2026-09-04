@@ -6,6 +6,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
+import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
@@ -59,15 +60,18 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
     private final CacheAwareService cacheAwareService;
     private final ResourceMeasureFactory resourceMeasureFactory;
     private final EngineHealthReporter engineHealthReporter;
+    private final SessionPlacementStore sessionPlacementStore;
 
     public ShortestTTFTStrategy(EngineWorkerStatus engineWorkerStatus,
                                 CacheAwareService cacheAwareService,
                                 ResourceMeasureFactory resourceMeasureFactory,
-                                EngineHealthReporter engineHealthReporter) {
+                                EngineHealthReporter engineHealthReporter,
+                                SessionPlacementStore sessionPlacementStore) {
         this.engineWorkerStatus = engineWorkerStatus;
         this.cacheAwareService = cacheAwareService;
         this.resourceMeasureFactory = resourceMeasureFactory;
         this.engineHealthReporter = engineHealthReporter;
+        this.sessionPlacementStore = sessionPlacementStore;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.SHORTEST_TTFT, this);
     }
 
@@ -171,62 +175,87 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
                                                 FlexlbConfig config) {
         RoutingConfig.CacheAffinityConfig cacheAffinity = config.getRouter().getRoles()
                 .getPrefill().getCacheAffinity();
-        if (cacheAffinity == null) {
-            return selectBaselineEndpoint(scoredEndpoints, config);
+        CacheAffinityPolicy.Decision affinity = null;
+        long minTtftMs = scoredEndpoints.getFirst().ttft();
+        if (cacheAffinity != null) {
+            long referenceHitTokens = scoredEndpoints.stream()
+                    .filter(candidate -> candidate.ttft() == minTtftMs)
+                    .mapToLong(ScoredEndpoint::hitCache)
+                    .max()
+                    .orElse(0L);
+            affinity = CacheAffinityPolicy.evaluate(
+                    scoredEndpoints.size(),
+                    index -> scoredEndpoints.get(index).ttft(),
+                    index -> scoredEndpoints.get(index).hitCache(),
+                    minTtftMs,
+                    referenceHitTokens,
+                    seqLen,
+                    cacheAffinity.getMaxExtraTtftMs(),
+                    cacheAffinity.getMinPrefixHitPercent());
         }
 
-        long minTtftMs = scoredEndpoints.getFirst().ttft();
-        long referenceHitTokens = scoredEndpoints.stream()
-                .filter(candidate -> candidate.ttft() == minTtftMs)
-                .mapToLong(ScoredEndpoint::hitCache)
-                .max()
-                .orElse(0L);
-        CacheAffinityPolicy.Decision affinity = CacheAffinityPolicy.evaluate(
-                scoredEndpoints.size(),
-                index -> scoredEndpoints.get(index).ttft(),
-                index -> scoredEndpoints.get(index).hitCache(),
-                minTtftMs,
-                referenceHitTokens,
-                seqLen,
-                cacheAffinity.getMaxExtraTtftMs(),
-                cacheAffinity.getMinPrefixHitPercent());
-
-        ScoredEndpoint selected;
-        String reason;
-        if (affinity.hasPreference()) {
+        if (affinity != null && affinity.hasPreference()) {
             List<ScoredEndpoint> preferenceOrder = new ArrayList<>(affinity.preferredCount());
             for (int i = 0; i < affinity.preferredCount(); i++) {
                 preferenceOrder.add(scoredEndpoints.get(affinity.preferredIndex(i)));
             }
-            selected = selectFirstWithoutConcurrentConflict(preferenceOrder);
+            ScoredEndpoint selected = selectFirstWithoutConcurrentConflict(preferenceOrder);
             if (selected == null) {
-                selected = selectBaselineEndpoint(
-                        refreshSelectionSnapshots(scoredEndpoints), config);
-                reason = "CACHE_AFFINITY_FALLBACK";
-            } else {
-                reason = selected.equals(preferenceOrder.getFirst())
-                        ? CacheAffinityPolicy.Reason.CACHE_LEADER.name()
-                        : "CACHE_AFFINITY_FALLBACK";
+                selected = selectBaselineEndpoint(refreshSelectionSnapshots(scoredEndpoints), config);
+                if (selected != null) {
+                    reportCacheAffinityDecision(
+                            roleType, selected.ep().getIp(), "CACHE_AFFINITY_FALLBACK");
+                    SessionAffinityPolicy.reportDecision(balanceContext, roleType,
+                            engineHealthReporter,
+                            SessionAffinityPolicy.Reason.CACHE_AFFINITY_PRECEDENCE);
+                }
+                return selected;
             }
-        } else {
-            selected = selectBaselineEndpoint(scoredEndpoints, config);
-            reason = affinity.reason().name();
+            String reason = selected.equals(preferenceOrder.getFirst())
+                    ? CacheAffinityPolicy.Reason.CACHE_LEADER.name()
+                    : "CACHE_AFFINITY_FALLBACK";
+            reportCacheAffinityDecision(roleType, selected.ep().getIp(), reason);
+            SessionAffinityPolicy.reportDecision(balanceContext, roleType,
+                    engineHealthReporter,
+                    SessionAffinityPolicy.Reason.CACHE_AFFINITY_PRECEDENCE);
+            return selected;
         }
 
-        if (selected != null) {
-            reportCacheAffinityDecision(roleType, selected.ep().getIp(), reason);
-            Logger.debug(
-                    "ShortestTtft cache-affinity decision - role: {}, group: {}, "
-                            + "selected: {}, minTtftMs: {}, selectedTtftMs: {}, "
-                            + "ttftCutoffMs: {}, hitTokens: {}, reason: {}",
-                    roleType,
-                    group,
-                    selected.ep().ipPort(),
-                    affinity.minScoreMs(),
-                    selected.ttft(),
-                    affinity.scoreCutoffMs(),
-                    selected.hitCache(),
-                    reason);
+        RoutingConfig.SessionAffinityConfig sessionConfig = config.getRouter().getRoles()
+                .getPrefill().getSessionAffinity();
+        SessionAffinityPolicy.Decision sessionAffinity = SessionAffinityPolicy.evaluate(
+                balanceContext.getRequest(), sessionConfig, sessionPlacementStore,
+                scoredEndpoints.size(),
+                index -> scoredEndpoints.get(index).ep().ipPort(),
+                index -> scoredEndpoints.get(index).ttft(), minTtftMs);
+        if (sessionAffinity.hasPreference()) {
+            ScoredEndpoint preferred = scoredEndpoints.get(sessionAffinity.preferredIndex());
+            ScoredEndpoint selected = selectFirstWithoutConcurrentConflict(List.of(preferred));
+            if (selected != null) {
+                if (affinity != null) {
+                    reportCacheAffinityDecision(
+                            roleType, selected.ep().getIp(), affinity.reason().name());
+                }
+                SessionAffinityPolicy.reportDecision(
+                        balanceContext, roleType, engineHealthReporter, sessionAffinity.reason());
+                return selected;
+            }
+            SessionAffinityPolicy.reportDecision(balanceContext, roleType,
+                    engineHealthReporter,
+                    SessionAffinityPolicy.Reason.SESSION_AFFINITY_CAS_FALLBACK);
+            selected = selectBaselineEndpoint(refreshSelectionSnapshots(scoredEndpoints), config);
+            if (selected != null && affinity != null) {
+                reportCacheAffinityDecision(
+                        roleType, selected.ep().getIp(), affinity.reason().name());
+            }
+            return selected;
+        }
+        SessionAffinityPolicy.reportDecision(
+                balanceContext, roleType, engineHealthReporter, sessionAffinity.reason());
+
+        ScoredEndpoint selected = selectBaselineEndpoint(scoredEndpoints, config);
+        if (selected != null && affinity != null) {
+            reportCacheAffinityDecision(roleType, selected.ep().getIp(), affinity.reason().name());
         }
         return selected;
     }

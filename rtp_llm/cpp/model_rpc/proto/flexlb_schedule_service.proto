@@ -38,6 +38,21 @@ message RequestLifecyclePB {
     int64 batch_id = 3;
 }
 
+enum SessionStatePB {
+    SESSION_STATE_UNSPECIFIED = 0;
+    SESSION_STATE_NEW = 1;
+    SESSION_STATE_ESTABLISHED = 2;
+}
+
+message SessionRoutingHintPB {
+    // Unknown schema versions are ignored as one unit. The caller guarantees
+    // session_id uniqueness; DashScope namespaces by user and model before
+    // generating an 80-bit random identifier. NEW means first use of this ID.
+    uint32 schema_version = 1;
+    string session_id = 2;
+    SessionStatePB state = 3;
+}
+
 message FlexlbScheduleRequestPB {
     int64 request_id = 1;
     // Wire-compatible with the historical GenerateInputPB message field:
@@ -64,6 +79,7 @@ message FlexlbScheduleRequestPB {
     // metadata) preserves the guard through a rolling upgrade because older
     // protobuf runtimes retain unknown fields when they relay the request.
     uint32 forward_hop = 15;
+    SessionRoutingHintPB session_routing_hint = 16;
 }
 
 message FlexlbServerStatusPB {

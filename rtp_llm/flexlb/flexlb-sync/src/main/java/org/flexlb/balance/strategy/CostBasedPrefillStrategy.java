@@ -4,6 +4,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
+import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
@@ -34,17 +35,20 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     private final CacheAwareService cacheAwareService;
     private final ResourceMeasureFactory resourceMeasureFactory;
     private final EngineHealthReporter engineHealthReporter;
+    private final SessionPlacementStore sessionPlacementStore;
     private final ThreadLocal<CandidateSet> candidateSets =
             ThreadLocal.withInitial(CandidateSet::new);
 
     public CostBasedPrefillStrategy(EngineWorkerStatus engineWorkerStatus,
                                     CacheAwareService cacheAwareService,
                                     ResourceMeasureFactory resourceMeasureFactory,
-                                    EngineHealthReporter engineHealthReporter) {
+                                    EngineHealthReporter engineHealthReporter,
+                                    SessionPlacementStore sessionPlacementStore) {
         this.engineWorkerStatus = engineWorkerStatus;
         this.cacheAwareService = cacheAwareService;
         this.resourceMeasureFactory = resourceMeasureFactory;
         this.engineHealthReporter = engineHealthReporter;
+        this.sessionPlacementStore = sessionPlacementStore;
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_PREFILL, this);
     }
 
@@ -141,49 +145,54 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
 
         RoutingConfig.CacheAffinityConfig cacheAffinity = config.getRouter().getRoles()
                 .getPrefill().getCacheAffinity();
-        if (cacheAffinity == null) {
-            return selectBaselineCandidate(survivors, minScore, config);
-        }
-
-        long referenceHitTokens = 0L;
-        for (int i = 0; i < survivors.size(); i++) {
-            if (survivors.score(i) == minScore) {
-                referenceHitTokens = Math.max(referenceHitTokens, survivors.cacheHit(i));
+        CacheAffinityPolicy.Decision affinity = null;
+        if (cacheAffinity != null) {
+            long referenceHitTokens = 0L;
+            for (int i = 0; i < survivors.size(); i++) {
+                if (survivors.score(i) == minScore) {
+                    referenceHitTokens = Math.max(referenceHitTokens, survivors.cacheHit(i));
+                }
             }
-        }
-        CacheAffinityPolicy.Decision affinity = CacheAffinityPolicy.evaluate(
-                survivors.size(),
-                survivors::score,
-                survivors::cacheHit,
-                minScore,
-                referenceHitTokens,
-                seqLen,
-                cacheAffinity.getMaxExtraTtftMs(),
-                cacheAffinity.getMinPrefixHitPercent());
-
-        int selectedIndex;
-        if (affinity.hasPreference()) {
-            selectedIndex = selectCacheLeader(survivors, affinity);
-        } else {
-            selectedIndex = selectBaselineCandidate(survivors, minScore, config);
+            affinity = CacheAffinityPolicy.evaluate(
+                    survivors.size(), survivors::score, survivors::cacheHit, minScore,
+                    referenceHitTokens, seqLen, cacheAffinity.getMaxExtraTtftMs(),
+                    cacheAffinity.getMinPrefixHitPercent());
         }
 
-        if (selectedIndex >= 0) {
-            String reason = affinity.reason().name();
-            reportCacheAffinityDecision(
-                    roleType, survivors.endpoint(selectedIndex).getIp(), reason);
-            Logger.debug(
-                    "CostBasedPrefill cache-affinity decision - role: {}, group: {}, "
-                            + "selected: {}, minScoreMs: {}, selectedScoreMs: {}, "
-                            + "scoreCutoffMs: {}, hitTokens: {}, reason: {}",
-                    roleType,
-                    group,
-                    survivors.endpoint(selectedIndex).ipPort(),
-                    affinity.minScoreMs(),
-                    survivors.score(selectedIndex),
-                    affinity.scoreCutoffMs(),
-                    survivors.cacheHit(selectedIndex),
-                    reason);
+        if (affinity != null && affinity.hasPreference()) {
+            int selectedIndex = selectCacheLeader(survivors, affinity);
+            if (selectedIndex >= 0) {
+                reportCacheAffinityDecision(roleType,
+                        survivors.endpoint(selectedIndex).getIp(), affinity.reason().name());
+                SessionAffinityPolicy.reportDecision(balanceContext, roleType,
+                        engineHealthReporter,
+                        SessionAffinityPolicy.Reason.CACHE_AFFINITY_PRECEDENCE);
+            }
+            return selectedIndex;
+        }
+
+        SessionAffinityPolicy.Decision sessionAffinity = SessionAffinityPolicy.evaluate(
+                balanceContext.getRequest(),
+                config.getRouter().getRoles().getPrefill().getSessionAffinity(),
+                sessionPlacementStore, survivors.size(),
+                index -> survivors.endpoint(index).ipPort(), survivors::score, minScore);
+        if (sessionAffinity.hasPreference()) {
+            int selectedIndex = sessionAffinity.preferredIndex();
+            if (affinity != null) {
+                reportCacheAffinityDecision(roleType,
+                        survivors.endpoint(selectedIndex).getIp(), affinity.reason().name());
+            }
+            SessionAffinityPolicy.reportDecision(
+                    balanceContext, roleType, engineHealthReporter, sessionAffinity.reason());
+            return selectedIndex;
+        }
+        SessionAffinityPolicy.reportDecision(
+                balanceContext, roleType, engineHealthReporter, sessionAffinity.reason());
+
+        int selectedIndex = selectBaselineCandidate(survivors, minScore, config);
+        if (selectedIndex >= 0 && affinity != null) {
+            reportCacheAffinityDecision(roleType,
+                    survivors.endpoint(selectedIndex).getIp(), affinity.reason().name());
         }
         return selectedIndex;
     }

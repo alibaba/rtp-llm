@@ -1,7 +1,7 @@
 package org.flexlb.dao.loadbalance;
 
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Getter;
 import lombok.Setter;
@@ -15,6 +15,7 @@ import java.util.List;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class Request {
     public static final long DEFAULT_GENERATE_TIMEOUT_MS = 60L * 60L * 1000L;
+    public static final int SESSION_SCHEMA_VERSION = 1;
 
     @ToString.Exclude
     @JsonProperty("block_cache_keys")
@@ -61,5 +62,17 @@ public class Request {
      */
     @JsonProperty("priority")
     private int priority = 0;
+
+    private int sessionSchemaVersion;
+
+    private String inferenceSessionId = "";
+
+    private SessionState inferenceSessionState = SessionState.UNSPECIFIED;
+
+    public enum SessionState {
+        UNSPECIFIED,
+        NEW,
+        ESTABLISHED
+    }
 
 }

@@ -26,6 +26,7 @@ from rtp_llm.dash_sc.structural_tag import (
     structural_tag_from_response_format,
     validate_structural_tag_shape,
 )
+from rtp_llm.server.request_headers import extract_request_headers
 from rtp_llm.utils.base_model_datatypes import GenerateOutputs
 
 _INT32_MIN = -2_147_483_648
@@ -987,15 +988,7 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
             ds_attrs.get("x-dashscope-inner-request-priority")
         )
 
-    request_headers: dict[str, str] = {}
-    for header_name in (
-        "user_id",
-        "x-dashscope-apikeyid",
-        "x-dashscope-inner-qos-level",
-    ):
-        value = _normalize_non_empty_str(ds_attrs.get(header_name))
-        if value is not None:
-            request_headers[header_name] = value
+    request_headers = extract_request_headers(ds_attrs)
 
     return OtherParams(
         return_input_ids=return_input_ids,

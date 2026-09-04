@@ -1,9 +1,12 @@
 from typing import Any, Dict, Mapping, Optional
 
 QOS_PRIORITY_HEADER = "x-dashscope-inner-qos-level"
+INFERENCE_SESSION_ID_HEADER = "x-ds-inference-session-id"
+INFERENCE_SESSION_STATE_HEADER = "x-ds-inference-session-state"
 DEFAULT_QOS_PRIORITY = 50
 MIN_QOS_PRIORITY = 1
 MAX_QOS_PRIORITY = 100
+MAX_INFERENCE_SESSION_ID_LENGTH = 256
 
 REQUEST_HEADER_NAMES = (
     "user_id",
@@ -18,6 +21,8 @@ REQUEST_HEADER_NAMES = (
     "eagleeye-traceid",
     "x-b3-traceid",
     QOS_PRIORITY_HEADER,
+    INFERENCE_SESSION_ID_HEADER,
+    INFERENCE_SESSION_STATE_HEADER,
 )
 CORRELATION_HEADER_NAMES = (
     "x-dashscope-request-id",
@@ -58,6 +63,13 @@ def extract_request_headers(
         if value is not None:
             result[header_name] = value
     return result
+
+
+def is_valid_inference_session_id(value: str) -> bool:
+    return (
+        0 < len(value) <= MAX_INFERENCE_SESSION_ID_LENGTH
+        and all("!" <= char <= "~" for char in value)
+    )
 
 
 def normalize_request_headers(headers: Optional[Mapping[str, Any]]) -> Dict[str, str]:

@@ -5,6 +5,7 @@ import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.SingleThreadEventExecutor;
 import org.apache.commons.collections4.CollectionUtils;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.BalanceContext;
@@ -68,6 +69,8 @@ import static org.flexlb.constant.MetricConstant.GRPC_SERVER_PROCESS_MS;
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_ESTIMATED_TTFT_MS;
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_EXECUTION_TIME_MS;
 import static org.flexlb.constant.MetricConstant.REQUEST_NETWORK_DELAY_MS;
+import static org.flexlb.constant.MetricConstant.SESSION_AFFINITY_DECISION;
+import static org.flexlb.constant.MetricConstant.SESSION_PLACEMENT_SIZE;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_EVENT;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_NODE;
 
@@ -85,16 +88,20 @@ public class EngineHealthReporter {
 
     private final EngineGrpcClient engineGrpcClient;
 
+    private final SessionPlacementStore sessionPlacementStore;
+
     private final Map<String, EventLoopGroup> eventLoopGroupMap;
 
     @Autowired
     public EngineHealthReporter(FlexMonitor monitor,
                                 CacheMetricsReporter cacheMetricsReporter,
                                 EngineGrpcClient engineGrpcClient,
-                                LoopResources serverLoopResources) {
+                                LoopResources serverLoopResources,
+                                SessionPlacementStore sessionPlacementStore) {
         this.monitor = monitor;
         this.cacheMetricsReporter = cacheMetricsReporter;
         this.engineGrpcClient = engineGrpcClient;
+        this.sessionPlacementStore = sessionPlacementStore;
         this.eventLoopGroupMap = Map.of(
                 "serverWorker", serverLoopResources.onServer(true),
                 "serverSelector", serverLoopResources.onServerSelect(true),
@@ -147,6 +154,8 @@ public class EngineHealthReporter {
         this.monitor.register(REQUEST_NETWORK_DELAY_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(GRPC_SERVER_PROCESS_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(FORWARD_TO_MASTER_RESULT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        this.monitor.register(SESSION_AFFINITY_DECISION, FlexMetricType.QPS);
+        this.monitor.register(SESSION_PLACEMENT_SIZE, FlexMetricType.GAUGE);
     }
 
     public void reportLatencyMetric(String modelName, String role, double result, double result2) {
@@ -166,7 +175,6 @@ public class EngineHealthReporter {
             monitor.report(ENGINE_PREFILL_WORKER_NUMBER, tags, modelWorkerStatus.getPrefillStatusMap().size());
             monitor.report(ENGINE_DECODE_WORKER_NUMBER, tags, modelWorkerStatus.getDecodeStatusMap().size());
         }
-
         if (AbstractEngineStatusSynchronizer.engineSyncExecutor != null
                 && AbstractEngineStatusSynchronizer.statusCheckExecutor != null
                 && WorkerAddressService.serviceDiscoveryExecutor != null) {
@@ -180,6 +188,11 @@ public class EngineHealthReporter {
         reportThreadPoolInfo(ENGINE_BALANCING_THREAD_POOL_INFO, "gRpcExecutor", (ThreadPoolExecutor) engineGrpcClient.getExecutor());
 
         eventLoopGroupMap.forEach(this::reportEventLoopGroup);
+        reportSessionPlacementSize();
+    }
+
+    void reportSessionPlacementSize() {
+        monitor.report(SESSION_PLACEMENT_SIZE, sessionPlacementStore.estimatedSize());
     }
 
     public void reportServiceDiscoveryResult(String modelName, int result, String role) {
@@ -406,6 +419,14 @@ public class EngineHealthReporter {
                                             String engineIp,
                                             String decision) {
         cacheMetricsReporter.reportCacheAffinityDecision(roleType, engineIp, decision);
+    }
+
+    public void reportSessionAffinityDecision(RoleType roleType, String reason) {
+        if (roleType == null || reason == null) {
+            return;
+        }
+        monitor.report(SESSION_AFFINITY_DECISION,
+                FlexMetricTags.of("role", roleType.name(), "reason", reason), 1.0);
     }
 
     public void reportArriveDelayTime(BalanceContext ctx) {

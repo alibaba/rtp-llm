@@ -100,6 +100,11 @@ class ConfigServiceTest {
                         "cacheAffinity": {
                           "maxExtraTtftMs": 25,
                           "minPrefixHitPercent": 10
+                        },
+                        "sessionAffinity": {
+                          "ttlMs": 1800000,
+                          "maxExtraTtftMs": 40,
+                          "maxEntries": 250000
                         }
                       },
                       "decode": {
@@ -166,6 +171,12 @@ class ConfigServiceTest {
                 .getMaxPendingVsAverageMultiplier());
         assertEquals(2.5, candidateChoice.getOutlierRejection()
                 .getMaxWaitVsAverageMultiplier());
+        assertEquals(1_800_000L, config.getRouter().getRoles().getPrefill()
+                .getSessionAffinity().getTtlMs());
+        assertEquals(40L, config.getRouter().getRoles().getPrefill()
+                .getSessionAffinity().getMaxExtraTtftMs());
+        assertEquals(250_000L, config.getRouter().getRoles().getPrefill()
+                .getSessionAffinity().getMaxEntries());
         assertEquals(128L, config.getRouter().getRoles().getDecode()
                 .getAvailability().getMaxEngineRequests());
         assertEquals(1, config.getRouter().getGroupSelector().getRules().size());
@@ -213,6 +224,60 @@ class ConfigServiceTest {
                   "dispatcher":{"type":"NON_BATCH"}
                 }
                 """));
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {
+                  "router":{"roles":{"prefill":{
+                    "selector":{"type":"RANDOM"},
+                    "sessionAffinity":{"ttlMs":1800000,"maxExtraTtftMs":10}
+                  }}},
+                  "scheduler":{"type":"DIRECT"},
+                  "dispatcher":{"type":"NON_BATCH"}
+                }
+                """));
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {
+                  "router":{"roles":{"prefill":{"sessionAffinity":{
+                    "ttlMs":0,"maxExtraTtftMs":10
+                  }}}}
+                }
+                """));
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {
+                  "router":{"roles":{"prefill":{"sessionAffinity":{
+                    "ttlMs":1800000,"maxExtraTtftMs":-1
+                  }}}}
+                }
+                """));
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {
+                  "router":{"roles":{"prefill":{"sessionAffinity":{
+                    "ttlMs":3600001,"maxExtraTtftMs":10
+                  }}}}
+                }
+                """));
+        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+                {
+                  "router":{"roles":{"prefill":{"sessionAffinity":{
+                    "ttlMs":1800000,"maxExtraTtftMs":10,"maxEntries":0
+                  }}}}
+                }
+                """));
+    }
+
+    @Test
+    void acceptsSessionAffinityTtlUpperBoundAndDefaultCapacity() {
+        FlexlbConfig config = ConfigService.parse("""
+                {
+                  "router":{"roles":{"prefill":{"sessionAffinity":{
+                    "ttlMs":3600000,"maxExtraTtftMs":10
+                  }}}}
+                }
+                """);
+
+        RoutingConfig.SessionAffinityConfig affinity = config.getRouter().getRoles()
+                .getPrefill().getSessionAffinity();
+        assertEquals(3_600_000L, affinity.getTtlMs());
+        assertEquals(200_000L, affinity.getMaxEntries());
     }
 
     @Test

@@ -3,18 +3,25 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.resource.PrefillResourceMeasure;
+import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
 import org.flexlb.balance.scheduler.priority.InflightRegistrar;
 import org.flexlb.balance.scheduler.priority.PriorityAdmissionScheduler;
+import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.balance.strategy.PrefillTimePredictor;
+import org.flexlb.balance.strategy.ShortestTTFTStrategy;
+import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -23,12 +30,15 @@ import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -38,6 +48,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -54,8 +65,8 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -466,6 +477,100 @@ class PrioritySchedulerTest {
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), response.getCode());
         verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
+    }
+
+    @Test
+    void queueSchedulerReservationSpillsConcurrentEstablishedSession() throws Exception {
+        SchedulingTestConfig.usePriorityQueue(config);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(64);
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10_000);
+        RoutingConfig.SessionAffinityConfig affinity = new RoutingConfig.SessionAffinityConfig();
+        affinity.setTtlMs(1_800_000L);
+        affinity.setMaxExtraTtftMs(6_000L);
+        config.getRouter().getRoles().getPrefill().setSessionAffinity(affinity);
+        useFixedCandidatePool(config, 1);
+
+        PrefillEndpoint placement = ensureSessionPrefill("10.0.0.1");
+        ensureSessionPrefill("10.0.0.3");
+        CacheAwareService cacheAwareService = mock(CacheAwareService.class);
+        when(cacheAwareService.findMatchingEngines(any(), any(), any()))
+                .thenReturn(new HashMap<>());
+        ResourceMeasureFactory resourceMeasureFactory = mock(ResourceMeasureFactory.class);
+        PrefillResourceMeasure resourceMeasure = mock(PrefillResourceMeasure.class);
+        when(resourceMeasureFactory.getMeasure(any())).thenReturn(resourceMeasure);
+        when(resourceMeasure.isResourceAvailable(any(PrefillEndpoint.class))).thenReturn(true);
+        SessionPlacementStore placementStore = new SessionPlacementStore();
+        placementStore.record("test-model", "session-queue", "10.0.0.1:8080");
+        EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
+        ShortestTTFTStrategy strategy = new ShortestTTFTStrategy(
+                new EngineWorkerStatus(endpointRegistry),
+                cacheAwareService,
+                resourceMeasureFactory,
+                healthReporter,
+                placementStore);
+        long baselinePressureBatchId = 49_999L;
+        placement.commitBatch(
+                baselinePressureBatchId,
+                5_000L,
+                List.of(routeDecisionItem(baselinePressureBatchId, placement)));
+        BalanceContext baselineContext = context(49_998L);
+        baselineContext.setConfig(config);
+        assertEquals("10.0.0.3",
+                strategy.select(baselineContext, RoleType.PREFILL, null).getServerIp());
+        clearInvocations(healthReporter);
+        List<String> selected = new CopyOnWriteArrayList<>();
+        when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
+            BalanceContext routed = invocation.getArgument(0);
+            ServerStatus prefill = strategy.select(routed, RoleType.PREFILL, null);
+            selected.add(prefill.getServerIp());
+            Response response = new Response();
+            response.setSuccess(true);
+            response.setServerStatus(List.of(prefill));
+            return response;
+        });
+
+        List<CompletableFuture<Response>> pending = new CopyOnWriteArrayList<>();
+        ExecutorService submitters = Executors.newFixedThreadPool(6);
+        CountDownLatch ready = new CountDownLatch(6);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<?>> submissions = new ArrayList<>();
+        try {
+            pending.add(scheduler.submit(establishedSessionContext(50_000L)));
+            awaitCondition(() -> placement.getBatcher().queueSize() == 1);
+            assertEquals("10.0.0.1", selected.getFirst());
+            verify(healthReporter).reportSessionAffinityDecision(
+                    RoleType.PREFILL, "SESSION_AFFINITY");
+
+            pending.add(scheduler.submit(establishedSessionContext(50_001L)));
+            assertEquals("10.0.0.3", selected.get(1));
+            verify(healthReporter).reportSessionAffinityDecision(
+                    RoleType.PREFILL, "OVER_CAP");
+
+            int concurrentStart = selected.size();
+            for (int i = 0; i < 6; i++) {
+                long requestId = 50_002L + i;
+                submissions.add(submitters.submit(() -> {
+                    ready.countDown();
+                    assertTrue(start.await(2, TimeUnit.SECONDS));
+                    pending.add(scheduler.submit(establishedSessionContext(requestId)));
+                    return null;
+                }));
+            }
+            assertTrue(ready.await(2, TimeUnit.SECONDS));
+            start.countDown();
+            for (Future<?> submission : submissions) {
+                submission.get(2, TimeUnit.SECONDS);
+            }
+
+            assertEquals(8, selected.size());
+            assertTrue(selected.subList(concurrentStart, selected.size()).contains("10.0.0.3"),
+                    "scheduler-owned queue pressure must spill the hot session");
+        } finally {
+            placement.releaseBatch(baselinePressureBatchId);
+            pending.forEach(future -> future.cancel(true));
+            submitters.shutdownNow();
+            assertTrue(submitters.awaitTermination(2, TimeUnit.SECONDS));
+        }
     }
 
     @Test
@@ -1608,6 +1713,15 @@ class PrioritySchedulerTest {
         return ctx;
     }
 
+    private BalanceContext establishedSessionContext(long requestId) {
+        BalanceContext context = contextWithSeqLen(requestId, 1_000L);
+        context.setConfig(config);
+        context.getRequest().setSessionSchemaVersion(1);
+        context.getRequest().setInferenceSessionId("session-queue");
+        context.getRequest().setInferenceSessionState(Request.SessionState.ESTABLISHED);
+        return context;
+    }
+
     private static BalanceContext contextWithLegacyBatchFields(long requestId) {
         BalanceContext ctx = context(requestId);
         ctx.setGenerateInputPbBytes(generateInputBytes(requestId, true));
@@ -2041,6 +2155,30 @@ class PrioritySchedulerTest {
         status.setGrpcPort(grpcPort);
         status.setAlive(true);
         return status;
+    }
+
+    private PrefillEndpoint ensureSessionPrefill(String ip) {
+        WorkerStatus status = workerStatus(ip, 8080, 8081);
+        status.setRole(RoleType.PREFILL);
+        status.setRunningTaskList(new HashMap<>());
+        CacheStatus cacheStatus = new CacheStatus();
+        cacheStatus.setAvailableKvCache(10_000);
+        cacheStatus.setBlockSize(256);
+        status.setCacheStatus(cacheStatus);
+        return (PrefillEndpoint) endpointRegistry.ensureEndpoint(
+                RoleType.PREFILL, ip + ":8080", status);
+    }
+
+    private static void useFixedCandidatePool(FlexlbConfig config, int workers) {
+        RoutingConfig.FixedCandidatePoolConfig pool = new RoutingConfig.FixedCandidatePoolConfig();
+        pool.setWorkers(workers);
+        RoutingConfig.LeastRecentlyUsedInPoolConfig choice =
+                new RoutingConfig.LeastRecentlyUsedInPoolConfig();
+        choice.setPool(pool);
+        RoutingConfig.EstimatedTtftSelectorConfig selector =
+                (RoutingConfig.EstimatedTtftSelectorConfig) config.getRouter().getRoles()
+                        .getPrefill().getSelector();
+        selector.setCandidateChoice(choice);
     }
 
     private static WorkerStatusResponse finishedStatus(RoleType role,

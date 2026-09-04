@@ -1,0 +1,112 @@
+package org.flexlb.balance.strategy;
+
+import org.flexlb.balance.session.SessionPlacementStore;
+import org.flexlb.config.RoutingConfig;
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.util.Logger;
+
+import java.util.Optional;
+import java.util.function.IntFunction;
+import java.util.function.IntToLongFunction;
+
+final class SessionAffinityPolicy {
+    private SessionAffinityPolicy() {
+    }
+
+    static void reportDecision(BalanceContext context,
+                               RoleType roleType,
+                               EngineHealthReporter reporter,
+                               Reason reason) {
+        RoutingConfig.SessionAffinityConfig config = context.getConfig().getRouter().getRoles()
+                .getPrefill().getSessionAffinity();
+        Request request = context.getRequest();
+        if (config == null
+                || request.getSessionSchemaVersion() != Request.SESSION_SCHEMA_VERSION
+                || request.getInferenceSessionState() != Request.SessionState.ESTABLISHED
+                || request.getInferenceSessionId() == null
+                || request.getInferenceSessionId().isBlank()) {
+            return;
+        }
+        context.setSessionAffinityReason(reason.name());
+        reporter.reportSessionAffinityDecision(roleType, reason.name());
+    }
+
+    static Decision evaluate(Request request,
+                             RoutingConfig.SessionAffinityConfig config,
+                             SessionPlacementStore store,
+                             int candidateCount,
+                             IntFunction<String> endpoint,
+                             IntToLongFunction score,
+                             long minScore) {
+        if (request.getSessionSchemaVersion() != Request.SESSION_SCHEMA_VERSION
+                || request.getInferenceSessionId() == null
+                || request.getInferenceSessionId().isBlank()) {
+            return Decision.none(Reason.DISABLED);
+        }
+        String model = request.getModel();
+        String sessionId = request.getInferenceSessionId();
+        Request.SessionState state = request.getInferenceSessionState();
+        if (state == Request.SessionState.NEW) {
+            return Decision.none(Reason.NEW_SESSION);
+        }
+        if (config == null || state != Request.SessionState.ESTABLISHED) {
+            return Decision.none(Reason.DISABLED);
+        }
+        var placement = findPlacement(request, config, store, model, sessionId);
+        if (placement.isEmpty()) {
+            return Decision.none(Reason.NO_PLACEMENT);
+        }
+        long cutoff = saturatedAdd(minScore, config.getMaxExtraTtftMs());
+        for (int i = 0; i < candidateCount; i++) {
+            if (placement.get().ipPort().equals(endpoint.apply(i))) {
+                return score.applyAsLong(i) <= cutoff
+                        ? new Decision(i, Reason.SESSION_AFFINITY)
+                        : Decision.none(Reason.OVER_CAP);
+            }
+        }
+        return Decision.none(Reason.ENDPOINT_UNAVAILABLE);
+    }
+
+    private static Optional<SessionPlacementStore.Placement> findPlacement(
+            Request request,
+            RoutingConfig.SessionAffinityConfig config,
+            SessionPlacementStore store,
+            String model,
+            String sessionId) {
+        try {
+            return store.find(model, sessionId, config.getTtlMs());
+        } catch (RuntimeException exception) {
+            Logger.warn("Failed to read session placement, request_id={}",
+                    request.getRequestId(), exception);
+            return Optional.empty();
+        }
+    }
+
+    private static long saturatedAdd(long left, long right) {
+        return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
+    }
+
+    enum Reason {
+        DISABLED,
+        NEW_SESSION,
+        CACHE_AFFINITY_PRECEDENCE,
+        NO_PLACEMENT,
+        ENDPOINT_UNAVAILABLE,
+        OVER_CAP,
+        SESSION_AFFINITY,
+        SESSION_AFFINITY_CAS_FALLBACK
+    }
+
+    record Decision(int preferredIndex, Reason reason) {
+        static Decision none(Reason reason) {
+            return new Decision(-1, reason);
+        }
+
+        boolean hasPreference() {
+            return preferredIndex >= 0;
+        }
+    }
+}
