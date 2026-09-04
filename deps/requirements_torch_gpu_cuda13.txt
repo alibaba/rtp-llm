@@ -2,8 +2,8 @@
 
 # CUDA 13.2 / torch 2.11+cu130 / triton 3.6.0 dep set.
 # First-version scope: torch + torchvision + triton + deep_gemm + flash_mla
-# + fast_safetensors + fastsafetensors (the last two rebuilt against
-# torch 2.11+cu130 and mirrored to oss://rtp-maga/0502/).  Other
+# + fast_safetensors + fastsafetensors. The native fast_safetensors companion
+# is built against torch 2.11+cu130; the wrapper resolves CUDA at runtime. Other
 # torch-ABI-bound wheels (flash_attn, flashinfer, deep_ep, rtp_kernel,
 # fast_hadamard, nvidia_cutlass_dsl) are deferred — see plan
 # §K and bazel/arch_select.bzl whl_deps() cuda13_x86 branch for how
@@ -27,13 +27,13 @@ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B924
 # sparse_attention*, clustered_gather) are import-tolerant in this build.
 https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/rtp_kernel-0.1.0%2Bcu13.4a1a7e3-cp310-cp310-linux_x86_64.whl
 
-# fastsafetensors / fast_safetensors rebuilt against torch 2.11+cu130
-# (originals were torch 2.1.2 + cu121).  Project name is `fast-safetensors`
-# on PyPI but the import is `fast_safetensors`; both wheels installed.
+# The native fast-safetensors companion is built for torch 2.11+cu130.
+# The fastsafetensors wrapper contains an extension that resolves CUDA symbols
+# at runtime; its cu129 storage prefix does not identify a CUDA 12 runtime pin.
+# Install both packages; the native companion imports as fast_safetensors.
 # Required by --load_method fastsafetensors smoke targets.
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130/fast_safetensors-0.7.4.dev0%2Btorch2.11.0.cu130.aone67401633-cp310-cp310-linux_x86_64.whl
-https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130/fastsafetensors-0.3.4.dev20260901%2Bali.fuseshm.g78ac75c8.aone67880226-cp310-cp310-linux_x86_64.whl
-# fast_safetensors rebuilt against torch 2.11+cu130.
+https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fastsafetensors-0.3.4.dev20260904%2Bali.fuseshm.gf2e21da-cp310-cp310-linux_x86_64.whl
 
 # Pin safetensors and tabulate for parity with cu12_9 lock.
 safetensors==0.7.0
