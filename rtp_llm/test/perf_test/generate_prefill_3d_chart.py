@@ -80,9 +80,9 @@ def load_rows(path: pathlib.Path, batch_size: int) -> list[dict[str, float]]:
             "ok",
             "success",
             "passed",
-            "unknown",
-            "invalid_reuse",
         }:
+            continue
+        if item.get("reuse_exact") is False:
             continue
         if item.get("success_runs") is not None:
             try:
@@ -122,19 +122,14 @@ def load_rows(path: pathlib.Path, batch_size: int) -> list[dict[str, float]]:
             values = [value for value in values if value is not None]
             if values:
                 rt = median(values)
-        # A positive requested seed that yielded no reuse is not a cache-hit
-        # measurement.  Physical block rounding is valid: plot the observed
-        # cache geometry rather than the requested (unaligned) value.
         if requested_cache is None:
             requested_cache = 0
         if inp is None or cache is None or rt is None or cache < 0 or cache >= inp:
             continue
-        if requested_cache > 0 and cache == 0:
+        if cache != requested_cache:
             continue
         rows.append({"compute": inp - cache, "cache": cache, "rt": rt, "input": inp})
-    # A requested cache can map to the same physical block as another request.
-    # Keep one deterministic point per physical geometry, using the median RT
-    # just like the formula fitter.
+    # Keep one deterministic point per exact requested geometry.
     grouped: defaultdict[tuple[float, float, float], list[dict[str, float]]] = (
         defaultdict(list)
     )

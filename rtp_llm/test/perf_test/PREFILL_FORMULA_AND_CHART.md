@@ -1,131 +1,76 @@
-# DeepSeek-V4-Pro prefill performance (corrected-v4)
+# DeepSeek-V4-Pro Prefill 性能数据审计与临时拟合
 
-> **Measurement validity notice (2026-09-04):** do not use the formula or
-> charts in this report as real TTFT results.  The runner recorded only
-> `aux_info.first_token_cost_time` and did not record HTTP wall time or the
-> local/remote/memory/device cache reuse breakdown.  In the raw file, the
-> reported cold latency stays between 165.2 and 341.7 ms from 256 to 1,048,575
-> tokens (sequence-length correlation 0.124).  The 1M case reports 173.124 ms
-> while the three-request case takes 13.346 seconds wall time.  That mismatch
-> fails the measurement sanity gate.  The 173.1 ms value and the fitted formula
-> are withdrawn pending a clean rerun with corrected instrumentation.
+这份报告只保留通过严格校验的数据。旧报告把 `invalid_reuse` 当成可用样本，导致 4,131 个 cache 未按请求命中的 case 混入图表和拟合。旧版 4,292 点公式、误差和图表全部作废。
 
-This report is **DeepSeek-V4-Pro only**.  The old v3 result is rejected and is
-not mixed into these numbers.  The authoritative raw result is
-`cache_grid_results.corrected_v4.json` in the delivered artifact directory.
+## 数据结论
 
-## Final measured coverage
-
-| Item | Result |
+| 项目 | 数量 |
 |---|---:|
-| Raw completed grid rows | 4,819 / 4,819 |
-| Successful rows with stable observed reuse | 4,523 |
-| Unique physical geometries used for fitting | 4,292 |
-| Distinct input lengths | 489 |
-| Input length range | 256 .. 1,048,575 |
-| Observed cache range | 0 .. 1,044,480 |
-| Batch size | 1 |
-| Measurements per geometry | 3 |
+| 原始 case | 4,819 |
+| 严格有效 case | 688 |
+| 排除 case | 4,131 |
+| 有效测量轮次 | 2,064 |
+| cache=0 case | 489 |
+| cache>0 且精确命中 case | 199 |
+| input_len 数量 | 489 |
+| input_len 范围 | 256–1,048,575 |
+| batch size | 1 |
 
-The runner aligns cache to physical blocks.  Therefore the requested cache is
-not always the cache actually reused.  We model `cache_len_observed` (the
-stable reuse reported by all three runs), collapse duplicate physical
-geometries by median, and reject positive requests that observed zero reuse.
-This is why 4,819 raw rows become 4,292 fitting geometries; it is not missing
-data silently converted to cache hits.
+一个 case 只有同时满足以下条件才会进入统计和拟合：
 
-## Representative 1M input
+- `status=ok`；
+- 三轮测量全部成功；
+- 三轮 `input_len` 与请求一致，`output_len=1`；
+- 三轮 `reuse_len` 完全相同，并且精确等于请求的 cache length；
+- latency 为有限正数。
 
-`input_len=1,048,575`, batch 1:
+4,131 个被排除的 case 均为 `status=invalid_reuse`，三轮实际 `reuse_len` 与请求值不一致。它们虽然完成了 HTTP forward，但不代表请求的 cache geometry，因此不能用于 cache 性能统计。
 
-| Requested cache | Observed cache | Median prefill RT (ms) |
-|---:|---:|---:|
-| 0 | 0 | 173.124 |
-| 130,816 | 126,976 | 173.196 |
-| 261,888 | 258,048 | 180.226 |
-| 392,960 | 389,120 | 178.476 |
-| 524,032 | 520,192 | 179.442 |
-| 655,104 | 651,264 | 182.965 |
-| 786,176 | 782,336 | 177.115 |
-| 917,248 | 913,408 | 191.022 |
-| 996,096 | 995,328 | 176.917 |
-| 1,048,064 | 1,044,480 | 180.391 |
+## 测量口径限制
 
-These are DSV4 measurements; do not substitute the earlier GLM5 1M value.
+当前 JSON 记录的延迟来自服务端 `aux_info.first_token_cost_time`。runner 没有记录每个请求的客户端 HTTP wall time，也没有保存 local、remote、memory、device cache 的复用明细。
 
-## Formula
+这会造成明显的合理性问题：`input_len=1,048,575, cache=0` 的三轮服务端数值为 333.363、171.510、173.124 ms，中位数 173.124 ms；但整个三请求 case 的 wall time 是 13.346 秒。现有数据无法解释两者之间的差值，所以 173.124 ms 不能写成端到端 TTFT。
 
-The fitted expression minimizes mean absolute error (L1/MAE) and uses only the
-FlexLB-supported variables `tokens` and `hitCacheTokens` and arithmetic
-operators.  For this fixed-batch dataset,
-`tokens` is the full input length and `hitCacheTokens` is the **observed**
-reused cache length.  Output is milliseconds:
+下面的公式只拟合 JSON 中的服务端 `first_token_cost_time`，用于检查数据形状和拟合流程。它不是可上线的端到端 TTFT 公式。
+
+## 严格数据重拟合
+
+目标值取每个有效 case 三轮 `prefill_time_ms` 的中位数。拟合目标为 MAE，表达式只使用 FlexLB 当前支持的 `tokens`、`hitCacheTokens` 和四则运算：
 
 ```text
-174.752216622553
-+ 0.0135885335168253 * tokens / 1024.0
-- 0.00699083362731531 * hitCacheTokens / 1024.0
-- 5.13588525008408e-06 * (tokens / 1024.0) * (tokens / 1024.0)
-- 9.85209664239846e-06 * (tokens / 1024.0) * (hitCacheTokens / 1024.0)
-+ 1.38198202857097e-05 * (hitCacheTokens / 1024.0) * (hitCacheTokens / 1024.0)
+177.638246514008
++ 0.00666514075108166 * tokens / 1024.0
+- 0.0258212149796806 * hitCacheTokens / 1024.0
++ 3.15503708549298e-06 * (tokens / 1024.0) * (tokens / 1024.0)
++ 5.44659822292038e-07 * (tokens / 1024.0) * (hitCacheTokens / 1024.0)
++ 2.65730353692932e-05 * (hitCacheTokens / 1024.0) * (hitCacheTokens / 1024.0)
 ```
 
-No `sum`, `max`, `batchSize`, `computeTokens`, or Python-only syntax is used.
-The formula is valid for batch 1 and the measured DSV4 range only; it is not a
-batch-scaling formula.
-
-## Fit accuracy
-
-| Split | N | MAPE | p95 absolute relative error | Max relative error | MAE (ms) |
+| 数据集 | N | MAE | MAPE | p95 相对误差 | 最大相对误差 |
 |---|---:|---:|---:|---:|---:|
-| Train | 3,148 | 3.310% | 13.398% | 52.820% | 6.859 |
-| Validation | 535 | 2.987% | 12.891% | 35.339% | 5.922 |
-| Test | 609 | 3.246% | 12.977% | 39.099% | 6.665 |
-| All fitting geometries | 4,292 | 3.260% | 13.245% | 52.820% | 6.715 |
+| Train | 507 | 14.196 ms | 6.327% | 31.434% | 46.456% |
+| Validation | 84 | 10.084 ms | 4.808% | 20.084% | 34.437% |
+| Test | 97 | 16.904 ms | 7.363% | 33.137% | 38.590% |
+| 全部严格有效数据 | 688 | 14.076 ms | 6.288% | 31.364% | 46.456% |
 
-The all-data MAE is 6.715 ms and the test MAE is 6.665 ms, lower than the
-previous squared-error fit.  Relative-error p95/max remain higher, so this is
-an audited absolute-error-optimized fit, not a claim of worst-case production
-SLA accuracy.
+结论很直接：有效 cache 数据只有 199 个，tail error 很大；加上 TTFT 测量口径未闭环，这个公式不能上线，`production_acceptance=false`。
 
-## Reproducible artifacts
+## 图表
 
-- Raw DSV4 JSON: `dsv4_corrected_v4/cache_grid_results.corrected_v4.json`
-- Input audit: `dsv4_corrected_v4/formula/input_audit.json`
-- Fit report: `dsv4_corrected_v4/formula/fit_report.json`
-- Formula text: `dsv4_corrected_v4/formula/deepseek_v4_prefill_formula.txt`
-- Per-geometry predictions: `dsv4_corrected_v4/formula/predictions.csv`
-- Dense 3D chart: `dsv4_corrected_v4/deepseek_v4_prefill_3d.svg`
+- `deepseek_v4_prefill_cold_strict_489.svg`：489 个 cache=0 case 的服务端指标趋势。
+- `deepseek_v4_prefill_3d_strict_688.svg`：688 个严格有效 case，X=服务端指标，Y=cached tokens，Z=compute tokens。
 
-The chart uses X=measured prefill RT (TTFT, ms), Y=observed cached tokens,
-and Z=uncached compute tokens (`input_len - observed_cache_len`).  The updated
-3-D view is an isometric projection: the three axes are drawn from one origin,
-the dots are the measured physical geometries, and the guide lines show
-selected fixed-cache and fixed-compute slices.  Colour identifies the slice
-family; it does not encode RT.  Failed rows and positive-cache requests with
-zero observed reuse are excluded.
+图中已经彻底排除 4,131 个 `invalid_reuse` case。由于服务端指标尚不能等同于端到端 TTFT，图标题和正文不得再写“真实 TTFT”。
 
-## Cache-miss trend (2-D)
+## 产物
 
-The companion chart is separate from the 3-D view.  It keeps only
-`observed_cache_len=0`, so each dot answers one question: how does cold
-prefill RT change as `seq_len` grows?  The horizontal axis is linear in tokens,
-and the small inset magnifies 0–131K tokens because a 1M-wide axis compresses
-short sequences near the origin.  Each of the 489 dots is the median of the
-three successful measurements for that physical geometry.
+- 原始输入（含失败记录，仅供审计）：`dsv4_corrected_v4/cache_grid_results.corrected_v4.json`
+- 严格有效数据：`dsv4_corrected_v4/cache_grid_results.strict_valid_688.json`
+- 严格拟合：`dsv4_corrected_v4/formula_strict_valid_688_final/`
+- 公式：`formula_strict_valid_688_final/deepseek_v4_prefill_formula.txt`
+- 输入审计：`formula_strict_valid_688_final/input_audit.json`
+- 误差报告：`formula_strict_valid_688_final/fit_report.json`
+- 逐点预测：`formula_strict_valid_688_final/predictions.csv`
 
-Run both charts together with:
-
-```bash
-python3 rtp_llm/test/perf_test/generate_prefill_3d_chart.py \
-  --input /data0/luoli.hn/work/glm52-prefill-perf-results/dsv4_corrected_v4/cache_grid_results.corrected_v4.json \
-  --output /data0/luoli.hn/work/glm52-prefill-perf-results/dsv4_corrected_v4/deepseek_v4_prefill_3d_readable.svg \
-  --cold-output /data0/luoli.hn/work/glm52-prefill-perf-results/dsv4_corrected_v4/deepseek_v4_prefill_cold_miss_2d.svg \
-  --batch-size 1
-```
-
-The generated files are `deepseek_v4_prefill_3d_readable.svg` and
-`deepseek_v4_prefill_cold_miss_2d.svg`.  In this DSV4 dataset the 1M cold point
-(`input_len=1,048,575`, `cache=0`) is 173.1 ms.  That value belongs to DSV4;
-it must not be compared with the earlier GLM5 1M result without changing the
-model label.
+下一轮采集必须补上逐请求客户端 wall time，并记录完整 cache reuse 分项。只有重跑后通过 1M 冷点合理性检查，才能生成正式 TTFT 报告和生产公式。

@@ -4,14 +4,12 @@
 The input is the raw ``cache_grid_results.json`` emitted by the DSV4
 prefill grid runner.  A grid file can contain successful measurements,
 failed requests, and successful requests whose cache seed was not actually
-reused.  This tool fits successful rows using the stable *observed* reuse
-length.  Requests whose physical cache block was rounded are retained as
-that observed geometry; positive requests with zero observed reuse are
-rejected.
+reused.  This tool accepts a row only when the runner marks it successful and
+all measured reuse lengths exactly match the requested cache length.
 
 * every requested measurement run succeeded;
 * every run has output length one and finite prefill latency;
-* observed reuse is constant across all runs; and
+* observed reuse is constant and exactly matches the request; and
 * the selected batch size is fixed (the DSV4 Pro configuration uses 1).
 
 The exported expression intentionally uses only the variables and operators
@@ -77,15 +75,12 @@ def _integer(value: Any) -> int | None:
 
 def _status_ok(item: dict[str, Any]) -> bool:
     status = str(item.get("status", "")).lower()
-    # ``invalid_reuse`` is still a successful forward.  The runner uses that
-    # status when the requested cache is rounded to a physical block; the
-    # observed reuse in cache_len_observed is the actual geometry to model.
+    # Fail closed. A completed HTTP forward is not a valid cache-performance
+    # sample when the runner marked its reuse contract invalid.
     return not status or status in {
         "ok",
         "success",
         "passed",
-        "unknown",
-        "invalid_reuse",
     }
 
 
@@ -102,6 +97,8 @@ def _median_run_time(
     values: list[float] = []
     input_len = _integer(item.get("input_len"))
     requested_cache_len = _integer(item.get("cache_len_requested")) or 0
+    if item.get("reuse_exact") is False:
+        return None, None, "reuse_not_exact"
     observed = item.get("cache_len_observed")
     observed_values = (
         [_integer(value) for value in observed] if isinstance(observed, list) else []
@@ -117,10 +114,8 @@ def _median_run_time(
     cache_len = observed_values[0]
     if cache_len < 0 or input_len is None or cache_len >= input_len:
         return None, None, "invalid_observed_geometry"
-    # A positive cache request that produced zero reuse is not a cache-hit
-    # observation.  Keep cold points only when cold was explicitly requested.
-    if requested_cache_len > 0 and cache_len == 0:
-        return None, None, "cache_not_observed"
+    if cache_len != requested_cache_len:
+        return None, None, "requested_reuse_mismatch"
     for run in runs:
         if not isinstance(run, dict) or run.get("success") is not True:
             return None, None, "run_failed"
@@ -230,15 +225,11 @@ def load_observations(
                 )
                 continue
             assert observed_cache_len is not None
-            if observed_cache_len != cache_len:
-                rejected["requested_cache_rounded"] = (
-                    rejected.get("requested_cache_rounded", 0) + 1
-                )
             observations.append(
                 Observation(
                     batch,
                     input_len,
-                    observed_cache_len,
+                    cache_len,
                     target,
                     f"{path.name}:metrics[{index}]",
                     cache_len,
@@ -570,10 +561,10 @@ def run_fit(args: argparse.Namespace) -> int:
             and metrics["test"]["max_ape_pct"] <= args.max_max_ape_pct
         ),
         "production_note": (
-            "Rows with physical cache rounding are represented by their stable "
-            "observed reuse. Failed requests and positive requests with zero "
-            "observed reuse are excluded. Validate tail error and deployment "
-            "range before production use."
+            "Only rows whose requested and observed reuse match exactly are "
+            "included. Failed requests and invalid_reuse rows are excluded. "
+            "Validate the latency measurement contract, tail error, and "
+            "deployment range before production use."
         ),
     }
     (output / "fit_report.json").write_text(
