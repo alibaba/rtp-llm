@@ -79,6 +79,24 @@ class StaticInputTailModel:
         return PyModelOutputs(inputs.input_hiddens + tail_signature)
 
 
+class StaticTokenMetadataTailModel:
+    """Expose stale token, MRoPE-position and hidden rows after graph shrink."""
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        tail_signature = torch.stack(
+            (
+                inputs.input_ids[-1],
+                inputs.combo_position_ids[-1],
+                inputs.combo_position_ids[-2],
+                inputs.input_hiddens[-1].sum().to(torch.int32),
+            )
+        ).to(inputs.input_hiddens.dtype)
+        return PyModelOutputs(inputs.input_hiddens + tail_signature)
+
+
 class AuxiliaryOutputModel:
     """Return a second output whose view must follow the selected graph bucket."""
 
@@ -464,6 +482,60 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                             output.hidden_states
                         ),
                     )
+
+    def test_target_verify_clears_static_token_metadata_after_shrink(self) -> None:
+        query_len = 8
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            StaticTokenMetadataTailModel(),
+            HIDDEN_SIZE,
+            64,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [8],
+            GROUP_TAGS,
+            True,
+            query_len,
+            1,
+        )
+
+        # Seed every graph-capacity row with non-zero request data. A later
+        # replay with six live requests must not let rows 48..63 retain it.
+        full_inputs = _build_target_verify_inputs(
+            GROUP_TAGS,
+            {"full": 2, "aux": 1},
+            batch_size=8,
+            query_len=query_len,
+            prefix_len=17,
+        )
+        full_inputs.input_ids.fill_(91)
+        full_inputs.input_hiddens.fill_(7)
+        full_inputs.combo_position_ids = torch.full(
+            (8 * query_len,), 73, dtype=torch.int32, device="cuda"
+        )
+        self.assertTrue(runner.canRun(full_inputs))
+        runner.forward(full_inputs)
+        torch.cuda.synchronize()
+
+        shrunk_inputs = _build_target_verify_inputs(
+            GROUP_TAGS,
+            {"full": 2, "aux": 1},
+            batch_size=6,
+            query_len=query_len,
+            prefix_len=17,
+        )
+        shrunk_inputs.combo_position_ids = torch.arange(
+            1,
+            6 * query_len + 1,
+            dtype=torch.int32,
+            device="cuda",
+        )
+        self.assertTrue(runner.canRun(shrunk_inputs))
+        self.assertEqual(runner.getCurrentRealGraphSize(), 8)
+
+        output = runner.forward(shrunk_inputs)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(output.hidden_states, shrunk_inputs.input_hiddens)
 
     def test_block_table_copy_clips_wider_hybrid_staging_rows(self) -> None:
         runner = CudaGraphRunner()
