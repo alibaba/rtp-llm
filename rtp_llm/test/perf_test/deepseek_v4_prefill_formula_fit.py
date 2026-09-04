@@ -12,10 +12,12 @@ all measured reuse lengths exactly match the requested cache length.
 * observed reuse is constant and exactly matches the request; and
 * the selected batch size is fixed (the DSV4 Pro configuration uses 1).
 
-The exported expression intentionally uses only the variables and operators
-accepted by the FlexLB prefill evaluator: ``tokens``, ``hitCacheTokens``,
-numbers, ``+``, ``-``, ``*``, ``/`` and parentheses.  It does not emit
-``sum()``, ``max()``, ``batchSize``, ``computeTokens`` or Python syntax.
+The exported expression uses the names and aggregate syntax implemented by
+``PrefillTimeFormula``: ``computeTokens``, ``hitCacheTokens``, ``sum()``,
+numbers, arithmetic operators, and parentheses.  It does not invent an alias
+such as ``tokens``.  The DSV4-Pro measurements currently use batch size one;
+``sum()`` keeps the per-request terms well-defined if the same expression is
+evaluated through FlexLB's batch path.
 
 New runner output uses client HTTP wall time with ``max_new_tokens=1`` as
 TTFT.  The server's ``first_token_cost_time`` is retained for diagnostics and
@@ -38,11 +40,11 @@ from typing import Any, Iterable, Sequence
 
 FEATURE_NAMES = (
     "1",
-    "tokens / 1024.0",
-    "hitCacheTokens / 1024.0",
-    "(tokens / 1024.0) * (tokens / 1024.0)",
-    "(tokens / 1024.0) * (hitCacheTokens / 1024.0)",
-    "(hitCacheTokens / 1024.0) * (hitCacheTokens / 1024.0)",
+    "sum(computeTokens / 1024.0)",
+    "sum(hitCacheTokens / 1024.0)",
+    "sum((computeTokens / 1024.0) * (computeTokens / 1024.0))",
+    "sum((computeTokens / 1024.0) * (hitCacheTokens / 1024.0))",
+    "sum((hitCacheTokens / 1024.0) * (hitCacheTokens / 1024.0))",
 )
 
 
@@ -300,9 +302,16 @@ def load_observations(
 
 
 def feature_values(row: Observation) -> list[float]:
-    tokens = row.input_len / 1024.0
+    compute = row.compute_len / 1024.0
     hit = row.cache_len / 1024.0
-    return [1.0, tokens, hit, tokens * tokens, tokens * hit, hit * hit]
+    return [
+        1.0,
+        compute,
+        hit,
+        compute * compute,
+        compute * hit,
+        hit * hit,
+    ]
 
 
 def _solve_linear_system(matrix: list[list[float]], vector: list[float]) -> list[float]:
@@ -756,7 +765,9 @@ def run_fit(args: argparse.Namespace) -> int:
         ),
         "formula": formula,
         "formula_compatibility": {
-            "variables": ["tokens", "hitCacheTokens"],
+            "parser": "org.flexlb.balance.strategy.PrefillTimeFormula",
+            "variables": ["computeTokens", "hitCacheTokens"],
+            "functions": ["sum"],
             "operators": ["+", "-", "*", "/", "(", ")"],
             "unsupported_constructs_used": [],
         },

@@ -30,6 +30,15 @@ py_test(
 )
 
 py_test(
+    name = "deepseek_v4_prefill_formula_fit_test",
+    srcs = [
+        "deepseek_v4_prefill_formula_fit.py",
+        "deepseek_v4_prefill_formula_fit_test.py",
+    ],
+    main = "deepseek_v4_prefill_formula_fit_test.py",
+)
+
+py_test(
         name = "distribution_perf_test",
         main = "batch_decode_test.py",
         srcs = [
