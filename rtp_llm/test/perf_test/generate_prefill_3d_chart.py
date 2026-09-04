@@ -115,9 +115,22 @@ def load_rows(path: pathlib.Path, batch_size: int) -> list[dict[str, float]]:
         if not observed_values or len(set(observed_values)) != 1:
             continue
         cache = observed_values[0]
-        rt = _number(
-            item.get("avg_prefill_time", item.get("target_ms", item.get("ttft_ms")))
-        )
+        # The strict cache runner publishes aggregate end-to-end request
+        # latency as median_ttft_ms/avg_ttft_ms.  Prefer the median because it
+        # is the fit target and is less sensitive to one noisy HTTP round.
+        # Older result formats remain supported after the two authoritative
+        # fields.
+        rt = None
+        for key in (
+            "median_ttft_ms",
+            "avg_ttft_ms",
+            "avg_prefill_time",
+            "target_ms",
+            "ttft_ms",
+        ):
+            rt = _number(item.get(key))
+            if rt is not None:
+                break
         if rt is None and isinstance(item.get("runs"), list):
             values = [_run_rt(run) for run in item["runs"] if isinstance(run, dict)]
             values = [value for value in values if value is not None]
