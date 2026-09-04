@@ -223,6 +223,8 @@ class CostBasedPrefillStrategyTest {
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
+        Mockito.verify(engineHealthReporter).reportCacheAffinityDecision(
+                RoleType.PREFILL, "10.0.0.2", "LOW_CACHE_HIT");
         Mockito.verify(engineHealthReporter).reportSessionAffinityDecision(
                 RoleType.PREFILL, "SESSION_AFFINITY");
     }

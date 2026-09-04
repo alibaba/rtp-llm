@@ -63,6 +63,8 @@ class EngineHealthReporterSelectionMetricTest {
                 FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         verify(monitor).register(PREFILL_SELECTED_EXECUTION_TIME_MS,
                 FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+        verify(monitor).register(SESSION_AFFINITY_DECISION, FlexMetricType.QPS);
+        verify(monitor).register(SESSION_PLACEMENT_SIZE, FlexMetricType.GAUGE);
     }
 
     @Test

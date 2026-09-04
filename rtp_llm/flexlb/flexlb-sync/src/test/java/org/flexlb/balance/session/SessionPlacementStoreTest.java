@@ -66,7 +66,6 @@ class SessionPlacementStoreTest {
         assertEquals(1L, store.estimatedSize());
 
         now.addAndGet(RoutingConfig.SessionAffinityConfig.MAX_TTL_MS + 1L);
-        store.cleanUp();
 
         assertEquals(0L, store.estimatedSize());
     }

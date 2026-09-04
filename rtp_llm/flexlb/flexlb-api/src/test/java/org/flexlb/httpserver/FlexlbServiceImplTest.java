@@ -449,7 +449,7 @@ class FlexlbServiceImplTest {
     }
 
     @Test
-    void masterNotFoundRoutesLocallyWithoutAllocatingSessionState() {
+    void masterNotFoundRoutesLocallyAndRecordsSessionPlacement() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
         when(lbStatusConsistencyService.isMaster()).thenReturn(false);
         when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(
@@ -460,6 +460,11 @@ class FlexlbServiceImplTest {
         Response localResponse = new Response();
         localResponse.setSuccess(true);
         localResponse.setCode(200);
+        ServerStatus prefill = new ServerStatus();
+        prefill.setRole(RoleType.PREFILL);
+        prefill.setServerIp("10.0.0.2");
+        prefill.setHttpPort(8080);
+        localResponse.setServerStatus(List.of(prefill));
         when(routeService.route(contextCaptor.capture()))
                 .thenReturn(CompletableFuture.completedFuture(localResponse));
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
@@ -476,7 +481,8 @@ class FlexlbServiceImplTest {
 
         service.schedule(request, mock(StreamObserver.class));
 
-        verify(sessionPlacementStore, never()).record(any(), any(), any());
+        verify(sessionPlacementStore).record(
+                "kimi-k3", "isess_v1_example", "10.0.0.2:8080");
     }
 
     @Test

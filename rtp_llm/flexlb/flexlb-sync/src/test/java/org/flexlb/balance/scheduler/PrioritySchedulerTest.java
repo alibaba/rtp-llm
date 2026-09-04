@@ -486,8 +486,9 @@ class PrioritySchedulerTest {
         SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10_000);
         RoutingConfig.SessionAffinityConfig affinity = new RoutingConfig.SessionAffinityConfig();
         affinity.setTtlMs(1_800_000L);
-        affinity.setMaxExtraTtftMs(100L);
+        affinity.setMaxExtraTtftMs(6_000L);
         config.getRouter().getRoles().getPrefill().setSessionAffinity(affinity);
+        useFixedCandidatePool(config, 1);
 
         PrefillEndpoint placement = ensureSessionPrefill("10.0.0.1");
         ensureSessionPrefill("10.0.0.3");
@@ -500,12 +501,23 @@ class PrioritySchedulerTest {
         when(resourceMeasure.isResourceAvailable(any(PrefillEndpoint.class))).thenReturn(true);
         SessionPlacementStore placementStore = new SessionPlacementStore();
         placementStore.record("test-model", "session-queue", "10.0.0.1:8080");
+        EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
         ShortestTTFTStrategy strategy = new ShortestTTFTStrategy(
                 new EngineWorkerStatus(endpointRegistry),
                 cacheAwareService,
                 resourceMeasureFactory,
-                mock(EngineHealthReporter.class),
+                healthReporter,
                 placementStore);
+        long baselinePressureBatchId = 49_999L;
+        placement.commitBatch(
+                baselinePressureBatchId,
+                5_000L,
+                List.of(routeDecisionItem(baselinePressureBatchId, placement)));
+        BalanceContext baselineContext = context(49_998L);
+        baselineContext.setConfig(config);
+        assertEquals("10.0.0.3",
+                strategy.select(baselineContext, RoleType.PREFILL, null).getServerIp());
+        clearInvocations(healthReporter);
         List<String> selected = new CopyOnWriteArrayList<>();
         when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
             BalanceContext routed = invocation.getArgument(0);
@@ -518,17 +530,24 @@ class PrioritySchedulerTest {
         });
 
         List<CompletableFuture<Response>> pending = new CopyOnWriteArrayList<>();
-        ExecutorService submitters = Executors.newFixedThreadPool(7);
-        CountDownLatch ready = new CountDownLatch(7);
+        ExecutorService submitters = Executors.newFixedThreadPool(6);
+        CountDownLatch ready = new CountDownLatch(6);
         CountDownLatch start = new CountDownLatch(1);
         List<Future<?>> submissions = new ArrayList<>();
         try {
             pending.add(scheduler.submit(establishedSessionContext(50_000L)));
             awaitCondition(() -> placement.getBatcher().queueSize() == 1);
             assertEquals("10.0.0.1", selected.getFirst());
+            verify(healthReporter).reportSessionAffinityDecision(
+                    RoleType.PREFILL, "SESSION_AFFINITY");
 
-            for (int i = 0; i < 7; i++) {
-                long requestId = 50_001L + i;
+            pending.add(scheduler.submit(establishedSessionContext(50_001L)));
+            assertEquals("10.0.0.3", selected.get(1));
+            verify(healthReporter).reportSessionAffinityDecision(
+                    RoleType.PREFILL, "OVER_CAP");
+
+            for (int i = 0; i < 6; i++) {
+                long requestId = 50_002L + i;
                 submissions.add(submitters.submit(() -> {
                     ready.countDown();
                     assertTrue(start.await(2, TimeUnit.SECONDS));
@@ -546,6 +565,7 @@ class PrioritySchedulerTest {
             assertTrue(selected.contains("10.0.0.3"),
                     "scheduler-owned queue pressure must spill the hot session");
         } finally {
+            placement.releaseBatch(baselinePressureBatchId);
             pending.forEach(future -> future.cancel(true));
             submitters.shutdownNow();
             assertTrue(submitters.awaitTermination(2, TimeUnit.SECONDS));
@@ -2146,6 +2166,18 @@ class PrioritySchedulerTest {
         status.setCacheStatus(cacheStatus);
         return (PrefillEndpoint) endpointRegistry.ensureEndpoint(
                 RoleType.PREFILL, ip + ":8080", status);
+    }
+
+    private static void useFixedCandidatePool(FlexlbConfig config, int workers) {
+        RoutingConfig.FixedCandidatePoolConfig pool = new RoutingConfig.FixedCandidatePoolConfig();
+        pool.setWorkers(workers);
+        RoutingConfig.LeastRecentlyUsedInPoolConfig choice =
+                new RoutingConfig.LeastRecentlyUsedInPoolConfig();
+        choice.setPool(pool);
+        RoutingConfig.EstimatedTtftSelectorConfig selector =
+                (RoutingConfig.EstimatedTtftSelectorConfig) config.getRouter().getRoles()
+                        .getPrefill().getSelector();
+        selector.setCandidateChoice(choice);
     }
 
     private static WorkerStatusResponse finishedStatus(RoleType role,
