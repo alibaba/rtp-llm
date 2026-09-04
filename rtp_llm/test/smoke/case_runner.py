@@ -978,7 +978,7 @@ class CaseRunner(object):
         for env_str in env_list:
             k, v = env_str.split("=", 1)
             v = self._expand_env_value(v)
-            if k == "MEMORY_CACHE_DISK_PATHS":
+            if k in {"MEMORY_CACHE_DISK_PATHS", "DISK_CACHE_PATHS"}:
                 self._prepare_memory_cache_disk_paths(v)
             env_dict.update({k: v})
             logging.info(f"env dict update {k}:{v}")
