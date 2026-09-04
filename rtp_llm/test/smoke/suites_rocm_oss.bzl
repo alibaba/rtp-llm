@@ -26,6 +26,14 @@ def rocm_oss_suites():
                 smoke_args="--tp_size 2 --warm_up 0 --seq_size_per_block 16 --use_asm_pa 0 --use_aiter_pa 1 --disable_flashinfer_native 1 --act_type BF16",
                 gpu_type=["MI308X-ROCM7"],
             ),
+            # Keep the capture config implicit so startup covers every default
+            # full-prefill bucket, including the >512-token Triton 3D path.
+            smoke_test(
+                name="rocm_basic_qwen25_full_prefill_cuda_graph",
+                task_info="data/model/qwen25/q_r_prefill_cuda_graph.json",
+                smoke_args="--warm_up 0 --act_type BF16 --seq_size_per_block 16 --test_block_num 1000 --concurrency_limit 5 --reuse_cache 0 --use_aiter_pa 1 --use_asm_pa 1 --use_triton_pa 1 --disable_flashinfer_native 1 --enable_cuda_graph 1 --enable_cuda_graph_debug_mode 1 --decode_capture_config '1' --enable_prefill_cuda_graph 1 --prefill_cuda_graph_max_requests 5",
+                gpu_type=["MI308X-ROCM7"],
+            ),
         ],
     )
 
