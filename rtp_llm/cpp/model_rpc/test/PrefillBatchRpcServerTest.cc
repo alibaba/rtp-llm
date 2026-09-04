@@ -1452,6 +1452,124 @@ TEST_F(PrefillBatchTraceTest, LogicalFailureUsesDomainStatusWithoutRpcAttributes
     EXPECT_EQ(attributes.find("rtp_llm.grpc_status_code"), attributes.end());
 }
 
+// Publishing the OTHER terminal cause is what unblocks requestLogicalFinalization()
+// on every other thread -- tryMarkOtherTerminal() also returns true when the cause
+// is already OTHER, so it fences nothing. finishSlotOperation() is a close-only
+// path: it claims the logical finalizer and ends the span while contributing no
+// status of its own. A failure status must therefore be committed before the cause
+// becomes visible, or the failed request is reported as a success.
+//
+// Entry A: cancel() itself publishes the cause (store/outward error paths).
+TEST_F(PrefillBatchTraceTest, CancelPublishingCauseItselfNeverReportsFailureAsSuccess) {
+    TestPrefillBatchRpcServer server;
+    server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots(1);
+    slots[0].input = std::make_shared<GenerateInputPB>();
+    slots[0].input->set_request_id(4601);
+    setTraceContext(*slots[0].input, "77777777777777777777777777777777", "7777777777777777");
+    server.buildSlotContexts(slots);
+    auto deferred = slots[0].deferred;
+    ASSERT_TRUE(deferred->context->trace_span_guard);
+
+    // The cause is still ACTIVE, so no other thread can claim the finalizer yet.
+    ASSERT_EQ(deferred->context->terminalCause(), PrefillTerminalCause::ACTIVE);
+    EXPECT_FALSE(deferred->requestLogicalFinalization());
+
+    deferred->cancel(grpc::Status(grpc::StatusCode::INTERNAL, "store failed"));
+    // A slot operation completing right after the cause became visible.
+    server.finishSlotOperation(4601, deferred);
+
+    EXPECT_FALSE(deferred->logical_status.ok()) << "cancel status dropped";
+    auto spans    = finishTelemetry();
+    auto logicals = findSpans(spans, "rtp_llm.prefill_batch_request");
+    ASSERT_EQ(logicals.size(), 1u);
+    EXPECT_EQ(logicals[0]->GetStatus(), trace_api::StatusCode::kError) << "a cancelled request was closed as a success";
+}
+
+// Entry B: callers that publish the terminal cause themselves and only reach
+// cancel() later -- expire() (marks under mu_, cancels after releasing it) and
+// cancelAll() (marks every context under mu_, then loops calling cancel()).
+// Real work sits in that gap, so cancel() cannot repair the ordering for them:
+// they must commit the status before they publish the cause. This pins that
+// call-site contract; reordering commit after the mark makes it fail.
+TEST_F(PrefillBatchTraceTest, CausePublishedByCallerRequiresStatusCommittedFirst) {
+    TestPrefillBatchRpcServer server;
+    server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+    std::vector<PrefillBatchRpcServer::BatchSlot> slots(1);
+    slots[0].input = std::make_shared<GenerateInputPB>();
+    slots[0].input->set_request_id(5601);
+    setTraceContext(*slots[0].input, "88888888888888888888888888888888", "8888888888888888");
+    server.buildSlotContexts(slots);
+    auto deferred = slots[0].deferred;
+    ASSERT_TRUE(deferred->context->trace_span_guard);
+
+    const grpc::Status shutdown_status(grpc::StatusCode::UNAVAILABLE, "Prefill batch server is shutting down");
+    // The ordering expire()/cancelAll() must use while still holding mu_.
+    deferred->commitTerminalStatus(shutdown_status);
+    deferred->context->tryMarkOtherTerminal();
+    // An in-flight slot operation completing in the gap before cancel() is reached:
+    // it claims the logical finalizer and ends the span, contributing no status.
+    server.finishSlotOperation(5601, deferred);
+    // The caller finally reaches cancel(); the span is already closed by now.
+    deferred->cancel(shutdown_status);
+
+    auto spans    = finishTelemetry();
+    auto logicals = findSpans(spans, "rtp_llm.prefill_batch_request");
+    ASSERT_EQ(logicals.size(), 1u);
+    EXPECT_EQ(logicals[0]->GetStatus(), trace_api::StatusCode::kError)
+        << "a shutdown-cancelled request was closed as a success";
+}
+
+// The reachable production interleaving: cancelAll() marks every stored context
+// under mu_, releases mu_, and only then loops calling cancel(). A slot whose
+// prepare task completes in that gap runs finishSlotOperation() on a worker
+// thread -- a close-only path -- sees the cause already OTHER, claims the
+// logical finalizer and ends the span. If cancelAll() had not committed the
+// shutdown status before marking, that span is closed as a success.
+TEST_F(PrefillBatchTraceTest, ConcurrentShutdownAndSlotFinalizationNeverReportsFailureAsSuccess) {
+    constexpr int kIterations = 60;
+    for (int i = 0; i < kIterations; ++i) {
+        TestPrefillBatchRpcServer server;
+        server.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+        std::vector<PrefillBatchRpcServer::BatchSlot> slots(1);
+        const int64_t                                 request_id = 6600 + i;
+        slots[0].input                                           = std::make_shared<GenerateInputPB>();
+        slots[0].input->set_request_id(request_id);
+        setTraceContext(*slots[0].input, "99999999999999999999999999999999", "9999999999999999");
+        server.buildSlotContexts(slots);
+        auto deferred = slots[0].deferred;
+        ASSERT_TRUE(deferred->context->trace_span_guard);
+
+        auto contexts = std::make_shared<DeferredPrefillContextMap>();
+        ASSERT_TRUE(contexts->store(request_id, deferred).ok());
+
+        std::atomic<bool> go{false};
+        std::thread       shutdowner([&] {
+            while (!go.load(std::memory_order_acquire)) {}
+            contexts->cancelAll(grpc::Status(grpc::StatusCode::UNAVAILABLE, "Prefill batch server is shutting down"));
+        });
+        // The prepare-pool thread finishing its slot in cancelAll()'s gap.
+        std::thread finalizer([&] {
+            while (!go.load(std::memory_order_acquire)) {}
+            server.finishSlotOperation(request_id, deferred);
+        });
+        go.store(true, std::memory_order_release);
+        shutdowner.join();
+        finalizer.join();
+        deferred->finishLogicalTrace();
+
+        EXPECT_FALSE(deferred->logical_status.ok()) << "shutdown status dropped at iteration " << i;
+    }
+
+    auto spans    = finishTelemetry();
+    auto logicals = findSpans(spans, "rtp_llm.prefill_batch_request");
+    ASSERT_FALSE(logicals.empty());
+    for (const auto* logical : logicals) {
+        EXPECT_EQ(logical->GetStatus(), trace_api::StatusCode::kError)
+            << "a request that failed during shutdown was closed as a success";
+    }
+}
+
 TEST_F(PrefillBatchTraceTest, TtlStyleCancellationSynthesizesTruncatedWaitExactlyOnce) {
     TestPrefillBatchRpcServer server;
     server.meta_ = std::make_shared<RpcServerRuntimeMeta>();

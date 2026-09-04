@@ -788,6 +788,7 @@ _CLIENT_ERROR_DESCRIPTIONS = {
     "Cancelled": "Client operation was cancelled",
     "RpcError": "Model RPC request failed",
     "TrafficLimit": "Request routing was rejected by traffic limits",
+    "FlexlbBusinessRejected": "Master rejected the schedule request",
 }
 
 

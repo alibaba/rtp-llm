@@ -229,7 +229,15 @@ class MasterClient:
                 raise
             if client_span is not None:
                 client_span.set_attribute("flexlb.schedule.code", int(response.code))
-                client_span.finish()
+                # A rejecting business code on an otherwise successful transport is
+                # still a failed schedule: the caller raises FtRuntimeException on
+                # it (see the SUCCESS_CODE branch below). Closing this span as OK
+                # would contradict the code just recorded above and hide the
+                # rejection from status-based filtering on the CLIENT span.
+                if int(response.code) != SUCCESS_CODE:
+                    client_span.finish(error_type="FlexlbBusinessRejected")
+                else:
+                    client_span.finish()
             return response
         except grpc.aio.AioRpcError as e:
             elapsed = time.time() - start

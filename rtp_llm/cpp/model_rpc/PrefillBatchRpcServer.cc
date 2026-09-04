@@ -226,10 +226,23 @@ opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> startBatchLogicalSp
         using SpanAttribute = std::pair<opentelemetry::nostd::string_view, opentelemetry::common::AttributeValue>;
         std::string                request_id = std::to_string(input.request_id());
         std::vector<SpanAttribute> attributes;
-        attributes.reserve(3);
+        attributes.reserve(4);
         attributes.emplace_back(telemetry::kAttrRequestId, opentelemetry::nostd::string_view(request_id));
         attributes.emplace_back(telemetry::kAttrRtpLlmRequestId, input.request_id());
         attributes.emplace_back(telemetry::kAttrRtpLlmPdSep, true);
+        // The coalescing wait that precedes this span is otherwise unreadable:
+        // master_route contains it but also contains the whole EnqueueGroup
+        // handling, and this span only starts once the request is already here.
+        // start_time is the frontend's wall clock, stamped by trans_input() for
+        // every request, so the unset guard only covers callers that build the PB
+        // directly. The clock belongs to another machine, so drop a negative
+        // delta as well -- a wrong value misleads more than an absent one.
+        if (input.start_time() > 0) {
+            const int64_t handoff_delay_us = currentTimeUs() - input.start_time();
+            if (handoff_delay_us >= 0) {
+                attributes.emplace_back(telemetry::kAttrRtpLlmPrefillHandoffDelayUs, handoff_delay_us);
+            }
+        }
         return telemetry::TelemetryRuntime::tracer()->StartSpan("rtp_llm.prefill_batch_request", attributes, options);
     } catch (...) {
         return {};
@@ -354,10 +367,19 @@ void DeferredPrefillContext::cancel(const grpc::Status& status) {
     if (!context) {
         return;
     }
+    // Commit before publishing the OTHER terminal cause. tryMarkOtherTerminal()
+    // also returns true when the cause is already OTHER, so it fences nothing:
+    // the moment the cause becomes OTHER, requestLogicalFinalization() starts
+    // succeeding on other threads (finishSlotOperation, cancelAll) and one of
+    // them can close the logical span while logical_status is still OK, which
+    // reports a failed request as a success and drops this status at the
+    // trace_finished_ check. A priority terminal still wins after this point:
+    // commitTerminalStatus() always lets a PRIORITY_PREEMPTED status overwrite,
+    // and finalizePriorityPreemption() commits one explicitly.
+    commitTerminalStatus(status);
     if (!context->tryMarkOtherTerminal()) {
         return;
     }
-    commitTerminalStatus(status);
     context->error_status = status;
     context->cancel_state->store(true);
     context->tryCancelDownstream();
@@ -684,6 +706,7 @@ void DeferredPrefillContextMap::finish(int64_t request_id, const DeferredPrefill
 }
 
 void DeferredPrefillContextMap::expire(int64_t request_id, const DeferredPrefillContext* expected) {
+    const grpc::Status expired_status(grpc::StatusCode::DEADLINE_EXCEEDED, "FetchResponse context TTL expired");
     std::shared_ptr<DeferredPrefillContext> deferred;
     {
         std::lock_guard<std::mutex> lock(mu_);
@@ -694,12 +717,18 @@ void DeferredPrefillContextMap::expire(int64_t request_id, const DeferredPrefill
         deferred = std::move(it->second);
         contexts_.erase(it);
         if (deferred->context) {
+            // Commit before publishing the terminal cause. The publication is
+            // what lets any other thread claim the logical finalizer, and the
+            // cancel() below is only reached after mu_ is released, so a slot
+            // operation completing in between would otherwise close the span
+            // while logical_status is still OK.
+            deferred->commitTerminalStatus(expired_status);
             deferred->context->tryMarkOtherTerminal();
         }
         active_contexts_.erase(request_id);
         rememberRecentlySeenRequest(request_id, autil::TimeUtility::currentTimeInMilliSeconds());
     }
-    deferred->cancel(grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "FetchResponse context TTL expired"));
+    deferred->cancel(expired_status);
 }
 
 void DeferredPrefillContextMap::stopAccepting() {
@@ -717,6 +746,11 @@ void DeferredPrefillContextMap::cancelAll(const grpc::Status& status) {
         std::unordered_set<DeferredPrefillContext*> stored_contexts;
         for (auto& entry : contexts_) {
             if (entry.second && entry.second->context) {
+                // Commit before publishing the terminal cause: cancel() for these
+                // contexts only runs after mu_ is released below, so publishing
+                // first would let a concurrent close-only finalizer report the
+                // shutdown as a success.
+                entry.second->commitTerminalStatus(status);
                 entry.second->context->tryMarkOtherTerminal();
                 stored_contexts.insert(entry.second.get());
             }
@@ -724,9 +758,12 @@ void DeferredPrefillContextMap::cancelAll(const grpc::Status& status) {
         }
         for (auto& entry : active_contexts_) {
             if (auto active = entry.second.lock(); active && active->context) {
-                active->context->tryMarkOtherTerminal();
-                if (stored_contexts.find(active.get()) == stored_contexts.end()) {
+                const bool already_stored = stored_contexts.find(active.get()) != stored_contexts.end();
+                if (!already_stored) {
                     active->commitTerminalStatus(status);
+                }
+                active->context->tryMarkOtherTerminal();
+                if (!already_stored) {
                     active_only_contexts.push_back(std::move(active));
                 }
             }

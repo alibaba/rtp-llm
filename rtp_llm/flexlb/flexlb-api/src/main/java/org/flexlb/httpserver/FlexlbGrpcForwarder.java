@@ -107,6 +107,15 @@ public class FlexlbGrpcForwarder {
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB response =
                     stub.schedule(forwardedRequest);
             engineHealthReporter.reportForwardToMasterResult(ip, String.valueOf(response.getCode()));
+            // Transport succeeded but the master may still have rejected the
+            // request. Route that through the same business-error channel
+            // completeSchedule() uses, otherwise this span closes OK while the
+            // health report above already recorded the rejecting code.
+            if (!response.getSuccess()) {
+                FlexlbTrace.markBusinessError(
+                        FlexlbTrace.withSpan(forwardSpan.get(), Context.current()),
+                        response.getCode(), "FLEXLB_BUSINESS_REJECTED");
+            }
             finishForwardSpan.accept(null);
             return MasterForwardResult.forwarded(response, masterHostIpPort);
         } catch (StatusRuntimeException e) {
