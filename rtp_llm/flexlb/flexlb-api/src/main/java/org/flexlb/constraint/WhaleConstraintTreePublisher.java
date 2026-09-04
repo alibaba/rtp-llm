@@ -116,19 +116,25 @@ public class WhaleConstraintTreePublisher implements ConstraintTreePublisher {
                 return current;
             }
             WorkerUpdateResponse response = httpService
-                    .requestRawJson(artifact.payload(), uri, UPDATE_PATH, WorkerUpdateResponse.class)
+                    .requestRawBytes(artifact.payload(), uri, UPDATE_PATH, WorkerUpdateResponse.class)
                     .timeout(publishTimeout)
                     .block();
             if (response == null) {
                 return new WorkerPublication(worker, false, 0, "worker returned an empty response");
             }
+            if (response.version() > artifact.version()) {
+                return new WorkerPublication(worker, false, response.version(),
+                        "worker already has a newer tree version");
+            }
+            if (response.version() == artifact.version()) {
+                return new WorkerPublication(worker, true, response.version(), "tree is active");
+            }
             String status = response.status() == null ? "" : response.status().toLowerCase(Locale.ROOT);
-            boolean accepted = status.equals("accepted")
-                    || status.equals("already_accepted")
-                    || status.equals("updated")
-                    || status.equals("already_current")
-                    || status.equals("ready");
-            return new WorkerPublication(worker, accepted, response.version(), response.message());
+            if (status.equals("accepted") || status.equals("already_accepted")) {
+                return new WorkerPublication(worker, false, response.version(),
+                        "tree was delivered and is awaiting Worker activation");
+            }
+            return new WorkerPublication(worker, false, response.version(), response.message());
         } catch (Exception e) {
             log.warn("constraint tree publication failed worker={}, version={}: {}",
                     worker, artifact.version(), rootMessage(e));
@@ -152,10 +158,14 @@ public class WhaleConstraintTreePublisher implements ConstraintTreePublisher {
             if (response.version() == artifact.version()) {
                 return new WorkerPublication(worker, true, response.version(), "already current");
             }
+            if (response.requestedVersion() > artifact.version()) {
+                return new WorkerPublication(worker, false, response.version(),
+                        "worker is already loading a newer tree version");
+            }
             String status = response.status() == null ? "" : response.status().toLowerCase(Locale.ROOT);
             if (response.requestedVersion() == artifact.version()
                     && (status.equals("queued") || status.equals("loading"))) {
-                return new WorkerPublication(worker, true, response.version(), "already loading");
+                return new WorkerPublication(worker, false, response.version(), "delivered; activation is still pending");
             }
         } catch (Exception ignored) {
             // A status probe is only an optimization. The update POST remains authoritative.

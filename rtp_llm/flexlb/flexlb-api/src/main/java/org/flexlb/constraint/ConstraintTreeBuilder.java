@@ -6,15 +6,14 @@ import org.flexlb.constraint.ConstraintTreeModels.BuildRequest;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ForkJoinPool;
 import java.util.stream.IntStream;
 
 public class ConstraintTreeBuilder implements AutoCloseable {
+
+    static final int TERMINAL_STATE = -1;
 
     private final Clock clock;
     private final ForkJoinPool buildPool;
@@ -87,39 +86,133 @@ public class ConstraintTreeBuilder implements AutoCloseable {
         int startTokenId = request.resolvedStartTokenId();
         int endTokenId = request.resolvedEndTokenId();
         int[][] tokenSequences = parseAndSort(request, separator, startTokenId, endTokenId);
-        Map<String, List<Integer>> prefixDict = new LinkedHashMap<>();
-        long uniqueSidCount = 0;
-        int[] previous = null;
-
-        // Lexicographic sorting makes all candidates for the same prefix contiguous.
-        // We can therefore append unique edges directly, without a HashSet per prefix.
-        for (int[] tokenIds : tokenSequences) {
-            if (previous != null && Arrays.equals(previous, tokenIds)) {
-                continue;
-            }
-            uniqueSidCount++;
-            StringBuilder prefix = new StringBuilder(Integer.toString(startTokenId));
-            for (int tokenId : tokenIds) {
-                appendCandidate(prefixDict, prefix.toString(), tokenId);
-                prefix.append(separator).append(tokenId);
-            }
-            appendCandidate(prefixDict, prefix.toString(), endTokenId);
-            previous = tokenIds;
-        }
-
-        prefixDict.replaceAll((ignored, candidates) -> List.copyOf(candidates));
+        CsrArrays csr = buildCsr(tokenSequences, endTokenId);
 
         return new Artifact(
                 request.version(),
                 request.model(),
                 startTokenId,
                 endTokenId,
-                separator,
-                Collections.unmodifiableMap(prefixDict),
+                csr.rowPtr(),
+                csr.colIdx(),
+                csr.nextState(),
                 request.inputCount(),
-                uniqueSidCount,
-                prefixDict.size(),
+                csr.uniqueSidCount(),
                 clock.millis());
+    }
+
+    /**
+     * Builds the trie directly in CSR form. The input is lexicographically sorted, so
+     * state ids can be assigned deterministically with only a stack for the previous
+     * path. No String prefix keys or per-node HashMaps are materialized.
+     */
+    private CsrArrays buildCsr(int[][] tokenSequences, int endTokenId) {
+        long stateCountLong = 1; // state 0 is the root/start-token state
+        long uniqueSidCount = 0;
+        int maxDepth = 0;
+        int[] previous = null;
+        for (int[] tokens : tokenSequences) {
+            if (previous != null && Arrays.equals(previous, tokens)) {
+                continue;
+            }
+            int commonPrefix = commonPrefixLength(previous, tokens);
+            stateCountLong += tokens.length - commonPrefix;
+            uniqueSidCount++;
+            maxDepth = Math.max(maxDepth, tokens.length);
+            previous = tokens;
+        }
+        long edgeCountLong = stateCountLong - 1 + uniqueSidCount;
+        if (stateCountLong > Integer.MAX_VALUE || edgeCountLong > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("constraint tree exceeds int32 CSR capacity");
+        }
+
+        int stateCount = (int) stateCountLong;
+        int edgeCount = (int) edgeCountLong;
+        int[] degrees = new int[stateCount];
+        assignStates(tokenSequences, maxDepth,
+                (parent, token, child) -> degrees[parent]++,
+                terminal -> degrees[terminal]++);
+
+        int[] rowPtr = new int[stateCount + 1];
+        for (int state = 0; state < stateCount; state++) {
+            rowPtr[state + 1] = Math.addExact(rowPtr[state], degrees[state]);
+        }
+        if (rowPtr[stateCount] != edgeCount) {
+            throw new IllegalStateException("CSR edge count mismatch");
+        }
+
+        int[] colIdx = new int[edgeCount];
+        int[] nextState = new int[edgeCount];
+        int[] cursor = Arrays.copyOf(rowPtr, stateCount);
+        assignStates(tokenSequences, maxDepth,
+                (parent, token, child) -> {
+                    int position = cursor[parent]++;
+                    colIdx[position] = token;
+                    nextState[position] = child;
+                },
+                terminal -> {
+                    int position = cursor[terminal]++;
+                    colIdx[position] = endTokenId;
+                    nextState[position] = TERMINAL_STATE;
+                });
+
+        // Normal child edges arrive sorted because the SID list is sorted. A terminal
+        // edge can share a row with longer SIDs, so sort each row together with its
+        // next-state value to make Worker-side binary search valid for every token id.
+        runOnBuildPool(() -> IntStream.range(0, stateCount).parallel().forEach(state ->
+                sortEdgePairs(colIdx, nextState, rowPtr[state], rowPtr[state + 1])));
+        return new CsrArrays(rowPtr, colIdx, nextState, uniqueSidCount);
+    }
+
+    private void assignStates(int[][] tokenSequences,
+                              int maxDepth,
+                              EdgeConsumer edgeConsumer,
+                              TerminalConsumer terminalConsumer) {
+        int[] stateStack = new int[maxDepth + 1];
+        int nextStateId = 1;
+        int[] previous = null;
+        for (int[] tokens : tokenSequences) {
+            if (previous != null && Arrays.equals(previous, tokens)) {
+                continue;
+            }
+            int commonPrefix = commonPrefixLength(previous, tokens);
+            for (int depth = commonPrefix; depth < tokens.length; depth++) {
+                int childState = nextStateId++;
+                edgeConsumer.accept(stateStack[depth], tokens[depth], childState);
+                stateStack[depth + 1] = childState;
+            }
+            terminalConsumer.accept(stateStack[tokens.length]);
+            previous = tokens;
+        }
+    }
+
+    private static int commonPrefixLength(int[] left, int[] right) {
+        if (left == null || right == null) {
+            return 0;
+        }
+        int limit = Math.min(left.length, right.length);
+        int index = 0;
+        while (index < limit && left[index] == right[index]) {
+            index++;
+        }
+        return index;
+    }
+
+    private static void sortEdgePairs(int[] tokens, int[] nextStates, int from, int to) {
+        // Rows are normally tiny. Insertion sort avoids allocating one boxed Pair per
+        // edge and keeps peak memory bounded for multi-million-state trees.
+        for (int index = from + 1; index < to; index++) {
+            int token = tokens[index];
+            int nextState = nextStates[index];
+            int cursor = index - 1;
+            while (cursor >= from && tokens[cursor] > token) {
+                tokens[cursor + 1] = tokens[cursor];
+                nextStates[cursor + 1] = nextStates[cursor];
+                cursor--;
+            }
+            tokens[cursor + 1] = token;
+            nextStates[cursor + 1] = nextState;
+        }
     }
 
     private int[][] parseAndSort(BuildRequest request, String separator, int startTokenId, int endTokenId) {
@@ -160,13 +253,6 @@ public class ConstraintTreeBuilder implements AutoCloseable {
                 throw runtimeException;
             }
             throw new IllegalStateException("constraint tree build failed", cause);
-        }
-    }
-
-    private void appendCandidate(Map<String, List<Integer>> prefixDict, String prefix, int tokenId) {
-        List<Integer> candidates = prefixDict.computeIfAbsent(prefix, ignored -> new ArrayList<>());
-        if (candidates.isEmpty() || candidates.get(candidates.size() - 1) != tokenId) {
-            candidates.add(tokenId);
         }
     }
 
@@ -233,5 +319,18 @@ public class ConstraintTreeBuilder implements AutoCloseable {
     @Override
     public void close() {
         buildPool.shutdownNow();
+    }
+
+    private record CsrArrays(int[] rowPtr, int[] colIdx, int[] nextState, long uniqueSidCount) {
+    }
+
+    @FunctionalInterface
+    private interface EdgeConsumer {
+        void accept(int parent, int token, int child);
+    }
+
+    @FunctionalInterface
+    private interface TerminalConsumer {
+        void accept(int terminalState);
     }
 }

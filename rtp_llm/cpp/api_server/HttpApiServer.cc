@@ -228,7 +228,7 @@ bool HttpApiServer::registerConstraintTreeService() {
         return false;
     }
 
-    constraint_tree_service_.reset(new ConstraintTreeService());
+    constraint_tree_service_.reset(new ConstraintTreeService(engine_ ? engine_->getDevice() : nullptr));
     auto update_callback = [constraint_tree_service =
                                 constraint_tree_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
                                                           const http_server::HttpRequest& request) -> void {

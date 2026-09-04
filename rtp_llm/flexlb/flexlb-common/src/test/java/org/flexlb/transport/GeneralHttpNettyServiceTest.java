@@ -30,6 +30,7 @@ class GeneralHttpNettyServiceTest {
     private final EventLoopGroup eventLoopGroup = new NioEventLoopGroup(1);
     private final EventExecutorGroup callbackExecutor = new DefaultEventExecutorGroup(1);
     private final AtomicReference<byte[]> receivedBody = new AtomicReference<>();
+    private final AtomicReference<String> receivedContentType = new AtomicReference<>();
     private HttpServer server;
     private GeneralHttpNettyService httpService;
     private URI serverUri;
@@ -67,15 +68,15 @@ class GeneralHttpNettyServiceTest {
     }
 
     @Test
-    void sendsPreSerializedJsonBytesAndParsesResponse() {
-        byte[] payload = "{\"version\":202609031210,\"prefix_dict\":{\"1699\":[169967]}}"
-                .getBytes(StandardCharsets.UTF_8);
+    void sendsBinaryBytesWithoutCorruptionAndParsesJsonResponse() {
+        byte[] payload = new byte[]{'R', 'T', 'P', 'C', 'S', 'R', '0', '1', 0, 1, 0, (byte) 0xff};
 
-        TestResponse response = httpService.requestRawJson(
+        TestResponse response = httpService.requestRawBytes(
                         payload, serverUri, "/update_constraint_tree", TestResponse.class)
                 .block(Duration.ofSeconds(5));
 
         assertArrayEquals(payload, receivedBody.get());
+        assertEquals("application/octet-stream", receivedContentType.get());
         assertEquals("accepted", response.status());
         assertEquals(202609031210L, response.requestedVersion());
     }
@@ -92,6 +93,7 @@ class GeneralHttpNettyServiceTest {
 
     private void handleUpdate(HttpExchange exchange) throws IOException {
         assertEquals("POST", exchange.getRequestMethod());
+        receivedContentType.set(exchange.getRequestHeaders().getFirst("Content-Type"));
         receivedBody.set(exchange.getRequestBody().readAllBytes());
         respond(exchange, "{\"status\":\"accepted\",\"version\":0,"
                 + "\"requested_version\":202609031210}");

@@ -16,7 +16,8 @@ cc_library(
     copts = copts(),
     deps = [
         ":http_server",
-        "//rtp_llm/cpp/models:dfa_utils",
+        "//rtp_llm/cpp/devices:devices_base_impl",
+        "//rtp_llm/cpp/models:constraint_tree_csr",
         "//rtp_llm/cpp/utils:core_utils",
         "@havenask//aios/autil:json",
     ],

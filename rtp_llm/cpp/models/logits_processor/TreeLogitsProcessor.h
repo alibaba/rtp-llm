@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/ConstraintTreeCsr.h"
 #include "rtp_llm/cpp/models/logits_processor/DFAUtil.h"
 
 namespace rtp_llm {
@@ -11,7 +12,9 @@ struct StreamTreeInfo {
     int32_t                                    current_output_length;
     bool                                       is_beam_search;
     std::shared_ptr<TreeDFA<std::string, int>> dfa_ptr;
-    StreamTreeInfo() = default;
+    ConstraintTreeCsrSnapshotPtr               csr_snapshot;
+    int32_t                                    csr_state = -1;
+    StreamTreeInfo()                                     = default;
     StreamTreeInfo(bool                                       in_tree_mode,
                    int32_t                                    input_length,
                    int32_t                                    output_length,
@@ -22,6 +25,18 @@ struct StreamTreeInfo {
         current_output_length(output_length),
         is_beam_search(is_beam_search),
         dfa_ptr(dfa_ptr) {}
+    StreamTreeInfo(bool                         in_tree_mode,
+                   int32_t                      input_length,
+                   int32_t                      output_length,
+                   bool                         is_beam_search,
+                   ConstraintTreeCsrSnapshotPtr csr_snapshot):
+        in_tree_mode(in_tree_mode),
+        input_length(input_length),
+        current_output_length(output_length),
+        is_beam_search(is_beam_search),
+        dfa_ptr(nullptr),
+        csr_snapshot(std::move(csr_snapshot)),
+        csr_state(0) {}
     StreamTreeInfo copy() {
         StreamTreeInfo tree_info;
         tree_info.in_tree_mode          = in_tree_mode;
@@ -31,6 +46,8 @@ struct StreamTreeInfo {
         if (dfa_ptr) {
             tree_info.dfa_ptr = std::make_shared<TreeDFA<std::string, int>>(*dfa_ptr);
         }
+        tree_info.csr_snapshot = csr_snapshot;
+        tree_info.csr_state    = csr_state;
         return tree_info;
     }
 };
@@ -44,6 +61,11 @@ public:
 public:
     static std::shared_ptr<TreeLogitsProcessor>
     fromGenerateInput(rtp_llm::DeviceBase* device, std::shared_ptr<GenerateInput> generate_input, int32_t num);
+    // Returns an admission error for a runtime-constrained request, or an empty
+    // string when the request can safely start.
+    static std::string validateCsrRequest(const ConstraintTreeCsrSnapshotPtr& snapshot,
+                                          const GenerateConfig&               generate_config,
+                                          bool                                runtime_tree_required);
 
 public:
     void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
@@ -62,7 +84,12 @@ public:
     }
 
 private:
+    void ensureCsrStateBuffers(size_t count);
+
+private:
     std::vector<StreamTreeInfo> tree_infos_;
+    rtp_llm::BufferPtr          csr_host_states_;
+    rtp_llm::BufferPtr          csr_device_states_;
 };
 typedef std::shared_ptr<TreeLogitsProcessor> TreeLogitsProcessorPtr;
 

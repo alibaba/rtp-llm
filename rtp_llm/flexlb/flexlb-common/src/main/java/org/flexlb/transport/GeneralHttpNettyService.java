@@ -5,6 +5,7 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
+import io.netty.handler.codec.http.DefaultHttpHeaders;
 import io.netty.handler.codec.http.HttpContent;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaderValues;
@@ -70,16 +71,14 @@ public class GeneralHttpNettyService {
         return doRequest(request, uri, path, headers, responseClz, HttpMethod.POST, false);
     }
 
-    /**
-     * Sends an already serialized JSON body. This avoids serializing a large immutable
-     * payload once for every target worker.
-     */
-    public <Result> Mono<Result> requestRawJson(String requestBody, URI uri, String path, Class<Result> responseClz) {
-        return doRequest(requestBody, uri, path, null, responseClz, HttpMethod.POST, true);
-    }
-
-    public <Result> Mono<Result> requestRawJson(byte[] requestBody, URI uri, String path, Class<Result> responseClz) {
-        return doRequest(requestBody, uri, path, null, responseClz, HttpMethod.POST, true);
+    /** Sends a pre-serialized binary body while still decoding the JSON response. */
+    public <Result> Mono<Result> requestRawBytes(byte[] requestBody, URI uri, String path, Class<Result> responseClz) {
+        HttpHeaders headers = new DefaultHttpHeaders();
+        headers.set(HttpHeaderNames.HOST, Objects.requireNonNull(uri).getHost());
+        headers.set(HttpHeaderNames.CONNECTION, HttpHeaderValues.KEEP_ALIVE);
+        headers.set(HttpHeaderNames.CONTENT_TYPE, "application/octet-stream");
+        headers.set(HttpHeaderNames.CONTENT_LENGTH, requestBody.length);
+        return doRequest(requestBody, uri, path, headers, responseClz, HttpMethod.POST, true);
     }
 
     public <Result> Mono<Result> get(URI uri, String path, Class<Result> responseClz) {

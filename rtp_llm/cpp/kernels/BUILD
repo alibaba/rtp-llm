@@ -311,6 +311,7 @@ cc_library(
         "ban_bad_words.cu",
         "banRepeatNgram.cu",
         "mask_logits.cu",
+        "mask_logits_csr.cu",
     ],
     hdrs = [
         "sampling_topk_kernels.h",
@@ -319,6 +320,7 @@ cc_library(
         "ban_bad_words.h",
         "banRepeatNgram.h",
         "mask_logits.h",
+        "mask_logits_csr.h",
         "penalty_types.h",
     ],
     deps = any_cuda_deps + [

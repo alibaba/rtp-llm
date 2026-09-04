@@ -65,6 +65,38 @@ Tree Decode is enabled when the model loads a valid config file (global effect; 
 
 If loaded successfully, you will see: `PrefixToCandidateTokens load [path] successfully` in logs. If not configured or failed to load, Tree Decode is disabled.
 
+### Realtime CSR constraint tree
+
+The runtime update path uses a compact CSR snapshot instead of the legacy string-keyed prefix map. FlexLB Master accepts variable-length SID token sequences, builds the CSR on a dedicated CPU pool, keeps `current` and `backup`, discovers Whale decode workers, and pushes the binary snapshot to each worker. A worker validates and uploads the snapshot in a background thread; new requests atomically pin the new version while in-flight requests keep their old snapshot.
+
+Submit a build to FlexLB Master (exactly one of `rq_token_ids` or `sids` is required):
+
+```json
+{
+  "version": 202609031210,
+  "model": "gul_item",
+  "start_token_id": 1699,
+  "end_token_id": 151645,
+  "rq_token_ids": [
+    [169967, 216546],
+    [169967, 215835],
+    [42, 43, 44]
+  ]
+}
+```
+
+Each `rq_token_ids` entry is one variable-length SID token sequence and excludes the reserved start/end tokens; `sids` is the separator-joined string form of the same data. Versions must increase monotonically, and `model` is the key used for Worker service discovery.
+
+- `POST /rtp_llm/constraint_tree/build`: queue a Master build.
+- `GET /rtp_llm/constraint_tree/status`: inspect build, desired version, and Worker activation counts.
+- `GET /rtp_llm/constraint_tree/artifact`: download `current`; add `?slot=backup` for the previous version.
+- Worker `POST /update_constraint_tree`: receive a CSR binary snapshot.
+- Worker `GET /constraint_tree_status`: report the version that is actually active.
+
+Set `CONSTRAINT_TREE_REQUIRED=true` on workers dedicated to realtime constrained decoding. Such a worker rejects generation requests until a runtime CSR snapshot is active, so startup or update failures cannot silently fall back to unconstrained generation. Runtime CSR currently supports fixed `num_beams`; `variable_num_beams` is rejected, and the root candidate count must be at least `num_beams`.
+
+Optional Master tuning variables are `CONSTRAINT_TREE_BUILD_THREADS`, `CONSTRAINT_TREE_RECONCILE_INTERVAL_SECONDS`, `CONSTRAINT_TREE_PUBLISH_CONCURRENCY`, and `CONSTRAINT_TREE_PUBLISH_TIMEOUT_SECONDS`.
+
 ---
 
 ### Design and best practices

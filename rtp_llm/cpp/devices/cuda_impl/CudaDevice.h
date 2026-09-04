@@ -247,6 +247,7 @@ public:
                                                                                const std::string& arch);
     void                              prepareCommBuffer(const PrepareCommBufferParams& params) override;
     void                              maskLogits(Buffer& logits, const Buffer& mask) override;
+    void csrMaskLogits(Buffer& logits, const Buffer& states, const Buffer& row_ptr, const Buffer& col_idx) override;
 
     void perfRangePush(const std::string& name) const override;
     void perfRangePop() const override;

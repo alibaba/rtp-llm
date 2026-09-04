@@ -13,9 +13,11 @@
 
 namespace rtp_llm {
 
+class DeviceBase;
+
 class ConstraintTreeService {
 public:
-    ConstraintTreeService();
+    explicit ConstraintTreeService(DeviceBase* device = nullptr);
     ~ConstraintTreeService();
 
     void updateConstraintTree(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
@@ -39,6 +41,7 @@ private:
     uint64_t                     latest_requested_version_ = 0;
     std::string                  update_state_             = "idle";
     std::string                  update_message_           = "no runtime update has been submitted";
+    DeviceBase*                  device_                   = nullptr;
     std::thread                  update_thread_;
 };
 

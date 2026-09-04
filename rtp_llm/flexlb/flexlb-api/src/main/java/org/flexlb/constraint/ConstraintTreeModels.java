@@ -3,7 +3,6 @@ package org.flexlb.constraint;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.util.List;
-import java.util.Map;
 
 public final class ConstraintTreeModels {
 
@@ -64,12 +63,20 @@ public final class ConstraintTreeModels {
             String model,
             @JsonProperty("start_token_id") int startTokenId,
             @JsonProperty("end_token_id") int endTokenId,
-            @JsonProperty("sep") String separator,
-            @JsonProperty("prefix_dict") Map<String, List<Integer>> prefixDict,
+            @JsonProperty("row_ptr") int[] rowPtr,
+            @JsonProperty("col_idx") int[] colIdx,
+            @JsonProperty("next_state") int[] nextState,
             @JsonProperty("input_sid_count") long inputSidCount,
             @JsonProperty("sid_count") long sidCount,
-            @JsonProperty("prefix_count") long prefixCount,
             @JsonProperty("created_at_epoch_ms") long createdAtEpochMs) {
+
+        public long prefixCount() {
+            return rowPtr.length - 1L;
+        }
+
+        public long edgeCount() {
+            return colIdx.length;
+        }
     }
 
     public record ArtifactMetadata(
@@ -80,6 +87,7 @@ public final class ConstraintTreeModels {
             @JsonProperty("input_sid_count") long inputSidCount,
             @JsonProperty("sid_count") long sidCount,
             @JsonProperty("prefix_count") long prefixCount,
+            @JsonProperty("edge_count") long edgeCount,
             @JsonProperty("created_at_epoch_ms") long createdAtEpochMs,
             @JsonProperty("serialized_size_bytes") long serializedSizeBytes) {
     }
@@ -131,7 +139,8 @@ public final class ConstraintTreeModels {
             @JsonProperty("requested_version") long requestedVersion,
             String message,
             boolean initialized,
-            @JsonProperty("prefix_count") long prefixCount) {
+            @JsonProperty("prefix_count") long prefixCount,
+            @JsonProperty("edge_count") long edgeCount) {
     }
 
     public record WorkerPublication(

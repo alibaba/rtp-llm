@@ -13,9 +13,11 @@
 #include "rtp_llm/cpp/core/torch_utils/torch_cuda_allocator.h"
 #include "rtp_llm/cpp/core/torch_utils/TorchEvent.h"
 #include "rtp_llm/cpp/kernels/mask_logits.h"
+#include "rtp_llm/cpp/kernels/mask_logits_csr.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
+#include <limits>
 #include <unistd.h>
 #include "3rdparty/flashinfer/flashinfer.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -723,6 +725,49 @@ void CudaDevice::maskLogits(Buffer& logits, const Buffer& mask) {
     } else if (logits.type() == DataType::TYPE_BF16) {
         invokeMaskLogits<__nv_bfloat16>(
             (__nv_bfloat16*)(logits.data()), (const uint8_t*)mask.data(), batch_size, vocab_size, stream_);
+    } else {
+        throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+    }
+}
+
+void CudaDevice::csrMaskLogits(Buffer& logits, const Buffer& states, const Buffer& row_ptr, const Buffer& col_idx) {
+    RTP_LLM_CHECK(logits.shape().size() == 2);
+    RTP_LLM_CHECK(states.type() == DataType::TYPE_INT32 && row_ptr.type() == DataType::TYPE_INT32
+                  && col_idx.type() == DataType::TYPE_INT32);
+    RTP_LLM_CHECK(states.size() == logits.shape()[0] && row_ptr.size() >= 2);
+    RTP_LLM_CHECK(logits.shape()[0] <= static_cast<size_t>(std::numeric_limits<int>::max())
+                  && logits.shape()[1] <= static_cast<size_t>(std::numeric_limits<int>::max())
+                  && row_ptr.size() - 1 <= static_cast<size_t>(std::numeric_limits<int>::max()));
+    const size_t batch_size  = logits.shape()[0];
+    const size_t vocab_size  = logits.shape()[1];
+    const int    state_count = static_cast<int>(row_ptr.size() - 1);
+    if (logits.type() == DataType::TYPE_FP32) {
+        invokeCSRMaskLogits<float>((float*)logits.data(),
+                                   (const int*)states.data(),
+                                   (const int*)row_ptr.data(),
+                                   (const int*)col_idx.data(),
+                                   static_cast<int>(batch_size),
+                                   static_cast<int>(vocab_size),
+                                   state_count,
+                                   stream_);
+    } else if (logits.type() == DataType::TYPE_FP16) {
+        invokeCSRMaskLogits<half>((half*)logits.data(),
+                                  (const int*)states.data(),
+                                  (const int*)row_ptr.data(),
+                                  (const int*)col_idx.data(),
+                                  static_cast<int>(batch_size),
+                                  static_cast<int>(vocab_size),
+                                  state_count,
+                                  stream_);
+    } else if (logits.type() == DataType::TYPE_BF16) {
+        invokeCSRMaskLogits<__nv_bfloat16>((__nv_bfloat16*)logits.data(),
+                                           (const int*)states.data(),
+                                           (const int*)row_ptr.data(),
+                                           (const int*)col_idx.data(),
+                                           static_cast<int>(batch_size),
+                                           static_cast<int>(vocab_size),
+                                           state_count,
+                                           stream_);
     } else {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }

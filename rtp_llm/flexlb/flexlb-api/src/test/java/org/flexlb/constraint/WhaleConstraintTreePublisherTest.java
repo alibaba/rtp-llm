@@ -37,23 +37,25 @@ class WhaleConstraintTreePublisherTest {
     }
 
     @Test
-    void publishesToCppHttpPortsAndDeduplicatesWorkersAcrossRoles() {
+    void deliversToCppHttpPortsAndDefersSuccessUntilReconciliationObservesActivation() {
         WorkerHost first = new WorkerHost("10.0.0.1", 8000, 8001, 8005, "hz", "default");
         WorkerHost second = new WorkerHost("10.0.0.2", 9000, 9001, 9005, "sh", "default");
         when(addresses.getEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of(first));
         when(addresses.getEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of(first, second));
-        when(http.requestRawJson(any(byte[].class), any(URI.class),
+        when(http.get(any(URI.class), eq(WhaleConstraintTreePublisher.STATUS_PATH),
+                eq(WorkerUpdateResponse.class))).thenReturn(Mono.empty());
+        when(http.requestRawBytes(any(byte[].class), any(URI.class),
                 eq(WhaleConstraintTreePublisher.UPDATE_PATH), eq(WorkerUpdateResponse.class)))
-                .thenReturn(Mono.just(new WorkerUpdateResponse("accepted", 0, 7, "queued", false, 0)));
+                .thenReturn(Mono.just(new WorkerUpdateResponse("accepted", 0, 7, "queued", false, 0, 0)));
 
         SerializedArtifact artifact = artifact();
         PublicationResult result = publisher.publish(artifact);
 
         assertEquals(2, result.targetWorkerCount());
-        assertEquals(2, result.publishedWorkerCount());
-        verify(http).requestRawJson(eq(artifact.payload()), eq(URI.create("http://10.0.0.1:8005")),
+        assertEquals(0, result.publishedWorkerCount());
+        verify(http).requestRawBytes(eq(artifact.payload()), eq(URI.create("http://10.0.0.1:8005")),
                 eq(WhaleConstraintTreePublisher.UPDATE_PATH), eq(WorkerUpdateResponse.class));
-        verify(http).requestRawJson(eq(artifact.payload()), eq(URI.create("http://10.0.0.2:9005")),
+        verify(http).requestRawBytes(eq(artifact.payload()), eq(URI.create("http://10.0.0.2:9005")),
                 eq(WhaleConstraintTreePublisher.UPDATE_PATH), eq(WorkerUpdateResponse.class));
     }
 
@@ -75,12 +77,12 @@ class WhaleConstraintTreePublisherTest {
         when(addresses.getEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of());
         when(http.get(URI.create("http://10.0.0.1:8005"), WhaleConstraintTreePublisher.STATUS_PATH,
                 WorkerUpdateResponse.class))
-                .thenReturn(Mono.just(new WorkerUpdateResponse("ready", 7, 7, "ready", true, 4)));
+                .thenReturn(Mono.just(new WorkerUpdateResponse("ready", 7, 7, "ready", true, 4, 5)));
 
         PublicationResult result = publisher.publish(artifact());
 
         assertEquals(1, result.publishedWorkerCount());
-        verify(http, never()).requestRawJson(any(byte[].class), any(URI.class),
+        verify(http, never()).requestRawBytes(any(byte[].class), any(URI.class),
                 eq(WhaleConstraintTreePublisher.UPDATE_PATH), eq(WorkerUpdateResponse.class));
     }
 
@@ -91,13 +93,13 @@ class WhaleConstraintTreePublisherTest {
         when(addresses.getEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of());
         when(http.get(URI.create("http://10.0.0.1:8005"), WhaleConstraintTreePublisher.STATUS_PATH,
                 WorkerUpdateResponse.class))
-                .thenReturn(Mono.just(new WorkerUpdateResponse("ready", 8, 8, "ready", true, 4)));
+                .thenReturn(Mono.just(new WorkerUpdateResponse("ready", 8, 8, "ready", true, 4, 5)));
 
         PublicationResult result = publisher.publish(artifact());
 
         assertEquals(0, result.publishedWorkerCount());
         assertEquals(8, result.workers().get(0).version());
-        verify(http, never()).requestRawJson(any(byte[].class), any(URI.class),
+        verify(http, never()).requestRawBytes(any(byte[].class), any(URI.class),
                 eq(WhaleConstraintTreePublisher.UPDATE_PATH), eq(WorkerUpdateResponse.class));
     }
 
@@ -108,19 +110,19 @@ class WhaleConstraintTreePublisherTest {
         when(addresses.getEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of());
         when(http.get(URI.create("http://10.0.0.1:8005"), WhaleConstraintTreePublisher.STATUS_PATH,
                 WorkerUpdateResponse.class))
-                .thenReturn(Mono.just(new WorkerUpdateResponse("loading", 6, 7, "loading", true, 3)));
+                .thenReturn(Mono.just(new WorkerUpdateResponse("loading", 6, 7, "loading", true, 3, 4)));
 
         PublicationResult result = publisher.publish(artifact());
 
-        assertEquals(1, result.publishedWorkerCount());
-        verify(http, never()).requestRawJson(any(byte[].class), any(URI.class),
+        assertEquals(0, result.publishedWorkerCount());
+        verify(http, never()).requestRawBytes(any(byte[].class), any(URI.class),
                 eq(WhaleConstraintTreePublisher.UPDATE_PATH), eq(WorkerUpdateResponse.class));
     }
 
     private SerializedArtifact artifact() {
         byte[] payload = "{\"version\":7}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         return new SerializedArtifact(
-                new ArtifactMetadata(7, "gul_item", 1699, 151645, 2, 2, 4, 1, payload.length),
+                new ArtifactMetadata(7, "gul_item", 1699, 151645, 2, 2, 4, 5, 1, payload.length),
                 payload);
     }
 }

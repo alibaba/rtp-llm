@@ -102,7 +102,7 @@ public class ConstraintTreeServer {
 
     private Mono<ServerResponse> artifactResponse(SerializedArtifact artifact) {
         return ServerResponse.ok()
-                .contentType(MediaType.APPLICATION_JSON)
+                .contentType(MediaType.APPLICATION_OCTET_STREAM)
                 .header("X-Constraint-Tree-Version", Long.toString(artifact.version()))
                 .bodyValue(artifact.payload());
     }

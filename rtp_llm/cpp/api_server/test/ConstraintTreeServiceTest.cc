@@ -14,11 +14,54 @@
 #include "http_server/HttpServer.h"
 #include "rtp_llm/cpp/api_server/ConstraintTreeService.h"
 #include "rtp_llm/cpp/api_server/test/mock/MockHttpResponseWriter.h"
-#include "rtp_llm/cpp/models/logits_processor/PrefixToCandidateTokens.h"
+#include "rtp_llm/cpp/models/logits_processor/ConstraintTreeCsr.h"
 
 using namespace ::testing;
 
 namespace rtp_llm {
+
+namespace {
+
+void appendU32(std::string& output, uint32_t value) {
+    for (int shift = 0; shift < 32; shift += 8) {
+        output.push_back(static_cast<char>((value >> shift) & 0xff));
+    }
+}
+
+void appendU64(std::string& output, uint64_t value) {
+    appendU32(output, static_cast<uint32_t>(value));
+    appendU32(output, static_cast<uint32_t>(value >> 32));
+}
+
+std::string makeArtifact(uint64_t             version,
+                         std::vector<int32_t> row_ptr        = {0, 1, 2},
+                         std::vector<int32_t> col_idx        = {10, 2},
+                         std::vector<int32_t> next_state     = {1, -1},
+                         uint64_t             sid_count      = 1,
+                         int32_t              start_token_id = 225,
+                         int32_t              end_token_id   = 2) {
+    std::string output("RTPCSR01", 8);
+    appendU32(output, 1);
+    appendU32(output, 48);
+    appendU64(output, version);
+    appendU32(output, static_cast<uint32_t>(start_token_id));
+    appendU32(output, static_cast<uint32_t>(end_token_id));
+    appendU32(output, static_cast<uint32_t>(row_ptr.size() - 1));
+    appendU32(output, static_cast<uint32_t>(col_idx.size()));
+    appendU64(output, sid_count);
+    for (int32_t value : row_ptr) {
+        appendU32(output, static_cast<uint32_t>(value));
+    }
+    for (int32_t value : col_idx) {
+        appendU32(output, static_cast<uint32_t>(value));
+    }
+    for (int32_t value : next_state) {
+        appendU32(output, static_cast<uint32_t>(value));
+    }
+    return output;
+}
+
+}  // namespace
 
 class ConstraintTreeServiceTest: public ::testing::Test {
 protected:
@@ -86,10 +129,8 @@ protected:
 };
 
 TEST_F(ConstraintTreeServiceTest, UpdateAndReadStatus) {
-    const uint64_t    version = PrefixToCandidateTokens::instance()->currentVersion() + 1;
-    const std::string body =
-        "{\"version\":" + std::to_string(version)
-        + R"(,"start_token_id":225,"end_token_id":2,"sep":"_","prefix_dict":{"225":[10],"225_10":[2]}})";
+    const uint64_t    version = ConstraintTreeCsrManager::instance()->currentVersion() + 1;
+    const std::string body    = makeArtifact(version);
 
     auto        mock_writer = std::make_unique<http_server::MockHttpResponseWriter>();
     std::string response_body;
@@ -109,12 +150,8 @@ TEST_F(ConstraintTreeServiceTest, UpdateAndReadStatus) {
     EXPECT_THAT(response_body, HasSubstr("\"requested_version\":" + std::to_string(version)));
     writer.release();
 
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (PrefixToCandidateTokens::instance()->currentVersion() != version
-           && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    ASSERT_EQ(version, PrefixToCandidateTokens::instance()->currentVersion());
+    ASSERT_TRUE(waitForState("ready"));
+    ASSERT_EQ(version, ConstraintTreeCsrManager::instance()->currentVersion());
 
     auto status_writer = std::make_unique<http_server::MockHttpResponseWriter>();
     EXPECT_CALL(*status_writer, Write).WillOnce(Invoke([&](const std::string& data) {
@@ -128,19 +165,17 @@ TEST_F(ConstraintTreeServiceTest, UpdateAndReadStatus) {
     service_->constraintTreeStatus(status_writer_ptr, status_request);
     EXPECT_THAT(response_body, HasSubstr("\"status\":\"ready\""));
     EXPECT_THAT(response_body, HasSubstr("\"prefix_count\":2"));
+    EXPECT_THAT(response_body, HasSubstr("\"edge_count\":2"));
     status_writer_ptr.release();
 }
 
 TEST_F(ConstraintTreeServiceTest, RejectsStaleVersion) {
-    auto             manager        = PrefixToCandidateTokens::instance();
-    const uint64_t   active_version = std::max<uint64_t>(2, manager->currentVersion() + 1);
-    TreeDecodeConfig config;
-    config.prefix_dict = {{"225", {10}}, {"225_10", {2}}};
-    ASSERT_TRUE(manager->updatePrefixDict(active_version, config).ok());
+    auto           manager        = ConstraintTreeCsrManager::instance();
+    const uint64_t active_version = std::max<uint64_t>(2, manager->currentVersion() + 1);
+    ASSERT_TRUE(manager->updateFromBinary(makeArtifact(active_version), nullptr).ok());
 
-    const std::string body =
-        "{\"version\":" + std::to_string(active_version - 1) + R"(,"prefix_dict":{"225":[11],"225_11":[2]}})";
-    auto mock_writer = std::make_unique<http_server::MockHttpResponseWriter>();
+    const std::string body        = makeArtifact(active_version - 1, {0, 1, 2}, {11, 2}, {1, -1});
+    auto              mock_writer = std::make_unique<http_server::MockHttpResponseWriter>();
     EXPECT_CALL(*mock_writer, Write).WillOnce(Return(true));
     auto* raw_writer = dynamic_cast<http_server::HttpResponseWriter*>(mock_writer.get());
     ASSERT_NE(nullptr, raw_writer);
@@ -154,8 +189,8 @@ TEST_F(ConstraintTreeServiceTest, RejectsStaleVersion) {
     writer.release();
 }
 
-TEST_F(ConstraintTreeServiceTest, RejectsInvalidJsonWithoutDroppingCurrentTree) {
-    auto           manager        = PrefixToCandidateTokens::instance();
+TEST_F(ConstraintTreeServiceTest, RejectsInvalidBinaryWithoutDroppingCurrentTree) {
+    auto           manager        = ConstraintTreeCsrManager::instance();
     const uint64_t active_version = manager->currentVersion();
     const auto     active_tree    = manager->snapshot();
 
@@ -174,18 +209,38 @@ TEST_F(ConstraintTreeServiceTest, RejectsInvalidJsonWithoutDroppingCurrentTree) 
     writer.release();
 }
 
+TEST_F(ConstraintTreeServiceTest, AtomicSwapKeepsPinnedSnapshotAlive) {
+    auto           manager       = ConstraintTreeCsrManager::instance();
+    const uint64_t first_version = manager->currentVersion() + 1;
+    ASSERT_EQ(ConstraintTreeCsrUpdateCode::UPDATED,
+              manager->updateFromBinary(makeArtifact(first_version, {0, 1, 2}, {10, 2}, {1, -1}), nullptr).code);
+    const auto pinned = manager->snapshot();
+    ASSERT_NE(nullptr, pinned);
+    ASSERT_EQ(1, pinned->transition(0, 10));
+
+    const uint64_t second_version = first_version + 1;
+    ASSERT_EQ(ConstraintTreeCsrUpdateCode::UPDATED,
+              manager->updateFromBinary(makeArtifact(second_version, {0, 1, 2}, {11, 2}, {1, -1}), nullptr).code);
+    const auto active = manager->snapshot();
+
+    ASSERT_NE(nullptr, active);
+    EXPECT_EQ(second_version, active->version());
+    EXPECT_EQ(1, active->transition(0, 11));
+    EXPECT_EQ(ConstraintTreeCsrSnapshot::INVALID_TRANSITION, active->transition(0, 10));
+    EXPECT_EQ(first_version, pinned->version());
+    EXPECT_EQ(1, pinned->transition(0, 10));
+    EXPECT_EQ(ConstraintTreeCsrSnapshot::INVALID_TRANSITION, pinned->transition(0, 11));
+}
+
 TEST_F(ConstraintTreeServiceTest, InvalidBackgroundLoadKeepsCurrentTreeAndSameVersionCanRetry) {
-    auto manager = PrefixToCandidateTokens::instance();
-    if (!manager->initSuccess()) {
-        TreeDecodeConfig initial_config;
-        initial_config.prefix_dict = {{"225", {10}}, {"225_10", {2}}};
-        ASSERT_TRUE(manager->updatePrefixDict(1, std::move(initial_config)).ok());
+    auto manager = ConstraintTreeCsrManager::instance();
+    if (!manager->snapshot()) {
+        ASSERT_TRUE(manager->updateFromBinary(makeArtifact(1), nullptr).ok());
     }
     const uint64_t failed_version = manager->currentVersion() + 1;
     const auto     active_tree    = manager->snapshot();
 
-    const auto accepted = sendUpdate("{\"version\":" + std::to_string(failed_version)
-                                     + R"(,"start_token_id":225,"end_token_id":2,"sep":"_","prefix_dict":{}})");
+    const auto accepted = sendUpdate(makeArtifact(failed_version, {0, 1}, {10}, {-2}));
     ASSERT_EQ(200, accepted.status_code);
     EXPECT_THAT(accepted.body, HasSubstr("\"status\":\"accepted\""));
     ASSERT_TRUE(waitForState("failed"));
@@ -196,19 +251,16 @@ TEST_F(ConstraintTreeServiceTest, InvalidBackgroundLoadKeepsCurrentTreeAndSameVe
     EXPECT_THAT(failed_status.body, HasSubstr("\"status\":\"failed\""));
     EXPECT_THAT(failed_status.body, HasSubstr("\"version\":" + std::to_string(active_tree->version())));
 
-    const auto retry =
-        sendUpdate("{\"version\":" + std::to_string(failed_version)
-                   + R"(,"start_token_id":225,"end_token_id":2,"sep":"_","prefix_dict":{"225":[12],"225_12":[2]}})");
+    const auto retry = sendUpdate(makeArtifact(failed_version, {0, 1, 2}, {12, 2}, {1, -1}));
     ASSERT_EQ(200, retry.status_code);
     EXPECT_THAT(retry.body, HasSubstr("\"status\":\"accepted\""));
     ASSERT_TRUE(waitForState("ready"));
     EXPECT_EQ(failed_version, manager->currentVersion());
 
-    const auto duplicate = sendUpdate("{\"version\":" + std::to_string(failed_version)
-                                      + R"(,"start_token_id":225,"end_token_id":2,"prefix_dict":{"225":[99]}})");
+    const auto duplicate = sendUpdate(makeArtifact(failed_version, {0, 1, 2}, {99, 2}, {1, -1}));
     EXPECT_EQ(200, duplicate.status_code);
     EXPECT_THAT(duplicate.body, HasSubstr("\"status\":\"already_current\""));
-    EXPECT_EQ((std::vector<int32_t>{12}), manager->snapshot()->getCandidateTokens("225"));
+    EXPECT_EQ(12, manager->snapshot()->colIdx().front());
 }
 
 TEST_F(ConstraintTreeServiceTest, RealHttpEndpointsQueueActivateAndReportStatus) {
@@ -230,10 +282,8 @@ TEST_F(ConstraintTreeServiceTest, RealHttpEndpointsQueueActivateAndReportStatus)
     ASSERT_TRUE(server->Start(address));
 
     auto              client  = std::make_shared<http_server::SimpleHttpClient>();
-    const uint64_t    version = PrefixToCandidateTokens::instance()->currentVersion() + 1;
-    const std::string body =
-        "{\"version\":" + std::to_string(version)
-        + R"(,"start_token_id":1699,"end_token_id":151645,"sep":"_","prefix_dict":{"1699":[169967],"1699_169967":[216546],"1699_169967_216546":[151645]}})";
+    const uint64_t    version = ConstraintTreeCsrManager::instance()->currentVersion() + 1;
+    const std::string body = makeArtifact(version, {0, 1, 2, 3}, {169967, 216546, 151645}, {1, 2, -1}, 1, 1699, 151645);
     std::promise<std::pair<bool, std::string>> update_promise;
     auto                                       update_future = update_promise.get_future();
     ASSERT_TRUE(
@@ -245,12 +295,8 @@ TEST_F(ConstraintTreeServiceTest, RealHttpEndpointsQueueActivateAndReportStatus)
     ASSERT_TRUE(update_response.first);
     EXPECT_THAT(update_response.second, HasSubstr("\"status\":\"accepted\""));
 
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (PrefixToCandidateTokens::instance()->currentVersion() != version
-           && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    ASSERT_EQ(version, PrefixToCandidateTokens::instance()->currentVersion());
+    ASSERT_TRUE(waitForState("ready"));
+    ASSERT_EQ(version, ConstraintTreeCsrManager::instance()->currentVersion());
 
     std::promise<std::pair<bool, std::string>> status_promise;
     auto                                       status_future = status_promise.get_future();

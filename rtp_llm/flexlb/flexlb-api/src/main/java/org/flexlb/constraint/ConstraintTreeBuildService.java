@@ -11,7 +11,6 @@ import org.flexlb.constraint.ConstraintTreeModels.PublicationResult;
 import org.flexlb.constraint.ConstraintTreeModels.SerializedArtifact;
 import org.flexlb.constraint.ConstraintTreeModels.Submission;
 import org.flexlb.constraint.ConstraintTreeModels.SubmissionState;
-import org.flexlb.util.JsonUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
@@ -174,6 +173,7 @@ public class ConstraintTreeBuildService {
                             built.inputSidCount(),
                             built.sidCount(),
                             built.prefixCount(),
+                            built.edgeCount(),
                             built.createdAtEpochMs(),
                             payload.length),
                     payload);
@@ -181,9 +181,9 @@ public class ConstraintTreeBuildService {
             SerializedArtifact previous = currentArtifact.getAndSet(candidate);
             backupArtifact.set(previous);
             long buildMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - buildStartedAt);
-            log.info("constraint tree built model={}, version={}, input_sids={}, unique_sids={}, prefixes={}, bytes={}, cost_ms={}",
+            log.info("constraint CSR built model={}, version={}, input_sids={}, unique_sids={}, states={}, edges={}, bytes={}, cost_ms={}",
                     built.model(), built.version(), built.inputSidCount(), built.sidCount(), built.prefixCount(),
-                    payload.length, buildMillis);
+                    built.edgeCount(), payload.length, buildMillis);
 
             status.set(new BuildStatus(
                     BuildState.PUBLISHING,
@@ -225,7 +225,7 @@ public class ConstraintTreeBuildService {
             if (publication.targetWorkerCount() == 0) {
                 publicationMessage = "tree built; no Whale inference workers discovered yet";
             } else if (fullyPublished) {
-                publicationMessage = "tree built and publication accepted by all discovered workers";
+                publicationMessage = "tree built and activated by all discovered workers";
             } else {
                 publicationMessage = "tree built; some Whale inference workers still need retry";
             }
@@ -260,15 +260,9 @@ public class ConstraintTreeBuildService {
     }
 
     private byte[] serialize(Artifact artifact) {
-        WireArtifact wireArtifact = new WireArtifact(
-                artifact.version(),
-                artifact.startTokenId(),
-                artifact.endTokenId(),
-                artifact.separator(),
-                artifact.prefixDict());
-        byte[] payload = JsonUtils.toBytes(wireArtifact);
+        byte[] payload = ConstraintTreeCsrCodec.encode(artifact);
         if (payload.length == 0) {
-            throw new IllegalStateException("failed to serialize constraint tree artifact");
+            throw new IllegalStateException("failed to serialize constraint CSR artifact");
         }
         return payload;
     }
@@ -286,11 +280,23 @@ public class ConstraintTreeBuildService {
                 return;
             }
             SerializedArtifact current = currentArtifact.get();
-            if (current == null || latestAcceptedVersion.get() != current.version()) {
+            if (current == null) {
                 return;
             }
+            long latestVersionBeforePublish = latestAcceptedVersion.get();
             PublicationResult publication = publisher.publish(current);
-            if (currentArtifact.get() != current || latestAcceptedVersion.get() != current.version()) {
+            if (currentArtifact.get() != current
+                    || latestAcceptedVersion.get() != latestVersionBeforePublish) {
+                return;
+            }
+            // A failed newer build must not prevent a restarted Worker from
+            // receiving the last known-good snapshot. Keep the FAILED status,
+            // however, so that submitting the failed version again remains legal.
+            if (latestVersionBeforePublish != current.version()) {
+                log.info("republished last known-good constraint tree after newer build failure "
+                                + "current_version={}, latest_requested_version={}, workers={}/{}",
+                        current.version(), latestVersionBeforePublish,
+                        publication.publishedWorkerCount(), publication.targetWorkerCount());
                 return;
             }
             boolean complete = publication.fullyPublished();
@@ -298,7 +304,7 @@ public class ConstraintTreeBuildService {
             if (publication.targetWorkerCount() == 0) {
                 publicationMessage = "no Whale inference workers discovered yet";
             } else if (complete) {
-                publicationMessage = "all discovered workers accepted the current tree";
+                publicationMessage = "all discovered workers activated the current tree";
             } else {
                 publicationMessage = "some Whale inference workers still need retry";
             }
@@ -346,11 +352,4 @@ public class ConstraintTreeBuildService {
         return current.getMessage() == null ? current.getClass().getSimpleName() : current.getMessage();
     }
 
-    private record WireArtifact(
-            long version,
-            @com.fasterxml.jackson.annotation.JsonProperty("start_token_id") int startTokenId,
-            @com.fasterxml.jackson.annotation.JsonProperty("end_token_id") int endTokenId,
-            @com.fasterxml.jackson.annotation.JsonProperty("sep") String separator,
-            @com.fasterxml.jackson.annotation.JsonProperty("prefix_dict") java.util.Map<String, List<Integer>> prefixDict) {
-    }
 }

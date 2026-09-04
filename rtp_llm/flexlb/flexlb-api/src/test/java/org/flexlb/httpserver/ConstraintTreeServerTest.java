@@ -2,6 +2,7 @@ package org.flexlb.httpserver;
 
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.constraint.ConstraintTreeBuildService;
+import org.flexlb.constraint.ConstraintTreeCsrCodec;
 import org.flexlb.constraint.ConstraintTreeModels.BuildRequest;
 import org.flexlb.constraint.ConstraintTreeModels.BuildState;
 import org.flexlb.constraint.ConstraintTreeModels.Submission;
@@ -9,6 +10,7 @@ import org.flexlb.constraint.ConstraintTreeModels.SubmissionState;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import reactor.core.publisher.Mono;
 
@@ -73,15 +75,15 @@ class ConstraintTreeServerTest {
                 .uri("/rtp_llm/constraint_tree/artifact")
                 .exchange()
                 .expectStatus().isOk()
-                .expectBody()
-                .jsonPath("$.version").isEqualTo(42)
-                .jsonPath("$.start_token_id").isEqualTo(1699)
-                .jsonPath("$.end_token_id").isEqualTo(151645)
-                .jsonPath("$.sep").isEqualTo("_")
-                .jsonPath("$.prefix_dict.1699[0]").isEqualTo(169967)
-                .jsonPath("$.prefix_dict.1699_169967[0]").isEqualTo(215835)
-                .jsonPath("$.prefix_dict.1699_169967[1]").isEqualTo(216546)
-                .jsonPath("$.prefix_dict.1699_169967_216546[0]").isEqualTo(151645);
+                .expectHeader().contentType(MediaType.APPLICATION_OCTET_STREAM)
+                .expectBody(byte[].class)
+                .value(payload -> {
+                    ConstraintTreeCsrCodec.DecodedArtifact artifact = ConstraintTreeCsrCodec.decode(payload);
+                    org.junit.jupiter.api.Assertions.assertEquals(42, artifact.version());
+                    org.junit.jupiter.api.Assertions.assertEquals(1699, artifact.startTokenId());
+                    org.junit.jupiter.api.Assertions.assertEquals(151645, artifact.endTokenId());
+                    org.junit.jupiter.api.Assertions.assertEquals(2, artifact.sidCount());
+                });
     }
 
     @Test

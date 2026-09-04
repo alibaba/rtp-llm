@@ -122,9 +122,9 @@ public:
 template<typename InputType>
 class TreeDFA<std::string, InputType>: public BaseDFA<std::string, InputType> {
 public:
-    explicit TreeDFA(PrefixTreeSnapshotPtr prefix_tree_snapshot):
-        prefix_tree_snapshot_(std::move(prefix_tree_snapshot)),
-        status_(std::to_string(prefix_tree_snapshot_->startTokenId())),
+    explicit TreeDFA(PrefixToCandidateTokensPtr prefix_to_candidate_tokens):
+        prefix_to_candidate_tokens_(std::move(prefix_to_candidate_tokens)),
+        status_(std::to_string(prefix_to_candidate_tokens_->startTokenId())),
         input_list_(10) {}
 
     TreeDFA(TreeDFA&)  = default;
@@ -134,7 +134,7 @@ public:
         if (input_list_.empty()) {
             return false;
         }
-        return input_list_[input_list_.size() - 1] == prefix_tree_snapshot_->endTokenId();
+        return input_list_[input_list_.size() - 1] == prefix_to_candidate_tokens_->endTokenId();
     }
 
     std::string status() {
@@ -149,9 +149,9 @@ public:
         if (isFinished()) {
             return status_;
         }
-        std::string new_status = prefix_tree_snapshot_->generateNextKey(status_, input);
-        if (prefix_tree_snapshot_->isValidStatus(new_status)
-            || std::to_string(input) == std::to_string(prefix_tree_snapshot_->endTokenId())) {
+        std::string new_status = prefix_to_candidate_tokens_->generateNextKey(status_, input);
+        if (prefix_to_candidate_tokens_->isValidStatus(new_status)
+            || std::to_string(input) == std::to_string(prefix_to_candidate_tokens_->endTokenId())) {
             input_list_.push_back(input);
             status_ = new_status;
         } else {
@@ -164,7 +164,7 @@ public:
 
     std::vector<size_t> getCandidateTokenIds() {
         std::vector<size_t> token_ids;
-        for (auto token_id : prefix_tree_snapshot_->getCandidateTokens(status_)) {
+        for (auto token_id : prefix_to_candidate_tokens_->getCandidateTokens(status_)) {
             if (token_id >= 0) {
                 token_ids.push_back(static_cast<size_t>(token_id));
             } else {
@@ -172,15 +172,15 @@ public:
             }
         }
         if (token_ids.empty()) {
-            token_ids.push_back(prefix_tree_snapshot_->endTokenId());
+            token_ids.push_back(prefix_to_candidate_tokens_->endTokenId());
         }
         return token_ids;
     }
 
 private:
-    PrefixTreeSnapshotPtr  prefix_tree_snapshot_;
-    std::string            status_;
-    std::vector<InputType> input_list_;
+    PrefixToCandidateTokensPtr prefix_to_candidate_tokens_;
+    std::string                status_;
+    std::vector<InputType>     input_list_;
 };
 
 }  // namespace rtp_llm

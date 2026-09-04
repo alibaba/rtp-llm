@@ -1,13 +1,11 @@
 package org.flexlb.constraint;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import org.flexlb.constraint.ConstraintTreeModels.BuildRequest;
 import org.flexlb.constraint.ConstraintTreeModels.BuildState;
 import org.flexlb.constraint.ConstraintTreeModels.PublicationResult;
 import org.flexlb.constraint.ConstraintTreeModels.Submission;
 import org.flexlb.constraint.ConstraintTreeModels.SubmissionState;
 import org.flexlb.constraint.ConstraintTreeModels.WorkerPublication;
-import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -44,13 +42,14 @@ class ConstraintTreeBuildServiceTest {
         assertEquals(10, service.getStatus().activeVersion());
         assertEquals(1, service.getStatus().publishedWorkerCount());
 
-        JsonNode artifact = JsonUtils.toTreeNode(
-                new String(service.getCurrentArtifact().orElseThrow().payload(), java.nio.charset.StandardCharsets.UTF_8));
-        assertEquals(10, artifact.path("version").asLong());
-        assertEquals(1699, artifact.path("start_token_id").asInt());
-        assertEquals(151645, artifact.path("end_token_id").asInt());
-        assertEquals(3, artifact.path("prefix_dict").path("1699_1").get(0).asInt());
-        assertEquals(4, artifact.path("prefix_dict").path("1699_1").get(1).asInt());
+        ConstraintTreeCsrCodec.DecodedArtifact artifact = ConstraintTreeCsrCodec.decode(
+                service.getCurrentArtifact().orElseThrow().payload());
+        assertEquals(10, artifact.version());
+        assertEquals(1699, artifact.startTokenId());
+        assertEquals(151645, artifact.endTokenId());
+        assertEquals(2, artifact.sidCount());
+        assertTrue(artifact.rowPtr().length > 1);
+        assertEquals(artifact.colIdx().length, artifact.nextState().length);
     }
 
     @Test
@@ -201,6 +200,36 @@ class ConstraintTreeBuildServiceTest {
             assertEquals(BuildState.READY, localService.getStatus().state());
             assertEquals(2, attempts.get());
             assertEquals(40, localService.getStatus().activeVersion());
+        } finally {
+            localService.destroy();
+        }
+    }
+
+    @Test
+    void reconciliationRepublishesLastGoodTreeAfterNewerBuildFails() throws Exception {
+        List<Long> publishedVersions = new CopyOnWriteArrayList<>();
+        ConstraintTreeBuildService localService = new ConstraintTreeBuildService(
+                new ConstraintTreeBuilder(),
+                Executors.newSingleThreadExecutor(),
+                artifact -> {
+                    publishedVersions.add(artifact.version());
+                    return new PublicationResult(1, 1, List.of());
+                });
+        try {
+            localService.submit(request(50, "1_2_3"));
+            awaitState(localService, BuildState.READY);
+            localService.submit(request(51, "malformed"));
+            awaitState(localService, BuildState.FAILED);
+
+            localService.reconcileCurrent();
+
+            assertEquals(List.of(50L, 50L), publishedVersions);
+            assertEquals(BuildState.FAILED, localService.getStatus().state());
+            assertEquals(51, localService.getStatus().requestedVersion());
+            assertEquals(50, localService.getStatus().activeVersion());
+            assertEquals(SubmissionState.ACCEPTED,
+                    localService.submit(request(51, "4_5_6")).state());
+            awaitState(localService, BuildState.READY);
         } finally {
             localService.destroy();
         }

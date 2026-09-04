@@ -323,6 +323,10 @@ void DeviceOps::maskLogits(Buffer& logits, const Buffer& mask) {
     throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
 }
 
+void DeviceOps::csrMaskLogits(Buffer& logits, const Buffer& states, const Buffer& row_ptr, const Buffer& col_idx) {
+    throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
+}
+
 void DeviceOps::perfRangePush(const std::string& name) const {}
 
 void DeviceOps::perfRangePop() const {}

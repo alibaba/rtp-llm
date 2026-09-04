@@ -34,12 +34,28 @@ cc_library(
         "logits_processor/DFAUtil.h",
         "logits_processor/PrefixToCandidateTokens.h",
     ],
-    srcs = [
-        "logits_processor/PrefixToCandidateTokens.cc",
-    ],
     deps = [
         "//rtp_llm/cpp/utils:core_utils",
         "@havenask//aios/autil:json",
+    ],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+# Versioned runtime CSR snapshot, kept separate from the legacy DFA library so
+# startup-only Prefix Map users do not acquire the DeviceBase link closure.
+cc_library(
+    name = "constraint_tree_csr",
+    srcs = [
+        "logits_processor/ConstraintTreeCsr.cc",
+    ],
+    hdrs = [
+        "logits_processor/ConstraintTreeCsr.h",
+    ],
+    deps = [
+        "//rtp_llm/cpp/core:buffer",
+        "//rtp_llm/cpp/devices:devices_base",
+        "//rtp_llm/cpp/utils:core_utils",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -63,6 +79,7 @@ cc_library(
         "logits_processor/TreeLogitsProcessor.cc",
     ],
     deps = [
+        ":constraint_tree_csr",
         ":sample_infos",
         ":dfa_utils",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
@@ -70,6 +87,7 @@ cc_library(
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
         "//rtp_llm/cpp/cache",
         "//rtp_llm/cpp/pybind:py_utils",
+        "@havenask//aios/autil:env_util",
     ],
     visibility = ["//visibility:public"],
 )
