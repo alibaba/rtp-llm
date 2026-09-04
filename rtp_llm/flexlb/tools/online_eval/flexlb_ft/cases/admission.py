@@ -2755,6 +2755,37 @@ def engine_prefill_token_budget_split(ctx: CaseContext):
         return False, f"exception: {exc!r}"
 
 
+def _two_cluster_split(values: list, sep: float = 1000.0) -> tuple:
+    """Two-execution-batch separation check (arrival-order robust).
+
+    The engine composes execution batches in ARRIVAL order — with the
+    concurrent wave the arrival order is nondeterministic, so rids[:2]
+    vs rids[2:] is NOT the batch split (observed in a live run: r3,r4
+    composed batch #1 and finished 3s BEFORE the rids[:2] members).
+    The ORDER contract the split actually pins: the two batches run
+    SERIALLY — the four completion stamps cluster into two pairs, the
+    pairs separated by > *sep* (each execution batch runs 3000ms) with
+    the members INSIDE a pair settling together (an execution batch
+    settles atomically on the engine; client-side the pair gaps are
+    poll-granularity, orders of magnitude under sep).  *values* may be
+    seconds (client done stamps) or milliseconds (engine end_ms) —
+    *sep* is in the caller's unit.  Returns (ok, detail).
+    """
+    vals = sorted(v for v in values if v is not None and v > 0)
+    if len(vals) != 4:
+        return False, f"need 4 stamps, got {len(vals)}"
+    early_pair_gap = vals[1] - vals[0]
+    batch_gap = vals[2] - vals[1]
+    late_pair_gap = vals[3] - vals[2]
+    ok = batch_gap > sep and early_pair_gap <= sep and late_pair_gap <= sep
+    return ok, (
+        f"clusters=[[{vals[0]:.3f},{vals[1]:.3f}],"
+        f"[{vals[2]:.3f},{vals[3]:.3f}]] "
+        f"(intra {early_pair_gap:.3f}/{late_pair_gap:.3f} <= {sep}, "
+        f"inter {batch_gap:.3f} > {sep})"
+    )
+
+
 @case(
     "engine_prefill_token_budget_split_fifo",
     profiles=["batch-window"],
@@ -2774,18 +2805,18 @@ def engine_prefill_token_budget_split_fifo(ctx: CaseContext):
     fresh wave of rids.
 
     Behaviour: the composer admits members while admitted < budget —
-    prefix [r1, r2] forms execution batch #1, tail [r3, r4] parks
-    until the prefix drains, so execution batches run in arrival
-    order.
+    the first two ARRIVALS form execution batch #1, the rest parks
+    until that batch drains; execution batches run serially (arrival
+    order is nondeterministic under the concurrent wave).
 
     Expected (contract): all four requests complete; the executed-
     batch counters grow by exactly 2 batches / 4 requests with max
     size 2 (delta over the shared env's pre-fire baseline); each
     fired request's engine lifecycle end_ms — written at prefill
-    completion — shows the tail finishing STRICTLY after the prefix
-    with >1s separation (each execution batch runs 3000ms; a
-    reshuffled or interleaved composition collapses the gap); the
-    master inflight ledger is clean and a fresh request succeeds.
+    completion — must show TWO serial execution batches — two-cluster
+    separation >1s with intra-pair settling <=1s (_two_cluster_split;
+    arrival-order robust); the master inflight ledger is clean and a
+    fresh request succeeds.
 
     Prediction: expected to pass — the FIFO contract is structural
     (the composer consumes the master batch head-first, the tail
@@ -2813,21 +2844,17 @@ def engine_prefill_token_budget_split_fifo(ctx: CaseContext):
             delta_batches == 2 and delta_requests == 4 and after_counters[2] == 2
         )
 
-        # ORDER: prefix members' prefill-completion timestamps must
-        # sit strictly before the tail's, with a >1s gap (the parked
-        # tail only starts after the prefix's 3s batch drains).
+        # ORDER (arrival-order robust): the engine composes execution
+        # batches in ARRIVAL order — with the concurrent wave the arrival
+        # order is nondeterministic, so rids[:2] vs rids[2:] is NOT the
+        # batch split.  The four prefill-completion stamps must cluster
+        # into TWO serial execution batches (two-cluster separation,
+        # _two_cluster_split — inter-batch gap >1s, intra-pair <=1s).
         rows = _lifecycle_rows(ops, names[0], rids)
         end_ms = {
             rid: int(row.get("end_ms", 0)) if row else 0 for rid, row in rows.items()
         }
-        prefix_done = max(end_ms[rids[0]], end_ms[rids[1]])
-        tail_done = min(end_ms[rids[2]], end_ms[rids[3]])
-        fifo_gap_ms = tail_done - prefix_done
-        fifo_ok = (
-            all(v > 0 for v in end_ms.values())
-            and prefix_done < tail_done
-            and fifo_gap_ms > 1000
-        )
+        fifo_ok, fifo_detail = _two_cluster_split(list(end_ms.values()), 1000.0)
 
         settled = wait_for(lambda: _park_settled(ops, names), 10.0, 0.2)
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
@@ -2851,8 +2878,7 @@ def engine_prefill_token_budget_split_fifo(ctx: CaseContext):
             f"(drain_errors={drain_errors[:1]}), "
             f"executed_delta={delta_batches}b/{delta_requests}r "
             f"max_size={after_counters[2]} (expect 2b/4r/2), "
-            f"fifo_prefix_done={prefix_done} tail_done={tail_done} "
-            f"gap_ms={fifo_gap_ms} (expect >1000), "
+            f"fifo={fifo_detail}, "
             f"park_settled_empty={settled}, "
             f"inflight_clean={inflight_ok}({inflight_detail}), "
             f"recovery={recovery_msg}"
