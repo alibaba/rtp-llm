@@ -8,6 +8,9 @@ except (ImportError, AttributeError):
     trtllm_fmha_v2_prefill = None
 
 from rtp_llm.models_py.modules.factory.attention import common
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+    PyFlashinferPrefillAttnOp,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import (
     is_cuda_12_9_or_later,
 )
@@ -486,3 +489,94 @@ class FlashInferTRTLLMFMHAv2PrefillImpl(FMHAImplBase):
             common.copy_kv_cache_offset(
                 self.rope_params.kv_cache_offset, new_kv_cache_offset
             )
+
+
+class FlashInferNativePrefillImpl(FMHAImplBase):
+    """Non-paged prefill: fused RoPE + FlashInfer native ragged FA2 attention.
+
+    Identical RoPE / KV-cache-write path to FlashInferTRTLLMFMHAv2PrefillImpl —
+    only the attention op differs. The native FA2 kernel measures ~1.9-2.3x
+    faster than TRT-LLM FMHA v2 for head_dim 256 causal GQA on SM120.
+    """
+
+    def __init__(
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        parallelism_config: Optional[ParallelismConfig] = None,
+    ) -> None:
+        self.need_rope = attn_configs.rope_config.style != RopeStyle.No
+        self.attn_configs = attn_configs
+        sm_scale = (
+            attn_configs.softmax_extra_scale
+            / attn_configs.q_scaling
+            * attn_configs.size_per_head**-0.5
+        )
+        self.fmha_impl = PyFlashinferPrefillAttnOp(
+            attn_configs, backend="fa2", sm_scale=sm_scale
+        )
+        self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
+        self.attn_inputs = attn_inputs
+        self.fmha_impl.prepare(attn_inputs)
+        self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
+        self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
+
+    @classmethod
+    def support(
+        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> bool:
+        if getattr(attn_inputs, "is_cuda_graph", False):
+            return False
+        return (
+            is_sm12x()
+            and attn_configs.dtype == torch.bfloat16
+            and attn_configs.kv_cache_dtype == KvCacheDataType.BASE
+            and not attn_configs.use_mla
+            and attn_configs.is_causal
+            and attn_configs.kv_head_num > 0
+            and attn_configs.head_num > attn_configs.kv_head_num
+            and attn_configs.head_num % attn_configs.kv_head_num == 0
+            and attn_configs.size_per_head == 256
+            and PyFlashinferPrefillAttnOp.support(attn_inputs)
+        )
+
+    def support_cuda_graph(self) -> bool:
+        return False
+
+    def _split_qkv(
+        self, qkv: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        head_num = self.attn_configs.head_num
+        kv_head_num = self.attn_configs.kv_head_num
+        head_dim = self.attn_configs.size_per_head
+        qkv = qkv.reshape(qkv.shape[0], -1)
+        q, k, v = torch.split(
+            qkv,
+            [head_dim * head_num, head_dim * kv_head_num, head_dim * kv_head_num],
+            dim=-1,
+        )
+        return (
+            q.reshape(-1, head_num, head_dim),
+            k.reshape(-1, kv_head_num, head_dim),
+            v.reshape(-1, kv_head_num, head_dim),
+        )
+
+    def forward(
+        self,
+        qkv: torch.Tensor,
+        kv_cache: Optional[LayerKVCache],
+        layer_idx: Optional[int] = 0,
+    ) -> torch.Tensor:
+        fmha_input = (
+            self.rope_kvcache_impl.forward(qkv, kv_cache, self.rope_params)
+            if self.need_rope or kv_cache is not None
+            else qkv
+        )
+        common.apply_write_cache_store(
+            self.write_cache_store_impl, self.attn_inputs, kv_cache
+        )
+        query, key, value = self._split_qkv(fmha_input)
+        out = self.fmha_impl.forward(query, key, value, kv_cache)
+        return out.reshape(
+            -1, self.attn_configs.head_num * self.attn_configs.size_per_head
+        )

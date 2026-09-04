@@ -25,7 +25,6 @@ from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     PREFILL_MHA_IMPS,
     PREFILL_MLA_IMPS,
 )
-
 from rtp_llm.utils.backend_registry import run_backend_registrations
 
 device_type = get_device_type()
@@ -64,6 +63,7 @@ elif device_type == DeviceType.Cuda:
         PyFlashinferPrefillImpl,
     )
     from rtp_llm.models_py.modules.factory.attention.cuda_impl.trt import (
+        FlashInferNativePrefillImpl,
         FlashInferTRTLLMFMHAv2PagedPrefillImpl,
         FlashInferTRTLLMFMHAv2PrefillImpl,
     )
@@ -83,6 +83,7 @@ elif device_type == DeviceType.Cuda:
             HeadWisePrefillImpl,
             FlashInferTRTLLMSpecDecodeImpl,
             FlashInferTRTLLMPrefillImpl,
+            FlashInferNativePrefillImpl,
             FlashInferTRTLLMFMHAv2PrefillImpl,
             PyFlashinferPrefillImpl,
             PyFlashinferHybridPrefillImpl,
