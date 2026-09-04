@@ -100,7 +100,7 @@ def cast_to_fp8(x: torch.Tensor):
     return x.to(torch.float8_e4m3fn)
 
 
-def per_block_cast_to_fp8(
+def per_block_cast_to_fp8_grouped(
     x: torch.Tensor, group_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     is_2d = x.dim() == 2
@@ -247,6 +247,9 @@ def create_w8a8_fp8_per_block_weight(
 
 
 class PerBlockFp8Weight(CompositeWeight, QuantWeight):
+    def _uses_direct_ue8m0(self) -> bool:
+        return False
+
     w8a8_weight_list: Dict[str, str] = {
         W.attn_qkv_w: W.attn_qkv_s,
         W.attn_o_w: W.attn_o_s,
@@ -838,7 +841,19 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             )
             # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
 
-            if is_deep_gemm_e8m0_used():
+            # Online SM120 loading can already produce the final packed
+            # UE8M0 representation directly from source weights.  Legacy/pre-quantized
+            # inputs still arrive with floating-point block scales and require
+            # the old dequantize/requantize conversion here.
+            if self._uses_direct_ue8m0():
+                from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+                    pack_weight_scale_ue8m0,
+                )
+
+                scale_weight = pack_weight_scale_ue8m0(
+                    scale_weight, kernel_weight.shape[-2]
+                )
+            elif is_deep_gemm_e8m0_used():
                 kernel_weight, scale_weight = requant_weight_ue8m0(
                     kernel_weight, scale_weight
                 )
@@ -892,6 +907,16 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         self.kernel = kernel
         self.scale = scale
 
+    def _uses_direct_ue8m0(self) -> bool:
+        from rtp_llm.models_py.utils.arch import is_sm12x
+
+        return (
+            self.scale is not None
+            and self.kernel.name not in (W.moe_w1, W.moe_w2)
+            and self.group_size == 128
+            and is_sm12x()
+        )
+
     def _load_raw_tensor(
         self,
         tensor_source: TensorSource,
@@ -903,10 +928,37 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
             tensor_source, layer_id, device, load_config
         )
 
+        direct_ue8m0 = self._uses_direct_ue8m0()
+        if (
+            self.scale is not None
+            and self.kernel.name not in (W.moe_w1, W.moe_w2)
+            and not direct_ue8m0
+        ):
+            from rtp_llm.models_py.utils.arch import is_sm12x
+
+            if is_sm12x() and self.group_size != 128:
+                raise ValueError(
+                    "SM120 DeepGEMM packed UE8M0 requires group_size=128, "
+                    f"got {self.group_size} for {self.kernel.name}"
+                )
         res = {}
         scale = None
-        if self.scale:
-            quant_kernel, scale = per_block_cast_to_fp8(
+        if direct_ue8m0:
+            from rtp_llm.models_py.kernels.cuda.fp8_kernel import quant_weight_ue8m0
+
+            source_weight = kernel.get(self.kernel.name)
+            if source_weight.dim() != 2:
+                raise ValueError(
+                    "Direct packed UE8M0 dense weight quantization requires a "
+                    f"2D tensor, got {tuple(source_weight.shape)} for "
+                    f"{self.kernel.name}"
+                )
+            source_weight = source_weight.T
+            quant_kernel, scale = quant_weight_ue8m0(
+                source_weight.contiguous().to(device), [128, 128]
+            )
+        elif self.scale:
+            quant_kernel, scale = per_block_cast_to_fp8_grouped(
                 kernel.get(self.kernel.name), self.group_size
             )
             if quant_kernel.dim() == 2:
@@ -916,12 +968,15 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
 
         if self.kernel.name == W.moe_w1 or self.kernel.name == W.moe_w2:
             pass
-        elif quant_kernel.dim() == 2:
+        elif quant_kernel.dim() == 2 and not direct_ue8m0:
             quant_kernel = quant_kernel.T
 
         res = {self.kernel.name: quant_kernel.contiguous().to(device)}
         if self.scale:
-            scale = scale.T if scale.dim() == 2 else scale
+            scale = scale.T if scale.dim() == 2 and not direct_ue8m0 else scale
+            # Keep ordinary [N/128, K/128] float scales through TP/DP/EP
+            # splitting. _postprocess packs each rank's local scale into the
+            # non-contiguous DeepGEMM TMA layout.
             res.update({self.scale.name: scale.contiguous().to(device)})
 
         return res

@@ -234,11 +234,31 @@ def bootstrap_remote_jit_dir():
         logging.warning(f"[JIT] REMOTE_JIT_DIR refused ({e}); cold start later")
 
 
-def setup_jit_cache():
+def setup_jit_cache(cache_dir=None, packages=None):
     bootstrap_remote_jit_dir()
 
-    cache_dir = Path.home().as_posix() + "/.cache"
-    packages = ["flashinfer", "torch", "deep_gemm", "tvm_ffi"]
+    if cache_dir is None:
+        cache_dir = Path.home() / ".cache"
+    cache_dir = Path(cache_dir).expanduser().resolve()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # DeepGEMM's NVCC compiler changes into the JIT tmp directory before
+    # compiling. A relative cache path would then be resolved a second time
+    # and make the generated kernel.cu unreachable. Normalize both the default
+    # and caller-provided path before launching the actual test process.
+    deep_gemm_cache_dir = (
+        Path(os.environ.get("DG_JIT_CACHE_DIR", Path.home() / ".deep_gemm"))
+        .expanduser()
+        .resolve()
+    )
+    deep_gemm_cache_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["DG_JIT_CACHE_DIR"] = str(deep_gemm_cache_dir)
+    logging.info(
+        f"[Package Setup] Set DG_JIT_CACHE_DIR: {os.environ['DG_JIT_CACHE_DIR']}"
+    )
+
+    if packages is None:
+        packages = ["flashinfer", "torch", "deep_gemm", "tvm_ffi"]
 
     # Copy packages to cache with file locking
     copied_paths = []

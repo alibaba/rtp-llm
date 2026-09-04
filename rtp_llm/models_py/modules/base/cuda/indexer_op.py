@@ -6,6 +6,9 @@ import torch
 from torch import nn
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, barrier
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
+    normalize_paged_mqa_context_lens,
+)
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
 
@@ -385,8 +388,11 @@ class IndexerOp(nn.Module):
             attention_inputs.kv_cache_kernel_block_id_device.shape[1] * self.blocksize
         )
 
+        # DeepGEMM 2.5 requires [batch, queries], while the cuda12 2.2 package
+        # retains the legacy one-dimensional decode contract.
+        context_lens = normalize_paged_mqa_context_lens(fmha_params.kvlen_d)
         schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
-            fmha_params.kvlen_d,
+            context_lens,
             self.blocksize,
             deep_gemm.get_num_sms(),
         )
@@ -395,7 +401,7 @@ class IndexerOp(nn.Module):
             q_fp8.unsqueeze(1),
             kv_cache_fp8.view(dtype=torch.uint8),
             weights,
-            fmha_params.kvlen_d,
+            context_lens,
             attention_inputs.kv_cache_kernel_block_id_device,
             schedule_metadata,
             max_seq_len,
@@ -468,7 +474,7 @@ class IndexerOp(nn.Module):
 
         # Compute logits
         weights = weights.squeeze(-1)
-        kv_fp8 = (k_fp8, k_scale.view(torch.float32))
+        kv_fp8 = (k_fp8, k_scale.view(torch.float32).view(-1))
 
         assert (
             fmha_params.ks is not None and fmha_params.ke is not None
@@ -575,7 +581,7 @@ class IndexerOp(nn.Module):
             attention_inputs.kv_cache_kernel_block_id_device,
             cu_kv_seqlens_global,
         )
-        kv_fp8_full = (k_fp8, k_scale.view(torch.float32))
+        kv_fp8_full = (k_fp8, k_scale.view(torch.float32).view(-1))
 
         def run_part_logits_topk(
             q_part: torch.Tensor,
@@ -603,9 +609,12 @@ class IndexerOp(nn.Module):
 
         if total_local_ids.size(0) > 0:
             topk = run_part_logits_topk(
-                q0, weights_sq0,
-                precomputed_ks, precomputed_ke,
-                precomputed_lengths, precomputed_topk_off,
+                q0,
+                weights_sq0,
+                precomputed_ks,
+                precomputed_ke,
+                precomputed_lengths,
+                precomputed_topk_off,
             )
         else:
             topk = None
