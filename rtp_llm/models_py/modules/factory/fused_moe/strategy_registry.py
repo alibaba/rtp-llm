@@ -72,7 +72,7 @@ class StrategyRegistry:
 
         if not candidates:
             quant_method = (
-                config.quant_config.get_method()
+                config.quant_config.get_moe_runtime_method_key()
                 if config.quant_config is not None
                 else None
             )

@@ -6,6 +6,7 @@ from unittest.mock import patch
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, Fp8PerTensorQuantConfig
 from rtp_llm.device.device_type import DeviceType
+from rtp_llm.models_py.distributed.deepep_wrapper import DeepepWrapperConfig
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -108,6 +109,25 @@ class TestMoeConfigResolver(unittest.TestCase):
 
         self.assertEqual(
             self.resolver.get_quant_method(config), "FP8_DYNAMIC_PER_TENSOR"
+        )
+
+    def test_fp8_moe_and_deepep_low_latency_share_runtime_method(self):
+        quant_config = Fp8PerTensorQuantConfig(is_quanted=True)
+        config = create_config_adapter(
+            ep_size=2,
+            quant_config=quant_config,
+            use_deepep_low_latency=True,
+        )
+
+        self.assertEqual(
+            self.resolver.get_quant_method(config),
+            quant_config.get_moe_runtime_method_key(),
+        )
+        self.assertEqual(
+            DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
+                17, 2, quant_config
+            ),
+            16,
         )
 
     def test_is_bf16_false(self):
