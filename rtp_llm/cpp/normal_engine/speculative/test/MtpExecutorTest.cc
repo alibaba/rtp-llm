@@ -1,8 +1,10 @@
 #include <algorithm>
 #include <array>
-#include <memory>
 #include <chrono>
+#include <exception>
+#include <functional>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include "torch/all.h"
@@ -75,6 +77,7 @@ struct MtpExecutorTestConfig {
 
     SpeculativeType sp_type              = SP_TYPE_MTP;
     int64_t         dspark_mask_token_id = -1;
+    RoleType        role_type            = RoleType::PDFUSION;
 };
 
 template<typename T>
@@ -166,11 +169,40 @@ public:
     GptModelOutputs forward(const GptModelInputs& inputs) override {
         checkInputs(inputs);
         ++forward_count_;
+        recordEvent("forward");
         return output_holder.get();
     }
 
     size_t forwardCount() const {
         return forward_count_;
+    }
+
+    std::string waitCacheStorePublication() override {
+        recordEvent("wait_publication");
+        if (publication_observer_) {
+            publication_observer_();
+        }
+        if (publication_exception_) {
+            std::rethrow_exception(publication_exception_);
+        }
+        return publication_error_;
+    }
+
+    void setPublicationResult(std::string error) {
+        publication_error_ = std::move(error);
+    }
+
+    void setPublicationException(std::exception_ptr exception) {
+        publication_exception_ = std::move(exception);
+    }
+
+    void setPublicationObserver(std::function<void()> observer) {
+        publication_observer_ = std::move(observer);
+    }
+
+    void setEventLog(std::shared_ptr<std::vector<std::string>> events, std::string name) {
+        event_log_  = std::move(events);
+        event_name_ = std::move(name);
     }
 
     void prepareAttentionInputs(const GptModelInputs& inputs) override {
@@ -242,12 +274,23 @@ public:
     }
 
 private:
-    TestDataHolder<GptModelInputs>  input_holder;
-    TestDataHolder<GptModelInputs>  prepare_input_holder;
-    TestDataHolder<GptModelOutputs> output_holder;
-    torch::Tensor                   mtp_target_hidden_rows_;
-    size_t                          forward_count_ = 0;
-    std::optional<bool>             expected_is_target_verify_;
+    void recordEvent(const char* event) {
+        if (event_log_) {
+            event_log_->push_back(event_name_ + "." + event);
+        }
+    }
+
+    TestDataHolder<GptModelInputs>           input_holder;
+    TestDataHolder<GptModelInputs>           prepare_input_holder;
+    TestDataHolder<GptModelOutputs>          output_holder;
+    torch::Tensor                            mtp_target_hidden_rows_;
+    size_t                                   forward_count_ = 0;
+    std::optional<bool>                      expected_is_target_verify_;
+    std::string                               publication_error_;
+    std::exception_ptr                        publication_exception_;
+    std::function<void()>                     publication_observer_;
+    std::shared_ptr<std::vector<std::string>> event_log_;
+    std::string                               event_name_;
 };
 
 class FakeFastTopKSampler: public spec::FastTopKSampler {
@@ -508,8 +551,10 @@ public:
                                                                             /*local_head_num_kv=*/128,
                                                                             /*size_per_head=*/256));
 
-        EngineInitParams params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
-        params.sp_config        = sp_config;
+        EngineInitParams params            = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+        params.sp_config                   = sp_config;
+        params.pd_sep_config.role_type     = test_config.role_type;
+        params.parallelism_config.role_type = test_config.role_type;
         if (test_config.vocab_size_override > 0) {
             params.model_config_.vocab_size = test_config.vocab_size_override;
         }
@@ -712,6 +757,7 @@ TEST_F(MtpExecutorTest, testDSparkPrefillCommitDoesNotUseTargetVerifyContract) {
     test_config.vocab_size_override  = test_config.vocab_size;
     test_config.sp_type              = SP_TYPE_DSPARK;
     test_config.dspark_mask_token_id = 0;
+    test_config.role_type            = RoleType::PREFILL;
     auto components                  = createMtpExecutorComponents(test_config);
 
     GenerateStreamPtr stream = createContextStream(
@@ -736,6 +782,15 @@ TEST_F(MtpExecutorTest, testDSparkPrefillCommitDoesNotUseTargetVerifyContract) {
     components.fake_draft_prefill_model->setOutputs({GptModelOutputs{}});
     components.fake_draft_prefill_model->expectTargetVerify(false);
 
+    auto publication_events = std::make_shared<std::vector<std::string>>();
+    components.fake_target_model->setEventLog(publication_events, "target");
+    components.fake_draft_prefill_model->setEventLog(publication_events, "draft");
+    auto assert_not_dispatched = [stream]() {
+        EXPECT_EQ((std::vector<int>{0, 1, 2, 3}), stream->getCompleteTokenIds()->completeTokenIdsVec(0));
+    };
+    components.fake_target_model->setPublicationObserver(assert_not_dispatched);
+    components.fake_draft_prefill_model->setPublicationObserver(assert_not_dispatched);
+
     auto sampler_input  = SamplerInputs{target_output.logits};
     auto sampler_output = SamplerOutput{torch::tensor({1}, torch::kInt32).reshape({1, 1})};
     components.fake_sampler->setInputs({sampler_input});
@@ -751,8 +806,140 @@ TEST_F(MtpExecutorTest, testDSparkPrefillCommitDoesNotUseTargetVerifyContract) {
 
     auto status = components.executor->process({stream});
     ASSERT_TRUE(status.ok()) << status.ToString();
+    EXPECT_EQ((std::vector<std::string>{"target.forward",
+                                        "draft.forward",
+                                        "target.wait_publication",
+                                        "draft.wait_publication"}),
+              *publication_events);
     EXPECT_EQ((std::vector<int>{0, 1, 2, 3, 1}), stream->getCompleteTokenIds()->completeTokenIdsVec(0));
     EXPECT_TRUE(stream->getProposeToken().empty());
+}
+
+TEST_F(MtpExecutorTest, testDSparkPublicationFailurePreventsPrefillDispatch) {
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle    = 3;
+    test_config.vocab_size_override  = test_config.vocab_size;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.dspark_mask_token_id = 0;
+    test_config.role_type            = RoleType::PREFILL;
+    auto components                  = createMtpExecutorComponents(test_config);
+
+    GenerateStreamPtr stream = createContextStream(
+        components.model_config, components.runtime_config, components.resource_context, {0, 1, 2, 3});
+
+    GptModelInputs target_input;
+    target_input.combo_tokens      = torch::tensor({0, 1, 2, 3}, torch::kInt32);
+    target_input.input_lengths     = torch::tensor({4}, torch::kInt32);
+    target_input.prefix_lengths    = torch::tensor({0}, torch::kInt32);
+    target_input.lm_output_indexes = torch::tensor({3}, torch::kInt32);
+
+    GptModelOutputs target_output;
+    target_output.logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f}).reshape({1, 4});
+    target_output.all_hidden_states =
+        torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f}).reshape({4, 2});
+    components.fake_target_model->setInputs({target_input});
+    components.fake_target_model->setOutputs({target_output});
+    components.fake_target_model->setPublicationException(
+        std::make_exception_ptr(std::runtime_error("target store wait failed")));
+
+    bool draft_waited = false;
+    components.fake_draft_prefill_model->setPublicationObserver([&draft_waited]() { draft_waited = true; });
+    components.fake_draft_prefill_model->setPublicationResult("draft store failed");
+    size_t reduction_count = 0;
+    components.executor->dspark_cache_store_status_reducer_for_test_ = [&reduction_count](bool local_ok) {
+        ++reduction_count;
+        EXPECT_FALSE(local_ok);
+        return local_ok;
+    };
+
+    GptModelInputs commit_input     = target_input;
+    commit_input.last_hidden_states = target_output.all_hidden_states;
+    components.fake_draft_prefill_model->setInputs({commit_input});
+    components.fake_draft_prefill_model->setOutputs({GptModelOutputs{}});
+    components.fake_draft_prefill_model->expectTargetVerify(false);
+
+    auto sampler_input  = SamplerInputs{target_output.logits};
+    auto sampler_output = SamplerOutput{torch::tensor({1}, torch::kInt32).reshape({1, 1})};
+    components.fake_sampler->setInputs({sampler_input});
+    components.fake_sampler->setOutputs({sampler_output});
+
+    auto* draft_prefill = components.fake_draft_prefill_model.get();
+    setupFakeModels(components.executor.get(),
+                    std::move(components.fake_target_model),
+                    std::move(components.fake_draft_model),
+                    std::move(components.fake_fast_topk_sampler),
+                    std::move(components.fake_speculative_sampler),
+                    std::move(components.fake_sampler),
+                    std::move(components.fake_draft_prefill_model));
+
+    auto status = components.executor->process({stream});
+    ASSERT_TRUE(status.ok()) << status.ToString();
+    EXPECT_EQ(draft_prefill->forwardCount(), 1u);
+    EXPECT_TRUE(draft_waited);
+    EXPECT_EQ(reduction_count, 1u);
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_EQ((std::vector<int>{0, 1, 2, 3}), stream->getCompleteTokenIds()->completeTokenIdsVec(0));
+}
+
+TEST_F(MtpExecutorTest, testDSparkRemoteTpRankFailurePreventsPrefillDispatch) {
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle    = 3;
+    test_config.vocab_size_override  = test_config.vocab_size;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.dspark_mask_token_id = 0;
+    test_config.role_type            = RoleType::PREFILL;
+    auto components                  = createMtpExecutorComponents(test_config);
+
+    GenerateStreamPtr stream = createContextStream(
+        components.model_config, components.runtime_config, components.resource_context, {0, 1, 2, 3});
+
+    GptModelInputs target_input;
+    target_input.combo_tokens      = torch::tensor({0, 1, 2, 3}, torch::kInt32);
+    target_input.input_lengths     = torch::tensor({4}, torch::kInt32);
+    target_input.prefix_lengths    = torch::tensor({0}, torch::kInt32);
+    target_input.lm_output_indexes = torch::tensor({3}, torch::kInt32);
+
+    GptModelOutputs target_output;
+    target_output.logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f}).reshape({1, 4});
+    target_output.all_hidden_states =
+        torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f}).reshape({4, 2});
+    components.fake_target_model->setInputs({target_input});
+    components.fake_target_model->setOutputs({target_output});
+
+    GptModelInputs commit_input     = target_input;
+    commit_input.last_hidden_states = target_output.all_hidden_states;
+    components.fake_draft_prefill_model->setInputs({commit_input});
+    components.fake_draft_prefill_model->setOutputs({GptModelOutputs{}});
+    components.fake_draft_prefill_model->expectTargetVerify(false);
+
+    bool   observed_local_ok = false;
+    size_t reduction_count   = 0;
+    components.executor->dspark_cache_store_status_reducer_for_test_ =
+        [&observed_local_ok, &reduction_count](bool local_ok) {
+            observed_local_ok = local_ok;
+            ++reduction_count;
+            return false;  // Simulate one different TP rank publishing a failure.
+        };
+
+    auto sampler_input  = SamplerInputs{target_output.logits};
+    auto sampler_output = SamplerOutput{torch::tensor({1}, torch::kInt32).reshape({1, 1})};
+    components.fake_sampler->setInputs({sampler_input});
+    components.fake_sampler->setOutputs({sampler_output});
+
+    setupFakeModels(components.executor.get(),
+                    std::move(components.fake_target_model),
+                    std::move(components.fake_draft_model),
+                    std::move(components.fake_fast_topk_sampler),
+                    std::move(components.fake_speculative_sampler),
+                    std::move(components.fake_sampler),
+                    std::move(components.fake_draft_prefill_model));
+
+    auto status = components.executor->process({stream});
+    ASSERT_TRUE(status.ok()) << status.ToString();
+    EXPECT_TRUE(observed_local_ok);
+    EXPECT_EQ(reduction_count, 1u);
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_EQ((std::vector<int>{0, 1, 2, 3}), stream->getCompleteTokenIds()->completeTokenIdsVec(0));
 }
 
 TEST_F(MtpExecutorTest, testMultiBatchPrefill) {
@@ -1107,6 +1294,37 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     ASSERT_TRUE(status.ok());
 
     checkOutput(stream, {0, 1, 2, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.21, 0.22});
+}
+
+TEST_F(MtpExecutorTest, testDSparkPrefillUsesCommitOnlyExecutorPolicy) {
+    MtpExecutorTestConfig test_config;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.gen_num_per_cycle    = 3;
+    test_config.vocab_size_override  = test_config.vocab_size;
+    test_config.dspark_mask_token_id = 0;
+    test_config.role_type            = RoleType::PREFILL;
+
+    auto components = createMtpExecutorComponents(test_config);
+
+    EXPECT_TRUE(components.executor->dspark_prefill_commit_only_);
+    EXPECT_FALSE(components.executor->draft_model_);
+    EXPECT_FALSE(components.executor->dspark_markov_w1_.defined());
+    EXPECT_FALSE(components.executor->dspark_markov_w2_.defined());
+}
+
+TEST_F(MtpExecutorTest, testDSparkDecodeKeepsProposalAndMarkovContract) {
+    MtpExecutorTestConfig test_config;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.gen_num_per_cycle    = 3;
+    test_config.vocab_size_override  = test_config.vocab_size;
+    test_config.dspark_mask_token_id = 0;
+    test_config.role_type            = RoleType::DECODE;
+
+    auto components = createMtpExecutorComponents(test_config);
+
+    EXPECT_FALSE(components.executor->dspark_prefill_commit_only_);
+    EXPECT_TRUE(components.executor->dspark_markov_w1_.defined());
+    EXPECT_TRUE(components.executor->dspark_markov_w2_.defined());
 }
 
 TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {

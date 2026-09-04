@@ -50,7 +50,7 @@ from rtp_llm.models.dsv4_kv_cache import (
     build_dsv4_kv_cache_spec_descs,
     resolve_dsv4_tokens_per_block,
 )
-from rtp_llm.ops import HybridAttentionType, KvCacheDataType
+from rtp_llm.ops import HybridAttentionType, KvCacheDataType, RoleType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -67,6 +67,13 @@ SCORING_FUNC_SIGMOID = 1
 SCORING_FUNC_SQRT_SOFTPLUS = 2  # DeepSeek-V4
 
 _TRUTHY_ENV_VALUES = ("yes", "true", "t", "1", "on")
+
+
+def _is_prefill_role(role_type: object) -> bool:
+    """Accept both the production pybind enum and lightweight string configs."""
+    if role_type == RoleType.PREFILL:
+        return True
+    return str(role_type).upper().rsplit(".", 1)[-1] == "PREFILL"
 
 
 def _dsv4_fixed_pool_use_host_memory() -> bool:
@@ -957,6 +964,45 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
         # DSpARK stages use the regular learned noaux_tc router rather than
         # the target model's initial hash-router schedule.
         self._num_hash_layers = 0
+
+    @property
+    def prefill_commit_only(self) -> bool:
+        """Whether this descriptor belongs to a dedicated prefill worker."""
+        return _is_prefill_role(getattr(self, "role_type", None))
+
+    def get_weight_info(self) -> ModelWeightInfo:
+        """Retain only tensors reachable from PREFILL's DSpARK commit graph.
+
+        Filtering after the common normalization/quantization pipeline keeps
+        each retained FP8 descriptor composite intact, including its generated
+        scale sibling.
+        """
+        info = super().get_weight_info()
+        if not self.prefill_commit_only:
+            return info
+
+        layer_names = {W.v4_attn_wkv_w, W.v4_attn_kv_norm}
+        global_names = {
+            # Embedding and LM head preserve the target/draft alias contract;
+            # they do not allocate duplicate tensors in production.
+            W.embedding,
+            W.lm_head,
+            W.v4_dspark_main_norm,
+            W.v4_dspark_main_proj_w,
+        }
+        info.layer_weights = [
+            [weight for weight in layer if weight.name in layer_names]
+            for layer in info.layer_weights
+        ]
+        info.weights = [weight for weight in info.weights if weight.name in global_names]
+        logging.info(
+            "[DeepSeekV4DSparkWeight] PREFILL commit-only descriptors: "
+            "layers=%d per-layer=%s globals=%s",
+            len(info.layer_weights),
+            sorted(layer_names),
+            sorted(global_names),
+        )
+        return info
 
     def _get_weight_info(self) -> ModelWeightInfo:
         layer_weights: List[List[WeightModule]] = [

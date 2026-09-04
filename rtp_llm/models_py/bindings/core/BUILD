@@ -364,6 +364,7 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:device_pin",
         "//rtp_llm/models_py/bindings:op_defs",
+        "@havenask//aios/autil:env_util",
         "@havenask//aios/autil:lock_free",
     ] + torch_deps(),
     visibility = ["//visibility:public"],

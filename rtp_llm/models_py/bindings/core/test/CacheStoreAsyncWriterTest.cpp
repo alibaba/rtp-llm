@@ -1,6 +1,7 @@
 #include "gtest/gtest.h"
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -10,6 +11,7 @@
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 
 #if USING_CUDA
@@ -286,6 +288,130 @@ TEST_F(CacheStoreAsyncWriterTest, WaitWithoutSubmit) {
     writer.waitAllDone();
 }
 
+TEST_F(CacheStoreAsyncWriterTest, FinishSubmissionsDoesNotFinishPublication) {
+    CacheStoreAsyncWriter writer;
+    writer.init(/*track_store_completions=*/true);
+    auto complete = writer.registerStoreCompletion();
+
+    writer.finishSubmissions();
+
+    EXPECT_EQ(CacheStoreAsyncWriter::State::IDLE, writer.state_);
+    EXPECT_NE(writer.finished_store_completion_state_, nullptr);
+    EXPECT_ANY_THROW(writer.init(/*track_store_completions=*/true));
+
+    complete(nullptr);
+    EXPECT_NO_THROW(writer.waitStoreCompletions());
+}
+
+TEST_F(CacheStoreAsyncWriterTest, DelayedPublicationCompletesBeforeTerminalTimeout) {
+    CacheStoreAsyncWriter writer(
+        /*device_id=*/-1, nullptr, /*cache_model_id=*/0, std::nullopt, std::chrono::milliseconds(500));
+    writer.init(/*track_store_completions=*/true);
+    auto complete = writer.registerStoreCompletion();
+    writer.finishSubmissions();
+
+    std::thread delayed_completion([complete]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        complete(nullptr);
+    });
+    EXPECT_NO_THROW(writer.waitStoreCompletions());
+    delayed_completion.join();
+}
+
+TEST_F(CacheStoreAsyncWriterTest, MissingPublicationCallbackTimesOutAndReleasesCycle) {
+    CacheStoreAsyncWriter writer(
+        /*device_id=*/-1, nullptr, /*cache_model_id=*/0, std::nullopt, std::chrono::milliseconds(20));
+    writer.init(/*track_store_completions=*/true);
+    auto missing_completion = writer.registerStoreCompletion();
+    (void)missing_completion;
+    writer.finishSubmissions();
+
+    EXPECT_THROW(writer.waitStoreCompletions(), std::runtime_error);
+    EXPECT_EQ(writer.finished_store_completion_state_, nullptr);
+
+    writer.init(/*track_store_completions=*/true);
+    writer.finishSubmissions();
+    EXPECT_NO_THROW(writer.waitStoreCompletions());
+}
+
+TEST_F(CacheStoreAsyncWriterTest, LatePublicationCallbackAfterTimeoutIsIgnored) {
+    CacheStoreAsyncWriter writer(
+        /*device_id=*/-1, nullptr, /*cache_model_id=*/0, std::nullopt, std::chrono::milliseconds(20));
+    writer.init(/*track_store_completions=*/true);
+    auto complete = writer.registerStoreCompletion();
+    writer.finishSubmissions();
+
+    EXPECT_THROW(writer.waitStoreCompletions(), std::runtime_error);
+    EXPECT_NO_THROW(complete(nullptr));
+    EXPECT_NO_THROW(complete(std::make_exception_ptr(std::runtime_error("duplicate late failure"))));
+}
+
+TEST_F(CacheStoreAsyncWriterTest, PublicationCancellationFailsWaitAndReleasesCycle) {
+    CacheStoreAsyncWriter writer(
+        /*device_id=*/-1, nullptr, /*cache_model_id=*/0, std::nullopt, std::chrono::seconds(1));
+    writer.init(/*track_store_completions=*/true);
+    auto complete = writer.registerStoreCompletion();
+    writer.finishSubmissions();
+
+    writer.cancelStoreCompletions(std::make_exception_ptr(std::runtime_error("publication cancelled")));
+    EXPECT_THROW(writer.waitStoreCompletions(), std::runtime_error);
+    EXPECT_NO_THROW(complete(nullptr));
+
+    writer.init(/*track_store_completions=*/true);
+    writer.finishSubmissions();
+    EXPECT_NO_THROW(writer.waitStoreCompletions());
+}
+
+TEST_F(CacheStoreAsyncWriterTest, ShutdownMakesOutstandingCallbackHarmless) {
+    CacheStoreAsyncWriter::StoreCompletionCallback complete;
+    {
+        CacheStoreAsyncWriter writer;
+        writer.init(/*track_store_completions=*/true);
+        complete = writer.registerStoreCompletion();
+        writer.finishSubmissions();
+    }
+
+    EXPECT_NO_THROW(complete(nullptr));
+}
+
+TEST_F(CacheStoreAsyncWriterTest, PublicationFailurePropagatesOnceAndCycleIsReusable) {
+    CacheStoreAsyncWriter writer;
+    writer.init(/*track_store_completions=*/true);
+    auto complete = writer.registerStoreCompletion();
+    writer.finishSubmissions();
+    complete(std::make_exception_ptr(std::runtime_error("publication failed")));
+
+    EXPECT_THROW(writer.waitStoreCompletions(), std::runtime_error);
+    EXPECT_NO_THROW(writer.waitStoreCompletions());
+
+    writer.init(/*track_store_completions=*/true);
+    writer.finishSubmissions();
+    EXPECT_NO_THROW(writer.waitStoreCompletions());
+}
+
+TEST_F(CacheStoreAsyncWriterTest, DuplicatePublicationCompletionIsIgnored) {
+    CacheStoreAsyncWriter writer;
+    writer.init(/*track_store_completions=*/true);
+    auto complete = writer.registerStoreCompletion();
+    writer.finishSubmissions();
+
+    complete(nullptr);
+    complete(std::make_exception_ptr(std::runtime_error("duplicate failure")));
+
+    EXPECT_NO_THROW(writer.waitStoreCompletions());
+}
+
+TEST_F(CacheStoreAsyncWriterTest, TrackedZeroStoreConsecutiveCyclesDoNotLeakState) {
+    CacheStoreAsyncWriter writer;
+    for (int cycle = 0; cycle < 3; ++cycle) {
+        writer.init(/*track_store_completions=*/true);
+        writer.finishSubmissions();
+        EXPECT_NO_THROW(writer.waitStoreCompletions());
+        EXPECT_EQ(CacheStoreAsyncWriter::State::IDLE, writer.state_);
+        EXPECT_EQ(writer.finished_store_completion_state_, nullptr);
+    }
+}
+
 TEST_F(CacheStoreAsyncWriterTest, ManyCycles) {
     CacheStoreAsyncWriter writer;
     std::atomic<int>      total{0};
@@ -305,6 +431,69 @@ TEST_F(CacheStoreAsyncWriterTest, DoubleWaitAllDoneThrows) {
     writer.init();
     writer.waitAllDone();
     ASSERT_ANY_THROW(writer.waitAllDone());
+}
+
+TEST_F(CacheStoreAsyncWriterTest, TrackedWriteWithoutCacheStoreFailsClosed) {
+    CacheStoreAsyncWriter        writer;  // default writer -> null cache manager/store
+    torch_ext::PyCacheStoreInputs cache_store_inputs;
+    torch_ext::LayerKVCache       layer_kv;
+
+    writer.init(/*track_store_completions=*/true);
+    // A silent skip here would leave zero pending callbacks, so the executor's
+    // publication wait would falsely report success while nothing was transferred.
+    EXPECT_ANY_THROW(writer.write(cache_store_inputs, layer_kv));
+    writer.finishSubmissions();
+    EXPECT_NO_THROW(writer.waitStoreCompletions());
+}
+
+TEST_F(CacheStoreAsyncWriterTest, UntrackedWriteWithoutCacheStoreIsSilentNoOp) {
+    CacheStoreAsyncWriter        writer;  // default writer -> null cache manager/store
+    torch_ext::PyCacheStoreInputs cache_store_inputs;
+    torch_ext::LayerKVCache       layer_kv;
+
+    writer.init(/*track_store_completions=*/false);
+    // Legacy non-PD path: a missing store is expected and stays a no-op.
+    EXPECT_NO_THROW(writer.write(cache_store_inputs, layer_kv));
+    writer.waitAllDone();
+}
+
+TEST_F(CacheStoreAsyncWriterTest, WorkerThreadPublicationRegistrationCompletesCycle) {
+    CacheStoreAsyncWriter writer(
+        /*device_id=*/-1, nullptr, /*cache_model_id=*/0, std::nullopt, std::chrono::milliseconds(5000));
+    writer.init(/*track_store_completions=*/true);
+    auto completion_state = writer.active_store_completion_state_;
+    ASSERT_NE(completion_state, nullptr);
+
+    std::atomic<int> registered{0};
+    for (int i = 0; i < 16; ++i) {
+        writer.submit([completion_state, &registered]() {
+            auto complete = CacheStoreAsyncWriter::registerStoreCompletionOn(completion_state);
+            registered.fetch_add(1);
+            complete(nullptr);
+        });
+    }
+
+    writer.finishSubmissions();
+    EXPECT_EQ(16, registered.load());
+    EXPECT_NO_THROW(writer.waitStoreCompletions());
+}
+
+TEST_F(CacheStoreAsyncWriterTest, WorkerExceptionTerminatesPublicationWithoutWaitingForTimeout) {
+    CacheStoreAsyncWriter writer(
+        /*device_id=*/-1, nullptr, /*cache_model_id=*/0, std::nullopt, std::chrono::milliseconds(30000));
+    writer.init(/*track_store_completions=*/true);
+    // Registered but never completed: the failing task is what would have published it.
+    auto complete = writer.registerStoreCompletion();
+    writer.submit([]() { throw std::runtime_error("worker boom"); });
+
+    writer.finishSubmissions();
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_THROW(writer.waitStoreCompletions(), std::runtime_error);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 5000);
+
+    // The orphaned callback must stay harmless after the cycle was terminated.
+    EXPECT_NO_THROW(complete(nullptr));
 }
 
 }  // namespace rtp_llm

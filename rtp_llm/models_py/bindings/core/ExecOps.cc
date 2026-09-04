@@ -23,6 +23,7 @@
 #include <memory>
 #include <mutex>
 #include <atomic>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #if USING_CUDA
@@ -150,7 +151,8 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                             size_t                               cache_model_id,
                             int                                  cp_rank,
                             int                                  cp_size,
-                            std::shared_ptr<torch::Event>        pre_created_event) {
+                            std::shared_ptr<torch::Event>        pre_created_event,
+                            CacheStoreCompletionRegistrar        register_store_completion) {
     const auto& param = cache_store_inputs;
     const auto  requireHostTensor =
         [](const torch::Tensor& tensor, const char* name, int64_t expected_dim, c10::ScalarType expected_type) {
@@ -180,6 +182,9 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     requireHostTensor(param.cache_keys, "cache_keys", 2, torch::kInt64);
 
     if (!cache_store) {
+        RTP_LLM_CHECK_WITH_INFO(!register_store_completion,
+                                "writeCacheStore has tracked publication but cache_store is null; "
+                                "refusing to silently drop the KV transfer");
         RTP_LLM_LOG_DEBUG("cache_store is null, skip writeCacheStore");
         return;
     }
@@ -442,25 +447,47 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
             addBlock(pair.key_index, pair.offset_index);
         }
 
-        auto storeCallback = [layer_id = layer_kv.layer_id,
-                              cache_model_id,
-                              tag = layer_kv.tag,
-                              request_id,
-                              request_blocks](bool success, CacheStoreErrorCode ec) {
-            if (!success) {
-                RTP_LLM_LOG_WARNING("PD_CACHE_KEY_WRITE_FAILED request_id=%ld model_id=%zu local_layer_id=%d tag=%s "
-                                    "error_code=%d error=%s buffer={%s}",
-                                    static_cast<long>(request_id),
-                                    cache_model_id,
-                                    layer_id,
-                                    tag.c_str(),
-                                    static_cast<int>(ec),
-                                    ErrorCodeToString(transCacheStoreErrorCode(ec)).c_str(),
-                                    request_blocks->debugInfo().c_str());
-            }
-        };
         if (request_blocks->getBlocksCount() > 0) {
-            cache_store->store(request_blocks, std::move(storeCallback));
+            CacheStoreCompletionCallback store_completion;
+            if (register_store_completion) {
+                store_completion = register_store_completion();
+            }
+            auto store_callback = [layer_id = layer_kv.layer_id,
+                                   cache_model_id,
+                                   tag = layer_kv.tag,
+                                   request_id,
+                                   request_blocks,
+                                   store_completion](bool success, CacheStoreErrorCode ec) {
+                if (!success) {
+                    RTP_LLM_LOG_WARNING("PD_CACHE_KEY_WRITE_FAILED request_id=%ld model_id=%zu local_layer_id=%d "
+                                        "tag=%s error_code=%d error=%s buffer={%s}",
+                                        static_cast<long>(request_id),
+                                        cache_model_id,
+                                        layer_id,
+                                        tag.c_str(),
+                                        static_cast<int>(ec),
+                                        ErrorCodeToString(transCacheStoreErrorCode(ec)).c_str(),
+                                        request_blocks->debugInfo().c_str());
+                }
+                if (store_completion) {
+                    if (success) {
+                        store_completion(nullptr);
+                    } else {
+                        store_completion(std::make_exception_ptr(std::runtime_error(
+                            "cache-store publication failed for request " + std::to_string(request_id)
+                            + ", model " + std::to_string(cache_model_id) + ", layer " + std::to_string(layer_id)
+                            + ", tag " + tag + ", error code " + std::to_string(static_cast<int>(ec)))));
+                    }
+                }
+            };
+            try {
+                cache_store->store(request_blocks, std::move(store_callback));
+            } catch (...) {
+                if (store_completion) {
+                    store_completion(std::current_exception());
+                }
+                throw;
+            }
         } else {
             RTP_LLM_LOG_DEBUG("skip cache store because all selected blocks are null, request id [%ld], layer id [%d]",
                               static_cast<long>(request_id),
