@@ -114,7 +114,9 @@ CATEGORY_WEIGHTS = {
     "status": 15,  # TTL / 3-strike / generation windows
     "balance": 15,  # concurrent burst rounds + decode sampling
     "cancel": 12,  # stream lifecycle, mostly short
-    "direct": 8,  # single fast-fail probe
+    # "direct" folded into "master" (dcae01e694) — no longer a runner
+    # category; listing it here makes list_case_pairs fail the
+    # no-rows-for-category check at plan time.
 }
 
 # ---------------------------------------------------------------------------
@@ -865,7 +867,7 @@ def main() -> int:
         default=None,
         help=(
             "comma-separated category subset to orchestrate (default: all "
-            "ten; CLI kebab-case, e.g. engine-fault is accepted as-is)"
+            "nine; CLI kebab-case, e.g. engine-fault is accepted as-is)"
         ),
     )
     parser.add_argument(
