@@ -2276,17 +2276,35 @@ def _regroup_spec(
 def _fire_regroup_wave(ops, base: int, n: int = 4):
     """Fire *n* 512-token requests 10ms apart — all inside the master's
     100ms collection window, so they coalesce into ONE master batch.
+
+    Concurrent submission (priority._fire_batch precedent, one submit
+    per worker on a ThreadPoolExecutor): _fire_request BLOCKS on the
+    schedule RPC — under BATCH dispatch the Schedule response settles
+    only after the EnqueueBatch ACK — so a serial fire could never land
+    four submits inside the 100ms window and the master answered each
+    fire with its own singleton batch, leaving the engine-side regroup
+    nothing to work on.  The 10ms inter-SUBMIT gap (main thread) keeps
+    the deterministic arrival order; futures are collected afterwards.
     Returns (rids, fired, fire_errors)."""
     fired: list = []
     rids: list = []
     fire_errors: list = []
-    for _ in range(n):
-        rid = ops.next_request_id(base)
-        rids.append(rid)
-        err = _fire_request(ops, rid, fired, input_len=512, output_len=2)
-        if err is not None:
-            fire_errors.append((rid, err))
-        time.sleep(0.01)
+    pool = ThreadPoolExecutor(max_workers=n)
+    try:
+        futures = []
+        for _ in range(n):
+            rid = ops.next_request_id(base)
+            rids.append(rid)
+            futures.append(
+                pool.submit(_fire_request, ops, rid, fired, input_len=512, output_len=2)
+            )
+            time.sleep(0.01)
+        for rid, future in zip(rids, futures):
+            err = future.result()
+            if err is not None:
+                fire_errors.append((rid, err))
+    finally:
+        pool.shutdown(wait=True)
     return rids, fired, fire_errors
 
 
