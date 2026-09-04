@@ -907,9 +907,11 @@ def profile_dispatches_batch(profile: str) -> bool:
     return PROFILE_SPECS[profile]["dispatcher"] == "batch"
 
 
-# Production DSv4 prefill execution-time fit, verbatim from the master-side
-# RoutingConfig.FormulaEstimatorConfig.DEFAULT_EXPRESSION constant (the
-# intake3 test-line default). The harness injects it EXPLICITLY into every
+# Production DSv4 prefill execution-time fit (the intake3 test-line value
+# formerly carried by the master-side
+# RoutingConfig.FormulaEstimatorConfig.DEFAULT_EXPRESSION constant, which the
+# codex schema migration removed — the Java default is now the inline
+# upstream legacy expression). The harness injects it EXPLICITLY into every
 # generated FLEXLB_CONFIG instead of relying on the Java code default: the
 # production default is the upstream legacy "1 ms/token" sum, which
 # overpredicts a 32k all-miss prefill by ~96x (32.8 s vs the fitted ~342 ms)
@@ -1081,11 +1083,16 @@ def build_flexlb_config(
     delivered_not_accepted_timeout_ms: int = 30_000,
     max_delivered_not_accepted: int = 200,
     # Admission-family capacity passthrough (admission wave-2 triggers,
-    # 2026-09): None → omit the key, keep the Java default / the template
-    # status quo (waiting queue 1024, prefill placement pool 100000 here);
-    # only an explicit value reaches FLEXLB_CONFIG.  Harness is a pipe —
-    # no default changes.
+    # 2026-09): None → omit the key, keep the Java default (waiting queue
+    # 1024); only an explicit value reaches FLEXLB_CONFIG.  Harness is a
+    # pipe — no default changes.
     max_waiting_requests_per_prefill_worker: Optional[int] = None,
+    # RETIRED by the codex strict schema: router.roles.prefill.availability
+    # (with its maxPendingRequests) no longer parses — ConfigServiceTest
+    # rejects prefill.availability, and prefill admission now parks in
+    # placementWaiters via the Blocked path instead of an availability
+    # reject.  Kept as a documented no-op so admission_config callers don't
+    # TypeError; no config key is emitted for any value.
     prefill_max_pending_requests: Optional[int] = None,
     # dispatcher knobs
     max_inflight_batches: int = 4,  # BATCH
@@ -1157,19 +1164,18 @@ def build_flexlb_config(
     }
     if queue_timeout_ms is not None:
         scheduler_cfg["queueTimeoutMs"] = queue_timeout_ms
-    prefill_availability: dict = {"maxPendingRequests": 100000}
-    if prefill_max_pending_requests is not None:
-        prefill_availability["maxPendingRequests"] = prefill_max_pending_requests
     return json.dumps(
         {
             "schemaVersion": 2,
             "scheduler": scheduler_cfg,
             "dispatcher": dispatcher_cfg,
             "router": {
-                "availabilityHysteresisPercent": 0,
+                # codex strict schema: RouterConfig carries only groupSelector
+                # + roles — router-level availabilityHysteresisPercent and the
+                # prefill-side availability/selector wrappers are retired
+                # (ConfigServiceTest rejects them on parse).
                 "roles": {
                     "prefill": {
-                        "availability": prefill_availability,
                         # Production DSv4 prefill fit injected explicitly
                         # (see DSV4_PREFILL_EXPRESSION above): the test line
                         # stays on the production-fit caliber regardless of
@@ -1177,6 +1183,20 @@ def build_flexlb_config(
                         "executionTimeEstimator": {
                             "type": "FORMULA",
                             "expression": DSV4_PREFILL_EXPRESSION,
+                        },
+                        # Candidate choice, flattened from the retired
+                        # selector{type: ESTIMATED_TTFT} wrapper — the codex
+                        # PrefillConfig keeps only executionTimeEstimator /
+                        # candidateChoice / cacheAffinity, so the nested block
+                        # moved up to the prefill level unchanged.
+                        "candidateChoice": {
+                            "type": "RANDOM_WITHIN_TOLERANCE",
+                            "relativeTolerance": 0.1,
+                            "minimumToleranceMs": 20,
+                            "outlierRejection": {
+                                "maxPendingVsAverageMultiplier": 1.5,
+                                "maxProjectedDrainVsAverageMultiplier": 3.0,
+                            },
                         },
                         # Bounded cache affinity, aligned with the production
                         # master template (data/config/master_fixed_window.json):
@@ -1189,19 +1209,9 @@ def build_flexlb_config(
                             "maxExtraTtftMs": 20,
                             "minPrefixHitPercent": 20,
                         },
-                        "selector": {
-                            "type": "ESTIMATED_TTFT",
-                            "candidateChoice": {
-                                "type": "RANDOM_WITHIN_TOLERANCE",
-                                "relativeTolerance": 0.1,
-                                "minimumToleranceMs": 20,
-                                "outlierRejection": {
-                                    "maxPendingVsAverageMultiplier": 1.5,
-                                    "maxProjectedDrainVsAverageMultiplier": 3.0,
-                                },
-                            },
-                        },
                     },
+                    # decode-side availability is still legal in the codex
+                    # schema (DecodeAvailabilityConfig) — kept as-is.
                     "decode": {"availability": {"maxEngineRequests": 132}},
                 },
             },
@@ -2634,8 +2644,10 @@ def admission_config(
         (batcher waiting-queue capacity; Java default 1024)
       * max_delivered_not_accepted — scheduler.lifecycle
         maxDeliveredNotAcceptedRequestsGlobal (acceptance global limit)
-      * prefill_max_pending_requests — router.roles.prefill.availability
-        maxPendingRequests (placement pool limit; Java default 64)
+      * prefill_max_pending_requests — RETIRED no-op (the codex schema
+        removed router.roles.prefill.availability; prefill admission now
+        parks via Blocked placementWaiters): accepted for caller
+        compatibility, emits no config key
     """
     kwargs = dict(
         ordering="priority",
