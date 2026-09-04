@@ -38,9 +38,11 @@ enum class ErrorCode {
     CANCELLED              = 8100,
     OUT_OF_VOCAB_RANGE     = 8101,
     OUTPUT_QUEUE_FULL      = 8102,
-    OUTPUT_QUEUE_IS_EMPTY  = 8103,
-    FINISHED               = 8104,
-    OUTPUT_QUEUE_NO_UPDATE = 8105,
+    OUTPUT_QUEUE_IS_EMPTY      = 8103,
+    FINISHED                   = 8104,
+    OUTPUT_QUEUE_NO_UPDATE     = 8105,
+    // Retryable grammar resource failure. 8105 is already occupied by OUTPUT_QUEUE_NO_UPDATE.
+    GRAMMAR_COMPILE_OVERLOADED = 8106,
 
     // rpc error
     GET_HOST_FAILED                       = 8200,
@@ -128,6 +130,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "FINISHED";
         case ErrorCode::OUTPUT_QUEUE_NO_UPDATE:
             return "OUTPUT_QUEUE_NO_UPDATE";
+        case ErrorCode::GRAMMAR_COMPILE_OVERLOADED:
+            return "GRAMMAR_COMPILE_OVERLOADED";
         case ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN:
             return "EXCEEDS_KV_CACHE_MAX_LEN";
         case ErrorCode::GRAMMAR_PARSER_REJECTED_TOKEN:

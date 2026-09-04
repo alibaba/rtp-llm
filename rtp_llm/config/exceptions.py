@@ -72,6 +72,7 @@ class ExceptionType(IntEnum):
     OUTPUT_QUEUE_IS_EMPTY = 8103
     FINISHED = 8104
     OUTPUT_QUEUE_NO_UPDATE = 8105
+    GRAMMAR_COMPILE_OVERLOADED = 8106, ExceptionCategory.CAPACITY
 
     # rpc error
     GET_HOST_FAILED = 8200

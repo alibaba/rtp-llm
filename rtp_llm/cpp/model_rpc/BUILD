@@ -52,6 +52,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/utils:core_utils",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ],
@@ -87,6 +88,7 @@ cc_library(
         "//rtp_llm/cpp/metrics",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:hash_util",
+        "//rtp_llm/cpp/utils:torch_cuda_oom",
         "//rtp_llm/cpp/multimodal_processor",
         "//rtp_llm/cpp/multimodal_processor:mm_processor_config",
         "//rtp_llm/cpp/normal_engine",

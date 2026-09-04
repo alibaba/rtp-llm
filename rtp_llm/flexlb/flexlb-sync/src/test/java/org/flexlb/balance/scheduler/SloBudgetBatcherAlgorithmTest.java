@@ -6,12 +6,14 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.ScheduleBudget;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.lang.reflect.Field;
 import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -251,6 +253,36 @@ class SloBudgetBatcherAlgorithmTest {
             verify(handler).onBatchReady(anyList(), meta.capture());
             assertEquals("deadline_guard", meta.getValue().reason());
         }
+    }
+
+    @Test
+    void longHeadBelowMaxSeqLenIsDispatchedAloneAboveBatchTokenBudget()
+            throws InterruptedException {
+        FlexlbConfig config = autoTpmOnConfig();
+        config.setFlexlbBatchMaxCapacity(1_048_576);
+
+        WorkerStatus status = new WorkerStatus();
+        status.setMaxSeqLen(1_048_576L);
+        status.setMaxBatchTokensSize(409_600L);
+        PrefillEndpoint endpoint = endpoint(0);
+        when(endpoint.getStatus()).thenReturn(status);
+
+        long now = System.currentTimeMillis();
+        BatchItem longHead = item(11L, now, 1_048_575L, 50);
+        longHead.setSortKey(now - 1L);
+        BatchItem next = item(12L, now + 1L, 1_024L, 50);
+        next.setSortKey(now);
+        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        BatcherContext ctx = context(
+                endpoint, config, handler, queueWith(longHead, next));
+
+        new SloBudgetBatcherAlgorithm().processQueue(ctx);
+
+        ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
+        verify(handler).onBatchReady(dispatched.capture(), any(DispatchMeta.class));
+        verify(handler, never()).onOfferFailure(any(), any());
+        assertEquals(List.of(longHead), dispatched.getValue());
+        assertEquals(List.of(next), ctx.sortedItems());
     }
 
     // ---- helpers ----

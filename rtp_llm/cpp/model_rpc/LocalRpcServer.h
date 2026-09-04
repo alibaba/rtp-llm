@@ -66,6 +66,13 @@ public:
     StartProfileInternal(grpc::ServerContext* context, const StartProfileInternalRequestPB* request, EmptyPB* response);
 
     grpc::Status
+    DumpTorchAllocator(grpc::ServerContext* context, const EmptyPB* request, TorchAllocatorDumpResponsePB* response);
+
+    grpc::Status DumpTorchAllocatorInternal(grpc::ServerContext*        context,
+                                            const EmptyPB*              request,
+                                            TorchAllocatorDumpResultPB* response);
+
+    grpc::Status
     UpdateSchedulerInfo(grpc::ServerContext* context, const UpdateSchedulerInfoRequestPB* request, EmptyPB* response);
 
     KVCacheInfo getCacheStatusInfo(int64_t latest_cache_version, bool need_cache_keys);
@@ -121,6 +128,7 @@ protected:
                                   std::shared_ptr<GenerateStream>&      stream,
                                   const std::shared_ptr<GenerateInput>& input,
                                   GenerateOutputs&                      last_outputs);
+    TorchAllocatorDumpResultPB dumpTorchAllocatorOnCurrentProcess();
 
 protected:
     std::shared_ptr<EngineBase>           engine_;
@@ -131,7 +139,7 @@ protected:
     std::atomic<size_t>                   onflight_requests_{0};
     std::shared_ptr<RpcServerRuntimeMeta> meta_;
     py::object                            weight_manager_;
-    std::shared_ptr<BroadcastManager>     profile_broadcaster_;
+    std::shared_ptr<BroadcastManager>     tp_broadcaster_;
 };
 
 }  // namespace rtp_llm

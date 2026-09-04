@@ -402,5 +402,79 @@ TEST(RpcWriterCancellationTest, PriorityPreemptionOverridesOkAndCancelledTranspo
     }
 }
 
+TEST(RpcWriterCancellationTest, DecodeStageSettlementIsIdempotent) {
+    DecodeStatInfo stat_info;
+    stat_info.stage      = DecodeStatInfo::allocateResource;
+    stat_info.begin_time = currentTimeUs() - 1000;
+
+    stat_info.finishStage();
+    const auto recorded = stat_info.allocate_resource_rt_us;
+
+    EXPECT_GE(recorded, 1000);
+    EXPECT_EQ(stat_info.begin_time, 0);
+    stat_info.finishStage();
+    EXPECT_EQ(stat_info.allocate_resource_rt_us, recorded);
+    EXPECT_EQ(stat_info.load_cache_from_prefill_rt_us, 0);
+}
+
+TEST(RpcWriterCancellationTest, PrefillStageSettlementIsIdempotent) {
+    PrefillStatInfo stat_info;
+    stat_info.stage      = PrefillStatInfo::remoteAllocateResource;
+    stat_info.begin_time = currentTimeUs() - 1000;
+
+    stat_info.finishStage();
+    const auto recorded = stat_info.remote_allocate_resource_rt_us;
+
+    EXPECT_GE(recorded, 1000);
+    EXPECT_EQ(stat_info.begin_time, 0);
+    stat_info.finishStage();
+    EXPECT_EQ(stat_info.remote_allocate_resource_rt_us, recorded);
+    EXPECT_EQ(stat_info.enqueue_request_rt_us, 0);
+}
+
+TEST(RpcWriterCancellationTest, ContextCleanupPropagatesSpecificTerminalError) {
+    auto stream = std::make_shared<SingleOutputStream>();
+    {
+        kmonitor::MetricsReporterPtr metrics_reporter;
+        auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
+        GenerateContext              context(49, 0, nullptr, metrics_reporter, meta);
+        context.stream_     = stream;
+        context.error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "allocation failed");
+    }
+
+    ASSERT_TRUE(stream->hasError());
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+}
+
+TEST(RpcWriterCancellationTest, ContextCleanupPreservesExistingStreamError) {
+    auto stream = std::make_shared<SingleOutputStream>();
+    stream->reportError(ErrorCode::GENERATE_TIMEOUT, "original terminal error");
+    {
+        kmonitor::MetricsReporterPtr metrics_reporter;
+        auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
+        GenerateContext              context(50, 0, nullptr, metrics_reporter, meta);
+        context.stream_     = stream;
+        context.error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "later context error");
+    }
+
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+}
+
+TEST(RpcWriterCancellationTest, RequestGaugeSamplesLiveAtomicValue) {
+    std::atomic<size_t>          onflight_requests{3};
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
+    GenerateContext              context(51, 0, nullptr, metrics_reporter, meta);
+    context.onflight_requests = &onflight_requests;
+
+    RpcMetricsCollector collector;
+    context.collectBasicMetrics(collector);
+    EXPECT_EQ(collector.onflight_request, 3);
+
+    onflight_requests.store(1);
+    context.collectBasicMetrics(collector);
+    EXPECT_EQ(collector.onflight_request, 1);
+}
+
 }  // namespace
 }  // namespace rtp_llm

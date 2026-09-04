@@ -312,7 +312,7 @@ TEST_F(SamplerTest, testThinkingAllowsNaturalThinkEndBeforeBudgetEnforce) {
     EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
 }
 
-TEST_F(SamplerTest, testThinkingMasksThinkBoundaryTokensAfterThinkEnd) {
+TEST_F(SamplerTest, testThinkingMasksThinkBeginAndAllowsThinkEndAfterThinkEnd) {
     SamplerDataBuilder builder;
 
     auto generate_input                                    = std::make_shared<GenerateInput>();
@@ -334,7 +334,7 @@ TEST_F(SamplerTest, testThinkingMasksThinkBoundaryTokensAfterThinkEnd) {
 
     float neg_inf = -std::numeric_limits<float>::max();
     EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128821].item<float>());
-    EXPECT_EQ(neg_inf, sampler_inputs.logits[0][128822].item<float>());
+    EXPECT_EQ(0, sampler_inputs.logits[0][128822].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][201].item<float>());
     EXPECT_EQ(0, sampler_inputs.logits[0][271].item<float>());
 }
@@ -457,15 +457,16 @@ TEST_F(SamplerTest, testThinkingBudgetEnforceStartsAfterReasoningBudget) {
     EXPECT_EQ(neg_inf, enforce_inputs.logits[0][9].item<float>());
 }
 
-TEST_F(SamplerTest, testForcedSingleTokenThinkEndDoesNotRepeatBeforeAsyncStatusUpdate) {
+TEST_F(SamplerTest, testForcedSingleTokenThinkEndRemainsAllowedBeforeAsyncStatusUpdate) {
     SamplerDataBuilder builder;
 
-    auto generate_input                                  = std::make_shared<GenerateInput>();
-    generate_input->generate_config                      = std::make_shared<GenerateConfig>();
-    generate_input->generate_config->in_think_mode       = true;
-    generate_input->generate_config->max_thinking_tokens = 3;
-    generate_input->generate_config->end_think_token_ids = {8};
-    generate_input->input_ids                            = torch::tensor({1, 2}, torch::kInt32);
+    auto generate_input                                    = std::make_shared<GenerateInput>();
+    generate_input->generate_config                        = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->in_think_mode         = true;
+    generate_input->generate_config->max_thinking_tokens   = 3;
+    generate_input->generate_config->begin_think_token_ids = {7};
+    generate_input->generate_config->end_think_token_ids   = {8};
+    generate_input->input_ids                              = torch::tensor({1, 2}, torch::kInt32);
 
     auto processor = ThinkModeLogitsProcessor::fromGenerateInput(generate_input, 1);
     ASSERT_NE(processor, nullptr);
@@ -475,7 +476,6 @@ TEST_F(SamplerTest, testForcedSingleTokenThinkEndDoesNotRepeatBeforeAsyncStatusU
     enforce_inputs.sequence_lengths = torch::tensor({5}, torch::kInt32);
     processor->process(enforce_inputs, 0, 1);
 
-    float neg_inf = -std::numeric_limits<float>::max();
     EXPECT_EQ(1, enforce_inputs.logits[0][8].item<float>());
 
     SamplerInputs next_inputs    = builder.allocate({1, 16, 8}, {processor}, {1});
@@ -483,7 +483,9 @@ TEST_F(SamplerTest, testForcedSingleTokenThinkEndDoesNotRepeatBeforeAsyncStatusU
     next_inputs.sequence_lengths = torch::tensor({6}, torch::kInt32);
     processor->process(next_inputs, 0, 1);
 
-    EXPECT_EQ(neg_inf, next_inputs.logits[0][8].item<float>());
+    float neg_inf = -std::numeric_limits<float>::max();
+    EXPECT_EQ(neg_inf, next_inputs.logits[0][7].item<float>());
+    EXPECT_EQ(0, next_inputs.logits[0][8].item<float>());
 }
 
 TEST_F(SamplerTest, testForcedMultiTokenThinkEndAdvancesBeforeAsyncStatusUpdate) {
@@ -579,6 +581,37 @@ TEST_F(SamplerTest, testSpecForceMismatchCapsWithoutMutatingParent) {
     ASSERT_TRUE(cap_or.ok());
     EXPECT_EQ(cap_or.value(), 0);
     EXPECT_EQ(0, processor.thinkEndTokensStatus()[0]);
+}
+
+TEST_F(SamplerTest, testSpecAfterThinkMasksThinkBeginAndAllowsThinkEnd) {
+    std::vector<int> end_think_token_ids = {8, 9};
+    auto             dfa_ptr             = std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids);
+    dfa_ptr->next(8);
+    dfa_ptr->next(9);
+
+    StreamThinkInfo info(true, 4, {7}, end_think_token_ids, 0, 2, false, dfa_ptr);
+    info.process_state = ThinkProcessState::AFTER_THINK;
+    ThinkModeLogitsProcessor processor({info});
+
+    const size_t W = SpecLogitsProcessorRequest::bitmaskWordCount(16);
+    auto accepted_tokens = [&](int32_t boundary_token) {
+        std::vector<int32_t> draft = {boundary_token};
+        std::vector<int32_t> bitmask(2 * W, SpecLogitsProcessorRequest::kBitmaskAllowAll);
+
+        SpecLogitsProcessorRequest request;
+        request.draft_tokens       = draft.data();
+        request.propose_step       = 1;
+        request.bitmask_cpu_out    = bitmask.data();
+        request.bitmask_size_int32 = W;
+        request.vocab_size         = 16;
+
+        auto result = processor.prepareSpeculative(request);
+        EXPECT_TRUE(result.ok());
+        return result.ok() ? result.value() : -1;
+    };
+
+    EXPECT_EQ(accepted_tokens(7), 0);
+    EXPECT_EQ(accepted_tokens(8), 1);
 }
 
 TEST_F(SamplerTest, testUpdateStatusAllowsPartialCommitWindow) {

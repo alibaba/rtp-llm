@@ -99,6 +99,16 @@ def write_test_info(args: argparse.Namespace, remaining_args: List[str]) -> None
         "max_seq_len": args.max_seq_len,
         "concurrency_limit": args.concurrency_limit,
         "decode_test_length": args.decode_test_length,
+        "cache_grid_json": args.cache_grid_json or None,
+        "cache_measure_runs": (
+            args.cache_measure_runs if args.cache_grid_json else None
+        ),
+        "cache_request_timeout": (
+            args.cache_request_timeout if args.cache_grid_json else None
+        ),
+        "cache_commit_tail_tokens": (
+            args.cache_commit_tail_tokens if args.cache_grid_json else None
+        ),
         "dataset_name": args.dataset_name or None,
         "dataset_path": args.dataset_path or args.dataset or None,
     }

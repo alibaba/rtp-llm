@@ -28,15 +28,17 @@ namespace rtp_llm {
 
 namespace {
 
-// Pairs init() with waitAllDone() so an exception between them still returns the
-// writer to IDLE. Without this a single failed forward leaves it RUNNING, and every
-// later init() trips its IDLE precondition -- the instance can never publish again.
+// Pairs init() with a full drain on exceptional exits. DSpark's normal path
+// finishes only writer submissions here and leaves actual publication for the
+// executor's pre-dispatch barrier, preserving overlap with draft computation.
 class CacheStoreWriteCycleGuard {
 public:
-    CacheStoreWriteCycleGuard(const std::shared_ptr<CacheStoreAsyncWriter>& writer, bool has_work):
-        writer_(writer), active_(has_work) {
+    CacheStoreWriteCycleGuard(const std::shared_ptr<CacheStoreAsyncWriter>& writer,
+                              bool                                          has_work,
+                              bool                                          track_store_completions):
+        writer_(writer), active_(has_work), track_store_completions_(track_store_completions) {
         if (active_) {
-            writer_->init();
+            writer_->init(track_store_completions_);
         }
     }
 
@@ -55,13 +57,19 @@ public:
         }
     }
 
-    // Normal path: let a drain failure propagate to the caller.
+    // Normal path: let a drain failure propagate to the caller. Tracked cycles
+    // keep publication pending for MtpExecutor; legacy cycles drain everything.
     void finish() {
         if (!active_) {
             return;
         }
-        active_ = false;
-        writer_->waitAllDone();
+        if (track_store_completions_) {
+            writer_->finishSubmissions();
+            active_ = false;
+        } else {
+            active_ = false;
+            writer_->waitAllDone();
+        }
     }
 
     CacheStoreWriteCycleGuard(const CacheStoreWriteCycleGuard&)            = delete;
@@ -70,6 +78,7 @@ public:
 private:
     std::shared_ptr<CacheStoreAsyncWriter> writer_;
     bool                                   active_{false};
+    bool                                   track_store_completions_{false};
 };
 
 }  // namespace
@@ -500,6 +509,23 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
     return cache_store_inputs;
 }
 
+std::string PyWrappedModel::waitCacheStorePublication() {
+    RTP_LLM_PROFILE_SCOPE("py_model.waitCacheStorePublication");
+    if (!track_cache_store_completion_) {
+        return {};
+    }
+    try {
+        cache_store_async_writer_->waitStoreCompletions();
+        return {};
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("DSpARK cache-store publication failed: %s", e.what());
+        return e.what();
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("DSpARK cache-store publication failed with an unknown exception");
+        return "unknown cache-store publication failure";
+    }
+}
+
 GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.forwardMicroBatched");
 
@@ -564,8 +590,9 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                                               bert_embedding_inputs});
     }
 
-    const bool                has_cache_store_work = !inputs.warmup && inputs.pd_separation;
-    CacheStoreWriteCycleGuard cache_store_write_cycle(cache_store_async_writer_, has_cache_store_work);
+    const bool has_cache_store_work = !inputs.warmup && inputs.pd_separation;
+    CacheStoreWriteCycleGuard cache_store_write_cycle(
+        cache_store_async_writer_, has_cache_store_work, track_cache_store_completion_);
 
     fusedCopy(d2d_copies_);
 
@@ -814,8 +841,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             // chunk; cache-store planning must keep the full pre-sharding lengths.
             attention_inputs_.cache_store_inputs->input_lengths_host = cp_params.prefill_actual_input_lengths_cpu;
         }
-        const bool                has_cache_store_work = !inputs.warmup && inputs.pd_separation;
-        CacheStoreWriteCycleGuard cache_store_write_cycle(cache_store_async_writer_, has_cache_store_work);
+        const bool has_cache_store_work = !inputs.warmup && inputs.pd_separation;
+        CacheStoreWriteCycleGuard cache_store_write_cycle(
+            cache_store_async_writer_, has_cache_store_work, track_cache_store_completion_);
 
         auto           py_model_inputs = PyModelInputs({token_ids,
                                                         input_hiddens,

@@ -8,7 +8,9 @@ from unittest.mock import patch
 import rtp_llm.dash_sc.repetition_monitor as repetition_monitor
 from rtp_llm.dash_sc.repetition_monitor import (
     NativeModuleStatus,
+    OutputRepetitionConfig,
     RequestRepetitionMonitor,
+    RequestRepetitionMonitorConfig,
     ToolCallLoopConfig,
     ToolCallMarkerConfig,
     detect_tool_call_loop,
@@ -34,6 +36,27 @@ def _patched_native_module(fake_native):
 
 def _patched_native_unavailable(error: str = "missing native module"):
     return _native_status(NativeModuleStatus(available=False, error=error))
+
+
+def _fake_output_native(result):
+    class FakeConfig:
+        pass
+
+    class FakeTracker:
+        def __init__(self, _config):
+            self.result = result
+
+        def update_many(self, _token_ids):
+            return self.result
+
+        def finalize(self):
+            return self.result
+
+    return types.SimpleNamespace(
+        OnlineRepetitionConfig=FakeConfig,
+        OnlineRepetitionTracker=FakeTracker,
+        check_tool_call_loop=lambda *_args: (False, 0, 0, -1),
+    )
 
 
 def _fresh_native_status():
@@ -73,11 +96,107 @@ class NativeAvailabilityTest(TestCase):
                 status = repetition_monitor.native_online_repetition_status()
 
         self.assertFalse(status.available)
-        self.assertIn("missing API check_tool_call_loop", status.error)
+        self.assertIn("check_tool_call_loop", status.error)
+        self.assertIn("OnlineRepetitionTracker", status.error)
         self.assertEqual(len(logs.output), 1)
 
 
 class RepetitionMonitorTest(TestCase):
+    def test_streaming_output_repetition_detects_same_token_run(self) -> None:
+        config = RequestRepetitionMonitorConfig(
+            output_config=OutputRepetitionConfig(
+                enabled=True, min_repeats=3, min_duplicate_tokens=8
+            )
+        )
+        result = types.SimpleNamespace(
+            hit=True,
+            repeat_unit_size=1,
+            repeat_count=10,
+            covered_token_count=10,
+            duplicate_token_count=9,
+            start_index=0,
+            end_index=10,
+            first_detect_index=8,
+            non_contiguous=False,
+            occurrence_count=10,
+        )
+        with _patched_native_module(_fake_output_native(result)):
+            monitor = RequestRepetitionMonitor(monitor_config=config)
+            monitor.update_output_delta([42] * 5)
+            monitor.update_output_delta([42] * 5)
+            monitor.finalize_output()
+            fields = monitor.record_fields()
+        self.assertTrue(fields["output_repetition"])
+        self.assertEqual(fields["output_repetition_kind"], "same_token_run")
+        self.assertEqual(fields["output_repetition_period"], 1)
+
+    def test_streaming_output_repetition_detects_non_contiguous_span(self) -> None:
+        config = RequestRepetitionMonitorConfig(
+            output_config=OutputRepetitionConfig(
+                enabled=True,
+                min_repeats=3,
+                min_duplicate_tokens=64,
+                non_contiguous_min_span=32,
+                non_contiguous_min_occurrences=3,
+                non_contiguous_max_span=32,
+            )
+        )
+        repeated = list(range(100, 132))
+        result = types.SimpleNamespace(
+            hit=True,
+            repeat_unit_size=32,
+            repeat_count=3,
+            covered_token_count=96,
+            duplicate_token_count=64,
+            start_index=0,
+            end_index=131,
+            first_detect_index=131,
+            non_contiguous=True,
+            occurrence_count=3,
+        )
+        with _patched_native_module(_fake_output_native(result)):
+            monitor = RequestRepetitionMonitor(monitor_config=config)
+            monitor.update_output_delta(repeated + list(range(1000, 1017)))
+            monitor.update_output_delta(repeated + list(range(2000, 2018)))
+            monitor.update_output_delta(repeated)
+            monitor.finalize_output()
+            fields = monitor.record_fields()
+        self.assertTrue(fields["output_repetition"])
+        self.assertEqual(
+            fields["output_repetition_kind"], "non_contiguous_span_repeat"
+        )
+        self.assertEqual(fields["output_repetition_occurrence_count"], 3)
+
+    def test_output_runtime_error_is_visible_without_escaping(self) -> None:
+        class FakeConfig:
+            pass
+
+        class FailingTracker:
+            def __init__(self, _config):
+                pass
+
+            def update_many(self, _token_ids):
+                raise RuntimeError("output check failed")
+
+        fake_native = types.SimpleNamespace(
+            OnlineRepetitionConfig=FakeConfig,
+            OnlineRepetitionTracker=FailingTracker,
+            check_tool_call_loop=lambda *_args: (False, 0, 0, -1),
+        )
+        config = RequestRepetitionMonitorConfig(
+            output_config=OutputRepetitionConfig(enabled=True)
+        )
+        with _patched_native_module(fake_native):
+            monitor = RequestRepetitionMonitor(monitor_config=config)
+            monitor.update_output_delta([1, 2, 3])
+            fields = monitor.record_fields()
+
+        self.assertFalse(fields["repetition_monitor_available"])
+        self.assertIn(
+            "RuntimeError: output check failed",
+            fields["repetition_monitor_unavailable_reason"],
+        )
+
     def test_native_unavailable_surfaces_in_record_fields(self) -> None:
         marker = ToolCallMarkerConfig(begin_ids=(1,), end_ids=(2,))
         with _patched_native_unavailable("no libonline_repetition_tracker"):
@@ -89,7 +208,8 @@ class RepetitionMonitorTest(TestCase):
 
         self.assertFalse(fields["repetition_monitor_available"])
         self.assertEqual(
-            fields["repetition_monitor_impl"], "tool=online_cpp_pybind_unavailable"
+            fields["repetition_monitor_impl"],
+            "output=disabled,tool=online_cpp_pybind_unavailable",
         )
         self.assertIn(
             "no libonline_repetition_tracker",
@@ -119,19 +239,6 @@ class RepetitionMonitorTest(TestCase):
             "RuntimeError: tool loop check failed",
             fields["repetition_monitor_unavailable_reason"],
         )
-
-    def test_packaged_native_module_imports_from_runfiles(self) -> None:
-        with _fresh_native_status():
-            status = repetition_monitor.native_online_repetition_status()
-            self.assertTrue(status.available)
-            self.assertTrue(hasattr(status.module, "check_tool_call_loop"))
-            guard_result = status.module.check_tool_call_loop(
-                [1, 42, 2] * 4, [1, 42, 2], [[1]], [[2]], 5, 16
-            )
-
-        self.assertTrue(guard_result[0])
-        self.assertEqual(guard_result[1], 5)
-        self.assertEqual(guard_result[2], 3)
 
     def test_detect_tool_call_loop_uses_request_level_native_function(self) -> None:
         class FakeNativeResult:

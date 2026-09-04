@@ -104,6 +104,14 @@ public class MetricConstant {
      */
     public static final String INFLIGHT_TTL_EXPIRED_QPS = "app.flexlb.inflight.ttl.expired.qps";
 
+    /** Selection-time first-token readiness estimate, including outstanding work. */
+    public static final String PREFILL_SELECTED_ESTIMATED_TTFT_MS =
+            "app.flexlb.prefill.selected.estimated_ttft_ms";
+
+    /** Selection-time predictor execution estimate, excluding queueing. */
+    public static final String PREFILL_SELECTED_EXECUTION_TIME_MS =
+            "app.flexlb.prefill.selected.execution_time_ms";
+
     /**
      * Batch predicted execution time (formula estimate) in milliseconds
      */
@@ -276,6 +284,9 @@ public class MetricConstant {
      */
     public static final String CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS =
             "app.cache.routing.candidate.max.hit.tokens";
+
+    /** Cache-affinity routing decisions, tagged by role, engineIp, and decision. */
+    public static final String CACHE_AFFINITY_DECISION = "app.cache.affinity.decision.qps";
 
     /**
      * Cache request total count

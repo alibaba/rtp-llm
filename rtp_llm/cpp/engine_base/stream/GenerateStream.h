@@ -872,6 +872,7 @@ protected:
     size_t                             propose_step_         = 0;
     size_t                             score_len_            = 0;
     size_t                             reserve_step_         = 0;
+    bool                               stream_async_reserve_ = false;
     bool                               acceped_bouns_token_  = false;
     int                                sp_edit_search_index_ = 0;
     bool                               sp_edit_first_time_   = true;

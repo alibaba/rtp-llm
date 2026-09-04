@@ -15,56 +15,55 @@ void PrefillStatInfo::restoreStage(PrefillStatInfo::ExecuteStage stage_) {
 }
 
 void PrefillStatInfo::nextStage() {
-    stage             = static_cast<PrefillStatInfo::ExecuteStage>(static_cast<int>(stage) + 1);
-    auto cost_time_us = currentTimeUs() - begin_time;
-    begin_time        = currentTimeUs();
+    finishStage();
+    stage      = static_cast<PrefillStatInfo::ExecuteStage>(static_cast<int>(stage) + 1);
+    begin_time = currentTimeUs();
+}
+
+void PrefillStatInfo::finishStage() {
+    if (begin_time == 0) {
+        return;
+    }
+    const auto cost_time_us = currentTimeUs() - begin_time;
+    begin_time              = 0;
     switch (stage) {
-        case getRpcConnection: {
-            break;
-        }
-        case multimodalProcess: {
+        case getRpcConnection:
             get_rpc_connection_rt_us += cost_time_us;
             break;
-        }
-        case remoteAllocateResource: {
+        case multimodalProcess:
             multimodal_process_rt_us += cost_time_us;
             break;
-        }
-        case enqueueRequest: {
+        case remoteAllocateResource:
             remote_allocate_resource_rt_us += cost_time_us;
             break;
-        }
-        case remoteLoadCacheStart: {
+        case enqueueRequest:
             enqueue_request_rt_us += cost_time_us;
             break;
-        }
-        case pollLocalOutput: {
+        case remoteLoadCacheStart:
             remote_load_cache_start_rt_us += cost_time_us;
             break;
-        }
-        case remoteLoadCacheEnd: {
+        case pollLocalOutput:
             poll_local_output_rt_us += cost_time_us;
             break;
-        }
-        case RemoteGenerate: {
+        case remoteLoadCacheEnd:
             remote_load_cache_end_rt_us += cost_time_us;
             break;
-        }
-        case pollRemoteOutput: {
+        case RemoteGenerate:
             remote_generate_rt_us += cost_time_us;
             break;
-        }
-        case finish: {
+        case pollRemoteOutput:
             poll_remote_output_rt_us += cost_time_us;
             break;
-        }
-        default: {
+        case start:
+        case finish:
+            break;
+        default:
             RTP_LLM_CHECK_WITH_INFO(false, "error stage");
-        }
     }
 }
 
 PrefillGenerateContext::~PrefillGenerateContext() {
+    stat_info.finishStage();
     reportTime();
     closeGrpcStream();
     stopStream();
@@ -143,16 +142,16 @@ grpc::Status PrefillGenerateContext::closeGrpcStream(const std::string& attempt_
         // Written here so the final retry attempt's guard gets the settled
         // values.
         // pollRemoteOutput() calls closeGrpcStream() as its own last step,
-        // i.e. before the stage is settled by the trailing nextStage() in
-        // GenerateStreamCall (and this method is idempotent, so the value
-        // would stay 0 forever). Settle the in-flight stage locally without
+        // i.e. before the stage is settled by EXECUTE_STAGE_FUNC's trailing
+        // finishStage() (and this method is idempotent, so the value would
+        // stay 0 forever). Settle the in-flight stage locally without
         // touching stat_info so the kmonitor path keeps its own accounting.
         int64_t poll_remote_output_rt_us = stat_info.poll_remote_output_rt_us;
-        if (stat_info.stage == PrefillStatInfo::pollRemoteOutput) {
+        if (stat_info.stage == PrefillStatInfo::pollRemoteOutput && stat_info.begin_time != 0) {
             poll_remote_output_rt_us += currentTimeUs() - stat_info.begin_time;
         }
         int64_t remote_allocate_resource_rt_us = stat_info.remote_allocate_resource_rt_us;
-        if (stat_info.stage == PrefillStatInfo::remoteAllocateResource) {
+        if (stat_info.stage == PrefillStatInfo::remoteAllocateResource && stat_info.begin_time != 0) {
             // A failed allocation closes the attempt from inside the gRPC error
             // macro, before GenerateStreamCall can advance and settle the stage.
             remote_allocate_resource_rt_us += currentTimeUs() - stat_info.begin_time;
@@ -183,8 +182,8 @@ grpc::Status PrefillGenerateContext::closeGrpcStream(const std::string& attempt_
 }
 
 void PrefillGenerateContext::closeGrpcConnection() {
-    if (!decode_addr.empty()) {
-        resource->rpc_pool.removeConnection(decode_addr);
+    if (!decode_addr.empty() && grpc_connection.channel) {
+        resource->rpc_pool.removeConnection(decode_addr, grpc_connection.channel);
     }
 }
 
@@ -370,7 +369,8 @@ void PrefillGenerateContext::reportTime() {
 
     collectBasicMetrics(collector);
 
-    collector.loading_cache_request                 = loading_cache_requests;
+    collector.loading_cache_request =
+        loading_cache_requests ? static_cast<int64_t>(loading_cache_requests->load()) : 0;
     collector.get_rpc_connection_rt_us              = stat_info.get_rpc_connection_rt_us;
     collector.remote_allocate_resource_rt_us        = stat_info.remote_allocate_resource_rt_us;
     collector.multimodal_process_rt_us              = stat_info.multimodal_process_rt_us;

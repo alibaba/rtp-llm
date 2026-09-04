@@ -85,15 +85,13 @@ from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import PoolBackedModule
 
 # Process-local cache for the device-side cos_sin tensor derived from a
 # given freqs_cis source. DSV4 has ~91 CompressorFP8 instances (main +
-# indexer + indexer.compressor per layer), each holding its own 256 MiB
-# cos_sin_cache at 1M seq len → 22.75 GiB of duplicated baseline memory.
-# Since reset_rope_cache now binds the memoized shared freqs_cis tensor
-# (see rope.py), all instances see the same ``id(freqs_cis)`` → one
-# shared entry instead of 91. Saves ~22.5 GiB of persistent GPU memory
-# per rank during 1M prefill.
-_SHARED_COS_SIN_CACHE: Dict[
+# indexer + indexer.compressor per layer), so active instances share one cache
+# tensor. Weak values prevent this module global from pinning a previous model's
+# large device allocation across unload/reload; each running compressor keeps a
+# strong ``self._cos_sin_cache`` reference, so eviction cannot cause UAF.
+_SHARED_COS_SIN_CACHE: weakref.WeakValueDictionary[
     Tuple[int, torch.device, Tuple[int, ...], torch.dtype], torch.Tensor
-] = {}
+] = weakref.WeakValueDictionary()
 
 
 @dataclass(frozen=True)
@@ -525,15 +523,9 @@ class CompressorFP8(PoolBackedModule):
         # Legacy attribute kept for attention.py's cmp_T fallback (line 1583).
         self._kv_cache_t: int = 0
 
-        # Cached cos_sin cache built from self.freqs_cis at first forward.
-        # ``_cos_sin_cache_device`` is the cached device sibling so the hot
-        # path avoids ``tensor.device`` property construction (~70 ns/call).
+        # Built from freqs_cis during model loading. Runtime only reads it.
         self.freqs_cis: Optional[torch.Tensor] = None
         self._cos_sin_cache: Optional[torch.Tensor] = None
-        self._cos_sin_cache_device: Optional[torch.device] = None
-        self._cos_sin_cache_key: Optional[
-            Tuple[int, torch.device, Tuple[int, ...], torch.dtype]
-        ] = None
         self._state_tokens_per_block: int = 0
         self._cp_ctx: Optional[CPContext] = None
         self._cp_gather_stream: Optional[Any] = None
@@ -707,32 +699,21 @@ class CompressorFP8(PoolBackedModule):
     # ----------------------------------------------------------------------
     # Internal helpers
     # ----------------------------------------------------------------------
-    def _ensure_cos_sin_cache(self, device: torch.device) -> torch.Tensor:
-        assert (
-            self.freqs_cis is not None
-        ), "CompressorFP8.freqs_cis must be bound before forward"
+    def init_rope_cache(self, freqs_cis: torch.Tensor) -> None:
+        """Bind RoPE tables and build the shared kernel cache at model load."""
+        self.freqs_cis = freqs_cis
+        device = freqs_cis.device
         key = (
-            id(self.freqs_cis),
+            id(freqs_cis),
             device,
-            tuple(int(v) for v in self.freqs_cis.shape),
-            self.freqs_cis.dtype,
+            tuple(int(v) for v in freqs_cis.shape),
+            freqs_cis.dtype,
         )
-        cached = self._cos_sin_cache
-        # Compare against a key that includes source freqs_cis identity. A
-        # reset may bind a new shared freqs tensor on the same device.
-        if cached is not None and self._cos_sin_cache_key == key:
-            return cached
-        # Dedup at module level by source freqs_cis identity. After the
-        # rope.py memoization, all CompressorFP8 instances binding the same
-        # rope params share one freqs_cis object → one cos_sin_cache.
         shared = _SHARED_COS_SIN_CACHE.get(key)
-        if shared is None or shared.device != device:
-            shared, _ = build_cos_sin_cache(self.freqs_cis.to(device))
+        if shared is None:
+            shared, _ = build_cos_sin_cache(freqs_cis)
             _SHARED_COS_SIN_CACHE[key] = shared
         self._cos_sin_cache = shared
-        self._cos_sin_cache_device = device
-        self._cos_sin_cache_key = key
-        return shared
 
     def _compute_state_slot_mapping(
         self,
@@ -873,8 +854,8 @@ class CompressorFP8(PoolBackedModule):
         indexed by ``req_idx``, not by absolute position offset).
 
         All slot-mapping math is consumed from ``meta`` — this method only
-        does kernel launches and the cos_sin_cache lazy build. Designed to
-        stay branch-light so it composes cleanly with CUDA graph capture.
+        does kernel launches. Designed to stay branch-light so it composes
+        cleanly with CUDA graph capture.
         """
         if (
             self._state_pool_3d is None
@@ -889,8 +870,8 @@ class CompressorFP8(PoolBackedModule):
         if N == 0:
             return
 
-        with record_function_range("dsv4.fp8.compressor.launch.cos_sin_cache"):
-            cos_sin_cache = self._ensure_cos_sin_cache(kv_flat.device)
+        cos_sin_cache = self._cos_sin_cache
+        assert cos_sin_cache is not None
 
         with record_function_range("dsv4.fp8.compressor.launch.save_partial_states"):
             run_save_partial_states(

@@ -12,6 +12,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.lang.reflect.Field;
 
+import static org.flexlb.constant.MetricConstant.CACHE_AFFINITY_DECISION;
 import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_BYTES;
 import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_COUNT;
@@ -58,6 +59,19 @@ class CacheMetricsReporterTest {
         verify(monitor).register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.QPS);
         verify(monitor).register(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, FlexMetricType.QPS);
         verify(monitor).register(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, FlexMetricType.QPS);
+        verify(monitor).register(CACHE_AFFINITY_DECISION, FlexMetricType.QPS);
+    }
+
+    @Test
+    void should_report_cache_affinity_decision() {
+        reporter.reportCacheAffinityDecision(
+                RoleType.PREFILL, "10.0.0.1", "CACHE_LEADER");
+
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", "PREFILL",
+                "engineIp", "10.0.0.1",
+                "decision", "CACHE_LEADER");
+        verify(monitor).report(CACHE_AFFINITY_DECISION, tags, 1.0);
     }
 
     @Test
