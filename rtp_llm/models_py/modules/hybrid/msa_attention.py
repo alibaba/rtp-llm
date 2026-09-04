@@ -1577,6 +1577,52 @@ class _IdxKScratch:
 _IDX_K_SCRATCH = _IdxKScratch()
 
 
+class _Bf16WorkingPages:
+    """Process-wide shared BF16 HND working pages for CP direct-paged prefill.
+
+    Each MSA sparse layer used to ``torch.empty`` a fresh
+    ``[2, page_count, kv_heads, page, dim]`` buffer (~2.3 GiB at bs16/75k).
+    With CP side/prefetch streams those frees are deferred across stream
+    events, so N layer-local copies piled up in the caching allocator
+    (~12 gens -> 30GB+). Sparse layers run strictly sequentially, so one
+    grown-on-demand buffer is enough — footprint stays 1x.
+    """
+
+    def __init__(self) -> None:
+        self._kv: Optional[torch.Tensor] = None
+
+    def acquire(
+        self,
+        page_count: int,
+        heads: int,
+        page_size: int,
+        dim: int,
+        device: torch.device,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        kv = self._kv
+        if (
+            kv is None
+            or kv.shape[1] < page_count
+            or kv.shape[2] != heads
+            or kv.shape[3] != page_size
+            or kv.shape[4] != dim
+            or kv.dtype != torch.bfloat16
+            or kv.device != device
+        ):
+            # Leading pair dim keeps K/V individually contiguous (base[:, 0]
+            # would not be). Match the previous per-layer empty() contract.
+            kv = torch.empty(
+                (2, page_count, heads, page_size, dim),
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            self._kv = kv
+        return kv[0, :page_count], kv[1, :page_count]
+
+
+_BF16_WORKING_PAGES = _Bf16WorkingPages()
+
+
 class _RopeDummyScratch:
 
     def __init__(self) -> None:
@@ -2641,11 +2687,12 @@ class MSAAttention(nn.Module):
         ni: int,
         token_count: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Write suffix K/V directly into transient BF16 HND working pages.
+        """Write suffix K/V directly into process-wide BF16 HND working pages.
 
         The same launch persists rank-owned suffix pages and fills the BF16
         idx-K scratch. Main K/V never materialize in the process-wide BF16
-        flat scratch on this path.
+        flat scratch on this path. Working pages come from ``_BF16_WORKING_PAGES``
+        so all sparse layers of one forward share a single buffer.
         """
         base = self._paged_kv_base_view(kv_cache)
         if base is None or base.dim() != 5:
@@ -2676,20 +2723,18 @@ class MSAAttention(nn.Module):
                 f"MSA CP scratch slots {scratch_slots} are not page-aligned "
                 f"to page_size={self.page_size}"
             )
-        device = packed.device
         page_count = scratch_slots // int(self.page_size)
-        page_shape = (
+        device = packed.device
+        # Process-wide pool: one BF16 HND working set shared across all sparse
+        # layers of a forward. Avoids N x ~2GiB empties that pile up under CP
+        # side/prefetch stream deferred frees.
+        k_paged, v_paged = _BF16_WORKING_PAGES.acquire(
             page_count,
             self.kv_head_num,
-            self.page_size,
+            int(self.page_size),
             self.head_dim,
+            device,
         )
-        # One allocation keeps K and V as individually contiguous HND tensors
-        # while avoiding two allocator lookups per sparse layer. A leading pair
-        # dimension is required: base[:, 0] would be non-contiguous.
-        kv_paged = torch.empty((2, *page_shape), dtype=torch.bfloat16, device=device)
-        k_paged = kv_paged[0]
-        v_paged = kv_paged[1]
         idx_scratch = _IDX_K_SCRATCH.acquire(
             scratch_slots, 1, self.idx_head_dim, packed.dtype, device
         )
@@ -3178,9 +3223,15 @@ class MSAAttention(nn.Module):
             cls._cp_prefetch_entries.pop(oldest)["event"].synchronize()
 
     @classmethod
-    def join_cp_prefix_prefetch(cls) -> None:
+    def join_cp_side_comms(cls) -> None:
+        for stream in cls._cp_prefetch_stream.values():
+            torch.cuda.current_stream(stream.device).wait_stream(stream)
+        for stream in cls._cp_side_stream.values():
+            torch.cuda.current_stream(stream.device).wait_stream(stream)
         for entry in cls._cp_prefetch_entries.values():
             torch.cuda.current_stream(entry["device"]).wait_event(entry["event"])
+
+    join_cp_prefix_prefetch = join_cp_side_comms
 
     def maybe_prefetch_cp_prefix(
         self, kv_cache: Optional[LayerKVCache], attn_inputs: PyAttentionInputs
