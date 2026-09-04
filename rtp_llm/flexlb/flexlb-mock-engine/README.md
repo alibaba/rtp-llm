@@ -619,37 +619,21 @@ Representative additions beyond the v2 baseline suite (full list under
 
 ## Java-only cleanup on this branch
 
-The Python mock engine / Python load client implementations have been
-**removed** from this branch (`tools/online_eval/mock_engine.py`,
-`mock_engine_cluster.py`, `mock_engine_shard_launcher.py`,
-`flexlb_load_client.py`, `run_single_engine.py`, `test_resolve_decode.py` and
-`tests/test_mock_engine.py`), together with `tools/online_eval/run_batch_smoke_only.sh`
-(a matrix subset with no CI references — its coverage is subsumed by
-`run_online_eval.sh` / `run_matrix_smoke.sh`) and the stale
-`tools/online_eval/BUILD` filegroup that still referenced the deleted Python
-files: nine files in total. The `MOCK_ENGINE_IMPL` / `LOAD_CLIENT_IMPL`
-orchestration switches and their Python branches are gone as well, so the
-Java stack described in this README is the only implementation.
+The Python mock engine and load client implementations have been removed;
+`JavaMockEngineCluster` and `JavaLoadClient` are now the only implementations.
+The former standalone smoke/chaos shell and Python entry points have also been
+retired. Their scenarios were migrated into the single
+`tools/online_eval/flexlb_functional_tests.py` entry point and the
+`tools/online_eval/flexlb_ft/` case framework, which talks to the Java cluster
+over its gRPC and HTTP control planes. Use `--suite smoke|chaos` and
+`--profile batch-window|single-nonbatch|single-batch|window-nonbatch` to select
+the equivalent coverage, or `parallel_runner.py` to execute isolated lanes in
+parallel.
 
-All seven orchestration test scripts have been converted to the Java stack and
-now drive JavaMockEngineCluster / JavaLoadClient through the shared
-`tools/online_eval/lib_load_client.sh` helpers
-(`start_java_mock_cluster` / `wait_mock_cluster_ready` / `mock_http` /
-`stop_java_mock_cluster` / `run_java_load_client`):
-
-- `flexlb_behavior_test.sh`
-- `engine_kill_restart_test.sh`
-- `run_cancel_smoke.sh`
-- `run_matrix_smoke.sh`
-- `master_kill_restart_test.sh`
-- `master_recovery_ttft_test.sh`
-- `engine_disconnect_ttft_test.sh`
-
-The Python **smoke client family** has been retired and removed (it was
-tooling, not the mock engine): `flexlb_smoke_base.py`,
-`priority_preemption_smoke.py` and their tests are gone — their coverage
-lives in the `tools/online_eval/flexlb_ft/` functional-test framework,
-which talks to the Java cluster over its gRPC + HTTP control plane.
+The long-running performance path remains `run_online_eval.sh`; it drives the
+same Java mock/load stack through `lib_load_client.sh` and feeds the retained
+aggregation, comparison, consolidation, and report-generation tools. The stale
+`tools/online_eval/BUILD` filegroup was removed with the Python implementation.
 `encode_unique_key` now lives in
 `online_eval/proto_utils.py`, used by the remaining analysis tooling.
 
@@ -661,14 +645,5 @@ in-process channel. The smoke suites default to the HTTP control plane (the
 explicit `--flexlb.test.mock-cancel-control-url` wiring); pointing that
 setting at the gRPC endpoint exercises the production channel instead.
 
-Exit-code contract: the `engine_kill_restart` / `master_kill_restart` /
-`flexlb_behavior` fault suites now propagate scenario failures to their exit
-code — the pre-conversion scripts always exited 0. Anything wiring these
-suites into automation should re-check pass/fail on the exit code instead of
-scraping logs.
-
-Assertion semantics: the engine-kill suite's assertion 5 (cancelled request
-counting) is now faithful — since the Java mock implements gRPC `Cancel`,
-cancels issued on the master's active-eviction path really reach the engine
-and are counted. Historical "undercounted PASS" baselines will turn red;
-that is a semantic alignment, not a regression.
+Exit-code contract: the functional-test runner returns non-zero when a selected
+case fails; automation should consume that exit code rather than scrape logs.

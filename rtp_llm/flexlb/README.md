@@ -124,10 +124,6 @@ export FLEXLB_CONFIG='{
         "availability": {
           "maxPendingRequests": 64
         },
-        "executionTimeEstimator": {
-          "type": "FORMULA",
-          "expression": "sum(computeTokens) + 0.3*sum(hitCacheTokens)"
-        },
         "selector": {
           "type": "ESTIMATED_TTFT",
           "candidateChoice": {
@@ -511,7 +507,8 @@ Authorization: Bearer <token>
 - **FlexLB behavior**: one strict JSON document in `FLEXLB_CONFIG`.
 - **Prefill execution formula**:
   `router.roles.prefill.executionTimeEstimator.expression` when estimator type is
-  `FORMULA`.
+  `FORMULA`. Omitting the estimator applies the code default: the production
+  DSv4 prefill fit (`RoutingConfig.FormulaEstimatorConfig.DEFAULT_EXPRESSION`).
 - **Routing strategy parameters**: the tagged selector objects under
   `router.roles.prefill`, `router.roles.decode`, and `router.roles.vit`.
 - **Traffic group selection**: `router.groupSelector` inside the same document.
