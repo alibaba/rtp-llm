@@ -16,10 +16,23 @@ import logging
 import os
 import statistics
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
+from requests.adapters import HTTPAdapter
+
+
+def _make_http_session() -> requests.Session:
+    """Keep one localhost connection alive while forwards remain serial."""
+    session = requests.Session()
+    session.mount(
+        "http://",
+        HTTPAdapter(pool_connections=1, pool_maxsize=1, max_retries=0),
+    )
+    session.headers.update({"Connection": "keep-alive"})
+    return session
 
 
 def _encode(tokenizer: Any, text: str) -> List[int]:
@@ -155,7 +168,11 @@ class PrefixPromptFactory:
 
 
 def _post_prefill(
-    port: int, prompt: str, timeout: int, request_id: str
+    port: int,
+    prompt: str,
+    timeout: int,
+    request_id: str,
+    session: Optional[requests.Session] = None,
 ) -> Dict[str, Any]:
     body = {
         "prompt": prompt,
@@ -167,7 +184,7 @@ def _post_prefill(
     }
     started = time.perf_counter()
     try:
-        response = requests.post(
+        response = (session or requests).post(
             f"http://127.0.0.1:{port}", json=body, timeout=timeout
         )
     except Exception as exc:
@@ -242,6 +259,11 @@ class CacheGridRunner:
         self.cache_commit_tail_tokens = cache_commit_tail_tokens
         self.result_path = self.result_dir / "cache_grid_results.json"
         self._results: Dict[str, Dict[str, Any]] = {}
+        self._http_session = _make_http_session()
+        self._checkpoint_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="checkpoint-writer"
+        )
+        self._checkpoint_future: Optional[Future] = None
         if self.result_path.exists():
             with self.result_path.open(encoding="utf-8") as f:
                 payload = json.load(f)
@@ -253,7 +275,13 @@ class CacheGridRunner:
     def case_key(case: Dict[str, int]) -> str:
         return f"bs{case['batch_size']}_seq{case['input_len']}_cache{case['cache_len']}"
 
-    def _save(self, *, complete: bool = False) -> None:
+    def _write_checkpoint(self, payload: Dict[str, Any]) -> None:
+        tmp = self.result_path.with_suffix(".json.tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        os.replace(tmp, self.result_path)
+
+    def _save(self, *, complete: bool = False, asynchronous: bool = False) -> None:
         payload = {
             "schema_version": 1,
             "mode": "prefix_cache_grid",
@@ -262,10 +290,79 @@ class CacheGridRunner:
             "completed_cases": len(self._results),
             "metrics": list(self._results.values()),
         }
-        tmp = self.result_path.with_suffix(".json.tmp")
-        with tmp.open("w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        os.replace(tmp, self.result_path)
+        if asynchronous:
+            if self._checkpoint_future is not None:
+                self._checkpoint_future.result()
+            self._checkpoint_future = self._checkpoint_executor.submit(
+                self._write_checkpoint, payload
+            )
+            return
+        if self._checkpoint_future is not None:
+            self._checkpoint_future.result()
+            self._checkpoint_future = None
+        self._write_checkpoint(payload)
+
+    def _close_resources(self) -> None:
+        if self._checkpoint_future is not None:
+            self._checkpoint_future.result()
+            self._checkpoint_future = None
+        self._checkpoint_executor.shutdown(wait=True)
+        self._http_session.close()
+
+    def _prepare_case_payload(self, case: Dict[str, int]) -> Dict[str, Any]:
+        """Build prompts for one case without issuing a model request."""
+        key = self.case_key(case)
+        total_len = int(case["input_len"])
+        cache_len = int(case["cache_len"])
+        batch_size = int(case.get("batch_size", 1))
+        if batch_size != 1:
+            raise ValueError("prefix cache grid currently requires batch_size=1")
+        if cache_len and cache_len % self.cache_commit_tail_tokens:
+            raise ValueError(
+                f"cache_len must align to commit tail "
+                f"{self.cache_commit_tail_tokens}, got {cache_len}"
+            )
+        if cache_len and cache_len + self.cache_commit_tail_tokens > total_len:
+            raise ValueError(
+                f"cache_len must leave at least {self.cache_commit_tail_tokens} "
+                f"tokens for seed commit, got {cache_len}/{total_len}"
+            )
+        target, prefix, built_len = self.factory.make_case(
+            int(case["case_id"]), total_len, cache_len
+        )
+        seed = (
+            self.factory.make_seed(
+                int(case["case_id"]),
+                prefix,
+                cache_len,
+                self.cache_commit_tail_tokens,
+            )
+            if cache_len
+            else ""
+        )
+        prefix_ids = _encode(self.factory.tokenizer, prefix) if cache_len else []
+        run_targets: List[str] = []
+        for run_idx in range(self.measure_runs):
+            if cache_len:
+                run_target, run_ids = self.factory._exact_text_and_ids(
+                    total_len, prefix + f" __run_{run_idx}_"
+                )
+                if run_ids[:cache_len] != prefix_ids:
+                    raise ValueError(f"run {run_idx} did not preserve cache prefix")
+            else:
+                run_target, _ = self.factory._exact_text_and_ids(
+                    total_len, f"case_{case['case_id']}_cold_run_{run_idx}_"
+                )
+            run_targets.append(run_target)
+        return {
+            "key": key,
+            "total_len": total_len,
+            "cache_len": cache_len,
+            "batch_size": batch_size,
+            "built_len": built_len,
+            "seed": seed,
+            "run_targets": run_targets,
+        }
 
     def run(self) -> List[Dict[str, Any]]:
         pending = [c for c in self.cases if self.case_key(c) not in self._results]
@@ -275,143 +372,151 @@ class CacheGridRunner:
             len(self._results),
             len(pending),
         )
-        for idx, case in enumerate(pending, 1):
-            key = self.case_key(case)
-            total_len = int(case["input_len"])
-            cache_len = int(case["cache_len"])
-            batch_size = int(case.get("batch_size", 1))
-            if batch_size != 1:
-                raise ValueError("prefix cache grid currently requires batch_size=1")
-            if cache_len and cache_len % self.cache_commit_tail_tokens:
-                raise ValueError(
-                    f"cache_len must align to commit tail "
-                    f"{self.cache_commit_tail_tokens}, got {cache_len}"
-                )
-            if cache_len and cache_len + self.cache_commit_tail_tokens > total_len:
-                raise ValueError(
-                    f"cache_len must leave at least {self.cache_commit_tail_tokens} "
-                    f"tokens for seed commit, got {cache_len}/{total_len}"
-                )
-            started = time.time()
-            try:
-                target, prefix, built_len = self.factory.make_case(
-                    int(case["case_id"]), total_len, cache_len
-                )
-                seed_result: Dict[str, Any] = {}
-                if cache_len:
-                    seed = self.factory.make_seed(
-                        int(case["case_id"]),
-                        prefix,
-                        cache_len,
-                        self.cache_commit_tail_tokens,
-                    )
-                    seed_result = _post_prefill(
-                        self.port,
-                        seed,
-                        self.request_timeout,
-                        f"{key}:seed",
-                    )
-                    if not seed_result.get("success"):
-                        raise RuntimeError(seed_result.get("error", "seed request failed"))
+        if not pending:
+            self._save(complete=True)
+            self._close_resources()
+            return list(self._results.values())
 
-                prefix_ids = _encode(self.factory.tokenizer, prefix) if cache_len else []
-                runs: List[Dict[str, Any]] = []
-                for run_idx in range(self.measure_runs):
-                    # Vary only the continuation suffix; this prevents the
-                    # measured target itself from becoming a larger cache hit.
-                    if cache_len:
-                        run_target, run_ids = self.factory._exact_text_and_ids(
-                            total_len, prefix + f" __run_{run_idx}_"
-                        )
-                        if run_ids[:cache_len] != prefix_ids:
-                            raise ValueError(f"run {run_idx} did not preserve cache prefix")
-                    else:
-                        run_target, _ = self.factory._exact_text_and_ids(
-                            total_len, f"case_{case['case_id']}_cold_run_{run_idx}_"
-                        )
-                    result = _post_prefill(
-                        self.port, run_target, self.request_timeout, f"{key}:run{run_idx}"
-                    )
-                    runs.append(result)
+        try:
+            with ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="query-prefetch"
+            ) as prep:
+                prepared: Future = prep.submit(self._prepare_case_payload, pending[0])
+                for idx, case in enumerate(pending, 1):
+                    key = self.case_key(case)
+                    started = time.time()
+                    try:
+                        try:
+                            payload = prepared.result()
+                        finally:
+                            if idx < len(pending):
+                                prepared = prep.submit(
+                                    self._prepare_case_payload, pending[idx]
+                                )
+                        total_len = payload["total_len"]
+                        cache_len = payload["cache_len"]
+                        batch_size = payload["batch_size"]
+                        built_len = payload["built_len"]
+                        seed_result: Dict[str, Any] = {}
+                        if cache_len:
+                            seed_result = _post_prefill(
+                                self.port,
+                                payload["seed"],
+                                self.request_timeout,
+                                f"{key}:seed",
+                                self._http_session,
+                            )
+                            if not seed_result.get("success"):
+                                raise RuntimeError(
+                                    seed_result.get("error", "seed request failed")
+                                )
 
-                successful = [r for r in runs if r.get("success")]
-                expected_reuse = cache_len
-                reuse_values = [int(r.get("reuse_len", -1)) for r in successful]
-                reuse_exact = bool(
-                    len(successful) == self.measure_runs
-                    and all(x == expected_reuse for x in reuse_values)
-                )
-                shape_exact = bool(
-                    len(successful) == self.measure_runs
-                    and all(
-                        int(r.get("input_len", -1)) == total_len for r in successful
+                        runs = [
+                            _post_prefill(
+                                self.port,
+                                run_target,
+                                self.request_timeout,
+                                f"{key}:run{run_idx}",
+                                self._http_session,
+                            )
+                            for run_idx, run_target in enumerate(payload["run_targets"])
+                        ]
+
+                        successful = [r for r in runs if r.get("success")]
+                        expected_reuse = cache_len
+                        reuse_values = [
+                            int(r.get("reuse_len", -1)) for r in successful
+                        ]
+                        reuse_exact = bool(
+                            len(successful) == self.measure_runs
+                            and all(x == expected_reuse for x in reuse_values)
+                        )
+                        shape_exact = bool(
+                            len(successful) == self.measure_runs
+                            and all(
+                                int(r.get("input_len", -1)) == total_len
+                                for r in successful
+                            )
+                            and all(
+                                int(r.get("output_len", -1)) == 1 for r in successful
+                            )
+                        )
+                        ttft_values = [
+                            float(r["ttft_ms"])
+                            for r in successful
+                            if float(r.get("ttft_ms", 0.0)) > 0.0
+                        ]
+                        timing_valid = len(ttft_values) == self.measure_runs
+                        metric = {
+                            "case_key": key,
+                            "case_id": int(case["case_id"]),
+                            "batch_size": batch_size,
+                            "input_len": total_len,
+                            "input_len_built": built_len,
+                            "cache_len_requested": cache_len,
+                            "cache_len_observed": reuse_values,
+                            "input_len_observed": [
+                                int(r.get("input_len", 0)) for r in successful
+                            ],
+                            "expected_reuse_len": expected_reuse,
+                            "success_runs": len(successful),
+                            "measure_runs": self.measure_runs,
+                            "cache_commit_tail_tokens": self.cache_commit_tail_tokens,
+                            "seed": seed_result,
+                            "runs": runs,
+                            "reuse_exact": reuse_exact,
+                            "shape_exact": shape_exact,
+                            "timing_valid": timing_valid,
+                            "ttft_ms": ttft_values,
+                            "median_ttft_ms": (
+                                statistics.median(ttft_values)
+                                if timing_valid
+                                else None
+                            ),
+                            "avg_ttft_ms": (
+                                statistics.fmean(ttft_values)
+                                if timing_valid
+                                else None
+                            ),
+                            "elapsed_s": time.time() - started,
+                            "status": (
+                                "ok"
+                                if reuse_exact and shape_exact and timing_valid
+                                else "invalid_shape"
+                                if len(successful) == self.measure_runs
+                                and not shape_exact
+                                else "invalid_timing"
+                                if len(successful) == self.measure_runs
+                                and not timing_valid
+                                else "invalid_reuse"
+                                if len(successful) == self.measure_runs
+                                else "failed"
+                            ),
+                        }
+                    except Exception as exc:
+                        metric = {
+                            "case_key": key,
+                            "case_id": int(case["case_id"]),
+                            "batch_size": int(case.get("batch_size", 1)),
+                            "input_len": int(case["input_len"]),
+                            "cache_len_requested": int(case["cache_len"]),
+                            "status": "error",
+                            "error": repr(exc),
+                            "elapsed_s": time.time() - started,
+                        }
+                    self._results[key] = metric
+                    if idx % self.checkpoint_every == 0:
+                        self._save(asynchronous=True)
+                    logging.info(
+                        "[CACHE_GRID] %d/%d %s status=%s reuse=%s "
+                        "query_prefetch=next",
+                        idx,
+                        len(pending),
+                        key,
+                        metric.get("status"),
+                        metric.get("cache_len_observed", []),
                     )
-                    and all(int(r.get("output_len", -1)) == 1 for r in successful)
-                )
-                ttft_values = [
-                    float(r["ttft_ms"])
-                    for r in successful
-                    if float(r.get("ttft_ms", 0.0)) > 0.0
-                ]
-                timing_valid = len(ttft_values) == self.measure_runs
-                metric = {
-                    "case_key": key,
-                    "case_id": int(case["case_id"]),
-                    "batch_size": batch_size,
-                    "input_len": total_len,
-                    "cache_len_requested": cache_len,
-                    "cache_len_observed": reuse_values,
-                    "input_len_observed": [int(r.get("input_len", 0)) for r in successful],
-                    "expected_reuse_len": expected_reuse,
-                    "success_runs": len(successful),
-                    "measure_runs": self.measure_runs,
-                    "cache_commit_tail_tokens": self.cache_commit_tail_tokens,
-                    "seed": seed_result,
-                    "runs": runs,
-                    "reuse_exact": reuse_exact,
-                    "shape_exact": shape_exact,
-                    "timing_valid": timing_valid,
-                    "ttft_ms": ttft_values,
-                    "median_ttft_ms": (
-                        statistics.median(ttft_values) if timing_valid else None
-                    ),
-                    "avg_ttft_ms": (
-                        statistics.fmean(ttft_values) if timing_valid else None
-                    ),
-                    "elapsed_s": time.time() - started,
-                    "status": (
-                        "ok"
-                        if reuse_exact and shape_exact and timing_valid
-                        else "invalid_shape"
-                        if len(successful) == self.measure_runs and not shape_exact
-                        else "invalid_timing"
-                        if len(successful) == self.measure_runs and not timing_valid
-                        else "invalid_reuse"
-                        if len(successful) == self.measure_runs
-                        else "failed"
-                    ),
-                }
-            except Exception as exc:
-                metric = {
-                    "case_key": key,
-                    "case_id": int(case["case_id"]),
-                    "batch_size": batch_size,
-                    "input_len": total_len,
-                    "cache_len_requested": cache_len,
-                    "status": "error",
-                    "error": repr(exc),
-                    "elapsed_s": time.time() - started,
-                }
-            self._results[key] = metric
-            if idx % self.checkpoint_every == 0:
-                self._save()
-            logging.info(
-                "[CACHE_GRID] %d/%d %s status=%s reuse=%s",
-                idx,
-                len(pending),
-                key,
-                metric.get("status"),
-                metric.get("cache_len_observed", []),
-            )
-        self._save(complete=len(self._results) == len(self.cases))
-        return list(self._results.values())
+            self._save(complete=len(self._results) == len(self.cases))
+            return list(self._results.values())
+        finally:
+            self._close_resources()
