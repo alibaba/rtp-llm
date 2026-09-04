@@ -17,6 +17,7 @@ from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
+from rtp_llm.utils.scr_template_utils import ScrParticipantManifest
 
 setup_logging()
 
@@ -38,6 +39,7 @@ def start_dash_sc_server(
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
     bind_barrier=None,
+    scr_manifest: ScrParticipantManifest | None = None,
 ):
     _install_hot_hook_runtime(f"dash_sc_rank_{rank_id}_server_{server_id}")
     logging.info(
@@ -66,7 +68,16 @@ def start_dash_sc_server(
 
     try:
         set_global_controller(global_controller)
-        app = DashScApp(py_env_configs)
+        scr_worker_id = None
+        scr_worker_num = None
+        if scr_manifest is not None:
+            scr_worker_id = scr_manifest.worker_id("dash_sc", f"{rank_id}:{server_id}")
+            scr_worker_num = scr_manifest.worker_num
+        app = DashScApp(
+            py_env_configs,
+            scr_worker_id=scr_worker_id,
+            scr_worker_num=scr_worker_num,
+        )
         app.start(
             ready_pipe_writer=pipe_writer,
             bind_barrier=bind_barrier,

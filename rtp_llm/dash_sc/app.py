@@ -43,6 +43,8 @@ from rtp_llm.openai.renderer_factory import ChatRendererFactory
 from rtp_llm.openai.renderers.custom_renderer import RendererParams
 from rtp_llm.ops import TaskType
 from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_visitor
+from rtp_llm.utils.app_prebind_barrier import get_app_prebind_barrier_client
+from rtp_llm.utils.scr_template_utils import start_scr_checkpoint
 
 _PROXY_MODE_ENV_KEY = "DASH_SC_GRPC_PROXY_MODE"
 _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
@@ -415,7 +417,13 @@ class DashScApp:
          SIGTERM/SIGINT.
     """
 
-    def __init__(self, py_env_configs: PyEnvConfigs):
+    def __init__(
+        self,
+        py_env_configs: PyEnvConfigs,
+        *,
+        scr_worker_id: int | None = None,
+        scr_worker_num: int | None = None,
+    ):
         self.py_env_configs = py_env_configs
         self.server_config = py_env_configs.server_config
         self.dash_sc_grpc_config = py_env_configs.dash_sc_grpc_config
@@ -428,8 +436,20 @@ class DashScApp:
         self._pre_stop_lock = threading.RLock()
         self._pre_stop_timer: Optional[threading.Timer] = None
         self._shutdown_manager = DashScShutdownManager()
+        self._scr_worker_id = scr_worker_id
+        self._scr_worker_num = scr_worker_num
         self._grpc_server = DashScGrpcServer(
             dash_sc_grpc_config=self.dash_sc_grpc_config
+        )
+        # Optional process-level sCR gate.  It is deliberately independent of
+        # the existing DashSc-only bind barrier and is a no-op when SCR is off.
+        self._app_prebind_barrier = (
+            None
+            if scr_worker_id is not None and scr_worker_num is not None
+            else get_app_prebind_barrier_client(
+                "dash_sc",
+                f"{self.server_config.rank_id}:{self.server_config.frontend_server_id}",
+            )
         )
 
     def _start_enqueue_loop(self) -> asyncio.AbstractEventLoop:
@@ -448,6 +468,45 @@ class DashScApp:
         self._enqueue_loop = loop
         self._enqueue_loop_thread = thread
         return loop
+
+    def _wait_for_app_prebind(self, port: int, is_proxy: bool) -> None:
+        """Join the unified Epsilon barrier before gRPC bind.
+
+        Directly constructed apps without a frozen manifest retain the old
+        local UDS barrier as a compatibility fallback.  The normal launcher
+        passes explicit IDs for every process, so Epsilon is the sole quorum.
+        """
+        worker_id = getattr(self, "_scr_worker_id", None)
+        worker_num = getattr(self, "_scr_worker_num", None)
+        if worker_id is not None and worker_num is not None:
+            result = start_scr_checkpoint(
+                worker_id=worker_id,
+                worker_num=worker_num,
+            )
+            logging.info(
+                "DashSc reached unified sCR barrier worker_id=%s worker_num=%s result=%s",
+                worker_id,
+                worker_num,
+                result,
+            )
+            return
+
+        app_barrier = getattr(self, "_app_prebind_barrier", None)
+        if app_barrier is None:
+            return
+        released = app_barrier.prebind_ready(
+            metadata={
+                "rank_id": self.server_config.rank_id,
+                "server_id": self.server_config.frontend_server_id,
+                "port": port,
+                "listener": "dash-sc-grpc",
+                "proxy": is_proxy,
+            }
+        )
+        if not released:
+            logging.warning(
+                "App pre-bind barrier did not release DashSc; continuing cold startup"
+            )
 
     def _stop_enqueue_loop(self) -> None:
         loop = self._enqueue_loop
@@ -666,11 +725,17 @@ class DashScApp:
             # (split via the ``protocol`` tag ``grpc_metrics`` injects).
             kmonitor.init()
 
-            _wait_for_bind_barrier(
-                bind_barrier,
-                self.server_config.rank_id,
-                self.server_config.frontend_server_id,
-            )
+            self._wait_for_app_prebind(port, is_proxy)
+
+            # Epsilon is the single cross-process barrier in the unified
+            # launcher.  The local multiprocessing barrier is only retained
+            # for direct/legacy callers that do not provide a manifest.
+            if getattr(self, "_scr_worker_id", None) is None:
+                _wait_for_bind_barrier(
+                    bind_barrier,
+                    self.server_config.rank_id,
+                    self.server_config.frontend_server_id,
+                )
             logging.info(
                 "[DashScApp] starting gRPC server rank_id=%s server_id=%s port=%s mode=%s",
                 self.server_config.rank_id,

@@ -75,3 +75,12 @@ py_test(
         "//rtp_llm:frontend",
     ],
 )
+
+py_test(
+    name = "frontend_prebind_test",
+    srcs = ["frontend_prebind_test.py"],
+    deps = [
+        "//rtp_llm:frontend",
+        "//rtp_llm:testlib",
+    ],
+)

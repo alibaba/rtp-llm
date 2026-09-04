@@ -1,4 +1,10 @@
 py_test(
+    name = "start_backend_scr_integration_test",
+    srcs = ["start_backend_scr_integration_test.py"],
+    deps = ["//rtp_llm:sdk"],
+)
+
+py_test(
     name = "generate_config_test",
     srcs = [
         "generate_config_test.py",

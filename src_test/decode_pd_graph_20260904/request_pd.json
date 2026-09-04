@@ -1,0 +1,21 @@
+{
+  "model": "deepseek_v4",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Reply with plain text only: ok."
+    }
+  ],
+  "max_tokens": 2,
+  "temperature": 0,
+  "top_p": 1,
+  "top_k": 1,
+  "stream": false,
+  "enable_thinking": false,
+  "response_format": {
+    "type": "text"
+  },
+  "extra_configs": {
+    "response_format": "not-json"
+  }
+}

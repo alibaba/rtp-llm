@@ -567,7 +567,11 @@ class DeepSeekV4Model(GptModelBase):
         # module tree is built under ``meta``; bind the real device table just
         # as the full path does.  Commit projection uses this table directly.
         for layer in self.v4.layers:
-            layer.attn.reset_rope_cache(device=device_str)
+            # AttentionFP8 (including the lightweight commit-only variant)
+            # exposes ``init_rope_cache`` after the rope-cache API rename.
+            # Keep the commit-only path in sync with the full-model path so
+            # the DSpARK prefill worker can finish initialization.
+            layer.attn.init_rope_cache(device=device_str)
 
         self._load_extra_weights(self.weight)
         del self.weight
