@@ -315,9 +315,8 @@ TEST(BlockTreeCacheMetricsTest, BusinessQueueWaitReportsQpsLatencyOperationAndPo
     BlockTreeCacheMetricsReporter reporter;
     reporter.setMetricsReporter(metrics_reporter);
 
-    const int64_t begin_time_us = reporter.reportBusinessQueueWaitStarted(CacheTransferOperation::LOAD, false);
-    const int64_t callback_begin_time_us =
-        reporter.reportBusinessQueueWaitStarted(CacheTransferOperation::LOAD, true);
+    const int64_t begin_time_us          = reporter.reportBusinessQueueWaitStarted(CacheTransferOperation::LOAD, false);
+    const int64_t callback_begin_time_us = reporter.reportBusinessQueueWaitStarted(CacheTransferOperation::LOAD, true);
     reporter.reportBusinessQueueWaitFinished(CacheTransferOperation::LOAD, false, begin_time_us);
     reporter.reportBusinessQueueWaitFinished(CacheTransferOperation::LOAD, true, callback_begin_time_us);
 
@@ -1209,7 +1208,7 @@ TEST(BlockTreeCacheFinalizationTest, CopyExceptionSettlesPendingReleasesBeforeTa
     barrier->waitUntilEntered();
 
     EXPECT_GT(BlockTreeCacheTestPeer::pendingEvictionReleasesForTest(*environment->cache), 0u);
-    const size_t submit_count  = per_rank_transfer_engine->submittedBatchCount();
+    const size_t submit_count = per_rank_transfer_engine->submittedBatchCount();
     BlockTreeCacheTestPeer::runMaintenanceForTest(*environment->cache);
     EXPECT_EQ(per_rank_transfer_engine->submittedBatchCount(), submit_count);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment->cache, Tier::DEVICE, 0.0);

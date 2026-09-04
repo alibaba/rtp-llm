@@ -33,8 +33,7 @@ public:
     std::shared_ptr<AsyncContext> execute(const std::vector<TransferDescriptor>& descriptors,
                                           const std::vector<const GroupSet*>&    group_sets);
 
-    std::shared_ptr<AsyncContext> executeDeviceToDisk(const TransferDescriptor& descriptor,
-                                                      const GroupSet&           group_set);
+    std::shared_ptr<AsyncContext> executeDeviceToDisk(const TransferDescriptor& descriptor, const GroupSet& group_set);
 
     void cancelPendingTransfers();
     void setMetricsReporter(BlockTreeCacheMetricsReporter* metrics_reporter) {
@@ -45,8 +44,8 @@ private:
     HostStagingBlockPool* stagingPool(CacheGroupType group_type) const;
     size_t                batchCapacity(CacheGroupType group_type) const;
 
-    DeviceHostTransferExecutor&          device_host_executor_;
-    HostDiskTransferExecutor&            host_disk_executor_;
+    DeviceHostTransferExecutor&           device_host_executor_;
+    HostDiskTransferExecutor&             host_disk_executor_;
     BlockTreeTaskPool&                    transfer_task_pool_;
     std::unique_ptr<HostStagingBlockPool> full_staging_pool_;
     std::unique_ptr<HostStagingBlockPool> swa_staging_pool_;

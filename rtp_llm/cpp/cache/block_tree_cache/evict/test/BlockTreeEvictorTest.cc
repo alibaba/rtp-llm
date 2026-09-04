@@ -734,7 +734,6 @@ TEST(BlockTreeEvictorAsyncTest, ForceDropDetachesTwoGroupSetsBeforeLateCompletio
     EXPECT_EQ(environment.pendingReleaseCount(), 0u);
     EXPECT_EQ(environment.settledEvents(),
               (std::vector<std::pair<bool, bool>>{{true, false}, {true, false}, {true, false}}));
-
 }
 
 void verifyMixedDetachedBatchSettlement(bool transfer_success) {

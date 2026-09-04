@@ -598,17 +598,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 constexpr size_t kFieldCount         = 55;
                 constexpr size_t kExtendedFieldCount = 64;
                 if ((t.size() != kFieldCount + 2 && t.size() != kExtendedFieldCount + 2)
-                    || t[0].cast<std::string>() != "KVCacheConfig"
-                    || t[1].cast<int>() != 1) {
+                    || t[0].cast<std::string>() != "KVCacheConfig" || t[1].cast<int>() != 1) {
                     throw std::runtime_error("invalid KVCacheConfig state");
                 }
 
                 KVCacheConfig c;
-                const auto value = [&](size_t index) { return t[index + 2]; };
+                const auto    value                    = [&](size_t index) { return t[index + 2]; };
                 c.reuse_cache                          = value(0).cast<bool>();
                 c.multi_task_prompt                    = value(1).cast<std::string>();
                 c.multi_task_prompt_str                = value(2).cast<std::string>();
-                c.multi_task_prompt_tokens = value(3).cast<std::map<std::string, std::vector<int>>>();
+                c.multi_task_prompt_tokens             = value(3).cast<std::map<std::string, std::vector<int>>>();
                 c.reserve_block_ratio                  = value(4).cast<int64_t>();
                 c.max_block_size_per_item              = value(5).cast<int>();
                 c.host_cache_size_mb                   = value(6).cast<int64_t>();
@@ -656,20 +655,20 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.reco_client_config                   = value(48).cast<std::string>();
                 c.device_cache_min_free_blocks         = value(49).cast<int64_t>();
                 c.memory_cache_max_descriptors_per_transfer_batch = value(50).cast<int64_t>();
-                c.dsv4_fixed_pool_blocks                         = value(51).cast<uint32_t>();
-                c.dsv4_hca_state_pool_blocks                    = value(52).cast<uint32_t>();
-                c.dsv4_fixed_pool_use_memory                    = value(53).cast<bool>();
-                c.block_tree_full_prefix_scan_interval_ms             = value(54).cast<int64_t>();
+                c.dsv4_fixed_pool_blocks                          = value(51).cast<uint32_t>();
+                c.dsv4_hca_state_pool_blocks                      = value(52).cast<uint32_t>();
+                c.dsv4_fixed_pool_use_memory                      = value(53).cast<bool>();
+                c.block_tree_full_prefix_scan_interval_ms         = value(54).cast<int64_t>();
                 if (t.size() == kExtendedFieldCount + 2) {
-                    c.block_tree_transfer_worker_count                = value(55).cast<int64_t>();
-                    c.block_tree_business_queue_max_size              = value(56).cast<int64_t>();
-                    c.block_tree_transfer_queue_max_size              = value(57).cast<int64_t>();
-                    c.block_tree_device_evict_low_watermark_ratio     = value(58).cast<double>();
+                    c.block_tree_transfer_worker_count             = value(55).cast<int64_t>();
+                    c.block_tree_business_queue_max_size           = value(56).cast<int64_t>();
+                    c.block_tree_transfer_queue_max_size           = value(57).cast<int64_t>();
+                    c.block_tree_device_evict_low_watermark_ratio  = value(58).cast<double>();
                     c.block_tree_device_evict_high_watermark_ratio = value(59).cast<double>();
-                    c.block_tree_host_evict_low_watermark_ratio       = value(60).cast<double>();
-                    c.block_tree_host_evict_high_watermark_ratio      = value(61).cast<double>();
-                    c.block_tree_disk_evict_low_watermark_ratio       = value(62).cast<double>();
-                    c.block_tree_disk_evict_high_watermark_ratio      = value(63).cast<double>();
+                    c.block_tree_host_evict_low_watermark_ratio    = value(60).cast<double>();
+                    c.block_tree_host_evict_high_watermark_ratio   = value(61).cast<double>();
+                    c.block_tree_disk_evict_low_watermark_ratio    = value(62).cast<double>();
+                    c.block_tree_disk_evict_high_watermark_ratio   = value(63).cast<double>();
                 }
                 return c;
             }));

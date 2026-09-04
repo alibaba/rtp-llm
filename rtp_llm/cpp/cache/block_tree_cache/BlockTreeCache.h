@@ -50,7 +50,7 @@ struct BlockTreeCacheConfig {
     EvictionPolicy disk_eviction_policy{EvictionPolicy::FIFO};
 
     // ---- Shared Store/Load/Evict task pool ----
-    int task_pool_size{4};
+    int    task_pool_size{4};
     size_t business_queue_max_size{10000};
 
     // ---- Shared per-rank TransferEngine task pool ----

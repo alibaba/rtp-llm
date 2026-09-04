@@ -99,23 +99,17 @@ private:
     bool                              isEvictable(TreeNode* node, size_t group_set_id, Tier source_tier) const;
     std::optional<TransferDescriptor> chooseVictim(size_t group_set_id, Tier tier, bool force_drop = false);
     EvictionDropTask                  createDropTask(TransferDescriptor eviction_desc);
-    bool                              batchEvictLocked(size_t  group_set_id,
-                                                       Tier    source_tier,
-                                                       size_t  max_victim_count,
-                                                       size_t& scheduled_count);
-    bool                              batchDropLocked(size_t  group_set_id,
-                                                      Tier    source_tier,
-                                                      size_t  max_victim_count,
-                                                      size_t& scheduled_count);
-    bool                              submitEvictionTask(EvictionTransferTask task);
-    Tier                              watermarkTargetTier(Tier source_tier) const;
-    size_t                            watermarkLogicalBatchLimit(Tier source_tier, Tier target_tier) const;
-    void                              runEvictionTask(std::shared_ptr<const EvictionTransferTask> task) noexcept;
-    void scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task, bool success) noexcept;
-    void runDropTask(TransferDescriptor eviction_desc, bool notify_settled = true);
-    void rollbackTransferLocked(const std::vector<TransferDescriptor>& descs);
-    void updateFullCandidate(TreeNode* node, size_t group_set_id);
-    void updateFullCandidate(TreeNode* parent);
+    bool   batchEvictLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count, size_t& scheduled_count);
+    bool   batchDropLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count, size_t& scheduled_count);
+    bool   submitEvictionTask(EvictionTransferTask task);
+    Tier   watermarkTargetTier(Tier source_tier) const;
+    size_t watermarkLogicalBatchLimit(Tier source_tier, Tier target_tier) const;
+    void   runEvictionTask(std::shared_ptr<const EvictionTransferTask> task) noexcept;
+    void   scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task, bool success) noexcept;
+    void   runDropTask(TransferDescriptor eviction_desc, bool notify_settled = true);
+    void   rollbackTransferLocked(const std::vector<TransferDescriptor>& descs);
+    void   updateFullCandidate(TreeNode* node, size_t group_set_id);
+    void   updateFullCandidate(TreeNode* parent);
 
     void                            selectUpwardCascades(EvictionDropTask& task);
     void                            collectFullPrune(const TransferDescriptor&                  eviction_desc,

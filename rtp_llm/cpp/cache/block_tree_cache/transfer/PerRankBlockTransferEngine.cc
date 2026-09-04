@@ -43,10 +43,10 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
                                                        size_t                   device_disk_staging_block_count,
                                                        size_t                   max_device_host_descriptors_per_batch,
                                                        size_t                   transfer_worker_count,
-                                                       size_t                   max_non_device_host_descriptors_per_batch,
-                                                       size_t                   transfer_queue_max_size,
-                                                       int                      host_queue_wait_timeout_ms,
-                                                       int                      disk_queue_wait_timeout_ms):
+                                                       size_t max_non_device_host_descriptors_per_batch,
+                                                       size_t transfer_queue_max_size,
+                                                       int    host_queue_wait_timeout_ms,
+                                                       int    disk_queue_wait_timeout_ms):
     group_sets_(std::move(group_sets)),
     device_host_executor_(std::make_unique<DeviceHostTransferExecutor>(std::move(device_host_options))),
     host_disk_executor_(std::make_unique<HostDiskTransferExecutor>()),
@@ -66,13 +66,13 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
         return group_set->diskPool() != nullptr;
     });
     if (any_disk_pool) {
-        device_disk_executor_ = std::make_unique<DeviceDiskTransferExecutor>(
-            *device_host_executor_,
-            *host_disk_executor_,
-            group_sets_,
-            device_disk_staging_block_count,
-            *transfer_task_pool_,
-            std::chrono::milliseconds(disk_queue_wait_timeout_ms_));
+        device_disk_executor_ =
+            std::make_unique<DeviceDiskTransferExecutor>(*device_host_executor_,
+                                                         *host_disk_executor_,
+                                                         group_sets_,
+                                                         device_disk_staging_block_count,
+                                                         *transfer_task_pool_,
+                                                         std::chrono::milliseconds(disk_queue_wait_timeout_ms_));
     }
 }
 
@@ -104,14 +104,13 @@ void PerRankBlockTransferEngine::setMetricsReporter(BlockTreeCacheMetricsReporte
     }
 }
 
-std::shared_ptr<AsyncContext>
-PerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descriptors) {
+std::shared_ptr<AsyncContext> PerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descriptors) {
     if (descriptors.empty()) {
         return std::make_shared<CompletedAsyncContext>(transferStatusToErrorInfo(TransferStatus::INVALID_ARGS));
     }
 
-    const Tier source = descriptors.front().source_tier;
-    const Tier target = descriptors.front().target_tier;
+    const Tier                   source = descriptors.front().source_tier;
+    const Tier                   target = descriptors.front().target_tier;
     std::vector<const GroupSet*> group_sets;
     std::vector<HostBufferView>  hosts;
     group_sets.reserve(descriptors.size());
@@ -139,18 +138,16 @@ PerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descri
             return std::make_shared<CompletedAsyncContext>(transferStatusToErrorInfo(TransferStatus::INVALID_ARGS));
         }
         return device_disk_executor_->executeDeviceToDisk(descriptors.front(), *group_sets.front());
-    } else if (!((source == Tier::DEVICE && target == Tier::HOST)
-                 || (source == Tier::HOST && target == Tier::DEVICE)
-                 || (source == Tier::HOST && target == Tier::DISK)
-                 || (source == Tier::DISK && target == Tier::HOST))) {
+    } else if (!((source == Tier::DEVICE && target == Tier::HOST) || (source == Tier::HOST && target == Tier::DEVICE)
+                 || (source == Tier::HOST && target == Tier::DISK) || (source == Tier::DISK && target == Tier::HOST))) {
         return std::make_shared<CompletedAsyncContext>(transferStatusToErrorInfo(TransferStatus::INVALID_ARGS));
     }
 
     const bool device_host_direction =
         (source == Tier::DEVICE && target == Tier::HOST) || (source == Tier::HOST && target == Tier::DEVICE);
-    const size_t batch_limit = device_host_direction ? max_device_host_descriptors_per_batch_ :
-                                                       max_non_device_host_descriptors_per_batch_;
-    auto context = std::make_shared<TransferBatchAsyncContext>();
+    const size_t batch_limit =
+        device_host_direction ? max_device_host_descriptors_per_batch_ : max_non_device_host_descriptors_per_batch_;
+    auto          context = std::make_shared<TransferBatchAsyncContext>();
     const int64_t queue_begin =
         metrics_reporter_ == nullptr ? 0 : metrics_reporter_->reportTransferQueueWaitStarted(source, target);
     auto on_timeout = [this, context, source, target, queue_begin]() {
@@ -160,49 +157,44 @@ PerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descri
         context->complete(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer expired in TE worker queue"));
     };
     const auto task_class = target == Tier::DEVICE ? BlockTreeTaskClass::LOAD : BlockTreeTaskClass::BACKGROUND;
-    const bool accepted = transfer_task_pool_->submit(task_class, [this,
-                                                       descriptors,
-                                                       group_sets,
-                                                       hosts,
-                                                       context,
-                                                       batch_limit,
-                                                       source,
-                                                       target,
-                                                       queue_begin] {
-        if (metrics_reporter_ != nullptr) {
-            metrics_reporter_->reportTransferQueueWaitFinished(source, target, queue_begin);
-        }
-        try {
-            for (size_t begin = 0; begin < descriptors.size(); begin += batch_limit) {
-                const size_t end = std::min(begin + batch_limit, descriptors.size());
-                const std::vector<HostBufferView> sub_hosts(hosts.begin() + begin, hosts.begin() + end);
-                const std::vector<TransferDescriptor> sub_descriptors(descriptors.begin() + begin,
-                                                                      descriptors.begin() + end);
-                const std::vector<const GroupSet*> sub_group_sets(group_sets.begin() + begin,
-                                                                  group_sets.begin() + end);
-                const TransferStatus status = execute(sub_hosts, sub_descriptors, sub_group_sets);
-                if (status != TransferStatus::OK) {
-                    for (size_t index = begin; index < end; ++index) {
-                        RTP_LLM_LOG_WARNING("transfer batch item failed, index=%zu %s",
-                                            index,
-                                            descriptors[index].debugString().c_str());
-                    }
-                    const auto error = transferStatusToErrorInfo(status);
-                    context->complete(ErrorInfo(error.code(),
-                                                error.ToString() + ", descriptor_range=[" + std::to_string(begin)
-                                                    + "," + std::to_string(end) + ")"));
-                    return;
-                }
+    const bool accepted   = transfer_task_pool_->submit(
+        task_class,
+        [this, descriptors, group_sets, hosts, context, batch_limit, source, target, queue_begin] {
+            if (metrics_reporter_ != nullptr) {
+                metrics_reporter_->reportTransferQueueWaitFinished(source, target, queue_begin);
             }
-            context->complete(ErrorInfo::OkStatus());
-        } catch (const std::exception& error) {
-            context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
-        } catch (...) {
-            context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown transfer executor exception"));
-        }
-    }, std::chrono::milliseconds(source == Tier::DISK || target == Tier::DISK ? disk_queue_wait_timeout_ms_ :
-                                                                                host_queue_wait_timeout_ms_),
-       std::move(on_timeout));
+            try {
+                for (size_t begin = 0; begin < descriptors.size(); begin += batch_limit) {
+                    const size_t                          end = std::min(begin + batch_limit, descriptors.size());
+                    const std::vector<HostBufferView>     sub_hosts(hosts.begin() + begin, hosts.begin() + end);
+                    const std::vector<TransferDescriptor> sub_descriptors(descriptors.begin() + begin,
+                                                                          descriptors.begin() + end);
+                    const std::vector<const GroupSet*>    sub_group_sets(group_sets.begin() + begin,
+                                                                      group_sets.begin() + end);
+                    const TransferStatus                  status = execute(sub_hosts, sub_descriptors, sub_group_sets);
+                    if (status != TransferStatus::OK) {
+                        for (size_t index = begin; index < end; ++index) {
+                            RTP_LLM_LOG_WARNING("transfer batch item failed, index=%zu %s",
+                                                index,
+                                                descriptors[index].debugString().c_str());
+                        }
+                        const auto error = transferStatusToErrorInfo(status);
+                        context->complete(ErrorInfo(error.code(),
+                                                    error.ToString() + ", descriptor_range=[" + std::to_string(begin)
+                                                        + "," + std::to_string(end) + ")"));
+                        return;
+                    }
+                }
+                context->complete(ErrorInfo::OkStatus());
+            } catch (const std::exception& error) {
+                context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
+            } catch (...) {
+                context->complete(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown transfer executor exception"));
+            }
+        },
+        std::chrono::milliseconds(source == Tier::DISK || target == Tier::DISK ? disk_queue_wait_timeout_ms_ :
+                                                                                 host_queue_wait_timeout_ms_),
+        std::move(on_timeout));
     if (!accepted) {
         if (metrics_reporter_ != nullptr) {
             metrics_reporter_->reportTransferQueueWaitFinished(source, target, queue_begin, false);
@@ -213,10 +205,9 @@ PerRankBlockTransferEngine::submit(const std::vector<TransferDescriptor>& descri
     return context;
 }
 
-TransferStatus
-PerRankBlockTransferEngine::execute(const std::vector<HostBufferView>&       hosts,
-                                    const std::vector<TransferDescriptor>& descriptors,
-                                    const std::vector<const GroupSet*>&    group_sets) const {
+TransferStatus PerRankBlockTransferEngine::execute(const std::vector<HostBufferView>&     hosts,
+                                                   const std::vector<TransferDescriptor>& descriptors,
+                                                   const std::vector<const GroupSet*>&    group_sets) const {
     const Tier source = descriptors.front().source_tier;
     const Tier target = descriptors.front().target_tier;
     if ((source == Tier::DEVICE && target == Tier::HOST) || (source == Tier::HOST && target == Tier::DEVICE)) {

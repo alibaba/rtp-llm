@@ -379,7 +379,7 @@ int BlockTreeCacheMetricsReporter::transferDirectionIndex(Tier source_tier, Tier
 }
 
 int64_t BlockTreeCacheMetricsReporter::reportBusinessQueueWaitStarted(CacheTransferOperation operation,
-                                                                      bool callback) noexcept {
+                                                                      bool                   callback) noexcept {
     if (!enabled()) {
         return 0;
     }
@@ -389,7 +389,7 @@ int64_t BlockTreeCacheMetricsReporter::reportBusinessQueueWaitStarted(CacheTrans
 void BlockTreeCacheMetricsReporter::reportBusinessQueueWaitFinished(CacheTransferOperation operation,
                                                                     bool                   callback,
                                                                     int64_t                begin_time_us,
-                                                                    bool report_latency) noexcept {
+                                                                    bool                   report_latency) noexcept {
     if (begin_time_us == 0 || !report_latency) {
         return;
     }
@@ -415,7 +415,7 @@ int64_t BlockTreeCacheMetricsReporter::reportTransferQueueWaitStarted(Tier sourc
 void BlockTreeCacheMetricsReporter::reportTransferQueueWaitFinished(Tier    source_tier,
                                                                     Tier    target_tier,
                                                                     int64_t begin_time_us,
-                                                                    bool report_latency) noexcept {
+                                                                    bool    report_latency) noexcept {
     if (begin_time_us == 0 || !report_latency) {
         return;
     }
@@ -423,12 +423,7 @@ void BlockTreeCacheMetricsReporter::reportTransferQueueWaitFinished(Tier    sour
     if (index < 0) {
         return;
     }
-    reportQueueWaitMetric(false,
-                          "transfer",
-                          nullptr,
-                          source_tier,
-                          target_tier,
-                          currentTimeUs() - begin_time_us);
+    reportQueueWaitMetric(false, "transfer", nullptr, source_tier, target_tier, currentTimeUs() - begin_time_us);
 }
 
 void BlockTreeCacheMetricsReporter::reportQueueWaitMetric(bool        callback,
@@ -452,10 +447,8 @@ void BlockTreeCacheMetricsReporter::reportQueueWaitMetric(bool        callback,
         collector.report_task_queue         = !callback;
         collector.report_callback_queue     = callback;
         collector.report_queue_wait_latency = latency_us >= 0;
-        metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(nullptr,
-                                                                                                   &collector);
-    } catch (...) {
-    }
+        metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(nullptr, &collector);
+    } catch (...) {}
 }
 
 int64_t BlockTreeCacheMetricsReporter::reportTransferStarted(CacheTransferOperation operation,

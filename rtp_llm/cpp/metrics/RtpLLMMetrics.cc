@@ -545,10 +545,8 @@ bool RtpLLMCacheTransferMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(transfer_latency_us_metric, "rtp_llm_kv_cache_transfer_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(transfer_task_queue_wait_latency_us_metric,
                                   "rtp_llm_kv_cache_transfer_task_queue_wait_latency_us");
-    REGISTER_QPS_MUTABLE_METRIC(task_queue_waiting_tasks_metric,
-                                  "rtp_llm_kv_cache_task_queue_waiting_tasks");
-    REGISTER_QPS_MUTABLE_METRIC(callback_queue_waiting_tasks_metric,
-                                  "rtp_llm_kv_cache_callback_queue_waiting_tasks");
+    REGISTER_QPS_MUTABLE_METRIC(task_queue_waiting_tasks_metric, "rtp_llm_kv_cache_task_queue_waiting_tasks");
+    REGISTER_QPS_MUTABLE_METRIC(callback_queue_waiting_tasks_metric, "rtp_llm_kv_cache_callback_queue_waiting_tasks");
     REGISTER_GAUGE_MUTABLE_METRIC(callback_queue_wait_latency_us_metric,
                                   "rtp_llm_kv_cache_callback_queue_wait_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(transfer_in_flight_metric, "rtp_llm_kv_cache_transfer_in_flight");
@@ -567,8 +565,8 @@ void RtpLLMCacheTransferMetrics::report(const kmonitor::MetricsTags*         tag
             queue_tags.AddTag("source_tier", collector->source_tier);
             queue_tags.AddTag("target_tier", collector->target_tier);
         }
-        auto* waiting_metric = collector->report_task_queue ? task_queue_waiting_tasks_metric :
-                                                              callback_queue_waiting_tasks_metric;
+        auto* waiting_metric =
+            collector->report_task_queue ? task_queue_waiting_tasks_metric : callback_queue_waiting_tasks_metric;
         waiting_metric->Report(&queue_tags, collector->queue_waiting_tasks);
         if (collector->report_queue_wait_latency) {
             auto* latency_metric = collector->report_task_queue ? transfer_task_queue_wait_latency_us_metric :
