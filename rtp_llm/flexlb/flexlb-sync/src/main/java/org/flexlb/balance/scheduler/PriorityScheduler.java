@@ -2505,7 +2505,13 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
             }
         }
         if (expiredCount > 0) {
-            reporter.reportInflightTtlExpired(expiredCount);
+            // Scheduler-ledger eviction: report through the split-by-ledger
+            // series (role=SCHEDULER + engineIp="scheduler" + reason) so it
+            // is no longer mislabelled as a PREFILL endpoint series. This
+            // architecture has a single stale-inflight exit, so the reason
+            // bucket is always "ttl".
+            reporter.reportSchedulerInflightTtlExpired(
+                    "ttl", expiredCount);
             Logger.info("event=scheduler_inflight_ttl_eviction evicted={} "
                             + "oldest_age_ms={} ttl_ms={} request_samples={}",
                     expiredCount, oldestExpiredAgeMs, ttlMs, expiredRequestSamples);
@@ -4277,12 +4283,40 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         return (deliveryLifecycle.get() & DELIVERY_LIFECYCLE_CLOSED) != 0;
     }
 
+    /**
+     * Age (ms) of the oldest live inflight entry, 0 when the ledger is empty.
+     * Port of the upstream RequestRegistry.oldestLiveSlotAgeMs observation
+     * onto this architecture's monolithic scheduler: single CHM traversal
+     * with the same entry-monitor double-check pattern the TTL sweep uses,
+     * so an entry being retired never produces a torn read.
+     */
+    private long oldestInflightAgeMs() {
+        long oldest = Long.MAX_VALUE;
+        long now = System.currentTimeMillis();
+        for (Map.Entry<String, InflightEntry> candidate : inflight.entrySet()) {
+            InflightEntry entry = candidate.getValue();
+            synchronized (entry) {
+                if (inflight.get(candidate.getKey()) == entry
+                        && !entry.lifecycle.isTerminal()) {
+                    oldest = Math.min(oldest, entry.createdAtMs());
+                }
+            }
+        }
+        return oldest == Long.MAX_VALUE ? 0L
+                : Math.max(0L, now - oldest);
+    }
+
     @Scheduled(fixedRateString = "${report.interval.ms:2000}")
     public void reportBatchMetrics() {
         if (shuttingDown.get()) {
             return;
         }
         reporter.reportSchedulerInflightSize(inflight.size());
+        // Age of the oldest scheduler-ledger inflight entry: with a
+        // healthy TTL the size gauge alone cannot distinguish "busy"
+        // from "leaking"; a max age creeping toward the TTL window is
+        // the leak signature.
+        reporter.reportSchedulerInflightMaxAgeMs(oldestInflightAgeMs());
 
         // Per-worker metrics: prefill endpoints
         for (Map.Entry<String, PrefillEndpoint> entry : endpointRegistry.getPrefillEndpoints().entrySet()) {
