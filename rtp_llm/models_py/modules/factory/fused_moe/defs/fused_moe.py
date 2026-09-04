@@ -62,6 +62,7 @@ class ExpertForwardPayload:
     expert_topk_ids: Optional[torch.Tensor] = None
     expert_topk_weights: Optional[torch.Tensor] = None
     expert_ids_are_local: bool = False
+    router_context: object | None = None
 
 
 @dataclass
@@ -71,6 +72,7 @@ class CombineForwardPayload:
     """
 
     fused_expert_output: torch.Tensor
+    router_context: object | None = None
 
 
 def should_skip_tp_allreduce(
@@ -261,7 +263,6 @@ class FusedMoe(torch.nn.Module):
             topk_weights,
             topk_ids,
         )
-
         if expert_payload.expert_topk_ids is None:
             expert_payload.expert_topk_ids = topk_ids
         if expert_payload.expert_topk_weights is None:
@@ -288,6 +289,7 @@ class FusedMoe(torch.nn.Module):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 extra_expert_args=extra_expert_args,
             )
+        combine_payload.router_context = expert_payload.router_context
 
         # Finalize arguments are a private per-call protocol. Copy caller
         # input before adding derived values so a reusable dict cannot retain
