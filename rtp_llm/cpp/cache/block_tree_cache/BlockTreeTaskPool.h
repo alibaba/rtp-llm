@@ -17,6 +17,8 @@ class LockFreeThreadPool;
 
 namespace rtp_llm {
 
+class BlockTreeCacheMetricsReporter;
+
 enum class BlockTreeTaskClass {
     LOAD,
     BACKGROUND,
@@ -57,6 +59,8 @@ public:
     void shutdown();
 
 private:
+    friend class BlockTreeCacheMetricsReporter;
+
     static constexpr size_t kMaxLoadBurst = 4;
 
     struct QueuedTask {

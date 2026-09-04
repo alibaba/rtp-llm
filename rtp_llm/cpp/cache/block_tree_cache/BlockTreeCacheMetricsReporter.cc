@@ -5,6 +5,7 @@
 #include <unordered_set>
 #include <utility>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -449,6 +450,23 @@ void BlockTreeCacheMetricsReporter::reportQueueWaitMetric(bool        callback,
         collector.report_queue_wait_latency = latency_us >= 0;
         metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(nullptr, &collector);
     } catch (...) {}
+}
+
+void BlockTreeCacheMetricsReporter::reportQueueBacklog(BlockTreeTaskPool& task_pool, const char* pool_type) const {
+    if (!enabled()) {
+        return;
+    }
+    RtpLLMCacheTransferMetricsCollector collector;
+    {
+        std::lock_guard<std::mutex> lock(task_pool.lifecycle_mutex_);
+        collector.load_queue_backlog       = task_pool.load_queue_.size();
+        collector.background_queue_backlog = task_pool.background_queue_.size();
+        collector.completion_queue_backlog = task_pool.completion_queue_.size();
+    }
+    collector.pool_type            = pool_type;
+    collector.report_transfer      = false;
+    collector.report_queue_backlog = true;
+    metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(nullptr, &collector);
 }
 
 int64_t BlockTreeCacheMetricsReporter::reportTransferStarted(CacheTransferOperation operation,
