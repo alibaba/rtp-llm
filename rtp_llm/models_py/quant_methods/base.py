@@ -70,6 +70,17 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     ) -> bool:
         return False
 
+    def dispatch_metadata(
+        self,
+        layer,
+        local_id: int,
+        projection: str,
+        parameter_name: str,
+        tensor: torch.Tensor,
+    ) -> bool:
+        """Validate quantization metadata that does not populate a buffer."""
+        return False
+
     def dispatch_weight(
         self,
         layer,
