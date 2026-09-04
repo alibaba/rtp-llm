@@ -12,6 +12,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.DirectSchedulerConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.NonBatchDispatcherConfig;
+import org.flexlb.config.PriorityOrderingConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
@@ -31,6 +32,11 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -178,17 +184,22 @@ class ShortestTtftCacheAffinityTest {
     }
 
     @Test
-    void directSchedulingSpillsHotSessionAfterPlacementExceedsBudget() {
+    void directSchedulingSpillsConcurrentHotSessionAfterPlacementExceedsBudget() throws Exception {
         FlexlbConfig config = sessionAffinityConfig(100);
         config.setScheduler(new DirectSchedulerConfig());
         config.setDispatcher(new NonBatchDispatcherConfig());
 
-        assertHotSessionSpillsAfterCommittedWork(config);
+        assertConcurrentHotSessionSpills(config, false);
     }
 
     @Test
-    void queueSchedulingSpillsHotSessionAfterPlacementExceedsBudget() {
-        assertHotSessionSpillsAfterCommittedWork(sessionAffinityConfig(100));
+    void queueSchedulingSpillsConcurrentHotSessionAfterReservationExceedsBudget() throws Exception {
+        FlexlbConfig config = sessionAffinityConfig(100);
+        config.queueScheduler().setOrdering(new PriorityOrderingConfig());
+        config.batchDispatcher().setMaxCollectionWaitMs(10_000);
+        config.batchDispatcher().setMaxRequests(8);
+
+        assertConcurrentHotSessionSpills(config, true);
     }
 
     @Test
@@ -577,27 +588,86 @@ class ShortestTtftCacheAffinityTest {
         context.getRequest().setInferenceSessionState(Request.SessionState.ESTABLISHED);
     }
 
-    private void assertHotSessionSpillsAfterCommittedWork(FlexlbConfig config) {
-        useFixedCandidatePool(config, 2);
+    private void assertConcurrentHotSessionSpills(FlexlbConfig config, boolean queueMode)
+            throws Exception {
+        ConfigService configured = Mockito.mock(ConfigService.class);
+        Mockito.when(configured.loadBalanceConfig()).thenReturn(config);
+        endpointRegistry.close();
+        endpointRegistry = new EndpointRegistry(
+                configured,
+                () -> Mockito.mock(PriorityScheduler.class),
+                Mockito.mock(BatchSchedulerReporter.class));
+        engineWorkerStatus = new EngineWorkerStatus(endpointRegistry);
+        strategy = new ShortestTTFTStrategy(
+                engineWorkerStatus,
+                cacheAwareService,
+                resourceMeasureFactory,
+                engineHealthReporter,
+                sessionPlacementStore);
         addWorker("10.0.0.1", 0);
         addWorker("10.0.0.2", 0);
         record("10.0.0.1:8080");
-        BalanceContext first = buildContext(1_000, 111L, config);
-        markEstablished(first, "kimi-k3", "session-1");
-
-        ServerStatus initial = strategy.select(first, RoleType.PREFILL, null);
-
-        assertTrue(initial.isSuccess());
-        assertEquals("10.0.0.1", initial.getServerIp());
+        int requests = 8;
+        ExecutorService executor = Executors.newFixedThreadPool(requests);
+        CountDownLatch ready = new CountDownLatch(requests);
+        CountDownLatch start = new CountDownLatch(1);
+        CountDownLatch pressureInstalled = new CountDownLatch(1);
         PrefillEndpoint placement = endpointRegistry.getPrefill("10.0.0.1:8080");
-        placement.commitBatch(112L, 500L, List.of(batchItem(112L, 1_000L)));
-        BalanceContext concurrent = buildContext(1_000, 113L, config);
-        markEstablished(concurrent, "kimi-k3", "session-1");
+        long pressureId = 112L;
+        List<Future<String>> selected = new ArrayList<>();
+        try {
+            for (int i = 0; i < requests; i++) {
+                long requestId = 10_000L + i;
+                boolean leader = i == 0;
+                selected.add(executor.submit(() -> {
+                    ready.countDown();
+                    assertTrue(start.await(2, TimeUnit.SECONDS));
+                    if (!leader) {
+                        assertTrue(pressureInstalled.await(2, TimeUnit.SECONDS));
+                    }
+                    BalanceContext context = buildContext(1_000, requestId, config);
+                    markEstablished(context, "kimi-k3", "session-1");
+                    ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+                    assertTrue(result.isSuccess());
+                    if (leader) {
+                        assertEquals("10.0.0.1", result.getServerIp());
+                        if (queueMode) {
+                            assertTrue(placement.getBatcher()
+                                    .tryOffer(queuedBatchItem(pressureId, 1_000L)));
+                            assertEquals(1, placement.getBatcher().queueSize());
+                        } else {
+                            placement.commitBatch(
+                                    pressureId,
+                                    500L,
+                                    List.of(batchItem(pressureId, 1_000L)));
+                        }
+                        pressureInstalled.countDown();
+                    }
+                    return result.getServerIp();
+                }));
+            }
+            assertTrue(ready.await(2, TimeUnit.SECONDS));
+            start.countDown();
 
-        ServerStatus overflow = strategy.select(concurrent, RoleType.PREFILL, null);
-
-        assertTrue(overflow.isSuccess());
-        assertEquals("10.0.0.2", overflow.getServerIp());
+            List<String> endpoints = new ArrayList<>();
+            for (Future<String> result : selected) {
+                endpoints.add(result.get(2, TimeUnit.SECONDS));
+            }
+            assertEquals("10.0.0.1", endpoints.getFirst());
+            long spilled = endpoints.stream().filter("10.0.0.2"::equals).count();
+            assertEquals(requests - 1, spilled,
+                    "every request after the pressure signal must spill from the placement");
+        } finally {
+            pressureInstalled.countDown();
+            if (queueMode) {
+                placement.getBatcher().queueManager().tryRemove(pressureId, "test cleanup");
+            } else {
+                placement.releaseBatch(pressureId);
+            }
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(2, TimeUnit.SECONDS));
+            endpointRegistry.close();
+        }
     }
 
     private void record(String ipPort) {
@@ -648,6 +718,17 @@ class ShortestTtftCacheAffinityTest {
         context.setRequest(request);
         context.setConfig(new FlexlbConfig());
         return new BatchItem(context, null, null, null, null, null, null, 0);
+    }
+
+    private BatchItem queuedBatchItem(long requestId, long seqLen) {
+        Request request = new Request();
+        request.setRequestId(requestId);
+        request.setSeqLen(seqLen);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        context.setConfig(new FlexlbConfig());
+        return new BatchItem(
+                context, null, null, null, null, null, null, System.currentTimeMillis());
     }
 
     private BalanceContext buildContext(long seqLen, long requestId, FlexlbConfig config) {
