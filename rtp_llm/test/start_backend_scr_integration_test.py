@@ -62,6 +62,47 @@ class BackendScrIntegrationTest(unittest.TestCase):
         )
         self.assertIs(manager._scr_checkpoint_arrival, thread)
 
+    def test_rank_arrival_honors_shared_scheduler_mapping(self):
+        manager = SimpleNamespace(engine=object())
+        config = self._config(local_rank=2, world_rank=7)
+        thread = object()
+        with mock.patch.dict(
+            os.environ,
+            {
+                "RTPLLM_ENABLE_SCR": "1",
+                "RTP_LLM_SCR_WORKER_OFFSET": "4",
+                "RTP_LLM_SCR_WORKER_NUM": "8",
+            },
+            clear=True,
+        ), mock.patch.object(
+            backend, "start_scr_checkpoint_arrival_thread", return_value=thread
+        ) as start:
+            self.assertIs(backend._start_scr_rank_arrival(manager, config), thread)
+
+        start.assert_called_once_with(
+            worker_id=6,
+            worker_num=8,
+            name="scr-checkpoint-arrival-rank-6",
+        )
+
+    def test_rank_arrival_skips_invalid_shared_scheduler_mapping(self):
+        manager = SimpleNamespace(engine=object())
+        config = self._config(local_rank=2, world_rank=7)
+        with mock.patch.dict(
+            os.environ,
+            {
+                "RTPLLM_ENABLE_SCR": "1",
+                "RTP_LLM_SCR_WORKER_OFFSET": "4",
+                "RTP_LLM_SCR_WORKER_NUM": "4",
+            },
+            clear=True,
+        ), mock.patch.object(
+            backend, "start_scr_checkpoint_arrival_thread"
+        ) as start:
+            self.assertIsNone(backend._start_scr_rank_arrival(manager, config))
+
+        start.assert_not_called()
+
     def test_registration_failure_remains_fail_open(self):
         manager = SimpleNamespace(engine=object())
         with mock.patch.dict(

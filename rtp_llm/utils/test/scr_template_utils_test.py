@@ -114,6 +114,38 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             )
         self.assertEqual(epsilon.calls, [])
 
+    def test_resolve_worker_mapping_supports_shared_scheduler_scope(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                scr.SCR_WORKER_OFFSET_ENV: "4",
+                scr.SCR_WORKER_NUM_ENV: "8",
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                scr.resolve_scr_worker_mapping(local_rank=2),
+                (6, 8),
+            )
+
+    def test_resolve_worker_mapping_rejects_invalid_scope(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {scr.SCR_WORKER_OFFSET_ENV: "4", scr.SCR_WORKER_NUM_ENV: "4"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "worker_id must be in"):
+                scr.resolve_scr_worker_mapping(local_rank=2)
+
+    def test_resolve_worker_mapping_rejects_malformed_override(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {scr.SCR_WORKER_NUM_ENV: "not-an-int"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ValueError, "must be an integer"):
+                scr.resolve_scr_worker_mapping(local_rank=0)
+
     def test_backend_mode_keeps_app_gate_and_shim_gate_separate(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(scr.epsilon_backend_mode(), "disabled")
@@ -154,6 +186,36 @@ class ScrTemplateUtilsTest(unittest.TestCase):
         self.assertEqual(epsilon.calls[0][1], [base, region, scale])
         self.assertTrue(callable(epsilon.before_callback))
         self.assertEqual(scr._registrations[id(engine)].tensors, (base, region, scale))
+
+    def test_registers_distinct_speculative_draft_cache(self) -> None:
+        target = _FakeTensor(100)
+        draft = _FakeTensor(200)
+        target_model = SimpleNamespace(
+            py_model=SimpleNamespace(
+                kv_cache=SimpleNamespace(kv_cache_base_by_layer=[[target]])
+            )
+        )
+        draft_model = SimpleNamespace(
+            py_model=SimpleNamespace(
+                kv_cache=SimpleNamespace(kv_cache_base_by_layer=[[draft]])
+            )
+        )
+        engine = SimpleNamespace(
+            model=target_model,
+            propose_model=SimpleNamespace(model=draft_model),
+        )
+        epsilon = _FakeEpsilon()
+
+        with mock.patch.dict(
+            os.environ, {scr.SCR_ENABLE_ENV: "1"}, clear=True
+        ), mock.patch.object(
+            scr.importlib, "import_module", return_value=epsilon
+        ), mock.patch.object(
+            scr, "_is_tensor", side_effect=lambda value: isinstance(value, _FakeTensor)
+        ):
+            self.assertTrue(scr.register_for_scr(engine))
+
+        self.assertEqual(epsilon.calls[0][1], [target, draft])
 
     def test_registration_is_inert_when_epsilon_is_not_active(self) -> None:
         model = SimpleNamespace(kv_cache=SimpleNamespace())
@@ -211,6 +273,26 @@ class ScrTemplateUtilsTest(unittest.TestCase):
         ):
             self.assertTrue(scr.register_for_scr(engine, after_restore=callback))
         self.assertEqual([call[0] for call in epsilon.calls], ["cache", "before", "after"])
+        callback.assert_not_called()
+
+    def test_external_shim_after_restore_callback_is_not_treated_as_ready(self) -> None:
+        epsilon = _FakeEpsilon()
+        epsilon._EXTERNAL_DIR = "/etc/scr/epsilon"
+        tensor = _FakeTensor(1)
+        model = SimpleNamespace(kv_cache=SimpleNamespace(kv_cache_base_by_layer=[[tensor]]))
+        engine = SimpleNamespace(model=SimpleNamespace(py_model=model))
+        callback = mock.Mock()
+        with mock.patch.dict(
+            os.environ, {scr.SCR_ENABLE_ENV: "1"}, clear=True
+        ), mock.patch.object(
+            scr.importlib, "import_module", return_value=epsilon
+        ), mock.patch.object(
+            scr, "_is_tensor", side_effect=lambda value: isinstance(value, _FakeTensor)
+        ):
+            self.assertFalse(scr.register_for_scr(engine, after_restore=callback))
+
+        registration = scr._registrations[id(engine)]
+        self.assertEqual(registration.after_restore_result, 0)
         callback.assert_not_called()
 
 

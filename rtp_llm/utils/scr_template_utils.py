@@ -44,6 +44,14 @@ SCR_PHASE_CHECKPOINT = "checkpoint"
 SCR_PHASE_RESTORE = "restore"
 SCR_PHASE_NORMAL = "normal"
 
+# Epsilon's wait_mode=1 IDs are scoped by the scheduler, not by Python's
+# process tree. Keep the mapping explicit so a deployment that puts prefill
+# and decode ranks in one scheduler can give the roles disjoint ranges. The
+# default remains one local Pod (LOCAL_WORLD_SIZE) and local_rank.
+SCR_WORKER_ID_ENV = "RTP_LLM_SCR_WORKER_ID"
+SCR_WORKER_NUM_ENV = "RTP_LLM_SCR_WORKER_NUM"
+SCR_WORKER_OFFSET_ENV = "RTP_LLM_SCR_WORKER_OFFSET"
+
 def _flag(value: Optional[str]) -> bool:
     return value is not None and value.strip().lower() in {
         "1",
@@ -243,6 +251,49 @@ def _kv_cache_tensors(kv_cache: Any) -> tuple[Any, ...]:
     return tuple(result)
 
 
+def _engine_kv_cache_tensors(engine: Any) -> tuple[Any, ...]:
+    """Collect cache storage owned by the target and optional draft engines.
+
+    Speculative decoding can construct a second C++ ``PyWrappedModel`` for an
+    MTP/Eagle/DSpARK draft model. Its Python model is reachable through
+    ``engine.propose_model.model`` and may own a distinct KV allocation. A
+    snapshot that registers only ``engine.model`` would then restore the main
+    cache while leaving the draft cache outside the optimized registration.
+    Pointer de-duplication keeps shared/aliased allocations safe.
+    """
+
+    candidates: list[Any] = []
+    seen_candidates: set[int] = set()
+
+    def _append(value: Any) -> None:
+        if value is None:
+            return
+        value_id = id(value)
+        if value_id in seen_candidates:
+            return
+        seen_candidates.add(value_id)
+        candidates.append(value)
+
+    _append(getattr(engine, "model", None))
+    _append(getattr(engine, "py_model", None))
+    propose_model = getattr(engine, "propose_model", None)
+    _append(propose_model)
+    _append(getattr(propose_model, "model", None))
+
+    result: list[Any] = []
+    seen_tensors: set[tuple[Any, ...]] = set()
+    for candidate in candidates:
+        for owner in (getattr(candidate, "py_model", None), candidate):
+            kv_cache = getattr(owner, "kv_cache", None)
+            for tensor in _kv_cache_tensors(kv_cache):
+                key = _tensor_key(tensor)
+                if key in seen_tensors:
+                    continue
+                seen_tensors.add(key)
+                result.append(tensor)
+    return tuple(result)
+
+
 @dataclass(frozen=True)
 class ScrRegistration:
     """Diagnostic result retained by the caller after registration."""
@@ -252,6 +303,7 @@ class ScrRegistration:
     cache_result: int | None
     hook_result: int | None
     ok: bool
+    after_restore_result: int | None = None
 
 
 _registration_lock = threading.Lock()
@@ -358,18 +410,11 @@ def register_for_scr(
         if previous is not None and previous.ok:
             return True
 
-    engine_model = getattr(engine, "model", None)
-    cache_owner = (
-        getattr(engine_model, "py_model", None)
-        or engine_model
-        or getattr(engine, "py_model", None)
-        or engine
-    )
-    kv_cache = getattr(cache_owner, "kv_cache", None)
-    tensors = _kv_cache_tensors(kv_cache)
+    tensors = _engine_kv_cache_tensors(engine)
 
     cache_result: int | None = None
     hook_result: int | None = None
+    after_restore_result: int | None = None
     ok = True
 
     try:
@@ -398,8 +443,31 @@ def register_for_scr(
         else:
             LOGGER.warning("sCR active but Epsilon before-checkpoint hook is unavailable")
             ok = False
-        if after_restore is not None and hasattr(epsilon, "register_after_restore_func"):
-            _call_result(epsilon.register_after_restore_func, after_restore)
+        if after_restore is not None:
+            register_after_restore = getattr(
+                epsilon, "register_after_restore_func", None
+            )
+            if register_after_restore is None:
+                LOGGER.warning(
+                    "sCR after-restore callback requested but Epsilon does not "
+                    "provide register_after_restore_func"
+                )
+                ok = False
+            else:
+                after_restore_result = _call_result(
+                    register_after_restore, after_restore
+                )
+                ok = ok and after_restore_result in (None, 0)
+                if getattr(epsilon, "_EXTERNAL_DIR", ""):
+                    # The external shim currently returns success but does not
+                    # execute callbacks (see /etc/scr/epsilon). Do not let a
+                    # caller mistake that return code for restore fix-up.
+                    LOGGER.warning(
+                        "sCR external Epsilon shim accepted an after-restore "
+                        "callback but does not execute it; use an explicit "
+                        "RunD/supervisor restore hook"
+                    )
+                    ok = False
     except Exception:
         # Registration is an optimization hint; generic sCR dump remains a
         # valid fallback when registration is unavailable.
@@ -412,10 +480,82 @@ def register_for_scr(
         cache_result=cache_result,
         hook_result=hook_result,
         ok=ok,
+        after_restore_result=after_restore_result,
     )
     with _registration_lock:
         _registrations[engine_key] = registration
     return ok
+
+
+def _parse_scr_int_env(name: str) -> int | None:
+    """Parse an optional SCR integer override without silently changing scope.
+
+    A malformed worker mapping is more dangerous than a disabled optimization:
+    one rank can occupy another rank's Epsilon slot and leave the scheduler
+    quorum waiting forever. Callers therefore treat a malformed value as a
+    mapping error and skip arrival for this process.
+    """
+
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+
+
+def resolve_scr_worker_mapping(
+    *, local_rank: int, worker_id: int | None = None, worker_num: int | None = None
+) -> tuple[int, int]:
+    """Resolve and validate a rank's Epsilon wait-mode mapping.
+
+    The default scope is the current Pod: ``worker_num`` comes from
+    ``LOCAL_WORLD_SIZE`` and the ID is ``local_rank``. Deployments sharing one
+    scheduler may set ``RTP_LLM_SCR_WORKER_OFFSET`` (or an explicit per-process
+    ``RTP_LLM_SCR_WORKER_ID``) and ``RTP_LLM_SCR_WORKER_NUM`` to describe the
+    complete GPU quorum. CPU/frontend processes must not be counted here.
+    """
+
+    try:
+        local_rank = int(local_rank)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"local_rank must be an integer, got {local_rank!r}") from exc
+    if local_rank < 0:
+        raise ValueError(f"local_rank must be non-negative, got {local_rank}")
+
+    if worker_num is None:
+        env_worker_num = _parse_scr_int_env(SCR_WORKER_NUM_ENV)
+        if env_worker_num is not None:
+            worker_num = env_worker_num
+        else:
+            local_world_size = _parse_scr_int_env("LOCAL_WORLD_SIZE")
+            worker_num = local_world_size if local_world_size is not None else 1
+    try:
+        worker_num = int(worker_num)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"worker_num must be an integer, got {worker_num!r}") from exc
+    if worker_num <= 0:
+        raise ValueError(f"worker_num must be positive, got {worker_num}")
+
+    if worker_id is None:
+        env_worker_id = _parse_scr_int_env(SCR_WORKER_ID_ENV)
+        if env_worker_id is not None:
+            worker_id = env_worker_id
+        else:
+            offset = _parse_scr_int_env(SCR_WORKER_OFFSET_ENV)
+            worker_id = (offset if offset is not None else 0) + local_rank
+    try:
+        worker_id = int(worker_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"worker_id must be an integer, got {worker_id!r}") from exc
+
+    if not 0 <= worker_id < worker_num:
+        raise ValueError(
+            "worker_id must be in [0, worker_num), "
+            f"got worker_id={worker_id}, worker_num={worker_num}"
+        )
+    return worker_id, worker_num
 
 
 def arrive_scr_checkpoint_barrier(
@@ -496,10 +636,38 @@ def start_scr_checkpoint_arrival_thread(
 
     def _arrive() -> None:
         try:
-            arrive_scr_checkpoint_barrier(
+            result = arrive_scr_checkpoint_barrier(
                 worker_id=worker_id,
                 worker_num=worker_num,
             )
+            if result is None:
+                # None means the optional integration was inactive or could
+                # not reach Epsilon. This is fail-open for normal serving, but
+                # the control plane must treat it as a missing quorum member.
+                LOGGER.warning(
+                    "sCR snapshot arrival did not complete "
+                    "(worker_id=%s worker_num=%s phase=%s)",
+                    worker_id,
+                    worker_num,
+                    os.environ.get(SCR_PHASE_ENV, ""),
+                )
+            elif result != 0:
+                LOGGER.error(
+                    "sCR snapshot arrival returned non-zero result=%s "
+                    "(worker_id=%s worker_num=%s phase=%s)",
+                    result,
+                    worker_id,
+                    worker_num,
+                    os.environ.get(SCR_PHASE_ENV, ""),
+                )
+            else:
+                LOGGER.info(
+                    "sCR snapshot arrival completed "
+                    "(worker_id=%s worker_num=%s phase=%s)",
+                    worker_id,
+                    worker_num,
+                    os.environ.get(SCR_PHASE_ENV, ""),
+                )
         except BaseException:
             LOGGER.exception("sCR snapshot barrier arrival thread failed")
 
@@ -524,11 +692,15 @@ __all__ = [
     "SCR_PHASE_NORMAL",
     "SCR_PHASE_RESTORE",
     "SCR_SHIM_ENABLE_ENV",
+    "SCR_WORKER_ID_ENV",
+    "SCR_WORKER_NUM_ENV",
+    "SCR_WORKER_OFFSET_ENV",
     "ScrRegistration",
     "arrive_scr_checkpoint_barrier",
     "epsilon_backend_mode",
     "configure_scr_environment",
     "is_scr_enabled",
     "register_for_scr",
+    "resolve_scr_worker_mapping",
     "start_scr_checkpoint_arrival_thread",
 ]

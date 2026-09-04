@@ -39,6 +39,8 @@ from rtp_llm.utils.scr_template_utils import (
     configure_scr_environment,
     is_scr_enabled,
     register_for_scr,
+    resolve_scr_worker_mapping,
+    SCR_WORKER_NUM_ENV,
     start_scr_checkpoint_arrival_thread,
 )
 from rtp_llm.utils.util import copy_gemm_config
@@ -178,10 +180,22 @@ def _scr_worker_num(py_env_configs: PyEnvConfigs) -> int:
     controller sidecar on each pod does not wait for ranks in another pod.
     """
 
+    raw = os.environ.get(SCR_WORKER_NUM_ENV, "")
+    if raw.strip():
+        try:
+            value = int(raw)
+        except ValueError:
+            logging.error("invalid %s=%r; refusing custom SCR quorum", SCR_WORKER_NUM_ENV, raw)
+            raise ValueError(f"{SCR_WORKER_NUM_ENV} must be an integer, got {raw!r}")
+        if value <= 0:
+            raise ValueError(f"{SCR_WORKER_NUM_ENV} must be positive, got {value}")
+        return value
+
     raw = os.environ.get("LOCAL_WORLD_SIZE", "")
     try:
         value = int(raw)
     except ValueError:
+        logging.warning("invalid LOCAL_WORLD_SIZE=%r; using parsed parallelism", raw)
         value = 0
     if value > 0:
         return value
@@ -197,8 +211,18 @@ def _start_scr_rank_arrival(backend_manager, py_env_configs):
         return None
     try:
         pc = py_env_configs.parallelism_config
-        worker_id = int(getattr(pc, "local_rank", 0))
-        worker_num = _scr_worker_num(py_env_configs)
+        worker_id, worker_num = resolve_scr_worker_mapping(
+            local_rank=int(getattr(pc, "local_rank", 0)),
+            worker_num=_scr_worker_num(py_env_configs),
+        )
+        logging.info(
+            "sCR rank arrival mapping resolved: local_rank=%s worker_id=%s "
+            "worker_num=%s phase=%s",
+            getattr(pc, "local_rank", 0),
+            worker_id,
+            worker_num,
+            os.environ.get("SCR_PHASE", ""),
+        )
         thread = start_scr_checkpoint_arrival_thread(
             worker_id=worker_id,
             worker_num=worker_num,
