@@ -589,6 +589,93 @@ class ServerArgsSetTest(TestCase):
         )
 
 
+class ExternalModelPackagesArgsTest(TestCase):
+    def setUp(self):
+        self._environ_backup = os.environ.copy()
+        self._argv_backup = sys.argv.copy()
+        os.environ.clear()
+        sys.argv = ["prog"]
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._environ_backup)
+        sys.argv = self._argv_backup
+
+    def _setup(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        return setup_args()
+
+    def test_default_is_none(self):
+        py_env_configs = self._setup()
+
+        self.assertIsNone(py_env_configs.model_args.external_model_packages)
+
+    def test_cli_space_separated_value(self):
+        sys.argv = [
+            "prog",
+            "--external_model_packages",
+            "atom.plugin.rtpllm.models,plugin.extra",
+        ]
+
+        py_env_configs = self._setup()
+
+        self.assertEqual(
+            py_env_configs.model_args.external_model_packages,
+            ["atom.plugin.rtpllm.models", "plugin.extra"],
+        )
+
+    def test_cli_equals_value_deduplicates_packages(self):
+        sys.argv = [
+            "prog",
+            "--external_model_packages=plugin.models, plugin.extra,plugin.models",
+        ]
+
+        py_env_configs = self._setup()
+
+        self.assertEqual(
+            py_env_configs.model_args.external_model_packages,
+            ["plugin.models", "plugin.extra"],
+        )
+
+    def test_last_repeated_cli_value_wins(self):
+        sys.argv = [
+            "prog",
+            "--external_model_packages",
+            "plugin.old",
+            "--external_model_packages",
+            "plugin.new",
+        ]
+
+        py_env_configs = self._setup()
+
+        self.assertEqual(
+            py_env_configs.model_args.external_model_packages,
+            ["plugin.new"],
+        )
+
+    def test_environment_variables_are_ignored(self):
+        os.environ["EXTERNAL_MODEL_PACKAGES"] = "plugin.unprefixed"
+        os.environ["RTP_LLM_EXTERNAL_MODEL_PACKAGES"] = "plugin.prefixed"
+
+        py_env_configs = self._setup()
+
+        self.assertIsNone(py_env_configs.model_args.external_model_packages)
+
+    def test_empty_entries_produce_an_empty_list(self):
+        sys.argv = ["prog", "--external_model_packages", ",,"]
+
+        py_env_configs = self._setup()
+
+        self.assertEqual(py_env_configs.model_args.external_model_packages, [])
+
+    def test_invalid_module_path_is_rejected(self):
+        sys.argv = ["prog", "--external_model_packages", "plugin.models,not-valid"]
+
+        with self.assertRaises(SystemExit):
+            self._setup()
+
+
 class ServerArgsGrammarConfigTest(TestCase):
     """Cover every CLI-wired field on GrammarConfig (--grammar_* /
     --constrained_json_*): default values and CLI binding."""
