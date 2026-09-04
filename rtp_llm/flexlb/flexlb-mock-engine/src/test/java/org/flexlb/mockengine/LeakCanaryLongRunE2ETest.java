@@ -41,7 +41,7 @@ class LeakCanaryLongRunE2ETest {
         // EngineFence, which is a production safety property rather than a leak.
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 2, 1, "5", 1.0, true)) {
             h.allowPreemption(VictimStage.PREFILL_QUEUED);
-            // PR-D: rescue removed — reducer deadline + AdmissionLease handle expiry
+            // PR-D: rescue removed — reducer deadline + exact ownership cleanup
             // 小队列制造真实驱逐压力；小批次 + 快派发形成持续流转
             h.config.batchDispatcher().setMaxWaitingRequestsPerPrefillWorker(64);
             h.config.batchDispatcher().setMaxRequests(4);
@@ -50,6 +50,7 @@ class LeakCanaryLongRunE2ETest {
             // EnqueueBatch fault windows. Keep the independent post-success
             // backpressure gate out of the way, otherwise it can reject the
             // whole tail as 8431 before the injected 8510 path is exercised.
+            // (dsv4 v1: QueueSchedulerConfig.lifecycle 与 intake3 同构，保留原调用)
             h.config.queueScheduler().getLifecycle()
                     .setMaxDeliveredNotAcceptedRequestsGlobal(0);
             h.prefillSelector = ctx -> (int) (ctx.getRequestId() % 2);

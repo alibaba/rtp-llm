@@ -1,7 +1,6 @@
 package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel.CancelAck;
@@ -15,35 +14,43 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Path;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Consumer;
+import java.util.concurrent.TimeoutException;
 
+import static org.flexlb.mockengine.MockEngineTestSupport.batch;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.inputWithDecode;
+import static org.flexlb.mockengine.MockEngineTestSupport.slot;
+import static org.flexlb.mockengine.MockEngineTestSupport.workerStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * {@link MockEngineCancelChannel} contract tests against the in-process mock
- * engine cluster (test wiring only — production Spring contexts keep
- * UnsupportedEngineCancelChannel):
+ * engine cluster (test wiring only):
  * <ul>
  *   <li>accepted: a live request on the addressed worker is cancelled and its
  *       CANCELLED completion surfaces in WorkerStatus;</li>
  *   <li>idempotent: an accepted priority-cancel tombstone stays ACCEPTED;</li>
- *   <li>not found: completed-before-cancel and unknown requests do not scan
- *       another Prefill for a match;</li>
+ *   <li>not found: a completed-before-cancel request answers NOT_FOUND
+ *       (production seen-but-terminal branch) and does not scan another
+ *       Prefill for a match;</li>
+ *   <li>tombstoned: a never-seen rid answers TOMBSTONED, installs the
+ *       ABSENT_FENCE tombstone, and a racing later Enqueue of that rid is
+ *       rejected pre-admission with the typed 8429 error;</li>
  *   <li>failed: Decode rejects the Prefill-owned Cancel RPC;</li>
- *   <li>unsupported: endpoint whose port maps to no mock engine.</li>
+ *   <li>unsupported: endpoint whose port maps to no mock engine;</li>
+ *   <li>fault injections: an armed cancel_no_respond / cancel_error /
+ *       cancel_unexpected_status is an RPC-LAYER failure — the future hangs /
+ *       fails, the engine cancel state machine is never touched (no fences,
+ *       no tombstones, no census branch), and clearing the injection restores
+ *       the normal path.</li>
  * </ul>
  */
 class MockEngineCancelChannelTest {
@@ -54,20 +61,16 @@ class MockEngineCancelChannelTest {
     @TempDir
     Path tempDir;
 
-    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(8);
+    private MockEngineTestCluster cluster;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
     private List<JavaMockEngineCluster.FastRpcService> prefillServices;
     private List<JavaMockEngineCluster.FastRpcService> decodeServices;
 
     @AfterEach
-    void tearDown() throws InterruptedException {
-        if (services != null) {
-            for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-                service.shutdown();
-            }
+    void tearDown() {
+        if (cluster != null) {
+            cluster.close();
         }
-        scheduler.shutdownNow();
-        scheduler.awaitTermination(3, TimeUnit.SECONDS);
     }
 
     // ---- accepted: mid-flight cancel drives the mock ----
@@ -165,6 +168,10 @@ class MockEngineCancelChannelTest {
         CancelOutcome outcome = channel
                 .cancel(target(prefill.getGrpcPort()), 11L, 2_000)
                 .get(2, TimeUnit.SECONDS);
+        // Production-faithful branch (C++ Cancel handler):
+        // seen-but-terminal answers NOT_FOUND — the completion record
+        // stays in the retain-window backlog for GetWorkerStatus delivery
+        // (TOMBSTONED is reserved for never-seen rids).
         assertEquals(CancelAck.NOT_FOUND, outcome.ack());
         // Behavior: the request had already finished; nothing is re-inflight.
         assertEquals(0, prefill.getInflightCount());
@@ -207,14 +214,40 @@ class MockEngineCancelChannelTest {
     // ---- not found: unknown request id / wrong worker ----
 
     @Test
-    void cancelUnknownRequestIsNotFound() throws Exception {
+    void cancelUnknownRequestIsTombstonedAndFencesLaterEnqueue() throws Exception {
         startCluster(model("10"), 1, 1);
+        JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
 
         CancelOutcome outcome = channel
-                .cancel(target(prefillServices.get(0).getGrpcPort()), 424242L, 2_000)
+                .cancel(target(prefill.getGrpcPort()), 424242L, 2_000)
                 .get(2, TimeUnit.SECONDS);
-        assertEquals(CancelAck.NOT_FOUND, outcome.ack());
+        // Never-seen rid: TOMBSTONED — the ABSENT_FENCE tombstone is
+        // installed (production Prefill contract).
+        assertEquals(CancelAck.TOMBSTONED, outcome.ack());
+
+        // Fence idempotence: a retried cancel still reads TOMBSTONED (it
+        // must NOT flip onto the ACCEPTED ACTIVE_CANCEL tombstone branch).
+        CancelOutcome retry = channel
+                .cancel(target(prefill.getGrpcPort()), 424242L, 2_000)
+                .get(2, TimeUnit.SECONDS);
+        assertEquals(CancelAck.TOMBSTONED, retry.ack());
+
+        // The absent fence rejects a racing later Enqueue of the same rid
+        // with the typed 8429 error, pre-admission: no success ack, no
+        // engine state, no inflight residue.
+        EngineRpcService.EnqueueBatchResponsePB response = enqueue(prefill,
+                batch(9101, slot(0,
+                        inputWithDecode(424242L, 10, decodeServices.get(0).getGrpcPort()))));
+        assertEquals(0, response.getSuccessesCount(),
+                "a fenced rid must not be acked as admitted");
+        assertEquals(1, response.getErrorsCount(),
+                "the fenced rid carries exactly one ack error");
+        assertEquals(424242L, response.getErrors(0).getRequestId());
+        assertEquals(8429L, response.getErrors(0).getErrorInfo().getErrorCode(),
+                "absent-fence rejection carries the typed 8429 (PRIORITY_PREEMPTED)");
+        assertEquals(0, prefill.getInflightCount(),
+                "a fenced rid must leave no engine-side inflight residue");
     }
 
     @Test
@@ -254,6 +287,127 @@ class MockEngineCancelChannelTest {
         assertEquals(CancelAck.UNSUPPORTED, outcome.ack());
     }
 
+    // ---- cancel fault injections: RPC-layer failures, engine state untouched ----
+
+    @Test
+    void cancelNoRespondInjectionHangsTheFutureAndLeavesEngineStateUntouched() throws Exception {
+        // Prefill expression 3000ms — a wide-enough execution window that
+        // the request stays tracked through the 500ms hang assertion below,
+        // yet short enough that the post-clear cancel settles inside the
+        // 10s awaitAllInflightZero window.
+        startCluster(model("3000"), 1, 1);
+        JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
+        EngineCancelChannel channel = new MockEngineCancelChannel(services);
+
+        enqueue(prefill, batch(9400, slot(0,
+                inputWithDecode(41, 10, decodeServices.get(0).getGrpcPort()))));
+        awaitInflight(prefill, 1, 1_000);
+
+        prefill.setFaultConfig(prefill.getFaultConfig().toBuilder()
+                .cancelNoRespond(true)
+                .build());
+        try {
+            CompletableFuture<CancelOutcome> future = channel
+                    .cancel(target(prefill.getGrpcPort()), 41L, 2_000);
+            assertThrows(TimeoutException.class,
+                    () -> future.get(500, TimeUnit.MILLISECONDS),
+                    "cancel_no_respond must leave the cancel future pending");
+            assertFalse(future.isDone(),
+                    "the injected cancel future must stay incomplete (hanging RPC)");
+            assertEquals(1, prefill.getInflightCount(),
+                    "an injected cancel must not touch engine state (still in flight)");
+            assertEquals(1L, cluster.stats().cancelCensusInjected.sum(),
+                    "the injected arrival must be censused");
+            assertEquals(0L, cluster.stats().cancelCensusTracked.sum(),
+                    "the engine cancel state machine was never entered");
+        } finally {
+            prefill.clearFaultConfig();
+        }
+
+        // After the injection clears, the same rid cancels normally — proof
+        // the fault path installed no tombstone and no fence.
+        CancelOutcome outcome = channel
+                .cancel(target(prefill.getGrpcPort()), 41L, 2_000)
+                .get(2, TimeUnit.SECONDS);
+        assertEquals(CancelAck.ACCEPTED, outcome.ack());
+        awaitAllInflightZero(10_000);
+    }
+
+    @Test
+    void cancelErrorInjectionFailsTheFutureAndInstallsNoFence() throws Exception {
+        startCluster(model("3000"), 1, 1);
+        JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
+        EngineCancelChannel channel = new MockEngineCancelChannel(services);
+
+        // A never-seen rid: a REAL cancel would install the ABSENT_FENCE
+        // tombstone and answer TOMBSTONED — the injected transport failure
+        // must short-circuit before any of that.
+        prefill.setFaultConfig(prefill.getFaultConfig().toBuilder()
+                .cancelError(true)
+                .build());
+        try {
+            CompletableFuture<CancelOutcome> future = channel
+                    .cancel(target(prefill.getGrpcPort()), 424243L, 2_000);
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> future.get(2, TimeUnit.SECONDS),
+                    "cancel_error must surface as a failed future");
+            assertTrue(failure.getCause() instanceof IllegalStateException,
+                    "the transport-layer failure surfaces as IllegalStateException");
+            assertEquals(1L, cluster.stats().cancelCensusInjected.sum(),
+                    "the injected arrival must be censused");
+            assertEquals(0L, cluster.stats().cancelCensusTombstone.sum(),
+                    "an injected cancel must NOT install the absent-fence tombstone");
+            assertEquals(0L, cluster.stats().cancelCensusUnknown.sum(),
+                    "the engine cancel state machine was never entered");
+        } finally {
+            prefill.clearFaultConfig();
+        }
+
+        // No fence was installed: the same never-seen rid enqueues cleanly
+        // (an ABSENT_FENCE would have rejected it with the typed 8429).
+        EngineRpcService.EnqueueBatchResponsePB response = enqueue(prefill,
+                batch(9401, slot(0,
+                        inputWithDecode(424243L, 10, decodeServices.get(0).getGrpcPort()))));
+        assertEquals(1, response.getSuccessesCount(),
+                "an injected cancel failure must not fence later enqueues");
+        awaitAllInflightZero(10_000);
+    }
+
+    @Test
+    void cancelUnexpectedStatusInjectionFailsTheFutureWithoutTerminalJudgment() throws Exception {
+        startCluster(model("3000"), 1, 1);
+        JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
+        EngineCancelChannel channel = new MockEngineCancelChannel(services);
+
+        prefill.setFaultConfig(prefill.getFaultConfig().toBuilder()
+                .cancelUnexpectedStatus(true)
+                .build());
+        try {
+            CompletableFuture<CancelOutcome> future = channel
+                    .cancel(target(prefill.getGrpcPort()), 424244L, 2_000);
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> future.get(2, TimeUnit.SECONDS),
+                    "an out-of-contract ack status must fail the future");
+            assertTrue(failure.getCause() instanceof IllegalStateException);
+            assertTrue(failure.getCause().getMessage().contains("unexpected cancel ack status"),
+                    "the failure must name the out-of-contract status mapping");
+            assertEquals(1L, cluster.stats().cancelCensusInjected.sum(),
+                    "the injected arrival must be censused");
+            assertEquals(0L, cluster.stats().cancelCensusTombstone.sum(),
+                    "an injected cancel must NOT install the absent-fence tombstone");
+        } finally {
+            prefill.clearFaultConfig();
+        }
+
+        // Engine state untouched: the never-seen rid enqueues cleanly.
+        EngineRpcService.EnqueueBatchResponsePB response = enqueue(prefill,
+                batch(9402, slot(0,
+                        inputWithDecode(424244L, 10, decodeServices.get(0).getGrpcPort()))));
+        assertEquals(1, response.getSuccessesCount(),
+                "an unexpected-status cancel must not fence later enqueues");
+        awaitAllInflightZero(10_000);
+    }
+
     // ---- helpers ----
 
     private static CancelTarget target(int grpcPort) {
@@ -261,6 +415,8 @@ class MockEngineCancelChannelTest {
     }
 
     private static DecodeEndpoint endpoint(int grpcPort) {
+        // dsv4 (v1)：WorkerStatus 无 createDiscovered 工厂，DecodeEndpoint 为
+        // 单参构造（无 EndpointEventSink 依赖）。
         WorkerStatus status = new WorkerStatus();
         status.setIp("127.0.0.1");
         status.setPort(grpcPort - 2);
@@ -268,29 +424,12 @@ class MockEngineCancelChannelTest {
         return new DecodeEndpoint(status);
     }
 
-    private void startCluster(MockPerformanceModel model, int nPrefill, int nDecode) {
-        services = new ConcurrentHashMap<>();
-        prefillServices = new ArrayList<>();
-        decodeServices = new ArrayList<>();
-
-        for (int i = 0; i < nPrefill; i++) {
-            int port = BASE_PORT + i;
-            JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
-                    "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                    port, services, scheduler, model, 100,
-                    new JavaMockEngineCluster.ClusterStats());
-            services.put(port, service);
-            prefillServices.add(service);
-        }
-        for (int i = 0; i < nDecode; i++) {
-            int port = BASE_PORT + nPrefill + i;
-            JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
-                    "decode", EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                    port, services, scheduler, model, 100,
-                    new JavaMockEngineCluster.ClusterStats());
-            services.put(port, service);
-            decodeServices.add(service);
-        }
+    private void startCluster(MockPerformanceModel model, int nPrefill, int nDecode)
+            throws IOException {
+        cluster = MockEngineTestCluster.create(model, BASE_PORT, nPrefill, nDecode);
+        services = cluster.services();
+        prefillServices = cluster.prefills();
+        decodeServices = cluster.decodes();
     }
 
     private MockPerformanceModel model(String formula) throws IOException {
@@ -298,144 +437,21 @@ class MockEngineCancelChannelTest {
     }
 
     private MockPerformanceModel model(String formula, double decodeStepMs) throws IOException {
-        Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
-        Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
-        MAPPER.writeValue(performance.toFile(), Map.of(
-                "block_size", 1024,
-                "sleep_scale", 1.0,
-                "jitter_pct", 0.0,
-                "prefill", Map.of("scale", 1.0),
-                "decode", Map.of("scale", 1.0,
-                        "step_ms_by_batch", List.of(List.of(1, decodeStepMs)))));
-        MockMasterConfig.writeWithPrefillExpression(master, formula);
-        return MockPerformanceModel.load(performance.toString(), master.toString());
+        return MockEngineTestSupport.performanceModel(tempDir, formula, 1.0, decodeStepMs);
     }
 
     private void awaitInflight(JavaMockEngineCluster.FastRpcService service, int min, long timeoutMs)
             throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
-        while (System.nanoTime() < deadline) {
-            if (service.getInflightCount() >= min) {
-                return;
-            }
-            Thread.sleep(5);
-        }
-        fail("inflight never reached " + min + " on port " + service.getGrpcPort());
+        cluster.awaitInflight(service, min, timeoutMs);
     }
 
     private void awaitNoInflight(JavaMockEngineCluster.FastRpcService service, long timeoutMs)
             throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
-        while (System.nanoTime() < deadline) {
-            if (service.getInflightCount() == 0) {
-                return;
-            }
-            Thread.sleep(5);
-        }
-        fail("inflight never reached zero on port " + service.getGrpcPort());
+        cluster.awaitNoInflight(service, timeoutMs);
     }
 
     private void awaitAllInflightZero(long timeoutMs) throws InterruptedException {
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
-        while (System.nanoTime() < deadline) {
-            if (services.values().stream().allMatch(s -> s.getInflightCount() == 0)) {
-                return;
-            }
-            Thread.sleep(10);
-        }
-        StringBuilder sb = new StringBuilder("inflight not zero: ");
-        for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-            sb.append("port=").append(service.getGrpcPort())
-                    .append(" inflight=").append(service.getInflightCount()).append(" ");
-        }
-        fail(sb.toString());
+        cluster.awaitAllInflightZero(timeoutMs);
     }
 
-    private static EngineRpcService.WorkerStatusPB workerStatus(
-            JavaMockEngineCluster.FastRpcService service, long sinceVersion) {
-        return unary(observer -> service.getWorkerStatus(
-                EngineRpcService.StatusVersionPB.newBuilder()
-                        .setLatestFinishedVersion(sinceVersion)
-                        .build(),
-                observer));
-    }
-
-    private static EngineRpcService.GenerateInputPB inputWithDecode(
-            long requestId, int inputTokens, int decodePort) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(1)
-                        .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
-                                .setRole(EngineRpcService.RoleAddrPB.RoleType.DECODE)
-                                .setRoleStr("DECODE")
-                                .setGrpcPort(decodePort)
-                                .build())
-                        .build());
-        for (int token = 0; token < inputTokens; token++) {
-            input.addTokenIds(token);
-        }
-        return input.build();
-    }
-
-    private static EngineRpcService.EnqueueBatchDpSlotPB slot(
-            int dpRank, EngineRpcService.GenerateInputPB... inputs) {
-        EngineRpcService.EnqueueBatchDpSlotPB.Builder slot =
-                EngineRpcService.EnqueueBatchDpSlotPB.newBuilder().setDpRank(dpRank);
-        for (EngineRpcService.GenerateInputPB input : inputs) {
-            slot.addRequests(EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
-                    .setInput(input)
-                    .build());
-        }
-        return slot.build();
-    }
-
-    private static EngineRpcService.EnqueueBatchRequestPB batch(
-            long batchId, EngineRpcService.EnqueueBatchDpSlotPB... slots) {
-        return EngineRpcService.EnqueueBatchRequestPB.newBuilder()
-                .setBatchId(batchId)
-                .addAllDpSlots(List.of(slots))
-                .build();
-    }
-
-    private static EngineRpcService.EnqueueBatchResponsePB enqueue(
-            JavaMockEngineCluster.FastRpcService service,
-            EngineRpcService.EnqueueBatchRequestPB request) {
-        return unary(observer -> service.enqueueBatch(request, observer));
-    }
-
-    private static <T> T unary(Consumer<StreamObserver<T>> invocation) {
-        AtomicReference<T> response = new AtomicReference<>();
-        AtomicReference<Throwable> error = new AtomicReference<>();
-        CountDownLatch latch = new CountDownLatch(1);
-        invocation.accept(new StreamObserver<>() {
-            @Override
-            public void onNext(T value) {
-                response.set(value);
-            }
-
-            @Override
-            public void onError(Throwable throwable) {
-                error.set(throwable);
-                latch.countDown();
-            }
-
-            @Override
-            public void onCompleted() {
-                latch.countDown();
-            }
-        });
-        try {
-            if (!latch.await(5, TimeUnit.SECONDS)) {
-                fail("unary response timeout");
-            }
-        } catch (InterruptedException e) {
-            fail("interrupted waiting for unary response");
-        }
-        if (error.get() != null) {
-            throw new AssertionError(error.get());
-        }
-        assertNotNull(response.get(), "unary response");
-        return response.get();
-    }
 }

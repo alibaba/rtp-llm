@@ -2,7 +2,6 @@ package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel.CancelTarget;
@@ -16,30 +15,31 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.lang.reflect.Method;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 
+import static org.flexlb.mockengine.MockEngineTestSupport.batch;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.inputWithDecode;
+import static org.flexlb.mockengine.MockEngineTestSupport.slot;
+import static org.flexlb.mockengine.MockEngineTestSupport.workerStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * Cross-process 8429 wiring integration test (C1 three-piece set, self-test
@@ -47,8 +47,14 @@ import static org.junit.jupiter.api.Assertions.fail;
  * {@link HttpMockEngineCancelChannel} pointed at it, asserting:
  * <ul>
  *   <li>a live request and its priority-cancel tombstone return ACCEPTED;
- *       completed-before-cancel, unknown, or wrongly routed Prefill requests
- *       return NOT_FOUND,</li>
+ *       completed-before-cancel requests return NOT_FOUND; never-seen rids
+ *       (including wrongly routed Prefill targets) return TOMBSTONED with the
+ *       absent-fence tombstone installed engine-side (block-2 fix — the
+ *       channel previously crashed on this branch with an unknown status),</li>
+ *   <li>armed cancel fault injections (cancel_no_respond / cancel_error /
+ *       cancel_unexpected_status) surface as failed channel futures with
+ *       zero engine-state change, and clearing the injection restores the
+ *       normal path,</li>
  *   <li>a Decode target returns HTTP 501 / a failed channel future, matching
  *       the production UNIMPLEMENTED contract,</li>
  *   <li>the raw /cancel_request JSON still exposes the mock control-plane
@@ -182,14 +188,45 @@ class HttpMockCancelIntegrationTest {
     }
 
     @Test
-    void httpCancelUnknownRequestIsNotFound() throws Exception {
+    void httpCancelUnknownRequestIsTombstonedAndFencesLaterEnqueue() throws Exception {
         startGatedDecodeCluster(false);
         EngineCancelChannel channel = channel();
 
         CancelOutcome outcome = channel
                 .cancel(target(prefillService.getGrpcPort()), 424242L, 5_000)
                 .get(5, TimeUnit.SECONDS);
-        assertEquals(CancelAck.NOT_FOUND, outcome.ack());
+        // Never-seen rid over the HTTP control plane: TOMBSTONED with the
+        // ABSENT_FENCE tombstone installed engine-side (block-2 fix — the
+        // channel previously crashed on this branch with an unknown status).
+        assertEquals(CancelAck.TOMBSTONED, outcome.ack());
+
+        // Raw control-plane JSON evidence of the three-branch contract.
+        HttpResponse<String> raw = HttpClient.newHttpClient().send(
+                HttpRequest.newBuilder()
+                        .uri(URI.create("http://127.0.0.1:" + controlServer.getPort()
+                                + "/cancel_request"))
+                        .POST(HttpRequest.BodyPublishers.ofString(
+                                "{\"port\": " + prefillService.getGrpcPort()
+                                        + ", \"request_id\": 424242}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, raw.statusCode());
+        JsonNode json = MAPPER.readTree(raw.body());
+        assertEquals("TOMBSTONED", json.get("status").asText(),
+                "the raw endpoint must mirror the never-seen branch");
+        assertFalse(json.get("found").asBoolean());
+        assertFalse(json.get("already_finished").asBoolean());
+
+        // The installed fence rejects a racing later Enqueue of that rid with
+        // the typed 8429 error, pre-admission (no success ack, no inflight).
+        EngineRpcService.EnqueueBatchResponsePB response = enqueue(prefillService,
+                batch(9102, slot(0,
+                        inputWithDecode(424242L, 10, decodeService.getGrpcPort()))));
+        assertEquals(0, response.getSuccessesCount(),
+                "a fenced rid must not be acked as admitted");
+        assertEquals(1, response.getErrorsCount());
+        assertEquals(8429L, response.getErrors(0).getErrorInfo().getErrorCode(),
+                "absent-fence rejection carries the typed 8429 (PRIORITY_PREEMPTED)");
     }
 
     @Test
@@ -208,7 +245,10 @@ class HttpMockCancelIntegrationTest {
         CancelOutcome outcome = channel().cancel(target(wrongPort), 23L, 5_000)
                 .get(5, TimeUnit.SECONDS);
 
-        assertEquals(CancelAck.NOT_FOUND, outcome.ack());
+        // The wrong Prefill never saw rid 23: the never-seen branch answers
+        // TOMBSTONED — never a scan of other workers (that would have found
+        // and cancelled the live request elsewhere).
+        assertEquals(CancelAck.TOMBSTONED, outcome.ack());
         assertTrue(decodeService.getInflightCount() > 0,
                 "the control plane must not find and cancel a request on another worker");
     }
@@ -331,15 +371,110 @@ class HttpMockCancelIntegrationTest {
         assertEquals(prefillService.getGrpcPort(), json.get("port").asInt());
     }
 
+    // ──────────── cancel fault injections over the HTTP control plane ────────────
+
+    @Test
+    void httpCancelNoRespondInjectionTimesOutAsFailedFuture() throws Exception {
+        startGatedDecodeCluster(false);
+        assertTrue(scheduleOwnedDecode(51L));
+        EngineCancelChannel channel = channel();
+        inject("cancel_no_respond", true);
+
+        long inflightBefore = decodeService.getInflightCount();
+        var future = channel.cancel(target(prefillService.getGrpcPort()), 51L, 5_000);
+        ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> future.get(5, TimeUnit.SECONDS),
+                "cancel_no_respond must fail the channel future");
+        assertTrue(failure.getCause() instanceof HttpTimeoutException,
+                "the client-side 500ms REQUEST_TIMEOUT must fire before the "
+                        + "750ms control-plane sleep answers, got: " + failure.getCause());
+        assertEquals(inflightBefore, decodeService.getInflightCount(),
+                "an injected cancel must not touch engine state");
+
+        inject("cancel_no_respond", false);
+        CancelOutcome outcome = channel
+                .cancel(target(prefillService.getGrpcPort()), 51L, 5_000)
+                .get(5, TimeUnit.SECONDS);
+        assertEquals(CancelAck.ACCEPTED, outcome.ack(),
+                "clearing the injection must restore the normal cancel path");
+    }
+
+    @Test
+    void httpCancelErrorInjectionSurfacesAsFailedFuture() throws Exception {
+        startGatedDecodeCluster(false);
+        assertTrue(scheduleOwnedDecode(52L));
+        EngineCancelChannel channel = channel();
+        inject("cancel_error", true);
+
+        var future = channel.cancel(target(prefillService.getGrpcPort()), 52L, 5_000);
+        ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> future.get(5, TimeUnit.SECONDS),
+                "cancel_error (HTTP 500) must surface as a failed future");
+        assertTrue(failure.getCause() instanceof IllegalStateException,
+                "the non-200 response must fail the mapping, got: " + failure.getCause());
+        assertTrue(decodeService.getInflightCount() > 0,
+                "an injected cancel must not touch engine state");
+
+        inject("cancel_error", false);
+        CancelOutcome outcome = channel
+                .cancel(target(prefillService.getGrpcPort()), 52L, 5_000)
+                .get(5, TimeUnit.SECONDS);
+        assertEquals(CancelAck.ACCEPTED, outcome.ack(),
+                "clearing the injection must restore the normal cancel path");
+    }
+
+    @Test
+    void httpCancelUnexpectedStatusInjectionFailsTheMapping() throws Exception {
+        startGatedDecodeCluster(false);
+        assertTrue(scheduleOwnedDecode(53L));
+        EngineCancelChannel channel = channel();
+        inject("cancel_unexpected_status", true);
+
+        var future = channel.cancel(target(prefillService.getGrpcPort()), 53L, 5_000);
+        ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> future.get(5, TimeUnit.SECONDS),
+                "an out-of-contract ack status must fail the response mapping");
+        assertTrue(failure.getCause() instanceof IllegalStateException);
+        assertTrue(failure.getCause().getMessage().contains("UNEXPECTED_STATUS"),
+                "the failure must name the out-of-contract status, got: "
+                        + failure.getCause().getMessage());
+        assertTrue(decodeService.getInflightCount() > 0,
+                "an injected cancel must not touch engine state");
+
+        inject("cancel_unexpected_status", false);
+        CancelOutcome outcome = channel
+                .cancel(target(prefillService.getGrpcPort()), 53L, 5_000)
+                .get(5, TimeUnit.SECONDS);
+        assertEquals(CancelAck.ACCEPTED, outcome.ack(),
+                "clearing the injection must restore the normal cancel path");
+    }
+
+    /** Arms/disarms a cancel fault injection on prefill-0 via POST /inject. */
+    private void inject(String type, boolean enabled) throws Exception {
+        HttpResponse<String> response = HttpClient.newHttpClient().send(
+                HttpRequest.newBuilder()
+                        .uri(URI.create("http://127.0.0.1:" + controlServer.getPort()
+                                + "/inject"))
+                        .POST(HttpRequest.BodyPublishers.ofString(
+                                "{\"port\": " + prefillService.getGrpcPort()
+                                        + ", \"type\": \"" + type + "\", \"enabled\": "
+                                        + enabled + "}"))
+                        .build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, response.statusCode(),
+                "inject " + type + "=" + enabled + " must be accepted: " + response.body());
+    }
+
     // ──────────── Setup helpers ────────────
 
     /**
-     * One gated decode engine (decodeMaxConcurrency=1, pending queue cap 4)
-     * behind a real MockControlServer on an ephemeral port. Long decode step
-     * (10s × 0.1 sleep_scale = 1s) keeps requests in flight during asserts.
+     * One gated decode engine (decodeMaxConcurrency=1, unbounded pending
+     * queue — the hard gate is unconditional) behind a real MockControlServer
+     * on an ephemeral port. Long decode step (10s × 0.1 sleep_scale = 1s)
+     * keeps requests in flight during asserts.
      */
     private void startGatedDecodeCluster(boolean reportQueuedAsKvAllocated) throws Exception {
-        MockPerformanceModel model = model(10_000.0, 4, reportQueuedAsKvAllocated);
+        MockPerformanceModel model = model(10_000.0, reportQueuedAsKvAllocated);
         int prefillPort = BASE_PORT + nextPortOffset++;
         prefillService = new JavaMockEngineCluster.FastRpcService(
                 "prefill-0", "127.0.0.1", "prefill",
@@ -385,79 +520,19 @@ class HttpMockCancelIntegrationTest {
         return new DecodeEndpoint(status);
     }
 
-    private MockPerformanceModel model(double decodeStepMs, Integer maxPendingRequests,
+    private MockPerformanceModel model(double decodeStepMs,
                                        boolean reportQueuedAsKvAllocated) throws Exception {
-        Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
-        Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
         Map<String, Object> decodeConfig = new LinkedHashMap<>();
-        decodeConfig.put("scale", 1.0);
-        decodeConfig.put("step_ms_by_batch", List.of(List.of(1, decodeStepMs)));
-        if (maxPendingRequests != null) {
-            decodeConfig.put("max_pending_requests", maxPendingRequests);
-        }
         if (reportQueuedAsKvAllocated) {
             decodeConfig.put("report_queued_as_kv_allocated", true);
         }
-        MAPPER.writeValue(performance.toFile(), Map.of(
-                "block_size", 1024,
-                "sleep_scale", 0.1,
-                "jitter_pct", 0.0,
-                "prefill", Map.of("scale", 1.0),
-                "decode", decodeConfig));
-        MockMasterConfig.writeWithPrefillExpression(master, "10");
-        return MockPerformanceModel.load(performance.toString(), master.toString());
+        return MockEngineTestSupport.performanceModel(
+                tempDir, "10", 0.1, decodeStepMs, Map.of(), decodeConfig);
     }
 
     private MockPerformanceModel.RequestShape shapeOf(long requestId) throws Exception {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(1)
-                        .build());
-        for (int token = 0; token < 8; token++) {
-            input.addTokenIds(token);
-        }
-        return decodeService.getPerformance().shape(input.build(), new MockLruBlockCache(100));
-    }
-
-    private static EngineRpcService.WorkerStatusPB workerStatus(
-            JavaMockEngineCluster.FastRpcService service, long sinceVersion) {
-        AtomicReference<EngineRpcService.WorkerStatusPB> response = new AtomicReference<>();
-        AtomicReference<Throwable> error = new AtomicReference<>();
-        CountDownLatch latch = new CountDownLatch(1);
-        service.getWorkerStatus(
-                EngineRpcService.StatusVersionPB.newBuilder()
-                        .setLatestFinishedVersion(sinceVersion)
-                        .build(),
-                new StreamObserver<>() {
-                    @Override
-                    public void onNext(EngineRpcService.WorkerStatusPB value) {
-                        response.set(value);
-                    }
-
-                    @Override
-                    public void onError(Throwable throwable) {
-                        error.set(throwable);
-                        latch.countDown();
-                    }
-
-                    @Override
-                    public void onCompleted() {
-                        latch.countDown();
-                    }
-                });
-        try {
-            if (!latch.await(5, TimeUnit.SECONDS)) {
-                fail("worker status timeout");
-            }
-        } catch (InterruptedException e) {
-            fail("interrupted waiting for worker status");
-        }
-        if (error.get() != null) {
-            fail(String.valueOf(error.get()));
-        }
-        assertNotNull(response.get());
-        return response.get();
+        return MockEngineTestSupport.requestShape(
+                decodeService.getPerformance(), requestId, 8);
     }
 
     private static boolean invokeScheduleDecodeCompletion(
@@ -466,12 +541,7 @@ class HttpMockCancelIntegrationTest {
             long batchId,
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue)
             throws Exception {
-        Method method = JavaMockEngineCluster.FastRpcService.class.getDeclaredMethod(
-                "scheduleDecodeCompletion",
-                MockPerformanceModel.RequestShape.class,
-                long.class,
-                LinkedBlockingQueue.class);
-        method.setAccessible(true);
-        return (Boolean) method.invoke(service, shape, batchId, responseQueue);
+        return MockEngineTestSupport.scheduleDecodeCompletion(
+                service, shape, batchId, responseQueue);
     }
 }
