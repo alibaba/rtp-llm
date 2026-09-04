@@ -365,6 +365,8 @@ class BaseMoEExperts(RtpModule):
                         f"{tensor.shape[0] if tensor.dim() else 0} experts; "
                         f"expected {self.num_experts}"
                     )
+                if self._load_stacked_expert_metadata(base, parameter_name, tensor):
+                    continue
                 if parameter_name == "weight":
                     if tensor.dim() != 3:
                         raise ValueError(
@@ -406,6 +408,11 @@ class BaseMoEExperts(RtpModule):
 
             local_expert_id = self._remap_expert_id(global_expert_id)
             if local_expert_id is None:
+                continue
+
+            if self.quant_method.dispatch_metadata(
+                self, local_expert_id, proj, param_name, tensor
+            ):
                 continue
 
             if param_name in ("weight", "weight_packed"):
@@ -480,6 +487,28 @@ class BaseMoEExperts(RtpModule):
                     )
                     self._logged_first_scale = True
                 self._dispatch_scale(local_expert_id, proj, param_name, tensor)
+
+    def _load_stacked_expert_metadata(
+        self, base: str, param_name: str, tensor: torch.Tensor
+    ) -> bool:
+        local_experts = [
+            (local_id, tensor[global_id])
+            for global_id in range(self.num_experts)
+            if (local_id := self._remap_expert_id(global_id)) is not None
+        ]
+        first_local_id, first_tensor = local_experts[0]
+        if not self.quant_method.dispatch_metadata(
+            self, first_local_id, base, param_name, first_tensor
+        ):
+            return False
+        for local_id, expert_tensor in local_experts[1:]:
+            if not self.quant_method.dispatch_metadata(
+                self, local_id, base, param_name, expert_tensor
+            ):
+                raise RuntimeError(
+                    f"MoE quant method inconsistently handled {base}.{param_name}"
+                )
+        return True
 
     def _load_stacked_expert_aux(
         self, base: str, param_name: str, tensor: torch.Tensor

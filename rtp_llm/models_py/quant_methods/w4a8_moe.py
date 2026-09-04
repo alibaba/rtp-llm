@@ -150,34 +150,6 @@ class W4A8Int4MoEMethod(FusedMoEMethodBase):
         return True
 
     def dispatch_scale(self, layer, local_id: int, proj: str, param_name: str, tensor):
-        if self.compressed and param_name == "weight_shape":
-            if tensor.dtype not in (
-                torch.int8,
-                torch.uint8,
-                torch.int16,
-                torch.int32,
-                torch.int64,
-            ):
-                raise TypeError(
-                    "W4A8 compressed weight_shape must use integer storage, "
-                    f"got {tensor.dtype}"
-                )
-            logical_shape = tensor.reshape(-1)
-            if logical_shape.numel() != 2 or bool((logical_shape <= 0).any()):
-                raise ValueError(
-                    "W4A8 compressed weight_shape must contain two positive dimensions"
-                )
-            logical_numel = int(logical_shape[0]) * int(logical_shape[1])
-            expected_numel = layer.hidden_size * layer.moe_inter
-            if logical_numel != expected_numel:
-                raise ValueError(
-                    "W4A8 compressed weight_shape describes "
-                    f"{logical_numel} elements; expected {expected_numel}"
-                )
-            # compressed-tensors stores the original two-dimensional shape
-            # next to each packed tensor. RTP-LLM derives the runtime layout
-            # from the model config, so validation is the only required use.
-            return True
         if not self.compressed or param_name != "weight_scale":
             return False
         if not tensor.is_floating_point():
@@ -194,6 +166,56 @@ class W4A8Int4MoEMethod(FusedMoEMethodBase):
             scale.copy_(self._slice_down_scale(layer, tensor))
         else:
             return False
+        return True
+
+    def dispatch_metadata(
+        self, layer, local_id: int, proj: str, param_name: str, tensor
+    ) -> bool:
+        if not self.compressed or param_name != "weight_shape":
+            return False
+        if tensor.dtype not in (
+            torch.int8,
+            torch.uint8,
+            torch.int16,
+            torch.int32,
+            torch.int64,
+        ):
+            raise TypeError(
+                "W4A8 compressed weight_shape must use integer storage, "
+                f"got {tensor.dtype}"
+            )
+        logical_shape = tensor.reshape(-1)
+        if logical_shape.numel() != 2 or bool((logical_shape <= 0).any()):
+            raise ValueError(
+                "W4A8 compressed weight_shape must contain two positive dimensions"
+            )
+
+        H = layer.hidden_size
+        M = layer.moe_inter
+        if proj == "gate_up_proj":
+            expected_shapes = ((2 * M, H), (H, 2 * M))
+            expected_numel = 2 * H * M
+        elif proj in ("gate_proj", "up_proj", "down_proj"):
+            expected_shapes = ((M, H), (H, M))
+            expected_numel = H * M
+        else:
+            return False
+
+        actual_shape = (int(logical_shape[0]), int(logical_shape[1]))
+        logical_numel = actual_shape[0] * actual_shape[1]
+        if logical_numel != expected_numel:
+            raise ValueError(
+                "W4A8 compressed weight_shape describes "
+                f"{logical_numel} elements; expected {expected_numel}"
+            )
+        if actual_shape not in expected_shapes:
+            raise ValueError(
+                f"W4A8 compressed {proj}.weight_shape {actual_shape} must be "
+                f"one of {expected_shapes}"
+            )
+        # compressed-tensors stores the original two-dimensional shape next
+        # to each packed tensor. RTP-LLM derives runtime buffers from the model
+        # config, so this metadata is validated but does not populate storage.
         return True
 
     def process_weights_after_loading(self, layer):
