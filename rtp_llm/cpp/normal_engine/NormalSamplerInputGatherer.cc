@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include "torch/all.h"
 #include "rtp_llm/cpp/normal_engine/NormalSamplerInputGatherer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -57,13 +58,16 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
                           tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
     }
 
-    auto vocab_size           = (size_t)model_output.logits.size(1);
-    sampler_inputs.vocab_size = vocab_size;
-    if (all_streams.front()->outputVocabSize() > 0) {
+    auto       vocab_size            = (size_t)model_output.logits.size(1);
+    const auto output_vocab_size     = all_streams.front()->outputVocabSize();
+    const auto configured_vocab_size = output_vocab_size > 0 ? output_vocab_size : all_streams.front()->vocabSize();
+    const auto valid_vocab_size      = std::min(vocab_size, configured_vocab_size);
+    sampler_inputs.vocab_size        = vocab_size;
+    if (output_vocab_size > 0) {
         auto* top_k_values = sampler_inputs.top_k.data_ptr<int32_t>();
         for (size_t index = 0; index < sampler_inputs.batch_size; ++index) {
             if (top_k_values[index] > 0) {
-                top_k_values[index] = std::min<int32_t>(top_k_values[index], static_cast<int32_t>(vocab_size));
+                top_k_values[index] = std::min<int32_t>(top_k_values[index], static_cast<int32_t>(valid_vocab_size));
             }
         }
     }
@@ -100,6 +104,10 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
         logits_tensor = model_output.logits.clone();
     } else {
         logits_tensor = model_output.logits;
+    }
+    if (vocab_size > valid_vocab_size) {
+        logits_tensor.narrow(1, valid_vocab_size, vocab_size - valid_vocab_size)
+            .fill_(-std::numeric_limits<float>::infinity());
     }
     sampler_inputs.logits = logits_tensor;
 

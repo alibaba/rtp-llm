@@ -53,6 +53,11 @@ def _kv_vector_width(attn_configs: AttentionConfigs) -> int:
     return 16 // itemsize
 
 
+def _validate_v_geometry(head: int, page: int, width: int) -> None:
+    if head % width or page <= 0 or page % width:
+        raise ValueError(f"invalid V geometry: {head=}, {page=}, {width=}")
+
+
 def prefill_writes_vectorized_v(
     attn_configs: AttentionConfigs, fmha_config: Optional[FMHAConfig]
 ) -> bool:
@@ -72,11 +77,14 @@ def validate_v_layout(
         attn_configs
     ):
         return False
+    if fmha_config is not None and not any(
+        (fmha_config.use_aiter_pa, fmha_config.use_asm_pa, fmha_config.use_triton_pa)
+    ):
+        raise ValueError("every ROCm KV-cache backend is disabled")
     page = attn_configs.kernel_tokens_per_block
     head = attn_configs.size_per_head
     width = _kv_vector_width(attn_configs)
-    if head % width or page <= 0 or page % width:
-        raise ValueError(f"invalid V geometry: {head=}, {page=}, {width=}")
+    _validate_v_geometry(head, page, width)
     if attn_inputs.is_prefill or fmha_config is None:
         return True
     prefill_vec = prefill_writes_vectorized_v(attn_configs, fmha_config)
@@ -242,7 +250,7 @@ class FMHAParams(ParamsBase):
 
 
 class AiterPrefillAttnOp:
-    def __init__(self, attn_configs: AttentionConfigs, v1_kv_layout: bool = False):
+    def __init__(self, attn_configs: AttentionConfigs, linear_v: bool = False):
         self.head_num = attn_configs.head_num
         self.head_dim = attn_configs.size_per_head
         self.head_num_kv = attn_configs.kv_head_num
@@ -251,10 +259,7 @@ class AiterPrefillAttnOp:
         self.kv_cache_torch_dtype = self._get_kv_cache_torch_dtype(
             attn_configs.kv_cache_dtype, attn_configs.dtype
         )
-        self.v1_kv_layout = v1_kv_layout
-        self.use_compact = (
-            self.v1_kv_layout and attn_configs.kv_cache_dtype != KvCacheDataType.FP8
-        )
+        self.linear_v = linear_v
         self._block_positions: Optional[torch.Tensor] = None
         self._compact_arange: Optional[torch.Tensor] = None
 
@@ -313,7 +318,10 @@ class AiterPrefillAttnOp:
             sanitized
         )
 
-        if self.use_compact:
+        if self.linear_v and self.kv_cache_torch_dtype not in (
+            torch.float8_e4m3fnuz,
+            torch.float8_e4m3fn,
+        ):
             # Pre-allocate compact K/V buffers with trailing zero-block for CK
             # speculative read safety. Reused every layer — forward() writes into
             # buf[:num_gathered] and the last row stays zero, eliminating per-layer
@@ -357,16 +365,16 @@ class AiterPrefillAttnOp:
         vs = 16 // kv_cache_base.element_size()
 
         # FP8 KV cache always uses vectorized layout (getKLocalIdx<FP8>/getVLocalIdx<FP8>),
-        # regardless of v1_kv_layout flag.
+        # regardless of the linear_v flag.
         is_fp8 = kv_cache_base.dtype in (torch.float8_e4m3fnuz, torch.float8_e4m3fn)
-        use_v1_linear_v = self.v1_kv_layout and not is_fp8
+        use_linear_v = self.linear_v and not is_fp8
 
         if kv_cache_base.ndim >= 4:
             # Already shaped as [block_num, 2, hk, ps, hd] or similar multi-dim format.
             k_4d = kv_cache_base.select(1, 0)  # [block_num, hk, ps, hd]
             v_4d = kv_cache_base.select(1, 1)  # [block_num, hk, ps, hd]
             k_cache = k_4d.view(block_num, hk, hd // vs, ps, vs)
-            if use_v1_linear_v:
+            if use_linear_v:
                 v_linear = v_4d.reshape(block_num, hk, hd, ps)
                 v_cache = (
                     v_linear.reshape(block_num, hk, hd, ps // vs, vs)
@@ -384,7 +392,7 @@ class AiterPrefillAttnOp:
         # K: kernel writes via getKLocalIdx<CType> → vectorized [hd//vs, ps, vs].
         k_cache = flat[:, 0, :, :].view(block_num, hk, hd // vs, ps, vs)
 
-        if use_v1_linear_v:
+        if use_linear_v:
             # V1 non-FP8: kernel uses non-template getVLocalIdx → linear [hd, ps].
             v_linear = flat[:, 1, :, :].view(block_num, hk, hd, ps)
             v_cache = (
@@ -420,7 +428,7 @@ class AiterPrefillAttnOp:
     ):
         """Gather referenced blocks once, then reshape to VECTORIZED_LAYOUT.
 
-        For v1_kv_layout=True (non-ASM, non-FP8) path, the V cache needs a
+        For the linear V (non-ASM, non-FP8) path, the V cache needs a
         permute+contiguous to convert from linear [hd, ps] to vectorized
         [ps//vs, hd, vs] layout. Doing this on the full KV cache pool is
         extremely expensive. This method gathers all referenced blocks
@@ -565,7 +573,10 @@ class AiterPrefillAttnOp:
         max_seqlen_q = fmha_params.max_seqlen_q
         max_seqlen_k = fmha_params.max_seqlen_k
 
-        if self.use_compact:
+        if self.linear_v and kv_cache.kv_cache_base.dtype not in (
+            torch.float8_e4m3fnuz,
+            torch.float8_e4m3fn,
+        ):
             block_table = fmha_params.compact_block_table
             k_cache, v_cache = self._gather_and_reshape_kv_compact(
                 kv_cache.kv_cache_base,
@@ -774,6 +785,7 @@ class AiterPrefillAttnOpPaged:
         self.kv_indptr_buf: Optional[torch.Tensor] = None
         self.kv_page_indices_buf: Optional[torch.Tensor] = None
         self.descale_buf: Optional[torch.Tensor] = None
+        self.sanitized_bt_buf: Optional[torch.Tensor] = None
         self._block_positions: Optional[torch.Tensor] = None
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
@@ -816,6 +828,14 @@ class AiterPrefillAttnOpPaged:
             device=self.graph_device, dtype=torch.int32
         )
         batch_size = fmha_params.cu_seqlens_q.shape[0] - 1
+        bt = fmha_params.kv_cache_block_id_device
+        extra_pages = (128 + self.tokens_per_block - 1) // self.tokens_per_block
+        required_shape = (batch_size, bt.shape[1] + extra_pages)
+        buffer = self.sanitized_bt_buf
+        if buffer is not None and (
+            buffer.shape != required_shape or buffer.device != self.graph_device
+        ):
+            raise ValueError("Aiter graph buffer changed; recapture required")
         if self.seqlen_k_buf is None or self.seqlen_k_buf.shape[0] < batch_size:
             self.seqlen_k_buf = torch.empty(
                 max(1, batch_size), dtype=torch.int32, device=self.graph_device
@@ -832,15 +852,10 @@ class AiterPrefillAttnOpPaged:
             self.descale_buf = torch.ones(
                 1, dtype=torch.float32, device=self.graph_device
             )
-        # Pre-allocate a fixed-address buffer for the sanitized+padded block_table.
-        # CUDA graph replay requires stable tensor addresses; sanitize produces a
-        # new tensor each call, so we copy_ into this fixed buffer.
-        bt = fmha_params.kv_cache_block_id_device
-        extra_pages = (128 + self.tokens_per_block - 1) // self.tokens_per_block
-        max_cols = bt.shape[1] + extra_pages
-        self.sanitized_bt_buf = torch.zeros(
-            batch_size, max_cols, dtype=torch.int32, device=self.graph_device
-        )
+        if self.sanitized_bt_buf is None:
+            self.sanitized_bt_buf = torch.zeros(
+                required_shape, dtype=torch.int32, device=self.graph_device
+            )
         self.cuda_graph_prepared = True
 
     def forward(self, qkv, kv_cache, fmha_params) -> torch.Tensor:
@@ -970,12 +985,10 @@ def _run_triton_paged_attention(
 
     x = 16 // key_cache.element_size()
     kv_sizes = key_cache.shape
-    # K: [N, nkv, ps, hd] -> [N, nkv, hd//x, ps, x]  (shuffle layout)
+    _validate_v_geometry(kv_sizes[3], kv_sizes[2], x)
     key_cache = key_cache.view(
         kv_sizes[0], kv_sizes[1], kv_sizes[3] // x, kv_sizes[2], x
     )
-    # 4D V is the linear [hd, ps] reader for the Non-ASM writer; 5D V is the
-    # vectorized VALUE_TRANSPOSED reader for the ASM writer.
     value_cache = value_cache.view(
         (kv_sizes[0], kv_sizes[1], kv_sizes[3], kv_sizes[2])
         if linear_v
@@ -1179,6 +1192,9 @@ class AiterPrefillAttnOpTriton:
         # same padded row layout.
         fmha_params.graph_query_length = query_length
         fmha_params.graph_token_q_capacity = fmha_params.token_q_num
+        fmha_params.graph_max_seqlen_k = (
+            max_context_partition_num * self.context_partition_size
+        )
 
         fmha_params.attention_output = torch.empty(
             output_shape, dtype=output_dtype, device=device
@@ -1201,8 +1217,8 @@ class AiterPrefillAttnOpTriton:
 
     def _calc_compact_indices(self, fmha_params: FMHAParams):
         cu_seqlens_q = fmha_params.cu_seqlens_q
-        query_stride = getattr(
-            fmha_params, "graph_query_length", fmha_params.max_seqlen_q
+        query_stride = (
+            getattr(fmha_params, "graph_query_length", 0) or fmha_params.max_seqlen_q
         )
         device = cu_seqlens_q.device
 
@@ -1632,7 +1648,7 @@ class AiterPrefillImplNonAsm(FMHAImplBase):
     ) -> None:
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
-        self.fmha_impl = AiterPrefillAttnOp(attn_configs, v1_kv_layout=True)
+        self.fmha_impl = AiterPrefillAttnOp(attn_configs, linear_v=True)
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpNonAsm(attn_configs)
         self.rope_kvcache_impl.use_paged_fmha = True
 
@@ -1698,6 +1714,8 @@ class AiterPrefillImplPaged(FMHAImplBase):
         self.head_num_kv = attn_configs.kv_head_num
         self.head_dim = attn_configs.size_per_head
         self.tokens_per_block = attn_configs.kernel_tokens_per_block
+        query_group_size = max(1, attn_configs.head_num // max(1, self.head_num_kv))
+        self.max_triton_q_len = min(4, 64 // query_group_size)
 
         self.batch_prefill_impl = AiterPrefillAttnOpPaged(attn_configs)
         self.triton_prefill_impl = AiterPrefillAttnOpTriton(attn_configs)
@@ -1728,10 +1746,13 @@ class AiterPrefillImplPaged(FMHAImplBase):
         input_lengths = attn_inputs.input_lengths
         batch_size = input_lengths.numel()
         max_q_len = int(input_lengths.max().item()) if batch_size > 0 else 0
-        return batch_size > 0 and 0 < max_q_len <= 4
+        return batch_size > 0 and 0 < max_q_len <= self.max_triton_q_len
 
     def _select_backend(self, attn_inputs: PyAttentionInputs) -> str:
         return "triton" if self._use_triton_paged_prefill(attn_inputs) else "batch"
+
+    def support_cuda_graph(self) -> bool:
+        return self.backend == "triton"
 
     def _prepare_backend(self, backend: str) -> FMHAParams:
         if backend == "triton":
@@ -1845,10 +1866,10 @@ class AiterPrefillImplPaged(FMHAImplBase):
                 "prefill_seqlen_k_int32 tensor"
             )
         prefill_seqlen_k.copy_(kv_lens, non_blocking=True)
-
         fmha_params.prefix_lengths = prefix_host.to(
             device=fmha_params.cu_seqlens_q.device
         )
+
         fmha_params.max_seq_len = (
             int(q_lens_host.max().item()) if expected_batch > 0 else 0
         )
@@ -1881,14 +1902,31 @@ class AiterPrefillImplPaged(FMHAImplBase):
                 f"replay={fmha_params.token_q_num}"
             )
 
+        graph_max_seqlen_k = getattr(fmha_params, "graph_max_seqlen_k", None)
+        if (
+            graph_max_seqlen_k is not None
+            and fmha_params.max_seqlen_k > graph_max_seqlen_k
+        ):
+            raise ValueError(
+                "Aiter prefill CUDA graph replay kv length exceeds capture "
+                f"capacity: capture={graph_max_seqlen_k}, replay={fmha_params.max_seqlen_k}"
+            )
+
         kv_block_id = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
         if kv_block_id is None:
             kv_block_id = getattr(attn_inputs, "kv_cache_block_id_device", None)
         if kv_block_id is None:
+            raise ValueError("Aiter prefill CUDA graph replay requires block ids")
+        captured = fmha_params.kv_cache_block_id_device
+        if (
+            captured is None
+            or captured.shape != kv_block_id.shape
+            or captured.device != kv_block_id.device
+        ):
             raise ValueError(
-                "Aiter prefill CUDA graph replay requires kv cache block ids"
+                "Aiter prefill CUDA graph block-table shape/device changed; recapture required"
             )
-        fmha_params.kv_cache_block_id_device = kv_block_id
+        captured.copy_(kv_block_id, non_blocking=True)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         self.attn_inputs = attn_inputs

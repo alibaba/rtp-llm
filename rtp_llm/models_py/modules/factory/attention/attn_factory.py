@@ -1,6 +1,7 @@
 import logging
 from typing import Callable, Dict, List, Optional, Union
 
+from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
     FMHAImplBase,
@@ -24,11 +25,6 @@ PREFILL_MHA_IMPS: List[type[FMHAImplBase]] = []
 DECODE_MHA_IMPS: List[type[FMHAImplBase]] = []
 PREFILL_MLA_IMPS: List[type[MlaImplBase]] = []
 DECODE_MLA_IMPS: List[type[MlaImplBase]] = []
-
-# ROCm installs this hook to reject incompatible prefill/decode V layouts.
-VALIDATE_FMHA_CONFIG: Optional[
-    Callable[[AttentionConfigs, PyAttentionInputs, Optional[FMHAConfig]], bool]
-] = None
 
 FLASHINFER_TRTLLM_GEN_IMPLS = {
     "FlashInferTRTLLMPrefillImpl",
@@ -170,9 +166,15 @@ def get_fmha_impl(
     attn_inputs.is_cuda_graph = is_cuda_graph
 
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
-    strict_impl_selection = VALIDATE_FMHA_CONFIG is not None and VALIDATE_FMHA_CONFIG(
-        attn_configs, attn_inputs, fmha_config
-    )
+    strict_impl_selection = False
+    if get_device_type() == DeviceType.ROCm:
+        from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
+            validate_v_layout,
+        )
+
+        strict_impl_selection = validate_v_layout(
+            attn_configs, attn_inputs, fmha_config
+        )
 
     for impl in mha_impls:
         # Check if this FMHA implementation is disabled before creating instance
@@ -193,9 +195,10 @@ def get_fmha_impl(
         try:
             instance = impl(attn_configs, attn_inputs, parallelism_config, **kwargs)
         except Exception as e:
-            # ROCm validation predicts the selected cache layout, so falling back
-            # after construction could select a reader with a different layout.
-            if strict_impl_selection:
+            if strict_impl_selection or (
+                isinstance(e, RuntimeError)
+                and "illegal memory access" in str(e).lower()
+            ):
                 raise
             logging.warning(f"Failed to instantiate {impl_class_name}: {e}")
             continue

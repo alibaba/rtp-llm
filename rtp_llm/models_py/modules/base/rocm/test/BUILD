@@ -86,10 +86,10 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm/models_py/modules/base/rocm:trt_allreduce",
     ],
-    timeout = "moderate",
-    env = {"GPU_COUNT": "2"},
+    timeout = "long",
+    env = {"GPU_COUNT": "4"},
     tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'2'},
+    exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'4'},
 )
 
 py_test(

@@ -1216,10 +1216,10 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel_v1(T*                 
     }
 
     // refer to the implementation of hipify decode attention
-    const auto batch_beam_idx = blockIdx.y;
-    const int  position_id    = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
+    // input_lengths is indexed by sequence (batch_idx), not head index (blockIdx.y).
+    const int  position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
 
-    const int input_len = (input_lengths == nullptr) ? 0 : input_lengths[batch_beam_idx];
+    const int input_len = (input_lengths == nullptr) ? 0 : input_lengths[batch_idx];
     const int timestep  = tlength;
     attention_rope<T, Vec_t, ROPE_STYLE>(rope_config,
                                          q,
@@ -1376,10 +1376,10 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
     }
 
     // refer to the implementation of hipify decode attention
-    const auto batch_beam_idx = blockIdx.y;
-    const int  position_id    = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
+    // input_lengths is indexed by sequence (batch_idx), not head index (blockIdx.y).
+    const int  position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
 
-    const int input_len = (input_lengths == nullptr) ? 0 : input_lengths[batch_beam_idx];
+    const int input_len = (input_lengths == nullptr) ? 0 : input_lengths[batch_idx];
     const int timestep  = tlength;
     attention_rope<T, Vec_t, ROPE_STYLE>(rope_config,
                                          q,
