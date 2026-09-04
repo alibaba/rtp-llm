@@ -1105,6 +1105,7 @@ class IndexerFP8(PoolBackedModule):
                     attention_inputs.freqs_cis_slice,
                     self.rope_head_dim,
                 )
+            del q, weights, q_for_quant, w_for_quant
 
             assert (
                 has_fp8_mqa_logits()
@@ -1319,6 +1320,7 @@ class IndexerFP8(PoolBackedModule):
                     attention_inputs.freqs_cis_slice,
                     self.rope_head_dim,
                 )
+            del q, weights, q_for_quant, w_for_quant
 
             assert (
                 has_fp8_mqa_logits()

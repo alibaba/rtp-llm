@@ -130,6 +130,35 @@ def test_single_request_partial_last_virtual_block():
     _check(per_req=[20], cp_size=4, block_size=4)
 
 
+def test_single_request_known_total_avoids_tensor_length_and_repeat_helpers():
+    per_req = torch.tensor([17], dtype=torch.int64)
+    gathered, expected_tags = _ground_truth_restore(
+        per_req, 2, 4, torch.device("cpu")
+    )
+    old_padded = CP.cp_padded_local_kv_lens
+    old_repeat = torch.repeat_interleave
+    CP.cp_padded_local_kv_lens = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("tensor padded-length helper should not run")
+    )
+    torch.repeat_interleave = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("repeat_interleave should not run")
+    )
+    try:
+        restore = CP.build_kv_allgather_restore_indices(
+            per_req,
+            cp_size=2,
+            block_size=4,
+            device=torch.device("cpu"),
+            total_kv_len=17,
+            total_local_kv=12,
+        )
+    finally:
+        CP.cp_padded_local_kv_lens = old_padded
+        torch.repeat_interleave = old_repeat
+
+    assert torch.equal(gathered[restore], expected_tags)
+
+
 def test_multi_request_mixed():
     _check(per_req=[8, 12, 4], cp_size=2, block_size=4)
 

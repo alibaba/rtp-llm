@@ -1,10 +1,13 @@
+import os
 from unittest import TestCase, main
+from unittest.mock import patch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.deepseek_v4 import DeepSeekV4
 from rtp_llm.models.dsv4_kv_cache import (
     CSA_KV_TAG,
     CSA_STATE_TAG,
+    DSV4_FIXED_POOL_TAGS,
     DSV4_FP8_INDEXER_ENTRY_BYTES,
     DSV4_FP8_KV_ENTRY_BYTES,
     DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES,
@@ -342,6 +345,47 @@ class Dsv4PostBuildModelConfigTest(TestCase):
         self.assertEqual(config.kv_cache_spec_descs[0][0].tag, "sentinel")
         self.assertEqual(
             config.attn_config.tokens_per_block, FRAMEWORK_DEFAULT_TOKENS_PER_BLOCK
+        )
+
+    def _by_tag(self, layer_descs):
+        return {desc.tag: desc for descs in layer_descs for desc in descs}
+
+    def test_post_build_fixed_pool_blocks_env_pins_all_fixed_pools(self):
+        config = self._model_config()
+        with patch.dict(os.environ, {"DSV4_FIXED_POOL_BLOCKS": "777"}, clear=False):
+            DeepSeekV4._post_build_model_config(config)
+
+        by_tag = self._by_tag(config.kv_cache_spec_descs)
+        for tag in DSV4_FIXED_POOL_TAGS:
+            self.assertEqual(by_tag[tag].capacity.explicit_block_num, 777)
+
+    def test_post_build_hca_env_overrides_only_hca_state(self):
+        config = self._model_config()
+        with patch.dict(
+            os.environ,
+            {"DSV4_FIXED_POOL_BLOCKS": "777", "DSV4_HCA_STATE_POOL_BLOCKS": "321"},
+            clear=False,
+        ):
+            DeepSeekV4._post_build_model_config(config)
+
+        by_tag = self._by_tag(config.kv_cache_spec_descs)
+        self.assertEqual(by_tag[HCA_STATE_TAG].capacity.explicit_block_num, 321)
+        for tag in DSV4_FIXED_POOL_TAGS:
+            if tag == HCA_STATE_TAG:
+                continue
+            self.assertEqual(by_tag[tag].capacity.explicit_block_num, 777)
+
+    def test_post_build_without_env_keeps_default_hca_capacity(self):
+        config = self._model_config()
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DSV4_FIXED_POOL_BLOCKS", None)
+            os.environ.pop("DSV4_HCA_STATE_POOL_BLOCKS", None)
+            DeepSeekV4._post_build_model_config(config)
+
+        by_tag = self._by_tag(config.kv_cache_spec_descs)
+        self.assertEqual(
+            by_tag[HCA_STATE_TAG].capacity.explicit_block_num,
+            DSV4_HCA_STATE_POOL_BLOCKS,
         )
 
 
