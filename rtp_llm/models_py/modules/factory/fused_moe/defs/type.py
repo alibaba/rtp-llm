@@ -14,6 +14,7 @@ class RouterType(Enum):
     PURE_TP = 5  # optimize when EP=TP, use all_reduce as gather
     MORI_EP_INTRANODE = 6  # MORI intra-node EP router
     MORI_EP_INTERNODE = 7  # MORI inter-node EP router
+    DEEPEP_ELASTIC = 8  # DeepEPv2 elastic unified dispatch/combine
 
 
 class ExecutorType(Enum):
