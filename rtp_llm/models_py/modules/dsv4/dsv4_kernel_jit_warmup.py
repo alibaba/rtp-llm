@@ -841,11 +841,9 @@ def _collect_dsv4_dense_gemm_shapes(model: Any) -> Dict[tuple[str, int, int], di
             )
 
     for module_name, module in model.named_modules():
-        cls_name = module.__class__.__name__
-        if cls_name == "GroupedFP4Strategy":
-            _collect_grouped_fp4_strategy_shapes(shapes, module_name, module)
-        elif cls_name == "LocalLoopStrategy":
-            _collect_local_loop_strategy_shapes(shapes, module_name, module)
+        warmup_weights = getattr(module, "dense_gemm_warmup_weights", None)
+        if callable(warmup_weights):
+            _collect_dense_gemm_warmup_weights(shapes, module_name, warmup_weights())
         # NOTE: MegaMoEStrategy intentionally NOT walked here — its own
         # ``_maybe_warmup_jit_once`` covers ``fp8_fp4_mega_moe`` (a distinct
         # symm-mem kernel from ``fp8_fp4_gemm_nt`` used by GroupedFP4 /
@@ -1011,50 +1009,16 @@ def _collect_dsv4_fp8_mqa_logits_shapes(model: Any) -> Dict[tuple[int, int], dic
     return shapes
 
 
-def _collect_grouped_fp4_strategy_shapes(
+def _collect_dense_gemm_warmup_weights(
     shapes: Dict[tuple[str, int, int], dict],
     module_name: str,
-    strategy: Any,
+    warmup_weights: Any,
 ) -> None:
-    for name, weight_attr, scale_attr in (
-        ("grouped_w13", "_w13", "_s13_dense_t"),
-        ("grouped_w2", "_w2", "_s2_dense_t"),
-    ):
-        if not hasattr(strategy, weight_attr) or not hasattr(strategy, scale_attr):
+    for name, weight_stack, scale_stack_t in warmup_weights:
+        if not isinstance(weight_stack, torch.Tensor) or not isinstance(
+            scale_stack_t, torch.Tensor
+        ):
             continue
-        weight_stack = getattr(strategy, weight_attr)
-        scale_stack_t = getattr(strategy, scale_attr)
-        if weight_stack.dim() != 3:
-            continue
-        expert_idx = torch.zeros((1,), dtype=torch.long, device=weight_stack.device)
-        weight = weight_stack[0]
-        scale = (
-            torch.index_select(scale_stack_t, 0, expert_idx).squeeze(0).transpose(0, 1)
-        )
-        n_value = int(weight.shape[0])
-        k_value = int(weight.shape[1]) * 2
-        key = _shape_key("fp8_fp4", n_value, k_value)
-        _maybe_add_shape(
-            shapes,
-            key,
-            {"name": f"{module_name}.{name}", "weight": weight, "scale": scale},
-        )
-
-
-def _collect_local_loop_strategy_shapes(
-    shapes: Dict[tuple[str, int, int], dict],
-    module_name: str,
-    strategy: Any,
-) -> None:
-    for name, weight_attr, scale_attr in (
-        ("local_w1", "_W1_w", "_W1_s_gemm_t"),
-        ("local_w2", "_W2_w", "_W2_s_gemm_t"),
-        ("local_w3", "_W3_w", "_W3_s_gemm_t"),
-    ):
-        if not hasattr(strategy, weight_attr) or not hasattr(strategy, scale_attr):
-            continue
-        weight_stack = getattr(strategy, weight_attr)
-        scale_stack_t = getattr(strategy, scale_attr)
         if weight_stack.dim() != 3:
             continue
         expert_idx = torch.zeros((1,), dtype=torch.long, device=weight_stack.device)
@@ -1790,9 +1754,7 @@ def warmup_mhc_head_fused_jit(
         return
     _assert_not_capturing()
 
-    from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import (
-        tk_mhc_head_fused_enabled,
-    )
+    from rtp_llm.models_py.modules.dsv4.hc.mhc_tilelang import tk_mhc_head_fused_enabled
 
     if not tk_mhc_head_fused_enabled():
         return
@@ -1828,13 +1790,9 @@ def warmup_mhc_head_fused_jit(
             _release_cuda_cache(device)
 
     t0 = time.time()
-    _run_deepgemm_warmup_launches_serialized(
-        "DSV4 mHCHeadFused", _run_warmup_launches
-    )
+    _run_deepgemm_warmup_launches_serialized("DSV4 mHCHeadFused", _run_warmup_launches)
     if rank == 0:
-        logging.info(
-            "[DSV4 mHCHeadFused] JIT warmup done in %.2fs", time.time() - t0
-        )
+        logging.info("[DSV4 mHCHeadFused] JIT warmup done in %.2fs", time.time() - t0)
     _MHC_HEAD_FUSED_JIT_WARMED_KEYS.add(warmup_key)
 
 

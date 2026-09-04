@@ -198,6 +198,92 @@ py_test(
 )
 
 py_test(
+    name = "test_moe_weight_adapter",
+    srcs = ["test_moe_weight_adapter.py"],
+    deps = _DSV4_TEST_DEPS,
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_mega_moe_jit_warmup",
+    srcs = ["test_mega_moe_jit_warmup.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "mega_moe_static_buf_test",
+    srcs = ["mega_moe_static_buf_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_gate_fused",
+    srcs = ["test_gate_fused.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_silu_mul_split",
+    srcs = ["test_silu_mul_split.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_silu_mul_fp8_quant",
+    srcs = ["test_silu_mul_fp8_quant.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "grouped_moe_equivalence_test",
+    srcs = ["grouped_moe_equivalence_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "mega_moe_routed_only_execution_test",
+    srcs = ["mega_moe_routed_only_execution_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    env = {"GPU_COUNT": "2"},
+    timeout = "long",
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "2"},
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
     name = "test_chunked_moe",
     srcs = ["test_chunked_moe.py"],
     deps = [
@@ -256,15 +342,6 @@ py_test(
 )
 
 py_test(
-    name = "test_mega_moe_gate_pack",
-    srcs = ["test_mega_moe_gate_pack.py"],
-    deps = ["//rtp_llm/models_py:dsv4_fused_kernel_sources"],
-    tags = ["SM100_ARM"],
-    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
-    target_compatible_with = _DSV4_CUDA13_ONLY,
-)
-
-py_test(
     name = "test_dsv4_kernel_jit_warmup",
     srcs = ["test_dsv4_kernel_jit_warmup.py"],
     deps = [
@@ -277,7 +354,9 @@ py_test(
 py_test(
     name = "test_mega_moe_input_packer_perf",
     srcs = ["test_mega_moe_input_packer_perf.py"],
-    deps = ["//rtp_llm/models_py:dsv4_fused_kernel_sources"],
+    deps = ["//rtp_llm/models_py/triton_kernels:moe"],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
     target_compatible_with = _DSV4_CUDA13_ONLY,
 )
 

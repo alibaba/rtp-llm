@@ -8,6 +8,14 @@ py_test(
 )
 
 py_test(
+    name = "test_strategy_registry",
+    srcs = ["test_strategy_registry.py"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "test_cuda_strategies",
     srcs = ["test_cuda_strategies.py"],
     deps = [

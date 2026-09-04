@@ -182,9 +182,16 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
             "fp4_ep_low_latency",
             "fp4_ep_normal",
             "fp4_no_dp",
+            "mega_moe",
+            "mega_moe_se",
+            "grouped_fp4",
+            "local_loop",
         ],
         default="auto",
-        help="指定moe strategy, 默认为auto",
+        help=(
+            "指定 MoE strategy，默认为 auto。具体策略的适用性由当前模型配置、"
+            "并行拓扑和运行时后端共同校验。"
+        ),
     )
     moe_group.add_argument(
         "--fp4_moe_op",

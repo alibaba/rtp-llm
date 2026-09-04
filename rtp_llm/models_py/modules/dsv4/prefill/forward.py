@@ -115,6 +115,7 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     build_block_tables_batched,
     primary_attention_inputs,
 )
+from rtp_llm.models_py.modules.dsv4.moe_layer import synchronized_moe_chunk_plan
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
@@ -241,11 +242,45 @@ def _build_positions_from_lengths(
     return prefix_lengths.gather(0, req_ids) + local_offsets
 
 
+def _resolve_prefill_cu_seqlens(
+    cu_seqlens: Optional[torch.Tensor],
+    input_lengths: Optional[torch.Tensor],
+    device: Optional[torch.device] = None,
+) -> torch.Tensor:
+    """Return valid query boundaries for normal and warmup prefill calls.
+
+    The request path normally populates ``attn.cu_seqlens``. Callers choose
+    the returned tensor's device explicitly so regular requests can retain
+    the downstream host-resident shape contract, while startup warmup and
+    capture probes can rebuild ``[0, cumsum(lengths)]`` from device-resident
+    ``input_lengths`` without a capture-unsafe host transfer.
+    """
+    if cu_seqlens is not None and cu_seqlens.numel() >= 2:
+        target_device = cu_seqlens.device if device is None else device
+        return cu_seqlens.to(device=target_device)
+
+    if input_lengths is None or input_lengths.numel() == 0:
+        raise RuntimeError(
+            "DSV4 prefill: no usable cu_seqlens and no non-empty input_lengths"
+        )
+    target_device = input_lengths.device if device is None else device
+    lengths = input_lengths.to(device=target_device, dtype=torch.int32).reshape(-1)
+    return torch.cat(
+        (
+            torch.zeros(1, dtype=torch.int32, device=target_device),
+            torch.cumsum(lengths, dim=0, dtype=torch.int32),
+        ),
+        dim=0,
+    ).contiguous()
+
+
 def _last_hidden_by_request(
     flat: torch.Tensor,
     cu_seqlens: Optional[torch.Tensor],
     cp_ctx: Optional[Any],
 ) -> torch.Tensor:
+    if flat.size(0) == 0:
+        return flat
     if cp_ctx is not None and cp_ctx.cp_size > 1:
         return cp_gather_last_by_request(flat, cp_ctx)
     if cu_seqlens is not None and cu_seqlens.numel() >= 2:
@@ -403,7 +438,7 @@ def forward_layers(
     # BF16 path doesn't need this; ``Attention`` rebuilds meta inside its
     # own forward.
     with record_range_ctx():
-        if v4.fp8_kv_cache:
+        if v4.fp8_kv_cache and h.size(0) > 0:
             sp_int_for_meta = int(positions[0].item())
             sp_per_req: Optional[torch.Tensor] = None
             req_id_per_token: Optional[torch.Tensor] = None
@@ -501,7 +536,9 @@ def forward_layers(
             )
 
     try:
-        with record_range_ctx():
+        with record_range_ctx(), synchronized_moe_chunk_plan(
+            v4.layers, h.size(0), h.device
+        ):
             # Two callable chains intentionally coexist:
             #   * normal ``Block.forward`` keeps debug checks and fallback layouts;
             #   * cached fast callables are validated once for the FP8 production
@@ -714,35 +751,48 @@ def forward_prefill(
     #    (the field the dev branch called ``position_ids``; it is only populated
     #    when the model declares a position-id length factor, so the synthesize
     #    branch below stays the live path for DSV4).
-    # CP prefill (and RTP_LLM_DEVICE_INPUT) leave the host mirror empty: the CP
-    # processor republishes input_lengths to CUDA before buildPyAttentionInputs
-    # runs, so only the device cu_seqlens gets filled.
-    cu_seqlens = attn.cu_seqlens
-    if cu_seqlens is None or cu_seqlens.numel() < 2:
-        cu_seqlens = attn.cu_seqlens_device
-    if cu_seqlens is None or cu_seqlens.numel() < 2:
-        # Without at least [start, end] the batch_size fallback at :440 would
-        # treat every token as one request and silently mis-bound attention.
-        def _desc(t):
-            return "None" if t is None else f"{tuple(t.shape)}@{t.device}"
-
-        raise RuntimeError(
-            "DSV4 prefill: no usable cu_seqlens — "
-            f"cu_seqlens={_desc(attn.cu_seqlens)}, "
-            f"cu_seqlens_device={_desc(attn.cu_seqlens_device)}"
-        )
-    if cu_seqlens.is_cuda:
-        # Downstream shape logic (dsv4/block.py) gates the dense-layout fast path
-        # on cu_seqlens being host-resident; a CUDA tensor there silently degrades
-        # max_S to T_total and over-allocates the padded buffer by a factor of B.
-        cu_seqlens = cu_seqlens.cpu()
+    # CP prefill (and RTP_LLM_DEVICE_INPUT) can leave the host mirror empty, so
+    # fall back to the device mirror. Existing boundaries are normalized to
+    # CPU because downstream shape logic gates its dense-layout fast path on
+    # host residency. Only a boundary rebuilt for warmup/capture remains on
+    # the input-length tensor's device, keeping that path graph-capture-safe.
+    host_cu_seqlens = getattr(attn, "cu_seqlens", None)
+    cu_seqlens_device = getattr(attn, "cu_seqlens_device", None)
+    framework_cu_seqlens = host_cu_seqlens
+    if framework_cu_seqlens is None or framework_cu_seqlens.numel() < 2:
+        framework_cu_seqlens = cu_seqlens_device
+    input_lengths_device = getattr(attn, "input_lengths_device", None)
+    rebuild_input_lengths = input_lengths_device
+    if rebuild_input_lengths is None or rebuild_input_lengths.numel() == 0:
+        rebuild_input_lengths = getattr(attn, "input_lengths", None)
+    if framework_cu_seqlens is not None and framework_cu_seqlens.numel() >= 2:
+        cu_seqlens_target_device = torch.device("cpu")
+    else:
+        cu_seqlens_target_device = getattr(rebuild_input_lengths, "device", None)
+    cu_seqlens = _resolve_prefill_cu_seqlens(
+        framework_cu_seqlens,
+        rebuild_input_lengths,
+        cu_seqlens_target_device,
+    )
     positions = getattr(attn, "combo_position_ids", None)
     # warmup / cudagraph capture path doesn't populate combo_position_ids —
-    # synthesize from (prefix_lengths, input_lengths).
+    # synthesize from (prefix_lengths, input_lengths). Prefer ``*_device``
+    # variants when available: during cudagraph capture, the host-side
+    # ``input_lengths`` / ``prefix_lengths`` are pinned int32 CPU tensors,
+    # but a dtype-converting ``.to(device=..., dtype=int64)`` on a pinned
+    # tensor produces an unpinned intermediate which capture rejects.
     if positions is None or positions.numel() == 0:
+        il_d = getattr(attn, "input_lengths_device", None)
+        pl_d = getattr(attn, "prefix_lengths_device", None)
+        input_lens = (
+            il_d if il_d is not None and il_d.numel() > 0 else attn.input_lengths
+        )
+        prefix_lens = (
+            pl_d if pl_d is not None and pl_d.numel() > 0 else attn.prefix_lengths
+        )
         positions = _build_positions_from_lengths(
-            attn.input_lengths,
-            attn.prefix_lengths,
+            input_lens,
+            prefix_lens,
             input_ids.device,
             total_tokens=int(input_ids.numel()),
         )

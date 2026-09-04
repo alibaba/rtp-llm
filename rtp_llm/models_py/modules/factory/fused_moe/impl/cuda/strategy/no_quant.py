@@ -22,6 +22,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
 class CudaNoQuantEpLowLatencyStrategy(MoeStrategy):
     """CUDA EP low latency mode without quantization strategy"""
 
+    strategy_name = "no_auant_ep_low_latency"
+
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         resolver = MoeConfigResolver()
@@ -51,6 +53,8 @@ class CudaNoQuantEpLowLatencyStrategy(MoeStrategy):
 class CudaNoQuantCppStrategy(MoeStrategy):
     """CUDA CPP mode without quantization strategy"""
 
+    strategy_name = "no_auant_cpp"
+
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         resolver = MoeConfigResolver()
@@ -78,6 +82,8 @@ class CudaNoQuantCppStrategy(MoeStrategy):
 
 class CudaNoQuantDpNormalStrategy(MoeStrategy):
     """CUDA CPP mode without quantization strategy and dp normal mode"""
+
+    strategy_name = "no_auant_dp_normal"
 
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:

@@ -81,17 +81,15 @@ class GenericMoeLayer(nn.Module):
             quant_config=quant_config,
             enable_cuda_graph=enable_cuda_graph,
         )
+        config_adapter.has_shared_expert_gate = W.shared_expert_gate in weights
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
         router = self.fused_moe.router
         router_tp_size = router.tp_collective_size
 
-        self.w1 = weights.get(W.moe_w1, None)
-        self.w2 = weights.get(W.moe_w2, None)
-        assert (
-            self.w1 is not None and self.w2 is not None
-        ), "Weights w1 and w2 must be provided"
-        self.num_local_experts = self.w1.shape[0]
-        self.add_shared_expert = config.moe_style == 2
+        self.num_local_experts = self.num_experts // max(self.ep_size, 1)
+        self.add_shared_expert = (
+            config.moe_style == 2 and not self.fused_moe.includes_shared_expert
+        )
         if self.add_shared_expert:
             self.shared_expert = DenseMLP(
                 config.activation_type,

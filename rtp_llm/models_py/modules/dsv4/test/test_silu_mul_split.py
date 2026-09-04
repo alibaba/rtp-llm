@@ -15,8 +15,6 @@ Bypasses rtp_llm package init via importlib.
 
 from __future__ import annotations
 
-import importlib.util
-import os
 import unittest
 
 import torch
@@ -24,14 +22,9 @@ import torch.nn.functional as F
 
 
 def _load_silu_mul_split():
-    here = os.path.dirname(os.path.abspath(__file__))
-    src = os.path.abspath(
-        os.path.join(here, "..", "_silu_mul_split_triton.py")
-    )
-    spec = importlib.util.spec_from_file_location("_v4_silu_mul_split", src)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod.silu_mul_split
+    from rtp_llm.models_py.triton_kernels.moe.silu_mul_split import silu_mul_split
+
+    return silu_mul_split
 
 
 def _ref_silu_mul(gate: torch.Tensor, up: torch.Tensor, clamp_limit: float):
@@ -46,10 +39,7 @@ def _ref_silu_mul(gate: torch.Tensor, up: torch.Tensor, clamp_limit: float):
 class SiluMulSplitEquivTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        try:
-            _load_silu_mul_split()
-        except Exception as e:
-            raise unittest.SkipTest(f"silu_mul_split not importable: {e}")
+        _load_silu_mul_split()
 
     def _check(self, *, N, D, clamp_limit, atol=1e-6, rtol=1e-5):
         torch.manual_seed(0)

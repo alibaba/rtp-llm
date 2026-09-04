@@ -73,6 +73,7 @@ class ModelConfig(CppModelConfig):
         "quant_config",
         "inter_size",
         "moe_inter_size",
+        "n_shared_experts",
         "generate_env_config",
         "render_config",
         "phy2log_path",
@@ -557,6 +558,7 @@ class ModelConfig(CppModelConfig):
         self.moe_inter_size: int = (
             0  # MOE intermediate size (for MOE expert FFN layers)
         )
+        self.n_shared_experts: int = 0
 
         # Renderer configuration fields
         self.generate_env_config: Optional[Any] = (

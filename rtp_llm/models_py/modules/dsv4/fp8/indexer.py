@@ -22,6 +22,7 @@ What this class does NOT do — by design:
 from __future__ import annotations
 
 import os
+from contextlib import suppress
 from typing import Any, Callable, Dict, NamedTuple, Optional
 
 import torch
@@ -56,7 +57,6 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import (
     _CompressorPending,
 )
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
-from rtp_llm.models_py.modules.dsv4.qlinear import QuantizedLinear
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 
@@ -199,9 +199,7 @@ def _fp8_prefill_score_chunk_rows() -> int:
 def _get_topk_workspace(device: torch.device) -> torch.Tensor:
     ws = _topk_v3_workspace_cache.get(device)
     if ws is None:
-        ws = torch.empty(
-            _TOPK_V3_WORKSPACE_SIZE, dtype=torch.uint8, device=device
-        )
+        ws = torch.empty(_TOPK_V3_WORKSPACE_SIZE, dtype=torch.uint8, device=device)
         _topk_v3_workspace_cache[device] = ws
     return ws
 

@@ -6,7 +6,7 @@ import unittest
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.moe._mega_se_input_pack_triton import (
+from rtp_llm.models_py.triton_kernels.moe.mega_moe_se_input_pack import (
     stage_mega_moe_se_shared_l1_scales,
 )
 

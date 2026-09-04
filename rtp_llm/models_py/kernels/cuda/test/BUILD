@@ -76,3 +76,11 @@ py_test(
     tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20'},
 )
+
+py_test(
+    name = "fused_silu_mul_token_quant_batched_test",
+    srcs = ["fused_silu_mul_token_quant_batched_test.py"],
+    deps = py_test_deps,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)

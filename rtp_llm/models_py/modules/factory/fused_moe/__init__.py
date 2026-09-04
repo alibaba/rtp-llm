@@ -21,13 +21,14 @@ import torch
 from rtp_llm.device.device_impl import is_gfx950
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.utils.arch import get_sm, is_cuda
-
 from rtp_llm.utils.backend_registry import run_backend_registrations
+
 from .defs.fused_moe import FusedMoe
 from .factory import FusedMoeFactory
 from .strategy_registry import StrategyRegistry
 
 __all__ = ["FusedMoeFactory", "StrategyRegistry", "FusedMoe"]
+
 
 # ============================================================================
 # Device-specific MoE strategy registration
@@ -48,9 +49,9 @@ if device_type == DeviceType.ROCm:
         RocmBf16PureTPStrategy,
         RocmEpLowLatencyStrategy,
         RocmEpNormalStrategy,
-        RocmMXFp4PureTPStrategy,
         RocmFp8PerBlockPureTPStrategy,
         RocmFp8PerChannelPureTPStrategy,
+        RocmMXFp4PureTPStrategy,
     )
 
     registry = StrategyRegistry()
@@ -68,15 +69,19 @@ else:
 
     # MoE strategies
     from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (
-        CudaFp8PerBlockPureCPStrategy,
-        CudaFp8PerBlockPureDPStrategy,
         CudaFp8PerBlockEpLowLatencyStrategy,
         CudaFp8PerBlockEpNormalStrategy,
         CudaFp8PerBlockNoDPMaskedStrategy,
         CudaFp8PerBlockNoDPStrategy,
+        CudaFp8PerBlockPureCPStrategy,
+        CudaFp8PerBlockPureDPStrategy,
         CudaFp8PerTensorEpLowLatencyStrategy,
         CudaFp8PerTensorEpNormalStrategy,
         CudaFp8PerTensorNoDPStrategy,
+        CudaGroupedFp4Strategy,
+        CudaLocalLoopStrategy,
+        CudaMegaMoeSEStrategy,
+        CudaMegaMoeStrategy,
         CudaNoQuantCppStrategy,
         CudaNoQuantDpNormalStrategy,
         CudaNoQuantEpLowLatencyStrategy,
@@ -86,6 +91,10 @@ else:
     )
 
     registry = StrategyRegistry()
+    registry.register(CudaMegaMoeSEStrategy())
+    registry.register(CudaMegaMoeStrategy())
+    registry.register(CudaGroupedFp4Strategy())
+    registry.register(CudaLocalLoopStrategy())
     registry.register(CudaFp8PerTensorEpLowLatencyStrategy())
     registry.register(CudaFp8PerTensorEpNormalStrategy())
     registry.register(CudaFp8PerBlockEpLowLatencyStrategy())

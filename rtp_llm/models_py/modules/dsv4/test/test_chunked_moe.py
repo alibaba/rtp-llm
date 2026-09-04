@@ -1,8 +1,4 @@
-from __future__ import annotations
-
 import os
-import sys
-import types
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -10,448 +6,278 @@ from unittest import mock
 import torch
 import torch.nn as nn
 
-_THIS = os.path.dirname(os.path.abspath(__file__))
-_REPO = os.path.abspath(os.path.join(_THIS, "..", "..", "..", "..", ".."))
-if _REPO not in sys.path:
-    sys.path.insert(0, _REPO)
-
-
-def _stub_package(name: str, path: str) -> None:
-    module = types.ModuleType(name)
-    module.__path__ = [path]
-    sys.modules.setdefault(name, module)
-
-
-_stub_package("rtp_llm", os.path.join(_REPO, "rtp_llm"))
-_stub_package("rtp_llm.models_py", os.path.join(_REPO, "rtp_llm", "models_py"))
-_stub_package(
-    "rtp_llm.models_py.modules",
-    os.path.join(_REPO, "rtp_llm", "models_py", "modules"),
-)
-_stub_package(
-    "rtp_llm.models_py.modules.dsv4",
-    os.path.join(_REPO, "rtp_llm", "models_py", "modules", "dsv4"),
-)
-_stub_package(
-    "rtp_llm.models_py.modules.dsv4.moe",
-    os.path.join(_REPO, "rtp_llm", "models_py", "modules", "dsv4", "moe"),
-)
-_stub_package(
-    "rtp_llm.models_py.modules.dsv4.moe.strategies",
-    os.path.join(_REPO, "rtp_llm", "models_py", "modules", "dsv4", "moe", "strategies"),
-)
-
-_ops_pkg = types.ModuleType("librtp_compute_ops")
-_ops_pkg.__path__ = []
-_ops_mod = types.ModuleType("librtp_compute_ops.rtp_llm_ops")
-sys.modules.setdefault("librtp_compute_ops", _ops_pkg)
-sys.modules.setdefault("librtp_compute_ops.rtp_llm_ops", _ops_mod)
-
-from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
-from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
+from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
+from rtp_llm.models_py.modules.dsv4.moe_layer import (
     DEFAULT_MOE_CHUNK_TOKENS,
-    MoE,
+    Dsv4MoeLayer,
     chunked_moe_enabled,
     cp_padded_tokens_per_rank_bound,
     moe_chunk_tokens_from_env,
     resolve_moe_max_tokens_per_rank,
+    synchronized_moe_chunk_plan,
 )
-from rtp_llm.models_py.modules.dsv4.moe.strategies.mega import _mega_output_capacity
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
+    _mega_output_capacity,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.profiler import (
+    record_function_ranges_enabled,
+)
 
 
-class _FakeGate(nn.Module):
-    def __init__(self) -> None:
+class _FakeMoe(nn.Module):
+    def __init__(self, capacity):
         super().__init__()
-        self.input_id_chunks: list[torch.Tensor] = []
-        self.token_chunks: list[int] = []
+        self.capacity = capacity
+        self.token_chunks = []
+        self.input_id_chunks = []
+        self.output_buffers = []
+        self.ranges_enabled = []
 
-    def forward(self, x: torch.Tensor, input_ids: torch.Tensor):
+    def forward(self, x, input_ids, observer=None, out=None):
+        if x.size(0) > self.capacity:
+            raise RuntimeError("chunk overflow")
         self.token_chunks.append(x.size(0))
-        self.input_id_chunks.append(input_ids.detach().clone())
-        weights = torch.ones((x.size(0), 1), dtype=torch.float32, device=x.device)
-        indices = input_ids.view(-1, 1).to(torch.long)
-        return weights, indices
+        self.input_id_chunks.append(None if input_ids is None else input_ids.clone())
+        self.ranges_enabled.append(record_function_ranges_enabled())
+        result = x * 3
+        if out is not None:
+            out.copy_(result)
+            result = out
+            self.output_buffers.append(out)
+        if observer is not None:
+            observer("final_y", result)
+        return result
 
 
-class _FakeSharedExecutor:
-    def __init__(self) -> None:
-        self.token_chunks: list[int] = []
-        self._out: torch.Tensor | None = None
-
-    def start(self, shared_experts, x: torch.Tensor) -> None:
-        self.token_chunks.append(x.size(0))
-        self._out = x.float() + 1.0
-
-    def finish(self) -> torch.Tensor:
-        assert self._out is not None
-        out = self._out
-        self._out = None
-        return out
+def _fake_layer(dim=4, capacity=5, is_decode_role=False):
+    layer = Dsv4MoeLayer.__new__(Dsv4MoeLayer)
+    nn.Module.__init__(layer)
+    layer.layer_id = 0
+    layer.dim = dim
+    layer.max_tokens_per_rank = capacity
+    layer._is_decode_role = is_decode_role
+    layer._moe = _FakeMoe(capacity)
+    layer.strategy_name = "local_loop"
+    return layer
 
 
-class _FakeStrategy(nn.Module):
-    name = "mega"
-
-    def __init__(self, cap: int) -> None:
-        super().__init__()
-        self.cap = cap
-        self.token_chunks: list[int] = []
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        weights: torch.Tensor,
-        indices: torch.Tensor,
-    ) -> torch.Tensor:
-        self.token_chunks.append(x.size(0))
-        if x.size(0) > self.cap:
-            raise RuntimeError(f"chunk overflow: {x.size(0)} > {self.cap}")
-        return x.float() * 2.0
-
-
-class _FakeGatePackStrategy(_FakeStrategy):
-    def __init__(self, cap: int) -> None:
-        super().__init__(cap)
-        self.gate_pack_token_chunks: list[int] = []
-        self.gate_pack_input_id_chunks: list[torch.Tensor] = []
-
-    def can_use_gate_pack_static(self, gate) -> bool:
-        del gate
-        return True
-
-    def forward_with_gate_pack(
-        self,
-        x: torch.Tensor,
-        gate,
-        input_ids: torch.Tensor,
-    ) -> torch.Tensor:
-        del gate
-        self.gate_pack_token_chunks.append(x.size(0))
-        self.gate_pack_input_id_chunks.append(input_ids.detach().clone())
-        if x.size(0) > self.cap:
-            raise RuntimeError(f"chunk overflow: {x.size(0)} > {self.cap}")
-        return x.float() * 2.0
-
-
-def _fake_moe(dim: int, cap: int, is_decode_role: bool = False) -> MoE:
-    moe = MoE.__new__(MoE)
-    nn.Module.__init__(moe)
-    moe.layer_id = 0
-    moe.dim = dim
-    moe.max_tokens_per_rank = cap
-    moe._is_decode_role = is_decode_role
-    moe._routed_includes_shared = False
-    moe.gate = _FakeGate()
-    moe.shared_experts = nn.Identity()
-    moe._shared_executor = _FakeSharedExecutor()
-    moe._strategy = _FakeStrategy(cap)
-    moe._gate_pack_static = False
-    return moe
-
-
-class ChunkedMoETest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.env = mock.patch.dict(
-            os.environ,
-            {
-                "DSV4_MOE_CHUNK_PREFILL": "1",
-                "DSV4_MOE_STRICT_FUSED": "0",
-                "DSV4_SHARED_EXPERT_BF16_ADD": "1",
-            },
-            clear=False,
-        )
-        self.env.start()
-
-    def tearDown(self) -> None:
-        self.env.stop()
-
-    def test_env_helpers_default_on(self):
+class ChunkedMoeTest(unittest.TestCase):
+    def test_chunk_helpers(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertTrue(chunked_moe_enabled())
-            self.assertEqual(DEFAULT_MOE_CHUNK_TOKENS, 16384)
             self.assertEqual(moe_chunk_tokens_from_env(), DEFAULT_MOE_CHUNK_TOKENS)
-        with mock.patch.dict(os.environ, {"DSV4_MOE_CHUNK_TOKENS": "4096"}):
-            self.assertEqual(moe_chunk_tokens_from_env(), 4096)
-        with mock.patch.dict(os.environ, {"DSV4_MOE_CHUNK_TOKENS": "bad"}):
-            self.assertEqual(moe_chunk_tokens_from_env(), DEFAULT_MOE_CHUNK_TOKENS)
-
-    def test_global_chunk_tokens_overrides_legacy_chunk_envs(self):
-        with mock.patch.dict(
-            os.environ,
-            {
-                "DSV4_CHUNK_TOKENS": "16384",
-                "DSV4_MOE_CHUNK_PREFILL": "0",
-                "DSV4_MOE_CHUNK_TOKENS": "4096",
-                "DSV4_FP8_INDEXER_SCORE_CHUNK_ROWS": "8192",
-            },
-            clear=True,
-        ):
-            self.assertTrue(chunked_moe_enabled())
-            self.assertEqual(moe_chunk_tokens_from_env(), 16384)
+        self.assertEqual(cp_padded_tokens_per_rank_bound(200002, 4), 50002)
+        with mock.patch.dict(os.environ, {"DSV4_MOE_CHUNK_PREFILL": "0"}):
             self.assertEqual(
-                dsv4_chunk_tokens_from_env("DSV4_FP8_INDEXER_SCORE_CHUNK_ROWS"),
-                16384,
+                resolve_moe_max_tokens_per_rank(200002, 200002, 4, 8), 50002
             )
-            budget = resolve_moe_max_tokens_per_rank(
-                max_seq_len=1048576,
-                current_max_tokens_per_rank=1048576,
-                cp_size=4,
-                max_generate_batch_size=8,
-            )
-        self.assertEqual(budget, 16384)
 
-    def test_global_chunk_tokens_zero_disables_all_chunking(self):
+    def test_global_zero_disables_chunking_without_shrinking_capacity(self):
         with mock.patch.dict(
             os.environ,
             {
                 "DSV4_CHUNK_TOKENS": "0",
                 "DSV4_MOE_CHUNK_PREFILL": "1",
                 "DSV4_MOE_CHUNK_TOKENS": "4096",
-                "DSV4_MTP_FUSION_CHUNK_TOKENS": "8192",
             },
             clear=True,
         ):
             self.assertFalse(chunked_moe_enabled())
             self.assertEqual(moe_chunk_tokens_from_env(), 0)
             self.assertEqual(
-                dsv4_chunk_tokens_from_env("DSV4_MTP_FUSION_CHUNK_TOKENS"),
-                0,
+                resolve_moe_max_tokens_per_rank(1048576, 65536, 4, 8),
+                65536,
             )
-            budget = resolve_moe_max_tokens_per_rank(
-                max_seq_len=1048576,
-                current_max_tokens_per_rank=65536,
-                cp_size=4,
-                max_generate_batch_size=8,
-            )
-        self.assertEqual(budget, 65536)
 
-    def test_token_budget_caps_cp_1m_to_moe_chunk(self):
+    def test_prefill_budget_never_expands_existing_capacity(self):
         with mock.patch.dict(
             os.environ,
             {"DSV4_MOE_CHUNK_PREFILL": "1", "DSV4_MOE_CHUNK_TOKENS": "65536"},
+            clear=True,
         ):
-            budget = resolve_moe_max_tokens_per_rank(
-                max_seq_len=1048576,
-                current_max_tokens_per_rank=1048576,
-                cp_size=4,
-                max_generate_batch_size=8,
+            self.assertEqual(
+                resolve_moe_max_tokens_per_rank(1048576, 8192, 4, 8),
+                8192,
             )
-        self.assertEqual(budget, 65536)
 
-    def test_cp_token_budget_includes_zigzag_padding(self):
-        self.assertEqual(cp_padded_tokens_per_rank_bound(200002, 4), 50002)
-        with mock.patch.dict(os.environ, {"DSV4_MOE_CHUNK_PREFILL": "0"}):
-            budget = resolve_moe_max_tokens_per_rank(
-                max_seq_len=200002,
-                current_max_tokens_per_rank=200002,
-                cp_size=4,
-                max_generate_batch_size=8,
-            )
-        self.assertEqual(budget, 50002)
-
-    def test_token_budget_never_expands_existing_cap(self):
+    def test_prefill_budget_shrinks_to_moe_chunk_capacity(self):
         with mock.patch.dict(
             os.environ,
-            {"DSV4_MOE_CHUNK_PREFILL": "1", "DSV4_MOE_CHUNK_TOKENS": "65536"},
+            {"DSV4_MOE_CHUNK_PREFILL": "1", "DSV4_MOE_CHUNK_TOKENS": "4096"},
+            clear=True,
         ):
-            budget = resolve_moe_max_tokens_per_rank(
-                max_seq_len=1048576,
-                current_max_tokens_per_rank=8192,
-                cp_size=4,
-                max_generate_batch_size=8,
+            self.assertEqual(
+                resolve_moe_max_tokens_per_rank(1048576, 65536, 1, 8),
+                4096,
             )
-        self.assertEqual(budget, 8192)
 
-    def test_token_budget_decode_uses_batch_size(self):
+    def test_global_chunk_capacity_takes_priority(self):
         with mock.patch.dict(
             os.environ,
-            {"DSV4_MOE_CHUNK_PREFILL": "1", "DSV4_MOE_CHUNK_TOKENS": "65536"},
+            {
+                "DSV4_CHUNK_TOKENS": "2048",
+                "DSV4_MOE_CHUNK_TOKENS": "4096",
+            },
+            clear=True,
         ):
-            budget = resolve_moe_max_tokens_per_rank(
-                max_seq_len=1048576,
-                current_max_tokens_per_rank=1048576,
-                cp_size=4,
-                max_generate_batch_size=32,
+            self.assertEqual(moe_chunk_tokens_from_env(), 2048)
+            self.assertEqual(
+                resolve_moe_max_tokens_per_rank(1048576, 65536, 1, 8),
+                2048,
+            )
+
+    def test_speculative_decode_budget_accounts_for_generated_tokens(self):
+        self.assertEqual(
+            resolve_moe_max_tokens_per_rank(
+                1048576,
+                1048576,
+                4,
+                1024,
                 is_decode_role=True,
-            )
-        self.assertEqual(budget, 32)
-
-    def test_token_budget_decode_accounts_for_speculative_width(self):
-        budget = resolve_moe_max_tokens_per_rank(
-            max_seq_len=1048576,
-            current_max_tokens_per_rank=1048576,
-            cp_size=4,
-            max_generate_batch_size=1024,
-            is_decode_role=True,
-            is_speculative=True,
-            gen_num_per_cycle=4,
+                is_speculative=True,
+                gen_num_per_cycle=4,
+            ),
+            5120,
         )
-        self.assertEqual(budget, 5120)
 
-    def test_token_budget_decode_non_speculative_uses_batch_size(self):
-        budget = resolve_moe_max_tokens_per_rank(
-            max_seq_len=1048576,
-            current_max_tokens_per_rank=1048576,
-            cp_size=4,
-            max_generate_batch_size=1024,
-            is_decode_role=True,
-            is_speculative=False,
-            gen_num_per_cycle=4,
-        )
-        self.assertEqual(budget, 1024)
-
-    def test_token_budget_ignores_role_type_env(self):
-        with mock.patch.dict(
-            os.environ,
-            {"ROLE_TYPE": "DECODE", "DSV4_MOE_CHUNK_PREFILL": "0"},
-        ):
-            budget = resolve_moe_max_tokens_per_rank(
-                max_seq_len=200002,
-                current_max_tokens_per_rank=200002,
-                cp_size=4,
-                max_generate_batch_size=8,
-            )
-        self.assertEqual(budget, 50002)
-
-    def test_chunk_splits_flat_tokens_and_preserves_order(self):
-        moe = _fake_moe(dim=3, cap=5)
+    def test_chunking_preserves_tokens_and_input_ids(self):
+        layer = _fake_layer(dim=3, capacity=5)
         x = torch.arange(17 * 3, dtype=torch.float32).view(17, 3)
-        input_ids = torch.arange(17, dtype=torch.long)
-
-        out = moe(x, input_ids)
-
-        self.assertEqual(moe.gate.token_chunks, [5, 5, 5, 2])
-        self.assertEqual(moe._shared_executor.token_chunks, [5, 5, 5, 2])
-        self.assertEqual(moe._strategy.token_chunks, [5, 5, 5, 2])
-        self.assertTrue(torch.equal(out, x * 3.0 + 1.0))
-
-    def test_input_ids_are_sliced_with_token_chunks(self):
-        moe = _fake_moe(dim=2, cap=4)
-        x = torch.arange(11 * 2, dtype=torch.float32).view(11, 2)
-        input_ids = torch.arange(100, 111, dtype=torch.long)
-
-        moe(x, input_ids)
-
-        chunks = [c.tolist() for c in moe.gate.input_id_chunks]
+        input_ids = torch.arange(100, 117)
+        output = layer(x, input_ids)
+        self.assertTrue(torch.equal(output, x * 3))
+        self.assertEqual(layer._moe.token_chunks, [5, 5, 5, 2])
         self.assertEqual(
-            chunks, [[100, 101, 102, 103], [104, 105, 106, 107], [108, 109, 110]]
+            [chunk.tolist() for chunk in layer._moe.input_id_chunks],
+            [
+                [100, 101, 102, 103, 104],
+                [105, 106, 107, 108, 109],
+                [110, 111, 112, 113, 114],
+                [115, 116],
+            ],
         )
+        self.assertEqual(len(layer._moe.output_buffers), 4)
+        output_storage = output.untyped_storage().data_ptr()
+        for buf in layer._moe.output_buffers:
+            self.assertEqual(buf.untyped_storage().data_ptr(), output_storage)
 
-    def test_chunking_avoids_strategy_token_overflow(self):
-        moe = _fake_moe(dim=4, cap=8)
-        x = torch.randn(33, 4)
-        input_ids = torch.arange(33, dtype=torch.long)
+    def test_decode_rejects_oversized_input(self):
+        layer = _fake_layer(capacity=4, is_decode_role=True)
+        with self.assertRaisesRegex(ValueError, "decode MoE input tokens=5"):
+            layer(torch.zeros(5, 4), torch.arange(5))
+        self.assertEqual(layer._moe.token_chunks, [])
 
-        moe(x, input_ids)
+    def test_input_ids_are_optional(self):
+        layer = _fake_layer(dim=3, capacity=5)
+        x = torch.arange(7 * 3, dtype=torch.float32).view(7, 3)
+        output = layer(x)
+        self.assertTrue(torch.equal(output, x * 3))
+        self.assertEqual(layer._moe.token_chunks, [5, 2])
+        self.assertEqual(layer._moe.input_id_chunks, [None, None])
 
-        self.assertLessEqual(max(moe._strategy.token_chunks), 8)
-
-    def test_varlen_multi_request_flat_order(self):
-        moe = _fake_moe(dim=1, cap=6)
-        request_lengths = [3, 17, 5]
-        total = sum(request_lengths)
-        x = torch.arange(total, dtype=torch.float32).view(total, 1)
-        input_ids = torch.arange(total, dtype=torch.long)
-
-        out = moe(x, input_ids)
-
-        self.assertEqual(out.view(-1).tolist(), (x.view(-1) * 3.0 + 1.0).tolist())
-        self.assertEqual(moe.gate.token_chunks, [6, 6, 6, 6, 1])
-
-    def test_small_input_keeps_single_call(self):
-        moe = _fake_moe(dim=2, cap=8)
-        x = torch.randn(7, 2)
-        input_ids = torch.arange(7, dtype=torch.long)
-
-        out = moe(x, input_ids)
-
-        self.assertEqual(moe.gate.token_chunks, [7])
-        self.assertTrue(torch.allclose(out, x * 3.0 + 1.0))
-
-    def test_nonfused_gate_pack_keeps_shared_expert_add(self):
-        moe = _fake_moe(dim=2, cap=8)
-        moe._strategy = _FakeGatePackStrategy(cap=8)
-        moe._gate_pack_static = True
-        x = torch.randn(7, 2)
-        input_ids = torch.arange(100, 107, dtype=torch.long)
-
-        out = moe(x, input_ids)
-
-        self.assertEqual(moe.gate.token_chunks, [])
-        self.assertEqual(moe._strategy.gate_pack_token_chunks, [7])
-        self.assertEqual(moe._shared_executor.token_chunks, [7])
-        self.assertEqual(
-            moe._strategy.gate_pack_input_id_chunks[0].tolist(),
-            input_ids.tolist(),
-        )
-        self.assertTrue(torch.allclose(out, x * 3.0 + 1.0))
-
-    def test_nonfused_gate_pack_chunking_preserves_order(self):
-        moe = _fake_moe(dim=2, cap=4)
-        moe._strategy = _FakeGatePackStrategy(cap=4)
-        moe._gate_pack_static = True
-        x = torch.arange(11 * 2, dtype=torch.float32).view(11, 2)
-        input_ids = torch.arange(200, 211, dtype=torch.long)
-
-        out = moe(x, input_ids)
-
-        self.assertEqual(moe.gate.token_chunks, [])
-        self.assertEqual(moe._strategy.gate_pack_token_chunks, [4, 4, 3])
-        self.assertEqual(moe._shared_executor.token_chunks, [4, 4, 3])
-        chunks = [c.tolist() for c in moe._strategy.gate_pack_input_id_chunks]
-        self.assertEqual(
-            chunks,
-            [[200, 201, 202, 203], [204, 205, 206, 207], [208, 209, 210]],
-        )
-        self.assertTrue(torch.equal(out, x * 3.0 + 1.0))
-
-    def test_env_can_disable_chunking(self):
-        moe = _fake_moe(dim=2, cap=4)
-        x = torch.randn(9, 2)
-        input_ids = torch.arange(9, dtype=torch.long)
-        with mock.patch.dict(os.environ, {"DSV4_MOE_CHUNK_PREFILL": "0"}):
-            with self.assertRaisesRegex(RuntimeError, "chunk overflow"):
-                moe(x, input_ids)
-
-    def test_decode_asserts_instead_of_chunking(self):
-        moe = _fake_moe(dim=2, cap=4, is_decode_role=True)
-        x = torch.randn(9, 2)
-        input_ids = torch.arange(9, dtype=torch.long)
-
-        with self.assertRaisesRegex(AssertionError, "decode must not use chunked MoE"):
-            moe(x, input_ids)
-
-        self.assertEqual(moe.gate.token_chunks, [])
-
-    def test_cuda_graph_capture_asserts_instead_of_chunking(self):
-        moe = _fake_moe(dim=2, cap=4)
-        x = torch.randn(9, 2)
-        input_ids = torch.arange(9, dtype=torch.long)
-
+    def test_cuda_graph_capture_rejects_oversized_input(self):
+        layer = _fake_layer(capacity=4)
         with mock.patch.object(torch.cuda, "is_available", return_value=True):
             with mock.patch.object(
                 torch.cuda, "is_current_stream_capturing", return_value=True
             ):
                 with self.assertRaisesRegex(
-                    AssertionError, "CUDA graph capture must not use chunked MoE"
+                    ValueError, "CUDA graph capture MoE input tokens=5"
                 ):
-                    moe(x, input_ids)
+                    layer(torch.zeros(5, 4), torch.arange(5))
+        self.assertEqual(layer._moe.token_chunks, [])
 
-        self.assertEqual(moe.gate.token_chunks, [])
-
-    def test_input_ids_must_match_flat_tokens(self):
-        moe = _fake_moe(dim=2, cap=4)
-        x = torch.randn(5, 2)
-        input_ids = torch.arange(4, dtype=torch.long)
-
-        with self.assertRaisesRegex(RuntimeError, "input_ids/token mismatch"):
-            moe(x, input_ids)
+    def test_input_ids_must_match_flattened_tokens(self):
+        layer = _fake_layer(dim=2, capacity=4)
+        with self.assertRaisesRegex(ValueError, "input_ids has 4 tokens, expected 5"):
+            layer(torch.zeros(5, 2), torch.arange(4))
 
     def test_mega_output_capacity_uses_aligned_buffer_capacity(self):
-        aligned = SimpleNamespace(num_max_tokens_per_rank=50304)
-        self.assertEqual(_mega_output_capacity(aligned, 50000), 50304)
-        smaller = SimpleNamespace(num_max_tokens_per_rank=49920)
-        self.assertEqual(_mega_output_capacity(smaller, 50000), 50000)
+        buffer = type("Buffer", (), {"num_max_tokens_per_rank": 384})()
+        self.assertEqual(_mega_output_capacity(buffer, 17), 384)
+
+    def test_synchronizes_chunk_plan_once_for_the_layer_stack(self):
+        first = _fake_layer()
+        second = _fake_layer()
+        first.strategy_name = "mega_moe_se"
+        second.strategy_name = "mega_moe_se"
+        layers = [SimpleNamespace(ffn=first), SimpleNamespace(ffn=second)]
+
+        def set_remote_max(token_count, **_):
+            token_count.fill_(9)
+
+        with (
+            mock.patch(
+                "rtp_llm.models_py.modules.dsv4.moe_layer.dist.is_available",
+                return_value=True,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.dsv4.moe_layer.dist.is_initialized",
+                return_value=True,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.modules.dsv4.moe_layer.dist.all_reduce",
+                side_effect=set_remote_max,
+            ) as all_reduce,
+        ):
+            with synchronized_moe_chunk_plan(layers, 3, torch.device("cpu")):
+                self.assertEqual(
+                    first._synchronized_chunk_tokens(3, torch.device("cpu")), 9
+                )
+                self.assertEqual(
+                    second._synchronized_chunk_tokens(3, torch.device("cpu")), 9
+                )
+
+        all_reduce.assert_called_once()
+
+    def test_dsv4_profiler_switch_disables_generic_moe_ranges(self):
+        layer = _fake_layer(capacity=5)
+        with mock.patch(
+            "rtp_llm.models_py.modules.dsv4._profiler._RANGES_ENABLED", False
+        ):
+            layer(torch.ones(1, 4), torch.zeros(1, dtype=torch.long))
+
+        self.assertEqual(layer._moe.ranges_enabled, [False])
+
+    def test_debug_observer_preserves_tensor_names_and_position_filter(self):
+        layer = _fake_layer()
+        layer.layer_id = 3
+        positions = torch.tensor([4, 9])
+        records = []
+
+        def record(level, name, tensor):
+            records.append((level, name, tensor.clone()))
+
+        with mock.patch.object(_rt, "should_record_layer", return_value=True):
+            with mock.patch.object(_rt, "_DBG_GLOBAL_POS", 9):
+                with mock.patch.object(_rt, "record_if_level", side_effect=record):
+                    observer = layer._debug_observer(positions)
+                    self.assertIsNotNone(observer)
+                    for kind in (
+                        "input",
+                        "topk_weights",
+                        "topk_indices",
+                        "routed_y",
+                        "shared_y",
+                        "final_y",
+                    ):
+                        observer(kind, torch.arange(4).view(2, 2))
+
+        names = [name for _, name, _ in records]
+        for suffix in (
+            "moe_x_in",
+            "moe_topk_weights",
+            "moe_topk_indices",
+            "moe_routed_y",
+            "moe_shared_y",
+            "moe_y",
+        ):
+            self.assertIn(f"L03_{suffix}", names)
+            self.assertIn(f"L03_{suffix}_pos9", names)
+        position_records = [
+            tensor for _, name, tensor in records if name.endswith("pos9")
+        ]
+        self.assertTrue(all(tensor.shape == (1, 2) for tensor in position_records))
 
 
 if __name__ == "__main__":

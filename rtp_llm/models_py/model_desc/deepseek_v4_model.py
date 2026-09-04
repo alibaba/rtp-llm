@@ -48,7 +48,7 @@ from rtp_llm.models_py.modules.dsv4.decode.forward import (
     forward_decode,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
-from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
+from rtp_llm.models_py.modules.dsv4.moe_layer import (
     chunked_moe_enabled,
     cp_padded_tokens_per_rank_bound,
     moe_chunk_tokens_from_env,
@@ -56,8 +56,8 @@ from rtp_llm.models_py.modules.dsv4.moe.moe_layer import (
 )
 from rtp_llm.models_py.modules.dsv4.prefill.forward import forward_prefill
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
-from rtp_llm.utils.warmup import model_warm_up_enabled
 from rtp_llm.ops import RoleType
+from rtp_llm.utils.warmup import model_warm_up_enabled
 
 
 def _materialize_meta_buffers(module: torch.nn.Module, device: str) -> int:
@@ -225,8 +225,53 @@ class Dsv4SharedRuntimeBufferStore:
             module._bind_runtime_buffers(mtp_hidden_buffer)
 
 
+def _resolve_dsv4_moe_strategy(moe_config) -> str:
+    """Forward the public MoE strategy to the generic strategy registry."""
+    if moe_config is None:
+        return "auto"
+    return str(moe_config.moe_strategy or "auto").strip() or "auto"
+
+
+def _resolve_dsv4_moe_inter_dim(model_config: ModelConfig) -> int:
+    """Resolve one routed expert's width and validate shared-expert metadata."""
+    n_shared_experts = int(model_config.n_shared_experts)
+    if n_shared_experts < 0:
+        raise ValueError(
+            "DeepSeek-V4 n_shared_experts must be non-negative, got "
+            f"{n_shared_experts}"
+        )
+
+    moe_inter_dim = int(model_config.moe_inter_size)
+    shared_inter_dim = int(model_config.inter_size)
+    if moe_inter_dim <= 0:
+        if (
+            n_shared_experts > 0
+            and shared_inter_dim > 0
+            and shared_inter_dim % n_shared_experts == 0
+        ):
+            moe_inter_dim = shared_inter_dim // n_shared_experts
+        else:
+            raise ValueError(
+                "DeepSeek-V4 moe_inter_size must resolve to a positive routed "
+                f"expert width, got moe_inter_size={model_config.moe_inter_size}, "
+                f"inter_size={model_config.inter_size}, "
+                f"n_shared_experts={n_shared_experts}"
+            )
+
+    expected_shared_inter_dim = n_shared_experts * moe_inter_dim
+    if shared_inter_dim != expected_shared_inter_dim:
+        raise ValueError(
+            "DeepSeek-V4 shared-expert width is inconsistent with routed expert "
+            f"metadata: inter_size={shared_inter_dim}, expected "
+            f"n_shared_experts * moe_inter_size={expected_shared_inter_dim}"
+        )
+    return moe_inter_dim
+
+
 def _args_from_model_config(
-    model_config: ModelConfig, max_generate_batch_size: int = 4
+    model_config: ModelConfig,
+    max_generate_batch_size: int = 4,
+    moe_config=None,
 ) -> V4Args:
     from rtp_llm.ops import KvCacheDataType, RoleType
 
@@ -257,13 +302,10 @@ def _args_from_model_config(
         index_n_heads=attn_config.indexer_head_num,
         index_head_dim=attn_config.indexer_head_dim,
         index_topk=attn_config.indexer_topk,
-        moe_inter_dim=(
-            model_config.inter_size // max(1, model_config.moe_k or 1)
-            if False
-            else model_config.inter_size // 1
-        ),
+        moe_inter_dim=_resolve_dsv4_moe_inter_dim(model_config),
         n_routed_experts=model_config.expert_num,
-        n_shared_experts=1,
+        n_shared_experts=int(model_config.n_shared_experts),
+        moe_strategy=_resolve_dsv4_moe_strategy(moe_config),
         n_activated_experts=model_config.moe_k,
         score_func={0: "softmax", 1: "sigmoid", 2: "sqrtsoftplus"}[
             model_config.scoring_func
@@ -315,7 +357,11 @@ class DeepSeekV4Model(GptModelBase):
         )
 
         # Build V4Transformer with matching args.
-        args = _args_from_model_config(model_config, max_generate_batch_size)
+        args = _args_from_model_config(
+            model_config,
+            max_generate_batch_size,
+            moe_config=moe_config,
+        )
         self._max_generate_batch_size = int(max_generate_batch_size)
         assert self._max_generate_batch_size > 0, (
             "max_generate_batch_size must be positive, "
@@ -348,8 +394,7 @@ class DeepSeekV4Model(GptModelBase):
         ):
             args.moe_inter_dim = int(moe_config.moe_inter_padding_size)
         else:
-            # V4-Flash = 2048. config.inter_size = n_shared * 2048 = 2048 (since n_shared=1).
-            args.moe_inter_dim = int(model_config.inter_size) or args.moe_inter_dim
+            args.moe_inter_dim = _resolve_dsv4_moe_inter_dim(model_config)
 
         # S7 scaffold: thread the framework's parallelism config into V4Args.
         # No behavior change at TP=1; the fields are read by future patches
@@ -825,11 +870,15 @@ class DeepSeekV4Model(GptModelBase):
             try:
                 import torch.distributed as _dist
 
-                _strategy = self.v4.layers[0].ffn._strategy
-                if getattr(_strategy, "name", "") in ("mega", "mega_se"):
+                _moe_layer = self.v4.layers[0].ffn
+                _executor = _moe_layer.fused_moe.fused_experts
+                if _moe_layer.strategy_name in (
+                    "mega_moe",
+                    "mega_moe_se",
+                ):
                     if _dist.is_available() and _dist.is_initialized():
                         _dist.barrier()
-                    _cfg = _strategy.cfg
+                    _cfg = _executor.cfg
                     _x_moe = _torch.zeros(
                         (1, int(_cfg.dim)), dtype=_torch.bfloat16, device=device_str
                     )
@@ -850,7 +899,7 @@ class DeepSeekV4Model(GptModelBase):
                         % (_end - _start)
                     ) + _start
                     _idx_moe = _idx_vals.unsqueeze(0).contiguous()
-                    _strategy(_x_moe, _w_moe, _idx_moe)
+                    _executor(_x_moe, _w_moe, _idx_moe)
                     _torch.cuda.synchronize()
                     if _dist.is_available() and _dist.is_initialized():
                         _dist.barrier()

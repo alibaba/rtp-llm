@@ -1,4 +1,4 @@
-"""UT for the V4 fused router-gate epilogue (DSV4_GATE_FUSED).
+"""UT for the generic fused router-gate epilogue (MOE_GATE_FUSED).
 
 Replaces the per-token chain
     scores = F.softplus(scores).sqrt()       # 2 elementwise launches
@@ -8,17 +8,14 @@ Replaces the per-token chain
     weights = weights / (weights.sum(-1) + eps) * route_scale  # 2 launches
 with one Triton kernel (~7-10 launches → 1 per layer × 43 layers).
 
-Default flipped to ON (DSV4_GATE_FUSED=1) on 2026-05-04; UT verifies
+The default-on path verifies
 indices match exactly and weights are within tight tolerance vs the
 eager epilogue.
 
-Bypasses rtp_llm package init via importlib.
 """
 
 from __future__ import annotations
 
-import importlib.util
-import os
 import unittest
 
 import torch
@@ -26,16 +23,21 @@ import torch.nn.functional as F
 
 
 def _load_fused_gate():
-    here = os.path.dirname(os.path.abspath(__file__))
-    src = os.path.abspath(os.path.join(here, "..", "_gate_fused_triton.py"))
-    spec = importlib.util.spec_from_file_location("_v4_gate_fused", src)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod.fused_sqrtsoftplus_gate
+    from rtp_llm.models_py.triton_kernels.moe.gate_fused import fused_sqrtsoftplus_gate
+
+    return fused_sqrtsoftplus_gate
+
+
+def _load_fused_hash_gate():
+    from rtp_llm.models_py.triton_kernels.moe.gate_fused import (
+        fused_sqrtsoftplus_hash_gate,
+    )
+
+    return fused_sqrtsoftplus_hash_gate
 
 
 def _load_eager_route_selector():
-    from rtp_llm.models_py.modules.dsv4.moe.gate import (
+    from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.gate import (
         _select_routes_with_nonfinite_fallback,
     )
 
@@ -49,7 +51,7 @@ def _eager_sqrtsoftplus_gate(
     route_scale: float,
     norm_eps: float = 1e-12,
 ):
-    """Eager epilogue mirroring moe.py:Gate.forward when score_func='sqrtsoftplus'."""
+    """Eager epilogue for ``score_func='sqrtsoftplus'``."""
     s = F.softplus(scores).sqrt()
     s_biased = s + bias
     indices = s_biased.topk(topk, dim=-1)[1]
@@ -62,10 +64,7 @@ def _eager_sqrtsoftplus_gate(
 class GateFusedEquivTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        try:
-            _load_fused_gate()
-        except Exception as e:
-            raise unittest.SkipTest(f"fused_sqrtsoftplus_gate not importable: {e}")
+        _load_fused_gate()
 
     def _check(self, *, N, E, K, route_scale=2.5):
         torch.manual_seed(0)
@@ -203,6 +202,30 @@ class GateFusedEquivTest(unittest.TestCase):
             self.assertTrue(torch.allclose(weights[row], expected_weights))
         self.assertTrue(torch.isfinite(weights).all().item())
         self.assertTrue(((indices >= 0) & (indices < E)).all().item())
+
+    def test_hash_gate_matches_selected_score_reference(self):
+        torch.manual_seed(3)
+        device = "cuda:0"
+        N, E, K, vocab = 64, 256, 6, 512
+        scores = torch.randn(N, E, device=device, dtype=torch.bfloat16)
+        input_ids = torch.randint(vocab, (N,), device=device, dtype=torch.long)
+        tid2eid = torch.stack(
+            [torch.randperm(E, device=device)[:K] for _ in range(vocab)]
+        ).contiguous()
+
+        selected = scores.float().gather(1, tid2eid[input_ids])
+        expected = F.softplus(selected).sqrt()
+        expected = expected / (expected.sum(dim=-1, keepdim=True) + 1e-12) * 2.5
+
+        fused = _load_fused_hash_gate()
+        weights, indices = fused(
+            scores.contiguous(),
+            input_ids,
+            tid2eid,
+            route_scale=2.5,
+        )
+        self.assertTrue(torch.equal(indices, tid2eid[input_ids]))
+        self.assertTrue(torch.allclose(weights, expected, rtol=1e-4, atol=1e-6))
 
 
 class GateEagerNonfiniteTest(unittest.TestCase):

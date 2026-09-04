@@ -38,6 +38,26 @@ class FinalizeArgs(TypedDict, total=False):
     skip_tp_allreduce: bool
 
 
+@dataclass(frozen=True)
+class ExpertGatePayload:
+    """Raw gate output accepted by route-and-pack capable backends.
+
+    The payload is model-agnostic: a hash-routed gate supplies ``input_ids``
+    and ``tid2eid``; a score-routed gate supplies ``bias``.  Backends that do
+    not advertise ``supports_gate_pack`` continue to consume materialized
+    top-k weights and ids through the ordinary ``prepare`` path.
+    """
+
+    scores: torch.Tensor
+    topk: int
+    score_func: str
+    route_scale: float
+    norm_eps: float = 1.0e-12
+    bias: Optional[torch.Tensor] = None
+    input_ids: Optional[torch.Tensor] = None
+    tid2eid: Optional[torch.Tensor] = None
+
+
 @dataclass
 class ExpertTokensMetadata:
     """
@@ -63,6 +83,7 @@ class ExpertForwardPayload:
     expert_topk_weights: Optional[torch.Tensor] = None
     expert_ids_are_local: bool = False
     router_context: object | None = None
+    gate_payload: Optional[ExpertGatePayload] = None
 
 
 @dataclass
@@ -129,6 +150,21 @@ class FusedMoeDataRouter(ABC):
         """
         return False
 
+    @property
+    def supports_gate_pack(self) -> bool:
+        """Whether this router can pass raw gate output to its executor."""
+
+        return False
+
+    def prepare_gate_pack(
+        self,
+        a1: torch.Tensor,
+        gate_payload: ExpertGatePayload,
+    ) -> ExpertForwardPayload:
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support fused gate packing"
+        )
+
     @classmethod
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         """Check if this router can handle the given configuration.
@@ -165,6 +201,9 @@ class FusedMoeDataRouter(ABC):
 
 
 class FusedMoeExpertExecutor(ABC):
+    includes_shared_expert = False
+    execute_empty_inputs = False
+
     def __init__(
         self,
         config: MoEConfigAdapter,
@@ -202,6 +241,12 @@ class FusedMoeExpertExecutor(ABC):
     def topk_ids_dtype(self) -> torch.dtype:
         return torch.int64
 
+    @property
+    def supports_gate_pack(self) -> bool:
+        """Whether ``execute`` accepts an ``ExpertGatePayload``."""
+
+        return False
+
     @abstractmethod
     def execute(
         self,
@@ -222,15 +267,56 @@ class FusedMoe(torch.nn.Module):
         router: FusedMoeDataRouter,
         fused_experts: FusedMoeExpertExecutor,
         expert_num: int,
+        strategy_name: str = "",
     ):
         super().__init__()
         self.router = router
         self.fused_experts = fused_experts
         self.expert_num = expert_num
+        self.strategy_name = strategy_name
+
+    @property
+    def includes_shared_expert(self) -> bool:
+        return bool(self.fused_experts.includes_shared_expert)
 
     @property
     def topk_ids_dtype(self) -> torch.dtype:
         return self.fused_experts.topk_ids_dtype
+
+    @property
+    def supports_gate_pack(self) -> bool:
+        return bool(
+            self.router.supports_gate_pack and self.fused_experts.supports_gate_pack
+        )
+
+    def forward_gate_pack(
+        self,
+        hidden_states: torch.Tensor,
+        gate_payload: ExpertGatePayload,
+        activation: str = "silu",
+        expert_map: Optional[torch.Tensor] = None,
+        a2_scale: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        extra_expert_args: Optional[Dict[str, Any]] = None,
+        extra_finalize_args: Optional[FinalizeArgs] = None,
+        skip_tp_allreduce: bool = False,
+    ) -> torch.Tensor:
+        if not self.supports_gate_pack:
+            raise RuntimeError(
+                f"strategy {self.strategy_name!r} does not support fused gate packing"
+            )
+        expert_payload = self.router.prepare_gate_pack(hidden_states, gate_payload)
+        return self._execute_payload(
+            hidden_states,
+            expert_payload,
+            activation=activation,
+            expert_map=expert_map,
+            a2_scale=a2_scale,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            extra_expert_args=extra_expert_args,
+            extra_finalize_args=extra_finalize_args,
+            skip_tp_allreduce=skip_tp_allreduce,
+        )
 
     def forward(
         self,
@@ -248,12 +334,6 @@ class FusedMoe(torch.nn.Module):
         skip_tp_allreduce: bool = False,
     ) -> torch.Tensor:
 
-        if skip_tp_allreduce and not self.router.supports_skip_tp_allreduce:
-            raise ValueError(
-                "skip_tp_allreduce is only supported by routers that "
-                "advertise supports_skip_tp_allreduce"
-            )
-
         a1 = hidden_states
 
         expert_payload = self.router.prepare(
@@ -268,7 +348,41 @@ class FusedMoe(torch.nn.Module):
         if expert_payload.expert_topk_weights is None:
             expert_payload.expert_topk_weights = topk_weights
 
-        if expert_payload.expert_x.numel() == 0:
+        return self._execute_payload(
+            hidden_states,
+            expert_payload,
+            activation=activation,
+            expert_map=expert_map,
+            a2_scale=a2_scale,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            extra_expert_args=extra_expert_args,
+            extra_finalize_args=extra_finalize_args,
+            skip_tp_allreduce=skip_tp_allreduce,
+        )
+
+    def _execute_payload(
+        self,
+        hidden_states: torch.Tensor,
+        expert_payload: ExpertForwardPayload,
+        *,
+        activation: str,
+        expert_map: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool,
+        extra_expert_args: Optional[Dict[str, Any]],
+        extra_finalize_args: Optional[FinalizeArgs],
+        skip_tp_allreduce: bool,
+    ) -> torch.Tensor:
+        if skip_tp_allreduce and not self.router.supports_skip_tp_allreduce:
+            raise ValueError(
+                "skip_tp_allreduce is only supported by routers that "
+                "advertise supports_skip_tp_allreduce"
+            )
+
+        if (
+            expert_payload.expert_x.numel() == 0
+            and self.fused_experts.execute_empty_inputs is not True
+        ):
             # This happens when none of the tokens from the all2all reach this
             # EP rank. Also, note that this is only relevant for CUDAGraph
             # incompatible all2all kernels like the DeepEP high-throughput
@@ -277,7 +391,7 @@ class FusedMoe(torch.nn.Module):
             # and can never run into the tensor.numel() == 0 case.
             combine_payload = CombineForwardPayload(
                 fused_expert_output=torch.empty_like(
-                    expert_payload.expert_x, dtype=a1.dtype
+                    expert_payload.expert_x, dtype=hidden_states.dtype
                 )
             )
         else:
@@ -291,12 +405,18 @@ class FusedMoe(torch.nn.Module):
             )
         combine_payload.router_context = expert_payload.router_context
 
+        if (
+            expert_payload.expert_topk_weights is None
+            or expert_payload.expert_topk_ids is None
+        ):
+            raise RuntimeError("router/executor did not provide top-k weights and ids")
+
         # Finalize arguments are a private per-call protocol. Copy caller
         # input before adding derived values so a reusable dict cannot retain
         # state from a previous forward.
         finalize_args: FinalizeArgs = {
             **(extra_finalize_args or {}),
-            "a1_shape": a1.shape,
+            "a1_shape": hidden_states.shape,
         }
 
         # Pure-TP routers normally reduce their routed output in finalize().

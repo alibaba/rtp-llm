@@ -20,6 +20,7 @@ from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.block import Block
 from rtp_llm.models_py.modules.dsv4.cp import CPContext, build_cp_context
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_head
+from rtp_llm.models_py.modules.dsv4.moe_layer import synchronized_moe_chunk_plan
 
 
 @dataclass
@@ -55,6 +56,7 @@ class V4Args:
     moe_inter_dim: int = 2048
     n_routed_experts: int = 256
     n_shared_experts: int = 1
+    moe_strategy: str = "auto"
     n_activated_experts: int = 6
     score_func: str = "sqrtsoftplus"
     route_scale: float = 1.5
@@ -133,6 +135,7 @@ def _block_kwargs(
         n_routed_experts=args.n_routed_experts,
         n_activated_experts=args.n_activated_experts,
         n_shared_experts=args.n_shared_experts,
+        moe_strategy=args.moe_strategy,
         score_func=args.score_func,
         route_scale=args.route_scale,
         swiglu_limit=args.swiglu_limit,
@@ -147,6 +150,8 @@ def _block_kwargs(
         tp_rank=args.tp_rank,
         ep_size=args.ep_size,
         ep_rank=args.ep_rank,
+        world_size=args.world_size,
+        world_rank=args.world_rank,
         max_tokens_per_rank=args.max_tokens_per_rank,
         is_decode_role=args.is_decode_role,
         fp8_kv_cache=args.fp8_kv_cache,
@@ -573,17 +578,18 @@ class V4Transformer(nn.Module):
         cu_seqlens = torch.tensor(
             [0, S], dtype=torch.int64, device=input_ids.device
         )  # [2]
-        for li, layer in enumerate(self.layers):
-            h_flat = layer(
-                h_flat,
-                input_ids_flat,
-                positions,
-                cu_seqlens,
-                kv_cache=kv_cache,
-                block_tables_by_type=block_tables_by_type,
-            )
-            if _rt_on:
-                _rt.record(f"layer{li:02d}_out", h_flat)
+        with synchronized_moe_chunk_plan(self.layers, S, input_ids.device):
+            for li, layer in enumerate(self.layers):
+                h_flat = layer(
+                    h_flat,
+                    input_ids_flat,
+                    positions,
+                    cu_seqlens,
+                    kv_cache=kv_cache,
+                    block_tables_by_type=block_tables_by_type,
+                )
+                if _rt_on:
+                    _rt.record(f"layer{li:02d}_out", h_flat)
         h = h_flat.unsqueeze(0)  # [1, S, hc, d]
         h = self._hc_head_reduce(h)  # [B, S, d]
         if _rt_on:
