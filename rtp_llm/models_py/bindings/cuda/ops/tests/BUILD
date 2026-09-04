@@ -36,6 +36,16 @@ test_deps = [
     ":cuda_test_util",
 ] + torch_deps()
 
+cc_test(
+    name = "batch_copy_test",
+    srcs = [
+        "CudaBatchCopyTest.cc",
+    ],
+    data = [],
+    copts = copts(),
+    deps = test_deps,
+    exec_properties = {'gpu':'H20'},
+)
 
 cc_test(
     name = "cuda_mask_logits_op_test",

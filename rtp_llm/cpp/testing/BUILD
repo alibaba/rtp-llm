@@ -64,6 +64,7 @@ cc_library(
 cc_library(
     name = "base_tests",
     hdrs = [
+        "BatchCopyTest.hpp",
         "BeamSearchOpTest.hpp",
     ],
     deps = [
