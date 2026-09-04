@@ -2172,8 +2172,14 @@ def status_unknown_batchid(ctx: CaseContext):
         finally:
             clear_type_all(ops, names, "status_fake_task")
 
+        # Window-insufficient instability fix: the settle here rides the
+        # same stale-TTL + ExpirationTimer physical drain (worst ~90s) as
+        # every other residue contract — 30s let a normal slow drain read
+        # as a FAIL.  Aligned to the TTL_DRAIN_TIMEOUT_S standard; the
+        # all-zero assertion itself is unchanged (a true leak still
+        # times out and fails).
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
-            _master_http(ops), 30.0
+            _master_http(ops), TTL_DRAIN_TIMEOUT_S
         )
         master_ok = _master_ok(ops)
 

@@ -232,8 +232,14 @@ def _anomaly_error_case(
             response is not None and response.success and response.enqueued_by_master
         )
         if batch_delivered:
+            # Window-insufficient instability fix (no_respond family): the
+            # failed request's ledger settle after the explicit cancel can
+            # ride the stale-TTL + ExpirationTimer drain (worst ~90s) —
+            # the 10s window let a normal slow drain read as a FAIL.
+            # Aligned to the TTL_DRAIN_TIMEOUT_S standard; the all-zero
+            # assertion itself is unchanged (a true leak still fails).
             inflight_ok, inflight_detail = AssertUtils.inflight_clean(
-                _master_http(ops), 10.0
+                _master_http(ops), TTL_DRAIN_TIMEOUT_S
             )
         else:
             # NON_BATCH: see cancel_anomaly_path — client Cancel cannot

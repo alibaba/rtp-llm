@@ -16,6 +16,7 @@ assertions effective for the first time.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 import urllib.request
@@ -55,6 +56,20 @@ QOS_LEVEL_HEADER = "x-dashscope-inner-qos-level"
 # actuator path first, then the plain /prometheus fallback — the same URL
 # ladder as the G3 poller (eval_collectors.py).
 MASTER_PROMETHEUS_PATHS = ("actuator/prometheus", "prometheus")
+
+# Management-port warm-up gate: a freshly started master serves its HTTP
+# port and reports ready long before the management actuator exposition
+# answers (observed 40s–2.5min after master start).  A case that scrapes a
+# baseline right after env build then reads None and FAILs for environment
+# reasons — the full-parallel run masked this only because lanes shared an
+# already-warm env.  The gate polls the exposition ladder once per
+# EngineOps instance (== once per env: ops are cached per env in
+# CaseContext.engine_ops); after the endpoint answers the first time it
+# stays up for the env's lifetime, so later scrapes skip the wait.  A gate
+# timeout does NOT raise — the scrape falls through to the caller's
+# existing fail-loud None handling.
+PROMETHEUS_READY_TIMEOUT_S = 180.0
+PROMETHEUS_READY_INTERVAL_S = 2.0
 
 
 def _http_get_text(url: str, timeout: float = 5.0) -> Optional[str]:
@@ -182,12 +197,8 @@ class StreamHandle:
                 # typed failure to its caller.
                 try:
                     if output.HasField("error_info"):
-                        self.snap.stream_error_code = int(
-                            output.error_info.error_code
-                        )
-                        self.snap.stream_error_message = (
-                            output.error_info.error_message
-                        )
+                        self.snap.stream_error_code = int(output.error_info.error_code)
+                        self.snap.stream_error_message = output.error_info.error_message
                 except AttributeError:
                     pass
                 finished = output.flatten_output.finished
@@ -253,6 +264,10 @@ class EngineOps:
         self._channels: dict = {}
         self._request_counter = 20000
         self._rid_lock = threading.Lock()
+        # One-shot management-exposition readiness gate state (see
+        # _wait_prometheus_ready): False until the first
+        # master_prometheus_text() call has run the gate.
+        self._prometheus_gate_done = False
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -728,14 +743,56 @@ class EngineOps:
 
     # -- master prometheus (management port) --------------------------------
 
+    def _wait_prometheus_ready(self) -> None:
+        """One-shot warm-up gate for the management exposition.
+
+        Polls the MASTER_PROMETHEUS_PATHS ladder until any path answers
+        (HTTP 200 → non-None body) or PROMETHEUS_READY_TIMEOUT_S elapses,
+        then marks the gate done so every later scrape goes straight
+        through.  Never raises and never swallows: on timeout the scrape
+        proceeds and returns None, preserving the caller-side fail-loud
+        contract ("unreachable = environment failure").
+        """
+        deadline = time.monotonic() + PROMETHEUS_READY_TIMEOUT_S
+        print(
+            "[engine_ops] waiting for master /prometheus warm-up "
+            f"(management port {self.master_management_port}, "
+            f"up to {PROMETHEUS_READY_TIMEOUT_S:.0f}s) ...",
+            file=sys.stderr,
+            flush=True,
+        )
+        while time.monotonic() < deadline:
+            for path in MASTER_PROMETHEUS_PATHS:
+                if (
+                    _http_get_text(
+                        f"http://127.0.0.1:{self.master_management_port}/{path}"
+                    )
+                    is not None
+                ):
+                    return
+            time.sleep(PROMETHEUS_READY_INTERVAL_S)
+        print(
+            "[engine_ops] master /prometheus still cold after "
+            f"{PROMETHEUS_READY_TIMEOUT_S:.0f}s — scrape proceeds and may "
+            "return None",
+            file=sys.stderr,
+            flush=True,
+        )
+
     def master_prometheus_text(self) -> Optional[str]:
         """Raw prometheus exposition from the master management port.
 
         Tries /actuator/prometheus first, then the /prometheus fallback
         (MASTER_PROMETHEUS_PATHS).  Returns None when neither path
         answers (master down / management port not exposed) — distinct
-        from an empty exposition string.
+        from an empty exposition string.  The first call per instance
+        runs the one-shot warm-up gate first (see
+        _wait_prometheus_ready — fresh-master management exposition has
+        a 40s–2.5min cold window).
         """
+        if not self._prometheus_gate_done:
+            self._prometheus_gate_done = True
+            self._wait_prometheus_ready()
         for path in MASTER_PROMETHEUS_PATHS:
             body = _http_get_text(
                 f"http://127.0.0.1:{self.master_management_port}/{path}"
@@ -889,10 +946,7 @@ class EngineOps:
             if snap.error:
                 return addr, snap.error
             if not snap.completed:
-                if (
-                    typed_stream_error
-                    and snap.stream_error_code is not None
-                ):
+                if typed_stream_error and snap.stream_error_code is not None:
                     return addr, (
                         f"engine error code={snap.stream_error_code}: "
                         f"{snap.stream_error_message}"

@@ -64,6 +64,7 @@ from ..engine_ops import (
     inject_type_all,
 )
 from ..harness import (
+    TTL_DRAIN_TIMEOUT_S,
     AssertUtils,
     EnvSpec,
     default_perf,
@@ -786,8 +787,14 @@ def cancel_anomaly_path(ctx: CaseContext):
         cancel_latency = time.monotonic() - cancel_at
         recovery_ok, recovery_msg = ops.verify_recovery()
         if response.enqueued_by_master:
+            # Window-insufficient instability fix: the post-cancel ledger
+            # settle can ride the stale-TTL + ExpirationTimer drain (worst
+            # ~90s) instead of the immediate explicit-cancel release —
+            # the 10s window let a normal slow drain read as a FAIL.
+            # Aligned to the TTL_DRAIN_TIMEOUT_S standard; the all-zero
+            # assertion itself is unchanged.
             inflight_ok, inflight_detail = AssertUtils.inflight_clean(
-                _master_http(ops), 10.0
+                _master_http(ops), TTL_DRAIN_TIMEOUT_S
             )
         else:
             # NON_BATCH: a client Cancel on a delivered request cannot
