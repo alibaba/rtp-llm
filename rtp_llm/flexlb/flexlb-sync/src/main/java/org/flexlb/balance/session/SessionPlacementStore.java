@@ -75,6 +75,7 @@ public final class SessionPlacementStore {
     }
 
     public long estimatedSize() {
+        placements.cleanUp();
         return placements.estimatedSize();
     }
 

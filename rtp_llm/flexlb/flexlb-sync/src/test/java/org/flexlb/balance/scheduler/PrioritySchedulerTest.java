@@ -65,8 +65,8 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -546,6 +546,7 @@ class PrioritySchedulerTest {
             verify(healthReporter).reportSessionAffinityDecision(
                     RoleType.PREFILL, "OVER_CAP");
 
+            int concurrentStart = selected.size();
             for (int i = 0; i < 6; i++) {
                 long requestId = 50_002L + i;
                 submissions.add(submitters.submit(() -> {
@@ -562,7 +563,7 @@ class PrioritySchedulerTest {
             }
 
             assertEquals(8, selected.size());
-            assertTrue(selected.contains("10.0.0.3"),
+            assertTrue(selected.subList(concurrentStart, selected.size()).contains("10.0.0.3"),
                     "scheduler-owned queue pressure must spill the hot session");
         } finally {
             placement.releaseBatch(baselinePressureBatchId);

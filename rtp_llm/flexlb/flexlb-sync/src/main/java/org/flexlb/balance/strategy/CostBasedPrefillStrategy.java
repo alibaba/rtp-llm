@@ -177,9 +177,14 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                 sessionPlacementStore, survivors.size(),
                 index -> survivors.endpoint(index).ipPort(), survivors::score, minScore);
         if (sessionAffinity.hasPreference()) {
+            int selectedIndex = sessionAffinity.preferredIndex();
+            if (affinity != null) {
+                reportCacheAffinityDecision(roleType,
+                        survivors.endpoint(selectedIndex).getIp(), affinity.reason().name());
+            }
             SessionAffinityPolicy.reportDecision(
                     balanceContext, roleType, engineHealthReporter, sessionAffinity.reason());
-            return sessionAffinity.preferredIndex();
+            return selectedIndex;
         }
         SessionAffinityPolicy.reportDecision(
                 balanceContext, roleType, engineHealthReporter, sessionAffinity.reason());

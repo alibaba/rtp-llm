@@ -232,6 +232,10 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
             ScoredEndpoint preferred = scoredEndpoints.get(sessionAffinity.preferredIndex());
             ScoredEndpoint selected = selectFirstWithoutConcurrentConflict(List.of(preferred));
             if (selected != null) {
+                if (affinity != null) {
+                    reportCacheAffinityDecision(
+                            roleType, selected.ep().getIp(), affinity.reason().name());
+                }
                 SessionAffinityPolicy.reportDecision(
                         balanceContext, roleType, engineHealthReporter, sessionAffinity.reason());
                 return selected;
@@ -239,7 +243,12 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
             SessionAffinityPolicy.reportDecision(balanceContext, roleType,
                     engineHealthReporter,
                     SessionAffinityPolicy.Reason.SESSION_AFFINITY_CAS_FALLBACK);
-            return selectBaselineEndpoint(refreshSelectionSnapshots(scoredEndpoints), config);
+            selected = selectBaselineEndpoint(refreshSelectionSnapshots(scoredEndpoints), config);
+            if (selected != null && affinity != null) {
+                reportCacheAffinityDecision(
+                        roleType, selected.ep().getIp(), affinity.reason().name());
+            }
+            return selected;
         }
         SessionAffinityPolicy.reportDecision(
                 balanceContext, roleType, engineHealthReporter, sessionAffinity.reason());
