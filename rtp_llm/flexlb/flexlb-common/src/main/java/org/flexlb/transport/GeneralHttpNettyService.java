@@ -21,14 +21,17 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.netty.HttpNettyChannelContext;
 import org.flexlb.enums.StatusEnum;
 import org.flexlb.exception.FlexLBException;
+import org.flexlb.exception.HttpErrorResponseException;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.NettyUtils;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.FluxSink;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 
+import javax.annotation.PreDestroy;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -38,6 +41,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Supplier;
 
 /**
  * Generic HttpNettyClient request service
@@ -46,12 +50,16 @@ import java.util.concurrent.atomic.LongAdder;
 @Component
 public class GeneralHttpNettyService {
 
+    static final long DEFAULT_MAX_RESPONSE_BYTES = 16L * 1024 * 1024;
+
     private final HttpNettyClientHandler nettyClient;
     private final Scheduler httpRequestScheduler;
     private final ThreadPoolExecutor httpRequestExecutor;
+    private final long maxResponseBytes;
 
     public GeneralHttpNettyService(HttpNettyClientHandler nettyClient, ConfigService configService) {
         this.nettyClient = nettyClient;
+        this.maxResponseBytes = DEFAULT_MAX_RESPONSE_BYTES;
         FlexlbConfig config = configService.loadBalanceConfig();
         httpRequestExecutor = new ThreadPoolExecutor(
                 config.getHttpRequestExecutorCoreSize(),
@@ -64,13 +72,39 @@ public class GeneralHttpNettyService {
         httpRequestScheduler = Schedulers.fromExecutor(httpRequestExecutor);
     }
 
+    /** Test seam that keeps {@code EmbeddedChannel} access on the test thread. */
+    GeneralHttpNettyService(HttpNettyClientHandler nettyClient, Scheduler httpRequestScheduler) {
+        this(nettyClient, httpRequestScheduler, DEFAULT_MAX_RESPONSE_BYTES);
+    }
+
+    GeneralHttpNettyService(HttpNettyClientHandler nettyClient, Scheduler httpRequestScheduler,
+                            long maxResponseBytes) {
+        if (maxResponseBytes <= 0) {
+            throw new IllegalArgumentException("maxResponseBytes must be > 0");
+        }
+        this.nettyClient = Objects.requireNonNull(nettyClient);
+        this.httpRequestScheduler = Objects.requireNonNull(httpRequestScheduler);
+        this.httpRequestExecutor = null;
+        this.maxResponseBytes = maxResponseBytes;
+    }
+
+    @PreDestroy
+    void shutdown() {
+        if (httpRequestExecutor != null) {
+            httpRequestScheduler.dispose();
+            httpRequestExecutor.shutdownNow();
+        }
+    }
+
     public <Request, Result> Mono<Result> request(Request request, URI uri, String path, Class<Result> responseClz) {
         return this.doRequest(request, uri, path, null, responseClz);
     }
 
     public <Request, Result> Mono<Result> request(Request request, URI uri, String path, HttpHeaders headers, Class<Result> responseClz) {
-
-        return Mono.fromFuture(this.doRequest(request, uri, path, headers, responseClz).toFuture());
+        // Delegate rather than bridging through toFuture(), which subscribes at assembly time and
+        // would fire the request even if the returned Mono is never subscribed — the 4-arg overload
+        // above is cold, and these two must not differ in that.
+        return this.doRequest(request, uri, path, headers, responseClz);
     }
 
     public <Request, Result> Mono<Result> doRequest(Request request, URI uri, String path, HttpHeaders headers, Class<Result> responseClz) {
@@ -80,6 +114,7 @@ public class GeneralHttpNettyService {
                         .readCallback((resultHttpNettyChannelContext, httpObject)
                                 -> handleNettyMessage(resultHttpNettyChannelContext, httpObject, responseClz))
                         .errorCallback(this::handlerNettyError)
+                        .channelInactiveCallback(this::handleChannelInactive)
                         .byteDataList(new ArrayList<>(1 << 4))
                         .byteDataSize(new LongAdder())
                         .build())
@@ -118,10 +153,58 @@ public class GeneralHttpNettyService {
 
     private <Result> Mono<Result> executeHttpRequest(HttpNettyChannelContext<Result> nettyCtx, URI uri, String path, HttpHeaders headers) {
         return Flux.<Result>create(sink -> {
-            nettyCtx.setSink(sink);
+            if (nettyCtx.installSink(sink)) {
+                // The exchange ended before the sink existed, so whoever ended it had nothing to
+                // terminate and left the duty here — along with the cause it recorded, so a read
+                // timeout or protocol error keeps its type and cause chain instead of being
+                // reported as a plain disconnect.
+                Throwable pending = nettyCtx.getPendingError();
+                sink.error(pending != null ? pending
+                        : StatusEnum.ENGINE_ABNORMAL_DISCONNECT_EXCEPTION
+                                .toException("channel closed before request could be written"));
+                return;
+            }
             DefaultFullHttpRequest request = buildRequest(nettyCtx, uri, path, headers);
-            nettyCtx.getChannel().writeAndFlush(request);
+            // A write onto a channel that died between the connect and here fails its promise and
+            // fires nothing else: the peer is already gone, so no inbound frame and no read timeout
+            // will ever terminate the sink.
+            nettyCtx.getChannel().writeAndFlush(request).addListener((ChannelFutureListener) future -> {
+                if (!future.isSuccess()) {
+                    failSink(nettyCtx, () -> StatusEnum.ENGINE_ABNORMAL_DISCONNECT_EXCEPTION
+                            .toException("failed to write request, uri=" + uri + ", path=" + path, future.cause()));
+                    // An outbound-handler failure can leave the channel technically open even
+                    // though no response can complete this exchange.
+                    nettyCtx.getChannel().close();
+                }
+            });
         }).last();
+    }
+
+    /**
+     * The peer disconnected mid-exchange. Both aggregation paths (200 and non-200) terminate the
+     * sink only on {@link LastHttpContent}, which a disconnected peer will never send, and the
+     * read-timeout handler stops firing once the channel is inactive — so without failing the sink
+     * here the caller would wait forever.
+     */
+    private <Result> void handleChannelInactive(HttpNettyChannelContext<Result> nettyCtx) {
+        failSink(nettyCtx, () -> StatusEnum.ENGINE_ABNORMAL_DISCONNECT_EXCEPTION
+                .toException("channel closed before the response completed"));
+    }
+
+    /**
+     * Fails the sink if this caller wins the exclusive termination claim, so the several paths that
+     * can end an exchange (disconnect, netty error, failed write) cannot double-terminate it or,
+     * worse, each assume another one did. The error is built only by the winner — the losing path
+     * is the common one (a completed exchange closes its own channel) and must stay allocation-free.
+     */
+    private <Result> void failSink(HttpNettyChannelContext<Result> nettyCtx, Supplier<Throwable> error) {
+        FluxSink<Result> sink = nettyCtx.claimTermination(error);
+        if (sink == null || sink.isCancelled()) {
+            // Either the exchange had already ended, or this caller won the claim before the sink
+            // existed — in which case claimTermination recorded the cause for whoever installs it.
+            return;
+        }
+        sink.error(error.get());
     }
 
     private <Result> DefaultFullHttpRequest buildRequest(HttpNettyChannelContext<Result> nettyCtx, URI uri, String path, HttpHeaders headers) {
@@ -143,18 +226,27 @@ public class GeneralHttpNettyService {
 
     private <Result> void handlerNettyError(HttpNettyChannelContext<Result> nettyCtx, Throwable e) {
         if (e instanceof ReadTimeoutException) {
-            nettyCtx.getSink().error(StatusEnum.READ_TIME_OUT.toException());
+            failSink(nettyCtx, StatusEnum.READ_TIME_OUT::toException);
         } else {
-            nettyCtx.getSink()
-                    .error(StatusEnum.NETTY_CATCH_ERROR.toException("sync load balance unexpected netty " + "error " + "happened, exception: ",
-                            e));
+            failSink(nettyCtx, () -> StatusEnum.NETTY_CATCH_ERROR.toException("sync load balance unexpected netty "
+                    + "error " + "happened, exception: ", e));
         }
+        // Closing is this method's own duty and must happen whether or not the sink was ours to
+        // fail. A sink installed after the claim was taken is not covered by the channelInactive
+        // this close triggers — that one finds the claim gone and does nothing. It is installSink
+        // reporting the exchange already finished that hands termination to the installing thread.
         nettyCtx.getChannel().close();
     }
 
     private <Result> void handleNettyMessage(HttpNettyChannelContext<Result> nettyCtx, HttpObject obj,
                                              Class<Result> responseClz) {
-        if (nettyCtx.getSink().isCancelled()) {
+        FluxSink<Result> sink = nettyCtx.getSink();
+        if (sink == null) {
+            handlerNettyError(nettyCtx,
+                    new IllegalStateException("received HTTP data before request sink was installed"));
+            return;
+        }
+        if (sink.isCancelled()) {
             NettyUtils.finish(nettyCtx);
             log.error("sink canceled, finish netty");
             return;
@@ -175,15 +267,30 @@ public class GeneralHttpNettyService {
     private <Result> void handleNettyChunk(HttpNettyChannelContext<Result> nettyCtx, HttpObject obj,
                                            Class<Result> responseClz) {
 
+        HttpContent content = (HttpContent) obj;
+        long retained = nettyCtx.getByteDataSize().sum();
+        int incoming = content.content().readableBytes();
+        if (retained > maxResponseBytes - incoming) {
+            failSink(nettyCtx, () -> StatusEnum.INTERNAL_ERROR.toException(
+                    "upstream HTTP response exceeds " + maxResponseBytes + " bytes"));
+            nettyCtx.getChannel().close();
+            return;
+        }
+
         // Check if current HTTP response status is 200; if not 200, indicates abnormal situation, parse chunk and return error
         int httpStatusCode = NettyUtils.getHttpStatusCode(nettyCtx);
 
         // If status code is not 200, indicates abnormal situation, parse chunk and return error
         if (httpStatusCode != StatusEnum.SUCCESS.getCode()) {
             NettyUtils.cacheBuffer(nettyCtx, obj);
+            // Wait for the whole error body before failing; a chunked non-200 response would
+            // otherwise be truncated to its first chunk, corrupting upstream business-error JSON.
+            if (!(obj instanceof LastHttpContent)) {
+                return;
+            }
             String body = NettyUtils.readBody(nettyCtx);
             NettyUtils.finishNettyWithException(nettyCtx,
-                    new RuntimeException("http error, httpStatusCode=" + httpStatusCode + ", body=" + body));
+                    new HttpErrorResponseException(httpStatusCode, body));
             return;
         }
 

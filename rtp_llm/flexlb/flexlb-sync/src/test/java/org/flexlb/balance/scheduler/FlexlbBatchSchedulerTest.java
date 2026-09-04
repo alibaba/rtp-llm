@@ -1,10 +1,10 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
+import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -963,6 +963,10 @@ class FlexlbBatchSchedulerTest {
             Thread.sleep(1);
         }
         long batchId = sentBatches.getLast().getBatchId();
+        // Recording the mock RPC happens before its failed future's callback necessarily runs.
+        // Establish the same idempotent reconciliation fence explicitly so the worker-status
+        // assertions below cannot race that callback under a loaded full-suite run.
+        scheduler.onDispatchUncertain(item, batchId, new TimeoutException("lost ack"));
 
         scheduler.onWorkerStatusUpdate(prefillFinished(
                 309, batchId, 0, PriorityPreemptionProgress.NONE));

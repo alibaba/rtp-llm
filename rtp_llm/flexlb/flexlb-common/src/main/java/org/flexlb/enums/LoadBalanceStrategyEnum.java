@@ -13,7 +13,11 @@ public enum LoadBalanceStrategyEnum {
 
     COST_BASED_DECODE("CostBasedDecode"),
 
-    SHORTEST_TTFT("ShortestTtft")
+    SHORTEST_TTFT("ShortestTtft"),
+
+    WEIGHTED_CACHE("WeightedCache"),
+
+    ROUND_ROBIN("RoundRobin")
 
     ;
     private final String name;

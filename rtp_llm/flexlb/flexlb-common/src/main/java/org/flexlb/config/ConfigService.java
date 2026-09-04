@@ -46,6 +46,7 @@ public class ConfigService {
             "flexlbBatchSloMaxInflightBatches",
             "costFormula",
             "prefillPredictorType",
+            "engineType",
             "autoTpmEnabled",
             "flexlbBatchQueueMaxSize",
             "autoTpmSloLengthBuckets",
@@ -96,6 +97,10 @@ public class ConfigService {
         // ignores parse errors, so it is not called here. getDefaultScheduleModeEnum()
         // throws IllegalArgumentException for invalid schedule mode values.
         config.getDefaultScheduleModeEnum();
+        if (config.getEngineType() == null) {
+            throw new ConfigValidationException(
+                    "engineType", "must not be null; expected LLM or EMBEDDING");
+        }
         validateSloPolicySpecs(config);
 
         dumpEffectiveConfig(config);

@@ -3,6 +3,7 @@ import json
 import struct
 import sys
 from enum import Enum
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 # Mock the ops module to avoid CUDA dependency in this unit test
@@ -62,6 +63,8 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
 )
 from rtp_llm.cpp.model_rpc.proto import model_rpc_service_pb2_grpc
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    BatchGenerateOutputsPB,
+    ErrorCodePB,
     ErrorDetailsPB,
     GenerateConfigPB,
     GenerateInputPB,
@@ -1692,6 +1695,565 @@ class ClientSpanSettlementTest(TestCase):
 
         self.assertEqual(raised.exception.exception_type, ExceptionType.UNKNOWN_ERROR)
         self.assertEqual(raised.exception.message, "future error")
+
+
+class BatchAddressSelectionTest(TestCase):
+    """The dispatcher stamps generate_config.role_addrs on the prompt_batch endpoints, and
+    route_ips then skips FE's own master round-trip because they are present. batch_enqueue must
+    actually send the chunk to that pre-assigned backend — otherwise the scheduling decision is
+    silently discarded and the request lands on whatever the static address list says.
+
+    Most selection tests use lightweight address stubs to isolate routing behavior. The JSON
+    boundary is covered separately with a real pydantic RoleAddr, so Java dispatcher payloads and
+    the in-process selection helper cannot silently drift apart.
+    """
+
+    @staticmethod
+    def _client(addresses):
+        client = ModelRpcClient.__new__(ModelRpcClient)
+        client._addresses = addresses
+        client._decode_entrance = False
+        return client
+
+    @staticmethod
+    def _addr(ip, role, grpc_port=8089):
+        return SimpleNamespace(role=role, ip=ip, http_port=8088, grpc_port=grpc_port)
+
+    @staticmethod
+    def _input(request_id, role_addrs=()):
+        return SimpleNamespace(
+            request_id=request_id,
+            generate_config=SimpleNamespace(role_addrs=list(role_addrs)),
+        )
+
+    def test_pre_assigned_role_addr_wins_over_static_addresses(self):
+        client = self._client(["10.0.0.99:100"])
+        addr = self._addr("10.0.0.7", RoleType.PDFUSION)
+        inputs = [self._input(1, [addr]), self._input(2, [addr])]
+
+        self.assertEqual("10.0.0.7:8089", client._select_batch_address(inputs))
+
+    def test_falls_back_to_static_addresses_when_nothing_pre_assigned(self):
+        client = self._client(["10.0.0.1:100", "10.0.0.2:100"])
+        inputs = [self._input(3), self._input(4)]
+
+        self.assertEqual("10.0.0.2:100", client._select_batch_address(inputs))
+
+    def test_inconsistent_pre_assignment_is_rejected_not_silently_mis_routed(self):
+        client = self._client(["10.0.0.1:100"])
+        inputs = [
+            self._input(5, [self._addr("10.0.0.7", RoleType.PDFUSION)]),
+            self._input(6, [self._addr("10.0.0.8", RoleType.PDFUSION)]),
+        ]
+
+        # Typed (not a bare ValueError) so the HTTP layer reports a deterministic
+        # client-error code for a caller-assembled mixed batch.
+        with self.assertRaises(FtRuntimeException):
+            client._select_batch_address(inputs)
+
+    def test_mixed_assigned_and_unassigned_inputs_are_rejected_explicitly(self):
+        client = self._client(["10.0.0.1:100"])
+        inputs = [
+            self._input(7, [self._addr("10.0.0.7", RoleType.PDFUSION)]),
+            self._input(8),
+        ]
+
+        with self.assertRaises(FtRuntimeException) as raised:
+            client._select_batch_address(inputs)
+
+        self.assertEqual(ExceptionType.INVALID_PARAMS, raised.exception.exception_type)
+        self.assertIn("unassigned", raised.exception.message)
+
+    def test_empty_static_addresses_raises_instead_of_dividing_by_zero(self):
+        client = self._client([])
+        with self.assertRaises(ValueError):
+            client._select_batch_address([self._input(7)])
+
+    def test_decode_entrance_honours_decode_role_addr(self):
+        client = self._client(["10.9.9.9:1"])
+        client._decode_entrance = True
+        inputs = [
+            self._input(
+                8,
+                [
+                    self._addr("10.0.0.5", RoleType.PREFILL),
+                    self._addr("10.0.0.6", RoleType.DECODE, grpc_port=9000),
+                ],
+            )
+        ]
+
+        self.assertEqual("10.0.0.6:9000", client._select_batch_address(inputs))
+
+    def test_role_addr_with_empty_ip_is_skipped_not_selected(self):
+        client = self._client(["10.0.0.1:100", "10.0.0.2:100"])
+        inputs = [self._input(9, [self._addr("", RoleType.PDFUSION)])]
+
+        # An empty-ip role_addr is a placeholder, not an assignment: the batch must
+        # fall back to the static address list exactly like an unrouted input.
+        self.assertEqual("10.0.0.2:100", client._select_batch_address(inputs))
+
+    # The single-request enqueue() and the batch path now share _role_addr_target for the
+    # role->address rule; pin the helper directly so a change to either path cannot quietly
+    # diverge the two on where a pre-assigned request lands.
+    def test_role_addr_target_returns_the_pre_assigned_backend(self):
+        client = self._client(["10.0.0.99:100"])
+        target = client._role_addr_target(
+            self._input(10, [self._addr("10.0.0.7", RoleType.PDFUSION)])
+        )
+        self.assertEqual("10.0.0.7:8089", target)
+
+    def test_role_addr_target_is_none_when_nothing_pre_assigned(self):
+        client = self._client(["10.0.0.1:100"])
+        self.assertIsNone(client._role_addr_target(self._input(11)))
+
+    def test_role_addr_target_skips_an_empty_ip_placeholder(self):
+        client = self._client(["10.0.0.1:100"])
+        self.assertIsNone(
+            client._role_addr_target(
+                self._input(12, [self._addr("", RoleType.PDFUSION)])
+            )
+        )
+
+    def test_java_dispatcher_role_addr_json_deserializes_and_routes(self):
+        config = GenerateConfig.model_validate(
+            {
+                "role_addrs": [
+                    {
+                        "role": "PDFUSION",
+                        "ip": "10.0.0.7",
+                        "http_port": 8088,
+                        "grpc_port": 8089,
+                    }
+                ]
+            }
+        )
+        self.assertIsInstance(config.role_addrs[0], RoleAddr)
+        self.assertEqual(RoleType.PDFUSION, config.role_addrs[0].role)
+        self.assertEqual(
+            "10.0.0.7:8089",
+            self._client([])._role_addr_target(SimpleNamespace(generate_config=config)),
+        )
+
+
+class EnqueueTargetSelectionTest(TestCase):
+    """enqueue() delegates the role->address decision to _role_addr_target and then wraps it:
+    a hit becomes a single-target list, a miss falls back to the static data-parallel list, and
+    the request_id indexes into whichever list wins. That wiring never runs in the FakeModelRpcClient
+    (it overrides enqueue outright), so drive the real body far enough to capture the chosen target
+    and stop before any gRPC I/O.
+    """
+
+    class _StopBeforeRpc(Exception):
+        pass
+
+    @staticmethod
+    def _client(addresses):
+        client = ModelRpcClient.__new__(ModelRpcClient)
+        client._addresses = addresses
+        client._decode_entrance = False
+        return client
+
+    @staticmethod
+    def _addr(ip, role, grpc_port=8089):
+        return SimpleNamespace(role=role, ip=ip, http_port=8088, grpc_port=grpc_port)
+
+    @staticmethod
+    def _input(request_id, role_addrs=()):
+        return SimpleNamespace(
+            request_id=request_id,
+            generate_config=SimpleNamespace(
+                role_addrs=list(role_addrs),
+                timeout_ms=1000,
+                has_num_beams=lambda: False,
+            ),
+        )
+
+    def _capture_target(self, client, input_py, calls=None):
+        captured = {}
+
+        async def fake_get(address):
+            captured["address"] = address
+            raise EnqueueTargetSelectionTest._StopBeforeRpc()
+
+        client._channel_pool = SimpleNamespace(get=fake_get)
+
+        async def drive():
+            async for _ in client.enqueue(input_py):
+                pass
+
+        def counting_trans_input(x):
+            if calls is not None:
+                calls.append(x)
+            return GenerateInputPB()
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.trans_input", counting_trans_input
+        ):
+            with self.assertRaises(EnqueueTargetSelectionTest._StopBeforeRpc):
+                asyncio.run(drive())
+        return captured["address"]
+
+    def test_enqueue_builds_the_request_pb_exactly_once(self):
+        # trans_input validates the generate_config and copies every field into a fresh PB, so
+        # building it twice doubles that cost on every streaming request. enqueue once did exactly
+        # that (the first result was overwritten); pin the single build so it cannot come back.
+        client = self._client(["10.0.0.1:100"])
+        calls = []
+        self._capture_target(client, self._input(0), calls=calls)
+        self.assertEqual(
+            1, len(calls), "enqueue must build the request PB exactly once"
+        )
+
+    def test_enqueue_sends_to_the_pre_assigned_backend(self):
+        client = self._client(["10.9.9.9:1"])
+        input_py = self._input(0, [self._addr("10.0.0.7", RoleType.PDFUSION)])
+        self.assertEqual("10.0.0.7:8089", self._capture_target(client, input_py))
+
+    def test_enqueue_falls_back_to_static_addresses_when_unrouted(self):
+        client = self._client(["10.0.0.1:100", "10.0.0.2:100"])
+        # request_id=1 -> index 1 in the static list, proving the fallback both selects the
+        # static list and keeps the request_id modulo indexing.
+        self.assertEqual("10.0.0.2:100", self._capture_target(client, self._input(1)))
+
+    def test_input_conversion_failure_does_not_open_client_span(self):
+        client = self._client(["10.0.0.1:100"])
+
+        async def drive():
+            async for _ in client.enqueue(self._input(0)):
+                pass
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.trans_input",
+            side_effect=ValueError("invalid generate config"),
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.start_client_span"
+        ) as start_span:
+            with self.assertRaisesRegex(ValueError, "invalid generate config"):
+                asyncio.run(drive())
+
+        start_span.assert_not_called()
+
+
+class BatchEnqueueDecodeSemanticsTest(TestCase):
+    """Exercises the REAL ModelRpcClient.batch_enqueue decode/error path.
+
+    The routing tests above stub the client's batch_enqueue wholesale, so the gRPC call, the
+    results-decode loop, the inputs[i] <-> results[i] alignment, the raise-on-first-error
+    (chunk-level all-or-nothing) and the grpc.RpcError translation had no coverage at all. This
+    class drives that method body with a faked stub. trans_input/trans_output are the separately
+    tested leaf decoders; here they are spied so a mis-alignment (trans_output fed the wrong
+    input) or a dropped/renumbered error index turns the test red.
+    """
+
+    @staticmethod
+    def _client():
+        client = ModelRpcClient.__new__(ModelRpcClient)
+        client._addresses = ["10.0.0.1:8089"]
+        client._decode_entrance = False
+        client._max_rpc_timeout_ms = 30000
+
+        class _Pool:
+            async def get(self, addr):
+                return object()
+
+        client._channel_pool = _Pool()
+        return client
+
+    @staticmethod
+    def _input(request_id, role_addrs=()):
+        return SimpleNamespace(
+            request_id=request_id,
+            prompt_length=4,
+            generate_config=SimpleNamespace(
+                timeout_ms=1000, role_addrs=list(role_addrs)
+            ),
+        )
+
+    @staticmethod
+    def _addr(ip):
+        return SimpleNamespace(role=RoleType.PDFUSION, ip=ip, grpc_port=8089)
+
+    @staticmethod
+    def _stub(response=None, error=None, seen_call=None):
+        class _FakeStub:
+            def __init__(self, channel):
+                pass
+
+            async def BatchGenerateCall(self, batch_input_pb, **kwargs):
+                if seen_call is not None:
+                    seen_call.append(
+                        (batch_input_pb, kwargs.get("timeout"), "timeout" in kwargs)
+                    )
+                if error is not None:
+                    raise error
+                return response
+
+        return _FakeStub
+
+    def _run(
+        self, client, inputs, *, response=None, error=None, seen=None, seen_call=None
+    ):
+        def spy_trans_output(input_py, final_output, stream_state):
+            if seen is not None:
+                seen.append(input_py)
+            return ("OUT", input_py.request_id)
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            new=self._stub(response=response, error=error, seen_call=seen_call),
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.trans_input",
+            new=lambda inp: GenerateInputPB(),
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.trans_output",
+            new=spy_trans_output,
+        ):
+            return asyncio.run(client.batch_enqueue(inputs))
+
+    def test_empty_batch_short_circuits_without_touching_the_stub(self):
+        # error would fire if the stub were reached; an empty batch must not reach it.
+        self.assertEqual(
+            [], self._run(self._client(), [], error=RuntimeError("stub reached"))
+        )
+
+    def test_all_success_returns_one_output_per_input_in_order(self):
+        resp = BatchGenerateOutputsPB()
+        resp.results.add()  # result[0]: no error_info -> success
+        resp.results.add()  # result[1]: success
+        inputs = [self._input(0), self._input(1)]
+        seen = []
+
+        out = self._run(self._client(), inputs, response=resp, seen=seen)
+
+        self.assertEqual([("OUT", 0), ("OUT", 1)], out)
+        # inputs[i] <-> results[i]: decode input 0 then input 1, asserted by identity so that
+        # trans_output(inputs[0], results[1]) or a reused index cannot pass.
+        self.assertIs(inputs[0], seen[0])
+        self.assertIs(inputs[1], seen[1])
+
+    def test_first_item_error_aborts_whole_chunk_and_names_the_index(self):
+        resp = BatchGenerateOutputsPB()
+        resp.results.add()  # result[0]: success, decoded before the failure is seen ...
+        r1 = resp.results.add()  # result[1]: failure
+        r1.error_info.error_message = "boom"
+        inputs = [self._input(0), self._input(1)]
+        seen = []
+
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._run(self._client(), inputs, response=resp, seen=seen)
+
+        # chunk-level all-or-nothing: item 0's success was computed ...
+        self.assertIs(inputs[0], seen[0])
+        # ... yet the call raised (discarding it) and named the failing index.
+        self.assertIn("batch item 1", str(ctx.exception))
+
+    def test_error_index_is_the_failing_position_not_a_constant(self):
+        # Guards against a hard-coded index or an off-by-one in the error message.
+        resp = BatchGenerateOutputsPB()
+        resp.results.add()
+        resp.results.add()
+        r2 = resp.results.add()
+        r2.error_info.error_message = "third one failed"
+        inputs = [self._input(0), self._input(1), self._input(2)]
+
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._run(self._client(), inputs, response=resp)
+        self.assertIn("batch item 2", str(ctx.exception))
+
+    def test_grpc_error_is_translated_to_ft_runtime_exception(self):
+        class _FakeRpcError(grpc.RpcError):
+            def trailing_metadata(self):
+                return {}
+
+            def code(self):
+                return grpc.StatusCode.UNAVAILABLE
+
+            def details(self):
+                return "backend unavailable"
+
+        # grpc.RpcError must not leak raw; batch_enqueue funnels it through _handle_grpc_error.
+        with self.assertRaises(FtRuntimeException):
+            self._run(self._client(), [self._input(0)], error=_FakeRpcError())
+
+    def test_grpc_error_without_trailing_metadata_keeps_original_cause(self):
+        class _FakeRpcError(grpc.RpcError):
+            def trailing_metadata(self):
+                return None
+
+            def code(self):
+                return grpc.StatusCode.UNAVAILABLE
+
+            def details(self):
+                return "connection failed before metadata"
+
+        original = _FakeRpcError()
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._run(self._client(), [self._input(0)], error=original)
+        self.assertIs(original, ctx.exception.__cause__)
+
+    def test_batch_timeout_preserves_per_item_defaults_without_mutating_inputs(self):
+        resp = BatchGenerateOutputsPB()
+        resp.results.add()
+        resp.results.add()
+        defaulted = self._input(0)
+        defaulted.generate_config.timeout_ms = 0
+        explicit = self._input(1)
+        explicit.generate_config.timeout_ms = 1000
+        seen_call = []
+
+        self._run(
+            self._client(), [defaulted, explicit], response=resp, seen_call=seen_call
+        )
+
+        self.assertEqual(0, defaulted.generate_config.timeout_ms)
+        self.assertEqual(1000, explicit.generate_config.timeout_ms)
+        batch_pb, rpc_timeout, has_timeout_kwarg = seen_call[0]
+        self.assertEqual(
+            [30000, 1000],
+            [item.generate_config.timeout_ms for item in batch_pb.inputs],
+        )
+        self.assertEqual(30.0, rpc_timeout)
+        self.assertTrue(has_timeout_kwarg)
+
+    def test_nonpositive_batch_timeout_is_unbounded_when_server_default_is_disabled(
+        self,
+    ):
+        client = self._client()
+        client._max_rpc_timeout_ms = 0
+        item = self._input(0)
+        item.generate_config.timeout_ms = 0
+        response = BatchGenerateOutputsPB()
+        response.results.add()
+        seen_call = []
+
+        self._run(client, [item], response=response, seen_call=seen_call)
+
+        batch_pb, rpc_timeout, has_timeout_kwarg = seen_call[0]
+        self.assertEqual(0, batch_pb.inputs[0].generate_config.timeout_ms)
+        self.assertIsNone(rpc_timeout)
+        self.assertFalse(has_timeout_kwarg)
+
+    def test_one_unbounded_item_keeps_shared_batch_call_unbounded(self):
+        client = self._client()
+        client._max_rpc_timeout_ms = 0
+        unbounded = self._input(0)
+        unbounded.generate_config.timeout_ms = 0
+        finite = self._input(1)
+        finite.generate_config.timeout_ms = 1000
+        response = BatchGenerateOutputsPB()
+        response.results.add()
+        response.results.add()
+        seen_call = []
+
+        self._run(client, [unbounded, finite], response=response, seen_call=seen_call)
+
+        batch_pb, rpc_timeout, has_timeout_kwarg = seen_call[0]
+        self.assertEqual(
+            [0, 1000],
+            [item.generate_config.timeout_ms for item in batch_pb.inputs],
+        )
+        self.assertIsNone(rpc_timeout)
+        self.assertFalse(has_timeout_kwarg)
+
+    def test_finite_batch_timeout_preserves_millisecond_precision(self):
+        client = self._client()
+        first = self._input(0)
+        first.generate_config.timeout_ms = 1001
+        second = self._input(1)
+        second.generate_config.timeout_ms = 1003
+        response = BatchGenerateOutputsPB()
+        response.results.add()
+        response.results.add()
+        seen_call = []
+
+        self._run(client, [first, second], response=response, seen_call=seen_call)
+
+        batch_pb, rpc_timeout, has_timeout_kwarg = seen_call[0]
+        self.assertEqual(
+            [1001, 1003],
+            [item.generate_config.timeout_ms for item in batch_pb.inputs],
+        )
+        self.assertEqual(1.003, rpc_timeout)
+        self.assertTrue(has_timeout_kwarg)
+
+    def test_batch_item_error_preserves_typed_rpc_error_code(self):
+        resp = BatchGenerateOutputsPB()
+        failed = resp.results.add()
+        failed.error_info.error_code = ErrorCodePB.LOAD_CACHE_TIMEOUT
+        failed.error_info.error_message = "cache load timed out"
+
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._run(self._client(), [self._input(0)], response=resp)
+
+        self.assertEqual(ExceptionType.LOAD_CACHE_TIMEOUT, ctx.exception.exception_type)
+
+    def test_error_info_present_but_empty_message_is_treated_as_success(self):
+        # An explicitly present but entirely empty error_info retains protobuf success semantics.
+        resp = BatchGenerateOutputsPB()
+        r0 = resp.results.add()
+        r0.error_info.SetInParent()  # error_info present (HasField True) but error_message == ""
+        resp.results.add()  # result[1]: plain success
+        inputs = [self._input(0), self._input(1)]
+        seen = []
+
+        out = self._run(self._client(), inputs, response=resp, seen=seen)
+
+        self.assertEqual([("OUT", 0), ("OUT", 1)], out)
+        self.assertIs(inputs[0], seen[0])
+
+    def test_nonzero_error_code_with_empty_message_still_fails(self):
+        resp = BatchGenerateOutputsPB()
+        failed = resp.results.add()
+        failed.error_info.error_code = ErrorCodePB.LOAD_CACHE_TIMEOUT
+
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._run(self._client(), [self._input(0)], response=resp)
+
+        self.assertEqual(ExceptionType.LOAD_CACHE_TIMEOUT, ctx.exception.exception_type)
+        self.assertIn("LOAD_CACHE_TIMEOUT", str(ctx.exception))
+
+    def test_result_count_mismatch_fails_loudly_instead_of_silently_truncating(self):
+        # The C++ contract is 1:1 (one result per input). A short result vector must fail typed,
+        # not silently return a truncated list (trailing inputs dropped with no error). Mutation
+        # guard: drop the length check and this returns [("OUT", 0)] for two inputs instead of
+        # raising.
+        resp = BatchGenerateOutputsPB()
+        resp.results.add()  # only 1 result for 2 inputs
+        inputs = [self._input(0), self._input(1)]
+
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._run(self._client(), inputs, response=resp)
+        self.assertIn("1:1 per-item contract", str(ctx.exception))
+
+    def test_result_count_longer_than_inputs_also_raises(self):
+        # The guard's other direction: MORE results than inputs (which would otherwise IndexError
+        # on inputs[i] for the surplus i) must fail typed with the same 1:1-contract error. The
+        # docstring/comment names both failure modes; this pins the longer one. 3 results / 2 inputs.
+        resp = BatchGenerateOutputsPB()
+        resp.results.add()
+        resp.results.add()
+        resp.results.add()
+        inputs = [self._input(0), self._input(1)]
+
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._run(self._client(), inputs, response=resp)
+        self.assertIn("1:1 per-item contract", str(ctx.exception))
+
+    def test_mixed_pre_assigned_batch_raises_before_reaching_the_stub(self):
+        # _select_batch_address runs in the real body AFTER trans_input on every input but BEFORE
+        # the gRPC call. Two inputs pre-assigned to different backends is a caller assembly error
+        # that must fail typed (INVALID_PARAMS) without shipping the batch to either backend. The
+        # isolated BatchAddressSelectionTest drives _select_batch_address directly; this pins the same
+        # guard inside batch_enqueue's real ordering. error= would fire if the stub were reached.
+        inputs = [
+            self._input(0, [self._addr("10.0.0.7")]),
+            self._input(1, [self._addr("10.0.0.8")]),
+        ]
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._run(
+                self._client(), inputs, error=RuntimeError("stub must not be reached")
+            )
+        self.assertIn("one batch RPC targets one backend", str(ctx.exception))
 
 
 if __name__ == "__main__":

@@ -45,7 +45,8 @@ class DispatchFailureTest extends FlexLBMockTestBase {
 
         assertFalse(response.isSuccess(), "Request should fail when EnqueueBatch returns error");
         assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), response.getCode());
-        assertEquals(1, mockPrefillWorker.getEnqueueCount());
+        assertEquals(1, mockPrefillWorker.getEnqueueCount(),
+                "unexpected terminal before EnqueueBatch: " + response.getErrorMessage());
         assertEquals(0, mockDecodeWorker.getEnqueueCount());
         InflightAssertions.assertPrefillInflightEmpty(getPrefillEndpoint());
 

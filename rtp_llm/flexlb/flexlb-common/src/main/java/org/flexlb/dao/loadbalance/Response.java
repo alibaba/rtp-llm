@@ -42,15 +42,27 @@ public class Response {
     private AdmissionRejectReason admissionRejectReason = AdmissionRejectReason.UNSPECIFIED;
 
     public static Response error(StrategyErrorType strategyErrorType) {
-        return error(strategyErrorType, AdmissionRejectReason.UNSPECIFIED);
+        return error(strategyErrorType, strategyErrorType.getErrorMsg(),
+                AdmissionRejectReason.UNSPECIFIED);
+    }
+
+    /** Variant carrying a caller-supplied message, mirroring {@code BatchScheduleResponse.error}. */
+    public static Response error(StrategyErrorType strategyErrorType, String errorMessage) {
+        return error(strategyErrorType, errorMessage, AdmissionRejectReason.UNSPECIFIED);
     }
 
     public static Response error(StrategyErrorType strategyErrorType,
                                  AdmissionRejectReason admissionRejectReason) {
+        return error(strategyErrorType, strategyErrorType.getErrorMsg(), admissionRejectReason);
+    }
+
+    private static Response error(StrategyErrorType strategyErrorType,
+                                  String errorMessage,
+                                  AdmissionRejectReason admissionRejectReason) {
         Response result = new Response();
         result.setSuccess(false);
         result.setCode(strategyErrorType.getErrorCode());
-        result.setErrorMessage(strategyErrorType.buildErrorMessage(null));
+        result.setErrorMessage(strategyErrorType.buildErrorMessage(errorMessage));
         result.setAdmissionRejectReason(admissionRejectReason == null
                 ? AdmissionRejectReason.UNSPECIFIED : admissionRejectReason);
         return result;

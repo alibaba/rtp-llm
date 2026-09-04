@@ -45,6 +45,7 @@ class PyAccessLog:
     request: RequestLog
     response: ResponseLog
     id: int
+    path: Optional[str]
     log_time: str
 
     def __init__(
@@ -53,10 +54,14 @@ class PyAccessLog:
         response: ResponseLog,
         id: int,
         log_time: Optional[str] = None,
+        path: Optional[str] = None,
     ):
         self.request = request
         self.response = response
         self.id = id
+        # Keep old records byte-compatible unless a caller has an HTTP path to contribute.
+        if path is not None:
+            self.path = path
         if log_time is None:
             current_time = time.time()
             local_time = time.localtime(current_time)

@@ -7,6 +7,7 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.balance.scheduler.Router;
+import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
 import org.flexlb.cache.core.EngineLocalView;
 import org.flexlb.cache.core.GlobalCacheIndex;
 import org.flexlb.config.ConfigService;
@@ -192,7 +193,8 @@ public abstract class FlexLBMockTestBase {
         // 11. Create real scheduler
         scheduler = new FlexlbBatchScheduler(
                 configService, router,
-                endpointRegistry, dispatcher, reporter, null, null);
+                endpointRegistry, dispatcher, reporter, null, null,
+                createEngineCancelChannel());
 
         // 12. Register prefill endpoint with the real scheduler as BatchDecisionHandler
         endpointRegistry.ensureEndpoint(RoleType.PREFILL, prefillIpPort, prefillWs);
@@ -264,13 +266,46 @@ public abstract class FlexLBMockTestBase {
         return mock(EngineWorkerStatus.class);
     }
 
+    /**
+     * Keep post-send transport ambiguity unresolved in the generic fixture. Production uses an
+     * Engine cancel fence; focused tests can override this seam with a deterministic outcome.
+     */
+    protected EngineCancelChannel createEngineCancelChannel() {
+        return new EngineCancelChannel() {
+            @Override
+            public boolean isSupported(DecodeEndpoint endpoint) {
+                return false;
+            }
+
+            @Override
+            public CompletableFuture<CancelOutcome> cancel(CancelTarget target,
+                                                            long requestId,
+                                                            long timeoutMs) {
+                return new CompletableFuture<>();
+            }
+        };
+    }
+
     protected Router createRouter() {
         Router fixedRouter = mock(Router.class);
         when(fixedRouter.route(any(BalanceContext.class))).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
+            reserveDecodeForRoute(ctx);
             return successRoute(ctx.getRequestId());
         });
         return fixedRouter;
+    }
+
+    /**
+     * Mirror the Decode reservation side effect performed by production routing strategies.
+     * Tests that replace the fixed router must call this before returning a successful route;
+     * the scheduler now fences dispatch on ownership of that reservation.
+     */
+    protected void reserveDecodeForRoute(BalanceContext ctx) {
+        Request request = ctx.getRequest();
+        long expectedKvTokens = request.getSeqLen() + Math.max(0L, request.getMaxNewTokens());
+        getDecodeEndpoint().reserve(request.getRequestId(), request.getSeqLen(), expectedKvTokens,
+                ctx.getPriority(), ctx.getDeadlineMs());
     }
 
     /**

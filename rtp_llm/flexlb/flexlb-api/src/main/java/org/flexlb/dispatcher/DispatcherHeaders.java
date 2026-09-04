@@ -1,0 +1,96 @@
+package org.flexlb.dispatcher;
+
+import org.springframework.http.HttpHeaders;
+
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
+
+/**
+ * Which inbound headers the dispatcher relays to FE, shared by the passthrough and fanout paths so
+ * the two cannot drift: a caller must not lose its {@code Authorization}, tenant or tracing headers
+ * merely because its request happened to be batch-shaped and took the split path.
+ */
+final class DispatcherHeaders {
+
+    private DispatcherHeaders() {
+    }
+
+    /**
+     * Hop-by-hop headers from RFC 7230 §6.1 plus framing headers WebClient must compute itself for
+     * the outbound connection. Forwarding any of these from the inbound request — or back on the
+     * response — corrupts the new connection: an inbound {@code Transfer-Encoding: chunked}
+     * double-frames the body WebClient is already about to chunk-encode; an inbound {@code Host}
+     * routes to whatever the original client put there; {@code Proxy-Authorization} would be
+     * relayed downstream against the original intent. Comparison is case-insensitive.
+     */
+    static final Set<String> HOP_BY_HOP = caseInsensitiveSet(
+            "connection",
+            "keep-alive",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "te",
+            "trailer",
+            "transfer-encoding",
+            "upgrade",
+            "host",
+            "content-length");
+
+    /**
+     * Fanout drops everything hop-by-hop plus two more, because unlike passthrough it does not
+     * stream bytes through — it parses each FE response and re-serializes a merged one:
+     * <ul>
+     *   <li>{@code accept-encoding} — the dispatcher reads the FE body as raw bytes and hands them
+     *       to {@code JSON.parseObject}; letting FE gzip the response would break that parse.</li>
+     *   <li>{@code content-length} / {@code content-type} — each chunk body is re-serialized here,
+     *       so the inbound values describe the wrong entity ({@code content-type} is set explicitly
+     *       by {@link FeClient}; {@code content-length} is already hop-by-hop).</li>
+     * </ul>
+     */
+    static final Set<String> FANOUT_SKIP = caseInsensitiveSet(HOP_BY_HOP, "content-type", "accept-encoding");
+
+    /**
+     * Copy end-to-end headers while also honoring fields dynamically nominated by
+     * {@code Connection}, which are hop-by-hop even when absent from the fixed standard list.
+     */
+    static void copyEndToEnd(HttpHeaders source, HttpHeaders sink, Set<String> skip) {
+        Set<String> effectiveSkip = skip;
+        List<String> connectionValues = source.get(HttpHeaders.CONNECTION);
+        if (connectionValues != null) {
+            Set<String> withConnectionTokens = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+            withConnectionTokens.addAll(skip);
+            for (String value : connectionValues) {
+                for (String token : value.split(",")) {
+                    String name = token.trim();
+                    if (!name.isEmpty()) {
+                        withConnectionTokens.add(name);
+                    }
+                }
+            }
+            effectiveSkip = withConnectionTokens;
+        }
+        Set<String> namesToSkip = effectiveSkip;
+        source.forEach((name, values) -> {
+            if (!namesToSkip.contains(name)) {
+                sink.addAll(name, values);
+            }
+        });
+    }
+
+    /** Case-insensitive membership without the per-header {@code toLowerCase} allocation. */
+    private static Set<String> caseInsensitiveSet(String... names) {
+        Set<String> set = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+        set.addAll(Arrays.asList(names));
+        return Collections.unmodifiableSet(set);
+    }
+
+    /** Same as above but seeded from {@code base}, so a derived set cannot drift from its parent. */
+    private static Set<String> caseInsensitiveSet(Set<String> base, String... extra) {
+        Set<String> set = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+        set.addAll(base);
+        set.addAll(Arrays.asList(extra));
+        return Collections.unmodifiableSet(set);
+    }
+}

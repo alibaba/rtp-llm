@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import logging
 import os
 import time
@@ -240,12 +241,17 @@ class BackendRPCServerVisitor:
         return role_list
 
     async def get_master_route_addrs(
-        self, input: GenerateInput
+        self,
+        input: GenerateInput,
+        seq_len_hint: Optional[int] = None,
+        placement_only: bool = False,
     ) -> Optional[FlexlbResponse]:
         """
         Resolve role addrs from FlexLB master (and slave on connection failure).
         Returns None on success; on failure returns FlexlbResponse for routing decisions.
         request_id is frontend-generated and is not overwritten.
+        seq_len_hint: see MasterClient.get_backend_role_addrs — aggregate weight when this
+        one routing call stands in for a whole batch.
         """
         token_ids = (
             input.token_ids.tolist()[0]
@@ -258,7 +264,10 @@ class BackendRPCServerVisitor:
         full_block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
         block_cache_keys = self._route_cache_keys(full_block_cache_keys)
         self._report_recent_cache_key_metrics(block_cache_keys)
-        input_pb = trans_input(input)
+        # BatchGenerateCall itself carries every item to the chosen backend. Supplying the first
+        # item here would let a BATCH-mode master enqueue it as a separate GenerateStreamCall,
+        # duplicating work. Omitting generate_input asks master for placement/accounting only.
+        input_pb = None if placement_only else trans_input(input)
 
         try:
             route_result = await self.master_client.get_backend_role_addrs(
@@ -267,6 +276,7 @@ class BackendRPCServerVisitor:
                 input=input,
                 request_id=input.request_id,
                 input_pb=input_pb,
+                seq_len_hint=seq_len_hint,
             )
         except BaseException as e:
             exception_json = format_exception(e)
@@ -279,7 +289,9 @@ class BackendRPCServerVisitor:
 
         if route_result.is_ok:
             input.generate_config.role_addrs = route_result.role_addrs
-            input.enqueued_by_master = route_result.enqueued_by_master
+            input.enqueued_by_master = (
+                False if placement_only else route_result.enqueued_by_master
+            )
             route_logger.debug(
                 "master route success, request_id=%s, addrs=%s",
                 input.request_id,
@@ -360,7 +372,12 @@ class BackendRPCServerVisitor:
                 missing_roles,
             )
 
-    async def route_ips(self, input: GenerateInput):
+    async def route_ips(
+        self,
+        input: GenerateInput,
+        seq_len_hint: Optional[int] = None,
+        placement_only: bool = False,
+    ):
         # PD node selection span: master routing is a real RPC round-trip that
         # directly delays TTFT. Child of the HTTP SERVER span (same contextvars
         # chain as model_rpc_client.enqueue); no-op when telemetry is off.
@@ -417,7 +434,14 @@ class BackendRPCServerVisitor:
                 master_route_succeeded = False
                 if not role_addrs_specified and master_addr and not input_token_batched:
                     with Timer() as master_route_timer:
-                        master_route_result = await self.get_master_route_addrs(input)
+                        if placement_only:
+                            master_route_result = await self.get_master_route_addrs(
+                                input, seq_len_hint, placement_only=True
+                            )
+                        else:
+                            master_route_result = await self.get_master_route_addrs(
+                                input, seq_len_hint
+                            )
                     kmonitor.report(
                         GaugeMetrics.MASTER_ROUTE_RT_METRIC,
                         master_route_timer.cost_ms(),
@@ -711,8 +735,41 @@ class BackendRPCServerVisitor:
             self.check_prefill_cp_supported(input)
 
         if self.host_service.service_available:
-            for input in inputs:
-                await self.route_ips(input)
+            # A batch RPC is one scheduling unit: every input goes to the same backend in a
+            # single BatchGenerateCall (ModelRpcClient._select_batch_address enforces this).
+            # Routing each input separately would let the master legally scatter them across
+            # workers, leaving the batch with no single valid target — so route once and stamp
+            # the same assignment on the rest. Inputs that already carry role_addrs (the
+            # dispatcher pre-assigns whole chunks) keep them and skip routing entirely.
+            resolved_targets = [
+                self.model_rpc_client._role_addr_target(inp) for inp in inputs
+            ]
+            routed_count = sum(target is not None for target in resolved_targets)
+            if 0 < routed_count < len(inputs):
+                # Contacting master only for the unrouted subset can choose a
+                # different target after already charging load. Reject the
+                # malformed batch before any remote side effect instead.
+                raise FtRuntimeException(
+                    ExceptionType.INVALID_PARAMS,
+                    f"batch request: [{len(inputs)} items] mixes {routed_count} "
+                    "pre-assigned item(s) with unrouted items; one batch RPC "
+                    "requires one routing source",
+                )
+            if inputs and routed_count == 0:
+                # Report the batch's aggregate prompt length, not the first input's:
+                # this one /schedule call is the only load signal the master gets for
+                # the whole batch, and under-reporting it as a single request would
+                # make load-aware strategies (SHORTEST_TTFT) pile followers onto the
+                # worker that just absorbed N inputs.
+                await self.route_ips(
+                    inputs[0],
+                    seq_len_hint=sum(inp.prompt_length for inp in inputs),
+                    placement_only=True,
+                )
+                for inp in inputs[1:]:
+                    inp.generate_config.role_addrs = copy.deepcopy(
+                        inputs[0].generate_config.role_addrs
+                    )
 
         return await self.model_rpc_client.batch_enqueue(inputs)
 

@@ -1,0 +1,167 @@
+package org.flexlb.config;
+
+import org.flexlb.dao.route.Endpoint;
+import org.flexlb.dao.route.GroupRoleEndPoint;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.dao.route.ServiceRoute;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class ModelMetaConfigTest {
+
+    private static final String TEST_SERVICE_ID =
+            "aigc.text-generation.generation.model_meta_cfg_test";
+
+    /** Two distinct serviceIds whose modelName suffix is identical — see IdUtils#getModelNameByServiceId. */
+    private static final String SHARED_MODEL_SERVICE_A =
+            "aigc.text-generation.generation" + ".shared_model_a";
+    private static final String SHARED_MODEL_SERVICE_B =
+            "aigc.text-generation.generatioX" + ".shared_model_a";
+
+    @AfterEach
+    void tearDown() {
+        ModelMetaConfig.removeServiceRoute(TEST_SERVICE_ID);
+        ModelMetaConfig.removeServiceRoute(SHARED_MODEL_SERVICE_A);
+        ModelMetaConfig.removeServiceRoute(SHARED_MODEL_SERVICE_B);
+    }
+
+    @Test
+    void removingOneRouteKeepsAModelStillServedByAnother() {
+        // Several serviceIds can map to one modelName. Dropping the model from the sync set on the
+        // first removal would stop syncing a model other live routes still serve.
+        ServiceRoute a = routeWithRoles(SHARED_MODEL_SERVICE_A, true, false, false);
+        a.setLoadBalance(true);
+        ServiceRoute b = routeWithRoles(SHARED_MODEL_SERVICE_B, true, false, false);
+        b.setLoadBalance(true);
+        ModelMetaConfig.putServiceRoute(SHARED_MODEL_SERVICE_A, a);
+        ModelMetaConfig.putServiceRoute(SHARED_MODEL_SERVICE_B, b);
+        String modelName = org.flexlb.util.IdUtils.getModelNameByServiceId(SHARED_MODEL_SERVICE_A);
+        assertTrue(ModelMetaConfig.getLoadBalanceSyncModels().contains(modelName));
+
+        ModelMetaConfig.removeServiceRoute(SHARED_MODEL_SERVICE_A);
+
+        assertTrue(ModelMetaConfig.getLoadBalanceSyncModels().contains(modelName),
+                "the model is still served by the other route, so it must stay in the sync set");
+
+        ModelMetaConfig.removeServiceRoute(SHARED_MODEL_SERVICE_B);
+
+        assertFalse(ModelMetaConfig.getLoadBalanceSyncModels().contains(modelName),
+                "the last route referencing the model is gone, so it drops out");
+    }
+
+    @Test
+    void replacingLoadBalancedRouteWithDisabledRouteRemovesStaleModel() {
+        ServiceRoute enabled = routeWithRoles(TEST_SERVICE_ID, true, false, false);
+        enabled.setLoadBalance(true);
+        ModelMetaConfig.putServiceRoute(TEST_SERVICE_ID, enabled);
+        String modelName = org.flexlb.util.IdUtils.getModelNameByServiceId(TEST_SERVICE_ID);
+        assertTrue(ModelMetaConfig.getLoadBalanceSyncModels().contains(modelName));
+
+        ServiceRoute disabled = routeWithRoles(TEST_SERVICE_ID, true, false, false);
+        disabled.setLoadBalance(false);
+        ModelMetaConfig.putServiceRoute(TEST_SERVICE_ID, disabled);
+
+        assertFalse(ModelMetaConfig.getLoadBalanceSyncModels().contains(modelName));
+    }
+
+    @Test
+    void replacingRouteWithDifferentModelNamePublishesOnlyNewModel() {
+        ServiceRoute original = routeWithRoles(TEST_SERVICE_ID, true, false, false);
+        original.setLoadBalance(true);
+        ModelMetaConfig.putServiceRoute(TEST_SERVICE_ID, original);
+        String oldModel = org.flexlb.util.IdUtils.getModelNameByServiceId(TEST_SERVICE_ID);
+
+        ServiceRoute replacement = routeWithRoles(SHARED_MODEL_SERVICE_A, true, false, false);
+        replacement.setLoadBalance(true);
+        ModelMetaConfig.putServiceRoute(TEST_SERVICE_ID, replacement);
+        String newModel = org.flexlb.util.IdUtils.getModelNameByServiceId(SHARED_MODEL_SERVICE_A);
+
+        assertFalse(ModelMetaConfig.getLoadBalanceSyncModels().contains(oldModel));
+        assertTrue(ModelMetaConfig.getLoadBalanceSyncModels().contains(newModel));
+    }
+
+    private ServiceRoute routeWithRoles(String serviceId, boolean prefill, boolean decode, boolean pdFusion) {
+        GroupRoleEndPoint group = new GroupRoleEndPoint();
+        group.setGroup("g1");
+        if (prefill) {
+            group.setPrefillEndpoint(new Endpoint());
+        }
+        if (decode) {
+            group.setDecodeEndpoint(new Endpoint());
+        }
+        if (pdFusion) {
+            group.setPdFusionEndpoint(new Endpoint());
+        }
+        ServiceRoute route = new ServiceRoute();
+        route.setServiceId(serviceId);
+        route.setRoleEndpoints(List.of(group));
+        return route;
+    }
+
+    @Test
+    void getConfiguredRoleTypes_returns_union_of_registered_routes() {
+        ModelMetaConfig.putServiceRoute(TEST_SERVICE_ID,
+                routeWithRoles(TEST_SERVICE_ID, true, true, false));
+
+        ModelMetaConfig config = new ModelMetaConfig();
+        List<RoleType> roles = config.getConfiguredRoleTypes();
+
+        assertTrue(roles.contains(RoleType.PREFILL), "configured PREFILL must be reported: " + roles);
+        assertTrue(roles.contains(RoleType.DECODE), "configured DECODE must be reported: " + roles);
+    }
+
+    @Test
+    void getConfiguredDiscoveryAddresses_returns_sorted_unique_nonBlankAddresses() {
+        Endpoint prefill = new Endpoint();
+        prefill.setAddress("z-discovery");
+        Endpoint decode = new Endpoint();
+        decode.setAddress("a-discovery");
+        GroupRoleEndPoint group = new GroupRoleEndPoint();
+        group.setGroup("g1");
+        group.setPrefillEndpoint(prefill);
+        group.setDecodeEndpoint(decode);
+        ServiceRoute route = new ServiceRoute();
+        route.setServiceId(TEST_SERVICE_ID);
+        route.setRoleEndpoints(List.of(group));
+        ModelMetaConfig.putServiceRoute(TEST_SERVICE_ID, route);
+
+        assertEquals(List.of("a-discovery", "z-discovery"),
+                new ModelMetaConfig().getConfiguredDiscoveryAddresses());
+    }
+
+    @Test
+    void getConfiguredRoleTypes_sees_a_route_replacement_after_a_cached_read() {
+        ModelMetaConfig config = new ModelMetaConfig();
+        ModelMetaConfig.putServiceRoute(TEST_SERVICE_ID,
+                routeWithRoles(TEST_SERVICE_ID, true, false, false));
+        assertTrue(config.getConfiguredRoleTypes().contains(RoleType.PREFILL));
+
+        // The first read populated the cache; replacing the route must invalidate it.
+        ModelMetaConfig.putServiceRoute(TEST_SERVICE_ID,
+                routeWithRoles(TEST_SERVICE_ID, false, true, false));
+        List<RoleType> roles = config.getConfiguredRoleTypes();
+
+        assertTrue(roles.contains(RoleType.DECODE), "the replacement's roles must be visible: " + roles);
+        assertFalse(roles.contains(RoleType.PREFILL),
+                "the replaced route's roles must not survive in the cached union: " + roles);
+    }
+
+    @Test
+    void getConfiguredRoleTypes_sees_a_removal_after_a_cached_read() {
+        ModelMetaConfig config = new ModelMetaConfig();
+        ModelMetaConfig.putServiceRoute(TEST_SERVICE_ID,
+                routeWithRoles(TEST_SERVICE_ID, false, false, true));
+        assertTrue(config.getConfiguredRoleTypes().contains(RoleType.PDFUSION));
+
+        ModelMetaConfig.removeServiceRoute(TEST_SERVICE_ID);
+
+        assertFalse(config.getConfiguredRoleTypes().contains(RoleType.PDFUSION),
+                "a removed route's roles must not survive in the cached union");
+    }
+}

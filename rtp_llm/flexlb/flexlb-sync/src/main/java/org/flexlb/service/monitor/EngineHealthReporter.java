@@ -8,6 +8,9 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.BatchScheduleContext;
+import org.flexlb.dao.loadbalance.BatchScheduleRequest;
+import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -47,6 +50,8 @@ import static org.flexlb.constant.MetricConstant.CACHE_USED_KV_CACHE_TOKENS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_ALL_QPS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_ALL_RT;
+import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_QPS;
+import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_SCHEDULE_RT;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
 import static org.flexlb.constant.MetricConstant.ENGINE_DECODE_WORKER_NUMBER;
@@ -121,6 +126,9 @@ public class EngineHealthReporter {
         this.monitor.register(ENGINE_BALANCING_MASTER_ALL_QPS, FlexMetricType.QPS);
         this.monitor.register(ENGINE_BALANCING_MASTER_ALL_RT, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_BALANCING_MASTER_SELECT_DETAIL, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+
+        this.monitor.register(ENGINE_BALANCING_MASTER_BATCH_QPS, FlexMetricType.QPS);
+        this.monitor.register(ENGINE_BALANCING_MASTER_BATCH_SCHEDULE_RT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         this.monitor.register(ENGINE_RUNNING_QUEUE_TIME, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
@@ -397,5 +405,20 @@ public class EngineHealthReporter {
 
     public void reportForwardToMasterResult(String type, String code) {
         monitor.report(FORWARD_TO_MASTER_RESULT, FlexMetricTags.of("type", type, "code", code), 1.0);
+    }
+
+    public void reportBatchSchedule(BatchScheduleContext bctx) {
+        if (bctx == null) {
+            return;
+        }
+        BatchScheduleResponse response = bctx.getBatchResponse();
+        int code = response != null ? response.getCode() : 0;
+        BatchScheduleRequest request = bctx.getBatchRequest();
+        FlexMetricTags metricTags = FlexMetricTags.of(
+                "code", String.valueOf(code),
+                "assign_be", String.valueOf(request != null && request.isAssignBe()),
+                "assign_fe", String.valueOf(request != null && request.isAssignFe()));
+        monitor.report(ENGINE_BALANCING_MASTER_BATCH_QPS, metricTags, 1.0);
+        monitor.report(ENGINE_BALANCING_MASTER_BATCH_SCHEDULE_RT, metricTags, System.currentTimeMillis() - bctx.getStartTime());
     }
 }

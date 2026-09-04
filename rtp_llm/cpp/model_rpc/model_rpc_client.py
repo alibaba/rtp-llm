@@ -15,6 +15,7 @@ from rtp_llm.config.generate_config import ReturnAllProbsMode, RoleType
 from rtp_llm.config.response_format_compiler import validate_engine_ready
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     BatchGenerateInputPB,
+    ErrorCodePB,
     ErrorDetailsPB,
     FetchRequestPB,
     GenerateConfigPB,
@@ -47,7 +48,6 @@ from rtp_llm.utils.grpc_util import (
     trans_tensor,
 )
 
-MAX_GRPC_TIMEOUT_SECONDS = 3600
 RPC_CLEANUP_TIMEOUT_SECONDS = 0.1
 RPC_SETTLE_TIMEOUT_SECONDS = 5.0
 JsonableOption = Optional[Union[str, Dict[str, Any], bool]]
@@ -440,7 +440,7 @@ def trans_input(input_py: GenerateInput):
     input_pb.token_ids.extend(input_py.token_ids.reshape(-1).tolist())
     input_pb.start_time = int(time.time() * 1_000_000)
     input_pb.group_size = input_py.group_size
-    if hasattr(input_py, "group_id") and input_py.group_id != -1:
+    if input_py.group_id != -1:
         input_pb.group_id.value = input_py.group_id
 
     request_info = getattr(input_py, "request_info", None)
@@ -883,15 +883,13 @@ class ModelRpcClient(object):
     async def close(self) -> None:
         await self._channel_pool.close()
 
-    def _compute_grpc_timeout(self, timeout_ms) -> float:
-        rpc_timeout_ms = (
-            self._max_rpc_timeout_ms
-            if self._max_rpc_timeout_ms > 0
-            else MAX_GRPC_TIMEOUT_SECONDS * 1000
-        )
-        if timeout_ms is None or timeout_ms <= 0:
-            return rpc_timeout_ms / 1000
-        return timeout_ms / 1000
+    def _effective_timeout_ms(self, timeout_ms) -> Optional[int]:
+        """Return the effective deadline in milliseconds, or None when unbounded."""
+        if timeout_ms is not None and timeout_ms > 0:
+            return int(timeout_ms)
+        if self._max_rpc_timeout_ms > 0:
+            return self._max_rpc_timeout_ms
+        return None
 
     def _handle_grpc_error(
         self, e: grpc.RpcError, request_desc: str, target_address: str = ""
@@ -902,7 +900,7 @@ class ModelRpcClient(object):
         # internal cluster topology (worker ip:port) to callers.
         peer_desc = f" to [{target_address}]" if target_address else ""
         error_details = ErrorDetailsPB()
-        metadata = e.trailing_metadata()
+        metadata = e.trailing_metadata() or {}
         if "grpc-status-details-bin" in metadata and error_details.ParseFromString(
             metadata["grpc-status-details-bin"]
         ):
@@ -918,16 +916,20 @@ class ModelRpcClient(object):
                 f"{e.code()}, {e.details()}, detail error code is "
                 f"{error_code_name}"
             )
-            raise FtRuntimeException(exception_type, error_details.error_message)
+            raise FtRuntimeException(exception_type, error_details.error_message) from e
         else:
             logging.error(
                 f"{request_desc} RPC{peer_desc} failed: "
                 f"error code is {e.code()}, detail is {e.details()}"
             )
             if e.code() == StatusCode.DEADLINE_EXCEEDED:
-                raise FtRuntimeException(ExceptionType.GENERATE_TIMEOUT, e.details())
+                raise FtRuntimeException(
+                    ExceptionType.GENERATE_TIMEOUT, e.details()
+                ) from e
             elif e.code() == StatusCode.CANCELLED:
-                raise FtRuntimeException(ExceptionType.CANCELLED_ERROR, e.details())
+                raise FtRuntimeException(
+                    ExceptionType.CANCELLED_ERROR, e.details()
+                ) from e
             elif e.code() == StatusCode.UNAVAILABLE:
                 details = e.details() or ""
                 lower_details = details.lower()
@@ -940,9 +942,11 @@ class ModelRpcClient(object):
                     exception_type = ExceptionType.CONNECT_TIMEOUT
                 else:
                     exception_type = ExceptionType.CONNECT_FAILED
-                raise FtRuntimeException(exception_type, details)
+                raise FtRuntimeException(exception_type, details) from e
             else:
-                raise FtRuntimeException(ExceptionType.UNKNOWN_ERROR, e.details())
+                raise FtRuntimeException(
+                    ExceptionType.UNKNOWN_ERROR, e.details()
+                ) from e
 
     async def enqueue(
         self, input_py: GenerateInput
@@ -956,12 +960,6 @@ class ModelRpcClient(object):
             if request_timeout_ms is not None and request_timeout_ms > 0
             else self._max_rpc_timeout_ms
         )
-        if effective_ms > 0:
-            # Write the normalized timeout back so the server-visible timeout_ms
-            # matches the client gRPC deadline: engine-side timeout checks and
-            # P2P deadlineMs() require a positive timeout_ms.
-            input_py.generate_config.timeout_ms = int(effective_ms)
-        input_pb = trans_input(input_py)
         response_iterator = None
         rpc_status = None
         stream_state = StreamState()
@@ -981,19 +979,12 @@ class ModelRpcClient(object):
                 # the streaming channel below.
                 selected_role = RoleType.PREFILL
         else:
-            address_list = self._addresses
-            for role_addr in input_py.generate_config.role_addrs:
-                if (
-                    (self._decode_entrance and role_addr.role == RoleType.DECODE)
-                    or role_addr.role == RoleType.PDFUSION
-                    or (
-                        not self._decode_entrance and role_addr.role == RoleType.PREFILL
-                    )
-                ):
-                    if role_addr.ip != "":
-                        address_list = [role_addr.ip + ":" + str(role_addr.grpc_port)]
-                        selected_role = role_addr.role
-                        break
+            selected_addr = self._matching_role_addr(input_py)
+            if selected_addr is None:
+                address_list = self._addresses
+            else:
+                address_list = [selected_addr.ip + ":" + str(selected_addr.grpc_port)]
+                selected_role = selected_addr.role
 
         if not address_list:
             raise ValueError(f"No address found for request: {input_py.request_id}")
@@ -1014,6 +1005,15 @@ class ModelRpcClient(object):
         pd_separation = _selected_pd_separation(selected_role, input_py.generate_config)
         if pd_separation is not None and trace_state is not None:
             trace_state.set_attribute(trace_attrs.RTP_LLM_PD_SEP, pd_separation)
+
+        # Build once after routing and before opening a CLIENT span. A local validation/conversion
+        # failure performs no RPC and therefore must not leave a network span open.
+        input_pb = trans_input(input_py)
+        if effective_ms > 0:
+            # Keep the caller-owned GenerateInput immutable while giving the backend the
+            # same effective timeout as the gRPC deadline. Retries and request logging must
+            # continue to observe the value the caller supplied.
+            input_pb.generate_config.timeout_ms = int(effective_ms)
 
         # gRPC CLIENT span: child of the HTTP SERVER span
         # published via CURRENT_TRACE_STATE; W3C traceparent goes into gRPC
@@ -1224,20 +1224,118 @@ class ModelRpcClient(object):
             if response_iterator and should_cancel:
                 response_iterator.cancel()
 
+    def _matching_role_addr(self, input_py: GenerateInput):
+        """Return the pre-assigned address selected by this client's entrance."""
+        for role_addr in input_py.generate_config.role_addrs:
+            if (
+                (self._decode_entrance and role_addr.role == RoleType.DECODE)
+                or role_addr.role == RoleType.PDFUSION
+                or (not self._decode_entrance and role_addr.role == RoleType.PREFILL)
+            ) and role_addr.ip:
+                return role_addr
+        return None
+
+    def _role_addr_target(self, input_py: GenerateInput) -> Optional[str]:
+        """Pre-assigned backend for this input, or None if it carries no usable role_addr.
+
+        Same role-matching rule as :meth:`enqueue` — a caller that routed the request (the master,
+        or the dispatcher stamping ``generate_config.role_addrs``) has already chosen the backend,
+        and honouring it is the whole point of that choice.
+        """
+        role_addr = self._matching_role_addr(input_py)
+        if role_addr is None:
+            return None
+        return role_addr.ip + ":" + str(role_addr.grpc_port)
+
+    def _select_batch_address(self, inputs: list[GenerateInput]) -> str:
+        """Target for one batch RPC.
+
+        A batch RPC goes to a single backend, so every input in it must agree on the target. The
+        dispatcher stamps one chunk with one target and the chunk shares a single generate_config,
+        so agreement holds by construction; a disagreement means the caller mis-assembled the batch
+        and silently sending it to the first input's backend would route the rest somewhere they
+        were not scheduled for.
+        """
+        targets = {self._role_addr_target(inp) for inp in inputs}
+        if targets == {None}:
+            # Nothing pre-assigned: fall back to the static data-parallel address list.
+            if not self._addresses:
+                raise ValueError(
+                    f"No address found for batch request: {inputs[0].request_id}"
+                )
+            return self._addresses[inputs[0].request_id % len(self._addresses)]
+        if len(targets) > 1:
+            # Typed as INVALID_PARAMS to name the fault: a mixed batch is a caller assembly
+            # error. Note /batch_infer currently has no exception handler above this, so the
+            # wire response is Starlette's bare 500 either way — the type buys an accurate
+            # error_code for whoever adds one, and a message without a traceback stapled on.
+            target_labels = sorted(
+                "unassigned" if target is None else target for target in targets
+            )
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                f"batch request: [{len(inputs)} items] has inconsistent pre-assigned "
+                f"backends {target_labels}; one batch RPC targets one backend",
+            )
+        return targets.pop()
+
+    @staticmethod
+    def _exception_type_from_rpc_error_code(error_code: int) -> ExceptionType:
+        """Translate the compact model-RPC enum to the public exception taxonomy by name."""
+        try:
+            name = ErrorCodePB.Name(error_code)
+        except ValueError:
+            return ExceptionType.UNKNOWN_ERROR
+        # The protobuf keeps the historical US spelling while ExceptionType uses the
+        # spelling already exposed by the Python API.
+        if name == "P2P_CONNECTOR_WORKER_READ_CANCELED":
+            name = "P2P_CONNECTOR_WORKER_READ_CANCELLED"
+        return ExceptionType.__members__.get(name, ExceptionType.UNKNOWN_ERROR)
+
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
+        """Send one chunk as a single BatchGenerateCall and return one output per input, in order.
+
+        Error semantics are chunk-level all-or-nothing. The C++ BatchGenerateCall returns a
+        per-item result vector (1:1 with ``inputs``: a failed item carries ``error_info`` while
+        its siblings still carry a ``final_output``), but this client raises on the first
+        ``error_info`` and discards the rest. That is deliberate, not an oversight of the
+        server's per-item contract: the consumers (``pipeline.batch_infer``,
+        ``openai_endpoint``) and the single-request ``enqueue`` path have no per-item error
+        slot in a ``list[GenerateOutputs]``, and the dispatcher already provides partial-failure
+        at chunk granularity (a failed chunk becomes a placeholder while sibling chunks survive).
+        Turning this into per-item partial return is a larger change that must also teach both
+        consumers to represent a single failed item. ``BatchEnqueueDecodeSemanticsTest`` locks
+        this behavior (raise-on-first-error, ``inputs[i]`` <-> ``results[i]`` alignment, and
+        ``grpc.RpcError`` translation).
+        """
         if not inputs:
             return []
 
-        max_timeout_ms = max((inp.generate_config.timeout_ms or 0) for inp in inputs)
-        grpc_timeout_seconds = self._compute_grpc_timeout(max_timeout_ms)
+        effective_timeout_ms = [
+            self._effective_timeout_ms(inp.generate_config.timeout_ms) for inp in inputs
+        ]
+        # One unbounded item makes the shared outer call unbounded; finite siblings still carry
+        # their own timeout_ms in the protobuf and are enforced by the backend.
+        grpc_timeout_seconds = (
+            None
+            if any(timeout_ms is None for timeout_ms in effective_timeout_ms)
+            else max(
+                timeout_ms
+                for timeout_ms in effective_timeout_ms
+                if timeout_ms is not None
+            )
+            / 1000.0
+        )
 
         batch_input_pb = BatchGenerateInputPB()
-        for inp in inputs:
-            inp.generate_config.timeout_ms = int(grpc_timeout_seconds * 1000)
+        for inp, timeout_ms in zip(inputs, effective_timeout_ms):
             input_pb = trans_input(inp)
+            # A batch has one outer deadline, but every backend item keeps its own effective
+            # timeout. Do not normalize by mutating the caller's GenerateInput.
+            input_pb.generate_config.timeout_ms = timeout_ms or 0
             batch_input_pb.inputs.append(input_pb)
 
-        target_address = self._addresses[inputs[0].request_id % len(self._addresses)]
+        target_address = self._select_batch_address(inputs)
         logging.debug(
             f"batch request: [{len(inputs)} items] send to address: {target_address}"
         )
@@ -1245,19 +1343,42 @@ class ModelRpcClient(object):
         try:
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
-            response = await stub.BatchGenerateCall(
-                batch_input_pb, timeout=grpc_timeout_seconds
-            )
+            grpc_kwargs = {}
+            if grpc_timeout_seconds is not None:
+                grpc_kwargs["timeout"] = grpc_timeout_seconds
+            response = await stub.BatchGenerateCall(batch_input_pb, **grpc_kwargs)
+
+            if len(response.results) != len(inputs):
+                # C++ BatchGenerateCall is contractually 1:1 (one result per input). A shorter
+                # result vector would otherwise make the loop below return a silently-truncated
+                # list (dropping trailing inputs with no error); a longer one would IndexError on
+                # inputs[i]. Fail typed instead so a server-side contract break surfaces loudly.
+                raise FtRuntimeException(
+                    ExceptionType.UNKNOWN_ERROR,
+                    f"batch request: [{len(inputs)} items] got {len(response.results)} result(s); "
+                    f"server violated the 1:1 per-item contract",
+                )
 
             results = []
             for i, result_pb in enumerate(response.results):
-                if (
-                    result_pb.HasField("error_info")
-                    and result_pb.error_info.error_message
+                if result_pb.HasField("error_info") and (
+                    result_pb.error_info.error_code != ErrorCodePB.NONE_ERROR
+                    or result_pb.error_info.error_message
                 ):
+                    error_message = result_pb.error_info.error_message
+                    if not error_message:
+                        try:
+                            error_name = ErrorCodePB.Name(
+                                result_pb.error_info.error_code
+                            )
+                        except ValueError:
+                            error_name = "UNKNOWN_MODEL_RPC_ERROR"
+                        error_message = f"model RPC error: {error_name}"
                     raise FtRuntimeException(
-                        ExceptionType.UNKNOWN_ERROR,
-                        f"batch item {i} failed: {result_pb.error_info.error_message}",
+                        self._exception_type_from_rpc_error_code(
+                            result_pb.error_info.error_code
+                        ),
+                        f"batch item {i} failed: {error_message}",
                     )
                 stream_state = StreamState()
                 output = trans_output(inputs[i], result_pb.final_output, stream_state)

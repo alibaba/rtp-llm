@@ -19,9 +19,11 @@ import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
+import org.flexlb.balance.strategy.RoundRobinLoadBalancer;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.PrioritySloPolicy;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.master.WorkerStatus;
@@ -120,10 +122,12 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private ch.qos.logback.classic.Logger mockRpcLogger;
     private ch.qos.logback.classic.Logger nettyLogger;
     private ch.qos.logback.classic.Logger grpcLogger;
+    private ch.qos.logback.classic.Logger pvLogger;
     private Level previousFlexlbLogLevel;
     private Level previousMockRpcLogLevel;
     private Level previousNettyLogLevel;
     private Level previousGrpcLogLevel;
+    private Level previousPvLogLevel;
     private final Map<String, LongAdder> dispatchReasonCounts = new ConcurrentHashMap<>();
 
     @BeforeAll
@@ -188,10 +192,12 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 mock(EngineHealthReporter.class, withSettings().stubOnly()));
         new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory);
         new RandomStrategy(engineWorkerStatus, configService, resourceMeasureFactory);
+        new RoundRobinLoadBalancer(engineWorkerStatus, configService);
         return new DefaultRouter(
                 configService,
                 ignored -> GroupRoutingDecision.none(),
-                endpointRegistry);
+                endpointRegistry,
+                new ModelMetaConfig());
     }
 
     @BeforeEach
@@ -880,14 +886,17 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         mockRpcLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("org.flexlb.mock.MockRpcService");
         nettyLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("io.netty");
         grpcLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("io.grpc");
+        pvLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger");
         previousFlexlbLogLevel = flexlbLogger.getLevel();
         previousMockRpcLogLevel = mockRpcLogger.getLevel();
         previousNettyLogLevel = nettyLogger.getLevel();
         previousGrpcLogLevel = grpcLogger.getLevel();
+        previousPvLogLevel = pvLogger.getLevel();
         flexlbLogger.setLevel(Level.WARN);
         mockRpcLogger.setLevel(Level.WARN);
         nettyLogger.setLevel(Level.WARN);
         grpcLogger.setLevel(Level.WARN);
+        pvLogger.setLevel(Level.WARN);
     }
 
     private void restoreRequestPathLogs() {
@@ -902,6 +911,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         }
         if (grpcLogger != null) {
             grpcLogger.setLevel(previousGrpcLogLevel);
+        }
+        if (pvLogger != null) {
+            pvLogger.setLevel(previousPvLogLevel);
         }
     }
 

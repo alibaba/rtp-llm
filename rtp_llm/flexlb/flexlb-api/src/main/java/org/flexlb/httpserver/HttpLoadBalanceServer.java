@@ -8,16 +8,26 @@ import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.dao.BatchScheduleContext;
+import org.flexlb.dao.loadbalance.BatchScheduleRequest;
+import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
 import org.flexlb.dao.loadbalance.QueueSnapshotResponse;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.pv.BatchPvLogData;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.dispatcher.MasterFeAssigner;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
+import org.flexlb.exception.BatchScheduleTransportException;
+import org.flexlb.service.BatchScheduleCoordinator;
+import org.flexlb.service.grace.ActiveRequestCounter;
+import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
@@ -28,6 +38,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
+import org.springframework.web.server.ServerWebInputException;
 import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
@@ -48,15 +59,24 @@ public class HttpLoadBalanceServer {
     private final EndpointRegistry endpointRegistry;
     private final MasterEngineSynchronizer masterEngineSynchronizer;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
+    private final ActiveRequestCounter activeRequestCounter;
+    private final BatchScheduleCoordinator batchScheduleCoordinator;
+    private final MasterFeAssigner masterFeAssigner;
+    private final EngineHealthReporter engineHealthReporter;
 
-    public HttpLoadBalanceServer(LBStatusConsistencyService lbStatusConsistencyService,
-                                 QueueManager queueManager,
-                                 ConfigService configService,
-                                 FlexlbBatchScheduler batchScheduler,
-                                 EndpointRegistry endpointRegistry,
-                                 @org.springframework.beans.factory.annotation.Autowired(required = false)
-                                 MasterEngineSynchronizer masterEngineSynchronizer,
-                                 ServerScheduleLatencyRecorder serverLatencyRecorder) {
+    public HttpLoadBalanceServer(
+            LBStatusConsistencyService lbStatusConsistencyService,
+            QueueManager queueManager,
+            ConfigService configService,
+            FlexlbBatchScheduler batchScheduler,
+            EndpointRegistry endpointRegistry,
+            @org.springframework.beans.factory.annotation.Autowired(required = false)
+            MasterEngineSynchronizer masterEngineSynchronizer,
+            ServerScheduleLatencyRecorder serverLatencyRecorder,
+            ActiveRequestCounter activeRequestCounter,
+            BatchScheduleCoordinator batchScheduleCoordinator,
+            MasterFeAssigner masterFeAssigner,
+            EngineHealthReporter engineHealthReporter) {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.queueManager = queueManager;
         this.configService = configService;
@@ -64,11 +84,17 @@ public class HttpLoadBalanceServer {
         this.endpointRegistry = endpointRegistry;
         this.masterEngineSynchronizer = masterEngineSynchronizer;
         this.serverLatencyRecorder = serverLatencyRecorder;
+        this.activeRequestCounter = activeRequestCounter;
+        this.batchScheduleCoordinator = batchScheduleCoordinator;
+        this.masterFeAssigner = masterFeAssigner;
+        this.engineHealthReporter = engineHealthReporter;
     }
 
     @Bean
     public RouterFunction<ServerResponse> loadBalancePrefill() {
         return route()
+                .POST("/rtp_llm/batch_schedule", accept(MediaType.APPLICATION_JSON),
+                        this::batchScheduleRequest)
                 .POST("/rtp_llm/master/info", accept(MediaType.APPLICATION_JSON),
                         this::responseMasterInfo)
                 .POST("/rtp_llm/schedule_snapshot", accept(MediaType.APPLICATION_JSON),
@@ -86,6 +112,65 @@ public class HttpLoadBalanceServer {
                 .GET("/rtp_llm/server_latency", this::serverLatency)
                 .POST("/rtp_llm/server_latency/reset", this::resetServerLatency)
                 .build();
+    }
+
+    public Mono<ServerResponse> batchScheduleRequest(ServerRequest request) {
+        BatchScheduleContext context = new BatchScheduleContext();
+        return request.bodyToMono(BatchScheduleRequest.class)
+                .switchIfEmpty(Mono.error(new ServerWebInputException("empty request body")))
+                .flatMap(batchRequest -> {
+                    context.setBatchRequest(batchRequest);
+                    return Mono.using(
+                            activeRequestCounter::acquire,
+                            ignored -> processBatchScheduleRequest(context),
+                            ActiveRequestCounter.RequestToken::close);
+                })
+                .onErrorResume(error -> {
+                    Logger.error("Batch schedule request processing error", error);
+                    return batchError(context, errorTypeOf(context), error);
+                })
+                .doFinally(signal -> finalizeBatchContext(context));
+    }
+
+    private Mono<ServerResponse> processBatchScheduleRequest(BatchScheduleContext context) {
+        return batchScheduleCoordinator.schedule(context.getBatchRequest())
+                .flatMap(response -> {
+                    context.setBatchResponse(response);
+                    if (response.isSuccess()) {
+                        // The same singleton cursor also serves the master's in-process dispatcher,
+                        // so locally handled and forwarded requests share one FE allocation order.
+                        masterFeAssigner.assign(context.getBatchRequest(), response);
+                    } else {
+                        Logger.error("[BatchSchedule] failed: {}", response.getErrorMessage());
+                    }
+                    return json(statusOf(response), response);
+                })
+                .onErrorResume(
+                        BatchScheduleTransportException.class,
+                        error -> batchError(
+                                context, StrategyErrorType.NO_AVAILABLE_WORKER, error));
+    }
+
+    private static int statusOf(BatchScheduleResponse response) {
+        if (response.isSuccess()) {
+            return 200;
+        }
+        return response.getCode() == StrategyErrorType.INVALID_REQUEST.getErrorCode()
+                ? 400
+                : 500;
+    }
+
+    private static StrategyErrorType errorTypeOf(BatchScheduleContext context) {
+        return context.getBatchRequest() == null
+                ? StrategyErrorType.INVALID_REQUEST
+                : StrategyErrorType.NO_AVAILABLE_WORKER;
+    }
+
+    private Mono<ServerResponse> batchError(
+            BatchScheduleContext context, StrategyErrorType type, Throwable error) {
+        BatchScheduleResponse response = BatchScheduleResponse.error(type, error.getMessage());
+        context.setBatchResponse(response);
+        return json(statusOf(response), response);
     }
 
     private Mono<ServerResponse> debugMode(ServerRequest serverRequest) {
@@ -126,28 +211,29 @@ public class HttpLoadBalanceServer {
             if (statusMap == null || statusMap.isEmpty()) {
                 continue;
             }
-            Response.WorkerRoleSummary rs = new Response.WorkerRoleSummary();
-            rs.setDiscovered(statusMap.size());
-            for (WorkerStatus ws : statusMap.values()) {
-                if (ws.isAlive()) {
-                    rs.setAlive(rs.getAlive() + 1);
+            Response.WorkerRoleSummary roleSummary = new Response.WorkerRoleSummary();
+            roleSummary.setDiscovered(statusMap.size());
+            for (WorkerStatus status : statusMap.values()) {
+                if (status.isAlive()) {
+                    roleSummary.setAlive(roleSummary.getAlive() + 1);
                 }
             }
-            summary.put(role.getCode(), rs);
+            summary.put(role.getCode(), roleSummary);
         }
         return summary.isEmpty() ? null : summary;
     }
 
     private Mono<ServerResponse> responseMasterInfo(ServerRequest request) {
         return request.bodyToMono(Request.class)
-                .flatMap((Function<Request, Mono<ServerResponse>>) req -> {
+                .flatMap((Function<Request, Mono<ServerResponse>>) ignored -> {
                     Response result = new Response();
                     result.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
                     result.setQueueLength(queueManager.queueSize());
                     result.setCode(200);
                     result.setSuccess(true);
                     result.setWorkerSummary(buildWorkerSummary());
-                    result.setReady(masterEngineSynchronizer == null || masterEngineSynchronizer.isReady());
+                    result.setReady(masterEngineSynchronizer == null
+                            || masterEngineSynchronizer.isReady());
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
                             .body(Mono.just(result), Response.class);
@@ -166,10 +252,11 @@ public class HttpLoadBalanceServer {
     public Mono<ServerResponse> notifyParticipant(ServerRequest request) {
         return request.bodyToMono(MasterChangeNotifyReq.class)
                 .flatMap(masterChangeNotifyReq -> {
-                    MasterChangeNotifyResp resp = lbStatusConsistencyService.handleMasterChange(masterChangeNotifyReq);
+                    MasterChangeNotifyResp response =
+                            lbStatusConsistencyService.handleMasterChange(masterChangeNotifyReq);
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(resp), MasterChangeNotifyReq.class);
+                            .body(Mono.just(response), MasterChangeNotifyReq.class);
                 }).onErrorResume((Function<Throwable, Mono<ServerResponse>>) e -> {
                     Logger.error("notifyParticipant error", e);
                     return ServerResponse.status(500)
@@ -180,11 +267,11 @@ public class HttpLoadBalanceServer {
 
     public Mono<ServerResponse> dumpLBStatus(ServerRequest request) {
         return request.bodyToMono(SyncLBStatusReq.class)
-                .flatMap(syncLBStatusReq -> {
-                    SyncLBStatusResp resp = lbStatusConsistencyService.dumpLBStatus();
+                .flatMap(ignored -> {
+                    SyncLBStatusResp response = lbStatusConsistencyService.dumpLBStatus();
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(resp), SyncLBStatusResp.class);
+                            .body(Mono.just(response), SyncLBStatusResp.class);
                 }).onErrorResume(e -> {
                     Logger.error("dumpLBStatus error", e);
                     return ServerResponse.status(500)
@@ -213,20 +300,22 @@ public class HttpLoadBalanceServer {
             result.put("scheduler_inflight", batchScheduler.getInflightSize());
 
             List<Map<String, Object>> prefillList = new ArrayList<>();
-            for (Map.Entry<String, PrefillEndpoint> entry : endpointRegistry.getPrefillEndpoints().entrySet()) {
-                Map<String, Object> ep = new LinkedHashMap<>();
-                ep.put("ip_port", entry.getKey());
-                ep.put("inflight_batches", entry.getValue().getInflightBatchCount());
-                prefillList.add(ep);
+            for (Map.Entry<String, PrefillEndpoint> entry
+                    : endpointRegistry.getPrefillEndpoints().entrySet()) {
+                Map<String, Object> endpoint = new LinkedHashMap<>();
+                endpoint.put("ip_port", entry.getKey());
+                endpoint.put("inflight_batches", entry.getValue().getInflightBatchCount());
+                prefillList.add(endpoint);
             }
             result.put("prefill_endpoints", prefillList);
 
             List<Map<String, Object>> decodeList = new ArrayList<>();
-            for (Map.Entry<String, DecodeEndpoint> entry : endpointRegistry.getDecodeEndpoints().entrySet()) {
-                Map<String, Object> ep = new LinkedHashMap<>();
-                ep.put("ip_port", entry.getKey());
-                ep.put("inflight_requests", entry.getValue().getInflightCount());
-                decodeList.add(ep);
+            for (Map.Entry<String, DecodeEndpoint> entry
+                    : endpointRegistry.getDecodeEndpoints().entrySet()) {
+                Map<String, Object> endpoint = new LinkedHashMap<>();
+                endpoint.put("ip_port", entry.getKey());
+                endpoint.put("inflight_requests", entry.getValue().getInflightCount());
+                decodeList.add(endpoint);
             }
             result.put("decode_endpoints", decodeList);
 
@@ -252,5 +341,16 @@ public class HttpLoadBalanceServer {
         return ServerResponse.ok()
                 .contentType(MediaType.APPLICATION_JSON)
                 .bodyValue(Map.of("reset", true));
+    }
+
+    private Mono<ServerResponse> json(int status, Object body) {
+        return ServerResponse.status(status)
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(body);
+    }
+
+    private void finalizeBatchContext(BatchScheduleContext context) {
+        engineHealthReporter.reportBatchSchedule(context);
+        new BatchPvLogData(context).emit();
     }
 }

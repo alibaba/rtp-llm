@@ -41,6 +41,7 @@ class RandomStrategyTest {
     private RandomStrategy randomStrategy;
     private ResourceMeasure resourceMeasure;
     private EndpointRegistry endpointRegistry;
+    private EngineWorkerStatus engineWorkerStatus;
 
     @BeforeEach
     void setUp() {
@@ -52,8 +53,9 @@ class RandomStrategyTest {
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
         Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any(WorkerEndpoint.class))).thenReturn(true);
+        engineWorkerStatus = new EngineWorkerStatus(endpointRegistry);
         randomStrategy = new RandomStrategy(
-                new EngineWorkerStatus(endpointRegistry),
+                engineWorkerStatus,
                 configService,
                 resourceMeasureFactory);
     }
@@ -278,7 +280,8 @@ class RandomStrategyTest {
     }
 
     @Test
-    void should_skip_dead_workers() {
+    void should_skip_dead_workers_and_only_select_alive_ones() {
+        // Given: Model with mix of alive and dead workers
         Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
 
         WorkerStatus deadWorker = createWorkerStatus("127.0.0.1");
@@ -308,8 +311,46 @@ class RandomStrategyTest {
             }
         }
 
-        assertFalse(selectionCount.containsKey("127.0.0.1"));
-        assertEquals(totalRuns, selectionCount.getOrDefault("127.0.0.2", 0));
+        // Then: select() skips dead workers via wrap-around, so the dead worker is never chosen
+        // and every request lands on the only alive worker. Flipping the isAlive() guard in
+        // RandomStrategy.select() would let 127.0.0.1 appear here and turn this red.
+        assertFalse(selectionCount.containsKey("127.0.0.1"),
+                "dead worker must never be selected");
+        assertEquals(totalRuns, selectionCount.getOrDefault("127.0.0.2", 0),
+                "every request must route to the only alive worker");
+    }
+
+    @Test
+    void should_return_error_when_all_workers_are_dead() {
+        // Given: Model with only dead workers
+        Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+
+        WorkerStatus deadWorker1 = createWorkerStatus("127.0.0.1");
+        deadWorker1.setAlive(false);
+        prefillStatusMap.put("127.0.0.1:8080", deadWorker1);
+        registerPrefill("127.0.0.1:8080", deadWorker1);
+
+        WorkerStatus deadWorker2 = createWorkerStatus("127.0.0.2");
+        deadWorker2.setAlive(false);
+        prefillStatusMap.put("127.0.0.2:8080", deadWorker2);
+        registerPrefill("127.0.0.2:8080", deadWorker2);
+
+        assertEquals(2,
+                engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, null).size(),
+                "the test must reach the populated all-dead branch, not the empty-map branch");
+
+        Request req = new Request();
+
+        BalanceContext balanceContext = new BalanceContext();
+        balanceContext.setRequest(req);
+
+        // When: Select a worker
+        ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
+
+        // Then: wrap-around exhausts every worker without finding an alive one -> NO_AVAILABLE_WORKER
+        assertFalse(result.isSuccess());
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), result.getCode());
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorMsg(), result.getMessage());
     }
 
     @Test
@@ -331,7 +372,6 @@ class RandomStrategyTest {
         Request req = new Request();
         req.setSeqLen(1000);
         req.setRequestId(12345L);
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 

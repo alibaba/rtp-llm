@@ -1,31 +1,32 @@
 package org.flexlb.mock.grpc;
 
+import org.flexlb.balance.scheduler.RequestLifecycleState;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Worker offline: stop the mock prefill worker's gRPC server while requests
- * are in-flight, verifying that the master detects the connection failure and
- * cleans up resources.
+ * Worker offline: stop the mock prefill worker's gRPC server, then verify that Master retains
+ * ownership until an authoritative Engine fence resolves the post-send ambiguity.
  *
  * <p>Flow:
  * 1. Start mock prefill worker (normal config)
  * 2. Submit request → ACK succeeds (proves the gRPC link works)
  * 4. Stop the mock prefill worker's gRPC server (simulates worker crash)
  * 5. Submit a new request → gRPC call fails (connection refused / channel broken)
- * 6. Verify: request fails with BATCH_DISPATCH_FAILED, inflight cleaned up,
- *    error message contains gRPC failure indication
+ * 6. Verify: the request stays DISPATCHING and both ledgers are retained; an immediate
+ *    retryable failure would permit a duplicate if the request reached Engine before the crash
  *
  * <p>Key mechanism:
  * <ul>
@@ -37,10 +38,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li>{@link org.flexlb.engine.grpc.EngineGrpcClient#executeGrpcCall} catches the
  *       {@code StatusRuntimeException}. If {@code isConnectionBrokenError} matches,
  *       it retries once with a new channel — which also fails.</li>
- *   <li>Regardless of retry, the exception propagates to
- *       {@link org.flexlb.balance.scheduler.DefaultBatchDispatcher}, which calls
- *       {@code failItems()} → {@code callback.onFailure()} →
- *       {@link org.flexlb.balance.scheduler.FlexlbBatchScheduler#failAck}</li>
+ *   <li>The post-invocation transport error enters dispatch reconciliation; only an Engine
+ *       tombstone or typed WorkerStatus cancellation may settle it as absent</li>
  * </ul>
  *
  * <p>Note: {@code MockWorker.stop()} already supports graceful gRPC server shutdown
@@ -63,7 +62,7 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
 
     @Test
     @Timeout(20)
-    void workerOffline_newRequestFailsAndCleansUp() throws Exception {
+    void workerOffline_newRequestRemainsFencedUntilAuthoritativeSettlement() throws Exception {
         // 1. Submit request with normal worker — should succeed
         CompletableFuture<Response> future1 = submitRequest(20001);
         Response ackResponse = future1.get(5, TimeUnit.SECONDS);
@@ -74,29 +73,19 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         // 2. Stop the mock prefill worker's gRPC server (simulates worker crash)
         mockPrefillWorker.stop();
 
-        // 3. Brief pause to let the gRPC client detect the connection loss
-        //    (GOAWAY processing / keepalive detection is async)
-        Thread.sleep(500);
-
-        // 4. Submit a new request — gRPC call should fail (connection refused)
+        // 3. Submit a new request — its RPC fails after invocation (connection refused).
         CompletableFuture<Response> future2 = submitRequest(20002);
-        Response failResponse = future2.get(10, TimeUnit.SECONDS);
 
-        // 6. Verify: request failed with BATCH_DISPATCH_FAILED
-        assertFalse(failResponse.isSuccess(),
-                "Request should fail when prefill worker is offline");
-        assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), failResponse.getCode(),
-                "Request should have BATCH_DISPATCH_FAILED error code");
+        assertThrows(TimeoutException.class,
+                () -> future2.get(2, TimeUnit.SECONDS));
+        assertFalse(future2.isDone(),
+                "transport failure must not claim the worker rejected the request");
+        assertEquals(RequestLifecycleState.DISPATCHING,
+                scheduler.getRequestState(20002L, 0).state());
+        assertEquals(existingBatches + 1, getPrefillEndpoint().getInflightBatchCount(),
+                "ambiguous dispatch must retain its Prefill ledger until fenced");
 
-        // 7. Verify: error message contains gRPC failure indication
-        String errMsg = failResponse.getErrorMessage();
-        assertTrue(errMsg != null && !errMsg.isEmpty(),
-                "Error message should not be empty");
-
-        // 8. Verify: the failed request does not add leaked prefill inflight state.
-        assertEquals(existingBatches, getPrefillEndpoint().getInflightBatchCount());
-
-        // 9. Verify: decode worker never received any enqueue request (PD-separated)
+        // 4. Decode receives no enqueue in the P/D-separated path.
         assertEquals(0, mockDecodeWorker.getEnqueueCount(),
                 "Decode worker should not have received any request");
     }

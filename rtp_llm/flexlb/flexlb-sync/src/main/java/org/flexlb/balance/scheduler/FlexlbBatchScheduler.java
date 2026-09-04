@@ -9,6 +9,7 @@ import org.flexlb.balance.scheduler.priority.AdmissionFailureClassifier;
 import org.flexlb.balance.scheduler.priority.AdmissionLease;
 import org.flexlb.balance.scheduler.priority.EngineCancelChannel;
 import org.flexlb.balance.scheduler.priority.InflightRegistrar;
+import org.flexlb.balance.scheduler.priority.InflightRegistrar.PriorityCanceledObservation;
 import org.flexlb.balance.scheduler.priority.PriorityAdmissionScheduler;
 import org.flexlb.balance.scheduler.priority.QueuedRequestSnapshot;
 import org.flexlb.balance.scheduler.priority.UnsupportedEngineCancelChannel;
@@ -26,7 +27,6 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
-import org.flexlb.balance.scheduler.priority.InflightRegistrar.PriorityCanceledObservation;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -1298,6 +1298,8 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 dispatcher.dispatch(dispatchable, prefillEp, batchId, predMs, reason, this);
             }
         } catch (Throwable preSendFailure) {
+            Logger.error("FlexLB batch dispatch preparation failed batch_id={} dispatcher_entered={}",
+                    batchId, dispatcherEntered, preSendFailure);
             if (dispatcherEntered) {
                 // A dispatcher implementation may throw after starting its
                 // network invocation. Preserve both ledgers and use the same

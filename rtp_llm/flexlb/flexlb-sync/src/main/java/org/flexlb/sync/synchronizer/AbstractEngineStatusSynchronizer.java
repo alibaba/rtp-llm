@@ -2,8 +2,8 @@ package org.flexlb.sync.synchronizer;
 
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -68,7 +68,7 @@ public abstract class AbstractEngineStatusSynchronizer {
                 flexlbConfig.getStatusCheckExecutorCoreSize(),
                 flexlbConfig.getStatusCheckExecutorMaxSize(), 60L, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(15000), new NamedThreadFactory("status-checker-executor"),
-                new ThreadPoolExecutor.CallerRunsPolicy());
+                 new ThreadPoolExecutor.CallerRunsPolicy());
     }
 
     protected abstract void syncEngineStatus();

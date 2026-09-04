@@ -1,8 +1,8 @@
 # FlexLB - Intelligent Load Balancer for AI Model Inference
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Java](https://img.shields.io/badge/Java-8+-red.svg)](https://www.oracle.com/java/)
-[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-2.7.1-brightgreen.svg)](https://spring.io/projects/spring-boot)
+[![Java](https://img.shields.io/badge/Java-21-red.svg)](https://www.oracle.com/java/)
+[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-2.7.18-brightgreen.svg)](https://spring.io/projects/spring-boot)
 
 FlexLB is a high-performance, intelligent load balancer specifically designed for AI model inference workloads. It provides advanced load balancing strategies, request batching, caching mechanisms, and automatic failover to optimize the performance and reliability of AI service deployments.
 
@@ -16,6 +16,7 @@ FlexLB is a high-performance, intelligent load balancer specifically designed fo
 - **gRPC Support**: Native gRPC client implementation for backend services
 - **Metrics & Monitoring**: Prometheus metrics integration
 - **Master Election**: ZooKeeper-based master election for high availability
+- **Dispatcher Mode** (opt-in): Exposes `/dispatcher/*` on the master listener to split large batch requests across the FE pool, merging sub-batch responses with partial-failure semantics. Small or non-batch requests are passthrough-forwarded to one FE.
 
 ## Architecture
 
@@ -30,7 +31,7 @@ FlexLB consists of four main modules:
 
 ### Prerequisites
 
-- Java 8 or higher
+- Java 21
 - Maven 3.6+ (optional, project includes Maven Wrapper)
 - ZooKeeper (optional, for master election)
 
@@ -44,6 +45,17 @@ This project includes Maven Wrapper, so you don't need to install Maven separate
 ```bash
 ./mvnw clean package -DskipTests
 ```
+
+Before submitting a change that touches FlexLB, run the same public test gate used by pull
+requests (the explicit profile keeps local internal-source checkouts from changing coverage):
+
+```bash
+./mvnw -q -P '!internal' -pl flexlb-api -am \
+  -DexcludedGroups=performance-regression test
+```
+
+Host-capacity-tagged throughput benchmarks are intentionally separate from this functional gate;
+they are compiled here but should run on controlled performance hardware.
 
 **Windows:**
 ```bash
@@ -160,6 +172,31 @@ Traffic routing is two-layered: `TRAFFIC_POLICY_CONFIG` selects the target `grou
 
 Set `decodeConcurrencyLimit` to a positive number to cap each decode worker's in-flight requests. FlexLB counts reported waiting/running tasks plus local in-transit selections, deduplicated by request id. When a decode worker reaches the limit, it is not considered serviceable; values <= 0 disable this FlexLB-side limit.
 
+To enable dispatcher batch fanout, configure its FE discovery pool:
+
+```bash
+export DISPATCH_FE_POOL_SERVICE_ID='frontend.service'
+export DISPATCH_CONFIG='{
+    "subBatch":"count:5",
+    "feAllocation":"master",
+    "preAssignBe":false,
+    "maxAggregateResponseBytes":134217728,
+    "maxDryRunResponseBytes":67108864
+}'
+```
+
+`feAllocation=master` (default) coordinates FE assignment through the elected master's single
+cursor. `local` is the availability mode and uses each dispatcher's health-filtered local pool.
+`preAssignBe` defaults to `false` for rolling-upgrade safety; enable it only after every FE can
+deserialize dispatcher-provided `role_addrs`. Registered dispatcher batch paths reject
+caller-supplied `generate_config.role_addrs` at their HTTP boundary because dispatcher placement
+is authoritative, including when the request shape would otherwise be forwarded whole. The two
+byte limits cap the retained fanout response and diagnostic dry-run response per request.
+Per-field `DISPATCH_*` variables override the JSON,
+for example `DISPATCH_FE_ALLOCATION=local` and `DISPATCH_PRE_ASSIGN_BE=true`. See
+[`docs/fe-allocation-via-master.md`](docs/fe-allocation-via-master.md) for the allocation matrix,
+failure semantics, and deployment guidance.
+
 ### Run
 
 ```bash
@@ -209,6 +246,7 @@ FlexLB supports various configuration options through environment variables and 
 - **Strategy Parameters**: Configure strategy internals through `STRATEGY_CONFIGS`; `shortestTtft.queueTimeWeight` controls how strongly worker queue time affects scheduling (range `0.0-1.0`, default `1.0`), while `shortestTtft.candidatePool` controls the candidate pool. `mode=RATIO` uses `max(minSize, floor(workerCount * ratio))`, while `mode=FIXED` uses `size`.
 - **Backend Services**: Configure through `MODEL_SERVICE_CONFIG`
 - **ZooKeeper Settings**: Configure through `FLEXLB_SYNC_CONSISTENCY_CONFIG`
+- **Dispatcher Mode**: Configure through `DISPATCH_CONFIG` (opt-in). When enabled, FlexLB exposes `/dispatcher/*` to split batch requests across the FE pool and merge with partial-failure semantics. See `CLAUDE.md` for the full reference (endpoint registry, failure shapes, timeouts).
 
 Worker expiry and VIT endpoint health use startup-only environment variables:
 

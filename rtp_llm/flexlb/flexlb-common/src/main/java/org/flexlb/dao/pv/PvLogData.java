@@ -6,7 +6,7 @@ import org.flexlb.dao.loadbalance.Response;
 
 /** One completed FlexLB scheduling decision written to {@code pv.log}. */
 @Data
-public class PvLogData {
+public class PvLogData implements PvRecord {
 
     // Keep the historical PV fields for downstream compatibility.
     private long requestId;

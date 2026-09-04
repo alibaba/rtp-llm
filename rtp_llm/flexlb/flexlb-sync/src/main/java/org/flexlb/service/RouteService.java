@@ -1,6 +1,5 @@
 package org.flexlb.service;
 
-import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
@@ -8,10 +7,14 @@ import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.BatchScheduleRequest;
+import org.flexlb.dao.loadbalance.BatchScheduleResponse;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.concurrent.CompletableFuture;
 
@@ -24,13 +27,14 @@ public class RouteService {
     private final FlexlbBatchScheduler flexlbBatchScheduler;
     private final RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
 
-    public RouteService(ConfigService configService,
-                        DefaultRouter defaultScheduler,
-                        QueueManager queueManager,
-                        FlexlbBatchScheduler flexlbBatchScheduler,
-                        RecentCacheKeyTraceReporter recentCacheKeyTraceReporter) {
+    public RouteService(
+            ConfigService configService,
+            Router router,
+            QueueManager queueManager,
+            FlexlbBatchScheduler flexlbBatchScheduler,
+            RecentCacheKeyTraceReporter recentCacheKeyTraceReporter) {
         this.configService = configService;
-        this.router = defaultScheduler;
+        this.router = router;
         this.queueManager = queueManager;
         this.flexlbBatchScheduler = flexlbBatchScheduler;
         this.recentCacheKeyTraceReporter = recentCacheKeyTraceReporter;
@@ -38,8 +42,9 @@ public class RouteService {
 
     /**
      * Route request to appropriate workers based on the deployment-level schedule mode.
-     * @param balanceContext Load balancing context
-     * @return Routing result
+     *
+     * @param balanceContext load-balancing context
+     * @return asynchronous routing result
      */
     public CompletableFuture<Response> route(BalanceContext balanceContext) {
         FlexlbConfig flexlbConfig = configService.loadBalanceConfig();
@@ -54,33 +59,15 @@ public class RouteService {
                 if (flexlbBatchScheduler == null || !hasValidGenerateInput(balanceContext)) {
                     Logger.debug("BATCH mode cannot process this request, falling back to DIRECT");
                     balanceContext.setScheduleMode(ScheduleModeEnum.DIRECT);
-                    try {
-                        resultFuture = CompletableFuture.completedFuture(router.route(balanceContext));
-                    } catch (Exception e) {
-                        resultFuture = CompletableFuture.failedFuture(e);
-                    }
+                    resultFuture = routeDirect(balanceContext);
                 } else {
                     resultFuture = flexlbBatchScheduler.submit(balanceContext);
                     balanceContext.setFuture(resultFuture);
                 }
             }
-            case QUEUE -> {
-                resultFuture = queueManager.tryRouteAsync(balanceContext).toFuture();
-            }
-            case DIRECT -> {
-                try {
-                    resultFuture = CompletableFuture.completedFuture(router.route(balanceContext));
-                } catch (Exception e) {
-                    resultFuture = CompletableFuture.failedFuture(e);
-                }
-            }
-            default -> {
-                try {
-                    resultFuture = CompletableFuture.completedFuture(router.route(balanceContext));
-                } catch (Exception e) {
-                    resultFuture = CompletableFuture.failedFuture(e);
-                }
-            }
+            case QUEUE -> resultFuture = queueManager.tryRouteAsync(balanceContext).toFuture();
+            case DIRECT -> resultFuture = routeDirect(balanceContext);
+            default -> resultFuture = routeDirect(balanceContext);
         }
 
         return resultFuture.whenComplete((result, throwable) -> {
@@ -94,14 +81,31 @@ public class RouteService {
         });
     }
 
-    private boolean hasValidGenerateInput(BalanceContext ctx) {
-        byte[] bytes = ctx.getGenerateInputPbBytes();
+    private CompletableFuture<Response> routeDirect(BalanceContext context) {
+        try {
+            return CompletableFuture.completedFuture(router.route(context));
+        } catch (Exception error) {
+            return CompletableFuture.failedFuture(error);
+        }
+    }
+
+    private boolean hasValidGenerateInput(BalanceContext context) {
+        byte[] bytes = context.getGenerateInputPbBytes();
         return bytes != null && bytes.length > 0;
     }
 
-    public RequestLifecycleSnapshot getRequestState(long requestId,
-                                                    long expectedBatchId) {
-        return flexlbBatchScheduler == null ? null
+    public RequestLifecycleSnapshot getRequestState(long requestId, long expectedBatchId) {
+        return flexlbBatchScheduler == null
+                ? null
                 : flexlbBatchScheduler.getRequestState(requestId, expectedBatchId);
+    }
+
+    /**
+     * Resolve a whole dispatcher chunk atomically for a single-role deployment.
+     * This intentionally bypasses the normal request queue and its per-request lifecycle.
+     */
+    public Mono<BatchScheduleResponse> batchSchedule(BatchScheduleRequest request) {
+        return Mono.fromCallable(() -> router.batchSchedule(request))
+                .subscribeOn(Schedulers.parallel());
     }
 }
