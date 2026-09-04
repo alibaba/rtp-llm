@@ -1596,15 +1596,27 @@ def kv_capacity_conflict_overflow(ctx: CaseContext):
     observed fail: "Decode request seq_len=40960 exceeds max known
     physical KV=12288" (the case died on its FIRST request; the typed
     reject itself is correct engine-side behavior, the CONSTRUCTION
-    was over-limit).  The case now pins its own env with a 160-block
-    decode pool (163840 tokens >= the 144-block seed plus output
+    was over-limit).  The case now pins its own env with a 180-block
+    decode pool (184320 tokens >= the 144-block seed plus output
     margin) so every request's decode phase fits a single engine and
     the affinity-vs-capacity conflict — a PREFILL-side property — is
     the thing under test; decode-pool size plays no role in the
     prefill assertions (see _kv_spec), so this unblocks the
     construction without touching the semantics.
+
+    Threshold note (2026-09-05): physical fit is only the first gate —
+    the pre-dispatch permit also runs DecodeEndpoint.engineDispatchCapacityFits
+    with maxKvUsagePercent, whose Java default is 90 (flexlb_ft never
+    sets the key), against the master's GROSS demand (min(seqLen +
+    maxNewTokens, totalKv), no prefix-hit deduction — the net-demand
+    cut belongs to the engine-side prepare-stage ALLOCATE; master-side
+    gross demand is a deliberate conservative design choice).  The
+    seed's gross demand is 147458 tokens, 2 tokens past the old
+    160-block pool's 90% × 163840 = 147456 gate (park to the 30s
+    client deadline); 180 blocks put the gate at 90% × 180 × 1024 =
+    165888 ≥ 147458, with margin.
     """
-    env = ctx.env_manager.ensure(_kv_spec(ctx, "_conflict", decode_cache_blocks=160))
+    env = ctx.env_manager.ensure(_kv_spec(ctx, "_conflict", decode_cache_blocks=180))
     ops = ctx.engine_ops(env)
     base = rid_base(ctx, "kv")
     report = GradeReport(run_grade=ctx.grade)
