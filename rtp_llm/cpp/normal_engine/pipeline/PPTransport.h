@@ -13,7 +13,8 @@ public:
 
     virtual ~PPCommTicket() = default;
 
-    // CUDA transports make the caller's current stream wait for completion; the CPU thread need not block.
+    // CUDA tensors: make the caller's current stream wait for completion.
+    // CPU tensors: block the calling thread until the bytes arrive.
     virtual void wait() = 0;
 
 protected:
@@ -24,11 +25,12 @@ class PPTransport {
 public:
     virtual ~PPTransport() = default;
 
-    // CUDA transports observe the caller's current stream: a send depends on prior work on it.
+    // CUDA tensors observe the caller's current stream: a send depends on prior work on it.
     virtual std::unique_ptr<PPCommTicket> asyncSend(const torch::Tensor& tensor) = 0;
     virtual std::unique_ptr<PPCommTicket> asyncReceive(torch::Tensor& tensor)    = 0;
 };
 
+// Routes by tensor device: CUDA to the NCCL lane group, CPU to its gloo twin.
 class NcclPPTransport final: public PPTransport {
 public:
     NcclPPTransport(int64_t previous_rank, int64_t next_rank);
