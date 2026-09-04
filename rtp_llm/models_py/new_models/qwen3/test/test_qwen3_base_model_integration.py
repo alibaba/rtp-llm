@@ -10,6 +10,7 @@ from safetensors.torch import save_file
 
 from rtp_llm.config.quant_config import (
     CompressedW8A8Int8PerChannelQuantConfig,
+    Fp8PerTensorCompressedQuantConfig,
     GPTQConfig,
     ModelOptFp4Config,
 )
@@ -34,6 +35,7 @@ def _model_config():
         vocab_size=8,
         hidden_size=4,
         inter_size=4,
+        expert_num=0,
         attn_config=types.SimpleNamespace(
             head_num=2,
             kv_head_num=1,
@@ -317,6 +319,36 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "quantization config"):
                     model._load_with_new_loader()
                 config.use_new_loader = None
+
+    def test_static_activation_fp8_moe_routes_to_legacy_or_fails_early(self):
+        config = _model_config()
+        config.model_type = "qwen_3_moe"
+        config.expert_num = 8
+        config.use_new_loader = None
+        config.quant_config = Fp8PerTensorCompressedQuantConfig(
+            is_quanted=True,
+            dynamic=False,
+        )
+        model = _base_model(config)
+
+        self.assertIn(
+            "static-activation per-tensor FP8 MoE",
+            model._new_loader_unsupported_reason(),
+        )
+        self.assertFalse(model._use_new_loader())
+
+        config.use_new_loader = True
+        self.assertTrue(model._use_new_loader())
+        with self.assertRaisesRegex(ValueError, "static-activation per-tensor FP8 MoE"):
+            model._load_with_new_loader()
+
+        config.use_new_loader = None
+        config.quant_config = Fp8PerTensorCompressedQuantConfig(
+            is_quanted=True,
+            dynamic=True,
+        )
+        self.assertIsNone(model._new_loader_unsupported_reason())
+        self.assertTrue(model._use_new_loader())
 
     def test_automatic_newloader_preserves_legacy_until_policy_is_declared(self):
         config = _model_config()
