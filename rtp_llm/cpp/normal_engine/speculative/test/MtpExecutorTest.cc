@@ -1,6 +1,9 @@
 #include <algorithm>
+#include <condition_variable>
+#include <exception>
 #include <memory>
 #include <chrono>
+#include <thread>
 #include "torch/all.h"
 #include "gtest/gtest.h"
 
@@ -274,8 +277,11 @@ private:
 
 class RejectDraftTokenSpecProcessor: public BaseLogitsProcessor, public SpecLogitsProcessor {
 public:
-    explicit RejectDraftTokenSpecProcessor(int32_t rejected_token, int64_t accepted_token_len):
-        rejected_token_(rejected_token), accepted_token_len_(accepted_token_len) {}
+    explicit RejectDraftTokenSpecProcessor(int32_t               rejected_token,
+                                           int64_t               accepted_token_len,
+                                           std::function<void()> verify_callback = {}):
+        rejected_token_(rejected_token), accepted_token_len_(accepted_token_len),
+        verify_callback_(std::move(verify_callback)) {}
 
     void process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override {
         inputs.logits.narrow(0, start_idx, finish_idx - start_idx).fill_(BaseLogitsProcessor::neg_inf);
@@ -298,6 +304,9 @@ public:
     }
 
     int tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override {
+        if (verify_callback_) {
+            verify_callback_();
+        }
         if (request.propose_step <= 0 || request.bitmask_cpu_out == nullptr) {
             return request.propose_step;
         }
@@ -317,6 +326,7 @@ public:
 private:
     int32_t rejected_token_;
     int64_t accepted_token_len_;
+    std::function<void()> verify_callback_;
 };
 
 struct MtpExecutorComponents {
@@ -1416,11 +1426,27 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     auto                 stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
     auto                 stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
     StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, 3, stream_hidden_states, stream_draft_token_probs};
+    std::mutex              overlap_mutex;
+    std::condition_variable overlap_cv;
+    bool                    spec_verify_started_during_target_forward = false;
+    bool                    observed_overlap                         = false;
 
     GenerateStreamPtr stream = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
-    stream->logits_processor_list_.push_back(
-        std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen()));
+    stream->logits_processor_list_.push_back(std::make_shared<RejectDraftTokenSpecProcessor>(
+        3, stream->outputTokenLen(), [&] {
+            {
+                std::lock_guard<std::mutex> lock(overlap_mutex);
+                spec_verify_started_during_target_forward = true;
+            }
+            overlap_cv.notify_one();
+        }));
+    components.fake_target_model->setForwardCallback([&] {
+        std::unique_lock<std::mutex> lock(overlap_mutex);
+        observed_overlap = overlap_cv.wait_for(lock, std::chrono::seconds(2), [&] {
+            return spec_verify_started_during_target_forward;
+        });
+    });
 
     auto draft_input_1               = GptModelInputs{};
     auto draft_output_1              = GptModelOutputs{};
@@ -1491,7 +1517,128 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     auto status = components.executor->process({stream});
     ASSERT_TRUE(status.ok());
 
+    EXPECT_TRUE(observed_overlap) << "spec logits verification should overlap target verify forward";
+
     checkOutput(stream, {0, 1, 2, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.21, 0.22});
+}
+
+TEST_F(MtpExecutorTest, testDecodeDrainsSpecLogitsWorkerBeforePropagatingTargetForwardException) {
+    size_t propose_step = 2;
+    size_t vocab_size   = 4;
+
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle   = propose_step;
+    test_config.vocab_size_override = vocab_size;
+    auto components                 = createMtpExecutorComponents(test_config);
+
+    auto                 stream_new_tokens        = torch::tensor({{2}}, torch::kInt32);
+    auto                 stream_hidden_states     = torch::tensor({{0.03f, 0.04f}});
+    auto                 stream_draft_token_probs = torch::tensor({{0.0f, 0.0f, 0.0f, 1.0f}});
+    StreamSpecUpdateInfo spec_update_info{stream_new_tokens, 1, 3, stream_hidden_states, stream_draft_token_probs};
+
+    std::mutex              state_mutex;
+    std::condition_variable state_cv;
+    bool                    verify_started                        = false;
+    bool                    release_verify                        = false;
+    bool                    verify_finished                       = false;
+    bool                    target_forward_entered                = false;
+    bool                    process_returned                      = false;
+    bool                    verify_finished_when_process_returned = false;
+
+    GenerateStreamPtr stream = createDecodeStream(
+        components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
+    stream->logits_processor_list_.push_back(std::make_shared<RejectDraftTokenSpecProcessor>(
+        3, stream->outputTokenLen(), [&] {
+            std::unique_lock<std::mutex> lock(state_mutex);
+            verify_started = true;
+            state_cv.notify_all();
+            state_cv.wait(lock, [&] { return release_verify; });
+            verify_finished = true;
+            state_cv.notify_all();
+        }));
+    components.fake_target_model->setForwardCallback([&] {
+        std::unique_lock<std::mutex> lock(state_mutex);
+        if (!state_cv.wait_for(lock, std::chrono::seconds(2), [&] { return verify_started; })) {
+            throw std::runtime_error("spec logits verification did not start");
+        }
+        target_forward_entered = true;
+        state_cv.notify_all();
+        throw std::runtime_error("target forward failed");
+    });
+
+    auto draft_input               = GptModelInputs{};
+    auto draft_output              = GptModelOutputs{};
+    draft_input.combo_tokens       = torch::tensor({3}, torch::kInt32);
+    draft_input.input_lengths      = torch::tensor({2}, torch::kInt32);
+    draft_input.sequence_lengths   = torch::tensor({3}, torch::kInt32);
+    draft_input.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
+    draft_input.last_hidden_states = stream_hidden_states;
+    draft_output.logits            = torch::tensor({0.4f, 0.3f, 0.2f, 0.1f}).reshape({1, 4});
+    draft_output.all_hidden_states = torch::tensor({0.11f, 0.12f}).reshape({1, 2});
+
+    auto target_input              = GptModelInputs{};
+    target_input.combo_tokens      = torch::tensor({2, 3, 0}, torch::kInt32);
+    target_input.input_lengths     = torch::tensor({3}, torch::kInt32);
+    target_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
+    target_input.lm_output_indexes = torch::tensor({0, 1, 2}, torch::kInt32);
+
+    components.fake_draft_model->setInputs({draft_input});
+    components.fake_draft_model->setOutputs({draft_output});
+    components.fake_target_model->setInputs({target_input});
+    auto draft_sampler_output = spec::FastTopKSamplerOutput{
+        torch::tensor({1.0f, 0.0f, 0.0f, 0.0f}).reshape({1, 4}), torch::tensor({0}, torch::kInt32).reshape({1, 1})};
+    components.fake_fast_topk_sampler->setInputs({draft_output.logits});
+    components.fake_fast_topk_sampler->setOutputs({draft_sampler_output});
+
+    setupFakeModels(components.executor.get(),
+                    std::move(components.fake_target_model),
+                    std::move(components.fake_draft_model),
+                    std::move(components.fake_fast_topk_sampler),
+                    std::move(components.fake_speculative_sampler),
+                    std::move(components.fake_sampler));
+
+    std::thread release_thread([&] {
+        std::unique_lock<std::mutex> lock(state_mutex);
+        const bool target_started =
+            state_cv.wait_for(lock, std::chrono::seconds(2), [&] { return target_forward_entered; });
+        if (target_started) {
+            state_cv.wait_for(lock, std::chrono::milliseconds(500), [&] { return process_returned; });
+        }
+        release_verify = true;
+        lock.unlock();
+        state_cv.notify_all();
+    });
+
+    std::exception_ptr process_exception;
+    try {
+        components.executor->process({stream});
+    } catch (...) {
+        process_exception = std::current_exception();
+    }
+    {
+        std::lock_guard<std::mutex> lock(state_mutex);
+        verify_finished_when_process_returned = verify_finished;
+        process_returned                      = true;
+    }
+    state_cv.notify_all();
+    release_thread.join();
+
+    // Keep the old implementation safe after recording the expected failure:
+    // without exception-path draining, the worker may still be executing the
+    // verifier after its callback has returned.
+    components.executor->spec_logits_verify_async_runner_.sync(cuda_graph::graphGetCurrentStream());
+
+    ASSERT_NE(process_exception, nullptr);
+    try {
+        std::rethrow_exception(process_exception);
+    } catch (const std::runtime_error& e) {
+        EXPECT_STREQ(e.what(), "target forward failed");
+    } catch (...) {
+        ADD_FAILURE() << "target forward exception type changed";
+    }
+    EXPECT_TRUE(verify_finished_when_process_returned)
+        << "target forward exceptions must not escape while spec logits verification is still using the executor";
+    components.executor.reset();
 }
 
 TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTargetToken) {
