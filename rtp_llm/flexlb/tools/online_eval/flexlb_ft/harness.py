@@ -115,6 +115,15 @@ DEFAULT_MASTER_MANAGEMENT_PORT = int(
         "FLEXLB_FT_MASTER_MANAGEMENT_PORT", str(DEFAULT_MASTER_HTTP_PORT + 1)
     )
 )
+# Auto port-hunt (master block): when FLEXLB_FT_MASTER_HTTP_PORT is NOT
+# pinned, _pick_master_http_port() bind-probes the default block and shifts
+# forward by this stride — keeping the http / mgmt=+1 / gRPC=+2 layout —
+# until a free block is found.  A pinned env var keeps the legacy semantics
+# (start_master's wait loop owns contention): parallel_runner lanes pin
+# DISJOINT blocks per lane, and silent shifting there would make lanes
+# chase each other's blocks.  50 shifts cover 18080..18580.
+MASTER_PORT_STRIDE = 10
+MASTER_PORT_MAX_SHIFTS = 50
 
 # Every env var read by JavaLoadClient.Config.fromEnv().  Exported explicitly
 # (unset ones become empty string — JavaLoadClient treats empty as unset) so
@@ -336,6 +345,57 @@ def port_in_use(port: int, host: str = "127.0.0.1") -> bool:
             return False
         except OSError:
             return True
+
+
+# Bind-probe address for PRE-START port hunting: every JVM the harness
+# launches (mock NettyServer, Spring master --server.port) binds the
+# WILDCARD 0.0.0.0 — a probe on 127.0.0.1 only proves the loopback
+# interface free, so a foreign process bound to another interface
+# (observed: "Failed to bind to address 0.0.0.0/0.0.0.0:55252" while
+# the 127.0.0.1 probe passed) slips through and the JVM dies at startup.
+# Post-start RELEASE detection (_master_ports_in_use) keeps 127.0.0.1 —
+# an actually-running JVM on 0.0.0.0 shows up on loopback too.
+PROBE_BIND_HOST = "0.0.0.0"
+
+
+def _pick_master_http_port() -> tuple[int, str]:
+    """Bind-probe the master port block and auto-shift when busy.
+
+    The block layout is http / management=+1 / gRPC=+2 (README "master 组");
+    the probe uses the same SO_REUSEADDR bind as port_in_use so a port in
+    TIME_WAIT still counts as FREE only when the real JVM bind would
+    succeed — matching the actual start semantics.
+
+    Modes:
+      * FLEXLB_FT_MASTER_HTTP_PORT pinned → returned verbatim ("explicit")
+        with contention left to start_master's wait loop — a pinned port is
+        an orchestrator contract (parallel_runner lanes), never silently
+        moved;
+      * unpinned → probe from the default 18080 block, shifting forward by
+        MASTER_PORT_STRIDE (layout preserved) until a free block is found;
+        the note records the provenance ("auto 18080" or
+        "auto 18080->18090 (default block busy)") for the env build log
+        and the results JSON — a shifted run must be traceable when
+        debugging "which master did this case actually talk to".
+
+    Returns (http_port, note).
+    """
+    explicit = os.environ.get("FLEXLB_FT_MASTER_HTTP_PORT")
+    if explicit:
+        port = int(explicit)
+        return port, f"explicit {port}"
+    base = DEFAULT_MASTER_HTTP_PORT
+    for shift in range(MASTER_PORT_MAX_SHIFTS):
+        cand = base + MASTER_PORT_STRIDE * shift
+        if not any(port_in_use(p, PROBE_BIND_HOST) for p in (cand, cand + 1, cand + 2)):
+            if shift == 0:
+                return cand, f"auto {cand}"
+            return cand, f"auto {base}->{cand} (default block busy)"
+    raise RuntimeError(
+        f"no free master port block found in "
+        f"{base}..{base + MASTER_PORT_STRIDE * (MASTER_PORT_MAX_SHIFTS - 1) + 2} "
+        f"(stride {MASTER_PORT_STRIDE})"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1328,8 +1388,15 @@ class FlexEnv:
         self.run_dir = run_dir
         self.base_grpc_port = base_grpc_port
         self.mock_http_port = base_grpc_port - 1
-        self.master_http_port = DEFAULT_MASTER_HTTP_PORT
-        self.master_management_port = DEFAULT_MASTER_MANAGEMENT_PORT
+        # Master ports: auto-hunt (bind probe + forward shift) unless the
+        # env var pins them — see _pick_master_http_port.  An explicit
+        # FLEXLB_FT_MASTER_MANAGEMENT_PORT still wins (partial pin keeps
+        # its pinned axis; only the UNPINNED http block auto-shifts).
+        self.master_http_port, self.master_port_note = _pick_master_http_port()
+        explicit_mgmt = os.environ.get("FLEXLB_FT_MASTER_MANAGEMENT_PORT")
+        self.master_management_port = (
+            int(explicit_mgmt) if explicit_mgmt else self.master_http_port + 1
+        )
         self.endpoint_file = run_dir / "endpoints.json"
         self.discovery_file = run_dir / "discovery.json"  # dynamic file discovery
         self.perf_file = run_dir / "perf.json"
@@ -1447,7 +1514,9 @@ class EnvManager:
             # mock http = base-1; engines base .. base+n-1; victim zone base+149..base+151
             needed = [base - 1] + list(range(base, base + n_prefill + n_decode))
             needed += [base + 149, base + 150, base + 151]
-            if not any(port_in_use(p) for p in needed):
+            # wildcard probe (PROBE_BIND_HOST): the mock binds 0.0.0.0, a
+            # loopback-only probe misses foreign binds on other interfaces
+            if not any(port_in_use(p, PROBE_BIND_HOST) for p in needed):
                 return base
             base += 100
         raise RuntimeError("no free mock port range found")
@@ -1460,7 +1529,8 @@ class EnvManager:
         env = FlexEnv(spec, run_dir, base)
         self._log(
             f"building env '{spec.label}' ({spec.n_prefill}P+{spec.n_decode}D, "
-            f"mock_base={base}, dir={run_dir.name})"
+            f"mock_base={base}, master_http={env.master_http_port} "
+            f"({env.master_port_note}), dir={run_dir.name})"
         )
 
         # perf config

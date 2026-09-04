@@ -317,6 +317,24 @@ def main():
         # band failure) is finding evidence, not suite quality.
         if report is not None and not case.expected_fail:
             graded_achieved.append(report.achieved)
+        # Env port snapshot (auto port-hunt traceability): the master block
+        # can auto-shift off 18080 when busy (_pick_master_http_port) —
+        # without the actual ports in the results JSON, a shifted run is
+        # un-debuggable from the JSON alone ("which master did this case
+        # actually talk to?").  current is the env THIS case used (ensure()
+        # rebuilds/reuses before the case body runs); a case that never
+        # touched any env leaves the previous current — harmless then, as
+        # the detail/log channels carry the same provenance note.
+        env_ports = None
+        cur = env_mgr.current
+        if cur is not None:
+            env_ports = {
+                "master_http": cur.master_http_port,
+                "master_management": cur.master_management_port,
+                "master_grpc": cur.master_http_port + 2,
+                "master_port_note": cur.master_port_note,
+                "mock_base": cur.base_grpc_port,
+            }
         results.append(
             {
                 "category": case.category,
@@ -326,6 +344,7 @@ def main():
                 "expected_fail": case.expected_fail,
                 "duration_ms": duration_ms,
                 "detail": detail if not ok else "",
+                **({"env_ports": env_ports} if env_ports is not None else {}),
                 **({"grade": report.to_dict()} if report is not None else {}),
             }
         )
