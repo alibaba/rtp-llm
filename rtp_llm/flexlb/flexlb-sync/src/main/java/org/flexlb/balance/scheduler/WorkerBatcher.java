@@ -1171,13 +1171,11 @@ public final class WorkerBatcher {
     }
 
     private BatchCapacitySnapshot batchCapacitySnapshot() {
-        long capacity = positiveOrUnlimited(
-                config.getInternalRuntime()
-                        .getFallbackBatchTokenCapacity());
         WorkerStatus status = prefillEndpoint != null
                 ? prefillEndpoint.getStatus() : null;
         if (status == null) {
-            return new BatchCapacitySnapshot(capacity, Long.MAX_VALUE);
+            return new BatchCapacitySnapshot(
+                    Long.MAX_VALUE, Long.MAX_VALUE);
         }
         WorkerStatus.EngineObservation engineStatus =
                 status.committedEngineObservation();
@@ -1185,8 +1183,7 @@ public final class WorkerBatcher {
         if (engineCapacity <= 0) {
             engineCapacity = engineStatus.maxSeqLen();
         }
-        long batchTokenCapacity = Math.min(
-                capacity, positiveOrUnlimited(engineCapacity));
+        long batchTokenCapacity = positiveOrUnlimited(engineCapacity);
         long total = engineStatus.totalKvCacheTokens();
         if (total <= 0) {
             return new BatchCapacitySnapshot(

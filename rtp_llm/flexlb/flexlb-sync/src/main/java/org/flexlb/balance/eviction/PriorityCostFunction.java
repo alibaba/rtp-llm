@@ -13,6 +13,17 @@ import org.flexlb.enums.DecodeTaskPhase;
  */
 public final class PriorityCostFunction {
 
+    private static final int MIN_PRIORITY_RANK = 0;
+    private static final int MAX_PRIORITY_RANK = 4;
+    private static final int PRIORITY_RANK_BASE = 30;
+    private static final int PRIORITY_POINTS_PER_RANK = 10;
+    private static final long COST_RADIX = 1_024L;
+    private static final long KV_TOKENS_PER_COST_BUCKET = 1_024L;
+    private static final long MASTER_QUEUED_STAGE_WEIGHT = 1L;
+    private static final long ENGINE_MAY_HAVE_SEEN_STAGE_WEIGHT = 4L;
+    private static final long ACCEPTED_STAGE_WEIGHT = 16L;
+    private static final long RUNNING_STAGE_WEIGHT = 64L;
+
     // h(case) cross-type weights (design doc 7.6). A combined slot+KV plan
     // sums its already-weighted parts and is never multiplied again.
     /** h(DECODE_SLOT_FULL): frees concurrency, may affect D admission. */
@@ -25,7 +36,12 @@ public final class PriorityCostFunction {
 
     /** Rank 0..4 of a normalized priority (30..70), clamped for safety. */
     public static int rank(int priority) {
-        return Math.max(0, Math.min(4, (priority - 30) / 10));
+        return Math.max(
+                MIN_PRIORITY_RANK,
+                Math.min(
+                        MAX_PRIORITY_RANK,
+                        (priority - PRIORITY_RANK_BASE)
+                                / PRIORITY_POINTS_PER_RANK));
     }
 
     /** Single-value victim cost: 1024^rank. */
@@ -33,7 +49,7 @@ public final class PriorityCostFunction {
         long cost = 1;
         int rank = rank(priority);
         for (int i = 0; i < rank; i++) {
-            cost *= 1024;
+            cost *= COST_RADIX;
         }
         return cost;
     }
@@ -63,17 +79,19 @@ public final class PriorityCostFunction {
      */
     public static long g(DecodeTaskPhase stage) {
         return switch (stage) {
-            case MASTER_QUEUED_NOT_DISPATCHED -> 1L;
-            case ENGINE_MAY_HAVE_SEEN -> 4L;
-            case ACCEPTED_NOT_RUNNING -> 16L;
-            case RUNNING -> 64L;
+            case MASTER_QUEUED_NOT_DISPATCHED -> MASTER_QUEUED_STAGE_WEIGHT;
+            case ENGINE_MAY_HAVE_SEEN -> ENGINE_MAY_HAVE_SEEN_STAGE_WEIGHT;
+            case ACCEPTED_NOT_RUNNING -> ACCEPTED_STAGE_WEIGHT;
+            case RUNNING -> RUNNING_STAGE_WEIGHT;
         };
     }
 
     /** KV bucket of a reservation: ceil(kvTokens / 1024) (design doc 12.3). */
     public static long kvBucket(long kvTokens) {
         long nonNegativeTokens = Math.max(0, kvTokens);
-        return nonNegativeTokens == 0 ? 0 : 1 + (nonNegativeTokens - 1) / 1024;
+        return nonNegativeTokens == 0
+                ? 0
+                : 1 + (nonNegativeTokens - 1) / KV_TOKENS_PER_COST_BUCKET;
     }
 
     /**

@@ -33,7 +33,6 @@ public final class InternalRuntimeSettings {
     private final long queueDecisionThreadJoinTimeoutMs = 5_000L;
     /** Completion callbacks must not contend with the dispatch handoff pool. */
     private final int batchDispatchCompletionThreads = 8;
-    private final int fallbackBatchTokenCapacity = 1_048_576;
     private final long masterForwardRpcTimeoutMs = 5000;
 
     private static int resolveQueuePlannerThreads() {
