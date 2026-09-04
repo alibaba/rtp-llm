@@ -1,9 +1,9 @@
 """DeepGEMM Mega MoE strategy with the FP8 shared expert fused in-kernel.
 
 The installed DeepGEMM API uses the ordinary ``fp8_fp4_mega_moe`` symbol with
-optional shared weights.  This strategy is opt-in via
-``DSV4_USE_MEGA_MOE_SE=1`` and owns independent buffer/packer/warmup state so
-the default routed-only Mega path is unchanged.
+optional shared weights.  Compatible EP configurations prefer this strategy by
+default; ``DSV4_USE_MEGA_MOE_SE=0`` retains the routed-only or legacy fused
+path.  Buffer, packer, and warmup state remain independent from those paths.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 from ..mega_se_buf import (
     _get_or_create_mega_se_buf,
     _get_or_create_mega_se_output,
-    _mega_moe_se_enabled,
+    _mega_moe_se_available,
 )
 from ..mega_se_input_packer import get_mega_moe_se_input_packer
 from ..mega_se_jit_warmup import (
@@ -84,7 +84,7 @@ class MegaMoEStrategySE(MegaMoEStrategy):
 
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
-        return cfg.ep_size > 1 and _mega_moe_se_enabled()
+        return cfg.ep_size > 1 and _mega_moe_se_available()
 
     def setup_weights(self, layer_weights: Dict) -> None:
         import deep_gemm
