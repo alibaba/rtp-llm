@@ -1,7 +1,6 @@
 package org.flexlb.dao.loadbalance;
 
 import com.fasterxml.jackson.annotation.JsonAlias;
-import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Getter;
@@ -69,9 +68,6 @@ public class Request {
     private String inferenceSessionId = "";
 
     private SessionState inferenceSessionState = SessionState.UNSPECIFIED;
-
-    @JsonIgnore
-    private long sessionPlacementEpoch = -1L;
 
     public enum SessionState {
         UNSPECIFIED,

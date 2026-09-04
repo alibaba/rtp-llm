@@ -19,7 +19,7 @@ class LoadBalanceStrategyWiringTest {
             .withBean(CacheAwareService.class, () -> mock(CacheAwareService.class))
             .withBean(ResourceMeasureFactory.class, () -> mock(ResourceMeasureFactory.class))
             .withBean(EngineHealthReporter.class, () -> mock(EngineHealthReporter.class))
-            .withBean(SessionPlacementStore.class)
+            .withBean(SessionPlacementStore.class, SessionPlacementStore::new)
             .withBean("shortestTtftStrategy", ShortestTTFTStrategy.class)
             .withBean("costBasedPrefillStrategy", CostBasedPrefillStrategy.class);
 

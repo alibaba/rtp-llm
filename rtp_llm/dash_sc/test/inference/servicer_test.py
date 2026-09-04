@@ -3161,6 +3161,36 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             {"user_id": "u2", "x-dashscope-apikeyid": "ak2"},
         )
 
+    async def test_invocation_metadata_overrides_ds_header_attributes(self) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        context = MagicMock()
+        context.invocation_metadata.return_value = (
+            ("user_id", "metadata-user"),
+            ("x-ds-inference-session-id", "metadata-session"),
+        )
+        request = self._valid_infer_request()
+        request.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "user_id": "body-user",
+                "x-ds-inference-session-id": "body-session",
+                "x-ds-inference-session-state": "established",
+            }
+        )
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([request]), context))
+
+        self.assertIsNotNone(visitor.last_generate_input)
+        self.assertEqual(visitor.last_generate_input.headers["user_id"], "metadata-user")
+        self.assertEqual(
+            visitor.last_generate_input.headers["x-ds-inference-session-id"],
+            "metadata-session",
+        )
+        self.assertEqual(
+            visitor.last_generate_input.headers["x-ds-inference-session-state"],
+            "established",
+        )
+
     async def test_real_mode_uses_ds_header_attributes_for_backend_controls(
         self,
     ) -> None:

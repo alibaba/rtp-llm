@@ -143,68 +143,51 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             return -1;
         }
 
-        SessionAffinityPolicy.Decision sessionAffinity = SessionAffinityPolicy.evaluate(
-                balanceContext.getRequest(),
-                config.getRouter().getRoles().getPrefill().getSessionAffinity(),
-                sessionPlacementStore,
-                survivors.size(),
-                index -> survivors.endpoint(index).ipPort(),
-                survivors::score,
-                survivors::cacheHit,
-                minScore);
-        if (sessionAffinity.hasPreference()) {
-            int selectedIndex = sessionAffinity.preferredIndex();
-            reportCacheAffinityDecision(roleType,
-                    survivors.endpoint(selectedIndex).getIp(),
-                    sessionAffinity.reason().name());
+        RoutingConfig.CacheAffinityConfig cacheAffinity = config.getRouter().getRoles()
+                .getPrefill().getCacheAffinity();
+        CacheAffinityPolicy.Decision affinity = null;
+        if (cacheAffinity != null) {
+            long referenceHitTokens = 0L;
+            for (int i = 0; i < survivors.size(); i++) {
+                if (survivors.score(i) == minScore) {
+                    referenceHitTokens = Math.max(referenceHitTokens, survivors.cacheHit(i));
+                }
+            }
+            affinity = CacheAffinityPolicy.evaluate(
+                    survivors.size(), survivors::score, survivors::cacheHit, minScore,
+                    referenceHitTokens, seqLen, cacheAffinity.getMaxExtraTtftMs(),
+                    cacheAffinity.getMinPrefixHitPercent());
+        }
+
+        if (affinity != null && affinity.hasPreference()) {
+            int selectedIndex = selectCacheLeader(survivors, affinity);
+            if (selectedIndex >= 0) {
+                reportCacheAffinityDecision(roleType,
+                        survivors.endpoint(selectedIndex).getIp(), affinity.reason().name());
+                SessionAffinityPolicy.reportDecision(balanceContext, roleType,
+                        engineHealthReporter,
+                        SessionAffinityPolicy.Reason.CACHE_AFFINITY_PRECEDENCE);
+            }
             return selectedIndex;
         }
 
-        RoutingConfig.CacheAffinityConfig cacheAffinity = config.getRouter().getRoles()
-                .getPrefill().getCacheAffinity();
-        if (cacheAffinity == null) {
-            return selectBaselineCandidate(survivors, minScore, config);
+        SessionAffinityPolicy.Decision sessionAffinity = SessionAffinityPolicy.evaluate(
+                balanceContext.getRequest(),
+                config.getRouter().getRoles().getPrefill().getSessionAffinity(),
+                sessionPlacementStore, survivors.size(),
+                index -> survivors.endpoint(index).ipPort(), survivors::score, minScore);
+        if (sessionAffinity.hasPreference()) {
+            SessionAffinityPolicy.reportDecision(
+                    balanceContext, roleType, engineHealthReporter, sessionAffinity.reason());
+            return sessionAffinity.preferredIndex();
         }
+        SessionAffinityPolicy.reportDecision(
+                balanceContext, roleType, engineHealthReporter, sessionAffinity.reason());
 
-        long referenceHitTokens = 0L;
-        for (int i = 0; i < survivors.size(); i++) {
-            if (survivors.score(i) == minScore) {
-                referenceHitTokens = Math.max(referenceHitTokens, survivors.cacheHit(i));
-            }
-        }
-        CacheAffinityPolicy.Decision affinity = CacheAffinityPolicy.evaluate(
-                survivors.size(),
-                survivors::score,
-                survivors::cacheHit,
-                minScore,
-                referenceHitTokens,
-                seqLen,
-                cacheAffinity.getMaxExtraTtftMs(),
-                cacheAffinity.getMinPrefixHitPercent());
-
-        int selectedIndex;
-        if (affinity.hasPreference()) {
-            selectedIndex = selectCacheLeader(survivors, affinity);
-        } else {
-            selectedIndex = selectBaselineCandidate(survivors, minScore, config);
-        }
-
-        if (selectedIndex >= 0) {
-            String reason = affinity.reason().name();
-            reportCacheAffinityDecision(
-                    roleType, survivors.endpoint(selectedIndex).getIp(), reason);
-            Logger.debug(
-                    "CostBasedPrefill cache-affinity decision - role: {}, group: {}, "
-                            + "selected: {}, minScoreMs: {}, selectedScoreMs: {}, "
-                            + "scoreCutoffMs: {}, hitTokens: {}, reason: {}",
-                    roleType,
-                    group,
-                    survivors.endpoint(selectedIndex).ipPort(),
-                    affinity.minScoreMs(),
-                    survivors.score(selectedIndex),
-                    affinity.scoreCutoffMs(),
-                    survivors.cacheHit(selectedIndex),
-                    reason);
+        int selectedIndex = selectBaselineCandidate(survivors, minScore, config);
+        if (selectedIndex >= 0 && affinity != null) {
+            reportCacheAffinityDecision(roleType,
+                    survivors.endpoint(selectedIndex).getIp(), affinity.reason().name());
         }
         return selectedIndex;
     }

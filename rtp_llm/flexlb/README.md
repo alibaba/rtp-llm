@@ -167,7 +167,8 @@ export FLEXLB_CONFIG='{
         },
         "sessionAffinity": {
           "ttlMs": 1800000,
-          "maxExtraTtftMs": 100
+          "maxExtraTtftMs": 100,
+          "maxEntries": 200000
         }
       },
       "decode": {
@@ -322,7 +323,15 @@ request-count cap.
 
 Session affinity is enabled by including `router.roles.prefill.sessionAffinity` and
 is valid only with `ESTIMATED_TTFT`. `ttlMs` must be in `[1, 3600000]` and
-`maxExtraTtftMs` must be non-negative. Omit the object to disable it.
+`maxExtraTtftMs` must be non-negative. `maxEntries` is positive and defaults to
+`200000`; entries expire after `ttlMs`. Omit the object to disable it. A qualifying
+cache leader wins first, then an in-budget session placement, then baseline routing.
+Configuration is loaded at startup, and the in-memory placement store is empty after
+restart. In standalone multi-replica deployments affinity is per-replica best effort;
+endpoint reuse after a worker restart may point at a cold cache until TTL expiry.
+Roll out the FlexLB binary before adding `sessionAffinity` to `FLEXLB_CONFIG`, because
+older binaries reject unknown JSON fields. Removing or changing the setting also
+requires restart; configuration is not hot reloaded.
 
 See [QUEUE ordering and dispatcher modes](docs/priority-scheduler-delivery-modes.md)
 for the QUEUE lifecycle, accounting invariants, complete scheduler/dispatcher

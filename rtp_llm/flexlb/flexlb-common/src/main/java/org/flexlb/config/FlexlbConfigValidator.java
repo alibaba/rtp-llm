@@ -179,6 +179,8 @@ final class FlexlbConfigValidator {
                     "router.roles.prefill.sessionAffinity.ttlMs");
             nonNegative(sessionAffinity.getMaxExtraTtftMs(),
                     "router.roles.prefill.sessionAffinity.maxExtraTtftMs");
+            positive(sessionAffinity.getMaxEntries(),
+                    "router.roles.prefill.sessionAffinity.maxEntries");
         }
 
         require(routing.getRoles().getDecode() != null,

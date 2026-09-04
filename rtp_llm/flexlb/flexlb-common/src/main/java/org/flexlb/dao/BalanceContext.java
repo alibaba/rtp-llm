@@ -116,6 +116,8 @@ public class BalanceContext {
      */
     private String excludedPrefillIpPort;
 
+    private String sessionAffinityReason;
+
     //===================== Method ===================//
 
     public long getRequestId() {

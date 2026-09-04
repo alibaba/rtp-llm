@@ -45,6 +45,9 @@ enum SessionStatePB {
 }
 
 message SessionRoutingHintPB {
+    // Unknown schema versions are ignored as one unit. The caller guarantees
+    // session_id uniqueness; DashScope namespaces by user and model before
+    // generating an 80-bit random identifier. NEW means first use of this ID.
     uint32 schema_version = 1;
     string session_id = 2;
     SessionStatePB state = 3;

@@ -2,39 +2,45 @@ package org.flexlb.balance.session;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import org.flexlb.config.ConfigService;
 import org.flexlb.config.RoutingConfig;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 
 @Component
 public final class SessionPlacementStore {
-    private static final long DEFAULT_MAXIMUM_SIZE = 1_000_000L;
-    static final long MAX_IDLE_RETENTION_MS =
-            RoutingConfig.SessionAffinityConfig.MAX_TTL_MS;
     private static final int MAX_SESSION_ID_LENGTH = 256;
 
-    private final Cache<Key, State> placements;
+    private final Cache<Key, Placement> placements;
     private final LongSupplier clock;
-    private final AtomicLong epochs = new AtomicLong();
 
     public SessionPlacementStore() {
-        this(DEFAULT_MAXIMUM_SIZE, System::currentTimeMillis, System::nanoTime);
+        this(RoutingConfig.SessionAffinityConfig.DEFAULT_MAX_ENTRIES,
+                RoutingConfig.SessionAffinityConfig.MAX_TTL_MS,
+                System::currentTimeMillis,
+                System::nanoTime);
     }
 
     SessionPlacementStore(long maximumSize, LongSupplier clock) {
-        this(maximumSize, clock,
+        this(maximumSize, RoutingConfig.SessionAffinityConfig.MAX_TTL_MS, clock,
                 () -> TimeUnit.MILLISECONDS.toNanos(clock.getAsLong()));
     }
 
-    private SessionPlacementStore(long maximumSize, LongSupplier clock,
+    @Autowired
+    public SessionPlacementStore(ConfigService configService) {
+        this(maximumSize(configService), retentionMs(configService),
+                System::currentTimeMillis, System::nanoTime);
+    }
+
+    private SessionPlacementStore(long maximumSize, long retentionMs, LongSupplier clock,
                                   LongSupplier ticker) {
         this.placements = Caffeine.newBuilder()
                 .maximumSize(maximumSize)
-                .expireAfterAccess(MAX_IDLE_RETENTION_MS, TimeUnit.MILLISECONDS)
+                .expireAfterAccess(retentionMs, TimeUnit.MILLISECONDS)
                 .ticker(ticker::getAsLong)
                 .build();
         this.clock = clock;
@@ -45,62 +51,30 @@ public final class SessionPlacementStore {
             return Optional.empty();
         }
         Key key = new Key(model, sessionId);
-        State state = placements.getIfPresent(key);
-        if (state == null || state.placement() == null) {
+        Placement placement = placements.getIfPresent(key);
+        if (placement == null) {
             return Optional.empty();
         }
-        Placement placement = state.placement();
         if (clock.getAsLong() - placement.storedAtMs() > ttlMs) {
             return Optional.empty();
         }
         return Optional.of(placement);
     }
 
-    public void record(String model, String sessionId, String ipPort, long expectedEpoch) {
+    public void record(String model, String sessionId, String ipPort) {
         if (!valid(sessionId) || ipPort == null || ipPort.isBlank()) {
             return;
         }
-        Key key = new Key(model, sessionId);
-        Placement placement = new Placement(ipPort, clock.getAsLong());
-        placements.asMap().compute(key, (ignored, state) -> {
-            if (state == null) {
-                return null;
-            }
-            if (state.epoch() != expectedEpoch) {
-                return state;
-            }
-            return new State(state.epoch(), placement);
-        });
+        placements.put(new Key(model, sessionId), new Placement(ipPort, clock.getAsLong()));
     }
 
-    public long currentEpoch(String model, String sessionId) {
-        if (!valid(sessionId)) {
-            return -1L;
+    public void invalidate(String model, String sessionId) {
+        if (valid(sessionId)) {
+            placements.invalidate(new Key(model, sessionId));
         }
-        State state = placements.asMap().computeIfAbsent(
-                new Key(model, sessionId), ignored -> new State(nextEpoch(), null));
-        return state.epoch();
     }
 
-    public long reset(String model, String sessionId) {
-        if (!valid(sessionId)) {
-            return -1L;
-        }
-        State state = placements.asMap().compute(new Key(model, sessionId),
-                (ignored, current) -> new State(nextEpoch(), null));
-        return state.epoch();
-    }
-
-    public long resetIfPresent(String model, String sessionId) {
-        if (!valid(sessionId)) {
-            return -1L;
-        }
-        State state = placements.asMap().computeIfPresent(
-                new Key(model, sessionId), (ignored, current) -> new State(nextEpoch(), null));
-        return state == null ? -1L : state.epoch();
-    }
-
-    long estimatedSize() {
+    public long estimatedSize() {
         return placements.estimatedSize();
     }
 
@@ -116,9 +90,24 @@ public final class SessionPlacementStore {
         return sessionId.chars().allMatch(character -> character >= 0x21 && character <= 0x7e);
     }
 
-    private long nextEpoch() {
-        long epoch = epochs.incrementAndGet();
-        return epoch == 0L ? epochs.incrementAndGet() : epoch;
+    private static long maximumSize(ConfigService configService) {
+        RoutingConfig.SessionAffinityConfig config = affinityConfig(configService);
+        return config == null
+                ? RoutingConfig.SessionAffinityConfig.DEFAULT_MAX_ENTRIES
+                : config.getMaxEntries();
+    }
+
+    private static long retentionMs(ConfigService configService) {
+        RoutingConfig.SessionAffinityConfig config = affinityConfig(configService);
+        return config == null
+                ? RoutingConfig.SessionAffinityConfig.MAX_TTL_MS
+                : config.getTtlMs();
+    }
+
+    private static RoutingConfig.SessionAffinityConfig affinityConfig(
+            ConfigService configService) {
+        return configService.loadBalanceConfig().getRouter().getRoles()
+                .getPrefill().getSessionAffinity();
     }
 
     private record Key(String model, String sessionId) {
@@ -127,6 +116,4 @@ public final class SessionPlacementStore {
     public record Placement(String ipPort, long storedAtMs) {
     }
 
-    private record State(long epoch, Placement placement) {
-    }
 }

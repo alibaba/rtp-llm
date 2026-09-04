@@ -2,7 +2,10 @@ package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.config.RoutingConfig;
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.util.Logger;
 
 import java.util.Optional;
@@ -13,13 +16,30 @@ final class SessionAffinityPolicy {
     private SessionAffinityPolicy() {
     }
 
+    static void reportDecision(BalanceContext context,
+                               RoleType roleType,
+                               EngineHealthReporter reporter,
+                               Reason reason) {
+        RoutingConfig.SessionAffinityConfig config = context.getConfig().getRouter().getRoles()
+                .getPrefill().getSessionAffinity();
+        Request request = context.getRequest();
+        if (config == null
+                || request.getSessionSchemaVersion() != Request.SESSION_SCHEMA_VERSION
+                || request.getInferenceSessionState() != Request.SessionState.ESTABLISHED
+                || request.getInferenceSessionId() == null
+                || request.getInferenceSessionId().isBlank()) {
+            return;
+        }
+        context.setSessionAffinityReason(reason.name());
+        reporter.reportSessionAffinityDecision(roleType, reason.name());
+    }
+
     static Decision evaluate(Request request,
                              RoutingConfig.SessionAffinityConfig config,
                              SessionPlacementStore store,
                              int candidateCount,
                              IntFunction<String> endpoint,
                              IntToLongFunction score,
-                             IntToLongFunction cacheHit,
                              long minScore) {
         if (request.getSessionSchemaVersion() != Request.SESSION_SCHEMA_VERSION
                 || request.getInferenceSessionId() == null
@@ -34,11 +54,6 @@ final class SessionAffinityPolicy {
         }
         if (config == null || state != Request.SessionState.ESTABLISHED) {
             return Decision.none(Reason.DISABLED);
-        }
-        for (int i = 0; i < candidateCount; i++) {
-            if (cacheHit.applyAsLong(i) > 0) {
-                return Decision.none(Reason.EXACT_CACHE_PRESENT);
-            }
         }
         var placement = findPlacement(request, config, store, model, sessionId);
         if (placement.isEmpty()) {
@@ -77,11 +92,12 @@ final class SessionAffinityPolicy {
     enum Reason {
         DISABLED,
         NEW_SESSION,
-        EXACT_CACHE_PRESENT,
+        CACHE_AFFINITY_PRECEDENCE,
         NO_PLACEMENT,
         ENDPOINT_UNAVAILABLE,
         OVER_CAP,
-        SESSION_AFFINITY
+        SESSION_AFFINITY,
+        SESSION_AFFINITY_CAS_FALLBACK
     }
 
     record Decision(int preferredIndex, Reason reason) {

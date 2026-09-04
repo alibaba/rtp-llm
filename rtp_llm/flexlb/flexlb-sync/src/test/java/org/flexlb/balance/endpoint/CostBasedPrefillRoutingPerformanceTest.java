@@ -10,6 +10,7 @@ import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -22,8 +23,9 @@ import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
-import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 import org.slf4j.LoggerFactory;
 
@@ -53,6 +55,8 @@ class CostBasedPrefillRoutingPerformanceTest {
             Integer.getInteger("flexlb.perf.routing.operations-per-thread", 500);
 
     private EndpointRegistry endpointRegistry;
+    private FlexlbConfig routingConfig;
+    private SessionPlacementStore sessionPlacementStore;
     private ch.qos.logback.classic.Logger syncLogger;
     private Level previousSyncLogLevel;
 
@@ -72,9 +76,11 @@ class CostBasedPrefillRoutingPerformanceTest {
         syncLogger.setLevel(previousSyncLogLevel);
     }
 
-    @Test
+    @ParameterizedTest(name = "sessionAffinity={0}")
+    @ValueSource(booleans = {false, true})
     @Timeout(value = 30, unit = TimeUnit.SECONDS)
-    void routesAcross750EnginesWithoutThroughputRegression() throws Exception {
+    void routesAcross750EnginesWithoutThroughputRegression(boolean sessionAffinityEnabled)
+            throws Exception {
         int availableProcessors = Runtime.getRuntime().availableProcessors();
         int threadCount = Math.min(16, Math.max(4, availableProcessors));
         long defaultMinimumQps = Math.min(20_000L, Math.max(2_000L, availableProcessors * 1_000L));
@@ -82,7 +88,7 @@ class CostBasedPrefillRoutingPerformanceTest {
         double maximumP99Ms = Double.parseDouble(
                 System.getProperty("flexlb.perf.max-routing-p99-ms", "20"));
 
-        CostBasedPrefillStrategy strategy = createStrategy();
+        CostBasedPrefillStrategy strategy = createStrategy(sessionAffinityEnabled);
         assertEquals(ENGINE_COUNT, endpointRegistry.getEndpointCount(RoleType.PREFILL));
 
         ExecutorService executor = Executors.newFixedThreadPool(threadCount);
@@ -112,13 +118,20 @@ class CostBasedPrefillRoutingPerformanceTest {
         }
     }
 
-    private CostBasedPrefillStrategy createStrategy() {
-        FlexlbConfig config = new FlexlbConfig();
-        config.getRouter().getRoles().getPrefill().getAvailability()
+    private CostBasedPrefillStrategy createStrategy(boolean sessionAffinityEnabled) {
+        routingConfig = new FlexlbConfig();
+        routingConfig.getRouter().getRoles().getPrefill().getAvailability()
                 .setMaxPendingRequests(1_000_000L);
+        if (sessionAffinityEnabled) {
+            RoutingConfig.SessionAffinityConfig affinity =
+                    new RoutingConfig.SessionAffinityConfig();
+            affinity.setTtlMs(1_800_000L);
+            affinity.setMaxExtraTtftMs(40L);
+            routingConfig.getRouter().getRoles().getPrefill().setSessionAffinity(affinity);
+        }
 
         ConfigService configService = Mockito.mock(ConfigService.class);
-        Mockito.when(configService.loadBalanceConfig()).thenReturn(config);
+        Mockito.when(configService.loadBalanceConfig()).thenReturn(routingConfig);
         BatchSchedulerReporter reporter = Mockito.mock(BatchSchedulerReporter.class, withSettings().stubOnly());
         PriorityScheduler scheduler = Mockito.mock(
                 PriorityScheduler.class, withSettings().stubOnly());
@@ -139,9 +152,14 @@ class CostBasedPrefillRoutingPerformanceTest {
         EngineHealthReporter healthReporter =
                 Mockito.mock(EngineHealthReporter.class, withSettings().stubOnly());
 
+        sessionPlacementStore = new SessionPlacementStore();
+        if (sessionAffinityEnabled) {
+            sessionPlacementStore.record(
+                    "performance-model", "performance-session", "127.0.0.1:61000");
+        }
         return new CostBasedPrefillStrategy(
                 engineWorkerStatus, new EmptyCacheAwareService(), resourceMeasureFactory,
-                healthReporter, new SessionPlacementStore());
+                healthReporter, sessionPlacementStore);
     }
 
     private RoundResult runRound(CostBasedPrefillStrategy strategy,
@@ -217,15 +235,20 @@ class CostBasedPrefillRoutingPerformanceTest {
         return status;
     }
 
-    private static BalanceContext context(long requestId) {
-        FlexlbConfig config = new FlexlbConfig();
+    private BalanceContext context(long requestId) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(1_024L);
+        request.setModel("performance-model");
         request.setBlockCacheKeys(List.of(1L, 2L, 3L, 4L));
+        if (routingConfig.getRouter().getRoles().getPrefill().getSessionAffinity() != null) {
+            request.setSessionSchemaVersion(Request.SESSION_SCHEMA_VERSION);
+            request.setInferenceSessionId("performance-session");
+            request.setInferenceSessionState(Request.SessionState.ESTABLISHED);
+        }
         BalanceContext context = new BalanceContext();
         context.setRequest(request);
-        context.setConfig(config);
+        context.setConfig(routingConfig);
         return context;
     }
 

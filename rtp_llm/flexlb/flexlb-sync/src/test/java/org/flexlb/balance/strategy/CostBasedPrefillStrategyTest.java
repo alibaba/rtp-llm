@@ -7,7 +7,6 @@ import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
-import org.flexlb.balance.session.SessionPlacementLifecycle;
 import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.BatchDispatcherConfig;
@@ -113,6 +112,8 @@ class CostBasedPrefillStrategyTest {
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
+        Mockito.verify(engineHealthReporter, Mockito.never())
+                .reportSessionAffinityDecision(any(), any());
     }
 
     @Test
@@ -127,45 +128,19 @@ class CostBasedPrefillStrategyTest {
         affinity.setTtlMs(1_800_000L);
         affinity.setMaxExtraTtftMs(100L);
         config.getRouter().getRoles().getPrefill().setSessionAffinity(affinity);
-        sessionPlacementStore.record("kimi-k3", "session-1", "10.0.0.2:8080",
-                sessionPlacementStore.currentEpoch("kimi-k3", "session-1"));
+        sessionPlacementStore.record("kimi-k3", "session-1", "10.0.0.2:8080");
         BalanceContext context = buildContext(1000, 101L, config);
         context.getRequest().setModel("kimi-k3");
         context.getRequest().setSessionSchemaVersion(1);
         context.getRequest().setInferenceSessionId("session-1");
         context.getRequest().setInferenceSessionState(Request.SessionState.ESTABLISHED);
-        initializeSession(context);
 
         ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
-    }
-
-    @Test
-    void newSessionInvalidatesPlacementEvenWhenNoWorkerIsAvailable() {
-        FlexlbConfig config = new FlexlbConfig();
-        useBestOnly(config);
-        RoutingConfig.SessionAffinityConfig affinity = new RoutingConfig.SessionAffinityConfig();
-        affinity.setTtlMs(1_800_000L);
-        affinity.setMaxExtraTtftMs(100L);
-        config.getRouter().getRoles().getPrefill().setSessionAffinity(affinity);
-        long oldEpoch = sessionPlacementStore.currentEpoch("kimi-k3", "session-1");
-        sessionPlacementStore.record(
-                "kimi-k3", "session-1", "10.0.0.2:8080", oldEpoch);
-        BalanceContext context = buildContext(1000, 102L, config);
-        Request request = context.getRequest();
-        request.setModel("kimi-k3");
-        request.setSessionSchemaVersion(1);
-        request.setInferenceSessionId("session-1");
-        request.setInferenceSessionState(Request.SessionState.NEW);
-        initializeSession(context);
-
-        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
-
-        assertFalse(result.isSuccess());
-        assertTrue(request.getSessionPlacementEpoch() > oldEpoch);
-        assertTrue(sessionPlacementStore.find("kimi-k3", "session-1", 1_000).isEmpty());
+        Mockito.verify(engineHealthReporter).reportSessionAffinityDecision(
+                RoleType.PREFILL, "SESSION_AFFINITY");
     }
 
     @Test
@@ -180,6 +155,8 @@ class CostBasedPrefillStrategyTest {
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.1", result.getServerIp());
+        Mockito.verify(engineHealthReporter).reportSessionAffinityDecision(
+                RoleType.PREFILL, "OVER_CAP");
     }
 
     @Test
@@ -200,6 +177,32 @@ class CostBasedPrefillStrategyTest {
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
+        Mockito.verify(engineHealthReporter).reportSessionAffinityDecision(
+                RoleType.PREFILL, "CACHE_AFFINITY_PRECEDENCE");
+    }
+
+    @Test
+    void sessionPlacementThatIsCacheLeaderKeepsCachePrecedence() {
+        FlexlbConfig config = sessionAffinityConfig(1_000);
+        RoutingConfig.CacheAffinityConfig cacheAffinity = new RoutingConfig.CacheAffinityConfig();
+        cacheAffinity.setMaxExtraTtftMs(1_000);
+        cacheAffinity.setMinPrefixHitPercent(5);
+        config.getRouter().getRoles().getPrefill().setCacheAffinity(cacheAffinity);
+        addWorker("10.0.0.1", 0);
+        addWorker("10.0.0.2", 0);
+        recordSession("10.0.0.2:8080");
+        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any()))
+                .thenReturn(Map.of("10.0.0.2:8080", 32));
+        BalanceContext context = establishedSessionContext(20_000, 111L, config);
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.2", result.getServerIp());
+        Mockito.verify(engineHealthReporter).reportCacheAffinityDecision(
+                RoleType.PREFILL, "10.0.0.2", "CACHE_LEADER");
+        Mockito.verify(engineHealthReporter).reportSessionAffinityDecision(
+                RoleType.PREFILL, "CACHE_AFFINITY_PRECEDENCE");
     }
 
     @Test
@@ -220,6 +223,8 @@ class CostBasedPrefillStrategyTest {
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
+        Mockito.verify(engineHealthReporter).reportSessionAffinityDecision(
+                RoleType.PREFILL, "SESSION_AFFINITY");
     }
 
     @Test
@@ -234,12 +239,13 @@ class CostBasedPrefillStrategyTest {
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.1", result.getServerIp());
+        Mockito.verify(engineHealthReporter).reportSessionAffinityDecision(
+                RoleType.PREFILL, "ENDPOINT_UNAVAILABLE");
     }
 
     @Test
     void sessionPlacementLookupFailureUsesBaseline() {
         SessionPlacementStore failingStore = Mockito.mock(SessionPlacementStore.class);
-        Mockito.when(failingStore.currentEpoch("kimi-k3", "session-1")).thenReturn(3L);
         Mockito.when(failingStore.find("kimi-k3", "session-1", 1_800_000L))
                 .thenThrow(new IllegalStateException("store unavailable"));
         sessionPlacementStore = failingStore;
@@ -258,6 +264,8 @@ class CostBasedPrefillStrategyTest {
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.1", result.getServerIp());
+        Mockito.verify(engineHealthReporter).reportSessionAffinityDecision(
+                RoleType.PREFILL, "NO_PLACEMENT");
     }
 
     @Test
@@ -813,23 +821,11 @@ class CostBasedPrefillStrategyTest {
         request.setSessionSchemaVersion(1);
         request.setInferenceSessionId("session-1");
         request.setInferenceSessionState(Request.SessionState.ESTABLISHED);
-        initializeSession(context);
         return context;
     }
 
-    private void initializeSession(BalanceContext context) {
-        SessionPlacementLifecycle.initialize(
-                context.getRequest(),
-                context.getConfig().getRouter().getRoles().getPrefill().getSessionAffinity(),
-                sessionPlacementStore);
-    }
-
     private void recordSession(String ipPort) {
-        sessionPlacementStore.record(
-                "kimi-k3",
-                "session-1",
-                ipPort,
-                sessionPlacementStore.currentEpoch("kimi-k3", "session-1"));
+        sessionPlacementStore.record("kimi-k3", "session-1", ipPort);
     }
 
     private void addWorker(String ip, long estimatedWaitMs) {

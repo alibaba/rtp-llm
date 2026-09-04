@@ -28,6 +28,7 @@ public class PvLogData {
     private long batchId;
     private String requestState;
     private String realMasterHost;
+    private String sessionAffinityReason;
 
     public PvLogData(BalanceContext ctx,
                      int code,
@@ -54,5 +55,6 @@ public class PvLogData {
         this.batchId = batchId;
         this.requestState = requestState;
         this.realMasterHost = realMasterHost;
+        this.sessionAffinityReason = ctx.getSessionAffinityReason();
     }
 }

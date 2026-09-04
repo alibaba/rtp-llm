@@ -297,6 +297,10 @@ public class MetricConstant {
      */
     public static final String CACHE_AFFINITY_DECISION = "app.cache.affinity.decision.qps";
 
+    public static final String SESSION_AFFINITY_DECISION = "session.affinity.decision";
+
+    public static final String SESSION_PLACEMENT_SIZE = "session.placement.size";
+
     /**
      * Cache request total count
      */

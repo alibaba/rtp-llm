@@ -5,7 +5,6 @@ import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.session.SessionPlacementStore;
-import org.flexlb.balance.session.SessionPlacementLifecycle;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
@@ -206,10 +205,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             AtomicBoolean completionClaimed,
             ScheduleOrigin origin) {
         try {
-            SessionPlacementLifecycle.initialize(
-                    context.getRequest(),
-                    context.getConfig().getRouter().getRoles().getPrefill().getSessionAffinity(),
-                    sessionPlacementStore);
+            invalidateNewSessionPlacementSafely(context);
             routeLocally(context).whenComplete((response, routeError) -> {
                 if (routeError != null) {
                     Logger.warn("FlexlbService.schedule async error, request_id={}",
@@ -235,6 +231,21 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     origin,
                     token,
                     completionClaimed);
+        }
+    }
+
+    private void invalidateNewSessionPlacementSafely(BalanceContext context) {
+        try {
+            Request request = context.getRequest();
+            if (context.getConfig().getRouter().getRoles().getPrefill()
+                    .getSessionAffinity() != null
+                    && request.getSessionSchemaVersion() == Request.SESSION_SCHEMA_VERSION
+                    && request.getInferenceSessionState() == Request.SessionState.NEW) {
+                sessionPlacementStore.invalidate(
+                        request.getModel(), request.getInferenceSessionId());
+            }
+        } catch (RuntimeException exception) {
+            Logger.warn("Failed to invalidate session placement", exception);
         }
     }
 
@@ -588,8 +599,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 .ifPresent(status -> sessionPlacementStore.record(
                         request.getModel(),
                         request.getInferenceSessionId(),
-                        status.getServerIp() + ":" + status.getHttpPort(),
-                        request.getSessionPlacementEpoch()));
+                        status.getServerIp() + ":" + status.getHttpPort()));
     }
 
     /** Write one PV record on the node that made the scheduling decision. */
