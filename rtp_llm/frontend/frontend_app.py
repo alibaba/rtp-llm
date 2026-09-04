@@ -615,6 +615,15 @@ class FrontendApp(object):
             result = await self.grpc_client.post_request("start_profile", req)
             return result
 
+        @app.post("/rtp_llm/dump_torch_allocator")
+        @app.post("/dump_torch_allocator")
+        async def dump_torch_allocator(request: Request):
+            check_not_draining(request)
+            result = await self.grpc_client.post_request("dump_torch_allocator", {})
+            if result.get("status") != "ok":
+                return ORJSONResponse(status_code=500, content=result)
+            return result
+
         # request format: {"mode": "NONE", "update_time": 5000}
         @app.post("/update_eplb_config")
         async def update_eplb_config(req: Union[str, Dict[Any, Any]], request: Request):

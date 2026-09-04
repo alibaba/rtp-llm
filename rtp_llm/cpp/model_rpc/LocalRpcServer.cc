@@ -1,9 +1,11 @@
 #include <memory>
 #include <chrono>
+#include <unistd.h>
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/multimodal_processor/MMProcessorConfig.h"
@@ -54,10 +56,10 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
     propose_maga_init_params_ = propose_params.get();
     if (maga_init_params_.parallelism_config.tp_rank == 0
         && !maga_init_params_.runtime_config.worker_grpc_addrs.empty()) {
-        profile_broadcaster_ = std::make_shared<BroadcastManager>(maga_init_params_.runtime_config.worker_grpc_addrs);
-        if (!profile_broadcaster_->init()) {
-            RTP_LLM_LOG_WARNING("failed to init profile broadcaster");
-            profile_broadcaster_.reset();
+        tp_broadcaster_ = std::make_shared<BroadcastManager>(maga_init_params_.runtime_config.worker_grpc_addrs);
+        if (!tp_broadcaster_->init()) {
+            RTP_LLM_LOG_WARNING("failed to init TP broadcaster");
+            tp_broadcaster_.reset();
         }
     }
 
@@ -212,6 +214,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
+    generate_context.onflight_requests = &onflight_requests_;
     // gRPC SERVER span doubles as the request span on the fusion path; guard
     // destruction covers CHECK_ERROR_STATUS early returns.
     if (telemetry::TelemetryRuntime::isActive()) {
@@ -574,7 +577,7 @@ LocalRpcServer::StartProfile(grpc::ServerContext* context, const StartProfileReq
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
                             "enable_all_rank start_profile must be sent to tp_rank 0");
     }
-    if (!profile_broadcaster_) {
+    if (!tp_broadcaster_) {
         if (maga_init_params_.parallelism_config.tp_size <= 1) {
             RTP_LLM_LOG_INFO("start_profile enable_all_rank with tp_size=1, fallback to local start");
             engine_->startTimelineProfiling(request->trace_name(), request->start_step(), request->num_steps());
@@ -583,7 +586,7 @@ LocalRpcServer::StartProfile(grpc::ServerContext* context, const StartProfileReq
         return grpc::Status(grpc::StatusCode::INTERNAL, "tp broadcaster unavailable for enable_all_rank start_profile");
     }
 
-    std::vector<StartProfileInternalRequestPB> requests(profile_broadcaster_->workerNum());
+    std::vector<StartProfileInternalRequestPB> requests(tp_broadcaster_->workerNum());
     for (auto& internal_request : requests) {
         internal_request.set_trace_name(request->trace_name());
         internal_request.set_start_step(request->start_step());
@@ -595,7 +598,7 @@ LocalRpcServer::StartProfile(grpc::ServerContext* context, const StartProfileReq
                        grpc::CompletionQueue*                      completion_queue) {
         return stub->AsyncStartProfileInternal(context.get(), internal_request, completion_queue);
     };
-    auto broadcast_result = profile_broadcaster_->broadcast<StartProfileInternalRequestPB, EmptyPB>(
+    auto broadcast_result = tp_broadcaster_->broadcast<StartProfileInternalRequestPB, EmptyPB>(
         requests, /*timeout_ms=*/3000, rpc_call);
     if (!broadcast_result) {
         return grpc::Status(grpc::StatusCode::INTERNAL, "failed to broadcast start_profile_internal to tp group");
@@ -616,6 +619,76 @@ grpc::Status LocalRpcServer::StartProfileInternal(grpc::ServerContext*          
                      request->start_step(),
                      request->num_steps());
     engine_->startTimelineProfiling(request->trace_name(), request->start_step(), request->num_steps());
+    return grpc::Status::OK;
+}
+
+TorchAllocatorDumpResultPB LocalRpcServer::dumpTorchAllocatorOnCurrentProcess() {
+    const auto&                parallelism_config = maga_init_params_.parallelism_config;
+    TorchAllocatorDumpResultPB result;
+    result.set_world_rank(parallelism_config.world_rank);
+    result.set_dp_rank(parallelism_config.dp_rank);
+    result.set_tp_rank(parallelism_config.tp_rank);
+    result.set_local_rank(parallelism_config.local_rank);
+    result.set_pid(getpid());
+
+    auto output_path = dumpTorchCudaOomDiagnostics(parallelism_config.local_rank);
+    result.set_success(!output_path.empty());
+    result.set_file_path(std::move(output_path));
+    if (!result.success()) {
+        result.set_error("allocator dump failed; see backend log");
+    }
+    return result;
+}
+
+grpc::Status LocalRpcServer::DumpTorchAllocator(grpc::ServerContext*          context,
+                                                const EmptyPB*                request,
+                                                TorchAllocatorDumpResponsePB* response) {
+    (void)request;
+    RTP_LLM_LOG_INFO("dump_torch_allocator from %s", context->peer().c_str());
+    if (maga_init_params_.parallelism_config.tp_rank != 0) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "dump_torch_allocator must be sent to tp_rank 0");
+    }
+    if (maga_init_params_.parallelism_config.tp_size <= 1) {
+        response->add_results()->CopyFrom(dumpTorchAllocatorOnCurrentProcess());
+        return grpc::Status::OK;
+    }
+    if (!tp_broadcaster_) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "tp broadcaster unavailable for allocator dump");
+    }
+
+    std::vector<EmptyPB> requests(tp_broadcaster_->workerNum());
+    auto                 rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& context,
+                       const EmptyPB&                              internal_request,
+                       grpc::CompletionQueue*                      completion_queue) {
+        return stub->AsyncDumpTorchAllocatorInternal(context.get(), internal_request, completion_queue);
+    };
+    auto broadcast_result =
+        tp_broadcaster_->broadcast<EmptyPB, TorchAllocatorDumpResultPB>(requests, /*timeout_ms=*/60000, rpc_call);
+    if (!broadcast_result) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "failed to broadcast allocator dump to tp group");
+    }
+    try {
+        broadcast_result->waitDone();
+    } catch (const std::exception& exception) {
+        RTP_LLM_LOG_WARNING("allocator dump broadcast failed: %s", exception.what());
+        return grpc::Status(grpc::StatusCode::INTERNAL, exception.what());
+    }
+    if (!broadcast_result->success()) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, "allocator dump broadcast to tp group failed");
+    }
+    for (const auto& result : broadcast_result->responses()) {
+        response->add_results()->CopyFrom(result);
+    }
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::DumpTorchAllocatorInternal(grpc::ServerContext*        context,
+                                                        const EmptyPB*              request,
+                                                        TorchAllocatorDumpResultPB* response) {
+    (void)request;
+    RTP_LLM_LOG_INFO("dump_torch_allocator_internal from %s", context->peer().c_str());
+    response->CopyFrom(dumpTorchAllocatorOnCurrentProcess());
     return grpc::Status::OK;
 }
 

@@ -3,6 +3,7 @@ load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test")
 
 requirement([
     "grpcio",
+    "protobuf",
 ])
 
 
@@ -189,6 +190,18 @@ py_test(
         "//:rtp_compute_ops",
     ],
     exec_properties = {'gpu':'H20'}
+)
+
+py_test(
+    name = "grpc_client_wrapper_test",
+    srcs = ["grpc_client_wrapper_test.py"],
+    deps = [
+        ":grpcio",
+        ":protobuf",
+        "//rtp_llm:utils",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+        "//rtp_llm/metrics",
+    ],
 )
 
 py_test(

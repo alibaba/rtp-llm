@@ -61,10 +61,11 @@ public:
     // py_instance is `py_model` indeedly.
     PyWrappedModel(const GptModelInitParams& params,
                    py::object                py_instance,
-                   bool                      is_prefill_cuda_graph_mode = false,
-                   bool                      use_spec_decoding          = false,
-                   DSparkModelRole           dspark_model_role          = DSparkModelRole::NONE,
-                   bool                      allow_cuda_graph           = true);
+                   bool                      is_prefill_cuda_graph_mode  = false,
+                   bool                      use_spec_decoding           = false,
+                   DSparkModelRole           dspark_model_role           = DSparkModelRole::NONE,
+                   bool                      allow_cuda_graph            = true,
+                   bool                      track_cache_store_completion = false);
     ~PyWrappedModel();
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
@@ -76,6 +77,7 @@ public:
     void            prepareAttentionInputs(const GptModelInputs& inputs) override;
     void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
+    std::string     waitCacheStorePublication() override;
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
@@ -120,6 +122,7 @@ private:
     const rtp_llm::ExecProperties                   device_props_;
     const bool                                      enable_prefill_cp_;
     const DSparkModelRole                           dspark_model_role_;
+    const bool                                      track_cache_store_completion_;
     const rtp_llm::MlaOpsType                       mla_ops_type_;
     const size_t                                    layer_num_;
     const GptModelDescription                       description_;
@@ -162,7 +165,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                       bool                      is_prefill_cuda_graph_mode,
                                       bool                      use_spec_decoding,
                                       DSparkModelRole           dspark_model_role,
-                                      bool                      allow_cuda_graph):
+                                      bool                      allow_cuda_graph,
+                                      bool                      track_cache_store_completion):
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
     // Every prefill-shaped forward of a CP-enabled model goes through the
     // standard split/gather path — including the DSpARK draft commit, whose
@@ -173,6 +177,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     // rejected at executor construction).
     enable_prefill_cp_(device_props_.enable_prefill_cp),
     dspark_model_role_(dspark_model_role),
+    track_cache_store_completion_(track_cache_store_completion),
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
     description_(params.description),
@@ -343,7 +348,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }
 
-        graph_runner_ = new CudaGraphRunner(graph_params, py_instance, forward_method);
+        graph_runner_ = new CudaGraphRunner(graph_params, py_instance, forward_method, params.metrics_reporter);
         RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper");
         {
             void* nccl_comm = cuda_graph::getGraphCaptureTpNcclComm();

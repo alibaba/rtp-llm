@@ -29,6 +29,24 @@ namespace rtp_llm {
 
 namespace {
 
+constexpr auto kDecodeChannelReadyTimeoutCap = std::chrono::milliseconds(15000);
+constexpr auto kDecodeChannelReadyTimeoutMin = std::chrono::milliseconds(100);
+
+// Bound the decode-channel readiness wait by the request's remaining budget so a
+// nearly-expired request cannot block for the full cap. request_timeout_ms <= 0
+// means "no request deadline", in which case the cap applies unchanged.
+std::chrono::milliseconds resolveDecodeChannelReadyTimeout(int64_t request_timeout_ms, int64_t request_begin_time_us) {
+    if (request_timeout_ms <= 0) {
+        return kDecodeChannelReadyTimeoutCap;
+    }
+    const int64_t elapsed_ms   = (currentTimeUs() - request_begin_time_us) / 1000;
+    const int64_t remaining_ms = request_timeout_ms - elapsed_ms;
+    if (remaining_ms <= kDecodeChannelReadyTimeoutMin.count()) {
+        return kDecodeChannelReadyTimeoutMin;
+    }
+    return std::chrono::milliseconds(std::min<int64_t>(remaining_ms, kDecodeChannelReadyTimeoutCap.count()));
+}
+
 bool envValueIsTrue(const char* value) {
     return value != nullptr
            && (strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0 || strcasecmp(value, "on") == 0
@@ -256,12 +274,15 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
         logPrefillFailureTrace("get_rpc_connection_no_decode_host", prefill_context);
         return;
     }
-    auto decode_addr    = host->ip + ":" + std::to_string(host->rpc_port);
-    auto connect_status = resource_.rpc_pool.getConnection(decode_addr);
+    auto decode_addr          = host->ip + ":" + std::to_string(host->rpc_port);
+    auto ready_timeout        = resolveDecodeChannelReadyTimeout(prefill_context.request_timeout_ms,
+                                                          prefill_context.request_begin_time_us);
+    auto connect_status       = resource_.rpc_pool.getReadyConnection(decode_addr, ready_timeout);
     if (!connect_status.ok()) {
         setContextError(prefill_context,
                         ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
-                                  "get grpc connection for decode addr " + decode_addr + " failed"));
+                                  "get ready grpc connection for decode addr " + decode_addr
+                                      + " failed: " + connect_status.status().ToString()));
         prefill_context.decode_addr = decode_addr;
         logPrefillFailureTrace("get_rpc_connection_failed", prefill_context);
         return;
@@ -742,8 +763,8 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
                                                   metrics_reporter_,
                                                   meta_,
                                                   maga_init_params_.pd_sep_config.prefill_stop_stream_wait_timeout_ms);
-    prefill_context.onflight_requests      = onflight_requests_;
-    prefill_context.loading_cache_requests = loading_cache_requests_;
+    prefill_context.onflight_requests      = &onflight_requests_;
+    prefill_context.loading_cache_requests = &loading_cache_requests_;
 
     // Prefill SERVER span is created only on the PD path, AFTER the fallback
     // check above, so Local/Prefill each own exactly one SERVER span. RAII

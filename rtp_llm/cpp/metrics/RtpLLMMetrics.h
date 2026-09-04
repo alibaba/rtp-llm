@@ -354,6 +354,42 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class RtpLLMGrammarMetricsCollector final {
+public:
+    bool compile_qps         = false;
+    bool compile_invalid_qps = false;
+    bool cache_hit_qps       = false;
+    bool overload_qps        = false;
+
+    int64_t compile_latency_us          = 0;
+    int64_t compile_inflight            = 0;
+    int64_t verdict_cache_bytes         = 0;
+    int64_t total_cache_budget_bytes    = 0;
+    int64_t compiler_cache_budget_bytes = 0;
+    int64_t verdict_cache_budget_bytes  = 0;
+};
+
+class RtpLLMGrammarMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags, RtpLLMGrammarMetricsCollector* collector);
+
+public:
+    kmonitor::MutableMetric* compile_qps_metric                  = nullptr;
+    kmonitor::MutableMetric* compile_invalid_qps_metric          = nullptr;
+    kmonitor::MutableMetric* cache_hit_qps_metric                = nullptr;
+    kmonitor::MutableMetric* overload_qps_metric                 = nullptr;
+    kmonitor::MutableMetric* compile_latency_us_metric           = nullptr;
+    kmonitor::MutableMetric* compile_inflight_metric             = nullptr;
+    kmonitor::MutableMetric* verdict_cache_bytes_metric          = nullptr;
+    kmonitor::MutableMetric* total_cache_budget_bytes_metric     = nullptr;
+    kmonitor::MutableMetric* compiler_cache_budget_bytes_metric  = nullptr;
+    kmonitor::MutableMetric* verdict_cache_budget_bytes_metric   = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMTokenPSMetricsCollector final {
 public:
     void addTokenSize(int64_t context_token_num,
