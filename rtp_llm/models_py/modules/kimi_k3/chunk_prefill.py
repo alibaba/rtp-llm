@@ -43,6 +43,36 @@ class KimiK3ChunkRound:
         return sum(item.new_length for item in self.slices)
 
 
+def logical_chunk_round(
+    round_plan: KimiK3ChunkRound,
+    logical_request_count: int,
+) -> KimiK3ChunkRound:
+    """Return the real-request prefix of a physically padded Prefill round."""
+
+    if logical_request_count <= 0:
+        raise ValueError(
+            "K3 chunk Prefill requires a positive logical request count, "
+            f"got {logical_request_count}"
+        )
+    logical_slices = tuple(
+        item
+        for item in round_plan.slices
+        if int(item.original_batch_idx) < logical_request_count
+    )
+    padding_slices = tuple(
+        item
+        for item in round_plan.slices
+        if int(item.original_batch_idx) >= logical_request_count
+    )
+    if round_plan.slices != logical_slices + padding_slices:
+        raise RuntimeError(
+            "K3 chunk Prefill padding requests must form a packed suffix"
+        )
+    if not logical_slices:
+        raise RuntimeError("K3 chunk Prefill produced a padding-only internal round")
+    return KimiK3ChunkRound(logical_slices)
+
+
 @dataclass(frozen=True)
 class KimiK3ChunkRdmaPublishStep:
     """One original-batch publication frontier update."""
@@ -59,9 +89,7 @@ class KimiK3ChunkRdmaPublishStep:
 
     @property
     def terminal_indices(self) -> tuple[int, ...]:
-        return tuple(
-            index for index, terminal in enumerate(self.terminal) if terminal
-        )
+        return tuple(index for index, terminal in enumerate(self.terminal) if terminal)
 
     def to_op_plan(self) -> PyCacheStorePublishPlan:
         from rtp_llm.ops.compute_ops import PyCacheStorePublishPlan
@@ -98,9 +126,7 @@ class KimiK3ChunkRdmaPublisher:
                 f"K3 chunk RDMA page size must be positive, got {page_size}"
             )
         self.page_size = int(page_size)
-        self.kda_layer_indices = frozenset(
-            int(value) for value in kda_layer_indices
-        )
+        self.kda_layer_indices = frozenset(int(value) for value in kda_layer_indices)
         self._frontier = [0] * len(self.input_lengths)
         self._terminal = [False] * len(self.input_lengths)
         self._published_kda: set[tuple[int, int]] = set()
@@ -143,9 +169,7 @@ class KimiK3ChunkRdmaPublisher:
             [False] * len(self.input_lengths),
         )
 
-    def round_step(
-        self, round_plan: KimiK3ChunkRound
-    ) -> KimiK3ChunkRdmaPublishStep:
+    def round_step(self, round_plan: KimiK3ChunkRound) -> KimiK3ChunkRdmaPublishStep:
         ends = list(self._frontier)
         terminals = [False] * len(self.input_lengths)
         for item in round_plan.slices:
@@ -203,9 +227,7 @@ class KimiK3ChunkRdmaPublisher:
 
     def validate_complete(self) -> None:
         if not all(self._terminal):
-            missing = [
-                index for index, value in enumerate(self._terminal) if not value
-            ]
+            missing = [index for index, value in enumerate(self._terminal) if not value]
             raise RuntimeError(
                 f"K3 chunk RDMA requests did not reach terminal publication: {missing}"
             )
@@ -296,9 +318,7 @@ class KimiK3ChunkCachePublisher:
                 prefix_lengths,
                 page_size=page_size,
                 kda_layer_indices=(
-                    layer_idx
-                    for layer_idx, layer in enumerate(layers)
-                    if layer.is_kda
+                    layer_idx for layer_idx, layer in enumerate(layers) if layer.is_kda
                 ),
             ),
             layers=layers,
@@ -309,9 +329,7 @@ class KimiK3ChunkCachePublisher:
     def enabled(self) -> bool:
         return self._publisher is not None
 
-    def _context(
-        self, step: KimiK3ChunkRdmaPublishStep
-    ) -> KimiK3ChunkPublishContext:
+    def _context(self, step: KimiK3ChunkRdmaPublishStep) -> KimiK3ChunkPublishContext:
         return KimiK3ChunkPublishContext(
             writer=self._writer,
             publisher=self._publisher,
@@ -340,9 +358,7 @@ class KimiK3ChunkCachePublisher:
             return None
         return self._context(self._publisher.round_step(round_plan))
 
-    def commit_round(
-        self, context: Optional[KimiK3ChunkPublishContext]
-    ) -> None:
+    def commit_round(self, context: Optional[KimiK3ChunkPublishContext]) -> None:
         if context is not None:
             context.publisher.commit(context.step)
 
@@ -560,6 +576,17 @@ def build_chunk_attention_inputs(
     sequence_lengths = [item.absolute_end for item in round_plan.slices]
     batch_indices = [item.original_batch_idx for item in round_plan.slices]
     total_tokens = sum(lengths)
+    outer_physical_requests = int(attention_inputs.input_lengths_host.numel())
+    logical_request_count = int(
+        getattr(attention_inputs, "logical_request_count", 0) or outer_physical_requests
+    )
+    if logical_request_count <= 0 or logical_request_count > outer_physical_requests:
+        raise RuntimeError(
+            "whole-model K3 Prefill has an invalid logical request count: "
+            f"logical={logical_request_count} physical={outer_physical_requests}"
+        )
+    logical_round = logical_chunk_round(round_plan, logical_request_count)
+    logical_tokens = logical_round.token_count
     chunk = copy.copy(attention_inputs)
     cu_seqlens = [0]
     cu_kv_seqlens = [0]
@@ -567,9 +594,7 @@ def build_chunk_attention_inputs(
         cu_seqlens.append(cu_seqlens[-1] + length)
         cu_kv_seqlens.append(cu_kv_seqlens[-1] + sequence_length)
     chunk.cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
-    chunk.cu_kv_seqlens = torch.tensor(
-        cu_kv_seqlens, dtype=torch.int32, device=device
-    )
+    chunk.cu_kv_seqlens = torch.tensor(cu_kv_seqlens, dtype=torch.int32, device=device)
     chunk.input_lengths = torch.tensor(lengths, dtype=torch.int32, device=device)
     chunk.prefix_lengths = torch.tensor(prefixes, dtype=torch.int32, device=device)
     chunk.sequence_lengths = torch.tensor(
@@ -591,6 +616,18 @@ def build_chunk_attention_inputs(
     chunk.sequence_lengths_host = torch.tensor(sequence_lengths, dtype=torch.int32)
     chunk.total_tokens = int(total_tokens)
     chunk.context_total_kv_length = int(sum(sequence_lengths))
+    # Whole-chunk execution rebuilds attention metadata one internal round at
+    # a time.  Never inherit the outer forward's token counts: the final round
+    # can contain a real-request prefix followed by the model-boundary dummy
+    # request that makes the physical token count TP divisible.
+    chunk.logical_request_count = len(logical_round.slices)
+    chunk.physical_request_count = len(round_plan.slices)
+    chunk.logical_token_count = int(logical_tokens)
+    chunk.physical_token_count = int(total_tokens)
+    chunk.is_s_padded = (
+        chunk.logical_request_count != chunk.physical_request_count
+        or chunk.logical_token_count != chunk.physical_token_count
+    )
     chunk.is_prefill = True
     chunk.is_cuda_graph = False
     chunk.cache_store_inputs = None
@@ -671,7 +708,9 @@ def kda_materialized_block_maps(
     try:
         group_ids = sorted({int(layer_group_ids[index]) for index in kda_layer_indices})
     except IndexError as error:
-        raise RuntimeError("KDA layer/group map does not cover every KDA layer") from error
+        raise RuntimeError(
+            "KDA layer/group map does not cover every KDA layer"
+        ) from error
     if any(group_id < 0 or group_id >= len(maps_by_group) for group_id in group_ids):
         raise RuntimeError("KDA cache group is outside host kernel block maps")
     return tuple(maps_by_group[group_id] for group_id in group_ids)
@@ -700,6 +739,7 @@ __all__ = [
     "host_lengths",
     "kda_materialized_block_maps",
     "kda_round_state_mapping",
+    "logical_chunk_round",
     "plan_kimi_k3_chunk_rounds",
     "prepare_round_fmha",
     "validate_whole_chunk_prefill",

@@ -51,9 +51,7 @@ from rtp_llm.models_py.modules.hybrid.dense_mlp import (
     DenseMLP,
     DenseMLPParallelExecutor,
 )
-from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import (
-    configure_all_gather_gemm,
-)
+from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import configure_all_gather_gemm
 from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import (
     KimiK3ChunkCachePublisher,
     KimiK3ChunkPublishContext,
@@ -62,6 +60,7 @@ from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import (
     host_lengths,
     kda_materialized_block_maps,
     kda_round_state_mapping,
+    logical_chunk_round,
     plan_kimi_k3_chunk_rounds,
     prepare_round_fmha,
     validate_whole_chunk_prefill,
@@ -124,9 +123,7 @@ def _sequence_parallel_layout(
 ) -> SequenceParallelLayout:
     """Resolve the generic model-boundary layout published by PyWrappedModel."""
 
-    is_target_verify = bool(
-        getattr(attention_inputs, "is_target_verify", False)
-    )
+    is_target_verify = bool(getattr(attention_inputs, "is_target_verify", False))
     if is_target_verify:
         mode = "target_verify"
     elif attention_inputs.is_prefill:
@@ -140,8 +137,7 @@ def _sequence_parallel_layout(
         getattr(attention_inputs, "logical_token_count", 0) or physical_tokens
     )
     logical_requests = int(
-        getattr(attention_inputs, "logical_request_count", 0)
-        or physical_requests
+        getattr(attention_inputs, "logical_request_count", 0) or physical_requests
     )
     tokens_per_request = 0
     if mode != "prefill":
@@ -486,10 +482,13 @@ class KimiK3Model(GptModelBase):
         tp_size = int(self.parallelism_config.get_attn_tp_size())
         if init_resource.is_decode_role:
             tokens_per_batch = max(int(self.config.gen_num_per_cycle) + 1, 1)
-            max_global_tokens = max(
-                self._max_generate_batch_size,
-                int(getattr(init_resource, "max_decode_graph_batch_size", 1)),
-            ) * tokens_per_batch
+            max_global_tokens = (
+                max(
+                    self._max_generate_batch_size,
+                    int(getattr(init_resource, "max_decode_graph_batch_size", 1)),
+                )
+                * tokens_per_batch
+            )
         else:
             max_global_tokens = collective_gemm_workspace_global_tokens(
                 int(self.config.max_seq_len),
@@ -865,6 +864,16 @@ class KimiK3Model(GptModelBase):
         prefix_lengths = host_lengths(
             attention_inputs.prefix_lengths_host, "prefix_lengths_host"
         )
+        logical_request_count = int(
+            getattr(attention_inputs, "logical_request_count", 0) or len(input_lengths)
+        )
+        if logical_request_count <= 0 or logical_request_count > len(input_lengths):
+            raise RuntimeError(
+                "whole-model K3 Prefill has an invalid logical request count: "
+                f"logical={logical_request_count} physical={len(input_lengths)}"
+            )
+        logical_input_lengths = input_lengths[:logical_request_count]
+        logical_prefix_lengths = prefix_lengths[:logical_request_count]
         if sum(input_lengths) != total_tokens:
             raise RuntimeError(
                 "whole-model K3 packed lengths do not cover input tokens: "
@@ -892,8 +901,8 @@ class KimiK3Model(GptModelBase):
             attention_inputs,
             self.kv_cache,
             self.layers,
-            input_lengths=input_lengths,
-            prefix_lengths=prefix_lengths,
+            input_lengths=logical_input_lengths,
+            prefix_lengths=logical_prefix_lengths,
             page_size=page_size,
         )
         barrier(Group.TP)
@@ -912,7 +921,7 @@ class KimiK3Model(GptModelBase):
         )
         terminal_hidden: Optional[torch.Tensor] = None
         terminal_mtp_hidden: Optional[torch.Tensor] = None
-        terminal_written = [False] * len(input_lengths)
+        terminal_written = [False] * logical_request_count
         final_params: Any = None
         current_state_registry = KimiKDACurrentStateRegistry(len(input_lengths))
         for layer_idx, layer in enumerate(self.layers):
@@ -927,10 +936,14 @@ class KimiK3Model(GptModelBase):
                     )
         chunk_cache_publisher.publish_prefix()
         for round_idx, round_plan in enumerate(rounds):
+            logical_round_plan = logical_chunk_round(round_plan, logical_request_count)
             terminal_count = sum(int(item.terminal) for item in round_plan.slices)
             round_label = (
                 f"round={round_idx},tokens={round_plan.token_count},"
-                f"requests={len(round_plan.slices)},terminal={terminal_count}"
+                f"logical_tokens={logical_round_plan.token_count},"
+                f"requests={len(round_plan.slices)},"
+                f"logical_requests={len(logical_round_plan.slices)},"
+                f"terminal={terminal_count}"
             )
             chunk_inputs = build_chunk_model_inputs(
                 input_ids,
@@ -943,7 +956,9 @@ class KimiK3Model(GptModelBase):
             # target round. Drop that owner before this target forward builds
             # and all-gathers the next 3-layer Eagle hidden tensor.
             self._release_prefill_mtp_hidden_buffer()
-            chunk_publish_context = chunk_cache_publisher.begin_round(round_plan)
+            chunk_publish_context = chunk_cache_publisher.begin_round(
+                logical_round_plan
+            )
             with torch.profiler.record_function(
                 f"RTP::kimi_k3.chunk_prefill.target_forward({round_label})"
             ):
@@ -963,13 +978,13 @@ class KimiK3Model(GptModelBase):
                     )
                 if terminal_mtp_hidden is None:
                     terminal_mtp_hidden = torch.empty(
-                        (len(input_lengths), *round_mtp_hidden.shape[1:]),
+                        (logical_request_count, *round_mtp_hidden.shape[1:]),
                         dtype=round_mtp_hidden.dtype,
                         device=round_mtp_hidden.device,
                     )
                 draft_row_indices: list[int] = []
                 packed_start = 0
-                for item in round_plan.slices:
+                for item in logical_round_plan.slices:
                     packed_end = packed_start + item.new_length
                     draft_end = packed_end - (1 if item.terminal else 0)
                     draft_row_indices.extend(range(packed_start, draft_end))
@@ -983,16 +998,16 @@ class KimiK3Model(GptModelBase):
                     draft_row_indices,
                 )
                 self._mtp_hidden_valid_tokens = len(draft_row_indices)
-                chunk_prefill_round_hook(round_plan, round_plan is rounds[-1])
+                chunk_prefill_round_hook(logical_round_plan, round_plan is rounds[-1])
             if terminal_hidden is None:
                 terminal_hidden = torch.empty(
-                    (len(input_lengths), round_output.hidden_states.shape[-1]),
+                    (logical_request_count, round_output.hidden_states.shape[-1]),
                     dtype=round_output.hidden_states.dtype,
                     device=round_output.hidden_states.device,
                 )
             final_params = getattr(round_output, "params_ptr", None)
             packed_end = 0
-            for item in round_plan.slices:
+            for item in logical_round_plan.slices:
                 packed_end += item.new_length
                 if item.terminal:
                     terminal_hidden[item.original_batch_idx].copy_(
@@ -1014,7 +1029,7 @@ class KimiK3Model(GptModelBase):
             if terminal_mtp_hidden is None:
                 raise RuntimeError("whole-model K3 missing terminal MTP hidden rows")
             self._mtp_hidden_buffer = terminal_mtp_hidden
-            self._mtp_hidden_valid_tokens = len(input_lengths)
+            self._mtp_hidden_valid_tokens = logical_request_count
         hidden = terminal_hidden
         result = (
             PyModelOutputs(hidden, final_params)

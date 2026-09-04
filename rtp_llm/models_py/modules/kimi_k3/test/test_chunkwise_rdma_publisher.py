@@ -1,11 +1,12 @@
 import importlib.util
 import os
-from pathlib import Path
 import sys
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
+import torch
 
 compute_ops = types.ModuleType("rtp_llm.ops.compute_ops")
 compute_ops.PyAttentionInputs = type("PyAttentionInputs", (), {})
@@ -21,7 +22,9 @@ sys.modules.setdefault("rtp_llm.ops", ops_package)
 sys.modules.setdefault("rtp_llm.ops.compute_ops", compute_ops)
 
 module_path = Path(__file__).resolve().parents[1] / "chunk_prefill.py"
-spec = importlib.util.spec_from_file_location("kimi_k3_chunk_prefill_tested", module_path)
+spec = importlib.util.spec_from_file_location(
+    "kimi_k3_chunk_prefill_tested", module_path
+)
 assert spec is not None and spec.loader is not None
 chunk_prefill = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = chunk_prefill
@@ -30,6 +33,8 @@ spec.loader.exec_module(chunk_prefill)
 KimiK3ChunkRdmaPublisher = chunk_prefill.KimiK3ChunkRdmaPublisher
 KimiK3ChunkCachePublisher = chunk_prefill.KimiK3ChunkCachePublisher
 chunkwise_rdma_enabled = chunk_prefill.chunkwise_rdma_enabled
+build_chunk_attention_inputs = chunk_prefill.build_chunk_attention_inputs
+logical_chunk_round = chunk_prefill.logical_chunk_round
 plan_kimi_k3_chunk_rounds = chunk_prefill.plan_kimi_k3_chunk_rounds
 
 
@@ -72,6 +77,55 @@ def _publish_all(
 
 
 class KimiK3ChunkRdmaPublisherTest(unittest.TestCase):
+    def test_padded_prefill_round_rebuilds_logical_layout(self) -> None:
+        rounds = plan_kimi_k3_chunk_rounds(
+            [4991, 1], [0, 0], chunk_budget=4096, page_size=4096
+        )
+        self.assertEqual([round_plan.token_count for round_plan in rounds], [4096, 896])
+
+        attention_inputs = types.SimpleNamespace(
+            input_lengths_host=torch.tensor([4991, 1], dtype=torch.int32),
+            logical_request_count=1,
+            kv_cache_block_id_host=None,
+            kv_cache_kernel_block_id_host=None,
+            kv_cache_kernel_block_id_device=None,
+            kv_cache_block_id_host_by_group=[],
+            kv_cache_kernel_block_id_host_by_group=[],
+            kv_cache_kernel_block_id_device_by_group=[],
+        )
+        first = build_chunk_attention_inputs(
+            attention_inputs, round_plan=rounds[0], device=torch.device("cpu")
+        )
+        self.assertEqual(first.logical_request_count, 1)
+        self.assertEqual(first.physical_request_count, 1)
+        self.assertEqual(first.logical_token_count, 4096)
+        self.assertEqual(first.physical_token_count, 4096)
+        self.assertFalse(first.is_s_padded)
+
+        final = build_chunk_attention_inputs(
+            attention_inputs, round_plan=rounds[1], device=torch.device("cpu")
+        )
+        self.assertEqual(final.logical_request_count, 1)
+        self.assertEqual(final.physical_request_count, 2)
+        self.assertEqual(final.logical_token_count, 895)
+        self.assertEqual(final.physical_token_count, 896)
+        self.assertTrue(final.is_s_padded)
+        logical_final = logical_chunk_round(rounds[1], 1)
+        self.assertEqual(logical_final.token_count, 895)
+        self.assertEqual(
+            [item.original_batch_idx for item in logical_final.slices], [0]
+        )
+
+        publisher = KimiK3ChunkRdmaPublisher(
+            [4991], [0], page_size=4096, kda_layer_indices=[]
+        )
+        publisher.commit(publisher.prefix_step())
+        for round_plan in rounds:
+            step = publisher.round_step(logical_chunk_round(round_plan, 1))
+            publisher.commit(step)
+        publisher.validate_complete()
+        self.assertEqual(publisher.frontier, (2,))
+
     def test_cache_publisher_owns_prefix_round_and_layer_publication(self) -> None:
         class FakeLayer:
             def __init__(self, is_kda: bool) -> None:
@@ -135,9 +189,7 @@ class KimiK3ChunkRdmaPublisherTest(unittest.TestCase):
         for begins, ends in ranges:
             for request_idx, (begin, end) in enumerate(zip(begins, ends)):
                 covered[request_idx].extend(range(begin, end))
-        self.assertEqual(
-            covered, [list(range(3)), list(range(3)), list(range(4))]
-        )
+        self.assertEqual(covered, [list(range(3)), list(range(3)), list(range(4))])
 
     def test_prefix_hit_and_inactive_rows_keep_monotonic_frontiers(self) -> None:
         publisher, ranges = _publish_all(
@@ -152,9 +204,7 @@ class KimiK3ChunkRdmaPublisherTest(unittest.TestCase):
         self.assertTrue(any(begin[1] == end[1] for begin, end in ranges[1:]))
 
     def test_terminal_tail_is_not_exposed_by_nonterminal_step(self) -> None:
-        rounds = plan_kimi_k3_chunk_rounds(
-            [700], [0], chunk_budget=512, page_size=512
-        )
+        rounds = plan_kimi_k3_chunk_rounds([700], [0], chunk_budget=512, page_size=512)
         publisher = KimiK3ChunkRdmaPublisher(
             [700], [0], page_size=512, kda_layer_indices=[1]
         )
@@ -172,9 +222,7 @@ class KimiK3ChunkRdmaPublisherTest(unittest.TestCase):
         self.assertEqual(tail.terminal, (True,))
 
     def test_stale_commit_and_duplicate_kda_are_rejected(self) -> None:
-        rounds = plan_kimi_k3_chunk_rounds(
-            [700], [0], chunk_budget=512, page_size=512
-        )
+        rounds = plan_kimi_k3_chunk_rounds([700], [0], chunk_budget=512, page_size=512)
         publisher = KimiK3ChunkRdmaPublisher(
             [700], [0], page_size=512, kda_layer_indices=[1]
         )
