@@ -166,11 +166,13 @@ cc_library(
         "batch_copy.cu",
         "copy_utils.cu",
         "cuda_graph_copy_kernel.cu",
+        "input_embedding_overlay_kernel.cu",
     ],
     hdrs = [
         "batch_copy.h",
         "copy_utils.h",
         "cuda_graph_copy_kernel.h",
+        "input_embedding_overlay_kernel.h",
     ],
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",

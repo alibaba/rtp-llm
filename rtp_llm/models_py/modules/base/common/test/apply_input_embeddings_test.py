@@ -17,6 +17,15 @@ class _OverlayModel(GptModelBase):
         )
         return self.apply_input_embeddings(inputs_embeds.clone(), inputs)
 
+    def apply_graph(self, inputs_embeds, overrides, metadata):
+        inputs = types.SimpleNamespace(
+            input_embeddings=None,
+            input_embeddings_locs=None,
+            input_embedding_overrides=overrides,
+            input_embedding_metadata=metadata,
+        )
+        return self.apply_input_embeddings(inputs_embeds.clone(), inputs)
+
 
 class ApplyInputEmbeddingsTest(TestCase):
     def test_multiple_embeddings_scatter_and_preserve_gaps(self):
@@ -63,6 +72,34 @@ class ApplyInputEmbeddingsTest(TestCase):
 
         self.assertEqual(result.dtype, torch.float32)
         self.assertTrue(torch.equal(result[1:2], emb.to(torch.float32)))
+
+    def test_graph_staging_metadata_selects_dense_overrides_and_is_consumed(self):
+        model = _OverlayModel()
+        inputs_embeds = torch.arange(20, dtype=torch.float32).reshape(5, 4)
+        overrides = torch.full_like(inputs_embeds, 99.0)
+        metadata = torch.tensor([0, 1, 1, 0, 1], dtype=torch.int32)
+        active_rows = metadata != 0
+
+        result = model.apply_graph(inputs_embeds, overrides, metadata)
+
+        expected = inputs_embeds.clone()
+        expected[active_rows] = overrides[active_rows]
+        self.assertTrue(torch.equal(result, expected))
+        self.assertEqual(metadata.count_nonzero().item(), 0)
+
+    def test_graph_staging_requires_matching_shape_and_int32_metadata(self):
+        model = _OverlayModel()
+        inputs_embeds = torch.zeros(3, 4)
+        with self.assertRaisesRegex(ValueError, "overrides shape"):
+            model.apply_graph(
+                inputs_embeds, torch.zeros(2, 4), torch.zeros(3, dtype=torch.int32)
+            )
+        with self.assertRaisesRegex(ValueError, "must be an int32 tensor"):
+            model.apply_graph(
+                inputs_embeds,
+                torch.zeros_like(inputs_embeds),
+                torch.zeros(3, dtype=torch.bool),
+            )
 
 
 class ApplyInputEmbeddingsCudaTest(TestCase):

@@ -391,6 +391,22 @@ class PyModelInputs:
 
     @input_embeddings_locs.setter
     def input_embeddings_locs(self, arg0: torch.Tensor) -> None: ...
+    @property
+    def input_embedding_overrides(self) -> torch.Tensor:
+        """
+        Graph-stable dense input embedding overrides
+        """
+
+    @input_embedding_overrides.setter
+    def input_embedding_overrides(self, arg0: torch.Tensor) -> None: ...
+    @property
+    def input_embedding_metadata(self) -> torch.Tensor:
+        """
+        Graph-stable per-token input embedding metadata
+        """
+
+    @input_embedding_metadata.setter
+    def input_embedding_metadata(self, arg0: torch.Tensor) -> None: ...
 
 class PyModelOutputs:
     @typing.overload

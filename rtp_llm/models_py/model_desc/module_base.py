@@ -126,6 +126,66 @@ class GptModelBase(nn.Module):
     def apply_input_embeddings(
         self, inputs_embeds: Tensor, inputs: PyModelInputs
     ) -> Tensor:
+        graph_overrides = getattr(inputs, "input_embedding_overrides", None)
+        graph_metadata = getattr(inputs, "input_embedding_metadata", None)
+        if graph_overrides is not None or graph_metadata is not None:
+            if graph_overrides is None or graph_metadata is None:
+                raise ValueError(
+                    "input_embedding_overrides and input_embedding_metadata "
+                    "must be set together"
+                )
+            if inputs_embeds.dim() != 2:
+                raise ValueError(
+                    "inputs_embeds must be a 2D tensor of shape [tokens, hidden_size]"
+                )
+            if graph_overrides.shape != inputs_embeds.shape:
+                raise ValueError(
+                    "input_embedding_overrides shape "
+                    f"{tuple(graph_overrides.shape)} != inputs_embeds shape "
+                    f"{tuple(inputs_embeds.shape)}"
+                )
+            if graph_overrides.device != inputs_embeds.device:
+                raise ValueError(
+                    "input_embedding_overrides and inputs_embeds must be on the same device"
+                )
+            if graph_overrides.dtype != inputs_embeds.dtype:
+                raise ValueError(
+                    "input_embedding_overrides and inputs_embeds must have the same dtype"
+                )
+            if graph_metadata.dim() != 1 or graph_metadata.size(
+                0
+            ) != inputs_embeds.size(0):
+                raise ValueError("input_embedding_metadata must have shape [tokens]")
+            if (
+                graph_metadata.dtype != torch.int32
+                or graph_metadata.device != inputs_embeds.device
+            ):
+                raise ValueError(
+                    "input_embedding_metadata must be an int32 tensor on the "
+                    "embedding device"
+                )
+            # All three tensors have fixed shapes and addresses for the lifetime
+            # of a captured bucket. The graph-safe kernel only copies marked
+            # rows and clears their metadata after consuming them. In particular,
+            # a request without input embeddings no longer needs an external
+            # metadata clear or a dense torch.where over [tokens, hidden_size].
+            if inputs_embeds.is_cuda:
+                from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+                rtp_llm_ops.input_embedding_overlay(
+                    inputs_embeds, graph_overrides, graph_metadata
+                )
+                return inputs_embeds
+
+            # CPU support is only used by lightweight semantic unit tests; real
+            # prefill graph staging is always device-resident.
+            active_rows = graph_metadata != 0
+            result = torch.where(
+                active_rows.unsqueeze(1), graph_overrides, inputs_embeds
+            )
+            graph_metadata.zero_()
+            return result
+
         if inputs.input_embeddings is not None and len(inputs.input_embeddings) > 0:
             locs = inputs.input_embeddings_locs
             if locs is None:

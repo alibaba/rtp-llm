@@ -266,7 +266,13 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite(
             "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")
         .def_readwrite("input_embeddings", &PyModelInputs::input_embeddings, "Input embeddings tensors")
-        .def_readwrite("input_embeddings_locs", &PyModelInputs::input_embeddings_locs, "Input embeddings locations");
+        .def_readwrite("input_embeddings_locs", &PyModelInputs::input_embeddings_locs, "Input embeddings locations")
+        .def_readwrite("input_embedding_overrides",
+                       &PyModelInputs::input_embedding_overrides,
+                       "Graph-stable dense input embedding overrides")
+        .def_readwrite("input_embedding_metadata",
+                       &PyModelInputs::input_embedding_metadata,
+                       "Graph-stable per-token input embedding metadata");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")

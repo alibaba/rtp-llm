@@ -108,6 +108,13 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
                   py::arg("hidden_size"),
                   py::arg("cu_seq_len"));
 
+    rtp_ops_m.def("input_embedding_overlay",
+                  &torch_ext::input_embedding_overlay,
+                  "Apply graph-staged input embedding rows and consume their metadata",
+                  py::arg("inputs_embeds"),
+                  py::arg("input_embedding_overrides"),
+                  py::arg("input_embedding_metadata"));
+
     rtp_ops_m.def("is_hipgraph_capture_enabled",
                   &rtp_llm::rocm::isHipGraphCaptureEnabled,
                   "Return whether HIP graph capture mode is currently enabled");

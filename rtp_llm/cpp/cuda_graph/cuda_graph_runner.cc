@@ -136,6 +136,45 @@ int inferTotalTokensNoSync(const PyModelInputs& inputs) {
     return inputs.attention_inputs.total_tokens > 0 ? inputs.attention_inputs.total_tokens : 0;
 }
 
+bool validateGraphInputEmbeddings(const PyModelInputs& inputs, int token_count, int hidden_size) {
+    const bool has_embeddings = inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty();
+    const bool has_locations  = inputs.input_embeddings_locs.defined() && inputs.input_embeddings_locs.numel() > 0;
+    if (!has_embeddings) {
+        return !has_locations;
+    }
+    if (!has_locations || inputs.input_embeddings_locs.is_cuda() || !inputs.input_embeddings_locs.is_contiguous()
+        || inputs.input_embeddings_locs.dim() != 1
+        || (inputs.input_embeddings_locs.scalar_type() != torch::kInt32
+            && inputs.input_embeddings_locs.scalar_type() != torch::kInt64)
+        || inputs.input_embeddings_locs.numel() != static_cast<int64_t>(inputs.input_embeddings->size())) {
+        return false;
+    }
+
+    const auto location_at = [&](size_t index) -> int64_t {
+        if (inputs.input_embeddings_locs.scalar_type() == torch::kInt32) {
+            return inputs.input_embeddings_locs.data_ptr<int32_t>()[index];
+        }
+        return inputs.input_embeddings_locs.data_ptr<int64_t>()[index];
+    };
+    int64_t previous_end = 0;
+    for (size_t index = 0; index < inputs.input_embeddings->size(); ++index) {
+        const auto& embedding = inputs.input_embeddings->at(index);
+        if (!embedding.defined() || !embedding.is_cuda() || !embedding.is_floating_point()
+            || (embedding.dim() != 1 && embedding.dim() != 2)) {
+            return false;
+        }
+        const int64_t rows = embedding.dim() == 1 ? 1 : embedding.size(0);
+        const int64_t cols = embedding.dim() == 1 ? embedding.size(0) : embedding.size(1);
+        const int64_t loc  = location_at(index);
+        if (rows <= 0 || cols != hidden_size || loc < previous_end || loc < 0 || rows > token_count
+            || loc > token_count - rows) {
+            return false;
+        }
+        previous_end = loc + rows;
+    }
+    return true;
+}
+
 }  // namespace
 
 py::object CudaGraphRunner::prepareFmhaImpl(const PyModelInputs& inputs, bool is_cuda_graph) {
@@ -267,6 +306,52 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
     }
 }
 
+void CudaGraphRunner::prepareInputEmbeddings(const PyModelInputs& inputs, PyModelInputs& captured_inputs) {
+    if (!isGenerativePrefillCudaGraph()) {
+        return;
+    }
+    auto& overrides = captured_inputs.input_embedding_overrides;
+    auto& metadata  = captured_inputs.input_embedding_metadata;
+    RTP_LLM_CHECK_WITH_INFO(overrides.defined() && overrides.is_cuda() && overrides.dim() == 2
+                                && overrides.size(1) == hidden_size_,
+                            "prefill CUDA graph input embedding override buffer is invalid");
+    RTP_LLM_CHECK_WITH_INFO(metadata.defined() && metadata.is_cuda() && metadata.scalar_type() == torch::kInt32
+                                && metadata.dim() == 1 && metadata.size(0) == overrides.size(0),
+                            "prefill CUDA graph input embedding metadata buffer is invalid");
+
+    // A normal replay consumes and clears its own metadata inside the captured
+    // overlay kernel. Only an abandoned/failed prepared request can leave
+    // entries behind; clean the full shared buffer on that exceptional path so
+    // switching to a smaller bucket cannot hide stale entries in its tail.
+    if (input_embedding_metadata_dirty_.load(std::memory_order_acquire)) {
+        capture_mem_hold_.py_model_inputs_.input_embedding_metadata.zero_();
+        input_embedding_metadata_dirty_.store(false, std::memory_order_release);
+    }
+    if (!inputs.input_embeddings.has_value() || inputs.input_embeddings->empty()) {
+        return;
+    }
+
+    input_embedding_metadata_dirty_.store(true, std::memory_order_release);
+
+    const auto location_at = [&](size_t index) -> int64_t {
+        if (inputs.input_embeddings_locs.scalar_type() == torch::kInt32) {
+            return inputs.input_embeddings_locs.data_ptr<int32_t>()[index];
+        }
+        return inputs.input_embeddings_locs.data_ptr<int64_t>()[index];
+    };
+    for (size_t index = 0; index < inputs.input_embeddings->size(); ++index) {
+        auto          embedding = inputs.input_embeddings->at(index);
+        const int64_t loc       = location_at(index);
+        if (embedding.dim() == 1) {
+            embedding = embedding.unsqueeze(0);
+        }
+        const int64_t rows   = embedding.size(0);
+        auto          target = overrides.narrow(0, loc, rows);
+        target.copy_(embedding, /*non_blocking=*/true);
+        metadata.narrow(0, loc, rows).fill_(1);
+    }
+}
+
 void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs, CudaGraphState& state) {
     // Captured buffers are created under InferenceMode in initCapture(). Keep
     // preparation self-contained so callers cannot accidentally mutate an
@@ -300,6 +385,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs, CudaGr
     auto&      py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
     auto       attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
     const bool has_tagged_cache = !inputs.attention_inputs_by_tag.empty();
+
+    prepareInputEmbeddings(inputs, py_model_inputs_);
 
     // Per-launch capacity contract: see fuse_copy_util.h sizing rationale.
     // Worst case here is ~8 contiguous + (1 + group_count) strided copies,
@@ -853,6 +940,12 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
     }
     // record forward done event
     forward_event_.record(cuda_graph::graphGetCurrentStream());
+    if (isGenerativePrefillCudaGraph()) {
+        // The captured overlay kernel executes before the model body and
+        // clears every active metadata entry. The event orders the next
+        // preparation after that device-side consumption.
+        input_embedding_metadata_dirty_.store(false, std::memory_order_release);
+    }
     RTP_LLM_LOG_DEBUG("Replay End");
     return outputs;
 }
@@ -1088,6 +1181,9 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state,
         if (inferred_tokens <= 0 || length_sum != static_cast<int64_t>(inferred_tokens)) {
             return fallback("metadata_mismatch", PrefillCudaGraphStatus::INPUT_METADATA_INVALID);
         }
+        if (!validateGraphInputEmbeddings(inputs, inferred_tokens, hidden_size_)) {
+            return fallback("input_embeddings_invalid", PrefillCudaGraphStatus::INPUT_METADATA_INVALID);
+        }
         if (inputs.input_ids.defined()
             && (!inputs.input_ids.is_cuda() || inputs.input_ids.scalar_type() != torch::kInt32
                 || !inputs.input_ids.is_contiguous() || inputs.input_ids.numel() != inferred_tokens)) {
@@ -1178,7 +1274,7 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state,
         return false;
     }
 
-    if (inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
+    if (!isGenerativePrefillCudaGraph() && inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
         RTP_LLM_LOG_DEBUG("cuda graph disabled for request: input_embeddings present");
         return false;
     }
@@ -1453,7 +1549,9 @@ void CudaGraphRunner::initCapture() {
             // embeddings inside the captured model. input_hiddens is an MTP /
             // DSpARK transport buffer and can be hundreds of MiB for long
             // prompt buckets, so do not allocate it for this role.
-            inputs.input_hiddens = torch::empty({0}, options_cuda_float_);
+            inputs.input_hiddens             = torch::empty({0}, options_cuda_float_);
+            inputs.input_embedding_overrides = torch::zeros({max_num_token_, hidden_size_}, options_cuda_float_);
+            inputs.input_embedding_metadata  = torch::zeros({max_num_token_}, options_cuda_int32_);
         } else {
             RTP_LLM_CHECK_WITH_INFO(
                 input_hidden_size_ > 0, "CUDA graph input_hidden_size must be positive, got %zu", input_hidden_size_);
@@ -1652,6 +1750,10 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
         // transport-only tensor empty, matching initCapture(), instead of
         // relying on an oversized slice of an empty tensor being clamped.
         inputs.input_hiddens = capture_mem_hold_.py_model_inputs_.input_hiddens;
+        inputs.input_embedding_overrides =
+            capture_mem_hold_.py_model_inputs_.input_embedding_overrides.slice(0, 0, token_slice_len);
+        inputs.input_embedding_metadata =
+            capture_mem_hold_.py_model_inputs_.input_embedding_metadata.slice(0, 0, token_slice_len);
     } else {
         inputs.input_hiddens = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, token_slice_len);
     }

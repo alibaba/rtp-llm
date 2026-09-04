@@ -5,6 +5,7 @@ from typing import Optional
 import torch
 
 from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import CudaGraphRunner
+from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     CudaGraphSelectionMode,
 )
@@ -106,6 +107,14 @@ class BertWeightAwareModel(TextOnlyMultimodalCapableModel):
         position_bias = inputs.bert_embedding_inputs.position_encoding[0, 0]
         token_type_bias = inputs.bert_embedding_inputs.token_type_embedding[0, 0]
         return PyModelOutputs(base + position_bias + token_type_bias)
+
+
+class InputEmbeddingOverlayModel(TextOnlyMultimodalCapableModel):
+    """Exercise the production fixed-buffer input embedding overlay."""
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        base = super().forward(inputs, fmha_impl).hidden_states
+        return PyModelOutputs(GptModelBase.apply_input_embeddings(self, base, inputs))
 
 
 def _tag_attention_inputs(
@@ -570,6 +579,143 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
         ).unsqueeze(0)
         torch.testing.assert_close(output.hidden_states, expected + 8)
+
+    def test_generative_prefill_replays_dynamic_input_embeddings(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_generative_prefill(
+            InputEmbeddingOverlayModel(),
+            2,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [4, TOKENS_PER_BLOCK],
+            HIDDEN_SIZE,
+            GROUP_TAGS,
+            0,
+        )
+
+        inputs = _build_prefill_inputs(
+            GROUP_TAGS, {"full": 1, "aux": 2}, seq_len=[2, 2]
+        )
+        first_override = torch.tensor(
+            [[101.0, 102.0, 103.0, 104.0], [201.0, 202.0, 203.0, 204.0]],
+            dtype=torch.float32,
+            device="cuda",
+        )
+        inputs.input_embeddings = [first_override]
+        inputs.input_embeddings_locs = torch.tensor([1], dtype=torch.int32)
+        self.assertTrue(runner.prepare(inputs))
+        output = runner.forward(inputs)
+        torch.cuda.synchronize()
+        expected = inputs.input_ids.to(torch.bfloat16).unsqueeze(1) * 10 + torch.arange(
+            HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
+        ).unsqueeze(0)
+        expected[1:3] = first_override.to(torch.bfloat16)
+        torch.testing.assert_close(output.hidden_states, expected)
+
+        # Reuse the same four-token capture with a different interval topology,
+        # including a public-API 1-D embedding and dtype conversion.
+        changed = _build_prefill_inputs(GROUP_TAGS, {"full": 3, "aux": 4}, seq_len=3)
+        changed.input_embeddings = [
+            torch.full((HIDDEN_SIZE,), 7.0, dtype=torch.float32, device="cuda"),
+            torch.full((1, HIDDEN_SIZE), 9.0, dtype=torch.float16, device="cuda"),
+        ]
+        changed.input_embeddings_locs = torch.tensor([0, 2], dtype=torch.int64)
+        self.assertTrue(runner.canRun(changed))
+        changed_output = runner.forward(changed)
+        torch.cuda.synchronize()
+        changed_expected = changed.input_ids.to(torch.bfloat16).unsqueeze(
+            1
+        ) * 10 + torch.arange(
+            HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
+        ).unsqueeze(
+            0
+        )
+        changed_expected[0] = 7
+        changed_expected[2] = 9
+        torch.testing.assert_close(changed_output.hidden_states, changed_expected)
+
+        # The graph kernel consumes and clears metadata; stale intervals must
+        # not leak into a following request that has no input embeddings.
+        plain = _build_prefill_inputs(GROUP_TAGS, {"full": 5, "aux": 6}, seq_len=3)
+        self.assertTrue(runner.canRun(plain))
+        plain_output = runner.forward(plain)
+        torch.cuda.synchronize()
+        plain_expected = plain.input_ids.to(torch.bfloat16).unsqueeze(
+            1
+        ) * 10 + torch.arange(
+            HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
+        ).unsqueeze(
+            0
+        )
+        torch.testing.assert_close(plain_output.hidden_states, plain_expected)
+
+        # Async preparation may be abandoned before forward. Stage an override
+        # in the tail of the largest bucket, then replace it with a smaller
+        # plain request. Cleanup must cover the shared backing allocation, not
+        # only the currently selected bucket view.
+        abandoned = _build_prefill_inputs(
+            GROUP_TAGS, {"full": 7, "aux": 8}, seq_len=TOKENS_PER_BLOCK
+        )
+        abandoned.input_embeddings = [
+            torch.full((1, HIDDEN_SIZE), 77.0, dtype=torch.bfloat16, device="cuda")
+        ]
+        abandoned.input_embeddings_locs = torch.tensor(
+            [TOKENS_PER_BLOCK - 1], dtype=torch.int32
+        )
+        self.assertTrue(runner.prepare(abandoned))
+
+        smaller_plain = _build_prefill_inputs(
+            GROUP_TAGS, {"full": 9, "aux": 10}, seq_len=3
+        )
+        self.assertTrue(runner.prepare(smaller_plain))
+        smaller_output = runner.forward(smaller_plain)
+        torch.cuda.synchronize()
+        smaller_expected = smaller_plain.input_ids.to(torch.bfloat16).unsqueeze(
+            1
+        ) * 10 + torch.arange(
+            HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
+        ).unsqueeze(
+            0
+        )
+        torch.testing.assert_close(smaller_output.hidden_states, smaller_expected)
+
+        large_plain = _build_prefill_inputs(
+            GROUP_TAGS, {"full": 11, "aux": 12}, seq_len=TOKENS_PER_BLOCK
+        )
+        self.assertTrue(runner.canRun(large_plain))
+        large_output = runner.forward(large_plain)
+        torch.cuda.synchronize()
+        large_expected = large_plain.input_ids.to(torch.bfloat16).unsqueeze(
+            1
+        ) * 10 + torch.arange(
+            HIDDEN_SIZE, dtype=torch.bfloat16, device="cuda"
+        ).unsqueeze(
+            0
+        )
+        torch.testing.assert_close(large_output.hidden_states, large_expected)
+
+    def test_generative_prefill_rejects_invalid_input_embedding_metadata(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_generative_prefill(
+            InputEmbeddingOverlayModel(),
+            1,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [4],
+            HIDDEN_SIZE,
+            GROUP_TAGS,
+            0,
+        )
+
+        invalid = _build_prefill_inputs(GROUP_TAGS, {"full": 1, "aux": 2})
+        invalid.input_embeddings = [
+            torch.ones((2, HIDDEN_SIZE), dtype=torch.bfloat16, device="cuda")
+        ]
+        invalid.input_embeddings_locs = torch.tensor([3], dtype=torch.int32)
+        self.assertFalse(runner.canRun(invalid))
+        self.assertEqual(runner.getPrefillStatus(), "input_metadata_invalid")
 
     def test_duplicate_capture_tag_is_rejected(self) -> None:
         runner = CudaGraphRunner()

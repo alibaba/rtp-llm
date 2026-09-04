@@ -856,21 +856,24 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs) {
         fusedCopy(d2d_copies_);
     }
 
-    graph_state_          = CudaGraphState();
-    prefill_graph_state_  = CudaGraphState();
-    auto  empty           = torch::Tensor();
-    auto  py_model_inputs = PyModelInputs({empty,
-                                           empty,
-                                           attention_inputs_.combo_position_ids,
-                                           torch_ext::PyEmbeddingInputs(),
-                                           torch_ext::PyMultimodalInputs(),
-                                           attention_inputs_,
-                                           attention_inputs_by_tag_,
-                                           torch_ext::BertEmbeddingInputs()});
-    auto* runner          = selectGraphRunner(attention_inputs_);
-    auto& state           = selectGraphState(attention_inputs_);
-    if (enable_cuda_graph_ && (!inputs.input_embeddings.has_value() || inputs.input_embeddings->empty())
-        && runner != nullptr
+    graph_state_         = CudaGraphState();
+    prefill_graph_state_ = CudaGraphState();
+    auto empty           = torch::Tensor();
+    auto py_model_inputs = PyModelInputs({empty,
+                                          empty,
+                                          attention_inputs_.combo_position_ids,
+                                          torch_ext::PyEmbeddingInputs(),
+                                          torch_ext::PyMultimodalInputs(),
+                                          attention_inputs_,
+                                          attention_inputs_by_tag_,
+                                          torch_ext::BertEmbeddingInputs()});
+    if (inputs.input_embeddings.has_value() && !inputs.input_embeddings->empty()) {
+        py_model_inputs.input_embeddings      = inputs.input_embeddings;
+        py_model_inputs.input_embeddings_locs = inputs.input_embeddings_locs;
+    }
+    auto* runner = selectGraphRunner(attention_inputs_);
+    auto& state  = selectGraphState(attention_inputs_);
+    if (enable_cuda_graph_ && runner != nullptr
         && runner->canRun(py_model_inputs, state, CudaGraphCheckMode::PREPARE)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
         runner->prepareAttentionInputs(py_model_inputs, state);

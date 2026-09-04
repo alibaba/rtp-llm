@@ -175,6 +175,7 @@ private:
     }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
+    void prepareInputEmbeddings(const PyModelInputs& inputs, PyModelInputs& captured_inputs);
     // Common memory hold creation logic
     CaptureMemoryHold createCaptureMemoryHold(PyModelInputs& inputs, int tokens_count);
     void              initKernelInternalMemory();
@@ -254,6 +255,10 @@ private:
 
     std::atomic<bool> prepared_attention_inputs_    = false;
     std::atomic<bool> capture_session_may_be_dirty_ = false;
+    // True only while request overrides have been staged but not yet consumed
+    // by a successful graph replay. This makes abandoned async preparation
+    // recoverable without clearing metadata for the common request path.
+    std::atomic<bool> input_embedding_metadata_dirty_ = false;
 };
 
 }  // namespace rtp_llm

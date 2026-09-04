@@ -3,6 +3,7 @@
 #include "rtp_llm/models_py/bindings/core/Dispatch.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/common/kernels/cuda_graph_copy_kernel.h"
+#include "rtp_llm/models_py/bindings/common/kernels/input_embedding_overlay_kernel.h"
 #include <cstdint>
 #include <iostream>
 #include <type_traits>
@@ -79,6 +80,68 @@ void cuda_graph_copy_large2small(at::Tensor& input_tensor,
                                                         stream);
         return true;
     });
+}
+
+void input_embedding_overlay(at::Tensor& inputs_embeds,
+                             at::Tensor& input_embedding_overrides,
+                             at::Tensor& input_embedding_metadata) {
+    CHECK_INPUT(inputs_embeds);
+    CHECK_INPUT(input_embedding_overrides);
+    CHECK_INPUT(input_embedding_metadata);
+    CHECK_DIM(2, inputs_embeds);
+    CHECK_DIM(2, input_embedding_overrides);
+    CHECK_DIM(1, input_embedding_metadata);
+    TORCH_CHECK(inputs_embeds.sizes() == input_embedding_overrides.sizes(),
+                "input_embedding_overrides must match inputs_embeds shape");
+    TORCH_CHECK(inputs_embeds.scalar_type() == input_embedding_overrides.scalar_type(),
+                "input_embedding_overrides must match inputs_embeds dtype");
+    TORCH_CHECK(input_embedding_metadata.scalar_type() == at::ScalarType::Int,
+                "input_embedding_metadata must have int32 dtype");
+    TORCH_CHECK(input_embedding_metadata.size(0) == inputs_embeds.size(0),
+                "input_embedding_metadata must have one entry per token");
+    TORCH_CHECK(inputs_embeds.get_device() == input_embedding_overrides.get_device()
+                    && inputs_embeds.get_device() == input_embedding_metadata.get_device(),
+                "input embedding overlay tensors must be on the same device");
+
+    auto       stream       = GET_CURRENT_STREAM();
+    const auto token_count  = static_cast<int>(inputs_embeds.size(0));
+    const auto hidden_size  = static_cast<int>(inputs_embeds.size(1));
+    auto*      metadata_ptr = input_embedding_metadata.data_ptr<int32_t>();
+    switch (inputs_embeds.scalar_type()) {
+        case at::ScalarType::Float:
+            rtp_llm::invokeInputEmbeddingOverlay<float>(inputs_embeds.data_ptr<float>(),
+                                                        input_embedding_overrides.data_ptr<float>(),
+                                                        metadata_ptr,
+                                                        token_count,
+                                                        hidden_size,
+                                                        stream);
+            break;
+        case at::ScalarType::Half:
+            rtp_llm::invokeInputEmbeddingOverlay<half>(static_cast<half*>(inputs_embeds.data_ptr()),
+                                                       static_cast<const half*>(input_embedding_overrides.data_ptr()),
+                                                       metadata_ptr,
+                                                       token_count,
+                                                       hidden_size,
+                                                       stream);
+            break;
+        case at::ScalarType::BFloat16:
+#ifdef ENABLE_BF16
+            rtp_llm::invokeInputEmbeddingOverlay<bf16_type>(
+                static_cast<bf16_type*>(inputs_embeds.data_ptr()),
+                static_cast<const bf16_type*>(input_embedding_overrides.data_ptr()),
+                metadata_ptr,
+                token_count,
+                hidden_size,
+                stream);
+            break;
+#else
+            TORCH_CHECK(false, "input_embedding_overlay was built without BF16 support");
+#endif
+        default:
+            TORCH_CHECK(false,
+                        "input_embedding_overlay only supports float32, float16, and bfloat16, got ",
+                        inputs_embeds.scalar_type());
+    }
 }
 
 }  // namespace torch_ext
