@@ -21,8 +21,14 @@ def _silu_and_mul_kernel(
     pid_b = tl.program_id(axis=0)  # Batch dimension
     pid_n_block = tl.program_id(axis=1)  # N-dimension block
 
-    input_row_start_ptr = input_ptr + pid_b * input_row_stride
-    output_row_start_ptr = output_ptr + pid_b * output_row_stride
+    # pid_b and the strides are both int32, so the row offset must be widened before
+    # the multiply or it wraps and is then sign-extended into the pointer, landing the
+    # whole row outside the tensor. B here is a row count that grouped-GEMM MoE can
+    # push past 2**31 / stride (e.g. 699k rows at stride 3072), which is reachable with
+    # a large token batch and skewed routing.
+    row_index = pid_b.to(tl.int64)
+    input_row_start_ptr = input_ptr + row_index * input_row_stride
+    output_row_start_ptr = output_ptr + row_index * output_row_stride
 
     n_offsets = pid_n_block * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
 

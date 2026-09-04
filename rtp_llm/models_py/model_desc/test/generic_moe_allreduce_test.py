@@ -111,10 +111,18 @@ class GenericMoeInitializationTest(TestCase):
     def test_unified_decision_covers_all_predicate_terms(self):
         cases = (
             ("pure_tp_shared_supported", True, 2, 1, 2, True),
+            # ep_size == tp_size is a pure-TP layout too: whole experts per rank
+            # and a partial routed output that finalize() reduces.  The fold
+            # applies, which is what the router capability -- not ep_size --
+            # decides.
+            ("pure_tp_router_ep_equals_tp", True, 2, 2, 2, True),
             ("ffn_tp_one", True, 1, 1, 2, False),
-            ("ep_mode", True, 2, 2, 2, False),
             ("no_shared_expert", True, 2, 1, 1, False),
             ("unsupported_router", False, 2, 1, 2, False),
+            # An EP router's combine has already completed the routed output, so
+            # folding a partial shared output into it would be wrong.  It does not
+            # advertise the capability and must keep the shared-only reduce.
+            ("ep_router_in_ep_mode", False, 2, 2, 2, False),
         )
         for name, supports, ffn_tp, ep_size, moe_style, expected in cases:
             with self.subTest(name=name):
@@ -125,6 +133,21 @@ class GenericMoeInitializationTest(TestCase):
                     moe_style=moe_style,
                 )
                 self.assertEqual(layer.use_unified_tp_allreduce, expected)
+
+    def test_the_two_shared_expert_strategies_are_mutually_exclusive(self):
+        for name, supports, ep_size in (
+            ("pure_tp_router_ep_equals_tp", True, 2),
+            ("ep_router_in_ep_mode", False, 2),
+            ("pure_tp_router_ep_one", True, 1),
+        ):
+            with self.subTest(name=name):
+                layer = _make_layer(
+                    supports_skip_tp_allreduce=supports, ep_size=ep_size
+                )
+                self.assertFalse(
+                    layer.use_unified_tp_allreduce and layer.use_ep_shared_allreduce,
+                    "forward() would silently pick one and the other flag would be a lie",
+                )
 
     def test_router_tp_size_is_part_of_the_constructor_contract(self):
         self.assertFalse(
@@ -184,8 +207,53 @@ class GenericMoeUnifiedAllreduceTest(TestCase):
         self.assertTrue(fused_moe.call_args.kwargs["skip_tp_allreduce"])
 
     @patch("rtp_llm.models_py.model_desc.generic_moe.all_reduce")
-    def test_ep_reduces_shared_output_only(self, mock_all_reduce):
+    def test_ep_equal_tp_fold_matches_the_two_reduce_path_with_one_collective(
+        self, mock_all_reduce
+    ):
+        """The widened gate must not change the result, only the collective count.
+
+        A TP all-reduce is linear, so two identical ranks are modelled exactly by
+        doubling.  An affine stub (tensor + c) is not a reduce and would make the
+        comparison meaningless.
+        """
+        collectives = []
+
+        def reduce_stub(tensor, group=None):
+            collectives.append(group)
+            return tensor * 2
+
+        mock_all_reduce.side_effect = reduce_stub
+
         layer = _make_layer(ep_size=2)
+        self.assertTrue(layer.use_unified_tp_allreduce)
+        hidden_states, routed_output, shared_output, _, fused_moe = _configure_forward(
+            layer
+        )
+        # The router reduces its own routed output unless told to skip, so the
+        # stub has to do it too -- otherwise the control below compares the fold
+        # against a path that never reduced the routed half at all.
+        fused_moe.side_effect = lambda **kwargs: (
+            routed_output
+            if kwargs["skip_tp_allreduce"]
+            else reduce_stub(routed_output, Group.TP)
+        )
+
+        folded = layer(hidden_states)
+        folded_collectives = len(collectives)
+
+        collectives.clear()
+        # The path this replaces: the pre-change flags for the same layout.
+        layer.use_unified_tp_allreduce = False
+        layer.use_ep_shared_allreduce = True
+        unfolded = layer(hidden_states)
+
+        torch.testing.assert_close(folded, unfolded)
+        self.assertEqual(folded_collectives, 1)
+        self.assertEqual(len(collectives), 2)
+
+    @patch("rtp_llm.models_py.model_desc.generic_moe.all_reduce")
+    def test_ep_reduces_shared_output_only(self, mock_all_reduce):
+        layer = _make_layer(ep_size=2, supports_skip_tp_allreduce=False)
         hidden_states, routed_output, shared_output, _, fused_moe = _configure_forward(
             layer
         )
@@ -201,7 +269,7 @@ class GenericMoeUnifiedAllreduceTest(TestCase):
 
     @patch("rtp_llm.models_py.model_desc.generic_moe.all_reduce")
     def test_ep_gate_is_applied_before_shared_reduce(self, mock_all_reduce):
-        layer = _make_layer(ep_size=2)
+        layer = _make_layer(ep_size=2, supports_skip_tp_allreduce=False)
         hidden_states, routed_output, shared_output, gate_output, fused_moe = (
             _configure_forward(layer, gate_enabled=True)
         )

@@ -3,6 +3,7 @@ from typing import Any, Dict, Optional
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
@@ -64,6 +65,21 @@ class GenericMoeLayer(nn.Module):
             weights, W.moe_gate, None, None, quant_config, hw_kernel_config
         )
         self.select_topk = SelectTopk(config=config)
+        # An fp32 router is not cosmetic. Measured on GLM-4.7 W8A8 INT8 (37-token
+        # prompt, 89 MoE layers): computing the projection in bf16 and casting the
+        # result moves the logits by only 1.7e-3 relative, but that is enough to
+        # reorder near-ties in the top-8-of-160 selection, and 3% of all
+        # (layer, token) selections then pick a different expert set -- starting at
+        # the very first MoE layer. A different expert is a discrete output change,
+        # so it compounds: against SGLang, which does this projection in fp32, the
+        # per-layer relative error grew to 0.2 by layer 69.
+        # The fp32 copy is built on first use and kept, like the reference
+        # implementation does, because casting 160x5120 per layer per forward would
+        # cost real bandwidth on the decode path. It adds
+        # num_moe_layers * expert_num * hidden * 4 B per card (292 MB for GLM-4.7).
+        self.router_logits_fp32 = getattr(config, "router_logits_fp32", False)
+        self._gate_weight_fp32: Optional[torch.Tensor] = None
+        self._gate_weight_src = weights.get(W.moe_gate) if self.router_logits_fp32 else None
         if moe_config.fake_balance_expert:
             self.fake_balance_expert = FakeBalanceExpert(
                 expert_num=config.expert_num,
@@ -119,15 +135,29 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert_gate = None
             self.sigmoid_gate_scale_add = None
 
-        self.use_ep_shared_allreduce = (
-            self.shared_expert is not None and self.ffn_tp_size > 1 and self.ep_size > 1
-        )
+        # The fold is legal exactly when the routed output is still TP-partial on
+        # its way out of the router, and supports_skip_tp_allreduce is the property
+        # that says so: it advertises that finalize() owns the TP reduce and can be
+        # asked to skip it.  ep_size is deliberately not part of the predicate.  A
+        # pure-TP router with ep_size == tp_size gives every rank whole experts and
+        # sums the per-rank partial results in finalize(), so its routed output is
+        # partial for the same reason the ep_size == 1 intermediate-dim slicing is;
+        # an EP router (DeepEP, MoriEP) returns an output its own combine already
+        # completed and does not advertise the capability.  Restricting the fold to
+        # ep_size == 1 therefore left the ep_size == tp_size layout -- which
+        # PureTpRouterBase.check_conditions admits on CUDA -- paying two small TP
+        # collectives per MoE layer where one is enough.
         self.use_unified_tp_allreduce = (
             self.shared_expert is not None
             and self.ffn_tp_size > 1
-            and self.ep_size == 1
             and self.ffn_tp_size == router_tp_size
             and router.supports_skip_tp_allreduce
+        )
+        self.use_ep_shared_allreduce = (
+            self.shared_expert is not None
+            and self.ffn_tp_size > 1
+            and self.ep_size > 1
+            and not self.use_unified_tp_allreduce
         )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
@@ -169,8 +199,24 @@ class GenericMoeLayer(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
-        router_logits = self.gate(hidden_states)
-        router_logits_fp32 = router_logits.float()
+        if self.router_logits_fp32 and self._gate_weight_src is not None:
+            if self._gate_weight_fp32 is None:
+                # The checkpoint's gate weight is stored input-major,
+                # [hidden, expert_num], not the [out, in] that F.linear expects.
+                # Using F.linear on it fails only once a real shape arrives -- the
+                # startup warm-up at max_seq_len aborts the rank with
+                # "mat1 and mat2 shapes cannot be multiplied (202751x5120 and
+                # 160x5120)" -- so orient it explicitly instead of assuming.
+                weight = self._gate_weight_src
+                if weight.shape[0] == self.hidden_dim:
+                    weight = weight.t()
+                self._gate_weight_fp32 = weight.to(torch.float32).contiguous()
+            router_logits_fp32 = F.linear(
+                hidden_states.to(torch.float32), self._gate_weight_fp32, None
+            )
+        else:
+            router_logits = self.gate(hidden_states)
+            router_logits_fp32 = router_logits.float()
 
         topk_weights = torch.empty(
             (num_tokens, self.top_k),

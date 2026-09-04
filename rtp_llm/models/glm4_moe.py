@@ -38,6 +38,7 @@ from rtp_llm.utils.model_weight import (
     stack_moe_w1,
     transpose,
     transpose_pad,
+    zeros,
 )
 
 
@@ -395,6 +396,36 @@ class Glm4MoeWeight(ModelDeployWeightInfo):
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
 
 
+def resolve_config_dtype(config: "ModelConfig", ckpt_path: str) -> None:
+    """Fill ``config.config_dtype`` from the checkpoint, accepting either spelling.
+
+    ``_from_hf`` reads ``torch_dtype``, the key transformers has since renamed to
+    ``dtype``. GLM-4.7's W8A8 INT8 checkpoint carries only the new key, so
+    ``config_dtype`` stays None, ``data_type`` silently falls back to FP16, and
+    the PPU W8A8 INT8 MoE executor is then rejected by its own ``is_bf16``
+    condition. The engine dies *after* loading all 42 GiB of weights with
+    "W8A8_INT8_PER_CHANNEL_COMPRESSED weights were loaded, but no registered MOE
+    compute backend can consume them", which points at the backend rather than at
+    the dtype. Reading both spellings removes that trap.
+    """
+    if config.config_dtype is not None:
+        return
+    config_path = os.path.join(ckpt_path, "config.json")
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(
+            f"config.json not found at {config_path}, cannot determine model dtype"
+        )
+    with open(config_path) as reader:
+        content = json.load(reader)
+    dtype = content.get("torch_dtype") or content.get("dtype")
+    if dtype is None:
+        raise ValueError(
+            f"Neither 'torch_dtype' nor 'dtype' found in {config_path}; "
+            f"pass --act_type explicitly or add a dtype field to config.json"
+        )
+    config.config_dtype = dtype
+
+
 class Glm4Moe(DeepSeekV2):
     @classmethod
     def _create_config(cls, ckpt_path: str):
@@ -413,6 +444,10 @@ class Glm4Moe(DeepSeekV2):
         config.norm_type = "rmsnorm"
 
         cls._from_hf(config, ckpt_path)
+        resolve_config_dtype(config, ckpt_path)
+        # GLM's reference implementation computes the router projection in fp32;
+        # doing it in bf16 reorders near-ties in the top-8-of-160 selection.
+        config.router_logits_fp32 = True
         assert (
             config.attn_config.head_num > 0
             and config.attn_config.kv_head_num > 0
@@ -490,3 +525,192 @@ class Glm4Moe(DeepSeekV2):
 
 
 register_model("glm4_moe", Glm4Moe, [], ["Glm4MoeForCausalLM"])
+
+
+_NEXTN_MARKER = ".enorm.weight"
+_LAYER_TEMPLATE = "model.layers.{i}"
+
+
+def _retarget_layer(module: WeightModule, layer_id: int) -> None:
+    """Point every checkpoint name in this subtree at the NextN source layer.
+
+    Decoder templates read ``model.layers.{i}`` and the loader substitutes ``{i}``
+    from ``range(num_layers)``. A one-layer draft model would therefore resolve to
+    layer 0, which in GLM-4.7 is a dense layer with no MTP scaffold. Replacing the
+    literal ``model.layers.{i}`` prefix here pins the decoder to the NextN layer
+    while leaving ``{expert_id}`` and every other placeholder for its own later
+    resolution. MoE weights nest their real tensors under ``sub_weights``, so
+    recurse through both.
+    """
+    fixed = "model.layers.%d" % layer_id
+    for ckpt in getattr(module, "weights", None) or []:
+        ckpt.name = ckpt.name.replace(_LAYER_TEMPLATE, fixed)
+    sub_weights = getattr(module, "sub_weights", None)
+    if sub_weights:
+        for sub in sub_weights.values():
+            _retarget_layer(sub, layer_id)
+
+
+def _retarget_layer_list(layer: List[WeightModule], layer_id: int) -> None:
+    for module in layer:
+        _retarget_layer(module, layer_id)
+
+
+def find_nextn_layer_id(weight_keys: Any) -> int:
+    """Locate the NextN layer by its marker tensor.
+
+    GLM-4.7 keeps its single NextN layer inside the main checkpoint at
+    ``model.layers.<num_hidden_layers>`` (92 today). Reading the index off the
+    checkpoint instead of hardcoding it means a re-exported or renumbered
+    checkpoint fails loudly here rather than silently loading a different layer.
+    """
+    found = set()
+    for key in weight_keys:
+        if not key.endswith(_NEXTN_MARKER) or not key.startswith("model.layers."):
+            continue
+        middle = key[len("model.layers.") : -len(_NEXTN_MARKER)]
+        if middle.isdigit():
+            found.add(int(middle))
+    if not found:
+        raise ValueError(
+            "no GLM-4.7 NextN layer in this checkpoint: expected a tensor named "
+            "model.layers.<N>.enorm.weight"
+        )
+    if len(found) != 1:
+        raise ValueError(
+            "expected exactly one GLM-4.7 NextN layer, found layers "
+            f"{sorted(found)}"
+        )
+    return found.pop()
+
+
+class Glm4MoeNextNWeight(Glm4MoeWeight):
+    """One-layer draft model reading the NextN scaffold from the main checkpoint.
+
+    Globals come from the NextN layer's own tensors (its private ``embed_tokens``
+    and ``shared_head.head``), not the target model's. The scaffold
+    (``enorm`` / ``hnorm`` / ``eh_proj`` / output norm) stays in the per-layer list,
+    matching ``DeepSeekV3MtpWeight`` and ``qwen2_mtp``.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any):
+        self._nextn_layer_id: int = -1
+        super().__init__(*args, **kwargs)
+
+    def _process_meta(self, meta_dict, weight_keys):
+        self._nextn_layer_id = find_nextn_layer_id(weight_keys)
+        # The target path scans layer 0 for the router bias. A one-layer draft's
+        # layer 0 is the NextN layer in the checkpoint, so look there instead.
+        self.has_e_score_correction_bias = (
+            f"model.layers.{self._nextn_layer_id}.mlp.gate.e_score_correction_bias"
+            in weight_keys
+        )
+        logging.info(
+            f"glm4_moe_nextn: NextN layer {self._nextn_layer_id}, "
+            f"e_score_correction_bias={self.has_e_score_correction_bias}"
+        )
+
+    def _get_weight_info(self):
+        if self._nextn_layer_id < 0:
+            raise RuntimeError(
+                "Glm4MoeNextNWeight._process_meta must run before _get_weight_info; "
+                "the NextN layer index is read off the checkpoint, not assumed"
+            )
+        if self._num_layers != 1:
+            raise ValueError(
+                "GLM-4.7 NextN is a single next-token layer; num_layers must be 1, "
+                f"got {self._num_layers}"
+            )
+        if 0 not in self.moe_layer_index_:
+            raise ValueError(
+                "the GLM-4.7 NextN layer is a MoE layer; moe_layer_index must "
+                f"contain 0, got {self.moe_layer_index_}"
+            )
+
+        prefix = "model.layers.%d" % self._nextn_layer_id
+        weights: List[WeightModule] = [
+            AtomicWeight(
+                W.embedding,
+                [CkptWeightInfo(f"{prefix}.embed_tokens.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.lm_head,
+                [CkptWeightInfo(f"{prefix}.shared_head.head.weight", identity)],
+                identity,
+            ),
+        ]
+
+        layer = self._get_hf_layer_weight_info(0)
+        _retarget_layer_list(layer, self._nextn_layer_id)
+        layer.extend(
+            [
+                AtomicWeight(
+                    W.multi_tokens_predict_final_ln_gamma,
+                    [CkptWeightInfo(f"{prefix}.shared_head.norm.weight", identity)],
+                    identity,
+                ),
+                AtomicWeight(
+                    W.multi_tokens_predict_final_ln_beta,
+                    [],
+                    functools.partial(zeros, shape=[self._hidden_size]),
+                ),
+                AtomicWeight(
+                    W.multi_tokens_predict_enorm,
+                    [CkptWeightInfo(f"{prefix}.enorm.weight", identity)],
+                    identity,
+                ),
+                AtomicWeight(
+                    W.multi_tokens_predict_hnorm,
+                    [CkptWeightInfo(f"{prefix}.hnorm.weight", identity)],
+                    identity,
+                ),
+                AtomicWeight(
+                    W.multi_tokens_predict_eh_proj,
+                    [CkptWeightInfo(f"{prefix}.eh_proj.weight", identity)],
+                    transpose,
+                ),
+            ]
+        )
+        return ModelWeightInfo(layer_weights=[layer], weights=weights)
+
+
+class Glm4MoeNextN(Glm4Moe):
+    """GLM-4.7 NextN draft model (``--sp_model_type glm4_moe_nextn``)."""
+
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
+        config = super()._create_config(ckpt_path)
+        # The draft is the single NextN layer, and that layer is a MoE layer, so
+        # the dense-prefix rule the target uses (first_k_dense_replace) does not
+        # apply to it.
+        config.num_layers = 1
+        config.moe_layer_index = [0]
+        config.is_mtp = True
+        # GLM's eh_proj is trained on the [embed; hidden] concat, the opposite of
+        # DeepSeek's. Glm4MoeMtpModel builds the concat in GLM order, so the
+        # reverse flag stays off.
+        config.reverse_e_h_norm = False
+        return config
+
+    def _create_python_model(self):
+        from rtp_llm.models_py.model_desc.glm4_moe_mtp import Glm4MoeMtpModel
+
+        self.py_model = Glm4MoeMtpModel(
+            self.model_config,
+            self.parallelism_config,
+            self.weight,
+            self.moe_config,
+            max_generate_batch_size=self.max_generate_batch_size,
+            fmha_config=self.fmha_config,
+            py_hw_kernel_config=self.hw_kernel_config,
+            device_resource_config=self.device_resource_config,
+        )
+        return self.py_model
+
+    @staticmethod
+    def get_weight_cls() -> type[Glm4MoeNextNWeight]:
+        return Glm4MoeNextNWeight
+
+
+register_model("glm4_moe_nextn", Glm4MoeNextN, [], ["Glm4MoeForCausalLMNextN"])

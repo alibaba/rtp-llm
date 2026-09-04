@@ -129,6 +129,8 @@ ssize_t writeAll(int fd, const void* buf, std::size_t nbytes) {
             return -1;
         }
         if (n == 0) {
+            // Same reason as readAll: the caller prints strerror(errno).
+            errno = ECONNRESET;
             return -1;
         }
         p += n;
@@ -199,7 +201,11 @@ ssize_t readAll(int fd, void* buf, std::size_t nbytes) {
             return -1;
         }
         if (n == 0) {
-            // peer closed prematurely
+            // Peer closed prematurely. Set errno, because every caller reports this
+            // failure with strerror(errno) and this branch would otherwise leave it
+            // at whatever it already was -- usually 0, which prints as "Success".
+            // readAllWithTimeout above already does this; keep the two consistent.
+            errno = ECONNRESET;
             return -1;
         }
         p += n;
