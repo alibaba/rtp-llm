@@ -80,6 +80,31 @@ TEST(RpcServerRuntimeMetaTest, EnqueueConvertsWaitTimeFromMicrosecondsToMillisec
     EXPECT_EQ(info.running_task_info_list[0].waiting_time_ms, 123);
 }
 
+TEST(RpcServerRuntimeMetaTest, ChunkProgressPreservesInitialCacheHitLength) {
+    RpcServerRuntimeMeta meta;
+    auto                 input = std::make_shared<GenerateInput>();
+    input->request_id          = 104;
+    input->generate_config     = std::make_shared<GenerateConfig>();
+    input->input_ids = torch::arange(1, 13, torch::TensorOptions().dtype(torch::kInt32));
+    auto stream       = std::make_shared<RuntimeMetaTestStream>(input);
+
+    stream->setReuseLength(4);
+    stream->setInitialReuseLength(4);
+    stream->setChunkSize(4);
+    stream->advanceChunk();
+    ASSERT_EQ(stream->reuseLength(), 8);
+
+    meta.enqueue(input->request_id, stream);
+    auto running = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(running.running_task_info_list.size(), 1);
+    EXPECT_EQ(running.running_task_info_list[0].prefix_length, 4);
+
+    meta.dequeue(input->request_id, stream);
+    auto finished = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(finished.finished_task_info_list.size(), 1);
+    EXPECT_EQ(finished.finished_task_info_list[0].prefix_length, 4);
+}
+
 TEST(RpcServerRuntimeMetaTest, EnqueueKeepsEnvelopeBatchIdOnStreamMismatch) {
     RpcServerRuntimeMeta meta;
     auto                 input = std::make_shared<GenerateInput>();

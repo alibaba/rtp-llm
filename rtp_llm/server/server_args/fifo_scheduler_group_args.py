@@ -70,3 +70,14 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         default=0,
         help="FIFO 中已初始化 KV cache block 的 stream 数上限，0 表示不限制。",
     )
+    fifo_scheduler_group.add_argument(
+        "--prefill_chunk_size",
+        env_name="PREFILL_CHUNK_SIZE",
+        bind_to=[(fifo_scheduler_config, "prefill_chunk_size")],
+        type=int,
+        default=0,
+        help="chunked prefill 单次 PREFILL forward 的总 token 预算，由所有真实 context row 共享。"
+            ">0 时启用，并自动按 KV cache block 大小对齐。"
+            "仅支持 PREFILL / PDFUSION 角色，且不支持 MLA 或线性注意力模型。"
+            "使用 force_batch、beam、logits、loss、hidden_states、all_probs 或多模态输入的请求将被拒绝。",
+    )

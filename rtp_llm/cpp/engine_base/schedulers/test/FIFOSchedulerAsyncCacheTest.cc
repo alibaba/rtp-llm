@@ -64,13 +64,17 @@ protected:
         cache_manager_->coordinator_ = mock_coord_;
     }
 
-    std::shared_ptr<FIFOScheduler> createScheduler() {
+    std::shared_ptr<FIFOScheduler> createScheduler(int prefill_chunk_size = 0) {
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
         RuntimeConfig runtime_config;
         runtime_config.max_generate_batch_size                     = 100;
         runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+        runtime_config.fifo_scheduler_config.prefill_chunk_size    = prefill_chunk_size;
         PDSepConfig         pd_sep_config;
+        if (prefill_chunk_size > 0) {
+            pd_sep_config.role_type = RoleType::PDFUSION;
+        }
         ParallelismConfig   parallelism_config;
         ModelSpecificConfig model_specific_config;
         return std::make_shared<FIFOScheduler>(
@@ -109,15 +113,20 @@ protected:
                                    bool                    reuse_cache         = false,
                                    bool                    enable_memory_cache = false,
                                    int                     max_new_tokens      = 1,
-                                   const std::vector<int>& variable_num_beams  = {}) {
+                                   const std::vector<int>& variable_num_beams  = {},
+                                   int                     prefill_chunk_size  = 0) {
         ResourceContext resource_context;
         resource_context.cache_manager       = cache_manager_;
+        if (prefill_chunk_size > 0) {
+            resource_context.role_type = RoleType::PDFUSION;
+        }
         resource_context.reuse_cache         = reuse_cache;
         resource_context.enable_memory_cache = enable_memory_cache;
 
         ModelConfig model_config;
         model_config.max_seq_len = 8192;
         RuntimeConfig runtime_config;
+        runtime_config.fifo_scheduler_config.prefill_chunk_size = prefill_chunk_size;
 
         std::shared_ptr<GenerateInput>  query(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
@@ -1092,6 +1101,53 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testPDFusionLoadingCacheStreamsCountTowardBa
     ASSERT_EQ(second.value().size(), 0);
     ASSERT_EQ(scheduler->loading_cache_streams_.size(), 2);
     ASSERT_EQ(scheduler->waitingStreamsSize(), 1);
+}
+
+TEST_F(FIFOSchedulerAsyncCacheTest, testFIFOChunkedPDFusionLoadDoneDoesNotMixWithFinalPrefill) {
+    setupMockCoordinator();
+
+    auto mock_ctx = createDoneAsyncContext();
+    EXPECT_CALL(*mock_coord_, asyncRead(_)).WillOnce(Return(std::static_pointer_cast<AsyncContext>(mock_ctx)));
+
+    constexpr int prefill_chunk_size = 4;
+    auto          scheduler          = createScheduler(prefill_chunk_size);
+    auto loading_stream              = createStream({1, 2, 3, 4, 5, 6},
+                                       /*reuse_cache=*/true,
+                                       /*enable_memory_cache=*/true,
+                                       /*max_new_tokens=*/4,
+                                       /*variable_num_beams=*/{},
+                                       prefill_chunk_size);
+    auto direct_stream               = createStream({7, 8},
+                                      /*reuse_cache=*/false,
+                                      /*enable_memory_cache=*/false,
+                                      /*max_new_tokens=*/4,
+                                      /*variable_num_beams=*/{},
+                                      prefill_chunk_size);
+
+    ASSERT_TRUE(scheduler->enqueue(loading_stream).ok());
+    ASSERT_TRUE(scheduler->enqueue(direct_stream).ok());
+
+    auto direct_prefill = scheduler->schedule();
+    ASSERT_TRUE(direct_prefill.ok());
+    ASSERT_EQ(direct_prefill->size(), 1);
+    ASSERT_EQ(direct_prefill->front().get(), direct_stream.get());
+    ASSERT_EQ(direct_stream->currentChunkLen(), 2);
+    ASSERT_EQ(loading_stream->getStatus(), StreamState::LOADING_CACHE);
+
+    direct_stream->setIsContextStream(false);
+    direct_stream->setSeqLength(direct_stream->seqLength() + 1);
+    direct_stream->setReserveStep(1);
+    const size_t direct_blocks_before_load_done = direct_stream->curBlocksNum();
+
+    auto loaded_prefill = scheduler->schedule();
+    ASSERT_TRUE(loaded_prefill.ok());
+    ASSERT_EQ(loaded_prefill->size(), 1);
+    ASSERT_EQ(loaded_prefill->front().get(), loading_stream.get());
+    ASSERT_TRUE(loaded_prefill->front()->isContextStream());
+    ASSERT_EQ(loaded_prefill->front()->currentChunkLen(), prefill_chunk_size);
+    ASSERT_EQ(direct_stream->curBlocksNum(), direct_blocks_before_load_done);
+    ASSERT_EQ(scheduler->runningStreamsSize(), 1);
+    ASSERT_EQ(scheduler->pending_decode_streams_.size(), 1);
 }
 
 }  // namespace rtp_llm
