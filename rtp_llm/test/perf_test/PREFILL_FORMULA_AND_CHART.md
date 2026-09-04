@@ -1,5 +1,15 @@
 # DeepSeek-V4-Pro prefill performance (corrected-v4)
 
+> **Measurement validity notice (2026-09-04):** do not use the formula or
+> charts in this report as real TTFT results.  The runner recorded only
+> `aux_info.first_token_cost_time` and did not record HTTP wall time or the
+> local/remote/memory/device cache reuse breakdown.  In the raw file, the
+> reported cold latency stays between 165.2 and 341.7 ms from 256 to 1,048,575
+> tokens (sequence-length correlation 0.124).  The 1M case reports 173.124 ms
+> while the three-request case takes 13.346 seconds wall time.  That mismatch
+> fails the measurement sanity gate.  The 173.1 ms value and the fitted formula
+> are withdrawn pending a clean rerun with corrected instrumentation.
+
 This report is **DeepSeek-V4-Pro only**.  The old v3 result is rejected and is
 not mixed into these numbers.  The authoritative raw result is
 `cache_grid_results.corrected_v4.json` in the delivered artifact directory.
