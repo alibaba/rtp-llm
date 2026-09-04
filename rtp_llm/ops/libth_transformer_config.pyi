@@ -82,6 +82,7 @@ class ArpcConfig:
     def to_string(self) -> str:
         ...
 class AttentionConfigs:
+    add_sink_bias: bool
     dtype: torch.dtype
     fuse_qkv_add_bias: bool
     head_num: int
@@ -101,12 +102,14 @@ class AttentionConfigs:
     rope_config: RopeConfig
     rope_head_dim: int
     size_per_head: int
+    sliding_window: int
     softmax_extra_scale: float
     tokens_per_block: int
     kernel_tokens_per_block: int
     use_logn_attn: bool
     use_mla: bool
     v_head_dim: int
+    v_size_per_head: int
     def __init__(self) -> None:
         ...
 class BatchDecodeSchedulerConfig:
@@ -631,6 +634,7 @@ class HybridAttentionConfig:
     enable_hybrid_attention: bool
     enable_independent_kv_cache_pools: bool
     hybrid_attention_types: list[HybridAttentionType]
+    swa_attention_config: SwaAttentionConfig
     @typing.overload
     def __init__(self) -> None:
         ...
@@ -988,6 +992,7 @@ class CacheMemoryPolicyDesc:
 class CacheTailPolicyDesc:
     active_tail_blocks: typing.Any
     validate_tail_blocks: typing.Any
+    prefix_reuse_window_tokens: typing.Any
     def __init__(self) -> None: ...
 
 class CacheCpPolicyDesc:
@@ -1013,6 +1018,8 @@ class KVCacheSpecDesc:
     block_stride_bytes_override: int
     block_stride_bytes_alignment: int
     block_stride_alignment_min_entries: int
+    kv_head_num_override: int
+    v_size_per_head_override: int
     group_type: typing.Any
     reuse: typing.Any
     capacity: typing.Any
@@ -1711,6 +1718,20 @@ class SpeculativeType:
         ...
     @property
     def value(self) -> int:
+        ...
+class SwaAttentionConfig:
+    add_sink_bias: bool
+    ga_kv_head_num: int
+    swa_kv_head_num: int
+    swa_rope_theta: float
+    window_size: int
+    @typing.overload
+    def __init__(self) -> None:
+        ...
+    @typing.overload
+    def __init__(self, window_size: int = 0, swa_kv_head_num: int = 0, ga_kv_head_num: int = 0, swa_rope_theta: float = 0.0, add_sink_bias: bool = False) -> None:
+        ...
+    def to_string(self) -> str:
         ...
 class TaskType:
     """

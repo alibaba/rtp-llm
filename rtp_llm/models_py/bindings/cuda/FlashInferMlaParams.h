@@ -75,12 +75,18 @@ public:
     // Device-only fast path for MHA paged attention. Fills paged-KV metadata
     // plus batch_indice_d/positions_d, reusing fillParams buffers so existing
     // FlashInfer aliases stay valid. MLA-only/reuse fields are not filled.
+    //
+    // is_sliding_window selects the plan kernel variant that tolerates the
+    // NULL_BLOCK_IDX slots a windowed cache group leaves in its block table; see
+    // invokeSwaMhaPagedAttnPlan. Leave it false for full-attention groups, where a
+    // negative page id is a bug worth surfacing.
     void fillParamsMhaDevice(torch::Tensor t_prefix_lengths,
                              torch::Tensor t_sequence_lengths,
                              torch::Tensor t_input_lengths,
                              torch::Tensor t_kv_cache_block_id_device,
                              int           seq_size_per_block,
-                             bool          forbid_realloc = false);
+                             bool          forbid_realloc    = false,
+                             bool          is_sliding_window = false);
 
     // Tensor views into buf_h and buf_d
     torch::Tensor batch_indice_h;

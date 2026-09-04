@@ -205,6 +205,19 @@ class TestPyFlashinferPrefillAttnOp(BaseAttentionTest):
             with_kv_cache_block_ids=False,
         )
 
+    def test_asymmetric_head_dims_pin_fa2_backend(self):
+        config = self._create_config(
+            head_num=64,
+            head_num_kv=8,
+            size_per_head=192,
+            seq_size_per_block=8,
+        )
+        config.attn_configs.v_size_per_head = 128
+
+        attn_op = PyFlashinferPrefillAttnOp(config.attn_configs)
+
+        self.assertEqual(attn_op.backend, "fa2")
+
     def test_multi_batch_prefill(self):
         """Test prefill for multiple batches with varying sequence lengths"""
         logging.info("\n=== Testing multi-batch prefill ===")

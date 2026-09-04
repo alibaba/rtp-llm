@@ -70,10 +70,16 @@ void validateHybridPoolDescs(const ModelConfig& model_config, uint32_t kernel_to
     }
 }
 
-uint32_t mhaLocalKvHeadNum(const ModelConfig& model_config, const ParallelismConfig& parallelism_config) {
+uint32_t mhaLocalKvHeadNum(const KVCacheSpecDesc&   desc,
+                           const ModelConfig&       model_config,
+                           const ParallelismConfig& parallelism_config) {
     const auto     attn_tp = std::max<int64_t>(1, parallelism_config.get_attn_tp_size());
     const uint32_t tp      = static_cast<uint32_t>(attn_tp);
-    const uint32_t kv      = static_cast<uint32_t>(model_config.attn_config.kv_head_num);
+    // Must match MHAKVCacheSpec::build(): a per-desc override describes a layer kind whose
+    // KV head count differs from the model-wide one, and the group's local head count has
+    // to agree with the spec that sized its blocks.
+    const uint32_t kv = desc.kv_head_num_override != 0 ? desc.kv_head_num_override :
+                                                         static_cast<uint32_t>(model_config.attn_config.kv_head_num);
     RTP_LLM_CHECK_WITH_INFO(kv > 0, "local kv head num requires positive kv_head_num");
     return (kv % tp == 0) ? kv / tp : kv / std::gcd(kv, tp);
 }
@@ -98,7 +104,7 @@ uint32_t localKvHeadNumForDesc(const KVCacheSpecDesc&   desc,
                                const ParallelismConfig& parallelism_config) {
     switch (desc.cache_type) {
         case KVCacheSpecType::MultiHeadAttention:
-            return mhaLocalKvHeadNum(model_config, parallelism_config);
+            return mhaLocalKvHeadNum(desc, model_config, parallelism_config);
         case KVCacheSpecType::LinearAttention:
             return linearLocalKvHeadNum(model_config, parallelism_config);
         case KVCacheSpecType::MultiHeadLatentAttention:
@@ -239,7 +245,14 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
         group_kv_block_stride_bytes[gid] = kv_stride;
         group_kv_scale_stride_bytes[gid] = scale_stride;
         const auto type                  = config.typeForGroup(gid);
-        const bool is_paged_group        = type == CacheGroupType::FULL || type == CacheGroupType::LINEAR;
+        // A sliding-window group counts too when it is an ordinary paged pool: it draws
+        // its block count from the same global budget (finalizeBlockNums gives it
+        // global_block_num / linear_step), so its bytes belong in the per-block cost. DSv4
+        // instead backs its window with a fixed-allocation state cache, which is sized
+        // outside the paged budget and must stay excluded.
+        const bool is_state_cache = spec->type == KVCacheSpecType::OpaqueState;
+        const bool is_paged_group = type == CacheGroupType::FULL || type == CacheGroupType::LINEAR
+                                    || (type == CacheGroupType::SWA && !is_state_cache);
         if (is_paged_group && !config.usesExplicitIndependentBlocks(gid)) {
             total_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
             total_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;

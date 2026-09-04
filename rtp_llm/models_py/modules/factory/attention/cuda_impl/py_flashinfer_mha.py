@@ -1,3 +1,4 @@
+import math
 from typing import Any, Optional
 
 import torch
@@ -139,6 +140,139 @@ def attn_q_dtype(attn_configs: AttentionConfigs) -> torch.dtype:
     return attn_configs.dtype
 
 
+def attn_head_dim_vo(attn_configs: AttentionConfigs) -> int:
+    """V/output head dimension; equals the QK one unless the model splits them."""
+    return attn_configs.v_size_per_head or attn_configs.size_per_head
+
+
+def window_left_from_sliding_window(sliding_window: int) -> int:
+    """Translate a HuggingFace ``sliding_window`` into FlashInfer's ``window_left``.
+
+    HF masks with ``kv_idx > q_idx - sliding_window``, i.e. a query attends to
+    ``sliding_window`` keys including itself. FlashInfer masks with
+    ``kv_idx + qo_len + window_left >= kv_len + qo_idx``, i.e. ``window_left + 1`` keys
+    including itself. Passing ``sliding_window`` straight through widens the window by
+    one key.
+    """
+    if sliding_window <= 0:
+        return -1
+    return sliding_window - 1
+
+
+def resolve_paged_backend(backend: str, head_dim_qk: int, head_dim_vo: int) -> str:
+    """Pick a paged-KV backend that can handle this head-dim pair.
+
+    FlashInfer's SM90 (fa3) paged prefill only dispatches when
+    ``HEAD_DIM_QK == HEAD_DIM_VO``; anything else falls through to
+    ``return cudaErrorNotSupported`` (``hopper/prefill_sm90.cuh``,
+    ``BatchPrefillWithPagedKVCacheDispatched``). The AOT module for
+    ``head_dim_qk_192_head_dim_vo_128 ... sm90`` does get compiled, so the failure only
+    surfaces at launch as "BatchPrefillWithPagedKVCacheSM90Run failed with error:
+    operation not supported".
+
+    The fa3 *ragged* path has no such restriction, which is why asymmetric head dims
+    work there and this only bites once a layer moves to the paged wrapper. fa2's paged
+    dispatch carries no head-dim equality check, so pin it.
+    """
+    if backend == "auto" and head_dim_qk != head_dim_vo:
+        return "fa2"
+    return backend
+
+
+def resolve_ragged_backend(backend: str, head_dim_qk: int, head_dim_vo: int) -> str:
+    """Keep asymmetric ragged MHA on the same FA2 path as paged/decode.
+
+    MiMo V2.5 uses QK=192 and V=128 for both global and sliding-window layers.
+    FlashInfer can dispatch that ragged shape through FA3, but MiMo's validated
+    attention path is FA2. Pin only asymmetric MHA here so symmetric models retain
+    the existing automatic backend selection.
+    """
+    if backend == "auto" and head_dim_qk != head_dim_vo:
+        return "fa2"
+    return backend
+
+
+def normalize_sink_bias(bias: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    """Put a per-head attention sink bias into the dtype the correction needs.
+
+    The checkpoint stores the bias in the model dtype (bf16 for MiMo V2.5) and the
+    correction below runs in fp32; the upcast is exact, so this only fixes the type.
+    """
+    if bias is None:
+        return None
+    if bias.dtype != torch.float32:
+        bias = bias.to(torch.float32)
+    return bias.contiguous()
+
+
+# ln 2, converting FlashInfer's base-2 LSE into a natural log.
+_LN2 = math.log(2.0)
+
+
+def apply_attention_sink(
+    out: torch.Tensor, lse: torch.Tensor, sink: torch.Tensor
+) -> torch.Tensor:
+    """Fold a per-head attention sink into an output computed without one.
+
+    FlashInfer's wrappers accept a ``sinks=`` argument but only the ``trtllm-gen``
+    branch of ``prefill.py``'s ``paged_run`` shim forwards it to the kernel; the fa2 and
+    fa3 branches drop it silently, and their default ``DefaultAttention`` variant
+    declares no sink tensor at all. Applying sinks natively would mean the JIT-only
+    ``BatchAttentionWithAttentionSinkWrapper``, whose AOT coverage is (64, 64) only.
+    Doing it here instead is exact and needs no extra kernel.
+
+    A sink contributes one extra logit ``b_h`` to the softmax denominator and no value,
+    so with ``D = sum_j exp(s_j)`` over the visible keys:
+
+        out_sink = (sum_j exp(s_j) v_j) / (D + exp(b_h))
+                 = out * D / (D + exp(b_h))
+                 = out * sigmoid(log(D) - b_h)
+
+    Both backends report ``lse = log2(D)`` -- fa2 writes ``log2(d) + m`` with ``m``
+    already scaled into the log2 domain (``prefill.cuh``), fa3 writes
+    ``row_max * sm_scale_log2 + log2(sum)`` (``hopper/attention_updater.cuh``) -- hence
+    the ln2 factor.
+
+    Args:
+        out: attention output, ``[tokens, num_qo_heads, head_dim_vo]``
+        lse: base-2 log-sum-exp, ``[tokens, num_qo_heads]``
+        sink: per-head sink bias, ``[num_qo_heads]``, fp32
+    """
+    scale = torch.sigmoid(lse.float() * _LN2 - sink.view(1, -1))
+    return out * scale.unsqueeze(-1).to(out.dtype)
+
+
+def select_paged_kv_cache(
+    kv_cache: LayerKVCache,
+    head_dim_qk: int,
+    head_dim_vo: int,
+    local_kv_head_num: int,
+    page_size: int,
+) -> Any:
+    """Present the layer's cache the way FlashInfer's ``run()`` wants it.
+
+    With asymmetric K/V there is no single tensor holding both, so hand over the
+    ``(k_cache, v_cache)`` pair the C++ layer narrowed out of the interleaved block;
+    their strides are identical, which is what the paged kernels require. Otherwise
+    return the merged 5D view.
+    """
+    if head_dim_vo != head_dim_qk:
+        k_cache = kv_cache.k_cache
+        if k_cache is not None and k_cache.numel() > 0:
+            return (k_cache, kv_cache.v_cache)
+        raise ValueError(
+            "asymmetric K/V attention requires the split k_cache/v_cache views; "
+            "got an empty k_cache, which means the cache group was built with a "
+            "symmetric MHA spec"
+        )
+    paged_kv_cache = kv_cache.kv_cache_base
+    if paged_kv_cache is not None and paged_kv_cache.dim() == 2:
+        paged_kv_cache = common.reshape_paged_kv_cache(
+            paged_kv_cache, local_kv_head_num, page_size, head_dim_qk
+        )
+    return paged_kv_cache
+
+
 class PyFlashinferPrefillPagedAttnOp(object):
     """FlashInfer Prefill Attention Op with Paged KV Cache support"""
 
@@ -152,13 +286,15 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
         self.head_dim_qk = attn_configs.size_per_head
-        self.head_dim_vo = attn_configs.size_per_head
+        self.head_dim_vo = attn_head_dim_vo(attn_configs)
         self.page_size = attn_configs.kernel_tokens_per_block
         self.dtype = attn_configs.dtype
         self.kv_dtype = attn_kv_dtype(attn_configs)
         self.q_dtype = attn_q_dtype(attn_configs)
         self.max_seq_len = attn_configs.max_seq_len
         self.is_causal = attn_configs.is_causal
+        self.window_left = window_left_from_sliding_window(attn_configs.sliding_window)
+        self.sink_bias: Optional[torch.Tensor] = None
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
         self.prefill_cuda_graph_copy_params = None
@@ -168,10 +304,13 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self._aligned_q_cast_buf = None
         self._compact_out_buf = None
         # Use Paged KV Cache wrapper
+        self.backend = resolve_paged_backend(
+            backend, self.head_dim_qk, self.head_dim_vo
+        )
         self.prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
             self.g_workspace_buffer,
             "HND",
-            backend=backend,
+            backend=self.backend,
         )
 
     def __del__(self):
@@ -180,6 +319,10 @@ class PyFlashinferPrefillPagedAttnOp(object):
     def set_params(self, params: rtp_llm_ops.FlashInferMlaAttnParams):
         """Set the params object to be used by this op."""
         self.fmha_params = params
+
+    def set_sink_bias(self, bias: Optional[torch.Tensor]) -> None:
+        """Set this layer's per-head attention sink bias, or None if it has none."""
+        self.sink_bias = normalize_sink_bias(bias)
 
     def prepare(
         self,
@@ -199,7 +342,12 @@ class PyFlashinferPrefillPagedAttnOp(object):
         # buffers exactly while the device fill sizes for the worst case, so
         # switching paths between capture and replay forces a (forbidden)
         # reallocation during graph replay.
-        if attn_inputs.input_lengths.is_cuda:
+        # Windowed groups can carry NULL pages before their active suffix.  Use
+        # the SWA-aware device planner for both host and device input mirrors so
+        # those pages are redirected to the reserved block before FlashInfer
+        # sees them.  The regular host planner intentionally preserves negative
+        # page ids for full-attention groups.
+        if attn_inputs.input_lengths.is_cuda or self.window_left >= 0:
             self.fmha_params.fill_params_mha_device(
                 _device_or(
                     attn_inputs.prefix_lengths_device, attn_inputs.prefix_lengths
@@ -212,6 +360,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 ),
                 self.page_size,
                 forbid_realloc,
+                is_sliding_window=self.window_left >= 0,
             )
         else:
             self.fmha_params.fill_params(
@@ -292,12 +441,25 @@ class PyFlashinferPrefillPagedAttnOp(object):
             q_data_type=self.q_dtype,
             kv_data_type=self.kv_dtype,
             o_data_type=self.dtype,
+            head_dim_vo=self.head_dim_vo,
+            window_left=self.window_left,
         )
         return self.fmha_params
 
     @staticmethod
     def support(attn_inputs: PyAttentionInputs) -> bool:
         return True
+
+    def _run(self, q: torch.Tensor, paged_kv_cache: Any) -> torch.Tensor:
+        """Run the wrapper, folding in the attention sink when this layer has one.
+
+        ``sinks=`` is deliberately not passed to run(): fa2/fa3 accept and discard it,
+        see apply_attention_sink().
+        """
+        if self.sink_bias is None:
+            return self.prefill_wrapper.run(q, paged_kv_cache)
+        out, lse = self.prefill_wrapper.run(q, paged_kv_cache, return_lse=True)
+        return apply_attention_sink(out, lse, self.sink_bias)
 
     def forward(
         self, q: torch.Tensor, kv_cache: Optional[LayerKVCache]
@@ -323,11 +485,13 @@ class PyFlashinferPrefillPagedAttnOp(object):
             q.dim() == 3
         ), f"Expected q to be 3D tensor [total_tokens, num_heads, head_dim], got {q.dim()}D"
 
-        paged_kv_cache = kv_cache.kv_cache_base
-        if paged_kv_cache.dim() == 2:
-            paged_kv_cache = common.reshape_paged_kv_cache(
-                paged_kv_cache, self.local_kv_head_num, self.page_size, self.head_dim_qk
-            )
+        paged_kv_cache = select_paged_kv_cache(
+            kv_cache,
+            self.head_dim_qk,
+            self.head_dim_vo,
+            self.local_kv_head_num,
+            self.page_size,
+        )
         # CUDA graph copy logic for prefill
         if self.prefill_cuda_graph_copy_params:
             assert (
@@ -340,6 +504,9 @@ class PyFlashinferPrefillPagedAttnOp(object):
             # Reshape from 3D [token_num, head_num, head_size] to 2D [token_num, hidden_size]
             token_num, head_num, head_size = q.shape
             hidden_size = head_num * head_size
+            # The output carries head_dim_vo, which may differ from Q's head dim.
+            out_head_size = self.head_dim_vo
+            out_hidden_size = head_num * out_head_size
 
             # Pre-allocate buffers on first use (avoid per-forward GPU allocation)
             total_len = (
@@ -355,10 +522,10 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 )
             if self._compact_out_buf is None or self._compact_out_buf.shape != (
                 token_num,
-                hidden_size,
+                out_hidden_size,
             ):
                 self._compact_out_buf = torch.zeros(
-                    (token_num, hidden_size), dtype=q.dtype, device=q.device
+                    (token_num, out_hidden_size), dtype=q.dtype, device=q.device
                 )
 
             q_2d = q.view(token_num, hidden_size).contiguous()
@@ -399,10 +566,10 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 q_aligned = self._aligned_q_cast_buf
 
             # Paged FP8 defaults to unit scales and the output dtype from plan().
-            result = self.prefill_wrapper.run(q_aligned, paged_kv_cache)
+            result = self._run(q_aligned, paged_kv_cache)
 
             # Reshape result to 2D for copy back (ensure contiguous)
-            result_2d = result.view(total_len, hidden_size).contiguous()
+            result_2d = result.view(total_len, out_hidden_size).contiguous()
             self._compact_out_buf.zero_()
 
             # Copy large to small (aligned -> compact)
@@ -413,16 +580,16 @@ class PyFlashinferPrefillPagedAttnOp(object):
                 self.prefill_cuda_graph_copy_params.max_batch_size,
                 self.prefill_cuda_graph_copy_params.max_seq_len,
                 self.input_lengths,
-                hidden_size,
+                out_hidden_size,
                 self.cu_seq_lens,
             )
 
             # Reshape back to 3D
-            result = self._compact_out_buf.view(token_num, head_num, head_size)
+            result = self._compact_out_buf.view(token_num, head_num, out_head_size)
         else:
             # No CUDA graph copy, direct execution
             # Paged FP8 defaults to unit scales and the output dtype from plan().
-            result = self.prefill_wrapper.run(
+            result = self._run(
                 quantize_to_fp8_if_needed(q, self.q_dtype), paged_kv_cache
             )
 
@@ -441,16 +608,20 @@ class PyFlashinferPrefillAttnOp(object):
         self.local_kv_head_num = attn_configs.kv_head_num
         self.head_dim_qk = attn_configs.size_per_head
         self.page_size = attn_configs.kernel_tokens_per_block
-        # TODO: maybe use v_head_dim
-        self.head_dim_vo = attn_configs.size_per_head
+        self.head_dim_vo = attn_head_dim_vo(attn_configs)
+        self.backend = resolve_ragged_backend(
+            backend, self.head_dim_qk, self.head_dim_vo
+        )
         self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
             self.g_workspace_buffer,
-            backend=backend,
+            backend=self.backend,
         )
         self.dtype = attn_configs.dtype
         self.q_dtype = attn_q_dtype(attn_configs)
         self.kv_dtype = attn_kv_dtype(attn_configs)
         self.is_causal = attn_configs.is_causal
+        self.window_left = window_left_from_sliding_window(attn_configs.sliding_window)
+        self.sink_bias: Optional[torch.Tensor] = None
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
 
     def __del__(self):
@@ -459,6 +630,16 @@ class PyFlashinferPrefillAttnOp(object):
     def set_params(self, params: rtp_llm_ops.FlashInferMlaAttnParams):
         """Set the params object to be used by this op."""
         self.fmha_params = params
+
+    def set_sink_bias(self, bias: Optional[torch.Tensor]) -> None:
+        """Set this layer's per-head attention sink bias, or None if it has none.
+
+        The ragged wrapper's ``run(..., return_lse=True)`` returns the same
+        ``(out, lse)`` pair the paged one does, and apply_attention_sink() needs only
+        those two plus the bias -- it does not care whether K/V came from a cache or a
+        dense tensor. So sinks work here exactly as on the paged path.
+        """
+        self.sink_bias = normalize_sink_bias(bias)
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> ParamsBase:
         """
@@ -497,6 +678,7 @@ class PyFlashinferPrefillAttnOp(object):
             q_data_type=self.q_dtype,
             kv_data_type=self.kv_dtype,
             o_data_type=self.dtype,
+            window_left=self.window_left,
         )
         return self.fmha_params
 
@@ -506,6 +688,12 @@ class PyFlashinferPrefillAttnOp(object):
             attn_inputs.prefix_lengths.numel() <= 0
             or attn_inputs.prefix_lengths.sum().item() == 0
         )
+
+    def _run(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        if self.sink_bias is None:
+            return self.prefill_wrapper.run(q, k, v)
+        out, lse = self.prefill_wrapper.run(q, k, v, return_lse=True)
+        return apply_attention_sink(out, lse, self.sink_bias)
 
     def forward(
         self,
@@ -522,7 +710,17 @@ class PyFlashinferPrefillAttnOp(object):
             out = torch.empty(
                 q.shape[:-1] + v.shape[-1:], dtype=self.dtype, device=q.device
             )
-            return self.prefill_wrapper.run(
+            if self.sink_bias is None:
+                return self.prefill_wrapper.run(
+                    q,
+                    k,
+                    v,
+                    FP8_UNIT_SCALE,
+                    FP8_UNIT_SCALE,
+                    FP8_UNIT_SCALE,
+                    out=out,
+                )
+            fp8_out, fp8_lse = self.prefill_wrapper.run(
                 q,
                 k,
                 v,
@@ -530,8 +728,10 @@ class PyFlashinferPrefillAttnOp(object):
                 FP8_UNIT_SCALE,
                 FP8_UNIT_SCALE,
                 out=out,
+                return_lse=True,
             )
-        return self.prefill_wrapper.run(q, k, v)
+            return apply_attention_sink(fp8_out, fp8_lse, self.sink_bias)
+        return self._run(q, k, v)
 
 
 class PyFlashinferHybridPrefillAttnOp(object):
@@ -743,6 +943,14 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         self.fmha_impl.prepare(attn_inputs, forbid_realloc=True)
 
+    def set_sink_bias(self, bias: Optional[torch.Tensor]) -> None:
+        """Set the current layer's per-head attention sink bias, or None if it has none.
+
+        Presence of this method is how a model description probes whether an
+        implementation can serve a layer with an attention sink.
+        """
+        self.fmha_impl.set_sink_bias(bias)
+
     def create_params(self, attn_inputs: PyAttentionInputs):
         """Create FlashInfer MLA attention parameters.
 
@@ -783,20 +991,21 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         num_heads = self.attn_configs.head_num
         num_kv_heads = self.attn_configs.kv_head_num
         head_dim = self.attn_configs.size_per_head
+        head_dim_vo = attn_head_dim_vo(self.attn_configs)
 
         q, k, v = torch.split(
             qkv,
             [
                 head_dim * num_heads,
                 head_dim * num_kv_heads,
-                head_dim * num_kv_heads,
+                head_dim_vo * num_kv_heads,
             ],
             dim=-1,
         )
 
         query = q.reshape(q.shape[0], num_heads, head_dim)
         key = k.reshape(k.shape[0], num_kv_heads, head_dim)
-        value = v.reshape(v.shape[0], num_kv_heads, head_dim)
+        value = v.reshape(v.shape[0], num_kv_heads, head_dim_vo)
 
         return query, key, value
 
@@ -872,6 +1081,12 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
            TRTLLMGen/XQA do not have sm_120a support in this build.
         2. The underlying paged FMHA op supports the inputs
         3. MhaRotaryEmbeddingOp supports the inputs
+
+        Windowed groups use the SWA-aware planner, which substitutes the reserved
+        page for NULL block-table entries.  FlashInfer's ``window_left`` then masks
+        those pages because they are outside the active window.  A fresh request
+        still normally selects the ragged implementation first; this paged path is
+        needed when a non-empty prefix makes ragged attention inapplicable.
         """
         return (
             not is_sm10x()
@@ -938,10 +1153,18 @@ class PyFlashinferHybridPrefillImpl(PyFlashinferPrefillImplBase):
 
     @staticmethod
     def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
-        """Check if hybrid prefill implementation is supported."""
+        """Check if hybrid prefill implementation is supported.
+
+        Excluded for asymmetric K/V and for windowed layers. Its paged half plans over
+        the whole prefix and reads it from the cache, which is the same reason the paged
+        variant declines a windowed layer: a windowed group only ever holds a window's
+        worth of KV, so the prefix pages outside it were never written.
+        """
         return (
             not attn_inputs.is_cuda_graph
             and not is_sm10x()
+            and attn_configs.sliding_window <= 0
+            and attn_head_dim_vo(attn_configs) == attn_configs.size_per_head
             and PyFlashinferHybridPrefillAttnOp.support(attn_inputs)
             and attn_configs.rope_config.style != RopeStyle.Mrope
         )
@@ -989,6 +1212,12 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
         therefore does not cover BERT-style encoder-only inputs that lack
         one. Without this fallback, sm_120 has no usable prefill impl for
         such cases.
+
+        Windowed and sink layers land here rather than on the paged variant. Ragged
+        reads K/V from the QKV tensor the layer just produced, so their prefill never
+        touches the KV cache at all -- which is what lets a windowed group hold only a
+        window's worth per request. ``window_left`` comes from plan() and the sink is
+        folded in from the LSE, both of which the ragged wrapper supports.
         """
         return (
             PyFlashinferPrefillAttnOp.support(attn_inputs)
@@ -1013,14 +1242,30 @@ class PyFlashinferDecodeAttnOp(object):
         self.local_head_num = attn_configs.head_num
         self.local_kv_head_num = attn_configs.kv_head_num
         self.head_dim_qk = attn_configs.size_per_head
-        self.head_dim_vo = attn_configs.size_per_head
+        self.head_dim_vo = attn_head_dim_vo(attn_configs)
         self.seq_size_per_block = attn_configs.kernel_tokens_per_block
-        self.use_tensor_core = determine_use_tensor_core_from_configs(attn_configs)
-        self.decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
-            self.g_workspace_buffer,
-            "HND",
-            use_tensor_cores=self.use_tensor_core,
-        )
+        self.window_left = window_left_from_sliding_window(attn_configs.sliding_window)
+        self.is_sliding_window = attn_configs.sliding_window > 0
+        self.sink_bias: Optional[torch.Tensor] = None
+        # BatchDecodeWithPagedKVCacheWrapper.plan() carries a single head_dim and no
+        # head_dim_vo, so an asymmetric layer decodes through the paged *prefill*
+        # wrapper instead -- decode is prefill with one query token per request. fa2,
+        # not "auto": see resolve_paged_backend().
+        self.use_prefill_for_decode = self.head_dim_qk != self.head_dim_vo
+        if self.use_prefill_for_decode:
+            self.use_tensor_core = True
+            self.decode_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                self.g_workspace_buffer,
+                "HND",
+                backend="fa2",
+            )
+        else:
+            self.use_tensor_core = determine_use_tensor_core_from_configs(attn_configs)
+            self.decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
+                self.g_workspace_buffer,
+                "HND",
+                use_tensor_cores=self.use_tensor_core,
+            )
         self.dtype = attn_configs.dtype
         self.kv_dtype = attn_kv_dtype(attn_configs)
         # CUDA-core decode dequantizes FP8 KV; tensor-core decode uses the
@@ -1038,9 +1283,14 @@ class PyFlashinferDecodeAttnOp(object):
         """Set the params object to be used by this op."""
         self.fmha_params = params
 
+    def set_sink_bias(self, bias: Optional[torch.Tensor]) -> None:
+        """Set this layer's per-head attention sink bias, or None if it has none."""
+        self.sink_bias = normalize_sink_bias(bias)
+
     def _requires_tensor_core_cuda_graph_replan(self) -> bool:
-        # Tensor-core decode refreshes replay-time plan metadata.
-        return self.use_tensor_core
+        # Tensor-core decode refreshes replay-time plan metadata. The paged-prefill
+        # substitute plans from the device buffers instead, like CUDA-core decode.
+        return self.use_tensor_core and not self.use_prefill_for_decode
 
     def _plan_decode_wrapper(self, attn_inputs: PyAttentionInputs) -> None:
         if self._requires_tensor_core_cuda_graph_replan():
@@ -1054,6 +1304,34 @@ class PyFlashinferDecodeAttnOp(object):
             last_page_len = self.fmha_params.paged_kv_last_page_len_d
             plan_kwargs = {}
 
+        if self.use_prefill_for_decode:
+            batch_size = attn_inputs.input_lengths.size(0)
+            # One query token per request, so qo_indptr is just [0, 1, 2, ...].
+            qo_indptr = torch.arange(
+                batch_size + 1,
+                dtype=torch.int32,
+                device=self.g_workspace_buffer.device,
+            )
+            self.decode_wrapper.plan(
+                qo_indptr,
+                page_indptr,
+                page_indice,
+                last_page_len,
+                self.local_head_num,
+                self.local_kv_head_num,
+                self.head_dim_qk,
+                self.seq_size_per_block,
+                # A single query token has nothing ahead of it to mask.
+                causal=False,
+                q_data_type=self.q_dtype,
+                kv_data_type=self.kv_dtype,
+                o_data_type=self.dtype,
+                head_dim_vo=self.head_dim_vo,
+                window_left=self.window_left,
+                **plan_kwargs,
+            )
+            return
+
         self.decode_wrapper.plan(
             page_indptr,
             page_indice,
@@ -1065,6 +1343,7 @@ class PyFlashinferDecodeAttnOp(object):
             q_data_type=self.q_dtype,
             kv_data_type=self.kv_dtype,
             o_data_type=self.dtype,
+            window_left=self.window_left,
             **plan_kwargs,
         )
 
@@ -1083,7 +1362,9 @@ class PyFlashinferDecodeAttnOp(object):
         # only populates the device buffers and leaves the host mirrors at
         # their stale capacity sizes (MIN_CACHE_BATCH_SIZE), which corrupts
         # plan's batch size. Route tensor-core through the host fill.
-        if attn_inputs.input_lengths.is_cuda and not self.use_tensor_core:
+        if self.use_prefill_for_decode or (
+            attn_inputs.input_lengths.is_cuda and not self.use_tensor_core
+        ):
             self.fmha_params.fill_params_mha_device(
                 _device_or(
                     attn_inputs.prefix_lengths_device, attn_inputs.prefix_lengths
@@ -1096,6 +1377,7 @@ class PyFlashinferDecodeAttnOp(object):
                 ),
                 self.seq_size_per_block,
                 forbid_realloc=forbid_realloc,
+                is_sliding_window=self.is_sliding_window,
             )
         else:
             block_id_host = attn_inputs.kv_cache_kernel_block_id
@@ -1180,16 +1462,20 @@ class PyFlashinferDecodeAttnOp(object):
             q.reshape(q.shape[0], self.local_head_num, self.head_dim_qk),
             self.q_dtype,
         )
-        paged_kv_cache = kv_cache.kv_cache_base
-        if paged_kv_cache is not None and paged_kv_cache.dim() == 2:
-            paged_kv_cache = common.reshape_paged_kv_cache(
-                paged_kv_cache,
-                self.local_kv_head_num,
-                self.seq_size_per_block,
-                self.head_dim_qk,
-            )
+        paged_kv_cache = select_paged_kv_cache(
+            kv_cache,
+            self.head_dim_qk,
+            self.head_dim_vo,
+            self.local_kv_head_num,
+            self.seq_size_per_block,
+        )
         # Decode FP8 defaults to unit scales and the output dtype from plan().
-        return self.decode_wrapper.run(q, paged_kv_cache)
+        # ``sinks=`` is deliberately not passed to run(): fa2/fa3 accept and discard it,
+        # so the sink is folded in from the LSE. See apply_attention_sink().
+        if self.sink_bias is None:
+            return self.decode_wrapper.run(q, paged_kv_cache)
+        out, lse = self.decode_wrapper.run(q, paged_kv_cache, return_lse=True)
+        return apply_attention_sink(out, lse, self.sink_bias)
 
 
 class PyFlashinferDecodeImpl(FMHAImplBase):
@@ -1204,6 +1490,19 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
         self.fmha_impl = PyFlashinferDecodeAttnOp(attn_configs, attn_inputs)
         self.rope_impl = FusedRopeKVCacheDecodeOp(attn_configs)
         self.attn_configs = attn_configs
+        # The fused C++ RoPE+KV-write kernel writes K and V through one head dim, so an
+        # asymmetric layer splits the two steps: Python RoPE, then an explicit KV write.
+        # Same arrangement the prefill path already uses.
+        self.asymmetric_kv = (
+            attn_head_dim_vo(attn_configs) != attn_configs.size_per_head
+        )
+        if self.asymmetric_kv:
+            self.py_rope_impl = MhaRotaryEmbeddingOp(attn_configs)
+            self.kv_cache_write_op = KVCacheWriteOp(
+                num_kv_heads=attn_configs.kv_head_num,
+                head_size=attn_configs.size_per_head,
+                token_per_block=attn_configs.kernel_tokens_per_block,
+            )
 
         # Store input info
         self.attn_inputs = attn_inputs
@@ -1213,6 +1512,11 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
         self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
+        if self.asymmetric_kv:
+            # fmha_params carries positions_d / batch_indice_d and the page metadata
+            # both of these need.
+            self.py_rope_impl.set_params(self.fmha_params)
+            self.kv_cache_write_op.set_params(self.fmha_params)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
         """Prepare FlashInfer/RoPE buffers and metadata for CUDA graph replay."""
@@ -1224,13 +1528,19 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
         )
 
     def support_cuda_graph(self) -> bool:
-        return True
+        # The asymmetric path runs RoPE and the KV write from Python, which the capture
+        # does not cover.
+        return not self.asymmetric_kv
 
     @classmethod
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
         return not attn_configs.use_mla
+
+    def set_sink_bias(self, bias: Optional[torch.Tensor]) -> None:
+        """Set the current layer's per-head attention sink bias, or None if it has none."""
+        self.fmha_impl.set_sink_bias(bias)
 
     def forward(
         self,
@@ -1240,7 +1550,13 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
     ) -> torch.Tensor:
         # Apply RoPE and KV Cache processing
         if self.need_rope_kv_cache:
-            qkv = self.rope_impl.forward(qkv, kv_cache, self.rope_params)
+            if self.asymmetric_kv:
+                query, key, value = self.py_rope_impl.forward(qkv)
+                self.kv_cache_write_op.forward(key, value, kv_cache)
+                # Only Q goes on to attention; K/V now live in the cache.
+                qkv = query
+            else:
+                qkv = self.rope_impl.forward(qkv, kv_cache, self.rope_params)
 
         # Apply write cache store if needed
         common.apply_write_cache_store(

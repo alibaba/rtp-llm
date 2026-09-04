@@ -24,6 +24,7 @@ KvCacheDataType inline loadKvCacheDataTypeFromString(const std::string& str) {
 struct AttentionConfigs {
     size_t head_num;
     size_t kv_head_num;
+    // QK head dimension (e.g. 192 for MiMo V2.5)
     size_t size_per_head;
 
     // rotary embending config
@@ -64,12 +65,17 @@ struct AttentionConfigs {
     //   value 128 -> HCA (compress every m'=128 raw tokens, dense MQA)
     std::vector<int> layer_compress_ratios;
     // Output projection: grouped (n_h heads -> g groups -> per-group rank -> hidden_size)
-    size_t o_groups               = 0;
-    size_t o_lora_rank            = 0;
+    size_t o_groups    = 0;
+    size_t o_lora_rank = 0;
     // Sliding-window bypass attention window size (0 disables SWA bypass)
-    int    sliding_window         = 0;
+    int sliding_window = 0;
     // Separate RoPE base for the compressed K branch (V4: rope_theta=10000 main, compress=160000)
-    double compress_rope_theta    = 0.0;
+    double compress_rope_theta = 0.0;
+
+    // V head dimension; 0 means same as size_per_head (symmetric model)
+    size_t v_size_per_head = 0;
+    // MiMo: per-head learnable attention sink appended to the softmax denominator
+    bool add_sink_bias = false;
 
     // data type for attention computation
     c10::ScalarType dtype = c10::ScalarType::Half;
@@ -81,7 +87,10 @@ struct AttentionConfigs {
     int64_t gen_num_per_cycle = 0;
 
 public:
-    std::string DebugAttentionConfigStr() const;
+    std::string   DebugAttentionConfigStr() const;
+    inline size_t vSizePerHead() const {
+        return v_size_per_head == 0 ? size_per_head : v_size_per_head;
+    }
 };
 
 }  // namespace rtp_llm

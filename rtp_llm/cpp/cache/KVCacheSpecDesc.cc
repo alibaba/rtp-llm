@@ -72,6 +72,9 @@ CacheGroupPolicy SpecBuilder::groupPolicy(const KVCacheSpecDesc& desc) {
         if (desc.tail->active_tail_blocks.has_value()) {
             policy.active_tail_blocks = *desc.tail->active_tail_blocks;
         }
+        if (desc.tail->prefix_reuse_window_tokens.has_value()) {
+            policy.prefix_reuse_window_tokens = *desc.tail->prefix_reuse_window_tokens;
+        }
         if (desc.tail->validate_tail_blocks.has_value()) {
             policy.validate_tail_blocks = *desc.tail->validate_tail_blocks;
         }

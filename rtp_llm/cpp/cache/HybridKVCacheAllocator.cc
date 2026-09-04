@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/HybridKVCacheAllocator.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -56,6 +57,32 @@ BlockIndicesType validBlocksAfter(const BlockIndicesType& blocks, size_t begin) 
     return valid;
 }
 
+// Return the first canonical cache-key block needed by the SWA window when
+// `end` is the last reused block.  Cache keys are in canonical units under CP,
+// so one key covers cp_scale raw blocks.  A zero window keeps the historical
+// single-tail behavior used by generic SWA groups that do not declare a
+// prefix-reuse window; MiMo supplies the explicit window in its descriptor.
+int swaMatchBegin(const KVCacheGroup& group, int end, int cp_scale) {
+    const auto window_tokens = group.policy().prefix_reuse_window_tokens;
+    if (window_tokens == 0) {
+        return end;
+    }
+    if (window_tokens == 1) {
+        return end + 1;
+    }
+
+    const int     block_tokens    = std::max(1, group.seqSizePerBlock() * std::max(cp_scale, 1));
+    const int64_t first_new_token = static_cast<int64_t>(end + 1) * block_tokens;
+    const int64_t history_tokens  = static_cast<int64_t>(window_tokens - 1);
+    const int64_t history_start   = std::max<int64_t>(0, first_new_token - history_tokens);
+    return std::max(0, static_cast<int>(history_start / block_tokens));
+}
+
+struct SwaMatch {
+    int              begin = 0;
+    BlockIndicesType blocks;
+};
+
 }  // namespace
 
 bool HybridKVCacheAllocator::skipReuseCacheGroup(int gid) const {
@@ -102,14 +129,14 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
         full_matched_blocks[static_cast<size_t>(gid)] = std::move(match_result.block_indices);
     }
 
-    int                           pos = min_full_reuse_blocks - 1;
-    std::vector<BlockIdxType>     linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
-    std::vector<BlockIndicesType> swa_tail_blocks(swa_group_ids_.size());
-    const bool                    has_tail_groups = !linear_group_ids_.empty() || !swa_group_ids_.empty();
+    int                       pos = min_full_reuse_blocks - 1;
+    std::vector<BlockIdxType> linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
+    std::vector<SwaMatch>     swa_tail_matches(swa_group_ids_.size());
+    const bool                has_tail_groups = !linear_group_ids_.empty() || !swa_group_ids_.empty();
     for (; pos >= 0 && has_tail_groups; --pos) {
-        bool                          all_tail_groups_matched = true;
-        std::vector<BlockIdxType>     candidate_linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
-        std::vector<BlockIndicesType> candidate_swa_tail_blocks(swa_group_ids_.size());
+        bool                      all_tail_groups_matched = true;
+        std::vector<BlockIdxType> candidate_linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
+        std::vector<SwaMatch>     candidate_swa_tail_matches(swa_group_ids_.size());
         for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
             const int gid = linear_group_ids_[i];
             auto      result =
@@ -128,17 +155,28 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
             if (skipReuseCacheGroup(gid)) {
                 continue;
             }
-            auto result =
-                kv_cache_groups_[static_cast<size_t>(gid)]->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
-            if (result.block_indices.empty()) {
-                all_tail_groups_matched = false;
+            const auto& group = *kv_cache_groups_[static_cast<size_t>(gid)];
+            const int   begin = swaMatchBegin(group, pos, cp_scale);
+            auto&       match = candidate_swa_tail_matches[i];
+            match.begin       = begin;
+            if (begin <= pos) {
+                match.blocks.reserve(static_cast<size_t>(pos - begin + 1));
+                for (int key_pos = begin; key_pos <= pos; ++key_pos) {
+                    auto result = group.matchSingleKey(cache_keys[static_cast<size_t>(key_pos)]);
+                    if (result.block_indices.empty()) {
+                        all_tail_groups_matched = false;
+                        break;
+                    }
+                    match.blocks.push_back(result.block_indices[0]);
+                }
+            }
+            if (!all_tail_groups_matched) {
                 break;
             }
-            candidate_swa_tail_blocks[i].push_back(result.block_indices[0]);
         }
         if (all_tail_groups_matched) {
             linear_tail_blocks = std::move(candidate_linear_tail_blocks);
-            swa_tail_blocks    = std::move(candidate_swa_tail_blocks);
+            swa_tail_matches   = std::move(candidate_swa_tail_matches);
             break;
         }
     }
@@ -176,10 +214,17 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
         if (skipReuseCacheGroup(gid)) {
             continue;
         }
-        const size_t tail_begin =
-            static_cast<size_t>(std::max(group_reuse_len - static_cast<int>(swa_tail_blocks[i].size()), 0));
-        for (size_t j = 0; j < swa_tail_blocks[i].size(); ++j) {
-            kv_resource.mutableBlockIds(0, gid).setAt(tail_begin + j, swa_tail_blocks[i][j]);
+        const auto& match = swa_tail_matches[i];
+        for (size_t j = 0; j < match.blocks.size(); ++j) {
+            const int canonical_pos = match.begin + static_cast<int>(j);
+            // Compact-last-rank SWA uses one slot per canonical key.  The
+            // non-compact layout keeps cp_size logical slots per key, and the
+            // canonical key owns the last slot in that group.
+            const int logical_pos =
+                cpCompactSwaGroup(gid, cp_mapper) ? canonical_pos : (canonical_pos + 1) * cp_scale - 1;
+            if (logical_pos >= 0 && logical_pos < group_reuse_len) {
+                kv_resource.mutableBlockIds(0, gid).setAt(static_cast<size_t>(logical_pos), match.blocks[j]);
+            }
         }
     }
     return reuse_blocks_len;
@@ -259,19 +304,15 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         original_sizes[static_cast<size_t>(gid)] = kv_resource->blocksNum(0, gid);
     }
     for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-        auto&     block_ids_0   = kv_resource->mutableBlockIds(0, gid);
-        const int group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, config_, gid, common_seq_len);
-        const auto& group = kv_cache_groups_[static_cast<size_t>(gid)];
+        auto&       block_ids_0   = kv_resource->mutableBlockIds(0, gid);
+        const int   group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, config_, gid, common_seq_len);
+        const auto& group         = kv_cache_groups_[static_cast<size_t>(gid)];
         // Snapshot the slot count before the call so a failure can report this
         // group's exact physical request in the error_code=602 record.
         const int blocks_before = static_cast<int>(block_ids_0.blocksNum());
         if (!group->malloc(block_ids_0, group_seq_len, malloc_info.reuse_cache, 0)) {
-            logMallocFailure(malloc_info,
-                             "init_group_malloc",
-                             0,
-                             gid,
-                             false,
-                             group->needBlocksNum(group_seq_len, blocks_before, 0));
+            logMallocFailure(
+                malloc_info, "init_group_malloc", 0, gid, false, group->needBlocksNum(group_seq_len, blocks_before, 0));
             rollbackInitMalloc(*kv_resource, referenced_blocks, original_sizes);
             return {false, 0};
         }
