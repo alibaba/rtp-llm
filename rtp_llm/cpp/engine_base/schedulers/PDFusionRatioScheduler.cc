@@ -194,7 +194,7 @@ bool PDFusionRatioScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>
 
 bool PDFusionRatioScheduler::waitPredicate() {
     return stop_ || schedule_trigger_ || !waiting_streams_.empty() || !loading_cache_streams_.empty()
-           || !running_streams_.empty() || !pending_decode_streams_.empty();
+           || !running_streams_.empty() || !pending_decode_streams_.empty() || !new_streams_.empty();
 }
 
 absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
@@ -209,47 +209,58 @@ absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
 
     bool made_progress = false;
     made_progress |= evaluateAndUpdateStreams(loading_cache_streams_) > 0;
-    made_progress |= reapErroredWaitingStreams() > 0;
-    made_progress |= reapFinished(running_streams_) > 0;
-    made_progress |= reapFinished(pending_decode_streams_) > 0;
+    made_progress |= refreshAndReapTerminalStreams(waiting_streams_);
+    if (has_unclassified_prefill_batch_) {
+        made_progress |= classifyActivePrefillBatch();
+    } else {
+        made_progress |= refreshAndReapTerminalStreams(new_streams_);
+    }
+    made_progress |= refreshAndReapTerminalStreams(running_streams_);
+    made_progress |= refreshAndReapTerminalStreams(pending_decode_streams_);
 
     const RoundType round = chooseRound();
 
     if (round == RoundType::PREFILL) {
-        const size_t prev_waiting_size = waiting_streams_.size();
-        // Build once for this in-flight snapshot, then update for accepted candidates.
-        admission_peak_state_.reset();
-        evaluateWaitingStreams(waiting_streams_);
-        admission_peak_state_.reset();
-        made_progress |= evaluateAndUpdateStreams(waiting_streams_) > 0;
-        if (!new_streams_.empty()) {
-            list<GenerateStreamPtr> prefill_batch(new_streams_.begin(), new_streams_.end());
-            pending_decode_streams_.insert(pending_decode_streams_.end(), new_streams_.begin(), new_streams_.end());
-            new_streams_.clear();
-            decode_since_prefill_ = 0;
-            prefill_since_decode_ += 1;
+        if (new_streams_.empty()) {
+            const size_t prev_waiting_size = waiting_streams_.size();
+            // Build once for this in-flight snapshot, then update for accepted candidates.
+            admission_peak_state_.reset();
+            evaluateWaitingStreams(waiting_streams_);
+            admission_peak_state_.reset();
+            made_progress |= evaluateAndUpdateStreams(waiting_streams_) > 0;
             if (waiting_streams_.size() < prev_waiting_size) {
                 schedule_trigger_ = true;
             }
-            reportMetrics();
-            last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
-            return prefill_batch;
+        }
+        if (!new_streams_.empty()) {
+            const size_t active_size_before = new_streams_.size();
+            auto         prefill_batch      = selectPrefillPrefix(new_streams_);
+            made_progress |= new_streams_.size() < active_size_before;
+            if (!prefill_batch.empty()) {
+                has_unclassified_prefill_batch_ = true;
+                decode_since_prefill_          = 0;
+                prefill_since_decode_ += 1;
+                reportMetrics();
+                last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
+                return prefill_batch;
+            }
         }
     }
 
     made_progress |= evaluateAndUpdateStreams(running_streams_) > 0;
-    made_progress |= promotePendingDecodeStreams() > 0;
+    made_progress |= promotePendingDecodeStreams();
     if (!running_streams_.empty()) {
         decode_since_prefill_ += 1;
         prefill_since_decode_ = 0;
     }
-    if (!pending_decode_streams_.empty() || (made_progress && !waiting_streams_.empty())) {
+    if (!pending_decode_streams_.empty() || !new_streams_.empty()
+        || (made_progress && !waiting_streams_.empty())) {
         schedule_trigger_ = true;
     }
     if (running_streams_.empty() && !made_progress && !waiting_streams_.empty()) {
         cond_.wait_for(lock, kNoProgressScheduleGap, [this] {
             return stop_ || schedule_trigger_ || !loading_cache_streams_.empty() || !running_streams_.empty()
-                   || !pending_decode_streams_.empty();
+                   || !pending_decode_streams_.empty() || !new_streams_.empty();
         });
     }
 
@@ -259,7 +270,7 @@ absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
 }
 
 PDFusionRatioScheduler::RoundType PDFusionRatioScheduler::chooseRound() {
-    if (waiting_streams_.empty()) {
+    if (new_streams_.empty() && waiting_streams_.empty()) {
         return RoundType::DECODE;
     }
     if (running_streams_.empty() && pending_decode_streams_.empty()) {
@@ -356,68 +367,65 @@ bool PDFusionRatioScheduler::tryAdmitKVForPrefill(const GenerateStreamPtr& new_s
         new_stream, static_cast<int64_t>(initial_capacity), static_cast<int64_t>(available));
 }
 
-size_t PDFusionRatioScheduler::reapErroredWaitingStreams() {
-    size_t reaped_count = 0;
-    for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
-        auto& stream = *it;
-        if (stream->hasError()) {
-            auto new_state = stream->moveToNext();
-            if (new_state != StreamState::FINISHED) {
-                RTP_LLM_LOG_ERROR("Unexpected state %d when reaping errored waiting stream [%ld]",
-                                  static_cast<int>(new_state),
-                                  stream->streamId());
+bool PDFusionRatioScheduler::classifyActivePrefillBatch() {
+    const bool classified = !new_streams_.empty();
+    for (auto it = new_streams_.begin(); it != new_streams_.end();) {
+        const auto& stream = *it;
+        stream->checkTimeout();
+
+        const auto state    = stream->getStatus();
+        const bool terminal = stream->hasError() || stream->hasEvent(StreamEvents::GenerateDone);
+        if (state != StreamState::RUNNING || terminal) {
+            if (state != StreamState::RUNNING && state != StreamState::FINISHED && !stream->hasError()) {
+                stream->reportError(ErrorCode::UNKNOWN_ERROR, "invalid active-prefill stream state");
             }
-            it = waiting_streams_.erase(it);
-            ++reaped_count;
-        } else {
+            stream->moveToNext();
+            it = new_streams_.erase(it);
+        } else if (stream->chunkedPrefillEnabled() && stream->isContextStream()) {
             ++it;
+        } else {
+            // A completed non-chunk/final prefill is decode-ready, but must not grow decode KV
+            // until a DECODE round actually promotes it. Production dispatch already flips this
+            // flag; setting it here also keeps fake/test prefills out of later context batches.
+            stream->setIsContextStream(false);
+            auto current = it++;
+            pending_decode_streams_.splice(pending_decode_streams_.end(), new_streams_, current);
         }
     }
-    return reaped_count;
+    has_unclassified_prefill_batch_ = false;
+    return classified;
 }
 
-size_t PDFusionRatioScheduler::reapFinished(std::list<GenerateStreamPtr>& streams) {
-    size_t reaped_count = 0;
-    for (auto it = streams.begin(); it != streams.end();) {
-        auto& stream = *it;
-        if (stream->hasError() || stream->hasEvent(StreamEvents::GenerateDone)) {
-            auto new_state = stream->moveToNext();
-            if (new_state != StreamState::FINISHED) {
-                RTP_LLM_LOG_ERROR("Unexpected state %d when reaping finished stream [%ld]",
-                                  static_cast<int>(new_state),
-                                  stream->streamId());
-            }
-            it = streams.erase(it);
-            ++reaped_count;
-        } else {
-            ++it;
-        }
-    }
-    return reaped_count;
-}
-
-size_t PDFusionRatioScheduler::promotePendingDecodeStreams() {
-    size_t promoted_count = 0;
+bool PDFusionRatioScheduler::promotePendingDecodeStreams() {
+    const bool processed = !pending_decode_streams_.empty();
     for (auto it = pending_decode_streams_.begin(); it != pending_decode_streams_.end();) {
-        auto& stream    = *it;
-        auto  new_state = stream->moveToNext();
-        if (new_state == StreamState::RUNNING) {
-            running_streams_.push_back(stream);
-        } else if (new_state != StreamState::FINISHED) {
-            RTP_LLM_LOG_ERROR("Unexpected state %d when promoting pending decode stream [%ld]",
-                              static_cast<int>(new_state),
-                              stream->streamId());
-            addStreamToNewState(stream, new_state);
+        const auto& stream = *it;
+        const auto state = stream->getStatus();
+        if ((state != StreamState::RUNNING || stream->isContextStream()) && state != StreamState::FINISHED
+            && !stream->hasError()) {
+            stream->reportError(ErrorCode::UNKNOWN_ERROR, "invalid pending-decode stream state");
         }
-        it = pending_decode_streams_.erase(it);
-        ++promoted_count;
+
+        const auto new_state = stream->moveToNext();
+        if (new_state == StreamState::RUNNING) {
+            auto current = it++;
+            running_streams_.splice(running_streams_.end(), pending_decode_streams_, current);
+        } else {
+            if (new_state != StreamState::FINISHED) {
+                stream->reportError(ErrorCode::UNKNOWN_ERROR, "unexpected pending-decode promotion state");
+                stream->moveToNext();
+            }
+            it = pending_decode_streams_.erase(it);
+        }
     }
-    return promoted_count;
+    return processed;
 }
 
 int64_t PDFusionRatioScheduler::pendingDecodeStreamsSize() {
     std::lock_guard<mutex> lock(lock_);
-    return pending_decode_streams_.size();
+    // Preserve the historical test/diagnostic meaning: streams returned by a prefill round but
+    // not yet part of running decode, regardless of which classification stage they are in.
+    return pending_decode_streams_.size() + new_streams_.size();
 }
 
 int64_t PDFusionRatioScheduler::decodeSincePrefillForTest() {
@@ -427,20 +435,22 @@ int64_t PDFusionRatioScheduler::decodeSincePrefillForTest() {
 
 void PDFusionRatioScheduler::cancelExtraStreams() {
     cancelStreams(pending_decode_streams_);
+    has_unclassified_prefill_batch_ = false;
     cancelStreams(new_streams_);
 }
 
-bool PDFusionRatioScheduler::hasExtraStreams() const {
-    return !pending_decode_streams_.empty() || !new_streams_.empty();
-}
-
 int64_t PDFusionRatioScheduler::extraOnflightStreams() const {
-    return pending_decode_streams_.size();
+    return pending_decode_streams_.size() + new_streams_.size();
 }
 
 void PDFusionRatioScheduler::fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const {
     collector.pending_decode_stream_size = pending_decode_streams_.size();
     collector.decode_since_prefill       = decode_since_prefill_;
+}
+
+void PDFusionRatioScheduler::appendExtraRunningTaskList(std::vector<EngineScheduleInfo::TaskInfo>& task_list) const {
+    appendTaskInfos(task_list, pending_decode_streams_);
+    appendTaskInfos(task_list, new_streams_);
 }
 
 }  // namespace rtp_llm
