@@ -282,6 +282,18 @@ final class MockControlServer {
                     case "enqueue_ack_error_code" -> builder.enqueueAckErrorCode(
                             enabled ? body.path("code").asLong(0) : 0);
                     case "enqueue_ack_drop" -> builder.enqueueAckDrop(enabled);
+                    // ── Prefill execution-phase partial-failure family (the
+                    // completion-callback injection — see FaultInjectionConfig
+                    // .prefillAsyncPartialFail; single case carrying both k
+                    // and code, the status_fake_task multi-param pattern) ──
+                    case "prefill_async_partial_fail" -> {
+                        builder.prefillAsyncPartialFail(
+                                enabled ? body.path("k").asInt(1) : 0);
+                        // Disarm restores the default code (NOT 0 — a zero
+                        // errorCode reads as "success" in the terminal fact).
+                        builder.prefillAsyncFailCode(
+                                enabled ? body.path("code").asLong(8500L) : 8500L);
+                    }
                     // ── Cancel-RPC fault family (RPC-layer failures simulated
                     // BEFORE the engine cancel state machine is touched — no
                     // fences, no tombstones; the gRPC Cancel handler and the

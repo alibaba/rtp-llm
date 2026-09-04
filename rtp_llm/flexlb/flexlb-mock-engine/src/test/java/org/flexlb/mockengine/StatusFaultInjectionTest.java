@@ -1,5 +1,7 @@
 package org.flexlb.mockengine;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
@@ -12,21 +14,26 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.flexlb.mockengine.MockEngineTestSupport.batch;
 import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.httpGet;
 import static org.flexlb.mockengine.MockEngineTestSupport.httpPost;
 import static org.flexlb.mockengine.MockEngineTestSupport.input;
+import static org.flexlb.mockengine.MockEngineTestSupport.inputWithDecode;
 import static org.flexlb.mockengine.MockEngineTestSupport.slot;
 import static org.flexlb.mockengine.MockEngineTestSupport.workerStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -34,7 +41,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * 9 getWorkerStatus output-layer faults (suppress_finished / suppress_running /
  * suppress_rids / no_respond / fake_task / duplicate_finished / cursor_regress /
  * version_regress / zombie_running) and 3 EnqueueBatch ack faults
- * (enqueue_ack_partial_fail / enqueue_ack_error_code / enqueue_ack_drop).
+ * (enqueue_ack_partial_fail / enqueue_ack_error_code / enqueue_ack_drop),
+ * plus the execution-phase partial-failure injection
+ * (prefill_async_partial_fail: batch members that fail AT the prefill
+ * completion callback and surface as typed terminals on the status channel —
+ * production "stream->reportError → dequeue fills task_info.error_code /
+ * error_message → finished_task_list" semantics).
  *
  * <p>All injections go through the real HTTP /inject endpoint of
  * {@link MockControlServer} (Java type format) and are asserted against the
@@ -500,6 +512,241 @@ class StatusFaultInjectionTest {
     }
 
     // ════════════════════════════════════════════════════════════════
+    //  prefill_async_partial_fail (execution-phase partial failure)
+    // ════════════════════════════════════════════════════════════════
+
+    @Test
+    void prefillAsyncPartialFailFailsFirstKAtCompletionCallback() throws Exception {
+        MockPerformanceModel model = model("10");
+        int basePort = startCluster(model, 1, 0);
+        JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
+
+        inject(basePort, "prefill_async_partial_fail", "\"k\":1,\"code\":8500");
+        // The ack is HONEST for every member (this is the execution-phase
+        // counterpart of enqueue_ack_partial_fail): all members acknowledged.
+        EngineRpcService.EnqueueBatchResponsePB ack =
+                enqueue(prefill, batch(7101, slot(0, input(101, 10), input(102, 10), input(103, 10))));
+        assertEquals(3, ack.getSuccessesCount(),
+                "execution-phase injection must not touch the ack");
+        assertEquals(0, ack.getErrorsCount());
+
+        // All 3 members surface in finished_task_list: the failed one as a
+        // TYPED terminal (error_code 8500), the survivors as normal terminals
+        // — same batch_id throughout (stream group_id → TaskInfo).
+        EngineRpcService.WorkerStatusPB done = awaitFinished(prefill, 0, 3, 5_000);
+        assertEquals(3, done.getFinishedTaskListCount());
+        assertEquals(3, done.getLatestFinishedVersion());
+        EngineRpcService.TaskInfoPB failed = findByRid(done, 101);
+        assertNotNull(failed, "the batch's first member must be reported finished");
+        assertTrue(failed.hasErrorInfo(), "the injected member carries error_info");
+        assertEquals(8500L, failed.getErrorInfo().getErrorCode());
+        assertEquals("injected prefill_async_partial_fail",
+                failed.getErrorInfo().getErrorMessage());
+        assertEquals(7101, failed.getBatchId(),
+                "the typed failure terminal keeps the batch_id (master reconcile)");
+        assertFalse(findByRid(done, 102).hasErrorInfo(), "survivor 102 completes normally");
+        assertFalse(findByRid(done, 103).hasErrorInfo(), "survivor 103 completes normally");
+
+        // Prefill-only cluster: survivors take the completed branch, the
+        // failed member does NOT count as completed.
+        assertEquals(2, prefill.getCompletedCount(),
+                "the failed member is not a completed request");
+
+        // k=2 with a custom code: the first TWO members of a fresh batch fail.
+        inject(basePort, "prefill_async_partial_fail", "\"k\":2,\"code\":8431");
+        EngineRpcService.EnqueueBatchResponsePB ack2 =
+                enqueue(prefill, batch(7102, slot(0, input(104, 10), input(105, 10), input(106, 10))));
+        assertEquals(3, ack2.getSuccessesCount());
+        EngineRpcService.WorkerStatusPB done2 = awaitFinished(prefill, 3, 3, 5_000);
+        assertTrue(findByRid(done2, 104).hasErrorInfo());
+        assertEquals(8431L, findByRid(done2, 104).getErrorInfo().getErrorCode());
+        assertTrue(findByRid(done2, 105).hasErrorInfo());
+        assertFalse(findByRid(done2, 106).hasErrorInfo(),
+                "k=2: only the first two members fail");
+        assertEquals(3, prefill.getCompletedCount(), "2 + 1 survivors are completed");
+
+        // Cumulative counter: 1 + 2 failed members exported via /snapshot.
+        assertEquals(3L, snapshotCounter("prefill", "prefill_async_partial_fails"),
+                "/snapshot carries prefill_async_partial_fails");
+    }
+
+    @Test
+    void prefillAsyncPartialFailMemberSkipsDecodeAndReleasesReservations() throws Exception {
+        MockPerformanceModel model = model("10");
+        int basePort = startCluster(model, 1, 1);
+        JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
+        JavaMockEngineCluster.FastRpcService decode = decodeServices.get(0);
+        int decodePort = basePort + 1;
+
+        inject(basePort, "prefill_async_partial_fail", "\"k\":1,\"code\":8500");
+        EngineRpcService.EnqueueBatchResponsePB ack = enqueue(prefill, batch(7201, slot(0,
+                inputWithDecode(201, 10, decodePort),
+                inputWithDecode(202, 10, decodePort),
+                inputWithDecode(203, 10, decodePort))));
+        assertEquals(3, ack.getSuccessesCount());
+
+        // Prefill terminals: 1 typed failure (201) + 2 normal (202/203).
+        EngineRpcService.WorkerStatusPB done = awaitFinished(prefill, 0, 3, 5_000);
+        assertTrue(findByRid(done, 201).hasErrorInfo());
+        assertEquals(8500L, findByRid(done, 201).getErrorInfo().getErrorCode());
+        assertFalse(findByRid(done, 202).hasErrorInfo());
+        assertFalse(findByRid(done, 203).hasErrorInfo());
+
+        // Decode engine: ONLY the survivors hand off — the failed member
+        // never starts decode (no ghost decode stream, no D-side lease held).
+        EngineRpcService.WorkerStatusPB decodeDone = awaitFinished(decode, 0, 2, 5_000);
+        assertEquals(2, decodeDone.getFinishedTaskListCount(),
+                "exactly the two survivors complete decode");
+        List<Long> decodeRids = new ArrayList<>();
+        for (EngineRpcService.TaskInfoPB task : decodeDone.getFinishedTaskListList()) {
+            decodeRids.add(task.getRequestId());
+        }
+        assertTrue(decodeRids.contains(202L) && decodeRids.contains(203L),
+                "decode completions are the survivors: " + decodeRids);
+        assertFalse(decodeRids.contains(201L),
+                "the failed member never reaches decode: " + decodeRids);
+
+        // No leaked slots on either engine (the failed member's P-side lease
+        // AND D-side reservation both returned; survivors finished decode).
+        Thread.sleep(150);
+        assertEquals(0, prefill.getInflightCount(), "prefill slots quiesce");
+        assertEquals(0, prefill.getRunningCount(), "no zombie running entry");
+        assertEquals(0, decode.getInflightCount(), "decode slots quiesce");
+        assertEquals(1L, snapshotCounter("prefill", "prefill_async_partial_fails"));
+    }
+
+    @Test
+    void prefillAsyncPartialFailOffByDefaultAndDisarmsCleanly() throws Exception {
+        MockPerformanceModel model = model("10");
+        int basePort = startCluster(model, 1, 0);
+        JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
+
+        // Default (never injected): zero impact.
+        EngineRpcService.EnqueueBatchResponsePB cleanAck =
+                enqueue(prefill, batch(7301, slot(0, input(301, 10), input(302, 10))));
+        assertEquals(2, cleanAck.getSuccessesCount());
+        EngineRpcService.WorkerStatusPB cleanDone = awaitFinished(prefill, 0, 2, 5_000);
+        assertFalse(findByRid(cleanDone, 301).hasErrorInfo());
+        assertFalse(findByRid(cleanDone, 302).hasErrorInfo());
+        assertEquals(2, prefill.getCompletedCount());
+
+        // Explicit k=0 is equally inert.
+        inject(basePort, "prefill_async_partial_fail", "\"k\":0");
+        enqueue(prefill, batch(7302, slot(0, input(303, 10))));
+        EngineRpcService.WorkerStatusPB k0Done = awaitFinished(prefill, 2, 1, 5_000);
+        assertFalse(findByRid(k0Done, 303).hasErrorInfo(), "k=0 must inject nothing");
+        assertEquals(3, prefill.getCompletedCount());
+
+        // Armed (k=1, custom code) → exactly one typed failure.
+        inject(basePort, "prefill_async_partial_fail", "\"k\":1,\"code\":9001");
+        enqueue(prefill, batch(7303, slot(0, input(304, 10), input(305, 10))));
+        EngineRpcService.WorkerStatusPB armedDone = awaitFinished(prefill, 3, 2, 5_000);
+        assertTrue(findByRid(armedDone, 304).hasErrorInfo());
+        assertEquals(9001L, findByRid(armedDone, 304).getErrorInfo().getErrorCode());
+        assertFalse(findByRid(armedDone, 305).hasErrorInfo());
+
+        // Disarmed (enabled=false) → the next batch is fully clean.
+        disable(basePort, "prefill_async_partial_fail");
+        enqueue(prefill, batch(7304, slot(0, input(306, 10), input(307, 10))));
+        EngineRpcService.WorkerStatusPB disarmedDone = awaitFinished(prefill, 5, 2, 5_000);
+        assertFalse(findByRid(disarmedDone, 306).hasErrorInfo(),
+                "disabled injection must not fail members");
+        assertFalse(findByRid(disarmedDone, 307).hasErrorInfo());
+        assertEquals(6, prefill.getCompletedCount(), "2+1+1+2 completed requests");
+    }
+
+    @Test
+    void prefillAsyncPartialFailTerminatesFailedMemberStreamWithTypedErrorFrame() throws Exception {
+        MockPerformanceModel model = model("10");
+        int basePort = startCluster(model, 1, 0);
+        JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
+
+        inject(basePort, "prefill_async_partial_fail", "\"k\":1,\"code\":8500");
+
+        // Open BOTH client-side FetchResponse streams BEFORE enqueuing (the
+        // real client's call order: the stream is issued right after the
+        // schedule ack, well before the 10 ms prefill executes; the queue is
+        // shared with the EnqueueBatch Phase-1 admission either way).
+        StreamCollector failedStream = new StreamCollector();
+        StreamCollector survivorStream = new StreamCollector();
+        prefill.fetchResponse(EngineRpcService.FetchRequestPB.newBuilder()
+                .setRequestId(401).build(), failedStream.observer());
+        prefill.fetchResponse(EngineRpcService.FetchRequestPB.newBuilder()
+                .setRequestId(402).build(), survivorStream.observer());
+
+        EngineRpcService.EnqueueBatchResponsePB ack =
+                enqueue(prefill, batch(7401, slot(0, input(401, 10), input(402, 10))));
+        assertEquals(2, ack.getSuccessesCount());
+
+        failedStream.await(10_000);
+        survivorStream.await(10_000);
+
+        // Failed member: exactly ONE frame — the in-band typed error terminal
+        // (production stream->reportError's client-visible half). The code
+        // rides the RAW enum value (8500 sits outside ErrorCodePB; proto3 open
+        // enums keep it on the wire) and the message text carries the numeric
+        // too; the stream COMPLETES right after the frame (the pump treats
+        // hasErrorInfo frames as terminal), it does not error.
+        assertNull(failedStream.error.get(),
+                "the error frame must complete the stream, not error it");
+        assertEquals(1, failedStream.frames.size(),
+                "the failed member delivers exactly the error frame");
+        EngineRpcService.GenerateOutputsPB frame = failedStream.frames.get(0);
+        assertEquals(401L, frame.getRequestId());
+        assertTrue(frame.hasErrorInfo(), "the terminal frame carries error_info");
+        assertEquals(8500, frame.getErrorInfo().getErrorCodeValue(),
+                "the injected code rides the raw enum value");
+        assertTrue(frame.getErrorInfo().getErrorMessage().contains("8500"),
+                "the message text carries the numeric code as well");
+        assertTrue(frame.getErrorInfo().getErrorMessage()
+                        .contains("injected prefill_async_partial_fail"),
+                "the message identifies the injection");
+
+        // Survivor of the SAME batch: the normal single terminal frame
+        // (prefill-only cluster), no error_info — members settle
+        // independently, no batch-level failure propagation.
+        assertNull(survivorStream.error.get());
+        assertEquals(1, survivorStream.frames.size());
+        assertFalse(survivorStream.frames.get(0).hasErrorInfo());
+        assertEquals(1, survivorStream.frames.get(0).getFlattenOutput().getFinishedCount());
+        assertTrue(survivorStream.frames.get(0).getFlattenOutput().getFinished(0),
+                "the survivor's frame is the normal terminal frame");
+    }
+
+    /** Async FetchResponse / GenerateStreamCall collector (MultiFrameStreamTtft
+     *  style, adapted so several streams can be opened before the batch runs). */
+    private static final class StreamCollector {
+        final List<EngineRpcService.GenerateOutputsPB> frames = new CopyOnWriteArrayList<>();
+        final AtomicReference<Throwable> error = new AtomicReference<>();
+        final CountDownLatch terminal = new CountDownLatch(1);
+
+        StreamObserver<EngineRpcService.GenerateOutputsPB> observer() {
+            return new StreamObserver<>() {
+                @Override
+                public void onNext(EngineRpcService.GenerateOutputsPB value) {
+                    frames.add(value);
+                }
+
+                @Override
+                public void onError(Throwable t) {
+                    error.set(t);
+                    terminal.countDown();
+                }
+
+                @Override
+                public void onCompleted() {
+                    terminal.countDown();
+                }
+            };
+        }
+
+        void await(long ms) throws InterruptedException {
+            assertTrue(terminal.await(ms, TimeUnit.MILLISECONDS),
+                    "stream must terminate (completed or error) within " + ms + "ms");
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════
     //  Cluster scaffolding (direct service calls, MockControlServer on :0)
     // ════════════════════════════════════════════════════════════════
 
@@ -570,6 +817,31 @@ class StatusFaultInjectionTest {
             last = workerStatus(service, sinceVersion);
         }
         return last;
+    }
+
+    /** First finished-task entry matching {@code rid} (null if absent). */
+    private static EngineRpcService.TaskInfoPB findByRid(
+            EngineRpcService.WorkerStatusPB status, long rid) {
+        for (EngineRpcService.TaskInfoPB task : status.getFinishedTaskListList()) {
+            if (task.getRequestId() == rid) {
+                return task;
+            }
+        }
+        return null;
+    }
+
+    /** Read a per-engine long field from GET /snapshot (counter assertions).
+     *  Matches by snapshot "role": the test constructor derives engineName
+     *  as "&lt;role&gt;-&lt;port&gt;", so a name match would never hit. */
+    private long snapshotCounter(String role, String field) throws Exception {
+        JsonNode snapshot = new ObjectMapper()
+                .readTree(httpGet(controlServer.getPort(), "/snapshot"));
+        for (JsonNode engine : snapshot.path("engines")) {
+            if (role.equals(engine.path("role").asText())) {
+                return engine.path(field).asLong(-1);
+            }
+        }
+        return -1L;
     }
 
     /** Drive generateStreamCall without blocking on its stream (decode zombie test). */

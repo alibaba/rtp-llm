@@ -147,6 +147,16 @@ class StreamSnapshot:
     # under BATCH dispatch the first FetchResponse message only surfaces
     # after decode completes, so P7 uses the completion-duration口径 there).
     first_received_s: Optional[float] = None
+    # In-band typed error frame (GenerateOutputsPB.error_info, RpcErrorPB):
+    # the engine terminates failed streams IN-BAND — a frame carrying
+    # error_info is the LAST frame, then the stream completes with gRPC
+    # status OK (see priority.py _StreamTerminal's A1 note).  The raw code
+    # is an int: proto3 open enums surface non-production values (e.g. an
+    # injected 8500) as plain ints on the wire.  These fields are PURE
+    # additions — snap.error / snap.completed semantics stay untouched, so
+    # every existing consumer keeps its exact prior behavior.
+    stream_error_code: Optional[int] = None
+    stream_error_message: Optional[str] = None
 
 
 class StreamHandle:
@@ -165,6 +175,21 @@ class StreamHandle:
                     self.snap.first_received = True
                     self.snap.first_received_s = time.monotonic()
                 self.snap.outputs.append(output)
+                # In-band typed terminal (error frame): record the raw code
+                # and message WITHOUT touching error/completed — the fields
+                # above stay exactly as legacy consumers see them, and
+                # run_one_request(typed_stream_error=True) surfaces the
+                # typed failure to its caller.
+                try:
+                    if output.HasField("error_info"):
+                        self.snap.stream_error_code = int(
+                            output.error_info.error_code
+                        )
+                        self.snap.stream_error_message = (
+                            output.error_info.error_message
+                        )
+                except AttributeError:
+                    pass
                 finished = output.flatten_output.finished
                 if finished and any(finished):
                     self.snap.completed = True
@@ -824,11 +849,25 @@ class EngineOps:
     # -- composite request helper ------------------------------------------
 
     def run_one_request(
-        self, rid: int, stream_timeout_s: float = 15.0, **kwargs
+        self,
+        rid: int,
+        stream_timeout_s: float = 15.0,
+        typed_stream_error: bool = False,
+        **kwargs,
     ) -> tuple[str, Optional[str]]:
         """Schedule → stream → consume to completion.
 
         Returns (prefill_addr, error) — error is None on success.
+
+        ``typed_stream_error`` (default False, legacy behavior preserved):
+        when True, a stream that ended WITHOUT completing but WITH an
+        in-band error frame surfaces the typed failure
+        ("engine error code=<code>: <message>") instead of the generic
+        "stream did not complete" — the execution-phase failure family
+        (prefill_async_partial_fail) needs the code visible client-side
+        (production stream->reportError half of the terminal), while the
+        cancel/timeout family keeps the generic form every existing
+        assertion matches on.
         """
         try:
             response = self.schedule(rid, **kwargs)
@@ -850,6 +889,14 @@ class EngineOps:
             if snap.error:
                 return addr, snap.error
             if not snap.completed:
+                if (
+                    typed_stream_error
+                    and snap.stream_error_code is not None
+                ):
+                    return addr, (
+                        f"engine error code={snap.stream_error_code}: "
+                        f"{snap.stream_error_message}"
+                    )
                 return addr, "stream did not complete"
             return addr, None
         except Exception as exc:
