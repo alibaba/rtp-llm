@@ -57,7 +57,7 @@ python3 flexlb_functional_tests.py --category kv --json results.json   # 单分�
 python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbatch   # 子串过滤
 ```
 
-`--cases` 为精确 case 名逗号列表，仍受 `--profile` 过滤，未知名报错退出（rc=2）。其余 runner 参数（`--run-root` 等）见其 `--help`；全集 **118 例**（10 分类），`--list` 按当前 profile 过滤，默认 batch-window 下 103 例（priority 14 例仅 single-nonbatch、1 例仅 NON_BATCH 投递形态适用），用例间环境按需复用 / 重建。
+`--cases` 为精确 case 名逗号列表，仍受 `--profile` 过滤，未知名报错退出（rc=2）。其余 runner 参数（`--run-root` 等）见其 `--help`；全集 **119 例**（9 分类），`--list` 按当前 profile 过滤，默认 batch-window 下 104 例（priority 14 例仅 single-nonbatch、1 例仅 NON_BATCH 投递形态适用），用例间环境按需复用 / 重建。
 
 `--profile` / `--grade` 的取值语义（两个入口通用）：
 
@@ -87,7 +87,7 @@ python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbat
 
 实测参考（110 开发机容器，batch-window profile，共享负载）：串行单进程 wall 4918s（98 例快照）；category 级 4 路 wall 2444s（2.01x）——wall 被最重家族钳制（status 24 例实测 2104s，占串行 43%）；case 级 6 路 wall 941s（5.22x，15.7 分钟，最重路 16 例），8 路（`--mock-stride 500`，mock base 平移避开他人占用段）wall 703s（6.99x，11.7 分钟）——逐例摊平后钳制消除。等价性口径：并行 run 对串行基线逐例对照 + FINDING 集一致；实测 6 路 89/98 一致、9 例翻转全部单向好转（对翻转例同 jar 同 env 定向复跑两轮结果稳定，属快照漂移而非编排回归）；8 路对 6 路 FINDING 集完全相等。
 
-## 测试分类（118 例）
+## 测试分类（119 例）
 
 断言一律写**正确契约**而非当前实现——跑挂即 finding。表内「期望」为一句话摘要，完整断言与构造细节以各用例 docstring 为准。
 
@@ -111,7 +111,7 @@ python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbat
 | `cancel_stream_break_prefill_autonomous` | 客户端直接断流（不发 Cancel），prefill 引擎侧自主清理（仅 BATCH 投递） | 引擎感知断流并清理自身状态；账目无残渣 |
 | `cancel_stream_break_decode_autonomous` | 客户端直接断流，decode 侧自主提前终态（仅 NON_BATCH 投递） | decode 不等 stale-inflight TTL、主动上报终态；账目无残渣 |
 
-### status（24 例 · 固定 batch-window）
+### status（25 例 · 固定 batch-window）
 
 engine→master 状态上报通道的故障注入：ack 丢失 / 部分失败 / 错误码、终态抑制、伪造任务、重放、版本 / 游标回退、僵尸 RUNNING——master 账目在每种畸变下都必须收敛到正确终态。
 
@@ -119,6 +119,7 @@ engine→master 状态上报通道的故障注入：ack 丢失 / 部分失败 / 
 | --- | --- | --- |
 | `status_inflight_ttl_cleanup` | 引擎侧请求卡死、终态永不到达 | stale-inflight TTL 到期清理账目；后续请求不受污染 |
 | `status_ack_partial_fail` | 一批 4 个请求的 enqueue ack 中 1 个失败（瞬时码 13 / 永久码 8431 两档矩阵） | 失败请求表面化、其余照常完成；失败成员及时清出账目；瞬时码应重试至成功或 SLO 终态，永久码快速终态不重试 |
+| `status_batch_async_partial_fail` | 4 并发请求执行期注入批内部分失败（k=1、code=8500；组批窗口与 3s 串行批双形态） | 同批幸存者照常完成并走 decode 终态；失败者客户端错误带 8500、经 finished_task_list 结算为 FAILED 终态；账目清空无复活；混合终态批 lease 正常收口 |
 | `status_ack_multi_error` | ack 携带两种不同错误码（8431 / 8510） | 错误码按请求逐个透传，各自正确 |
 | `status_ack_empty_no_crash` | ack 整体丢失（空 ack，投递结果不确定） | master 不崩溃；不确定栅栏有界且最终可清空 |
 | `status_prefill_suppress_all` | 所有 prefill 状态消息全静默 | TTL 兜底清账；master 存活；恢复 |
@@ -212,9 +213,9 @@ KV 前缀缓存生命周期契约：per-engine 账本隔离、全局共享块的
 | `engine_fault_status_gap_long_retire` | 长状态空窗 | 代际退役；其账目 / inflight 被栅栏 |
 | `engine_fault_recovery_kv_usage_reset` | 引擎全量重启后 | KV 用量从零起步（不沿用旧读数）；不被误拉黑 |
 
-### master（8 例 · 固定 batch-window）
+### master（9 例 · 8 例固定 batch-window、1 例全 profile）
 
-master 自身进程级故障与冷启动行为，以及双实例 HA 链路（冻结判活 / kill -9 failover / 全下线直连兑底 / 回切 wrap-around）。
+master 自身进程级故障与冷启动行为，以及双实例 HA 链路（冻结判活 / kill -9 failover / 全下线直连兑底 / 回切 wrap-around）；另含全不可用时客户端直连引擎入口的旁路路径故障。
 
 | 用例 | 场景 | 期望 |
 | --- | --- | --- |
@@ -226,6 +227,7 @@ master 自身进程级故障与冷启动行为，以及双实例 HA 链路（冻
 | `fallback_direct` | ENABLE_FALLBACK 下杀掉全部 master | in-flight 双连接失败触发直连引擎兑底：fallback 路成功率健康、master 路为 0、无重复 rid |
 | `fallback_negative_errorcode` | 业务错误码（8431）与短 deadline（800ms 冻结）下 fallback 已武装 | 均不触发兑底：业务错误经 master 应答带码、deadline 失败不重试不切换；清除后账目收敛 |
 | `failback_wraparound` | 重建 sticky B 端态后重启 A、再杀 B | A 60s 内重新收敛并接恢复流量；对称切换绕回 A；inflight 干净、无 8511 风暴 |
+| `direct_generate_error` | 直连引擎入口 GenerateStreamCall 注入 generate_error | 立即失败；不注册 inflight；注入清除后恢复 |
 
 ### admission（15 例 · 14 例固定 batch-window、1 例仅 BATCH 投递）
 
@@ -270,14 +272,6 @@ master 自身进程级故障与冷启动行为，以及双实例 HA 链路（冻
 | `atpm_config_strict_reject` | 3 个非法 FLEXLB_CONFIG 原始 JSON 变体（removed 字段 / FIFO+defaultPriority / owned 无 engineCancellation） | master 启动失败 + 严格解析器报文族命中；rejected 后 current=None（AT1） |
 | `atpm_decode_reservation_priority` | decode 面三波：30<70 / 50==50 / kvBucket 偏好（D1 共享 env，kv_pressure 注入时序纪律） | [EV-2] 三波零驱逐、victim metric delta=0；[EV-1-FIXED] incoming 8511 park 终态（AT7 跨阶段一致性） |
 | `atpm_observability_integrity` | ENV-O1 复合编排（debug 日志 + FLEXLB_MONITOR_MODE=all） | 客户面形状 + `auto_tpm.request.count` 分桶 4/3/2/1 + latency success 桶 + `[priority-scheduler]` 日志 + pv.log admissionRejectReason 全在场（AT8/AT6） |
-
-### direct（1 例 · 全 profile）
-
-直连引擎入口（不经 master 调度决策）的故障注入。
-
-| 用例 | 场景 | 期望 |
-| --- | --- | --- |
-| `direct_generate_error` | 直连引擎入口 GenerateStreamCall 注入 generate_error | 立即失败；不注册 inflight；注入清除后恢复 |
 
 ## 新增用例
 

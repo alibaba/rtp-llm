@@ -747,6 +747,11 @@ public final class JavaMockEngineCluster {
          *  cache_keys_requested. */
         private final LongAdder cacheKeyHits = new LongAdder();
         private final LongAdder cacheKeysRequested = new LongAdder();
+        /** prefill_async_partial_fail members terminated at the prefill
+         *  completion callback (execution-phase injected failures): one bump
+         *  per failed member, cumulative (never drained). /snapshot carries
+         *  it as prefill_async_partial_fails. */
+        private final LongAdder prefillAsyncPartialFails = new LongAdder();
         // Per-engine busy time. Prefill engines accumulate batch execution ms
         // (maxPrefillConcurrency=1 -> busy == wall-clock occupancy; utilization =
         // busy/elapsed). Decode engines accumulate per-request execution ms under
@@ -2983,6 +2988,24 @@ public final class JavaMockEngineCluster {
                     return; // crashed mid-flight: this batch died with the process
                 }
                 int activeCount = 0;
+                // ── prefill_async_partial_fail (execution-phase partial
+                // failure): snapshot the volatile config ONCE for the whole
+                // batch, then select the first k NON-cancelled members in
+                // shapes order (the enqueue-ack fault family's cursor
+                // pattern — cancelled members already own a terminal and
+                // stay untouched). Production semantics: the batch ran, the
+                // ack was honest, the failure surfaces per-request through
+                // the status channel only — no batch-level propagation.
+                // Dual-budget caliber: the cursor is local to this EXECUTION
+                // batch (one runPrefillBatch call — under regroup that may
+                // span several origin master batches), so k counts per
+                // execution batch, matching production where the failure
+                // rides each request's own stream into FIFOScheduler
+                // regardless of how admission regrouped the members. ──
+                FaultInjectionConfig asyncFaultSnapshot = faultConfig;
+                int asyncFaultBudget = asyncFaultSnapshot.getPrefillAsyncPartialFail();
+                long asyncFaultCode = asyncFaultSnapshot.getPrefillAsyncFailCode();
+                final int[] asyncFaultCursor = {0};
                 // One wall-clock stamp for the whole batch: every member shares
                 // the same completion instant (the batch is the execution unit).
                 long doneTsMs = System.currentTimeMillis();
@@ -2990,6 +3013,13 @@ public final class JavaMockEngineCluster {
                     MockPerformanceModel.RequestShape shape = member.shape();
                     long requestId = shape.input().getRequestId();
                     boolean alreadyCancelled = cancelledRequests.containsKey(requestId);
+                    // This member is one of the batch's first k non-cancelled
+                    // members → injected execution-phase failure (production:
+                    // stream->reportError → dequeue fills task_info.error_code /
+                    // error_message → finished_task_list; independent of the
+                    // same batch's surviving members).
+                    boolean asyncFail = !alreadyCancelled && asyncFaultBudget > 0
+                            && asyncFaultCursor[0]++ < asyncFaultBudget;
                     EngineRpcService.TaskInfoPB removed = runningTasks.remove(requestId);
                     // status_zombie_running: re-insert the entry right after the
                     // removal so this request keeps being reported RUNNING
@@ -3008,7 +3038,14 @@ public final class JavaMockEngineCluster {
                     if (removed != null && !alreadyCancelled) {
                         activeCount++;
                     }
-                    recordCompletion(shape, member.batchId(), executionMs, member.dpRank());
+                    if (asyncFail) {
+                        recordCompletion(shape, member.batchId(), executionMs,
+                                member.dpRank(), asyncFaultCode);
+                        prefillAsyncPartialFails.increment();
+                    } else {
+                        recordCompletion(shape, member.batchId(), executionMs,
+                                member.dpRank());
+                    }
                     // Per-rid prefill terminal event row (engine_events.jsonl,
                     // replaces the former mock_prefill_done stdout trace line —
                     // per-request data now streams as structured JSONL, not
@@ -3035,13 +3072,22 @@ public final class JavaMockEngineCluster {
                     }
                     // Python marks the prefill-side lifecycle entry finished when the
                     // prefill phase ends, even though decode may continue elsewhere.
-                    recordLifecycleEnd(requestId, alreadyCancelled);
+                    // (recordLifecycleEnd is first-terminal-wins — the asyncFail
+                    // member must record "failed", not "completed".)
+                    if (asyncFail) {
+                        recordLifecycleEnd(requestId, "failed");
+                    } else {
+                        recordLifecycleEnd(requestId, alreadyCancelled);
+                    }
                     // Python compat (_run_prefill_batch): an engine
                     // with inject_config["no_respond"] completes its own work but
                     // never queues responses nor hands off to decode, so the client
                     // stream hangs until it times out.
                     boolean decodeStarted = false;
-                    if (!alreadyCancelled && !faultConfig.isNoRespond()) {
+                    // asyncFail members never hand off to decode (execution
+                    // failed — nothing to decode) and never emit a success
+                    // output frame (below).
+                    if (!asyncFail && !alreadyCancelled && !faultConfig.isNoRespond()) {
                         decodeStarted = startDecode(shape, member.batchId());
                     }
                     if (decodeStarted) {
@@ -3059,24 +3105,66 @@ public final class JavaMockEngineCluster {
                             queue.offer(buildOutput(shape, false));
                         }
                     } else {
-                        if (!alreadyCancelled) {
+                        if (asyncFail) {
+                            // Failed terminal (NOT completed): the typed error
+                            // rides the status channel; no SUCCESS frame is
+                            // ever emitted for this member.
+                            requestStates.put(requestId, "failed");
+                        } else if (!alreadyCancelled) {
                             completedCount.incrementAndGet();
                             requestStates.put(requestId, "completed");
                         }
                         if (!faultConfig.isNoRespond()) {
                             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
                                     responseQueues.get(requestId);
-                            if (queue != null && !alreadyCancelled) {
+                            if (queue != null && !alreadyCancelled && !asyncFail) {
                                 queue.offer(buildOutput(shape, true));
+                            }
+                            if (queue != null && asyncFail) {
+                                // Production stream->reportError is a TWO-channel
+                                // terminal: the typed error_info rides the status
+                                // channel (recordCompletion above, master
+                                // reconcile, slot failure terminal) AND the
+                                // request's output stream terminates with an
+                                // error frame so the client sees the failure
+                                // instead of hanging until its stream deadline.
+                                // Same frame shape as the cancel path's CANCELLED
+                                // frame and the decode LACK_MEM growth-failure
+                                // frame; the pump treats hasErrorInfo frames as
+                                // terminal (onNext then onCompleted). The queue
+                                // was provisioned by the EnqueueBatch Phase-1
+                                // admission (before the batch even started
+                                // executing), so the client's FetchResponse /
+                                // GenerateStreamCall pump -- whichever side got
+                                // there first -- shares this exact queue instance.
+                                // The injected code is NOT a production
+                                // ErrorCodePB value: proto3 open enums keep the
+                                // raw wire number (8500), and the numeric also
+                                // rides the message text so string-level
+                                // assertions survive enum lossiness.
+                                queue.offer(EngineRpcService.GenerateOutputsPB.newBuilder()
+                                        .setRequestId(requestId)
+                                        .setErrorInfo(EngineRpcService.RpcErrorPB.newBuilder()
+                                                .setErrorCodeValue((int) asyncFaultCode)
+                                                .setErrorMessage(String.format(
+                                                        "injected prefill_async_partial_fail (error_code=%d)",
+                                                        asyncFaultCode))
+                                                .build())
+                                        .build());
                             }
                         }
                         // Clean up per-request state to prevent unbounded map growth
                         responseQueues.remove(requestId);
                         cancelledRequests.remove(requestId);
                     }
-                    if (alreadyCancelled) {
+                    if (alreadyCancelled || asyncFail) {
                         // Cancelled member: blocks return to the pool directly
                         // (no LRU handover — a cancelled request leaves no cache).
+                        // asyncFail member: identical physical semantics — a
+                        // failed request leaves no KV cache (production stream
+                        // error paths free the lease) and its D-side decode
+                        // reservation returns too (the failure never hands
+                        // off to decode).
                         releaseBlockLease(requestId);
                         // P-enqueue decode-KV pre-alignment (20260903): the
                         // cancelled member's D-side reservation goes back too
@@ -3876,6 +3964,41 @@ public final class JavaMockEngineCluster {
                     .setExecutionTimeMs(executionMs)
                     .setIterateCount(1)
                     .setDpRank(dpRank)
+                    .build();
+            publishCompletion(task);
+        }
+
+        /**
+         * prefill_async_partial_fail variant: the SAME normal versioned
+         * completion path (publishCompletion — the zombie / duplicate
+         * output-layer faults compose on top), but the TaskInfo carries
+         * error_info(code, "injected prefill_async_partial_fail"):
+         * production "stream->reportError → dequeue fills
+         * task_info.error_code / error_message → finished_task_list"
+         * semantics. batch_id rides along unchanged (stream group_id →
+         * TaskInfo) so the master's reconcile correlates the typed failure
+         * terminal with the dispatched batch.
+         */
+        private void recordCompletion(MockPerformanceModel.RequestShape shape,
+                                      long batchId,
+                                      long executionMs,
+                                      int dpRank,
+                                      long errorCode) {
+            recordRecentExecutionTime(executionMs);
+            EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
+                    .setRequestId(shape.input().getRequestId())
+                    .setInputLength(shape.inputLen())
+                    .setPrefixLength(shape.hitTokens())
+                    .setBatchId(batchId)
+                    .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
+                    .setEndTimeMs(System.currentTimeMillis())
+                    .setExecutionTimeMs(executionMs)
+                    .setIterateCount(1)
+                    .setDpRank(dpRank)
+                    .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
+                            .setErrorCode(errorCode)
+                            .setErrorMessage("injected prefill_async_partial_fail")
+                            .build())
                     .build();
             publishCompletion(task);
         }
@@ -5144,6 +5267,7 @@ public final class JavaMockEngineCluster {
             snap.put("decode_reuse_blocks", decodeReuseBlocks.sum());
             snap.put("cache_key_hits", cacheKeyHits.sum());
             snap.put("cache_keys_requested", cacheKeysRequested.sum());
+            snap.put("prefill_async_partial_fails", prefillAsyncPartialFails.sum());
             Map<String, Object> injectConfig = new LinkedHashMap<>();
             injectConfig.put("enqueue_error", faultConfig.isFailOnEnqueue());
             injectConfig.put("fetch_error", faultConfig.isFetchError());

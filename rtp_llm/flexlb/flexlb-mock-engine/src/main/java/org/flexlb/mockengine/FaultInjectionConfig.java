@@ -46,6 +46,16 @@ public final class FaultInjectionConfig {
     private final int enqueueAckPartialFail;
     private final long enqueueAckErrorCode;
     private final boolean enqueueAckDrop;
+    // ── Prefill execution-phase partial-failure family (in-batch ASYNC
+    // failures at the batch's completion callback — production
+    // "stream->reportError → dequeue fills task_info.error_code /
+    // error_message → finished_task_list" semantics: the EnqueueBatch ack
+    // stays fully successful, the failure surfaces only through the
+    // per-request typed terminal on the status channel, independent of
+    // the same batch's surviving members — no batch-level failure
+    // propagation) ──
+    private final int prefillAsyncPartialFail;
+    private final long prefillAsyncFailCode;
     // ── Cancel-RPC fault family (RPC-layer failures simulated BEFORE the
     // engine cancel state machine is touched — production semantics "RPC
     // failed = engine state unchanged": no fences, no tombstones, no census
@@ -80,6 +90,8 @@ public final class FaultInjectionConfig {
         this.enqueueAckPartialFail = b.enqueueAckPartialFail;
         this.enqueueAckErrorCode = b.enqueueAckErrorCode;
         this.enqueueAckDrop = b.enqueueAckDrop;
+        this.prefillAsyncPartialFail = b.prefillAsyncPartialFail;
+        this.prefillAsyncFailCode = b.prefillAsyncFailCode;
         this.cancelNoRespond = b.cancelNoRespond;
         this.cancelError = b.cancelError;
         this.cancelUnexpectedStatus = b.cancelUnexpectedStatus;
@@ -178,6 +190,25 @@ public final class FaultInjectionConfig {
     }
 
     /**
+     * prefill_async_partial_fail: k = how many members of every executing
+     * prefill batch fail AT the completion callback (the execution-phase
+     * counterpart of {@link #getEnqueueAckPartialFail()}: the admission
+     * ack was honest, the execution lies). 0 = injection off.
+     */
+    public int getPrefillAsyncPartialFail() {
+        return prefillAsyncPartialFail;
+    }
+
+    /**
+     * The engine-side ErrorCode the injected execution-phase failure
+     * carries in task_info.error_code (LACK_MEM / MALLOC_FAILED / 8431
+     * family semantics; default 8500).
+     */
+    public long getPrefillAsyncFailCode() {
+        return prefillAsyncFailCode;
+    }
+
+    /**
      * cancel_no_respond: the Cancel RPC hangs — no response ever. The
      * master's short cancel-ack timeout (50ms) fails the future; the
      * engine state is never touched.
@@ -238,6 +269,8 @@ public final class FaultInjectionConfig {
                 .enqueueAckPartialFail(enqueueAckPartialFail)
                 .enqueueAckErrorCode(enqueueAckErrorCode)
                 .enqueueAckDrop(enqueueAckDrop)
+                .prefillAsyncPartialFail(prefillAsyncPartialFail)
+                .prefillAsyncFailCode(prefillAsyncFailCode)
                 .cancelNoRespond(cancelNoRespond)
                 .cancelError(cancelError)
                 .cancelUnexpectedStatus(cancelUnexpectedStatus);
@@ -268,6 +301,8 @@ public final class FaultInjectionConfig {
                 + ", enqueueAckPartialFail=" + enqueueAckPartialFail
                 + ", enqueueAckErrorCode=" + enqueueAckErrorCode
                 + ", enqueueAckDrop=" + enqueueAckDrop
+                + ", prefillAsyncPartialFail=" + prefillAsyncPartialFail
+                + ", prefillAsyncFailCode=" + prefillAsyncFailCode
                 + ", cancelNoRespond=" + cancelNoRespond
                 + ", cancelError=" + cancelError
                 + ", cancelUnexpectedStatus=" + cancelUnexpectedStatus
@@ -320,6 +355,8 @@ public final class FaultInjectionConfig {
         private int enqueueAckPartialFail = 0;
         private long enqueueAckErrorCode = 0;
         private boolean enqueueAckDrop = false;
+        private int prefillAsyncPartialFail = 0;
+        private long prefillAsyncFailCode = 8500L;
         private boolean cancelNoRespond = false;
         private boolean cancelError = false;
         private boolean cancelUnexpectedStatus = false;
@@ -439,6 +476,16 @@ public final class FaultInjectionConfig {
 
         public Builder enqueueAckDrop(boolean drop) {
             this.enqueueAckDrop = drop;
+            return this;
+        }
+
+        public Builder prefillAsyncPartialFail(int k) {
+            this.prefillAsyncPartialFail = k;
+            return this;
+        }
+
+        public Builder prefillAsyncFailCode(long code) {
+            this.prefillAsyncFailCode = code;
             return this;
         }
 
