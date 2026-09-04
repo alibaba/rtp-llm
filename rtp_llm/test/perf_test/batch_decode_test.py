@@ -395,7 +395,6 @@ def main() -> str:
                     f"server startup: {case}"
                 )
         max_input_len = max(int(case["input_len"]) for case in cases)
-        max_batch_size = max(int(case["batch_size"]) for case in cases)
         tokenizer_path = (
             extract_arg(remaining, "tokenizer_path")
             or extract_arg(remaining, "checkpoint_path")
@@ -409,7 +408,10 @@ def main() -> str:
         server = EngineServer(args, remaining)
         server.start(
             max_seq_len=max(max_input_len + args.decode_test_length, args.max_seq_len),
-            max_concurrency=max_batch_size,
+            # CacheGridRunner keeps model forwards serial. Preserve the
+            # requested service admission limit instead of rewriting it to
+            # the workload's fixed batch size of one.
+            max_concurrency=args.concurrency_limit,
         )
         try:
             from transformers import AutoTokenizer
