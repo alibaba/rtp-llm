@@ -4,6 +4,15 @@ def sm120_suites():
     native.test_suite(
         name = "smoke_sm120_basic",
         tests = [
+            # Qwen3.5 uses independent pools for full-attention KV pages and
+            # recurrent linear-attention states. Reusing one 64-token block
+            # exercises the first GDN state boundary on the SM120 Triton path.
+            smoke_test(
+                name = "qwen35_dense_bf16_block64_reuse_sm120",
+                task_info = "data/model/qwen35/qwen35_dense_bf16_block64_reuse_sm120.json",
+                smoke_args = "--act_type BF16 --seq_size_per_block 64 --kernel_seq_size_per_block 16 --test_block_num 512 --max_seq_len 4096 --tp_size 1 --world_size 1 --reuse_cache 1",
+                gpu_type = ["RTX_5000_PRO"],
+            ),
             smoke_test(
                 name = "softmax_probs_sm120",
                 task_info = "data/model/qwen25/q_r_softmax_probs_sm120.json",

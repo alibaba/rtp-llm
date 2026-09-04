@@ -105,6 +105,40 @@ static ModelConfig makeTinyDSV4ModelConfig() {
     return mc;
 }
 
+static ModelConfig makeTinyQwenHybridModelConfig() {
+    ModelConfig mc;
+    mc.num_layers                   = 4;
+    mc.data_type                    = DataType::TYPE_BF16;
+    mc.attn_config.head_num         = 8;
+    mc.attn_config.kv_head_num      = 2;
+    mc.attn_config.size_per_head    = 128;
+    mc.attn_config.tokens_per_block = 64;
+
+    mc.linear_attention_config.linear_conv_kernel_dim = 4;
+    mc.linear_attention_config.linear_key_head_dim    = 128;
+    mc.linear_attention_config.linear_value_head_dim  = 128;
+    mc.linear_attention_config.linear_num_key_heads   = 16;
+    mc.linear_attention_config.linear_num_value_heads = 32;
+    mc.linear_attention_config.ssm_state_dtype        = DataType::TYPE_BF16;
+    mc.linear_attention_config.conv_state_dtype       = DataType::TYPE_BF16;
+
+    mc.hybrid_attention_config.enable_hybrid_attention           = true;
+    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    mc.hybrid_attention_config.hybrid_attention_types            = {
+        HybridAttentionType::LINEAR,
+        HybridAttentionType::LINEAR,
+        HybridAttentionType::LINEAR,
+        HybridAttentionType::NONE,
+    };
+    mc.kv_cache_spec_descs = {
+        {KVCacheSpecDesc{"linear0", KVCacheSpecType::LinearAttention}},
+        {KVCacheSpecDesc{"linear1", KVCacheSpecType::LinearAttention}},
+        {KVCacheSpecDesc{"linear2", KVCacheSpecType::LinearAttention}},
+        {KVCacheSpecDesc{"full", KVCacheSpecType::MultiHeadAttention}},
+    };
+    return mc;
+}
+
 static ModelConfig makeProModelConfig() {
     ModelConfig mc;
     mc.num_layers                   = 61;
@@ -1177,6 +1211,25 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigUsesGroupOwnedBytesForPagedBloc
     EXPECT_GT(expected_paged_bytes, 0u);
 
     EXPECT_EQ(config.block_size_bytes, expected_paged_bytes);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, QwenPhysicalMhaStrideIsNotRepeatedForKernelPages) {
+    ParallelismConfig pc;
+    KVCacheConfig     kv_cache_config;
+    kv_cache_config.seq_size_per_block        = 64;
+    kv_cache_config.kernel_seq_size_per_block = 16;
+
+    auto config = HybridPoolConfigCreator::createConfig(makeTinyQwenHybridModelConfig(), pc, kv_cache_config, false, 0);
+
+    const auto full_gid = static_cast<size_t>(config.groupIdForTag("full"));
+    ASSERT_LT(full_gid, static_cast<size_t>(config.groupNums()));
+    EXPECT_EQ(config.kernelBlocksPerKvBlockForGroup(full_gid), 4u);
+    EXPECT_EQ(config.kvBlockStrideBytesForGroup(full_gid), config.specForGroup(full_gid)->block_size_bytes());
+
+    auto full_pool = BlockPoolConfigHelper::createConfigForGroup(config, full_gid);
+    ASSERT_EQ(full_pool.memory_layouts.size(), 1u);
+    EXPECT_EQ(full_pool.memory_layouts[0].kv_block_stride_bytes, config.specForGroup(full_gid)->block_size_bytes());
+    EXPECT_EQ(full_pool.memory_layouts[0].kernel_blocks_per_kv_block, 4u);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, ReserveRatioExcludesExplicitIndependentPools) {

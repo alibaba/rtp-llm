@@ -90,10 +90,20 @@ def rocm_oss_suites():
         ],
     )
 
-    # Minimal Qwen3.5 coverage for interleaved MRoPE CUDA Graph replay.
+    # Qwen3.5 hybrid-attention coverage, including prefix reuse and MRoPE
+    # CUDA Graph replay.
     native.test_suite(
         name = "smoke_rocm_qwen35_mrope_cg",
         tests = [
+            # A 65-token prompt makes the second request reuse exactly one
+            # physical 64-token block. This covers the first GDN state boundary.
+            smoke_test(
+                name="rocm_qwen35_bf16_block64_reuse",
+                task_info="data/model/qwen35/qwen35_bf16_rocm_block64_reuse.json",
+                smoke_args="--warm_up 0 --act_type BF16 --seq_size_per_block 64 --kernel_seq_size_per_block 16 --test_block_num 512 --max_seq_len 4096 --tp_size 1 --world_size 1 --use_asm_pa 0 --use_aiter_pa 1 --use_triton_pa 1 --reserver_runtime_mem_mb 40480 --reuse_cache 1",
+                envs=["USE_FLYDSL=1"],
+                gpu_type=["MI308X-ROCM7"],
+            ),
             # Aiter prefill and Triton decode share the vectorized-V pair even
             # when the standalone ASM flag is off.
             smoke_test(

@@ -112,6 +112,10 @@ class Qwen3NextBase(BaseModel):
     def _parse_hybrid_attention_config(cls, config_json: dict, config: ModelConfig):
         attention_step = config_json["full_attention_interval"]
         config.hybrid_attention_config.enable_hybrid_attention = True
+        # Full-attention KV pages and recurrent linear-attention states have
+        # different physical layouts. Keep them in independent backing pools
+        # instead of padding both cache groups to one shared block stride.
+        config.hybrid_attention_config.enable_independent_kv_cache_pools = True
         hybrid_layer_types: List[HybridAttentionType] = []
         for i in range(config.num_layers):
             if (i + 1) % attention_step == 0:

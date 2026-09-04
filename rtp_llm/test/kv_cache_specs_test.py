@@ -5,7 +5,7 @@ from rtp_llm.models.deepseek_v2 import DeepSeekV3Mtp
 from rtp_llm.models.hybrid_kv_cache import calculate_hybrid_group_layer_num
 from rtp_llm.models.kimi_linear.kimi_linear import KimiLinear
 from rtp_llm.models.qwen2_vl import QWen2_VL
-from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next, Qwen35Moe
+from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next, Qwen35Dense, Qwen35Moe
 from rtp_llm.models.qwen3_next.qwen3_next_mtp import Qwen3NextMTP
 from rtp_llm.models.qwen3_vl import QWen3_VL
 from rtp_llm.models.qwen_v2 import QwenV2MTP
@@ -96,6 +96,35 @@ class HybridKVCacheSpecTest(TestCase):
         self.assertEqual(tags[11], "full")
         self.assertEqual(tags[12], "linear0")
         self.assertEqual(tags[13], "linear1")
+
+    def test_qwen35_hybrid_attention_uses_independent_cache_pools(self):
+        for model_cls in (Qwen35Moe, Qwen35Dense):
+            with self.subTest(model_cls=model_cls.__name__):
+                config = ModelConfig()
+                config.num_layers = 4
+
+                model_cls._parse_hybrid_attention_config(
+                    {"full_attention_interval": 4}, config
+                )
+                model_cls._post_build_model_config(config)
+
+                self.assertTrue(config.hybrid_attention_config.enable_hybrid_attention)
+                self.assertTrue(
+                    config.hybrid_attention_config.enable_independent_kv_cache_pools
+                )
+                self.assertEqual(
+                    list(config.hybrid_attention_config.hybrid_attention_types),
+                    [
+                        HybridAttentionType.LINEAR,
+                        HybridAttentionType.LINEAR,
+                        HybridAttentionType.LINEAR,
+                        HybridAttentionType.NONE,
+                    ],
+                )
+                self.assertEqual(
+                    [layer_descs[0].tag for layer_descs in config.kv_cache_spec_descs],
+                    ["linear0", "linear1", "linear2", "full"],
+                )
 
     def test_qwen35_defaults_missing_mrope_interleaved_to_true(self):
         config = ModelConfig()
