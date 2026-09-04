@@ -48,9 +48,11 @@ category-reorg migrations:
                                    eviction wave, typed 602 saturation
                                    reject, bounded failure share,
                                    release!=delete recovery
-    kv_decode_pool_exhaustion_terminal  D pool @2 blocks: P-enqueue
+    kv_decode_pool_exhaustion_terminal  D pool @3 blocks: P-enqueue
                                    decode reservation answers a
-                                   decode-side 602; P lease released
+                                   decode-side 602 (PERMANENT family:
+                                   lack_mem_rejects, not
+                                   kv_admission_fails); P lease released
                                    without residue; headroom recovery
 
 MOCK CAPABILITY NOTE (task #85 reorg wiring): the module IS registered
@@ -2617,21 +2619,25 @@ SAT_PROBE_BOUND_S = 3.0
 SAT_BURST_N = 2
 # Saturation window sampling cadence (available-floor proof).
 SAT_SAMPLE_S = 0.1
-# Decode-exhaustion caliber — FALLBACK tier, empirically switched after
-# remote run 20260903_130256: the primary tier (D pool 2, input 2048)
-# never reached the engine — the master's ROUTE-time decode soft
-# reservation prices the request at min(input + output_cap, totalKv)
-# tokens against a 90% usage door (RoutingConfig defaults:
-# maxKvUsagePercent=90, maxOutputTokensForEstimate=1000), so
-# min(2048+2, 2048) = 2048 > 2048*0.9 and the probe PARKED master-side
-# for its whole stream window (30s DEADLINE, engine enqueue_rpcs == 0).
-# The fallback tier lands in the master/engine caliber gap: D pool 3
-# blocks (3072 tokens, reserve = 1) with input_len 2560 prices at
-# 2562 <= 3072*0.9 -> master reservation passes; the engine's
-# block-caliber net demand ceil(2560/1024) = 3 hits the gate at
-# avail - need = 3 - 3 = 0 < 1 -> the synchronous decode-side 602 this
-# case pins.  verify_recovery (default input 2048 -> need 2,
-# 3 - 2 = 1 >= 1) passes naturally on this tier.
+# Decode-exhaustion caliber — PERMANENT tier (wave-3 v1 adaptation,
+# 2026-09): the occupant-based RETRYABLE tier tried first (D pool 4,
+# a stretched 3s prefill holding 2 decode blocks) never reached the
+# engine — the occupant occupied the single decode worker's
+# concurrency slot (decode concurrency is a production-locked one per
+# engine on this line), so the probe was rejected at ROUTE time with
+# NO_DECODE_WORKER(8403) before any admission arithmetic ran (0.00s
+# reject, engine enqueue_rpcs == 0).  "Hold KV blocks with an
+# in-flight request" is structurally impossible on the v1 stack, so
+# the tier reverts to direct saturation: D pool 3, probe input 2560
+# (net demand ceil(2560/1024) = 3), need + reserve = 3 + 1 > 3 — no
+# pool state can ever admit it — and the case PINS the deterministic,
+# stack-independent classification contract: a request the pool
+# structurally cannot fit counts into lack_mem_rejects (permanent
+# family), not kv_admission_fails (retryable family).  Upstream
+# carries the same bug, same fix.  The 2560 input stays the FALLBACK
+# caliber (remote run 20260903_130256): it passes the master's
+# ROUTE-time soft reservation token door (2562 <= 3072 x 0.9) while
+# the block-caliber demand saturates the pool.
 DSAT_DECODE_POOL_BLOCKS = 3
 # 2.5 blocks exactly: 2560 rounds up to a 3-block demand while staying
 # under the master's 90% token door with output headroom.
@@ -2963,6 +2969,21 @@ def kv_decode_pool_exhaustion_terminal(ctx: CaseContext):
     passes that token door while the block-caliber demand still
     saturates the pool.
 
+    PERMANENT classification (wave-3 v1 adaptation): need + reserve =
+    3 + 1 > 3 — no pool state can ever admit this request, so the
+    reject lands in the permanent family: the engine counts it into
+    lack_mem_rejects, not kv_admission_fails.  The RETRYABLE
+    occupant-based tier tried first (D pool 4, a stretched-prefill
+    request holding 2 blocks) never reached the engine at all — the
+    occupant occupied the single decode worker's concurrency slot
+    (decode concurrency is a production-locked one per engine on this
+    line), so the probe was rejected at ROUTE time with
+    NO_DECODE_WORKER(8403) before any admission arithmetic ran.  With
+    in-flight occupancy structurally unavailable, the case pins the
+    deterministic, stack-independent contract instead: a request the
+    pool cannot structurally fit counts into lack_mem_rejects
+    (upstream carries the same bug, same fix).
+
     DOCUMENTED DIVERGENCE (flexlb_ft README:437-440): production retries
     the decode KV allocation decode_retry_times times before failing;
     the mock answers terminal FINAL on the first exhaustion — this case
@@ -2975,15 +2996,17 @@ def kv_decode_pool_exhaustion_terminal(ctx: CaseContext):
         not to an engine-side reservation reject) with a typed error
         carrying "EnqueueBatch rejected" + "LACK_MEM" + "decode-side"
         (the master wraps the engine ack error verbatim);
-      * counter split: the target D engine's kv_admission_fails grew
-        (D-side rejection accounting); every P engine's lack_mem_rejects
-        stayed at its pre-probe value (the P pool was never the
-        constraint) and the P held blocks fell back to the pre-probe
-        watermark (the rejection branch releases the P lease — no
-        residue);
+      * counter split: the target D engine's lack_mem_rejects grew by
+        EXACTLY 1 (permanent-family accounting for the structurally
+        unfittable request) while its kv_admission_fails stayed flat
+        (the retryable family never saw it); every P engine's
+        lack_mem_rejects stayed at its pre-probe value (the P pool was
+        never the constraint) and the P held blocks fell back to the
+        pre-probe watermark (the rejection branch releases the P lease
+        — no residue);
       * recovery: one block of headroom (net demand 1, avail 3 -
-        reserve 1 = 2) completes a fresh request and the D counter stops
-        growing;
+        reserve 1 = 2) completes a fresh request and both D counters
+        stop moving;
       * the master ledger and engine inflight tables drain clean.
     """
     env = ctx.env_manager.ensure(
@@ -3006,6 +3029,7 @@ def kv_decode_pool_exhaustion_terminal(ctx: CaseContext):
         dname = decode_names[0]
         pnames = _prefill_names(ops)
         kv_fails_base = int(snap0.get(dname, {}).get("kv_admission_fails", 0))
+        d_lack_base = int(snap0.get(dname, {}).get("lack_mem_rejects", 0))
         lack_base = {
             p: int(snap0.get(p, {}).get("lack_mem_rejects", 0)) for p in pnames
         }
@@ -3032,17 +3056,23 @@ def kv_decode_pool_exhaustion_terminal(ctx: CaseContext):
         probe_fast = err is not None and probe_dur < DSAT_PROBE_BOUND_S
 
         # -- counter split + P-lease release (poll: the reject branch
-        #    releases asynchronously with the ack).
-        kv_fails_grew = wait_for(
+        #    releases asynchronously with the ack).  PERMANENT family:
+        #    the structurally unfittable request counts into
+        #    lack_mem_rejects EXACTLY once, while the retryable-family
+        #    counter kv_admission_fails never sees it.
+        d_lack_grew = wait_for(
             lambda: int(
-                ops.snapshot_by_name().get(dname, {}).get("kv_admission_fails", 0)
+                ops.snapshot_by_name().get(dname, {}).get("lack_mem_rejects", 0)
             )
-            > kv_fails_base,
+            == d_lack_base + 1,
             10.0,
             0.5,
         )
         time.sleep(0.5)
         snap1 = ops.snapshot_by_name()
+        kv_fails_flat = (
+            int(snap1.get(dname, {}).get("kv_admission_fails", 0)) == kv_fails_base
+        )
         lack_clean = all(
             int(snap1.get(p, {}).get("lack_mem_rejects", 0)) == lack_base[p]
             for p in pnames
@@ -3057,9 +3087,9 @@ def kv_decode_pool_exhaustion_terminal(ctx: CaseContext):
             0.5,
         )
 
-        # -- recovery: one block of headroom, counter stops growing.
-        kv_fails_after = int(
-            ops.snapshot_by_name().get(dname, {}).get("kv_admission_fails", 0)
+        # -- recovery: one block of headroom, both D counters stop.
+        d_lack_after = int(
+            ops.snapshot_by_name().get(dname, {}).get("lack_mem_rejects", 0)
         )
         rid_rec = ops.next_request_id(base)
         _, rec_err = ops.run_one_request(
@@ -3070,9 +3100,11 @@ def kv_decode_pool_exhaustion_terminal(ctx: CaseContext):
             stream_timeout_s=STREAM_TIMEOUT_S,
         )
         time.sleep(0.5)
-        kv_fails_stable = (
-            int(ops.snapshot_by_name().get(dname, {}).get("kv_admission_fails", 0))
-            == kv_fails_after
+        counters_stable = (
+            int(ops.snapshot_by_name().get(dname, {}).get("lack_mem_rejects", 0))
+            == d_lack_after
+            and int(ops.snapshot_by_name().get(dname, {}).get("kv_admission_fails", 0))
+            == kv_fails_base
         )
 
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
@@ -3086,11 +3118,12 @@ def kv_decode_pool_exhaustion_terminal(ctx: CaseContext):
         passed = (
             probe_typed
             and probe_fast
-            and kv_fails_grew
+            and d_lack_grew
+            and kv_fails_flat
             and lack_clean
             and held_released
             and rec_err is None
-            and kv_fails_stable
+            and counters_stable
             and inflight_ok
             and engine_clean
             and recovery_ok
@@ -3098,11 +3131,12 @@ def kv_decode_pool_exhaustion_terminal(ctx: CaseContext):
         return passed, (
             f"probe: typed={probe_typed}, fast={probe_fast}"
             f"({probe_dur:.2f}s), err={str(probe_text)[:90]}, "
-            f"d_kv_admission_fails_grew={kv_fails_grew}, "
+            f"d_lack_mem_rejects_grew={d_lack_grew}(+1), "
+            f"d_kv_admission_fails_flat={kv_fails_flat}, "
             f"p_lack_mem_clean={lack_clean}, "
             f"p_held_released={held_released}, "
             f"recovered={rec_err is None}, "
-            f"kv_fails_stable={kv_fails_stable}, "
+            f"counters_stable={counters_stable}, "
             f"inflight_clean={inflight_ok}({inflight_detail}), "
             f"engine_clean={engine_clean}({engine_detail}), "
             f"recovery={recovery_msg}"
