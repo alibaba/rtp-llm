@@ -5,7 +5,6 @@
 import functools
 import importlib
 import logging
-import os
 from typing import Optional
 
 import torch
@@ -28,6 +27,7 @@ from rtp_llm.models_py.triton_kernels.fla.solve_tril import solve_tril
 from rtp_llm.models_py.triton_kernels.fla.utils import (
     SUPPRESS_LEVEL,
     autocast_custom_fwd,
+    env_flag,
     input_guard,
     is_amd,
     is_amd_cdna3,
@@ -35,7 +35,6 @@ from rtp_llm.models_py.triton_kernels.fla.utils import (
 from rtp_llm.models_py.triton_kernels.fla.wy_fast import recompute_w_u_fwd
 
 RCP_LN2 = 1.0 / 0.6931471805599453
-_TRUE_ENV_VALUES = {"1", "true", "t", "yes", "y", "on"}
 logger = logging.getLogger(__name__)
 
 # All Qwen3.5/Qwen3.6 runtime (Hg, H, K, V) shapes that the FlyDSL megakernel
@@ -77,7 +76,7 @@ FLYDSL_CHUNK_GDN_ENABLED_SHAPES = frozenset(
 @functools.lru_cache(maxsize=None)
 def _use_flydsl_chunk_gdn() -> bool:
     """Cached read of USE_FLYDSL env var (evaluated once per process)."""
-    return os.getenv("USE_FLYDSL", "0").strip().lower() in _TRUE_ENV_VALUES
+    return env_flag("USE_FLYDSL")
 
 
 @functools.lru_cache(maxsize=1)
@@ -547,6 +546,7 @@ def chunk_gated_delta_rule(
         # a proper V-first contiguous tensor has stride(-2) == K and stride(-1) == 1.
         if V == K and initial_state.stride(-2) == 1 and initial_state.stride(-1) == V:
             import warnings
+
             warnings.warn(
                 f"initial_state appears to be a transposed K-first view "
                 f"(stride(-2)=1, stride(-1)={V}) rather than a true V-first layout. "
