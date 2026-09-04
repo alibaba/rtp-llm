@@ -100,11 +100,9 @@ cc_test(
     name = "pp_topology_validator_test",
     srcs = ["PPTopologyValidatorTest.cc"],
     copts = test_copts,
-    deps = [
-        "//rtp_llm/cpp/cache:cache_config",
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache:cache_core",
         "//rtp_llm/cpp/cache:pp_topology_validator",
-        "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main",
     ],
     env = {},
 )

@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/cache/CacheGroupTagOrder.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/normal_engine/pipeline/PPTypes.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
@@ -386,33 +388,39 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
         return {};
     }
 
-    const size_t group_count = static_cast<size_t>(inputs.kv_cache_kernel_block_id.size(0));
+    // The input block table carries one column per group of the stage that
+    // PRODUCED the plan, so the loop runs over local groups, not columns.
+    const size_t input_col_count   = static_cast<size_t>(inputs.kv_cache_kernel_block_id.size(0));
+    const size_t local_group_count = kv_cache_group_tags_.size();
     RTP_LLM_CHECK_WITH_INFO(kv_cache_layer_layout_.has_value(),
                             "group attention inputs require the current model cache layout");
-    // Dim 0 follows canonical sorted-tag order. The producing gatherer derives
-    // the same order from its own CacheConfig, so no ordering travels with the
-    // tensors and reordering topology records cannot move a group.
     const auto& group_tags = kv_cache_group_tags_;
-    RTP_LLM_CHECK_WITH_INFO(group_input_indices.size() == group_count,
-                            "validated cache tag mapping length=%zu does not match group count=%zu",
+    RTP_LLM_CHECK_WITH_INFO(group_input_indices.size() == local_group_count,
+                            "validated cache tag mapping length=%zu does not match local group count=%zu",
                             group_input_indices.size(),
-                            group_count);
-    RTP_LLM_CHECK_WITH_INFO(group_tags.size() == group_count,
-                            "KV block table group count=%zu does not match cache tag count=%zu",
-                            group_count,
-                            group_tags.size());
+                            local_group_count);
+    RTP_LLM_CHECK_WITH_INFO(local_group_count > 0 && local_group_count <= input_col_count,
+                            "KV block table has %zu columns but this model owns %zu cache groups; the plan must "
+                            "cover every local group",
+                            input_col_count,
+                            local_group_count);
     RTP_LLM_CHECK_WITH_INFO(!inputs.kv_cache_block_id.defined() || inputs.kv_cache_block_id.dim() == 3,
                             "physical kv_cache_block_id must be 3-D for group inputs");
     RTP_LLM_CHECK_WITH_INFO(!inputs.kv_cache_block_id.defined()
-                                || static_cast<size_t>(inputs.kv_cache_block_id.size(0)) == group_count,
+                                || static_cast<size_t>(inputs.kv_cache_block_id.size(0)) == input_col_count,
                             "physical kv_cache_block_id group count=%ld does not match kernel block table count=%zu",
                             inputs.kv_cache_block_id.defined() ? inputs.kv_cache_block_id.size(0) : -1,
-                            group_count);
+                            input_col_count);
     torch_ext::AttnInputsByGroup inputs_by_group;
-    for (size_t group_index = 0; group_index < group_count; ++group_index) {
-        const auto& tag                              = group_tags[group_index];
-        const auto  input_idx                        = group_input_indices[group_index];
-        auto        group_inputs                     = py_attn_inputs;
+    for (size_t group_index = 0; group_index < local_group_count; ++group_index) {
+        const auto& tag       = group_tags[group_index];
+        const auto  input_idx = group_input_indices[group_index];
+        RTP_LLM_CHECK_WITH_INFO(input_idx < input_col_count,
+                                "cache group [%s] resolves to input column %zu but the plan has only %zu columns",
+                                tag.c_str(),
+                                input_idx,
+                                input_col_count);
+        auto group_inputs                            = py_attn_inputs;
         group_inputs.kv_cache_kernel_block_id        = inputs.kv_cache_kernel_block_id[input_idx];
         group_inputs.kv_cache_kernel_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_kernel_block_id);
         if (inputs.kv_cache_block_id.defined()) {
@@ -429,11 +437,11 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
         RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate attention input tag=%s", tag.c_str());
     }
 
-    // A single global group keeps the direct fast path. Multiple groups are
+    // A single local group keeps the direct fast path. Multiple groups are
     // exposed only through the outer tag mapping, with the lowest tag mirrored
     // into the direct field so the mirror does not depend on record order.
     py_attn_inputs = inputs_by_group.at(group_tags.front());
-    if (group_count == 1) {
+    if (local_group_count == 1) {
         return {};
     }
     return inputs_by_group;
@@ -443,16 +451,24 @@ std::vector<size_t> PyWrappedModel::resolveCacheGroupInputIndices(const GptModel
     if (!inputs.kv_cache_kernel_block_id.defined() || inputs.kv_cache_kernel_block_id.dim() != 3) {
         return {};
     }
-    const auto group_count = static_cast<size_t>(inputs.kv_cache_kernel_block_id.size(0));
+    const auto input_col_count = static_cast<size_t>(inputs.kv_cache_kernel_block_id.size(0));
     RTP_LLM_CHECK_WITH_INFO(!kv_cache_group_tags_.empty(), "group KV block tables require non-empty model cache tags");
-    // tpSyncModelInputs broadcasts tensor payloads and group types, but not
-    // std::string tags. A non-root rank therefore reconstructs the documented
-    // canonical row order from its identical local CacheConfig. Root and any
-    // explicitly identified group inputs retain exact-set validation and row permutation.
+    // The plan columns are the PRODUCING stage groups, so a downstream stage
+    // may legitimately see more columns than it has tags: the contract is that
+    // input tags cover local tags. tpSyncModelInputs broadcasts tensors but not
+    // std::string tags, so a non-root TP rank reconstructs order positionally.
     const bool reconstruct_non_root_tags = inputs.kv_cache_group_tags.empty() && device_props_.tp_rank > 0;
-    RTP_LLM_CHECK_WITH_INFO(reconstruct_non_root_tags
-                                || inputs.kv_cache_group_tags.size() == kv_cache_group_tags_.size(),
-                            "model input cache tags must exactly match this model's cache tag set");
+    RTP_LLM_CHECK_WITH_INFO(reconstruct_non_root_tags || input_col_count >= kv_cache_group_tags_.size(),
+                            "kernel KV block-table has %zu columns but this model owns %zu cache groups",
+                            input_col_count,
+                            kv_cache_group_tags_.size());
+    RTP_LLM_CHECK_WITH_INFO(!reconstruct_non_root_tags || input_col_count == kv_cache_group_tags_.size(),
+                            "a non-root TP rank cannot resolve a %zu-column plan onto %zu local cache groups: "
+                            "positional reconstruction is only valid when the two sets are equal, so a stage owning "
+                            "a proper subset of the leading stage's cache groups currently requires TP size 1, or a "
+                            "layer partition that gives every stage the same cache group set",
+                            input_col_count,
+                            kv_cache_group_tags_.size());
     std::unordered_set<std::string> input_tags;
     input_tags.reserve(inputs.kv_cache_group_tags.size());
     for (const auto& tag : inputs.kv_cache_group_tags) {
@@ -465,44 +481,45 @@ std::vector<size_t> PyWrappedModel::resolveCacheGroupInputIndices(const GptModel
                                     "model input cache tags contain unknown or missing tags");
         }
     }
-    RTP_LLM_CHECK_WITH_INFO(group_count == kv_cache_group_tags_.size(),
-                            "kernel KV block-table group count=%zu does not match cache tag count=%zu",
-                            group_count,
-                            kv_cache_group_tags_.size());
     RTP_LLM_CHECK_WITH_INFO(!inputs.kv_cache_block_id.defined()
                                 || (inputs.kv_cache_block_id.dim() == 3
-                                    && static_cast<size_t>(inputs.kv_cache_block_id.size(0)) == group_count),
+                                    && static_cast<size_t>(inputs.kv_cache_block_id.size(0)) == input_col_count),
                             "physical KV block table must have the same group dimension as the kernel block table");
     RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_group_types.defined() && inputs.kv_cache_group_types.device().is_cpu()
                                 && inputs.kv_cache_group_types.scalar_type() == torch::kInt32
                                 && inputs.kv_cache_group_types.dim() == 1 && inputs.kv_cache_group_types.is_contiguous()
-                                && static_cast<size_t>(inputs.kv_cache_group_types.numel()) == group_count,
+                                && static_cast<size_t>(inputs.kv_cache_group_types.numel()) == input_col_count,
                             "cache group-type payload length must match cache tags");
     RTP_LLM_CHECK_WITH_INFO(kv_cache_layer_layout_.has_value(),
                             "group KV block tables require the current model cache layout");
 
+    // Project by tag name whenever the payload carries tags; positional
+    // reconstruction is confined to a non-root TP rank with an identical set.
     std::vector<size_t> group_input_indices;
-    group_input_indices.reserve(kv_cache_group_tags_.size());
-    const auto* input_types = inputs.kv_cache_group_types.data_ptr<int32_t>();
-    for (const auto& tag : kv_cache_group_tags_) {
-        size_t input_idx = group_input_indices.size();
-        if (!reconstruct_non_root_tags) {
-            const auto input_it = std::find(inputs.kv_cache_group_tags.begin(), inputs.kv_cache_group_tags.end(), tag);
-            RTP_LLM_CHECK_WITH_INFO(
-                input_it != inputs.kv_cache_group_tags.end(), "validated cache tag=%s has no input row", tag.c_str());
-            input_idx = static_cast<size_t>(std::distance(inputs.kv_cache_group_tags.begin(), input_it));
+    if (reconstruct_non_root_tags) {
+        group_input_indices.reserve(kv_cache_group_tags_.size());
+        for (size_t i = 0; i < kv_cache_group_tags_.size(); ++i) {
+            group_input_indices.push_back(i);
         }
-        RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr, "KV cache layout requires a cache manager");
-        const auto& cache_config  = mtp_cache_config_index_.has_value() ?
-                                        cache_manager_->getMTPModuleCacheConfig(*mtp_cache_config_index_) :
-                                        cache_manager_->cacheConfig();
+    } else {
+        group_input_indices =
+            projectCacheGroupColumns(kv_cache_group_tags_, inputs.kv_cache_group_tags, "model KV cache");
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr, "KV cache layout requires a cache manager");
+    const auto& cache_config = mtp_cache_config_index_.has_value() ?
+                                   cache_manager_->getMTPModuleCacheConfig(*mtp_cache_config_index_) :
+                                   cache_manager_->cacheConfig();
+    const auto* input_types  = inputs.kv_cache_group_types.data_ptr<int32_t>();
+    for (size_t i = 0; i < kv_cache_group_tags_.size(); ++i) {
+        const auto& tag           = kv_cache_group_tags_[i];
+        const auto  input_idx     = group_input_indices[i];
         const auto  expected_type = cache_config.group(tag).policy.group_type;
         RTP_LLM_CHECK_WITH_INFO(input_types[input_idx] == static_cast<int32_t>(expected_type),
                                 "cache group type mismatch for tag=%s: input=%d expected=%d",
                                 tag.c_str(),
                                 input_types[input_idx],
                                 static_cast<int32_t>(expected_type));
-        group_input_indices.push_back(input_idx);
     }
     return group_input_indices;
 }
@@ -840,6 +857,23 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
             graph_runner_->updateKVCacheKernelBlockId(py_model_inputs, graph_state_);
         }
     }
+}
+
+GptModelOutputs PyWrappedModel::forwardPP(const GptModelInputs&        inputs,
+                                          const PPIntermediateTensors* input_tensors,
+                                          PPIntermediateTensors*       output_tensors) {
+    RTP_LLM_PROFILE_SCOPE("py_model.forwardPP");
+    // Thin transport adapter: unpack upstream boundary tensors, delegate to
+    // forward(), then pack the boundary tensors this stage produced.
+    GptModelInputs local_inputs = inputs;
+    if (pp_size_ > 1 && input_tensors != nullptr && !input_tensors->tensors.empty()) {
+        local_inputs.pp_intermediates = input_tensors->tensors;
+    }
+    GptModelOutputs outputs = forward(local_inputs);
+    if (pp_size_ > 1 && output_tensors != nullptr) {
+        output_tensors->tensors = std::move(outputs.pp_intermediates);
+    }
+    return outputs;
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {

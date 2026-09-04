@@ -95,14 +95,27 @@ cc_library(
 )
 
 cc_library(
+    name = "cache_capacity_negotiator",
+    hdrs = ["CacheCapacityNegotiator.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_config",
+        "//rtp_llm/cpp/config:config_modules",
+    ],
+)
+
+cc_library(
     name = "pp_topology_validator",
     srcs = ["PPTopologyValidator.cc"],
     hdrs = ["PPTopologyValidator.h"],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":cache_capacity_negotiator",
         ":cache_config",
         ":cache_group_type",
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
     ],
 )
@@ -316,6 +329,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":batch_kv_cache_resource",
+        ":cache_capacity_negotiator",
         ":cache_types",
         ":coordinator_cache_manager",
         ":prefill_cache_hit_metrics_reporter",

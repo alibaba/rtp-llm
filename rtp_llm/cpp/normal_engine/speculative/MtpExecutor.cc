@@ -2096,7 +2096,10 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
     }
 }
 
-absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
+absl::Status MtpExecutor::process(const ScheduleOutput& schedule_output, int64_t schedule_time_us) {
+    // MTP consumes the scheduled streams only; finished_request_ids (the PP
+    // result-dispatch channel) is unused here since PP + speculative is gated.
+    const auto& streams = schedule_output.streams;
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.process(stream_size=%zu,mtp_step=%zu)", streams.size(), propose_step_);
 
     const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();

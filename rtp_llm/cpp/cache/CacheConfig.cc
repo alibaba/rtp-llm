@@ -209,14 +209,16 @@ size_t CacheConfig::totalGroupBlockSizeBytes() const {
     return bytes;
 }
 
-void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {
+void CacheConfig::finalizeBlockNums(uint32_t                   global_block_num,
+                                    const RuntimeConfig&       runtime_config,
+                                    const PPBlockNumOverrides* pp_overrides) {
     RTP_LLM_CHECK_WITH_INFO(global_block_num > 0, "finalizeBlockNums requires positive global_block_num");
     // TODO: use RuntimeConfig when group-level block sizing needs runtime parallelism context.
     (void)runtime_config;
     block_num = global_block_num;
     for (auto& sub_cfg : mtp_sub_configs) {
         RTP_LLM_CHECK_WITH_INFO(sub_cfg != nullptr, "CacheConfig mtp_sub_config must not be null");
-        sub_cfg->finalizeBlockNums(global_block_num, runtime_config);
+        sub_cfg->finalizeBlockNums(global_block_num, runtime_config, pp_overrides);
     }
 
     const auto step = static_cast<uint32_t>(std::max(1, linear_step));
@@ -227,6 +229,16 @@ void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConf
             rule_blocks = explicit_independent_blocks;
         } else if (group_config.policy.group_type == CacheGroupType::SWA) {
             rule_blocks = global_block_num / step + (global_block_num % step != 0 ? 1u : 0u);
+        }
+        if (pp_overrides != nullptr) {
+            const auto override_it = pp_overrides->find(group_config.tag);
+            if (override_it != pp_overrides->end()) {
+                RTP_LLM_CHECK_WITH_INFO(override_it->second > 0,
+                                        "PP block-count override for tag=%s must be positive, got %u",
+                                        group_config.tag.c_str(),
+                                        override_it->second);
+                rule_blocks = override_it->second;
+            }
         }
         group_config.block_num = rule_blocks;
     }

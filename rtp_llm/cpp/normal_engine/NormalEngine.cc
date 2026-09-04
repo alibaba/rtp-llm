@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/PPTopologyValidator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -523,8 +524,19 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         const auto& cache_cfg = resource_context_.cache_manager->cacheConfig();
         kv_cache_group_num_   = cache_cfg.groupNums();
     } else {
-        auto cache_config = CacheConfigCreator::createConfig(
-            model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result, sp_config);
+        // PP stages must agree on cache capacity before any pool exists; the
+        // hook keeps the exchange and its rules out of the engine.
+        std::shared_ptr<PPCacheCapacityNegotiator> pp_negotiator;
+        if (parallelism_config.pp_size > 1) {
+            pp_negotiator = std::make_shared<PPCacheCapacityNegotiator>();
+        }
+        auto cache_config = CacheConfigCreator::createConfig(model_config_,
+                                                             parallelism_config,
+                                                             runtime_config,
+                                                             kv_cache_config,
+                                                             warm_up_result,
+                                                             sp_config,
+                                                             pp_negotiator);
         RTP_LLM_LOG_INFO("create cache manager with config %s", cache_config.debugString().c_str());
         RTP_LLM_LOG_INFO("create cache manager with block nums %d, block size %ld KB",
                          cache_config.block_num,

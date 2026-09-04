@@ -63,6 +63,10 @@ struct CacheGroup {
     }
 };
 
+// PP: cross-stage agreed block counts keyed by cache group tag. A group
+// listed here takes that exact count instead of deriving it from global.
+using PPBlockNumOverrides = std::unordered_map<std::string, uint32_t>;
+
 struct CacheConfig {
 private:
     std::vector<CacheGroup>                           groups_;
@@ -186,7 +190,12 @@ public:
 
     static bool samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs);
 
-    void        finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config);
+    // Resolves the block count of every group. Priority: pp_overrides >
+    // policy.explicit_block_num > SWA fold-down > global_block_num. The same
+    // table goes down to mtp_sub_configs, other views of the same pools.
+    void        finalizeBlockNums(uint32_t                   global_block_num,
+                                  const RuntimeConfig&       runtime_config,
+                                  const PPBlockNumOverrides* pp_overrides = nullptr);
     std::string debugString(size_t indent = 0) const;
 };
 

@@ -9,9 +9,11 @@
 #include <utility>
 
 #include "absl/numeric/int128.h"
+#include "rtp_llm/cpp/cache/CacheCapacityNegotiator.h"
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
+#include "rtp_llm/cpp/config/PPLayout.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -113,6 +115,22 @@ SpecBuildContext makeSpecBuildContext(const ModelConfig&       model_config,
     ctx.parallelism_config        = &parallelism_config;
     ctx.gen_num_per_cycle         = static_cast<uint32_t>(gen_num_per_cycle);
     return ctx;
+}
+
+void validateStageScopedDescsForPP(const ModelConfig& stage_config) {
+    // PP scope: pipeline parallelism only supports paged pools. Opaque
+    // (state / byte-addressed KV) pools use per-stream ring and tail-block
+    // semantics that the leading stage's pools do not model yet.
+    for (size_t layer_id = 0; layer_id < stage_config.kv_cache_spec_descs.size(); ++layer_id) {
+        for (const auto& desc : stage_config.kv_cache_spec_descs[layer_id]) {
+            RTP_LLM_CHECK_WITH_INFO(desc.cache_type != KVCacheSpecType::OpaqueKV
+                                        && desc.cache_type != KVCacheSpecType::OpaqueState,
+                                    "pipeline parallelism does not support opaque kv cache pools (layer %zu, "
+                                    "cache_type=%d) yet",
+                                    layer_id,
+                                    static_cast<int>(desc.cache_type));
+        }
+    }
 }
 
 uint32_t mhaLocalKvHeadNum(const ModelConfig& model_config, const ParallelismConfig& parallelism_config) {
@@ -502,40 +520,104 @@ CacheTopologyPair CacheConfigCreator::mergeMTPModule(CacheTopologyPair&       ta
     return {std::move(sub_groups), std::move(sub_layers)};
 }
 
+ModelConfig CacheConfigCreator::stageScopedModelConfig(const ModelConfig&       model_config,
+                                                       const ParallelismConfig& parallelism_config) {
+    const int64_t pp_size = std::max<int64_t>(1, parallelism_config.pp_size);
+    if (pp_size <= 1) {
+        return model_config;
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(parallelism_config.pp_rank >= 0 && parallelism_config.pp_rank < pp_size,
+                            "invalid pp_rank=%ld for pp_size=%ld",
+                            parallelism_config.pp_rank,
+                            pp_size);
+
+    // The partition is materialized by the Python startup decision point;
+    // the PPLayout even-split fallback serves pp_size=1 and stale pickles.
+    RTP_LLM_CHECK_WITH_INFO(!parallelism_config.pp_stage_layer_counts.empty(),
+                            "pp_size=%ld requires a materialized layer partition "
+                            "(pp_stage_layer_counts); it must be written by the Python startup decision point",
+                            pp_size);
+
+    const PPLayout layout   = PPLayout::fromParallelismConfig(parallelism_config, model_config.num_layers);
+    const auto [begin, end] = layout.myLayerRange();
+    RTP_LLM_CHECK_WITH_INFO(end > begin,
+                            "pp stage %ld owns no layers: num_layers=%ld pp_size=%ld",
+                            parallelism_config.pp_rank,
+                            model_config.num_layers,
+                            pp_size);
+    RTP_LLM_CHECK_WITH_INFO(model_config.kv_cache_spec_descs.size() == static_cast<size_t>(model_config.num_layers),
+                            "kv_cache_spec_descs size %zu != num_layers %ld",
+                            model_config.kv_cache_spec_descs.size(),
+                            model_config.num_layers);
+
+    ModelConfig stage_config = model_config;
+    stage_config.num_layers  = end - begin;
+    stage_config.kv_cache_spec_descs.assign(model_config.kv_cache_spec_descs.begin() + begin,
+                                            model_config.kv_cache_spec_descs.begin() + end);
+
+    auto& types = stage_config.hybrid_attention_config.hybrid_attention_types;
+    if (!types.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(types.size() == static_cast<size_t>(model_config.num_layers),
+                                "hybrid_attention_types size %zu != num_layers %ld",
+                                types.size(),
+                                model_config.num_layers);
+        types.assign(types.begin() + begin, types.begin() + end);
+    }
+    validateStageScopedDescsForPP(stage_config);
+
+    RTP_LLM_LOG_INFO("PP cache stage %ld/%ld owns global layers [%ld, %ld) of %ld",
+                     parallelism_config.pp_rank,
+                     pp_size,
+                     begin,
+                     end,
+                     model_config.num_layers);
+    return stage_config;
+}
+
 CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model_config,
                                                   const ParallelismConfig& parallelism_config,
                                                   const KVCacheConfig&     kv_cache_config,
                                                   int                      gen_num_per_cycle) {
-    const auto [seq_size_per_block, kernel_seq_size_per_block] = resolveSeqSizes(model_config, kv_cache_config);
+    const ModelConfig scoped_model_config = stageScopedModelConfig(model_config, parallelism_config);
+    const auto [seq_size_per_block, kernel_seq_size_per_block] = resolveSeqSizes(scoped_model_config, kv_cache_config);
     const auto ctx                                             = makeSpecBuildContext(
-        model_config, parallelism_config, seq_size_per_block, kernel_seq_size_per_block, gen_num_per_cycle);
-    auto config        = createConfigFromDescs(model_config, ctx);
+        scoped_model_config, parallelism_config, seq_size_per_block, kernel_seq_size_per_block, gen_num_per_cycle);
+    auto config        = createConfigFromDescs(scoped_model_config, ctx);
     config.linear_step = std::max(1, kv_cache_config.linear_step);
     return config;
 }
 
-CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                               model_config,
-                                             const ParallelismConfig&                         parallelism_config,
-                                             const RuntimeConfig&                             runtime_config,
-                                             const KVCacheConfig&                             kv_cache_config,
-                                             const std::optional<WarmUpResult>&               warm_up_result,
-                                             const std::optional<SpeculativeExecutionConfig>& sp_config) {
-    CacheConfig    config    = createBasicConfig(model_config, parallelism_config, kv_cache_config, 0);
-    const uint32_t block_num = computeLocalBlockNum(blockBudgetForConfig(config),
+uint32_t CacheConfigCreator::measureLocalBlockCapacity(const CacheConfig&                 topology,
+                                                       const ModelConfig&                 model_config,
+                                                       const RuntimeConfig&               runtime_config,
+                                                       const KVCacheConfig&               kv_cache_config,
+                                                       const ParallelismConfig&           parallelism_config,
+                                                       const std::optional<WarmUpResult>& warm_up_result,
+                                                       const std::optional<SpeculativeExecutionConfig>& sp_config) {
+    const uint32_t block_num = computeLocalBlockNum(blockBudgetForConfig(topology),
                                                     model_config,
                                                     runtime_config,
                                                     kv_cache_config,
                                                     parallelism_config,
                                                     warm_up_result,
                                                     sp_config,
-                                                    config.linear_step);
+                                                    topology.linear_step);
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
                             "kv cache needs at least 1 block but %u, each block needs %ld MiB memory",
                             block_num,
-                            static_cast<long>(config.totalGroupBlockSizeBytes() / 1024 / 1024));
+                            static_cast<long>(topology.totalGroupBlockSizeBytes() / 1024 / 1024));
+    return block_num;
+}
 
-    const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
-    config.finalizeBlockNums(block_num, runtime_config);
+CacheConfig CacheConfigCreator::composeCacheConfig(CacheConfig                topology,
+                                                   uint32_t                   block_num,
+                                                   const RuntimeConfig&       runtime_config,
+                                                   const ModelConfig&         model_config,
+                                                   const PPBlockNumOverrides* pp_overrides) {
+    RTP_LLM_CHECK_WITH_INFO(block_num > 0, "composeCacheConfig requires a positive block_num, got %u", block_num);
+    const auto kv_cache_seq_len = static_cast<size_t>(block_num) * topology.seq_size_per_block;
+    topology.finalizeBlockNums(block_num, runtime_config, pp_overrides);
     RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %zu tokens", block_num, kv_cache_seq_len);
     if (kv_cache_seq_len < model_config.max_seq_len) {
         RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %zu tokens, less than max_seq_len %ld, "
@@ -544,18 +626,52 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                             kv_cache_seq_len,
                             model_config.max_seq_len);
     }
+    return topology;
+}
+
+CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                               model_config,
+                                             const ParallelismConfig&                         parallelism_config,
+                                             const RuntimeConfig&                             runtime_config,
+                                             const KVCacheConfig&                             kv_cache_config,
+                                             const std::optional<WarmUpResult>&               warm_up_result,
+                                             const std::optional<SpeculativeExecutionConfig>& sp_config,
+                                             const std::shared_ptr<CacheCapacityNegotiator>&  negotiator) {
+    CacheConfig topology  = createBasicConfig(model_config, parallelism_config, kv_cache_config, 0);
+    uint32_t    block_num = measureLocalBlockCapacity(
+        topology, model_config, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
+
+    // The hook reconciles local capacity with the peers and aborts startup
+    // on failure, so a returned agreement needs no error path here.
+    NegotiatedCapacity         agreed;
+    const PPBlockNumOverrides* overrides = nullptr;
+    if (negotiator != nullptr) {
+        agreed    = negotiator->negotiate(topology, block_num, runtime_config);
+        block_num = agreed.paged_block_num;
+        overrides = &agreed.block_num_overrides;
+    }
+
+    auto config = composeCacheConfig(std::move(topology), block_num, runtime_config, model_config, overrides);
+    if (negotiator != nullptr) {
+        negotiator->validateComposed(config, agreed);
+    }
     return config;
 }
 
-CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&                 score_model_config,
-                                               const ModelConfig&                 propose_model_config,
-                                               const ParallelismConfig&           parallelism_config,
-                                               const RuntimeConfig&               runtime_config,
-                                               const KVCacheConfig&               kv_cache_config,
-                                               const SpeculativeExecutionConfig&  sp_config,
-                                               const std::optional<WarmUpResult>& warm_up_result,
-                                               bool                               is_mtp,
-                                               bool                               is_eagle) {
+CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&                              score_model_config,
+                                               const ModelConfig&                              propose_model_config,
+                                               const ParallelismConfig&                        parallelism_config,
+                                               const RuntimeConfig&                            runtime_config,
+                                               const KVCacheConfig&                            kv_cache_config,
+                                               const SpeculativeExecutionConfig&               sp_config,
+                                               const std::optional<WarmUpResult>&              warm_up_result,
+                                               bool                                            is_mtp,
+                                               bool                                            is_eagle,
+                                               const std::shared_ptr<CacheCapacityNegotiator>& negotiator) {
+    // The joint topology below is built from whole-model configs (no
+    // stageScopedModelConfig), so it is not stage-scoped yet.
+    RTP_LLM_CHECK_WITH_INFO(parallelism_config.pp_size <= 1,
+                            "pipeline parallelism (pp_size=%ld) cannot be combined with speculative execution yet",
+                            parallelism_config.pp_size);
     const auto [seq_size_per_block, kernel_seq_size_per_block] = resolveSeqSizes(score_model_config, kv_cache_config);
     const auto score_ctx                                       = makeSpecBuildContext(score_model_config,
                                                 parallelism_config,
@@ -623,14 +739,14 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
 
     KVCacheBlockBudget joint_budget = score_data.storage.block_budget;
     addBlockBudget(joint_budget, propose_data.storage.block_budget, static_cast<size_t>(num_mtp_modules));
-    const uint32_t block_num = computeLocalBlockNum(joint_budget,
-                                                    score_model_config,
-                                                    runtime_config,
-                                                    kv_cache_config,
-                                                    parallelism_config,
-                                                    warm_up_result,
-                                                    sp_config,
-                                                    joint_step);
+    uint32_t block_num = computeLocalBlockNum(joint_budget,
+                                              score_model_config,
+                                              runtime_config,
+                                              kv_cache_config,
+                                              parallelism_config,
+                                              warm_up_result,
+                                              sp_config,
+                                              joint_step);
     RTP_LLM_CHECK_WITH_INFO(block_num > 0, "kv cache needs at least 1 block but %u", block_num);
 
     auto makeConfig = [](BuiltConfigData&&  data,
@@ -698,7 +814,19 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                             "CacheConfig topology layers %u != main and MTP layers %u",
                             config.layer_all_num,
                             validated_total_layer_num);
-    config.finalizeBlockNums(block_num, runtime_config);
+    // Same hook contract as createConfig, placed after the joint topology
+    // exists so the hook sees real per-group geometry.
+    NegotiatedCapacity         agreed;
+    const PPBlockNumOverrides* overrides = nullptr;
+    if (negotiator != nullptr) {
+        agreed    = negotiator->negotiate(config, block_num, runtime_config);
+        block_num = agreed.paged_block_num;
+        overrides = &agreed.block_num_overrides;
+    }
+    config.finalizeBlockNums(block_num, runtime_config, overrides);
+    if (negotiator != nullptr) {
+        negotiator->validateComposed(config, agreed);
+    }
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
     RTP_LLM_LOG_INFO("CacheConfig created: is_mtp=%d, total_layers=%u, num_mtp_modules=%d, block_num=%u, "

@@ -1,12 +1,8 @@
-// pp_size=1 equivalence baseline for gatherModelInput's KV block table
-// assembly: any future change must keep these tests green under pp_size=1.
+// pp_size=1 equivalence baseline for the KV block table assembly in
+// gatherModelInput: any future change must keep these green under pp_size=1.
 //
-// What is pinned (block tables are deterministic from setBatchBlocks):
-//  - kv_cache_block_id / kv_cache_kernel_block_id contents and shapes
-//  - row order: decode streams first, then context streams
-//  - row width: max block count across the batch, zero padding
-//  - kernel expansion: kernel_id = block_id * bpk + j (bpk=2 case)
-//  - context-only full gather output (combo tokens / lengths / block tables)
+// Pinned: table contents and shapes, row order (decode then context), row width
+// (batch max with zero padding), kernel expansion, context-only gather output.
 
 #include <memory>
 #include <numeric>
@@ -20,7 +16,7 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 
 using namespace std;
 
@@ -36,20 +32,28 @@ static torch::Tensor intTensor(std::vector<int32_t> data) {
     return torch::tensor(data, torch::kInt32);
 }
 
-static void initFullCacheConfig(CacheConfig& cache_config, int layer_num, uint32_t spec_seq_size = 0) {
-    auto spec = std::make_shared<MHAKVCacheSpec>();
-    spec->tag = "default";
-    if (spec_seq_size > 0) {
-        // KVCacheSpecBase defaults seq_size_per_block to 1, and setTopology prefers
-        // the spec value over the CacheConfig global — override it explicitly for
-        // kernel-expansion (bpk > 1) scenarios.
-        spec->seq_size_per_block = spec_seq_size;
-    }
-    std::vector<int> layer_ids(static_cast<size_t>(layer_num));
-    std::iota(layer_ids.begin(), layer_ids.end(), 0);
-    cache_config.layer_num     = static_cast<uint32_t>(layer_num);
-    cache_config.layer_all_num = static_cast<uint32_t>(layer_num);
-    cache_config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+// Single-FULL-group ("default") CacheConfig through the official creator
+// path. kernel_seq_size < seq_size exercises the kernel-block expansion
+// (bpk > 1) scenarios; defaults give bpk = 1.
+static CacheConfig makeFullCacheConfig(int64_t layer_num, uint32_t seq_size = 0, uint32_t kernel_seq_size = 0) {
+    ModelConfig model_config;
+    model_config.num_layers                   = layer_num;
+    model_config.data_type                    = DataType::TYPE_FP16;
+    model_config.attn_config.head_num         = 2;
+    model_config.attn_config.kv_head_num      = 2;
+    model_config.attn_config.size_per_head    = 16;
+    model_config.attn_config.tokens_per_block = 4;
+    model_config.attn_config.kv_cache_dtype   = KvCacheDataType::BASE;
+    KVCacheSpecDesc desc;
+    desc.tag        = "default";
+    desc.cache_type = KVCacheSpecType::MultiHeadAttention;
+    model_config.kv_cache_spec_descs.assign(static_cast<size_t>(layer_num), {desc});
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num            = 8;
+    kv_cache_config.seq_size_per_block        = seq_size;
+    kv_cache_config.kernel_seq_size_per_block = kernel_seq_size;
+    return CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, RuntimeConfig{}, kv_cache_config);
 }
 
 class PPKvBlockTableEquivalenceTest: public DeviceTestBase {
@@ -69,8 +73,8 @@ protected:
 
         BatchKVCacheResource resource;
         resource.resetBatchSize(1);
-        resource.initGroups(cache_config.topologyPtr());
-        resource.setBatchBlocks(0, 0, blocks);
+        resource.initGroups(cache_config);
+        resource.mutableBlockIds(0, "default").assign(blocks);
         stream->setKVCache(resource);
         stream->setIsContextStream(is_context);
         stream->generate_status_->status = StreamState::RUNNING;
@@ -88,9 +92,8 @@ TEST_F(PPKvBlockTableEquivalenceTest, MixedBatchBlockTableBaseline) {
     model_config.num_layers  = 2;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
-    CacheConfig                 cache_config;
-    initFullCacheConfig(cache_config, model_config.num_layers);
-    RuntimeConfig runtime_config;
+    CacheConfig                 cache_config = makeFullCacheConfig(model_config.num_layers);
+    RuntimeConfig               runtime_config;
 
     auto decode_stream =
         makeStream(resource_context, model_config, runtime_config, cache_config, {1, 2}, {5, 6}, false);
@@ -127,11 +130,8 @@ TEST_F(PPKvBlockTableEquivalenceTest, KernelBlockExpansionBpk2) {
     model_config.num_layers  = 2;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
-    CacheConfig                 cache_config;
-    cache_config.seq_size_per_block        = 4;
-    cache_config.kernel_seq_size_per_block = 2;
-    initFullCacheConfig(cache_config, model_config.num_layers, /*spec_seq_size=*/4);
-    ASSERT_EQ(cache_config.kernelBlocksPerKvBlock(), 2u);
+    CacheConfig cache_config = makeFullCacheConfig(model_config.num_layers, /*seq_size=*/4, /*kernel_seq_size=*/2);
+    ASSERT_EQ(cache_config.kernelBlocksPerKvBlock("default"), 2u);
     RuntimeConfig runtime_config;
 
     auto context_stream =
@@ -167,9 +167,8 @@ TEST_F(PPKvBlockTableEquivalenceTest, ContextOnlyFullBaseline) {
     model_config.num_layers  = 2;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
-    CacheConfig                 cache_config;
-    initFullCacheConfig(cache_config, model_config.num_layers);
-    RuntimeConfig runtime_config;
+    CacheConfig                 cache_config = makeFullCacheConfig(model_config.num_layers);
+    RuntimeConfig               runtime_config;
 
     auto ctx1 = makeStream(resource_context, model_config, runtime_config, cache_config, {1, 2, 3}, {5, 6}, true);
     auto ctx2 = makeStream(resource_context, model_config, runtime_config, cache_config, {4, 5}, {7}, true);

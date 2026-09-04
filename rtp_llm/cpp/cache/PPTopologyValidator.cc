@@ -4,8 +4,10 @@
 #include <limits>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 namespace rtp_llm {
@@ -30,6 +32,32 @@ PPValidationResult fail(std::string error) {
     return result;
 }
 
+// Fills per-tag construction inputs from the completed canonical table.
+void deriveConstructionInputs(PPValidationResult& result) {
+    uint32_t paged_min = std::numeric_limits<uint32_t>::max();
+    uint32_t any_max   = 0;
+    result.agreed.block_num_overrides.clear();
+    result.agreed.block_num_overrides.reserve(result.canonical_groups.size());
+    for (const auto& entry : result.canonical_groups) {
+        result.agreed.block_num_overrides.emplace(entry.tag, entry.logical_block_num);
+        any_max = std::max(any_max, entry.logical_block_num);
+        // Explicit and SWA pools are decoupled from the paged yardstick.
+        const bool follows_global_budget =
+            entry.explicit_block_num == 0
+            && (entry.type == CacheGroupType::FULL || entry.type == CacheGroupType::LINEAR);
+        if (follows_global_budget) {
+            paged_min = std::min(paged_min, entry.logical_block_num);
+        }
+    }
+    if (paged_min == std::numeric_limits<uint32_t>::max()) {
+        // All pools explicitly sized, so nothing follows the budget: take the
+        // largest so the top-level value never understates an actual pool.
+        paged_min = any_max;
+    }
+    RTP_LLM_CHECK_WITH_INFO(paged_min > 0, "PP canonical table yielded a non-positive top-level block count");
+    result.agreed.paged_block_num = paged_min;
+}
+
 }  // namespace
 
 bool StageCacheSnapshot::internallyConsistent() const {
@@ -39,36 +67,52 @@ bool StageCacheSnapshot::internallyConsistent() const {
 }
 
 std::string cacheGroupPolicyFingerprint(const CacheGroupPolicy& policy) {
-    // Fixed-field digest covering every field CacheConfig::samePolicy()
-    // compares; uses ':' separators only, so it is wire-safe.
+    // Fixed-field digest of every field samePolicy() compares; wire-safe.
     std::ostringstream oss;
     oss << "t" << static_cast<int>(policy.group_type) << ":r" << (policy.enable_prefix_reuse ? 1 : 0) << ":e"
         << static_cast<int>(policy.evict_policy) << ":v" << (policy.reservable ? 1 : 0) << ":x"
-        << policy.explicit_block_num << ":c" << (policy.charge_to_paged_budget ? 1 : 0) << ":p"
-        << static_cast<int>(policy.memory_placement) << ":a" << policy.active_tail_blocks << ":w"
+        << policy.explicit_block_num << ":a" << policy.active_tail_blocks << ":w"
         << (policy.validate_tail_blocks ? 1 : 0) << ":m" << static_cast<int>(policy.cp_mapping) << ":s"
         << static_cast<int>(policy.cp_slice);
     return oss.str();
 }
 
-StageCacheSnapshot StageCacheSnapshot::fromConfig(const CacheConfig& config) {
+StageCacheSnapshot StageCacheSnapshot::fromTopologyAndCapacity(const CacheConfig&   topology,
+                                                               uint32_t             local_capacity,
+                                                               const RuntimeConfig& runtime_config) {
+    // Derive per-group counts on a throwaway copy through the same rule the
+    // final composition uses, so a stage reports exactly what it would build.
+    CacheConfig sized = topology;
+    sized.finalizeBlockNums(local_capacity, runtime_config);
+
     StageCacheSnapshot snapshot;
-    for (const auto& group : config.topology().groups()) {
-        snapshot.group_tags.push_back(group.tag);
-        snapshot.group_types.push_back(group.policy.group_type);
-        snapshot.seq_size_per_block.push_back(group.seq_size_per_block);
-        snapshot.kernel_seq_size_per_block.push_back(group.kernel_seq_size_per_block);
-        snapshot.block_nums.push_back(group.block_num);
-        snapshot.explicit_block_nums.push_back(group.policy.explicit_block_num);
-        snapshot.policy_fingerprints.push_back(cacheGroupPolicyFingerprint(group.policy));
+    // Sort by tag so identical topologies serialize identically everywhere.
+    std::vector<const CacheGroup*> sorted_groups;
+    sorted_groups.reserve(sized.groups().size());
+    for (const auto& group : sized.groups()) {
+        sorted_groups.push_back(&group);
+    }
+    std::sort(sorted_groups.begin(), sorted_groups.end(), [](const CacheGroup* a, const CacheGroup* b) {
+        return a->tag < b->tag;
+    });
+    for (const auto* group : sorted_groups) {
+        snapshot.group_tags.push_back(group->tag);
+        snapshot.group_types.push_back(group->policy.group_type);
+        snapshot.seq_size_per_block.push_back(static_cast<uint32_t>(group->seqSizePerBlock()));
+        snapshot.kernel_seq_size_per_block.push_back(static_cast<uint32_t>(group->kernelSeqSizePerBlock()));
+        snapshot.block_nums.push_back(group->block_num);
+        snapshot.explicit_block_nums.push_back(group->policy.explicit_block_num);
+        snapshot.policy_fingerprints.push_back(cacheGroupPolicyFingerprint(group->policy));
     }
     return snapshot;
 }
 
 namespace {
 
-// Wire format: "v1|tags|types|seq|kseq|blocks|explicit|fingerprints"; tags
-// and fingerprints joined with \x1f, numeric fields joined with ','.
+// Bumped only on an incompatible field-set change; all stages run one binary.
+constexpr char kWireVersion[] = "v1";
+// Wire layout: version, then tags, types, seq, kseq, blocks, explicit,
+// fingerprints. Tags and fingerprints unit-separated, numerics by ','.
 constexpr char kFieldSep = '|';
 constexpr char kTagSep   = '\x1f';
 constexpr char kNumSep   = ',';
@@ -117,7 +161,7 @@ std::vector<T> parseNums(const std::string& field, size_t expected_size) {
 
 std::string StageCacheSnapshot::serialize() const {
     std::ostringstream oss;
-    oss << "v1" << kFieldSep;
+    oss << kWireVersion << kFieldSep;
     for (size_t i = 0; i < group_tags.size(); ++i) {
         if (i > 0) {
             oss << kTagSep;
@@ -144,23 +188,20 @@ std::string StageCacheSnapshot::serialize() const {
 
 StageCacheSnapshot StageCacheSnapshot::deserialize(const std::string& payload) {
     const auto fields = splitFields(payload, kFieldSep);
-    RTP_LLM_CHECK_WITH_INFO(fields.size() == 8 && fields[0] == "v1",
-                            "PP snapshot payload is malformed (version/field count)");
+    RTP_LLM_CHECK_WITH_INFO(fields.size() == 8 && fields[0] == kWireVersion,
+                            "PP snapshot payload malformed: got %zu fields with version [%s], expected 8 fields "
+                            "and version [%s]",
+                            fields.size(),
+                            fields.empty() ? "<none>" : fields[0].c_str(),
+                            kWireVersion);
     StageCacheSnapshot snapshot;
-    snapshot.group_tags = splitFields(fields[1], kTagSep);
-    // splitFields on an empty tag field yields zero entries (no empty tag).
-    if (fields[1].empty()) {
-        snapshot.group_tags.clear();
-    }
+    snapshot.group_tags                = splitFields(fields[1], kTagSep);
     snapshot.group_types               = parseNums<CacheGroupType>(fields[2], snapshot.group_tags.size());
     snapshot.seq_size_per_block        = parseNums<size_t>(fields[3], snapshot.group_tags.size());
     snapshot.kernel_seq_size_per_block = parseNums<size_t>(fields[4], snapshot.group_tags.size());
     snapshot.block_nums                = parseNums<uint32_t>(fields[5], snapshot.group_tags.size());
     snapshot.explicit_block_nums       = parseNums<uint32_t>(fields[6], snapshot.group_tags.size());
     snapshot.policy_fingerprints       = splitFields(fields[7], kTagSep);
-    if (fields[7].empty()) {
-        snapshot.policy_fingerprints.clear();
-    }
     RTP_LLM_CHECK_WITH_INFO(snapshot.internallyConsistent(), "PP snapshot payload failed consistency check");
     return snapshot;
 }
@@ -186,6 +227,7 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
                 entry.policy_fingerprint        = stages[0].policy_fingerprints[g];
                 result.canonical_groups.push_back(std::move(entry));
             }
+            deriveConstructionInputs(result);
         }
         return result;
     }
@@ -194,8 +236,15 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
         if (!stages[s].internallyConsistent()) {
             return fail("stage " + std::to_string(s) + " cache snapshot is internally inconsistent");
         }
-        // Invariant: a hybrid stage (any LINEAR group) must keep at least one
-        // FULL group.
+        // Tags come off the wire, so reject duplicates here rather than let a
+        // repeated tag masquerade as a second owner and skew the minimum.
+        std::unordered_set<std::string> seen;
+        for (const auto& tag : stages[s].group_tags) {
+            if (!seen.insert(tag).second) {
+                return fail("stage " + std::to_string(s) + " snapshot lists cache group [" + tag + "] twice");
+            }
+        }
+        // Invariant: a hybrid stage (any LINEAR group) must keep at least one FULL group.
         const bool has_linear = std::any_of(stages[s].group_types.begin(),
                                             stages[s].group_types.end(),
                                             [](CacheGroupType t) { return t == CacheGroupType::LINEAR; });
@@ -207,8 +256,8 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
                         + " has LINEAR cache groups but no FULL group; every hybrid PP stage must own at least one "
                           "full attention layer");
         }
-        // v1 scope: sliding-window pools use step-derived capacities whose
-        // cross-stage reconciliation is not implemented yet.
+        // Sliding-window pools use step-derived capacities whose cross-stage
+        // reconciliation is not implemented yet.
         const bool has_swa = std::any_of(stages[s].group_types.begin(),
                                          stages[s].group_types.end(),
                                          [](CacheGroupType t) { return t == CacheGroupType::SWA; });
@@ -218,72 +267,17 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
         }
     }
 
-    const auto& ref            = stages[0];
-    const bool  tag_sets_equal = std::all_of(
-        stages.begin(), stages.end(), [&](const StageCacheSnapshot& s) { return s.group_tags == ref.group_tags; });
-
-    if (tag_sets_equal) {
-        // Elevated path: identical tag sets allow the strict equality check
-        // (the original safety net for stage-scoped isomorphic topologies).
-        for (size_t s = 1; s < stages.size(); ++s) {
-            const auto& cur = stages[s];
-
-            if (cur.group_types != ref.group_types) {
-                return fail("stage " + std::to_string(s) + " group type sequence differs from stage 0");
-            }
-            for (size_t g = 0; g < ref.group_tags.size(); ++g) {
-                if (cur.seq_size_per_block[g] != ref.seq_size_per_block[g]) {
-                    return fail("stage " + std::to_string(s) + " group [" + ref.group_tags[g] + "] seq_size_per_block "
-                                + std::to_string(cur.seq_size_per_block[g]) + " != stage 0 "
-                                + std::to_string(ref.seq_size_per_block[g]));
-                }
-                if (cur.kernel_seq_size_per_block[g] != ref.kernel_seq_size_per_block[g]) {
-                    return fail("stage " + std::to_string(s) + " group [" + ref.group_tags[g]
-                                + "] kernel_seq_size_per_block " + std::to_string(cur.kernel_seq_size_per_block[g])
-                                + " != stage 0 " + std::to_string(ref.kernel_seq_size_per_block[g]));
-                }
-            }
-        }
-    } else {
-        // Pairing path: stage-scoped topologies may legitimately hold
-        // different tag subsets. Match groups by tag name against stage 0
-        // instead of requiring equal tag lists.
-        //
-        // Superset gate: the leading stage issues every block id from its own
-        // physical pools, so it must own every group that appears anywhere.
-        // Bookkeeping-only (layerless) pools are not supported (see the PP
-        // logical bookkeeping design for the future unlock path).
-        for (size_t s = 1; s < stages.size(); ++s) {
-            const auto& cur = stages[s];
-            for (const auto& tag : cur.group_tags) {
-                if (std::find(ref.group_tags.begin(), ref.group_tags.end(), tag) == ref.group_tags.end()) {
-                    return fail("stage " + std::to_string(s) + " owns cache group [" + tag
-                                + "] that is absent from stage 0 [" + joinTags(ref.group_tags)
-                                + "]; the leading PP stage must own every cache group (bookkeeping-only "
-                                  "allocation is not supported)");
-                }
-            }
-            for (size_t g = 0; g < cur.group_tags.size(); ++g) {
-                const auto ref_it = std::find(ref.group_tags.begin(), ref.group_tags.end(), cur.group_tags[g]);
-                RTP_LLM_CHECK_WITH_INFO(ref_it != ref.group_tags.end(),
-                                        "unreachable: stage %zu tag [%s] passed the superset gate",
-                                        s,
-                                        cur.group_tags[g].c_str());
-                const auto rg = static_cast<size_t>(ref_it - ref.group_tags.begin());
-                if (cur.group_types[g] != ref.group_types[rg]) {
-                    return fail("stage " + std::to_string(s) + " group [" + cur.group_tags[g]
-                                + "] type differs from stage 0");
-                }
-                if (cur.seq_size_per_block[g] != ref.seq_size_per_block[rg]) {
-                    return fail("stage " + std::to_string(s) + " group [" + cur.group_tags[g] + "] seq_size_per_block "
-                                + std::to_string(cur.seq_size_per_block[g]) + " != stage 0 "
-                                + std::to_string(ref.seq_size_per_block[rg]));
-                }
-                if (cur.kernel_seq_size_per_block[g] != ref.kernel_seq_size_per_block[rg]) {
-                    return fail("stage " + std::to_string(s) + " group [" + cur.group_tags[g]
-                                + "] kernel_seq_size_per_block " + std::to_string(cur.kernel_seq_size_per_block[g])
-                                + " != stage 0 " + std::to_string(ref.kernel_seq_size_per_block[rg]));
-                }
+    // Allocation authority: the leading stage issues every block id, so it must
+    // own a pool for every tag in the union.
+    const auto&                           ref = stages[0];
+    const std::unordered_set<std::string> stage0_tags(ref.group_tags.begin(), ref.group_tags.end());
+    for (size_t s = 1; s < stages.size(); ++s) {
+        for (const auto& tag : stages[s].group_tags) {
+            if (stage0_tags.find(tag) == stage0_tags.end()) {
+                return fail("stage " + std::to_string(s) + " owns cache group [" + tag
+                            + "] which stage 0 does not; the leading stage issues every block id, so it must own a "
+                              "pool for each tag (stage 0 group set: ["
+                            + joinTags(ref.group_tags) + "])");
             }
         }
     }
@@ -298,12 +292,11 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
         }
     }
 
-    // Canonical group table: cross-stage union ordered stage-0-first (stage-0
-    // order, then first-seen order on later stages). The leading allocator
-    // issues block ids for every entry, so same-tag owners must agree on
-    // type and geometry even when none of them is stage 0.
+    // Canonical table: cross-stage UNION by tag; owners must agree on type,
+    // geometry and policy, and capacity is the min over owners only.
     std::unordered_map<std::string, size_t> canonical_index;
-    std::vector<uint32_t>                   canonical_max_blocks;
+    // Tag-keyed, not positional: canonical_groups is sorted before publication.
+    std::unordered_map<std::string, uint32_t> max_blocks_by_tag;
     for (size_t s = 0; s < stages.size(); ++s) {
         for (size_t g = 0; g < stages[s].group_tags.size(); ++g) {
             const auto& tag = stages[s].group_tags[g];
@@ -319,7 +312,7 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
                 entry.explicit_block_num        = stages[s].explicit_block_nums[g];
                 entry.policy_fingerprint        = stages[s].policy_fingerprints[g];
                 result.canonical_groups.push_back(std::move(entry));
-                canonical_max_blocks.push_back(stages[s].block_nums[g]);
+                max_blocks_by_tag.emplace(tag, stages[s].block_nums[g]);
                 continue;
             }
             auto& entry = result.canonical_groups[it->second];
@@ -350,28 +343,33 @@ PPValidationResult validatePPTopology(const std::vector<StageCacheSnapshot>& sta
                 return fail("stage " + std::to_string(s) + " group [" + tag + "] policy ["
                             + stages[s].policy_fingerprints[g] + "] != canonical [" + entry.policy_fingerprint + "]");
             }
-            entry.logical_block_num          = std::min(entry.logical_block_num, stages[s].block_nums[g]);
-            canonical_max_blocks[it->second] = std::max(canonical_max_blocks[it->second], stages[s].block_nums[g]);
+            entry.logical_block_num = std::min(entry.logical_block_num, stages[s].block_nums[g]);
+            auto& max_blocks        = max_blocks_by_tag[tag];
+            max_blocks              = std::max(max_blocks, stages[s].block_nums[g]);
         }
     }
 
-    // Capacity skew guard over the whole canonical table (not just stage-0
-    // tags): an oversized owner would let the leading allocator issue ids
-    // beyond a smaller owner's pool.
-    for (size_t c = 0; c < result.canonical_groups.size(); ++c) {
-        const auto& entry = result.canonical_groups[c];
-        if (static_cast<double>(canonical_max_blocks[c]) / static_cast<double>(entry.logical_block_num)
-            > capacity_skew_threshold) {
+    // Deployment guard, not correctness (per-tag minima keep pools exact): a
+    // large spread means stranded VRAM, usually an unintended partition.
+    for (const auto& entry : result.canonical_groups) {
+        const auto max_blocks = max_blocks_by_tag[entry.tag];
+        if (static_cast<double>(max_blocks) / static_cast<double>(entry.logical_block_num) > capacity_skew_threshold) {
             std::ostringstream oss;
-            oss << "group [" << entry.tag << "] KV capacity skew too large: max/min = " << canonical_max_blocks[c]
-                << "/" << entry.logical_block_num << " > threshold " << capacity_skew_threshold
-                << "; adjust the layer partition to balance per-stage KV capacity";
+            oss << "group [" << entry.tag << "] KV capacity skew too large: max/min = " << max_blocks << "/"
+                << entry.logical_block_num << " > threshold " << capacity_skew_threshold
+                << "; the richer stage would strand the difference, adjust the layer partition to balance per-stage "
+                   "KV capacity";
             return fail(oss.str());
         }
     }
 
-    // Per-stage logical counts live on the canonical entries themselves;
-    // consumers look entries up by tag (gid is stage-private).
+    // Publish the canonical order as tag-lexicographic, keeping the invariant
+    // independent of stage arrival order.
+    std::sort(result.canonical_groups.begin(), result.canonical_groups.end(), [](const auto& a, const auto& b) {
+        return a.tag < b.tag;
+    });
+
+    deriveConstructionInputs(result);
     result.ok = true;
     return result;
 }
@@ -382,8 +380,7 @@ PPValidationResult initPPCacheGeometry(StageSnapshotCollector& collector, double
 
 std::vector<StageCacheSnapshot> PPSnapshotCollector::collect() {
     // All-gather over the PP process group; payloads come back in group-rank
-    // order, which equals pp_rank order (lane members are ascending world
-    // ranks), so vector index == stage index.
+    // order, which equals pp_rank order, so vector index == stage index.
     const auto payloads = execPPSnapshotExchange(local_.serialize());
     RTP_LLM_CHECK_WITH_INFO(!payloads.empty(), "PP snapshot exchange returned no stages");
     std::vector<StageCacheSnapshot> stages;
@@ -398,97 +395,42 @@ std::vector<StageCacheSnapshot> PPSnapshotCollector::collect() {
     return stages;
 }
 
-void applyPPLogicalBlockNums(CacheConfig& config, const PPValidationResult& validation) {
-    RTP_LLM_CHECK_WITH_INFO(validation.ok, "applyPPLogicalBlockNums requires a successful PP validation");
-    const size_t group_num = static_cast<size_t>(config.groupNums());
-    if (group_num == 0) {
-        return;
-    }
-
-    // Look every local group up in the canonical table by tag: entries carry
-    // the cross-stage min over all owners, so groups owned only by later
-    // stages are capped too. Strides are untouched (geometry was already
-    // validated identical for same-tag owners).
-    std::unordered_map<std::string, uint32_t> logical_blocks;
-    logical_blocks.reserve(validation.canonical_groups.size());
-    // The top-level block_num is the capacity yardstick of the paged pools
-    // that follow the global budget (independent-pool semantics): explicitly
-    // sized pools are decoupled from it and must not drag it down.
-    uint32_t paged_min = std::numeric_limits<uint32_t>::max();
-    for (const auto& entry : validation.canonical_groups) {
-        logical_blocks.emplace(entry.tag, entry.logical_block_num);
-        const bool follows_global_budget =
-            entry.explicit_block_num == 0
-            && (entry.type == CacheGroupType::FULL || entry.type == CacheGroupType::LINEAR);
-        if (follows_global_budget) {
-            paged_min = std::min(paged_min, entry.logical_block_num);
-        }
-    }
-
-    std::vector<uint32_t> block_nums;
-    std::vector<size_t>   kv_strides;
-    std::vector<size_t>   scale_strides;
-    block_nums.reserve(group_num);
-    kv_strides.reserve(group_num);
-    scale_strides.reserve(group_num);
-    for (size_t gid = 0; gid < group_num; ++gid) {
-        const auto& group = config.topology().groupById(gid);
-        const auto  it    = logical_blocks.find(group.tag);
-        RTP_LLM_CHECK_WITH_INFO(it != logical_blocks.end(),
+void validatePPComposedBlockNums(const CacheConfig& composed, const NegotiatedCapacity& agreed) {
+    for (const auto& group : composed.groups()) {
+        const auto it = agreed.block_num_overrides.find(group.tag);
+        RTP_LLM_CHECK_WITH_INFO(it != agreed.block_num_overrides.end(),
                                 "local group [%s] is missing from the PP canonical group table",
                                 group.tag.c_str());
-        // The canonical min includes this stage's own snapshot value, so the
-        // local count can never fall below it; a violation means the local
-        // block count was lowered after the startup snapshot exchange. Fail
-        // fast instead of silently building a pool smaller than the id space
-        // the leading stage may issue (runtime out-of-range writes).
-        RTP_LLM_CHECK_WITH_INFO(group.block_num >= it->second,
-                                "local group [%s] block_num %u is below the PP canonical logical min %u; "
-                                "local capacity changed after the startup snapshot exchange",
+        // Equality holds by construction; a mismatch means the table lost a tag
+        // or local capacity moved after the negotiation.
+        RTP_LLM_CHECK_WITH_INFO(group.block_num == it->second,
+                                "composed group [%s] block_num %u != cross-stage agreed %u",
                                 group.tag.c_str(),
                                 group.block_num,
                                 it->second);
-        // After the check, min(local, canonical) == canonical: pools are
-        // sized exactly to the cross-stage agreed logical capacity, leaving
-        // the richer stage's surplus VRAM unallocated.
-        block_nums.push_back(it->second);
-        kv_strides.push_back(group.kv_block_stride_bytes);
-        scale_strides.push_back(group.kv_scale_stride_bytes);
-    }
-
-    config.setGroupBlockLayout(block_nums, kv_strides, scale_strides);
-    // Keep the top-level (log/scheduler-facing) block count consistent with
-    // the capped paged pools; only ever decreases.
-    if (paged_min != std::numeric_limits<uint32_t>::max() && config.block_num > static_cast<int>(paged_min)) {
-        RTP_LLM_LOG_INFO("PP logical capacity caps local block_num %d to %u (paged-pool canonical min)",
-                         config.block_num,
-                         paged_min);
-        config.block_num = static_cast<int>(paged_min);
     }
 }
 
-void applyPPCanonicalIndices(CacheConfig& config, const PPValidationResult& validation) {
-    RTP_LLM_CHECK_WITH_INFO(validation.ok, "applyPPCanonicalIndices requires a successful PP validation");
-    const size_t group_num = static_cast<size_t>(config.groupNums());
-    if (group_num == 0) {
-        return;
+NegotiatedCapacity PPCacheCapacityNegotiator::negotiate(const CacheConfig&   topology,
+                                                        uint32_t             local_block_num,
+                                                        const RuntimeConfig& runtime_config) {
+    // Startup barrier: every stage reports its geometry and measured capacity,
+    // then all reduce the collected snapshots to the same per-tag minima.
+    PPSnapshotCollector collector(
+        StageCacheSnapshot::fromTopologyAndCapacity(topology, local_block_num, runtime_config));
+    const auto validation = initPPCacheGeometry(collector, capacity_skew_threshold_);
+    if (!validation.ok) {
+        RTP_LLM_FAIL("PP cache topology validation failed: %s", validation.error.c_str());
     }
+    RTP_LLM_LOG_INFO("PP cache negotiation: local block_num %u -> agreed paged %u over %zu canonical groups",
+                     local_block_num,
+                     validation.agreed.paged_block_num,
+                     validation.canonical_groups.size());
+    return validation.agreed;
+}
 
-    std::unordered_map<std::string, size_t> canonical_index;
-    canonical_index.reserve(validation.canonical_groups.size());
-    for (size_t c = 0; c < validation.canonical_groups.size(); ++c) {
-        canonical_index.emplace(validation.canonical_groups[c].tag, c);
-    }
-
-    auto groups = config.topology().groups();
-    for (auto& group : groups) {
-        const auto it = canonical_index.find(group.tag);
-        RTP_LLM_CHECK_WITH_INFO(it != canonical_index.end(),
-                                "local group [%s] is missing from the PP canonical group table",
-                                group.tag.c_str());
-        group.canonical_idx = it->second;
-    }
-    config.setTopology(std::move(groups), config.topology().layers());
+void PPCacheCapacityNegotiator::validateComposed(const CacheConfig& composed, const NegotiatedCapacity& agreed) {
+    validatePPComposedBlockNums(composed, agreed);
 }
 
 }  // namespace rtp_llm

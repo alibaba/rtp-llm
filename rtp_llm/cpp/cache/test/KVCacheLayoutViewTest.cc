@@ -470,6 +470,50 @@ TEST(KVCacheLayoutViewTest, SortedBoundaryTagOrderIsCanonicalAndValidated) {
     EXPECT_ANY_THROW(sortedCacheGroupTags({"full", "full"}));
 }
 
+// PP column projection: a stage resolves its own groups to columns of a block
+// table produced by another stage, by tag name.
+TEST(KVCacheLayoutViewTest, ProjectGroupColumnsIdentityWhenSetsMatch) {
+    // The common PP case: every stage owns the same groups, so projection is
+    // the identity and behaves exactly like the pre-PP positional addressing.
+    const std::vector<std::string> tags = {"csa_kv", "indexer_kv", "swa_kv"};
+    const auto                     cols = projectCacheGroupColumns(tags, tags);
+    EXPECT_EQ(cols, (std::vector<size_t>{0, 1, 2}));
+}
+
+TEST(KVCacheLayoutViewTest, ProjectGroupColumnsSelectsSubsetAndIgnoresExtra) {
+    // The uneven-partition case: the leading stage owns {full, linear} and emits
+    // two columns; a downstream stage owning only {linear} must pick column 1
+    // and never touch column 0.
+    const std::vector<std::string> input_tags = {"full", "linear"};
+    const std::vector<std::string> local_tags = {"linear"};
+    EXPECT_EQ(projectCacheGroupColumns(local_tags, input_tags), (std::vector<size_t>{1}));
+
+    // Same, with the local stage owning a different single group.
+    EXPECT_EQ(projectCacheGroupColumns({"full"}, input_tags), (std::vector<size_t>{0}));
+
+    // Three columns, local stage owns the outer two.
+    const std::vector<std::string> wide = {"a", "b", "c"};
+    EXPECT_EQ(projectCacheGroupColumns({"a", "c"}, wide), (std::vector<size_t>{0, 2}));
+}
+
+TEST(KVCacheLayoutViewTest, ProjectGroupColumnsIsOrderIndependent) {
+    // Resolution is by name, so the producer's column order is not this
+    // function's contract to assume — a differently ordered payload still maps
+    // each local group to the column that actually carries it.
+    const std::vector<std::string> local_tags = {"csa_kv", "swa_kv"};
+    EXPECT_EQ(projectCacheGroupColumns(local_tags, {"swa_kv", "indexer_kv", "csa_kv"}), (std::vector<size_t>{2, 0}));
+    EXPECT_EQ(projectCacheGroupColumns(local_tags, {"csa_kv", "indexer_kv", "swa_kv"}), (std::vector<size_t>{0, 2}));
+}
+
+TEST(KVCacheLayoutViewTest, ProjectGroupColumnsRejectsUncoveredLocalTag) {
+    // A local group with no column in the payload means the producer never
+    // allocated for it: fail loudly instead of reading a neighbouring column.
+    EXPECT_ANY_THROW(projectCacheGroupColumns({"full", "missing"}, {"full", "linear"}));
+    EXPECT_ANY_THROW(projectCacheGroupColumns({"full"}, {}));
+    // An empty local set projects to nothing (no groups, no columns needed).
+    EXPECT_TRUE(projectCacheGroupColumns({}, {"full", "linear"}).empty());
+}
+
 TEST(KVCacheLayoutViewTest, ModelCacheTagsAreSortedAndBindingIgnoresDeclarationOrder) {
     const auto csa       = torch::zeros({2, 64}, torch::TensorOptions().dtype(torch::kFloat16));
     const auto swa       = torch::ones({2, 64}, torch::TensorOptions().dtype(torch::kFloat16));

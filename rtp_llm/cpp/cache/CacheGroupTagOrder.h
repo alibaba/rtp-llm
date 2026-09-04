@@ -49,4 +49,24 @@ groupIndexForTag(const std::vector<std::string>& sorted_tags, std::string_view t
     return static_cast<size_t>(std::distance(sorted_tags.begin(), it));
 }
 
+// PP column projection: maps each local cache group tag to the column carrying
+// it in a payload produced by another stage. Resolution is by tag name, never by
+// position, since the producer may own more groups than the consumer.
+inline std::vector<size_t> projectCacheGroupColumns(const std::vector<std::string>& local_tags,
+                                                    const std::vector<std::string>& input_tags,
+                                                    const char*                     what = "cache group") {
+    std::vector<size_t> columns;
+    columns.reserve(local_tags.size());
+    for (const auto& tag : local_tags) {
+        const auto it = std::find(input_tags.begin(), input_tags.end(), tag);
+        RTP_LLM_CHECK_WITH_INFO(it != input_tags.end(),
+                                "%s tag=%s has no column in the incoming payload (which carries %zu columns)",
+                                what,
+                                tag.c_str(),
+                                input_tags.size());
+        columns.push_back(static_cast<size_t>(std::distance(input_tags.begin(), it)));
+    }
+    return columns;
+}
+
 }  // namespace rtp_llm

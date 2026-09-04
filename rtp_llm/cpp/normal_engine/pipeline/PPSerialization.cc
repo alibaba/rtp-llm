@@ -185,6 +185,10 @@ void writeModelInput(ByteWriter& w, const GptModelInputs& in) {
     w.tensor(in.kv_cache_block_id);
     w.tensor(in.kv_cache_kernel_block_id);
     w.tensor(in.kv_cache_group_types);
+    w.val<uint64_t>(in.kv_cache_group_tags.size());
+    for (const auto& tag : in.kv_cache_group_tags) {
+        w.str(tag);
+    }
     w.tensor(in.kv_cache_update_mapping);
     w.tensor(in.text_tokens_mask);
     w.tensor(in.mm_features_locs);
@@ -195,10 +199,6 @@ void writeModelInput(ByteWriter& w, const GptModelInputs& in) {
     w.optTensorList(in.multimodal_features);
     w.optTensorList(in.mm_extra_input);
     w.optTensorList(in.input_embeddings);
-    w.val<uint64_t>(in.kv_block_stride_bytes);
-    w.val<uint64_t>(in.kv_scale_stride_bytes);
-    w.val<uint64_t>(in.seq_size_per_block);
-    w.val<uint64_t>(in.kernel_seq_size_per_block);
     w.flag(in.pd_separation);
     w.flag(in.decode_entrance);
     w.flag(in.use_opaque_kv_cache_store);
@@ -209,7 +209,6 @@ void writeModelInput(ByteWriter& w, const GptModelInputs& in) {
     w.flag(in.skip_run);
     w.flag(in.is_fake_stream);
     w.flag(in.is_target_verify);
-    w.val<int32_t>(static_cast<int32_t>(in.dspark_call_phase));
 }
 
 void readModelInput(ByteReader& r, GptModelInputs& in) {
@@ -227,20 +226,25 @@ void readModelInput(ByteReader& r, GptModelInputs& in) {
     in.kv_cache_block_id        = r.tensor();
     in.kv_cache_kernel_block_id = r.tensor();
     in.kv_cache_group_types     = r.tensor();
-    in.kv_cache_update_mapping  = r.tensor();
-    in.text_tokens_mask         = r.tensor();
-    in.mm_features_locs         = r.tensor();
-    in.input_embeddings_locs    = r.tensor();
-    in.request_id               = r.tensor();
-    in.request_pd_separation    = r.tensor();
-    in.cache_keys               = r.tensor();
+    const auto group_tag_count  = r.val<uint64_t>();
+    RTP_LLM_CHECK_WITH_INFO(group_tag_count <= 4096,
+                            "PP payload declares %llu cache group tags, which is not a plausible group count",
+                            static_cast<unsigned long long>(group_tag_count));
+    in.kv_cache_group_tags.clear();
+    in.kv_cache_group_tags.reserve(static_cast<size_t>(group_tag_count));
+    for (uint64_t i = 0; i < group_tag_count; ++i) {
+        in.kv_cache_group_tags.push_back(r.str());
+    }
+    in.kv_cache_update_mapping = r.tensor();
+    in.text_tokens_mask        = r.tensor();
+    in.mm_features_locs        = r.tensor();
+    in.input_embeddings_locs   = r.tensor();
+    in.request_id              = r.tensor();
+    in.request_pd_separation   = r.tensor();
+    in.cache_keys              = r.tensor();
     r.optTensorList(in.multimodal_features);
     r.optTensorList(in.mm_extra_input);
     r.optTensorList(in.input_embeddings);
-    in.kv_block_stride_bytes     = r.val<uint64_t>();
-    in.kv_scale_stride_bytes     = r.val<uint64_t>();
-    in.seq_size_per_block        = r.val<uint64_t>();
-    in.kernel_seq_size_per_block = r.val<uint64_t>();
     in.pd_separation             = r.flag();
     in.decode_entrance           = r.flag();
     in.use_opaque_kv_cache_store = r.flag();
@@ -251,7 +255,6 @@ void readModelInput(ByteReader& r, GptModelInputs& in) {
     in.skip_run                  = r.flag();
     in.is_fake_stream            = r.flag();
     in.is_target_verify          = r.flag();
-    in.dspark_call_phase         = static_cast<DSparkCallPhase>(r.val<int32_t>());
 }
 
 void writeSamplingPlan(ByteWriter& w, const PPSamplingPlan& s) {

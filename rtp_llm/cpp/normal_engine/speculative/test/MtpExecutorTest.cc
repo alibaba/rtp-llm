@@ -708,7 +708,7 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
                     std::move(components.fake_sampler));
 
     // Verify executor was created successfully
-    auto status = components.executor->process({stream1});
+    auto status = components.executor->process({{stream1}});
     ASSERT_TRUE(status.ok());
 
     // check stream result
@@ -758,7 +758,7 @@ TEST_F(MtpExecutorTest, testDSparkPrefillCommitDoesNotUseTargetVerifyContract) {
                     std::move(components.fake_sampler),
                     std::move(components.fake_draft_prefill_model));
 
-    auto status = components.executor->process({stream});
+    auto status = components.executor->process({{stream}});
     ASSERT_TRUE(status.ok()) << status.ToString();
     EXPECT_EQ((std::vector<int>{0, 1, 2, 3, 1}), stream->getCompleteTokenIds()->completeTokenIdsVec(0));
     EXPECT_TRUE(stream->getProposeToken().empty());
@@ -836,7 +836,7 @@ TEST_F(MtpExecutorTest, testMultiBatchPrefill) {
                     std::move(components.fake_sampler));
 
     // Verify executor was created successfully
-    auto status = components.executor->process({stream1, stream2});
+    auto status = components.executor->process({{stream1, stream2}});
     ASSERT_TRUE(status.ok());
 
     // check stream result
@@ -1010,7 +1010,7 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
                     std::move(components.fake_draft_prefill_model));
 
     // Verify executor was created successfully
-    auto status = components.executor->process({stream1});
+    auto status = components.executor->process({{stream1}});
     ASSERT_TRUE(status.ok());
     EXPECT_EQ(active_draft_model->forwardCount(), propose_step - 1);
     EXPECT_EQ(draft_prefill_fake_model->forwardCount(), 1u);
@@ -1038,7 +1038,7 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
 
     GenerateStreamPtr stream = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
-    stream->logits_processor_list_.push_back(
+    stream->sampling_state_.logits_processors.push_back(
         std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen()));
 
     auto draft_input_1               = GptModelInputs{};
@@ -1107,7 +1107,7 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
                     std::move(components.fake_speculative_sampler),
                     std::move(components.fake_sampler));
 
-    auto status = components.executor->process({stream});
+    auto status = components.executor->process({{stream}});
     ASSERT_TRUE(status.ok());
 
     checkOutput(stream, {0, 1, 2, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.21, 0.22});
@@ -1144,7 +1144,7 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     EXPECT_FALSE(stream->getProposeTokensGpu().defined());
 
     auto processor = std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen());
-    stream->logits_processor_list_.push_back(processor);
+    stream->sampling_state_.logits_processors.push_back(processor);
     const auto main_thread_id = std::this_thread::get_id();
 
     GptModelInputs target_input;
@@ -1220,7 +1220,7 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
                     std::move(components.fake_sampler),
                     std::move(components.fake_draft_prefill_model));
 
-    auto status = components.executor->process({stream});
+    auto status = components.executor->process({{stream}});
     ASSERT_TRUE(status.ok()) << status.ToString();
     EXPECT_NE(std::thread::id(), processor->invocationThreadId());
     EXPECT_NE(main_thread_id, processor->invocationThreadId());
@@ -1426,7 +1426,7 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
 
     GenerateStreamPtr stream = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
-    stream->logits_processor_list_.push_back(
+    stream->sampling_state_.logits_processors.push_back(
         std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen()));
 
     auto target_input              = GptModelInputs{};
@@ -1481,7 +1481,7 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
                     std::move(components.fake_speculative_sampler),
                     std::move(components.fake_sampler));
 
-    auto status = components.executor->process({stream});
+    auto status = components.executor->process({{stream}});
     ASSERT_TRUE(status.ok());
 
     checkOutput(stream, {0, 1, 2, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {});
@@ -1660,7 +1660,7 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
                     std::move(components.fake_sampler));
 
     // Verify executor was created successfully
-    auto status = components.executor->process({stream1, stream2});
+    auto status = components.executor->process({{stream1, stream2}});
     ASSERT_TRUE(status.ok());
 
     // check stream result
@@ -1977,7 +1977,7 @@ TEST_F(MtpExecutorTest, testErroredSpecLogitsStreamDoesNotAbortExecutor) {
 
     GenerateStreamPtr stream = createDecodeStream(
         components.model_config, components.runtime_config, components.resource_context, {0, 1}, spec_update_info);
-    stream->logits_processor_list_.push_back(std::make_shared<IncompatibleMtpProcessor>());
+    stream->sampling_state_.logits_processors.push_back(std::make_shared<IncompatibleMtpProcessor>());
     stream->reportError(ErrorCode::INVALID_PARAMS, "grammar accept_token error: parser rejected token");
 
     auto target_input              = GptModelInputs{};
@@ -2030,7 +2030,7 @@ TEST_F(MtpExecutorTest, testErroredSpecLogitsStreamDoesNotAbortExecutor) {
                     std::move(components.fake_speculative_sampler),
                     std::move(components.fake_sampler));
 
-    auto status = components.executor->process({stream});
+    auto status = components.executor->process({{stream}});
     EXPECT_TRUE(status.ok());
     EXPECT_TRUE(stream->hasError());
 }

@@ -11,6 +11,8 @@
 #endif
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/CacheGroupTagOrder.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -44,6 +46,35 @@ static int64_t getProcessorEosTokenId(const ModelConfig& model_config) {
     RTP_LLM_CHECK_WITH_INFO(eos_it != output_vocab_ids.end() && *eos_it == eos_token_id,
                             "primary EOS token is absent from the configured output vocabulary");
     return std::distance(output_vocab_ids.begin(), eos_it);
+}
+
+// Mirrors NormalExecutor decodeCacheUpdateMapping: the first column is a
+// group_index in sorted-tag order, resolved to a tag before the cache layer.
+static std::vector<TaggedBlockIdPair> decodeCacheUpdateMapping(const torch::Tensor& mapping,
+                                                               const CacheConfig&   cache_config) {
+    RTP_LLM_CHECK_WITH_INFO(mapping.device().is_cpu() && mapping.scalar_type() == torch::kInt32
+                                && mapping.is_contiguous() && mapping.dim() == 2 && mapping.size(1) == 3,
+                            "kv_cache_update_mapping must be a contiguous CPU int32 [copies, 3] matrix");
+    std::vector<std::string> tags;
+    tags.reserve(cache_config.groups().size());
+    for (const auto& group : cache_config.groups()) {
+        tags.push_back(group.tag);
+    }
+    const auto sorted_tags = sortedCacheGroupTags(tags, "cache update mapping");
+
+    const auto*                    rows = reinterpret_cast<const GroupBlockIdPair*>(mapping.data_ptr());
+    std::vector<TaggedBlockIdPair> tagged;
+    tagged.reserve(static_cast<size_t>(mapping.size(0)));
+    for (int64_t i = 0; i < mapping.size(0); ++i) {
+        const auto group_index = rows[i].group_index;
+        RTP_LLM_CHECK_WITH_INFO(group_index >= 0 && static_cast<size_t>(group_index) < sorted_tags.size(),
+                                "kv_cache_update_mapping row %ld has out-of-range group_index=%d for %zu cache tags",
+                                static_cast<long>(i),
+                                group_index,
+                                sorted_tags.size());
+        tagged.push_back({sorted_tags[static_cast<size_t>(group_index)], rows[i].src, rows[i].dst});
+    }
+    return tagged;
 }
 
 void PPExecutor::InflightBatch::reset() {
@@ -178,12 +209,6 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
         sampler_ = std::make_unique<Sampler>(SamplerInitParams{initial_sampler_batch_size, false});
     }
 
-    const size_t runtime_tokens_per_block        = cache_manager_ ? cache_manager_->cacheConfig().seq_size_per_block :
-                                                                    params.model_config_.attn_config.tokens_per_block;
-    const size_t runtime_kernel_tokens_per_block = cache_manager_ ?
-                                                       cache_manager_->cacheConfig().kernel_seq_size_per_block :
-                                                       params.model_config_.attn_config.kernel_tokens_per_block;
-
     GptModelInitParams model_init_params(
         {params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
@@ -199,8 +224,6 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
          mla_ops_type,
          params.model_config_.max_seq_len,
          params.model_config_.hidden_size,
-         runtime_tokens_per_block,
-         runtime_kernel_tokens_per_block,
          cache_manager_,
          std::nullopt,
          params.model_config_.hc_mult});
@@ -470,8 +493,10 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
         GptModelInputs& local_model_input = plan.model_input;
         buffer_holder_.release();
         model_->releaseBuffers();
-        if (cache_manager_ && local_model_input.kv_cache_update_mapping.defined()) {
-            cache_manager_->blockBatchCopy(local_model_input.kv_cache_update_mapping);
+        if (cache_manager_ && local_model_input.kv_cache_update_mapping.defined()
+            && local_model_input.kv_cache_update_mapping.size(0) > 0) {
+            cache_manager_->blockBatchCopy(
+                decodeCacheUpdateMapping(local_model_input.kv_cache_update_mapping, cache_manager_->cacheConfig()));
         }
 
         const bool force = isStageRoot() && enable_detail_log_;
