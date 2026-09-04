@@ -39,3 +39,17 @@ py_test(
         "//rtp_llm:torch",
     ],
 )
+
+py_test(
+    name = "rocm_odd_rmsnorm_test",
+    srcs = ["rocm_odd_rmsnorm_test.py"],
+    exec_properties = {
+        "gpu": "MI308X-ROCM7",
+        "gpu_count": "1",
+    },
+    tags = ["rocm"],
+    deps = [
+        "//rtp_llm/models_py:new_weight_loader",
+        "//rtp_llm:torch",
+    ],
+)

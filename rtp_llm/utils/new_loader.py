@@ -71,6 +71,10 @@ def new_loader_unsupported_reason(
                 f"quantization config {type(quant_config).__name__} does not "
                 "provide a supported NewLoader runtime method"
             )
+        if model_config.expert_num > 0:
+            moe_reason = quant_config.get_new_loader_moe_unsupported_reason()
+            if moe_reason is not None:
+                return moe_reason
     if (
         device_resource_config is not None
         and device_resource_config.enable_layer_micro_batch != 0
