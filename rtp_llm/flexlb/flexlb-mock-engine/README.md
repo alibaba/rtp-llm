@@ -10,7 +10,7 @@ A Java-based mock engine for FlexLB load balancing testing. Simulates real GPU i
 - **HTTP control**: 14 endpoints for runtime control (/snapshot, /inject, /clear_inject, /health, /requests, /set_perf, /set_kv_pressure, /set_queue_depth, /stop_engine, /start_engine, /cancel_request, /add_engine, /remove_engine, /metrics)
 - **Inflight leak detection**: 30s periodic check with 60s grace period
 - **KV cache modeling**: block-pool capacity model v2 — heterogeneous prefill/decode pools, LRU-coupled admission/eviction (LACK_MEM), per-step decode KV growth, pressure simulation
-- **Concurrency modeling**: Prefill batch-level wait queue (inflight capped by `max_prefill_concurrency`, default 1 per DP rank; queued batches capped by `prefill.max_waiting_batches` only when > 0 — default 0 = unbounded, production-aligned P-side queueing with backpressure left to the master), decode wait queue + hard concurrency gate (`decode_max_concurrency`, default 132) with backpressure rejection when the pending queue is full
+- **Concurrency modeling**: Prefill batch-level wait queue (inflight capped by `max_prefill_concurrency`, default 1 per DP rank; queued batches capped by `prefill.max_waiting_batches` only when > 0 — default 0 = unbounded, production-aligned P-side queueing with backpressure left to the master), decode wait queue + hard concurrency gate (`decode_max_concurrency`, default 132) with backpressure rejection when the pending queue is full. Since #8 the prefill side additionally regroups admitted work in-engine under the dual budget `prefill.max_batch_tokens` / `prefill.max_batch_requests` (master batches are no longer executed verbatim — see the regroup section below)
 
 ## Quick Start
 
@@ -33,6 +33,8 @@ bash run_online_eval.sh
 | prefill.min_ms | null | Floor for the final (post-scale) prefill sleep in ms; guards against sleep_scale making prefill unrealistically fast |
 | prefill.scale | 1.0 | Prefill-specific multiplier |
 | prefill.max_waiting_batches | 0 | Cap on queued (not-running) prefill batches per engine. Default `0` / absent / negative = unbounded queue — production-aligned: the real engine's P side (`waiting_group_queue_` / `waiting_streams_`) enqueues unconditionally and never rejects on queue depth; backpressure lives in the master (inflight / maxEngineRequests gates), not the engine. A positive cap introduces an engine-side rejection surface (excess enqueues rejected with backpressure) — a front-loaded simulation of the master gate, hence a different rejection-attribution path than production (capped profiles such as the online_eval dsv4 profile's explicit 4 reject at the engine; production would reject at the master — read such tiers' conclusions with that difference in mind). Rule of thumb when capping: n ≈ SLO_ms / batch_ms − 1 (e.g. SLO 1000 ms, batch 150 ms → 4, deepest wait 600 ms + 150 ms execution leaves ~25% headroom); for 1x-scale runs where a batch takes ~330–400 ms, use 1–2 |
+| prefill.max_batch_tokens | 1048576 | In-engine dual-budget regroup (#8): token ceiling for one EXECUTION batch — admission stops once Σ(computeTokens + hitTokens) over admitted members reaches the budget (members join while admitted < budget, production FIFOScheduler.cc:371-481 semantics; the budget is a STOP, never a mid-batch cut). Default 1_048_576 mirrors the production `max_batch_tokens_size` the mock already reports via WorkerStatus. Explicit `0` disables the token dimension |
+| prefill.max_batch_requests | 32 | In-engine dual-budget regroup (#8): request-count ceiling for one execution batch. Default 32 mirrors the master FIXED_WINDOW `maxRequests` production value. Explicit `0` disables the request dimension. `max_batch_tokens=0` AND `max_batch_requests=0` together disable the regroup entirely — master batches then execute verbatim (the pre-#8 behaviour) |
 | decode.scale | 1.0 | Decode-specific multiplier |
 | decode.step_base_ms | 19.5 | Per-step decode latency intercept of the linear production fit: step_ms = step_base_ms + step_per_running_ms × running (production DSv4 fit, task #68). Applies when no `step_ms_by_batch` curve is declared |
 | decode.step_per_running_ms | 0.175 | Per-step decode latency slope per running stream (production DSv4 fit) |
@@ -231,7 +233,7 @@ name, same naming scheme as the cluster) or `{"port": N}` (gRPC port).
 - `/metrics`: aggregated by role by default; append `?per_engine=true` for
   per-engine labels (`engine_name`/`role`/`grpc_port`/`engine_ip`).
 
-## Test Suite (231 test methods)
+## Test Suite (313 test methods)
 
 | Test | Methods | Description |
 |------|---------|-------------|
@@ -255,6 +257,7 @@ name, same naming scheme as the cluster) or `{"port": N}` (gRPC port).
 | BlockPoolMetricsObservabilityTest | 6 | Block-pool series in both /metrics modes: three-state gauges over a request's life, prefill-602 vs decode-terminal-fail counter split, decode reuse accumulation (cumulative, never drained), decode admission-failure terminal semantics, P-enqueue reservation reject/adopt/release lifecycle |
 | CacheKeyHitMetricsTest | 2 | Cache key-hit counters: prefix-match run accumulation (hit/requested key sums across requests, /metrics + /snapshot terminal fields) and empty-block-hash 0/0 contribution |
 | RealisticTimingTest | 1 | Real timing verification |
+| PrefillBudgetRegroupTest | 6 | In-engine dual-budget prefill regroup (#8): over-budget master-batch split, arrival order across the split, == boundary verbatim, 0/0 off switch, cross-batch regroup under the request cap, direct path under the token budget |
 
 ## JavaLoadClient
 
@@ -516,11 +519,71 @@ The opt-in default is deliberate: Auto-TPM queue-eviction E2E scenarios need
 deep engine-side queues, so the cap must be explicitly requested. Do not
 "fix" the default to fail-fast without revisiting those scenarios.
 
+### In-engine dual-budget prefill regroup (#8)
+
+Before #8 the engine executed master `EnqueueBatch` batches verbatim —
+whatever the master's FIXED_WINDOW composed was what ran. The real
+engine does not: its scheduler re-groups waiting streams under a dual
+budget every time it forms an execution batch. The mock now mirrors
+that (production reference: FIFOScheduler.cc:371-481):
+
+- **Composition point**: the lane scheduler's take-a-batch step
+  (inside `prefillQueueLock`), for BOTH arrival paths — master
+  EnqueueBatch batches and direct generateStream arrivals feed the
+  same waiting pool. `max_prefill_concurrency` gating and the lane
+  CAS timeline are untouched: this changes how a batch is COMPOSED,
+  not how batches queue or run.
+- **Dual budget**: token ceiling `prefill.max_batch_tokens`
+  (Σ(computeTokens + hitTokens) over admitted members — the full
+  logical token count, cache hits included) plus request-count
+  ceiling `prefill.max_batch_requests`. Members join while
+  `admitted < budget` — the budget is a STOP, never a mid-batch cut,
+  so a batch exactly AT the budget executes verbatim (the boundary
+  is inclusive).
+- **Split fallback**: a master batch that exceeds the budget is
+  decomposed FIFO into the waiting pool and re-composed under the
+  budget — the overflow tail parks as a `PrefillPendingBatch`
+  (visible via `prefill_waiting_batches`) and admits FIFO when the
+  prefix drains. Execution order follows arrival order across the
+  split.
+- **Ledger closure (the split never breaks accounting)**: batch-id
+  attribution, `engine_events` rows and terminal claims are
+  per-request and keep each member's ORIGINAL master batch id; KV
+  block leases travel with the request, not the batch; the
+  `prefill_batches` / `avg_batch_size` stats family automatically
+  reflects the regrouped execution shape.
+- **Direct path**: the legacy `directBatchSizeMax` coalesce cap stays
+  binding; the regroup ADDS the token dimension to the direct pool,
+  never loosens the request cap.
+- **Off switch**: `prefill.max_batch_tokens=0` disables the token
+  dimension, `prefill.max_batch_requests=0` the request dimension;
+  both zero disable the regroup entirely — master batches execute
+  verbatim, the pre-#8 behaviour (use this to reproduce legacy
+  baselines). Defaults are production-aligned (1_048_576 / 32) so
+  the stress caliber needs no extra opt-in.
+- **Observation surface**: `/snapshot` exposes `prefill_batches` /
+  `prefill_batch_requests` / `max_prefill_batch_size` per prefill
+  engine — the executed-batch counters the flexlb_ft regroup cases
+  assert on.
+
+**Caliber break note**: `avg_batch_size` and the whole
+`prefill_batches` family changed meaning with #8 (verbatim master
+batches → regrouped execution batches). Historical report baselines
+are not directly comparable across the switch.
+
+**Deliberate omission — rectangular padding**: pricing keeps the
+token-sum formula (per-request token terms summed over batch
+members), NOT the production padded-rectangle model
+(`max_len × batch_size`). With extreme intra-batch length skew the
+mock under-prices vs production; a padded opt-in can be added later
+if a tier needs it.
+
 ### Test-suite size on this branch
 
 The v2 baseline table above ("Test Suite (68 test methods)") is outdated
-here: this branch's test surface totals **225 test methods**. Three v2
-baseline classes grew — `JavaLoadClientParityTest` 14 → **15**,
+here: this branch's test surface totals **313 test methods** (count re-synced
+2026-09-03 with the #8 regroup landing; earlier snapshots in this paragraph
+undercounted interim additions). Three v2 baseline classes grew — `JavaLoadClientParityTest` 14 → **15**,
 `ClusterConfigParamTest` 7 → **9** (one auto-tpm param + one per-role KV pool
 override) and `MetricsValidationTest` 1 → **3** (KV pool tracking +
 pressure-surface consistency) — and the remainder of the delta are the new
@@ -537,6 +600,11 @@ Representative additions beyond the v2 baseline suite (full list under
 - `PriorityLatencyE2ETest` — priority-driven latency differentiation E2E
 - `MockEngineCancelChannelTest` — in-process cancel channel contract
 - `DecodePendingQueueHardGateTest` — unconditional decode hard gate semantics
+- `PrefillBudgetRegroupTest` — in-engine dual-budget prefill regroup (#8):
+  over-budget master batch split (2 batches / 4 requests / max 2),
+  arrival-order preservation across the split, the == boundary
+  (verbatim), the 0/0 off switch, cross-batch regrouping under the
+  request cap and the direct path under the token budget
 - `KvAllocatedReportOptInTest` — queued-as-KV_ALLOCATED reporting
 - `BlockPoolCapacityTest` — KV block-pool admit/evict/match: LRU-coupled
   allocation, LACK_MEM rejection, reserve watermark, lease growth/handover

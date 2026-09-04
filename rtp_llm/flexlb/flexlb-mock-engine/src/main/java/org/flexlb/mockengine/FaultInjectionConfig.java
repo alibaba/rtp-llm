@@ -46,6 +46,15 @@ public final class FaultInjectionConfig {
     private final int enqueueAckPartialFail;
     private final long enqueueAckErrorCode;
     private final boolean enqueueAckDrop;
+    // ── Cancel-RPC fault family (RPC-layer failures simulated BEFORE the
+    // engine cancel state machine is touched — production semantics "RPC
+    // failed = engine state unchanged": no fences, no tombstones, no census
+    // branch. Mirrors noRespond / generateError in shape: pure transport /
+    // ack faults the master must survive one-shot — the production cancel
+    // contract never retries) ──
+    private final boolean cancelNoRespond;
+    private final boolean cancelError;
+    private final boolean cancelUnexpectedStatus;
 
     private FaultInjectionConfig(Builder b) {
         this.failOnEnqueue = b.failOnEnqueue;
@@ -71,6 +80,9 @@ public final class FaultInjectionConfig {
         this.enqueueAckPartialFail = b.enqueueAckPartialFail;
         this.enqueueAckErrorCode = b.enqueueAckErrorCode;
         this.enqueueAckDrop = b.enqueueAckDrop;
+        this.cancelNoRespond = b.cancelNoRespond;
+        this.cancelError = b.cancelError;
+        this.cancelUnexpectedStatus = b.cancelUnexpectedStatus;
     }
 
     public boolean isFailOnEnqueue() {
@@ -166,6 +178,32 @@ public final class FaultInjectionConfig {
     }
 
     /**
+     * cancel_no_respond: the Cancel RPC hangs — no response ever. The
+     * master's short cancel-ack timeout (50ms) fails the future; the
+     * engine state is never touched.
+     */
+    public boolean isCancelNoRespond() {
+        return cancelNoRespond;
+    }
+
+    /**
+     * cancel_error: the Cancel RPC fails at the transport layer (gRPC
+     * INTERNAL / HTTP 500) — a failed future, no fence installed.
+     */
+    public boolean isCancelError() {
+        return cancelError;
+    }
+
+    /**
+     * cancel_unexpected_status: the RPC succeeds but the ack status sits
+     * outside the cancel contract (UNSPECIFIED) — the master's response
+     * mapping must fail it, never accept it.
+     */
+    public boolean isCancelUnexpectedStatus() {
+        return cancelUnexpectedStatus;
+    }
+
+    /**
      * Create a new mutable builder with sensible defaults.
      */
     public static Builder builder() {
@@ -199,7 +237,10 @@ public final class FaultInjectionConfig {
                 .statusZombieRunning(statusZombieRunning)
                 .enqueueAckPartialFail(enqueueAckPartialFail)
                 .enqueueAckErrorCode(enqueueAckErrorCode)
-                .enqueueAckDrop(enqueueAckDrop);
+                .enqueueAckDrop(enqueueAckDrop)
+                .cancelNoRespond(cancelNoRespond)
+                .cancelError(cancelError)
+                .cancelUnexpectedStatus(cancelUnexpectedStatus);
     }
 
     @Override
@@ -227,6 +268,9 @@ public final class FaultInjectionConfig {
                 + ", enqueueAckPartialFail=" + enqueueAckPartialFail
                 + ", enqueueAckErrorCode=" + enqueueAckErrorCode
                 + ", enqueueAckDrop=" + enqueueAckDrop
+                + ", cancelNoRespond=" + cancelNoRespond
+                + ", cancelError=" + cancelError
+                + ", cancelUnexpectedStatus=" + cancelUnexpectedStatus
                 + '}';
     }
 
@@ -276,6 +320,9 @@ public final class FaultInjectionConfig {
         private int enqueueAckPartialFail = 0;
         private long enqueueAckErrorCode = 0;
         private boolean enqueueAckDrop = false;
+        private boolean cancelNoRespond = false;
+        private boolean cancelError = false;
+        private boolean cancelUnexpectedStatus = false;
 
         private Builder() {
         }
@@ -392,6 +439,21 @@ public final class FaultInjectionConfig {
 
         public Builder enqueueAckDrop(boolean drop) {
             this.enqueueAckDrop = drop;
+            return this;
+        }
+
+        public Builder cancelNoRespond(boolean noRespond) {
+            this.cancelNoRespond = noRespond;
+            return this;
+        }
+
+        public Builder cancelError(boolean error) {
+            this.cancelError = error;
+            return this;
+        }
+
+        public Builder cancelUnexpectedStatus(boolean unexpectedStatus) {
+            this.cancelUnexpectedStatus = unexpectedStatus;
             return this;
         }
 

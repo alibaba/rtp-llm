@@ -19,6 +19,27 @@ cases predicted to fail carry a finding note in their docstring):
     cancel_stream_break_prefill_autonomous  C1: engine-side stream-break cleanup
     cancel_stream_break_decode_autonomous   C2: decode autonomous terminal on break
 
+HA family (2026-09, task #26 — assertions pin the audited production
+ground truth: EngineFenceCoordinator is one-shot and owns no timer; a
+TOMBSTONED ack settles immediately via resumeTombstoned while FAILED /
+exception acks park in awaitAuthoritativeTerminal):
+
+    cancel_engine_restarted_tombstoned_settle  true-crash restart → fresh
+                                   instance never saw the rid → TOMBSTONED
+                                   + ABSENT_FENCE + immediate typed settle
+    cancel_prefill_dead_await_terminal   cancel vs dead prefill: decode
+                                   WorkerStatus terminal is the authority
+    cancel_decode_retire_closes_fence    decode generation retire closes an
+                                   AWAIT_TERMINAL cancel fence
+    cancel_fencing_lost_on_engine_restart  design boundary: fencing is
+                                   engine memory — a second crash drops it
+                                   and admits the late Enqueue (documented
+                                   trade-off, master ledger stays settled)
+    cancel_transport_failure_one_shot    cancel_no_respond: exactly one
+                                   cancel RPC, decode settles the request
+    cancel_unexpected_status_await_terminal  cancel_unexpected_status: no
+                                   false success, no false terminal
+
 The claim boundary (``deliveryClaimKind``) is the single point of no
 return: NONE = still owned by the master, BATCH_ENQUEUE / ROUTE_DECISION
 = already delivered to an engine.  Every case above probes what a cancel
@@ -35,13 +56,20 @@ from typing import Optional
 import grpc
 
 from ..context import CaseContext, CaseDef, rid_base
-from ..engine_ops import clear_type_all, engine_inflight_clean, inject_type_all
+from ..engine_ops import (
+    _fence_residue_stable,
+    clear_type_all,
+    engine_inflight_clean,
+    inject_type,
+    inject_type_all,
+)
 from ..harness import (
     AssertUtils,
     EnvSpec,
     default_perf,
     flexlb_config_for_profile,
     wait_for,
+    wait_for_port,
 )
 
 CANCEL_CASES: list[CaseDef] = []
@@ -1363,3 +1391,723 @@ def cancel_stream_break_decode_autonomous(ctx: CaseContext):
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
+
+
+# ===========================================================================
+# HA cancel family (task #26, 2026-09): the cancel contract across engine
+# restarts, dead-prefill windows, decode retirement and transport-layer
+# faults.  Production ground truth (code-audited):
+#   * the master cancel is ONE-SHOT — EngineFenceCoordinator "never
+#     retries and never owns a timer"; a TOMBSTONED ack settles the slot
+#     immediately (resumeTombstoned) while ACCEPTED / NOT_FOUND / FAILED /
+#     exceptions park in awaitAuthoritativeTerminal;
+#   * a TRUE engine crash (crash_after) wipes all per-engine memory — a
+#     restarted instance has NEVER SEEN pre-restart rids, so the master's
+#     cancel answers TOMBSTONED and installs the ABSENT_FENCE tombstone
+#     (later same-rid enqueues are 8429-rejected pre-admission);
+#   * decode WorkerStatus terminals and decode generation retire close
+#     open cancellation fences; prefill retire never closes fenced slots;
+#     there is no fallback sweeper for cancellation first-cause slots (a
+#     known production gap — the windows below are sized to the REAL
+#     settle paths instead of relying on a nonexistent safety net);
+#   * fencing is in-engine memory only: a second crash drops the tombstone
+#     and a late Enqueue of the settled rid is ACCEPTED by the fresh
+#     instance (documented design trade-off: the master ledger stays
+#     settled — no resurrection — and the engine-side orphan computation
+#     is bounded).
+# ===========================================================================
+
+# 3-strike health demotion + eviction window (engine_fault precedent).
+MASTER_EVICT_S = 30.0
+# Engine restart channel-reconnect settle window (engine_fault precedent).
+ENGINE_RECOVERY_WAIT_S = 3.0
+# A TOMBSTONED cancel settles the slot immediately — the client stream must
+# close well inside this bound, far away from the 95s TTL drain net.
+CANCEL_SETTLE_BOUND_S = 5.0
+
+
+def _direct_enqueue(ops, addr: str, input_pb, batch_id: int):
+    """Client-side EnqueueBatch probe straight at one engine's gRPC port.
+
+    Bypasses the master entirely — the late-Enqueue / fence probes below
+    must observe the ENGINE's admission decision, not the master's
+    already-settled ledger view.
+    """
+    stub = ops.pb2_grpc.RpcServiceStub(ops._channel(addr))
+    request = ops.pb2.EnqueueBatchRequestPB(
+        batch_id=batch_id,
+        dp_slots=[
+            ops.pb2.EnqueueBatchDpSlotPB(
+                dp_rank=0,
+                requests=[ops.pb2.EnqueueBatchExternalInputPB(input=input_pb)],
+            )
+        ],
+        fetch_attach_timeout_ms=30_000,
+    )
+    return stub.EnqueueBatch(request, timeout=10.0)
+
+
+def _fence_rejected_8429(ack, rid: int) -> tuple:
+    """True when the direct-enqueue ack carries exactly the typed 8429
+    absent-fence rejection for rid (no successes, no admission)."""
+    errors = list(ack.errors)
+    rejected = (
+        not ack.successes
+        and len(errors) == 1
+        and errors[0].request_id == rid
+        and errors[0].error_info.error_code == 8429
+    )
+    detail = (
+        f"successes={len(ack.successes)}, errors="
+        f"{[(e.request_id, e.error_info.error_code) for e in errors]}"
+    )
+    return rejected, detail
+
+
+def _crash_and_restart(ops, engine_name: str) -> tuple:
+    """True-crash + restart cycle on one engine (crash_after n=1).
+
+    The sacrificial request's own fate is the empty-ack uncertain path and
+    is deliberately not asserted (engine_fault_crash_after precedent);
+    what matters here is that ALL per-engine memory — running tasks,
+    cancel tombstones, absent-fence records, RPC counters — is wiped, so
+    the restarted instance has never seen any pre-restart rid.  Returns
+    (alive_dropped, alive_restored).
+    """
+    inject_type(ops, engine_name, "crash_after", n=1)
+    try:
+        sacrificial = ops.next_request_id()
+        ops.schedule(sacrificial, timeout_s=8.0)
+    except Exception:
+        # The crash may cut the RPC mid-flight — either way the port dies.
+        pass
+    dropped = wait_for(
+        lambda: ops.master_alive_count("PREFILL") <= 0, MASTER_EVICT_S, 0.5
+    )
+    ops.start_engine(engine_name)  # clears fault config + enqueue counter
+    restored = wait_for(
+        lambda: ops.master_alive_count("PREFILL") >= 1, MASTER_EVICT_S, 0.5
+    )
+    time.sleep(ENGINE_RECOVERY_WAIT_S)
+    return dropped, restored
+
+
+def _restore_engines(ops) -> None:
+    """Best-effort topology + fault restore for finally blocks."""
+    try:
+        for name, engine in ops.snapshot_by_name().items():
+            if engine.get("stopped"):
+                try:
+                    ops.start_engine(name)
+                except Exception:
+                    pass
+            try:
+                inject_type(ops, name, "crash_after", enabled=False)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _ha_env(ctx: CaseContext, label_suffix: str) -> tuple:
+    """1P/1D dedicated env for the HA cancel family.
+
+    One prefill keeps the crash trigger deterministic (every enqueue lands
+    on prefill-0); one decode keeps the handoff target unambiguous.  The
+    label embeds the profile so each profile gets its own env instance.
+    """
+    spec = EnvSpec(
+        label=f"cancel_{label_suffix}_{ctx.profile}",
+        n_prefill=1,
+        n_decode=1,
+        perf=default_perf(),
+        master_profile=ctx.profile,
+        master_env={"FLEXLB_CONFIG": flexlb_config_for_profile(ctx.profile)},
+    )
+    env = ctx.env_manager.ensure(spec)
+    return ctx.engine_ops(env), env
+
+
+@case("cancel_engine_restarted_tombstoned_settle", requires=["enqueue_batch"])
+def cancel_engine_restarted_tombstoned_settle(ctx: CaseContext):
+    """Engine restart + pre-restart cancel: TOMBSTONED settles immediately.
+
+    Scenario (BATCH): R1 is handed to decode (first output received, so
+    the slot lives on the decode side and survives the prefill generation
+    retire — prefill retire never closes decode-owned slots) when its
+    original prefill TRUE-CRASHES (crash_after: memory wipe + port kill)
+    and is restarted.  The master's cancel for R1 then reaches the FRESH
+    instance, which has never seen the rid: the three-branch contract
+    answers TOMBSTONED and installs the ABSENT_FENCE tombstone.
+
+    Expected (contract, EngineFenceCoordinator ground truth):
+      * resumeTombstoned settles the slot IMMEDIATELY — the client stream
+        closes as a typed cancelled well inside 5s, never via the 95s TTL
+        drain net (settle-latency bound asserted);
+      * the master really sent the cancel: the engine's Cancel RPC counter
+        increases by >= 1;
+      * the installed fence rejects a DIRECT late Enqueue of the same rid
+        with the typed 8429, pre-admission (no success ack, no engine
+        state, no inflight residue).  A master-routed re-schedule of the
+        settled rid cannot be probed here — the master answers from its
+        already-settled ledger (the documented no-resurrection semantics
+        pinned by cancel_fencing_lost_on_engine_restart instead);
+      * the decode leg finishes its bounded orphan computation, the
+        engines report inflight 0 with no leak, the master ledger keeps
+        only the sacrificial crash trigger's bounded uncertain residue
+        (non-growing), and a follow-up request completes normally.
+    """
+    ops, _ = _ha_env(ctx, "restart")
+    base = rid_base(ctx, "cancel")
+    handle = None
+    try:
+        rid = ops.next_request_id(base)
+        # output_len=5000 (~38s of decode at the production-fit step
+        # pricing) outlives the whole crash/restart cycle, so the slot is
+        # still inflight (decode-owned) when the cancel fires.
+        response = ops.schedule(rid, output_len=5000)
+        if response.code != 200 or not response.success:
+            return False, f"schedule failed: {response.error_message}"
+        input_pb = (
+            None
+            if response.enqueued_by_master
+            else ops.build_generate_input(rid, output_len=5000)
+        )
+        handle = ops.start_stream(response, rid, input_pb=input_pb)
+        if not handle.wait_first_output():
+            return False, "no output before the crash window"
+
+        dropped, restored = _crash_and_restart(ops, "prefill-0")
+        if not (dropped and restored):
+            return False, (
+                f"crash/restart failed: dropped={dropped}, " f"restored={restored}"
+            )
+
+        baseline_cancel = _cancel_rpc_total(ops)
+        settle_t0 = time.monotonic()
+        ops.cancel(rid, response)
+        settled_fast = handle.wait_end(CANCEL_SETTLE_BOUND_S)
+        settle_latency = time.monotonic() - settle_t0
+        # The master settles the slot locally within milliseconds, but the
+        # engine-side Cancel forward registers on the census asynchronously
+        # (observed ~8-10s under load) — poll the snapshot until the Cancel
+        # RPC count grows instead of sampling a stale value (the coordinator
+        # is one-shot, so the counter moves exactly once, late).  The poll
+        # must also land BEFORE the fence probe below: the tombstone is
+        # installed engine-side only when the Cancel RPC is processed.
+        cancel_reached = wait_for(
+            lambda: _cancel_rpc_total(ops) > baseline_cancel, 15.0, 0.5
+        )
+        cancel_delta = _cancel_rpc_total(ops) - baseline_cancel
+
+        # The ABSENT_FENCE tombstone from the TOMBSTONED cancel rejects a
+        # direct late Enqueue of the same rid with the typed 8429.
+        fence_ok, fence_detail = False, "no probe"
+        try:
+            probe = ops.build_generate_input(rid, output_len=2)
+            ops._copy_role_addrs(probe, response)
+            ack = _direct_enqueue(ops, ops.prefill_addr(response), probe, rid * 10 + 1)
+            fence_ok, fence_detail = _fence_rejected_8429(ack, rid)
+        except Exception as exc:
+            fence_detail = repr(exc)
+
+        engine_clean, engine_detail = engine_inflight_clean(
+            ops, _all_engine_names(ops), 45.0
+        )
+        residue_ok, residue_detail = _fence_residue_stable(ops, 1)
+        recovery_ok, recovery_msg = ops.verify_recovery()
+        passed = (
+            settled_fast
+            and not handle.snap.completed
+            and cancel_reached
+            and cancel_delta >= 1
+            and fence_ok
+            and engine_clean
+            and residue_ok
+            and recovery_ok
+        )
+        return passed, (
+            f"tombstoned_settle: settled_fast={settled_fast}"
+            f"({settle_latency:.3f}s <= {CANCEL_SETTLE_BOUND_S:.0f}s, "
+            f"completed={handle.snap.completed}), "
+            f"cancel_rpc_delta={cancel_delta} (>=1), "
+            f"fence_8429={fence_ok}({fence_detail}), "
+            f"engine_clean={engine_clean}({engine_detail}), "
+            f"master_residue={residue_ok}({residue_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        if handle is not None:
+            handle.cancel()
+        _restore_engines(ops)
+
+
+@case("cancel_prefill_dead_await_terminal", requires=["enqueue_batch"])
+def cancel_prefill_dead_await_terminal(ctx: CaseContext):
+    """Dead prefill mid-cancel-window: the decode leg is the authority.
+
+    Scenario (BATCH, stable ordering — stop FIRST, then cancel): R1 is
+    handed to decode (first output received) when its original prefill is
+    stopped (gRPC port closed; per-engine memory retained — only the
+    restart cases need the wipe).  The client cancel is then issued: the
+    master's one-shot cancel RPC hits the dead port, fails at the
+    transport layer and parks the fence in awaitAuthoritativeTerminal —
+    no retry, no timer.
+
+    Expected (contract): the client outcome is BOUNDED — the stream ends
+    inside the decode terminal-delivery horizon (typed cancelled OR
+    completed are both correct: whether the cancel could ever reach the
+    engine is exactly the race this case keeps open on purpose); the slot
+    settles through the decode WorkerStatus terminal; the master ledger
+    drains; the engines report inflight 0 with no leak; the restored
+    prefill serves a follow-up request normally.
+
+    Assertion-window rationale: the settle path is R1's remaining decode
+    (~4s at output_len=500) plus the WorkerStatus delivery period —
+    bounded well inside the 30s windows below; the 95s TTL drain is the
+    safety net, not an acceptable path.
+    """
+    ops, _ = _ha_env(ctx, "prefill_dead")
+    base = rid_base(ctx, "cancel")
+    handle = None
+    try:
+        rid = ops.next_request_id(base)
+        response = ops.schedule(rid, output_len=500)
+        if response.code != 200 or not response.success:
+            return False, f"schedule failed: {response.error_message}"
+        input_pb = (
+            None
+            if response.enqueued_by_master
+            else ops.build_generate_input(rid, output_len=500)
+        )
+        handle = ops.start_stream(response, rid, input_pb=input_pb)
+        if not handle.wait_first_output():
+            return False, "no output before the dead-prefill window"
+
+        # Stable ordering: stop first, then cancel — the cancel RPC fails
+        # at the transport layer for sure (port closed), exercising the
+        # awaitAuthoritativeTerminal path deterministically.
+        ops.stop_engine("prefill-0")
+        ops.cancel(rid, response)
+
+        ended = handle.wait_end(30.0)
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 30.0
+        )
+        engine_clean, engine_detail = engine_inflight_clean(
+            ops, _all_engine_names(ops), 20.0
+        )
+
+        # Restore the topology before the recovery probe.
+        _restore_engines(ops)
+        recovery_ok, recovery_msg = ops.verify_recovery()
+        passed = ended and inflight_ok and engine_clean and recovery_ok
+        return passed, (
+            f"prefill_dead_await_terminal: stream_ended={ended}"
+            f"(completed={handle.snap.completed}, "
+            f"error={str(handle.snap.error)[:60]}), "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"engine_clean={engine_clean}({engine_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        if handle is not None:
+            handle.cancel()
+        _restore_engines(ops)
+
+
+@case("cancel_decode_retire_closes_fence", requires=["enqueue_batch"])
+def cancel_decode_retire_closes_fence(ctx: CaseContext):
+    """Decode generation retire closes an AWAIT_TERMINAL cancel fence.
+
+    Scenario (BATCH, stable ordering): R1 is handed to decode (first
+    output received); its prefill is stopped first so the client cancel
+    fails at the transport layer and the fence parks in
+    awaitAuthoritativeTerminal (one-shot, no retry, no timer).  The
+    decode engine is then stopped too — BEFORE R1's decode completes — so
+    the master's health poller accumulates the 3-strike failures and
+    retires the decode generation, and reduceDecodeGenerationRetired is
+    the production close path for the open cancellation fence.
+
+    Expected (contract): the decode retire closes R1's fence — the slot
+    settles and the client stream ends as a typed cancelled inside the
+    retire horizon (3-strike eviction <= 30s + retire processing); the
+    master ledger drains; the engines (restarted, memory retained by the
+    mock stop) report inflight 0 with no leak once the orphan decode
+    finishes; the restored topology serves a follow-up request normally.
+
+    Prediction: passes — decode retire closing fenced slots is explicit
+    production wiring.  The window where BOTH engines sit between stop
+    and retire has no fallback sweeper for cancellation first-cause slots
+    (a known production gap this case deliberately does NOT probe — the
+    retire path itself is the contract under test).
+    """
+    ops, _ = _ha_env(ctx, "decode_retire")
+    base = rid_base(ctx, "cancel")
+    handle = None
+    try:
+        rid = ops.next_request_id(base)
+        # output_len=1000 (~7.7s of decode) leaves room for the
+        # stop-prefill → cancel → stop-decode sequence (~1s) to land
+        # while decode still runs.
+        response = ops.schedule(rid, output_len=1000)
+        if response.code != 200 or not response.success:
+            return False, f"schedule failed: {response.error_message}"
+        input_pb = (
+            None
+            if response.enqueued_by_master
+            else ops.build_generate_input(rid, output_len=1000)
+        )
+        handle = ops.start_stream(response, rid, input_pb=input_pb)
+        if not handle.wait_first_output():
+            return False, "no output before the retire window"
+
+        # Fence parks in AWAIT_TERMINAL (cancel to the dead prefill port
+        # fails at the transport layer), then the decode dies too.
+        ops.stop_engine("prefill-0")
+        ops.cancel(rid, response)
+        ops.stop_engine("decode-0")
+
+        ended = handle.wait_end(45.0)
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 45.0
+        )
+        engine_clean, engine_detail = engine_inflight_clean(
+            ops, _all_engine_names(ops), 30.0
+        )
+        _restore_engines(ops)
+        recovery_ok, recovery_msg = ops.verify_recovery()
+        passed = (
+            ended
+            and not handle.snap.completed
+            and inflight_ok
+            and engine_clean
+            and recovery_ok
+        )
+        return passed, (
+            f"decode_retire_closes_fence: stream_ended={ended}"
+            f"(completed={handle.snap.completed}, "
+            f"error={str(handle.snap.error)[:60]}), "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"engine_clean={engine_clean}({engine_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        if handle is not None:
+            handle.cancel()
+        _restore_engines(ops)
+
+
+@case("cancel_fencing_lost_on_engine_restart", requires=["enqueue_batch"])
+def cancel_fencing_lost_on_engine_restart(ctx: CaseContext):
+    """Design boundary: fencing is engine memory — a second crash drops it.
+
+    Scenario (BATCH): stage 1 replays the tombstoned-settle contract — R1
+    (decode-owned, decode still running) survives its prefill's TRUE
+    crash + restart; the master cancel answers TOMBSTONED on the fresh
+    instance (never-seen rid), installs the ABSENT_FENCE tombstone (the
+    direct late-Enqueue probe is 8429-rejected — the fence WORKS at this
+    point) and settles the slot.  Stage 2 crashes the prefill AGAIN: the
+    tombstone lived only in engine memory, so the second restart comes
+    up fence-less and the SAME late Enqueue is now ACCEPTED by the fresh
+    instance.
+
+    Expected (contract — a DOCUMENTED DESIGN TRADE-OFF, not a bug-fix
+    expectation): engine-side fencing is memory-only with no persistence.
+    The master ledger has already settled the rid, so nothing resurrects
+    master-side, and the orphan computation the fresh instance now runs
+    is bounded by its own execution.  Assertions:
+      (a) stage-1 fence rejects the probe with the typed 8429 (control);
+      (b) after the second crash+restart the same probe is ADMITTED
+          (>= 1 success, no 8429) — the trade-off made executable;
+      (c) the master ledger does NOT resurrect the settled rid: the
+          residue stays bounded at the two sacrificial crash triggers'
+          uncertain entries and never grows while the orphan completes
+          and its terminal is (correctly) reconciled as a no-op;
+      (d) the orphan computation is bounded — every engine reports
+          inflight 0 with no leak; a follow-up request completes.
+    """
+    ops, _ = _ha_env(ctx, "fence_lost")
+    base = rid_base(ctx, "cancel")
+    handle = None
+    try:
+        rid = ops.next_request_id(base)
+        response = ops.schedule(rid, output_len=5000)
+        if response.code != 200 or not response.success:
+            return False, f"schedule failed: {response.error_message}"
+        input_pb = (
+            None
+            if response.enqueued_by_master
+            else ops.build_generate_input(rid, output_len=5000)
+        )
+        handle = ops.start_stream(response, rid, input_pb=input_pb)
+        if not handle.wait_first_output():
+            return False, "no output before the first crash window"
+
+        # Stage 1: crash + restart; the cancel lands TOMBSTONED on the
+        # fresh instance and settles the slot (typed cancelled, fast).
+        dropped1, restored1 = _crash_and_restart(ops, "prefill-0")
+        if not (dropped1 and restored1):
+            return False, (f"first crash/restart failed: {dropped1}/{restored1}")
+        baseline_cancel = _cancel_rpc_total(ops)
+        settle_t0 = time.monotonic()
+        ops.cancel(rid, response)
+        settled_fast = handle.wait_end(CANCEL_SETTLE_BOUND_S)
+        settle_latency = time.monotonic() - settle_t0
+        # The ABSENT_FENCE tombstone is installed engine-side only when the
+        # Cancel RPC is PROCESSED — which the census records asynchronously
+        # (observed ~8-10s under load) — so wait for the RPC to register
+        # BEFORE probing the fence: a probe racing ahead of the tombstone
+        # would be admitted and masquerade as a lost fence.
+        cancel_reached = wait_for(
+            lambda: _cancel_rpc_total(ops) > baseline_cancel, 15.0, 0.5
+        )
+
+        # Control: the ABSENT_FENCE tombstone IS armed — a direct probe of
+        # the settled rid is 8429-rejected.
+        fence_armed = False
+        fence_detail = "no probe"
+        try:
+            probe = ops.build_generate_input(rid, output_len=100)
+            ops._copy_role_addrs(probe, response)
+            ack = _direct_enqueue(ops, ops.prefill_addr(response), probe, rid * 10 + 1)
+            fence_armed, fence_detail = _fence_rejected_8429(ack, rid)
+        except Exception as exc:
+            fence_detail = repr(exc)
+
+        # Stage 2: crash AGAIN — the tombstone dies with the memory.
+        dropped2, restored2 = _crash_and_restart(ops, "prefill-0")
+        if not (dropped2 and restored2):
+            return False, (f"second crash/restart failed: {dropped2}/{restored2}")
+
+        # The trade-off, executable: the same probe is now ADMITTED.
+        orphan_accepted = False
+        orphan_detail = "no probe"
+        try:
+            probe2 = ops.build_generate_input(rid, output_len=100)
+            ops._copy_role_addrs(probe2, response)
+            # Transport readiness: the SECOND crash killed the engine's
+            # gRPC listener and the fresh bind lags the master's alive view
+            # by a few seconds (observed _InactiveRpcError/UNAVAILABLE
+            # "Socket closed" on an immediate probe).  Stage 1 needs no
+            # such gate — its census poll already proves the engine's gRPC
+            # server is processing RPCs.  Wait for the port here; single
+            # probe, no retry (a re-sent rid could be admitted twice).
+            probe2_addr = ops.prefill_addr(response)
+            probe2_host, _, probe2_port = probe2_addr.rpartition(":")
+            wait_for_port(probe2_host, int(probe2_port), 10.0)
+            ack2 = _direct_enqueue(ops, probe2_addr, probe2, rid * 10 + 2)
+            orphan_accepted = len(ack2.successes) >= 1
+            orphan_detail = (
+                f"successes={len(ack2.successes)}, errors="
+                f"{[(e.request_id, e.error_info.error_code) for e in ack2.errors]}"
+            )
+        except Exception as exc:
+            orphan_detail = repr(exc)
+
+        # The orphan (output_len=100) and the surviving decode leg are
+        # both bounded; 60s covers the worst case with margin.
+        engine_clean, engine_detail = engine_inflight_clean(
+            ops, _all_engine_names(ops), 60.0
+        )
+        # Master ledger stays settled: bounded at the two sacrificial
+        # uncertain entries, never growing (the orphan's terminal is
+        # reconciled as a no-op — no resurrection).
+        residue_ok, residue_detail = _fence_residue_stable(ops, 2)
+        recovery_ok, recovery_msg = ops.verify_recovery()
+        passed = (
+            settled_fast
+            and not handle.snap.completed
+            and cancel_reached
+            and fence_armed
+            and orphan_accepted
+            and engine_clean
+            and residue_ok
+            and recovery_ok
+        )
+        return passed, (
+            f"fencing_lost: settled_fast={settled_fast}"
+            f"({settle_latency:.3f}s), "
+            f"stage1_fence_8429={fence_armed}({fence_detail}), "
+            f"stage2_orphan_accepted={orphan_accepted}({orphan_detail}) "
+            "[documented design trade-off: engine-memory-only fencing], "
+            f"engine_clean={engine_clean}({engine_detail}), "
+            f"master_residue={residue_ok}({residue_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        if handle is not None:
+            handle.cancel()
+        _restore_engines(ops)
+
+
+@case("cancel_transport_failure_one_shot", requires=["enqueue_batch"])
+def cancel_transport_failure_one_shot(ctx: CaseContext):
+    """One-shot cancel under transport failure: no retry, decode settles.
+
+    Scenario (BATCH): R1 is handed to decode (first output received) when
+    its prefill is armed with cancel_no_respond — the engine's Cancel RPC
+    handler counts the arrival and HANGS (an RPC-layer fault injected
+    BEFORE the engine cancel state machine: no fence, no tombstone, the
+    request keeps running untouched).  The client cancel is issued; the
+    master's short cancel-ack timeout (50ms) fails the future and the
+    fence parks in awaitAuthoritativeTerminal.
+
+    Expected (contract — EngineFenceCoordinator "never retries and never
+    owns a timer"; the no-retry design is explicit: a retry would flip an
+    already-ACCEPTED cancel into a NOT_FOUND false negative):
+      * the engine records EXACTLY ONE cancel RPC arrival — hard one-shot
+        assertion on the engine-side counter, re-sampled after the settle
+        window so a hidden retry would surface;
+      * the request settles through the decode leg's authoritative
+        terminal (client outcome bounded — typed cancelled or completed
+        are both correct: the cancel never reached the engine);
+      * the master ledger drains through that terminal; no engine-side
+        leak; after the injection is cleared a follow-up request
+        completes normally.
+    """
+    ops, _ = _ha_env(ctx, "oneshot")
+    base = rid_base(ctx, "cancel")
+    handle = None
+    prefill_names = None
+    try:
+        rid = ops.next_request_id(base)
+        response = ops.schedule(rid, output_len=500)
+        if response.code != 200 or not response.success:
+            return False, f"schedule failed: {response.error_message}"
+        input_pb = (
+            None
+            if response.enqueued_by_master
+            else ops.build_generate_input(rid, output_len=500)
+        )
+        handle = ops.start_stream(response, rid, input_pb=input_pb)
+        if not handle.wait_first_output():
+            return False, "no output before the injection window"
+
+        prefill_names = _prefill_names(ops)
+        inject_type_all(ops, prefill_names, "cancel_no_respond")
+        baseline_cancel = _cancel_rpc_total(ops)
+        ops.cancel(rid, response)
+        # Settle window: the decode leg finishes R1 (~4s) and its
+        # WorkerStatus terminal settles the slot; a master retry would
+        # move the engine counter past 1 inside this window — the
+        # post-settle re-sample below is the one-shot proof.
+        ended = handle.wait_end(30.0)
+        time.sleep(2.0)
+        cancel_delta = _cancel_rpc_total(ops) - baseline_cancel
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 30.0
+        )
+        engine_clean, engine_detail = engine_inflight_clean(
+            ops, _all_engine_names(ops), 20.0
+        )
+        clear_type_all(ops, prefill_names, "cancel_no_respond")
+        recovery_ok, recovery_msg = ops.verify_recovery()
+        passed = (
+            ended and cancel_delta == 1 and inflight_ok and engine_clean and recovery_ok
+        )
+        return passed, (
+            f"transport_failure_one_shot: stream_ended={ended}"
+            f"(completed={handle.snap.completed}, "
+            f"error={str(handle.snap.error)[:60]}), "
+            f"cancel_rpc_delta={cancel_delta} (== 1, one-shot contract), "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"engine_clean={engine_clean}({engine_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        if handle is not None:
+            handle.cancel()
+        if prefill_names:
+            clear_type_all(ops, prefill_names, "cancel_no_respond")
+
+
+@case("cancel_unexpected_status_await_terminal", requires=["enqueue_batch"])
+def cancel_unexpected_status_await_terminal(ctx: CaseContext):
+    """Out-of-contract cancel ack: no false success, no false terminal.
+
+    Scenario (BATCH): R1 is handed to decode (first output received) when
+    its prefill is armed with cancel_unexpected_status — the Cancel RPC
+    "succeeds" but answers a status outside the cancel contract
+    (CANCEL_STATUS_UNSPECIFIED).  The fault is injected before the engine
+    cancel state machine, so no fence and no tombstone are installed; the
+    master's response mapping must FAIL this ack (never accept it as
+    success) and the fence parks in awaitAuthoritativeTerminal — the
+    same one-shot, no-retry, no-timer contract as a transport failure.
+
+    Expected (contract): the master neither misreads the ack as success
+    (which would settle the slot on a cancel the engine never applied)
+    nor fails the request outright on the cancel alone — the request
+    settles through the decode leg's authoritative terminal (client
+    outcome bounded, typed cancelled or completed both correct); the
+    engine records exactly one cancel arrival; the master ledger drains;
+    no engine-side leak; no exception escapes the master (the follow-up
+    probe completing normally is the liveness proof); after the injection
+    is cleared everything recovers.
+    """
+    ops, _ = _ha_env(ctx, "unexpected")
+    base = rid_base(ctx, "cancel")
+    handle = None
+    prefill_names = None
+    try:
+        rid = ops.next_request_id(base)
+        response = ops.schedule(rid, output_len=500)
+        if response.code != 200 or not response.success:
+            return False, f"schedule failed: {response.error_message}"
+        input_pb = (
+            None
+            if response.enqueued_by_master
+            else ops.build_generate_input(rid, output_len=500)
+        )
+        handle = ops.start_stream(response, rid, input_pb=input_pb)
+        if not handle.wait_first_output():
+            return False, "no output before the injection window"
+
+        prefill_names = _prefill_names(ops)
+        inject_type_all(ops, prefill_names, "cancel_unexpected_status")
+        baseline_cancel = _cancel_rpc_total(ops)
+        ops.cancel(rid, response)
+        # Settle window: the UNSPECIFIED ack fails the master's mapping,
+        # the fence parks in awaitAuthoritativeTerminal and the decode
+        # terminal settles the slot; re-sample the counter afterwards so
+        # a hidden retry would surface.
+        ended = handle.wait_end(30.0)
+        time.sleep(2.0)
+        cancel_delta = _cancel_rpc_total(ops) - baseline_cancel
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 30.0
+        )
+        engine_clean, engine_detail = engine_inflight_clean(
+            ops, _all_engine_names(ops), 20.0
+        )
+        clear_type_all(ops, prefill_names, "cancel_unexpected_status")
+        recovery_ok, recovery_msg = ops.verify_recovery()
+        passed = (
+            ended and cancel_delta == 1 and inflight_ok and engine_clean and recovery_ok
+        )
+        return passed, (
+            f"unexpected_status_await_terminal: stream_ended={ended}"
+            f"(completed={handle.snap.completed}, "
+            f"error={str(handle.snap.error)[:60]}), "
+            f"cancel_rpc_delta={cancel_delta} (== 1, one-shot contract), "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"engine_clean={engine_clean}({engine_detail}), "
+            f"recovery={recovery_msg} (master liveness: no exception leak)"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        if handle is not None:
+            handle.cancel()
+        if prefill_names:
+            clear_type_all(ops, prefill_names, "cancel_unexpected_status")

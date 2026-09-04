@@ -2261,12 +2261,17 @@ def main():
             batch_cap = (
                 q_cap + "；y = 请求/批。主线 = 区间均值（interval：相邻采样间隔内 "
                 "enqueued 增量 ÷ batches 增量，反映真实波动）；淡线 = 集群"
-                "累计均值（cum，全程平均，含启动稀释）"
+                "累计均值（cum，全程平均，含启动稀释）；#8 起为引擎内"
+                "双预算重组后的执行批口径（master dispatch 批可被拆散/"
+                "混组），与旧基线不可直接对比"
             )
         else:
             batch_max = max((q.get("cum_avg_batch_size", 0) or 0) for q in queue_ts)
             batch_series = [("bs", "avg batch size", avg_batch, "info")]
-            batch_cap = q_cap + "；y = 请求/批（集群累计均值）"
+            batch_cap = (
+                q_cap + "；y = 请求/批（集群累计均值；#8 起为引擎内双预算重组后"
+                "的执行批口径，与旧基线不可直接对比）"
+            )
         queue_containers.append(
             emit_container(
                 "平均 batch size",

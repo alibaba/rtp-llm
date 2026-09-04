@@ -20,6 +20,11 @@ final class MockEngineTestCluster implements AutoCloseable {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final ScheduledExecutorService scheduler;
+    // Cluster-level stats shared by every engine (matches the production
+    // single-cluster stats shape) so tests can census-assert across the
+    // cancel surfaces (injected / tracked / finished / unknown / tombstone).
+    private final JavaMockEngineCluster.ClusterStats stats =
+            new JavaMockEngineCluster.ClusterStats();
     private final Map<Integer, JavaMockEngineCluster.FastRpcService> services =
             new ConcurrentHashMap<>();
     private final List<JavaMockEngineCluster.FastRpcService> prefills = new ArrayList<>();
@@ -118,13 +123,17 @@ final class MockEngineTestCluster implements AutoCloseable {
                         // on the 5% reserve watermark — a KV-rejection surface
                         // these tests never intended to exercise.
                         6144,
-                        new JavaMockEngineCluster.ClusterStats());
+                        stats);
         services.put(port, service);
         return service;
     }
 
     Map<Integer, JavaMockEngineCluster.FastRpcService> services() {
         return services;
+    }
+
+    JavaMockEngineCluster.ClusterStats stats() {
+        return stats;
     }
 
     List<JavaMockEngineCluster.FastRpcService> prefills() {

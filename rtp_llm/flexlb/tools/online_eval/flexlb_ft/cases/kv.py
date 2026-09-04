@@ -43,6 +43,16 @@ category-reorg migrations:
     kv_lru_eviction_affinity       LRU prefix reuse + capacity eviction +
                                    affinity routing end-to-end
 
+  block-pool saturation (KV v2 extremes, 2026-09 task #26 follow-up)
+    kv_pool_saturation_evict_recover  P pool @24 blocks: capacity
+                                   eviction wave, typed 602 saturation
+                                   reject, bounded failure share,
+                                   release!=delete recovery
+    kv_decode_pool_exhaustion_terminal  D pool @2 blocks: P-enqueue
+                                   decode reservation answers a
+                                   decode-side 602; P lease released
+                                   without residue; headroom recovery
+
 MOCK CAPABILITY NOTE (task #85 reorg wiring): the module IS registered
 with the runner, but two mock capabilities the per-engine/global cases
 depend on do not exist yet and are being added by a parallel agent (the
@@ -77,6 +87,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from ..context import CaseContext, CaseDef, rid_base
+from ..engine_ops import engine_inflight_clean
 from ..grade import GradeReport
 from ..harness import (
     DEFAULT_PREFILL_CACHE_BLOCKS,
@@ -2552,3 +2563,549 @@ def kv_decode_capacity_park(ctx: CaseContext):
                 ops.set_kv_pressure(name, 0)
             except Exception:
                 pass
+
+
+# ===========================================================================
+# Block-pool saturation calibers (KV v2 extremes, 2026-09 task #26
+# follow-up): the pool driven to BOTH extremes — the P pool through
+# capacity eviction to a synchronous 602 saturation reject and back
+# (release != delete), and the D pool to the P-enqueue decode-reservation
+# 602.  All numbers are calibrated against the mock's actual gate
+# (MockLruBlockCache.acquire: need <= avail AND avail - need >= reserve,
+# reserve = ceil(0.05 x totalBlocks)) and the master's error wrapping
+# (DefaultBatchDispatcher: "EnqueueBatch rejected request <rid>: <engine
+# error message verbatim>" — the engine's LACK_MEM text reaches the client
+# untouched inside that wrapper).
+# ===========================================================================
+
+# Saturation P pool: 24 blocks, reserve = ceil(24 x 0.05) = 2.
+# 27 = 3 x 8 occupants + reserve headroom: with the pool AT 24 the third
+# occupant's admit hits the reserve gate (avail 8 - need 8 = 0 < reserve
+# 2) and the wave degenerates to 2 occupants (remote evidence run
+# 20260903_130256: held_peak=16, occupants 2/3).  27 admits all three
+# (11 - 8 = 3 >= 2), pins held=24 and drops available to exactly
+# reserve + 1 = 3 — the floor the saturation proof samples for.
+SAT_POOL_BLOCKS = 27
+# Requests carry 8 block keys == an 8-block P demand (prefill admission
+# prices the hash-channel key count, JavaMockEngineCluster.needBlocks).
+SAT_REQUEST_KEYS = 8
+# input_len is DECOUPLED from the P-side demand (which prices the key
+# count) and kept at 2 blocks of tokens.  At 8192 the master's ROUTE-time
+# decode soft reservation (input+output TOKENS, CUMULATIVE across
+# in-flight requests) priced the 3 occupants at 8194 x 3 = 24582 —
+# within a hair of the widened 32-block D pool's 90% door (29491) — so
+# the probe's own 8194 parked master-side until an occupant drained
+# (remote evidence run 20260903_130256: probe 10.48s slow fail, engine
+# lack_mem_rejects +0, held_peak sampled only after the window).  At
+# 2048 the cumulative reservation (2050 x 4 = 8200) sits far under any
+# D-pool door while the P saturation semantics (8 keys = 8 blocks vs
+# the 27-block pool) are unchanged.
+SAT_INPUT_LEN = 2 * BLOCK_TOKENS
+# Decode pool widened past the saturation wave's D reservations: every
+# request reserves ceil(inputLen/spb) = 8 D blocks at P-enqueue (Phase
+# 1.6, the prepare-stage ALLOCATE counterpart), so 3 occupants reserve
+# 24 D blocks + reserve + per-step growth — the 12-block KV-family
+# default would 602 the wave on the DECODE side before the prefill pool
+# ever saturated (design said "decode default"; the code says otherwise).
+SAT_DECODE_POOL_BLOCKS = 32
+# 3s prefill pins all three occupants' P leases inside one occupancy
+# window; 0.4s fire spacing keeps the wave inside it.
+SAT_PREFILL_MS = 3000.0
+SAT_FIRE_SPACING_S = 0.4
+SAT_PROBE_BOUND_S = 3.0
+# Follow-up burst inside the saturation window (bounded-share caliber).
+SAT_BURST_N = 2
+# Saturation window sampling cadence (available-floor proof).
+SAT_SAMPLE_S = 0.1
+# Decode-exhaustion caliber — FALLBACK tier, empirically switched after
+# remote run 20260903_130256: the primary tier (D pool 2, input 2048)
+# never reached the engine — the master's ROUTE-time decode soft
+# reservation prices the request at min(input + output_cap, totalKv)
+# tokens against a 90% usage door (RoutingConfig defaults:
+# maxKvUsagePercent=90, maxOutputTokensForEstimate=1000), so
+# min(2048+2, 2048) = 2048 > 2048*0.9 and the probe PARKED master-side
+# for its whole stream window (30s DEADLINE, engine enqueue_rpcs == 0).
+# The fallback tier lands in the master/engine caliber gap: D pool 3
+# blocks (3072 tokens, reserve = 1) with input_len 2560 prices at
+# 2562 <= 3072*0.9 -> master reservation passes; the engine's
+# block-caliber net demand ceil(2560/1024) = 3 hits the gate at
+# avail - need = 3 - 3 = 0 < 1 -> the synchronous decode-side 602 this
+# case pins.  verify_recovery (default input 2048 -> need 2,
+# 3 - 2 = 1 >= 1) passes naturally on this tier.
+DSAT_DECODE_POOL_BLOCKS = 3
+# 2.5 blocks exactly: 2560 rounds up to a 3-block demand while staying
+# under the master's 90% token door with output headroom.
+DSAT_INPUT_LEN = (5 * BLOCK_TOKENS) // 2
+# Recovery probe: net demand ceil(1024/1024) = 1 <= avail - reserve = 1.
+DSAT_RECOVER_INPUT_LEN = BLOCK_TOKENS
+DSAT_PROBE_BOUND_S = 3.0
+
+
+def _pool_state(ops, engine_name: str) -> tuple:
+    """(cache_blocks, held, referenced, available) of one engine's pool."""
+    info = ops.snapshot_by_name().get(engine_name, {})
+    return (
+        int(info.get("cache_blocks", 0)),
+        int(info.get("held_blocks", 0)),
+        int(info.get("referenced_blocks", 0)),
+        int(info.get("available_blocks", 0)),
+    )
+
+
+@case(
+    "kv_pool_saturation_evict_reject_recover",
+    requires=["enqueue_batch"],
+    source="KV v2 saturation: evict wave + typed 602 + bounded failures + recovery",
+)
+def kv_pool_saturation_evict_reject_recover(ctx: CaseContext):
+    """P-pool saturation: capacity eviction, synchronous 602 rejection,
+    bounded failure share and full recovery — one pool, four calibers.
+
+    Env: 1P (one pool = unambiguous attribution) + 2D; the P pool is 27
+    blocks (reserve = ceil(27 x 0.05) = 2) — sized so the 3-occupant wave
+    fits WITH reserve headroom (3 x 8 + 2 <= 27), the degenerate 24-block
+    tier 602'd its own third occupant.  input_len stays at 2048 (2 blocks
+    of tokens): the P-side demand is priced by the 8 block_keys, while
+    the master's ROUTE-time decode soft reservation is input-caliber and
+    cumulative — at input 8192 the three occupants' token reservations
+    (8194 x 3) sat within a hair of the widened D pool's 90% door and
+    the probe parked master-side instead of ever hitting the P gate
+    (remote evidence run 20260903_130256).  The decode pool is widened
+    to 32 blocks so the wave's Phase-1.6 D reservations (2 blocks x 3
+    + growth) never 602 decode-side before the prefill pool saturates.
+
+    A1 eviction wave: 10 serial disjoint-key requests (8 keys each).
+    From the 4th onward the accumulated key set (32 > 27) forces LRU-tail
+    capacity eviction inside admit — eviction is the release valve, never
+    a rejection: all 10 requests must complete, the evictions counter
+    must grow, and the key set must stay capped at 27.
+
+    A2 three-state conservation: every snapshot sample satisfies
+    held + referenced + available == cache_blocks.  The case NEVER calls
+    /cache_evict, so every eviction is attributable to capacity pressure
+    alone.
+
+    A3 saturation: prefill slowed to 3s, 3 disjoint-key occupants fired
+    at 0.4s spacing hold all 24 leased P blocks (of the 27-block pool)
+    inside one occupancy window.
+    The 4th probe must be rejected SYNCHRONOUSLY by the Phase-1.5 gate —
+    a fast (< 3s, no park) typed 602 whose client-visible error carries
+    "EnqueueBatch rejected" + "LACK_MEM" + "insufficient KV cache blocks"
+    (the master wraps the engine ack error verbatim).  Snapshot proof
+    through the window: held peaked at >= 3 x 8 blocks (all three
+    occupants' leases) and available dipped to <= reserve + 1.
+
+    A4 bounded failure share: a follow-up burst fired inside the same
+    window fails with the same typed fast 602 — the failure count is
+    bounded below by the probe (the pool is full: >= 1 failure is
+    constructed) and above by probe + burst size; no failure may be a
+    park/timeout instead of the typed reject.  First-version caliber:
+    invariant + explicit bounds, no grade band.
+
+    A5 recovery: once the occupants drain, release != delete — the freed
+    key set makes the pool available again (>= 8 blocks), a fresh request
+    completes, and both the master ledger and the engine inflight tables
+    drain clean.
+    """
+    env = ctx.env_manager.ensure(
+        EnvSpec(
+            label=f"kv_sat_{ctx.profile}",
+            n_prefill=1,
+            n_decode=2,
+            perf=default_perf(),
+            master_profile=ctx.profile,
+            prefill_cache_blocks=SAT_POOL_BLOCKS,
+            decode_cache_blocks=SAT_DECODE_POOL_BLOCKS,
+        )
+    )
+    ops = ctx.engine_ops(env)
+    base = rid_base(ctx, "kv")
+    fired, fired_handles = [], {}
+    try:
+        names = _prefill_names(ops)
+        if not names:
+            return False, "no prefill workers found"
+        pname = names[0]
+        snap0 = ops.snapshot_by_name()
+        evict_base = int(snap0.get(pname, {}).get("cache_evictions", 0))
+        lack_base = int(snap0.get(pname, {}).get("lack_mem_rejects", 0))
+
+        # -- A1 + A2: serial eviction wave with conservation sampling.
+        conservation_ok = True
+        conservation_bad = ""
+        wave_ok = True
+        wave_err = None
+        for fam in range(10):
+            rid = ops.next_request_id(base)
+            _, err = ops.run_one_request(
+                rid,
+                input_len=SAT_INPUT_LEN,
+                output_len=2,
+                block_keys=_fam_keys(base, fam, SAT_REQUEST_KEYS),
+                stream_timeout_s=STREAM_TIMEOUT_S,
+            )
+            if err:
+                wave_ok = False
+                wave_err = f"fam{fam}: {err}"
+                break
+            blocks, held, ref, avail = _pool_state(ops, pname)
+            if held + ref + avail != blocks:
+                conservation_ok = False
+                conservation_bad = f"fam{fam}: {held}+{ref}+{avail} != {blocks}"
+        snap1 = ops.snapshot_by_name()
+        evictions = int(snap1.get(pname, {}).get("cache_evictions", 0)) - evict_base
+        key_cap_ok = len(_engine_cache_keys(ops, pname)) <= SAT_POOL_BLOCKS
+        evict_ok = evictions >= 1
+
+        # -- A3: saturation window — 3 occupants x 8 blocks pinned by a
+        #    3s prefill, then the probe (and burst) hit the full pool
+        #    BEFORE the first admit can free anything.
+        ops.set_perf(pname, prefill_fixed_ms=SAT_PREFILL_MS)
+        time.sleep(1.5)  # master perf sync
+        occupant_base = base + 100_000
+        occupant_errs = []
+        for i in range(3):
+            rid = ops.next_request_id(base)
+            _, err = _fire_request(
+                ops,
+                rid,
+                fired,
+                fired_handles,
+                input_len=SAT_INPUT_LEN,
+                output_len=2,
+                block_keys=_fam_keys(occupant_base, i, SAT_REQUEST_KEYS),
+            )
+            occupant_errs.append(err)
+            if err is None:
+                time.sleep(SAT_FIRE_SPACING_S)
+        time.sleep(0.3)  # all three enqueues (and their leases) landed
+
+        # Pin the saturation peak the moment the leases land: the probe
+        # and burst round trips eat into the 3s prefill window, and once
+        # the first occupant finishes prefill the peak is gone (remote
+        # evidence run 20260903_130256: a post-burst sampling loop saw
+        # held_peak=0 with all three occupants completing fine).
+        reserve_blocks = 2  # ceil(27 x 0.05)
+        held_peak = 0
+        saw_floor = False
+        wait_for(
+            lambda: _pool_state(ops, pname)[1] >= 3 * SAT_REQUEST_KEYS,
+            2.0,
+            0.05,
+        )
+        blocks, held, ref, avail = _pool_state(ops, pname)
+        held_peak = max(held_peak, held)
+        if avail <= reserve_blocks + 1:
+            saw_floor = True
+        if held + ref + avail != blocks:
+            conservation_ok = False
+            conservation_bad = f"saturation-lead: {held}+{ref}+{avail} != {blocks}"
+
+        # The probe: fast, typed, synchronous — no park, no retry.
+        probe_rid = ops.next_request_id(base)
+        probe_t0 = time.monotonic()
+        _, probe_err = ops.run_one_request(
+            probe_rid,
+            input_len=SAT_INPUT_LEN,
+            output_len=2,
+            block_keys=_fam_keys(occupant_base, 90, SAT_REQUEST_KEYS),
+            stream_timeout_s=STREAM_TIMEOUT_S,
+        )
+        probe_dur = time.monotonic() - probe_t0
+        probe_text = probe_err or ""
+        probe_typed = (
+            probe_err is not None
+            and "enqueuebatch rejected" in probe_text.lower()
+            and "lack_mem" in probe_text.lower()
+            and "insufficient kv cache" in probe_text.lower()
+        )
+        probe_fast = probe_err is not None and probe_dur < SAT_PROBE_BOUND_S
+
+        # -- A4: bounded failure share inside the same window.
+        burst_failures = 0
+        burst_typed_fast = True
+        for i in range(SAT_BURST_N):
+            rid = ops.next_request_id(base)
+            t0 = time.monotonic()
+            _, err = ops.run_one_request(
+                rid,
+                input_len=SAT_INPUT_LEN,
+                output_len=2,
+                block_keys=_fam_keys(occupant_base, 80 + i, SAT_REQUEST_KEYS),
+                stream_timeout_s=STREAM_TIMEOUT_S,
+            )
+            dur = time.monotonic() - t0
+            if err is not None:
+                burst_failures += 1
+                if dur >= SAT_PROBE_BOUND_S or "lack_mem" not in err.lower():
+                    burst_typed_fast = False
+        failures_total = (1 if probe_err else 0) + burst_failures
+        share_ok = 1 <= failures_total <= 1 + SAT_BURST_N
+        share = failures_total / (1 + SAT_BURST_N)
+
+        # Saturation snapshot proof continues (0.1s sampling through
+        # the window): the leading sample above pinned the peak; this
+        # loop adds floor / conservation coverage through the drain.
+        sat_deadline = time.monotonic() + SAT_PREFILL_MS / 1000.0
+        while time.monotonic() < sat_deadline:
+            blocks, held, ref, avail = _pool_state(ops, pname)
+            held_peak = max(held_peak, held)
+            if avail <= reserve_blocks + 1:
+                saw_floor = True
+            if held + ref + avail != blocks:
+                conservation_ok = False
+                conservation_bad = f"saturation: {held}+{ref}+{avail} != {blocks}"
+            time.sleep(SAT_SAMPLE_S)
+        # Structural: all three occupants' 8-block leases held at once
+        # (24 of 27) — a pool-relative margin would drift with pool size.
+        held_saturated = held_peak >= 3 * SAT_REQUEST_KEYS
+        snap2 = ops.snapshot_by_name()
+        lack_delta = int(snap2.get(pname, {}).get("lack_mem_rejects", 0)) - lack_base
+
+        # -- A5: drain, recover, verify.
+        outcomes = _drain_fired(ops, fired, fired_handles, wait_s=30.0)
+        fired, fired_handles = [], {}
+        occupants_ok = all(c for _, _, c, _ in outcomes) and not any(
+            e for e in occupant_errs
+        )
+        avail_recovered = wait_for(
+            lambda: _pool_state(ops, pname)[3] >= SAT_REQUEST_KEYS, 10.0, 0.5
+        )
+        rid_rec = ops.next_request_id(base)
+        _, rec_err = ops.run_one_request(
+            rid_rec,
+            input_len=SAT_INPUT_LEN,
+            output_len=2,
+            block_keys=_fam_keys(base, 500, SAT_REQUEST_KEYS),
+            stream_timeout_s=STREAM_TIMEOUT_S,
+        )
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 30.0
+        )
+        engine_clean, engine_detail = engine_inflight_clean(
+            ops, sorted(ops.snapshot_by_name().keys()), 30.0
+        )
+        recovery_ok, recovery_msg = ops.verify_recovery()
+
+        passed = (
+            wave_ok
+            and evict_ok
+            and key_cap_ok
+            and conservation_ok
+            and probe_typed
+            and probe_fast
+            and held_saturated
+            and saw_floor
+            and lack_delta >= 1
+            and share_ok
+            and burst_typed_fast
+            and occupants_ok
+            and avail_recovered
+            and rec_err is None
+            and inflight_ok
+            and engine_clean
+            and recovery_ok
+        )
+        return passed, (
+            f"A1 wave_ok={wave_ok}({wave_err}), evictions={evictions}"
+            f"(>=1), key_cap={key_cap_ok}(<= {SAT_POOL_BLOCKS}), "
+            f"A2 conservation={conservation_ok}"
+            f"({conservation_bad or 'identity held'}), "
+            f"A3 probe_typed={probe_typed}, probe_fast={probe_fast}"
+            f"({probe_dur:.2f}s, err={str(probe_err)[:120]!r}), "
+            f"held_peak={held_peak}"
+            f"(>= {3 * SAT_REQUEST_KEYS}), "
+            f"available_floor={saw_floor}(<= {reserve_blocks + 1}), "
+            f"lack_mem_rejects_delta={lack_delta}(>=1), "
+            f"A4 failures={failures_total}/{1 + SAT_BURST_N}"
+            f"(share={share:.0%}), burst_typed_fast={burst_typed_fast}, "
+            f"A5 occupants_ok={occupants_ok}, "
+            f"avail_recovered={avail_recovered}, "
+            f"fresh_request_ok={rec_err is None}, "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"engine_clean={engine_clean}({engine_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"
+    finally:
+        _drain_fired(ops, fired, fired_handles)
+        for name in _prefill_names(ops):
+            try:
+                ops.set_perf(name, prefill_fixed_ms=100.0)
+            except Exception:
+                pass
+
+
+@case(
+    "kv_decode_pool_exhaustion_terminal",
+    requires=["enqueue_batch"],
+    source="KV v2 decode-exhaustion: D-pool reservation 602 + clean recovery",
+)
+def kv_decode_pool_exhaustion_terminal(ctx: CaseContext):
+    """D-pool exhaustion: the P-enqueue decode reservation answers with
+    a synchronous decode-side 602, the P lease releases without residue,
+    and one block of headroom restores service.
+
+    Env: 2P + 1D — a single decode engine pins the exhaustion target
+    (with more D engines the KV-weighted router could detour around the
+    exhausted one, which would make this a routing caliber, not an
+    exhaustion one); the D pool is 3 blocks (reserve = ceil(3 x 0.05) =
+    1).  A probe with net decode demand ceil(2560/1024) = 3 blocks hits
+    the TOTAL_AND_AVAILABLE gate at avail - need = 3 - 3 = 0 < 1 and is
+    rejected SYNCHRONOUSLY at the prefill's EnqueueBatch Phase 1.6 — the
+    mock counterpart of production's prepare-stage ALLOCATE RPC.  The
+    2560 input is the FALLBACK caliber (empirically switched, remote run
+    20260903_130256): the primary tier (D pool 2, input 2048) parked
+    master-side — the route-time soft reservation prices input+output
+    TOKENS against a 90% door and never let the probe reach the engine
+    (30s DEADLINE, engine enqueue_rpcs == 0); 2560 + output headroom
+    passes that token door while the block-caliber demand still
+    saturates the pool.
+
+    DOCUMENTED DIVERGENCE (flexlb_ft README:437-440): production retries
+    the decode KV allocation decode_retry_times times before failing;
+    the mock answers terminal FINAL on the first exhaustion — this case
+    asserts the mock's documented single-shot terminal, not the
+    production retry ladder.
+
+    Assertions:
+      * the probe fails FAST (< 3s — no park: the QUEUE scheduler's
+        wait-condition path applies to ROUTE-time delivery capacity,
+        not to an engine-side reservation reject) with a typed error
+        carrying "EnqueueBatch rejected" + "LACK_MEM" + "decode-side"
+        (the master wraps the engine ack error verbatim);
+      * counter split: the target D engine's kv_admission_fails grew
+        (D-side rejection accounting); every P engine's lack_mem_rejects
+        stayed at its pre-probe value (the P pool was never the
+        constraint) and the P held blocks fell back to the pre-probe
+        watermark (the rejection branch releases the P lease — no
+        residue);
+      * recovery: one block of headroom (net demand 1, avail 3 -
+        reserve 1 = 2) completes a fresh request and the D counter stops
+        growing;
+      * the master ledger and engine inflight tables drain clean.
+    """
+    env = ctx.env_manager.ensure(
+        EnvSpec(
+            label=f"kv_dsat_{ctx.profile}",
+            n_prefill=2,
+            n_decode=1,
+            perf=default_perf(),
+            master_profile=ctx.profile,
+            decode_cache_blocks=DSAT_DECODE_POOL_BLOCKS,
+        )
+    )
+    ops = ctx.engine_ops(env)
+    base = rid_base(ctx, "kv")
+    try:
+        snap0 = ops.snapshot_by_name()
+        decode_names = sorted(n for n, e in snap0.items() if e.get("role") == "decode")
+        if not decode_names:
+            return False, "no decode workers found"
+        dname = decode_names[0]
+        pnames = _prefill_names(ops)
+        kv_fails_base = int(snap0.get(dname, {}).get("kv_admission_fails", 0))
+        lack_base = {
+            p: int(snap0.get(p, {}).get("lack_mem_rejects", 0)) for p in pnames
+        }
+        held_base = {p: int(snap0.get(p, {}).get("held_blocks", 0)) for p in pnames}
+
+        # -- the probe: fast typed decode-side 602, no park.
+        rid = ops.next_request_id(base)
+        t0 = time.monotonic()
+        _, err = ops.run_one_request(
+            rid,
+            input_len=DSAT_INPUT_LEN,
+            output_len=2,
+            block_keys=_fam_keys(base, 900, 2),
+            stream_timeout_s=STREAM_TIMEOUT_S,
+        )
+        probe_dur = time.monotonic() - t0
+        probe_text = err or ""
+        probe_typed = (
+            err is not None
+            and "enqueuebatch rejected" in probe_text.lower()
+            and "lack_mem" in probe_text.lower()
+            and "decode-side" in probe_text.lower()
+        )
+        probe_fast = err is not None and probe_dur < DSAT_PROBE_BOUND_S
+
+        # -- counter split + P-lease release (poll: the reject branch
+        #    releases asynchronously with the ack).
+        kv_fails_grew = wait_for(
+            lambda: int(
+                ops.snapshot_by_name().get(dname, {}).get("kv_admission_fails", 0)
+            )
+            > kv_fails_base,
+            10.0,
+            0.5,
+        )
+        time.sleep(0.5)
+        snap1 = ops.snapshot_by_name()
+        lack_clean = all(
+            int(snap1.get(p, {}).get("lack_mem_rejects", 0)) == lack_base[p]
+            for p in pnames
+        )
+        held_released = wait_for(
+            lambda: all(
+                int(ops.snapshot_by_name().get(p, {}).get("held_blocks", 0))
+                == held_base[p]
+                for p in pnames
+            ),
+            10.0,
+            0.5,
+        )
+
+        # -- recovery: one block of headroom, counter stops growing.
+        kv_fails_after = int(
+            ops.snapshot_by_name().get(dname, {}).get("kv_admission_fails", 0)
+        )
+        rid_rec = ops.next_request_id(base)
+        _, rec_err = ops.run_one_request(
+            rid_rec,
+            input_len=DSAT_RECOVER_INPUT_LEN,
+            output_len=2,
+            block_keys=_fam_keys(base, 910, 2),
+            stream_timeout_s=STREAM_TIMEOUT_S,
+        )
+        time.sleep(0.5)
+        kv_fails_stable = (
+            int(ops.snapshot_by_name().get(dname, {}).get("kv_admission_fails", 0))
+            == kv_fails_after
+        )
+
+        inflight_ok, inflight_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 30.0
+        )
+        engine_clean, engine_detail = engine_inflight_clean(
+            ops, sorted(ops.snapshot_by_name().keys()), 30.0
+        )
+        recovery_ok, recovery_msg = ops.verify_recovery()
+
+        passed = (
+            probe_typed
+            and probe_fast
+            and kv_fails_grew
+            and lack_clean
+            and held_released
+            and rec_err is None
+            and kv_fails_stable
+            and inflight_ok
+            and engine_clean
+            and recovery_ok
+        )
+        return passed, (
+            f"probe: typed={probe_typed}, fast={probe_fast}"
+            f"({probe_dur:.2f}s), err={str(probe_text)[:90]}, "
+            f"d_kv_admission_fails_grew={kv_fails_grew}, "
+            f"p_lack_mem_clean={lack_clean}, "
+            f"p_held_released={held_released}, "
+            f"recovered={rec_err is None}, "
+            f"kv_fails_stable={kv_fails_stable}, "
+            f"inflight_clean={inflight_ok}({inflight_detail}), "
+            f"engine_clean={engine_clean}({engine_detail}), "
+            f"recovery={recovery_msg}"
+        )
+    except Exception as exc:
+        return False, f"exception: {exc!r}"

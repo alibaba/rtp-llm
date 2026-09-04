@@ -282,6 +282,13 @@ final class MockControlServer {
                     case "enqueue_ack_error_code" -> builder.enqueueAckErrorCode(
                             enabled ? body.path("code").asLong(0) : 0);
                     case "enqueue_ack_drop" -> builder.enqueueAckDrop(enabled);
+                    // ── Cancel-RPC fault family (RPC-layer failures simulated
+                    // BEFORE the engine cancel state machine is touched — no
+                    // fences, no tombstones; the gRPC Cancel handler and the
+                    // in-process MockEngineCancelChannel run the same gate) ──
+                    case "cancel_no_respond" -> builder.cancelNoRespond(enabled);
+                    case "cancel_error" -> builder.cancelError(enabled);
+                    case "cancel_unexpected_status" -> builder.cancelUnexpectedStatus(enabled);
                     default -> throw new ApiException(
                             400, "unknown injection type: " + type);
                 }
@@ -533,6 +540,18 @@ final class MockControlServer {
      * already_finished}} with {@code phase} as the TaskPhase enum name (null
      * unless found). A Decode target returns HTTP 501 / {@code UNIMPLEMENTED},
      * matching the production role contract.
+     *
+     * <p>{@code status} mirrors the full three-branch contract (block-2 fix):
+     * {@code ACCEPTED} (tracked + cancelled), {@code NOT_FOUND} (seen but
+     * already finished), {@code TOMBSTONED} (never seen — an absent-fence
+     * tombstone is installed and later same-rid enqueues are 8429-rejected).
+     *
+     * <p>Armed cancel fault injections ({@code cancel_no_respond} /
+     * {@code cancel_error} / {@code cancel_unexpected_status}) short-circuit
+     * through {@link JavaMockEngineCluster.FastRpcService#arriveCancelRpc}
+     * BEFORE {@code cancelRequest}: no_respond sleeps past the channel's 500ms
+     * request timeout then 504s, error answers 500, unexpected_status answers
+     * 200 with the out-of-contract status string. Engine state never changes.
      */
     private void handleCancelRequest(HttpExchange exchange) throws IOException {
         handleServicePost(exchange, (body, service) -> {
@@ -540,6 +559,36 @@ final class MockControlServer {
                 throw new ApiException(400, "request must contain 'request_id'");
             }
             long requestId = parseRequestId(body.get("request_id"));
+            // Cancel-RPC fault-injection gate — same arriveCancelRpc entry as
+            // the gRPC Cancel handler and the in-process MockEngineCancelChannel:
+            // the arrival is counted once, the armed fault short-circuits
+            // BEFORE cancelRequest so the engine cancel state machine is never
+            // touched (production semantics "RPC failed = engine state
+            // unchanged": no fences, no tombstones, no census branch).
+            JavaMockEngineCluster.CancelFaultKind fault = service.arriveCancelRpc();
+            if (fault == JavaMockEngineCluster.CancelFaultKind.NO_RESPOND) {
+                // cancel_no_respond over HTTP: outlive HttpMockEngineCancel
+                // Channel's 500ms REQUEST_TIMEOUT (750ms > 500ms) so the
+                // client future times out, then answer 504. The cached
+                // thread pool keeps other control-plane requests responsive.
+                try {
+                    Thread.sleep(750L);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+                throw new ApiException(504, "cancel_no_respond injection");
+            }
+            if (fault == JavaMockEngineCluster.CancelFaultKind.ERROR) {
+                throw new ApiException(500, "cancel_error injection");
+            }
+            if (fault == JavaMockEngineCluster.CancelFaultKind.UNEXPECTED_STATUS) {
+                Map<String, Object> injected = new LinkedHashMap<>();
+                injected.put("status", "UNEXPECTED_STATUS");
+                injected.put("engine", service.getEngineName());
+                injected.put("port", service.getGrpcPort());
+                injected.put("request_id", requestId);
+                return injected;
+            }
             JavaMockEngineCluster.CancelResult result;
             try {
                 result = service.cancelRequest(requestId);
@@ -552,7 +601,11 @@ final class MockControlServer {
                                 "error", unsupported.getMessage()));
             }
             Map<String, Object> response = new LinkedHashMap<>();
-            response.put("status", result.found() ? "ACCEPTED" : "NOT_FOUND");
+            // Full three-branch contract mirror (block-2 fix): ACCEPTED /
+            // NOT_FOUND (already-finished) / TOMBSTONED (never-seen — absent
+            // fence installed, later same-rid enqueues are 8429-rejected).
+            response.put("status", result.found() ? "ACCEPTED"
+                    : result.alreadyFinished() ? "NOT_FOUND" : "TOMBSTONED");
             response.put("found", result.found());
             response.put("phase", result.phase() == null ? null : result.phase().name());
             response.put("already_finished", result.alreadyFinished());

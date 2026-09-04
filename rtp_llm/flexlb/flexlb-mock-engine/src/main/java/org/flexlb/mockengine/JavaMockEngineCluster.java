@@ -424,7 +424,7 @@ public final class JavaMockEngineCluster {
                         + "heap_used_mb=%d heap_max_mb=%d "
                         + "generate_stream_rpcs=%d fetch_response_rpcs=%d cancel_rpcs=%d "
                         + "cancel_census_tracked=%d cancel_census_finished=%d cancel_census_unknown=%d cancel_census_tombstone=%d "
-                        + "cancel_census_client_gone=%d%n",
+                        + "cancel_census_injected=%d cancel_census_client_gone=%d%n",
                 System.currentTimeMillis(),
                 stats.enqueueRpcs.sum(), stats.enqueuedRequests.sum(),
                 stats.statusRpcs.sum(), stats.cacheRpcs.sum(),
@@ -439,7 +439,7 @@ public final class JavaMockEngineCluster {
                 stats.generateStreamRpcs.sum(), stats.fetchResponseRpcs.sum(), stats.cancelRpcs.sum(),
                 stats.cancelCensusTracked.sum(), stats.cancelCensusAlreadyFinished.sum(),
                 stats.cancelCensusUnknown.sum(), stats.cancelCensusTombstone.sum(),
-                stats.cancelCensusClientGone.sum());
+                stats.cancelCensusInjected.sum(), stats.cancelCensusClientGone.sum());
     }
 
     static void writeDiscoveryFiles(Config config) throws IOException {
@@ -755,6 +755,17 @@ public final class JavaMockEngineCluster {
         // (never per-engine keys on the per-second stats line: 1250 engines would
         // bloat every tick line).
         private final AtomicLong busyMs = new AtomicLong();
+        // Per-engine PREFILL batch composition counters (20260903 #8): the
+        // engine-internal regroup makes the EXECUTION batch the unit worth
+        // observing — these count the regrouped batches this engine actually
+        // ran (not the master-composed batches that arrived). Mirrors the
+        // cluster-level ClusterStats batch counters, but per-engine so
+        // /snapshot consumers (flexlb_ft cases, canvas batch-caliber checks)
+        // see one engine's own batch composition without cross-engine
+        // contamination in shared-stats topologies.
+        private final LongAdder prefillBatchesExecuted = new LongAdder();
+        private final LongAdder prefillBatchRequestsExecuted = new LongAdder();
+        private final AtomicInteger maxPrefillBatchSizeExecuted = new AtomicInteger();
         private final AtomicInteger pendingRequests = new AtomicInteger();
         private final AtomicInteger waitingPrefillRequests = new AtomicInteger();
         private final AtomicInteger activePrefillBatches = new AtomicInteger();
@@ -2039,6 +2050,39 @@ public final class JavaMockEngineCluster {
         }
 
         /**
+         * Cancel-RPC arrival bookkeeping + fault-injection gate, shared by
+         * all three cancel surfaces (gRPC Cancel handler, HTTP
+         * {@code /cancel_request}, in-process {@link MockEngineCancelChannel}).
+         * Counts the arrival (stats.cancelRpcs + rpcCancel — exactly like
+         * statusNoRespond counts statusRpcs before hanging), then returns
+         * the armed injection kind or {@code null} for the normal path.
+         *
+         * <p>An injected cancel is an RPC-LAYER failure simulated BEFORE the
+         * engine cancel state machine is touched: no fences, no tombstones,
+         * no census branch — production semantics "RPC failed = engine state
+         * unchanged". The master's one-shot cancel contract (never retries,
+         * 50ms ack timeout) turns every injected kind into a failed future
+         * on the master side while the engine keeps its exact prior state.
+         */
+        CancelFaultKind arriveCancelRpc() {
+            stats.cancelRpcs.increment();
+            rpcCancel.incrementAndGet();
+            if (faultConfig.isCancelNoRespond()) {
+                stats.cancelCensusInjected.increment();
+                return CancelFaultKind.NO_RESPOND;
+            }
+            if (faultConfig.isCancelError()) {
+                stats.cancelCensusInjected.increment();
+                return CancelFaultKind.ERROR;
+            }
+            if (faultConfig.isCancelUnexpectedStatus()) {
+                stats.cancelCensusInjected.increment();
+                return CancelFaultKind.UNEXPECTED_STATUS;
+            }
+            return null;
+        }
+
+        /**
          * Three-branch cancel used by {@link MockEngineCancelChannel} and the
          * gRPC Cancel handler, mapped to the production C++ Prefill contract:
          * a live request (or an accepted-cancel tombstone retry) is
@@ -2056,8 +2100,13 @@ public final class JavaMockEngineCluster {
          * list.
          */
         CancelResult cancelRequest(long requestId) {
-            stats.cancelRpcs.increment();
-            rpcCancel.incrementAndGet();
+            // Arrival counting (stats.cancelRpcs + rpcCancel) lives in
+            // arriveCancelRpc() so EVERY cancel surface (gRPC handler, HTTP
+            // /cancel_request, in-process MockEngineCancelChannel) counts the
+            // arrival exactly once — including the injected short-circuit
+            // paths, mirroring statusNoRespond counting statusRpcs before
+            // hanging. Direct unit-test calls of cancelRequest skip the
+            // arrival counters; the census BRANCH counters below stay here.
             if (roleType != EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL) {
                 throw new UnsupportedOperationException(
                         "priority Cancel is only implemented by the original Prefill");
@@ -2443,6 +2492,11 @@ public final class JavaMockEngineCluster {
             if (shuttingDown) {
                 return false;
             }
+            // What this admission produced, published OUTSIDE the lock for the
+            // lane time-axis below: a regrouped per-member execution batch
+            // (regroup ON) or the verbatim master shapes (regroup OFF).
+            List<BatchMember> synchronizedExec = null;
+            List<MockPerformanceModel.RequestShape> synchronizedShapes = null;
             // Hard gate on maxPrefillConcurrency (change 2): a batch is either admitted
             // immediately (occupies a concurrency slot) or parked in the pending
             // queue until a running batch finishes. activePrefillBatches is reserved
@@ -2450,13 +2504,57 @@ public final class JavaMockEngineCluster {
             // completion-callback drain cannot over-admit into the same slot.
             synchronized (prefillQueueLock) {
                 if (activePrefillBatches.get() < maxPrefillConcurrency) {
-                    activePrefillBatches.incrementAndGet();
-                    activePrefillRequests.addAndGet(shapes.size());
-                    pendingRequests.addAndGet(shapes.size());
-                    for (MockPerformanceModel.RequestShape shape : shapes) {
-                        runningTasks.put(shape.input().getRequestId(),
-                                task(shape, batchId, dpRank,
-                                        EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED));
+                    if (prefillRegroupEnabled()) {
+                        // Engine-internal regroup (20260903 #8): the master
+                        // batch does NOT execute verbatim — its members join
+                        // the waiting pools' logical tail and ONE execution
+                        // batch is composed under the dual budget (older
+                        // waiting work drains first, production FIFO). The
+                        // unconsumed overflow tail requeues WITHOUT the
+                        // waiting-batch cap check: the batch already earned
+                        // its execution right at enqueue, the tail is that
+                        // right's remainder (an over-budget master batch
+                        // splits into prefix-execution + queued tail — the
+                        // group-split fallback).
+                        // Claim BEFORE composing: pollRegroupBatchLocked's
+                        // alive check keys off runningTasks, so arrivals must
+                        // already carry their RECEIVED entries when the
+                        // composer scans them (a cancel landing between claim
+                        // and compose then correctly drops the member — the
+                        // cancel branch has already settled its ledger).
+                        pendingRequests.addAndGet(shapes.size());
+                        for (MockPerformanceModel.RequestShape shape : shapes) {
+                            runningTasks.put(shape.input().getRequestId(),
+                                    task(shape, batchId, dpRank,
+                                            EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED));
+                        }
+                        List<BatchMember> arrivals = new ArrayList<>(shapes.size());
+                        for (MockPerformanceModel.RequestShape shape : shapes) {
+                            arrivals.add(new BatchMember(shape, batchId, dpRank));
+                        }
+                        List<BatchMember> exec = pollRegroupBatchLocked(arrivals,
+                                tail -> prefillPendingQueue.addLast(new PrefillPendingBatch(
+                                        shapesOf(tail), tail.get(0).batchId(), tail.get(0).dpRank())));
+                        if (exec.isEmpty()) {
+                            // Every arrival was cancelled between the ack and
+                            // this admission (rare race): cancel already
+                            // settled the counters and released the leases —
+                            // succeed without reserving a slot.
+                            return true;
+                        }
+                        activePrefillBatches.incrementAndGet();
+                        activePrefillRequests.addAndGet(exec.size());
+                        synchronizedExec = exec;
+                    } else {
+                        activePrefillBatches.incrementAndGet();
+                        activePrefillRequests.addAndGet(shapes.size());
+                        pendingRequests.addAndGet(shapes.size());
+                        for (MockPerformanceModel.RequestShape shape : shapes) {
+                            runningTasks.put(shape.input().getRequestId(),
+                                    task(shape, batchId, dpRank,
+                                            EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED));
+                        }
+                        synchronizedShapes = shapes;
                     }
                 } else {
                     int cap = performance.maxWaitingPrefillBatches();
@@ -2475,7 +2573,11 @@ public final class JavaMockEngineCluster {
                     return true;
                 }
             }
-            runPrefillBatch(shapes, batchId, dpRank);
+            if (synchronizedExec != null) {
+                runPrefillBatch(synchronizedExec);
+            } else if (synchronizedShapes != null) {
+                runPrefillBatch(legacyMembers(synchronizedShapes, batchId, dpRank));
+            }
             return true;
         }
 
@@ -2491,21 +2593,243 @@ public final class JavaMockEngineCluster {
             return batchCap > 0 ? batchCap * performance.directBatchSizeMax() : 0;
         }
 
+        // ────────────────────────────────────────────────────────────────
+        // Engine-internal prefill regroup (20260903 #8): waiting-pool
+        // recomposition under the dual budget. Production reference:
+        // FIFOScheduler.cc evaluateWaitingStreams — the engine scans its
+        // waiting streams FIFO and admits them into the running batch while
+        // the token budget and the sequence-count cap hold; which
+        // EnqueueBatch delivered a stream is irrelevant to the engine's own
+        // batch composition. The mock mirrors that at every admission /
+        // drain point: master batches are no longer executed verbatim — they
+        // enter the waiting pools and the engine regroups ONE execution
+        // batch per free concurrency slot, bounded by
+        // prefill.max_batch_tokens (sum(computeTokens + hitTokens) — the
+        // full logical input length INCLUDING cache hits) and
+        // prefill.max_batch_requests. Both dimensions at 0 = regroup fully
+        // OFF (the legacy verbatim-master-batch behavior).
+        // ────────────────────────────────────────────────────────────────
+
+        /**
+         * One request's slot in an engine execution batch, carrying its
+         * ORIGIN master-batch identity. Regrouped execution batches may span
+         * several master batches; per-request ledger attribution (the
+         * TaskInfoPB batchId the master reconciles fetch_response against,
+         * the engine_events prefill_done batch_id column, the decode
+         * hand-off) must stay keyed to the batch the request actually
+         * ARRIVED in — never to the engine's internal execution grouping.
+         */
+        private record BatchMember(
+                MockPerformanceModel.RequestShape shape,
+                long batchId,
+                int dpRank) {
+        }
+
+        /**
+         * Regroup token cost of one request: computeTokens + hitTokens —
+         * by construction exactly {@code inputLen()} (hitTokens is clamped
+         * to inputLen and computeTokens is the remainder), i.e. the FULL
+         * logical input length INCLUDING cache hits, the caliber the
+         * approved spec fixed for the budget (production's
+         * evaluateWaitingStreams prices its budget without cache; the mock
+         * divergence is deliberate and documented).
+         */
+        private static long regroupTokenCost(MockPerformanceModel.RequestShape shape) {
+            return shape.inputLen();
+        }
+
+        /** Regroup is ON when at least one budget dimension is configured. */
+        private boolean prefillRegroupEnabled() {
+            return performance.maxBatchTokens() > 0 || performance.maxBatchRequests() > 0;
+        }
+
+        /**
+         * Budget gate, production caliber: binds only from the SECOND
+         * admitted member on (the first member always admits — a single
+         * request larger than the whole budget still runs, matching
+         * FIFOScheduler admitting the first waiting stream whenever the
+         * budget is > 0), and the token budget is an admission STOP (once
+         * cumulative cost reaches it no further member joins this batch —
+         * the batch itself may carry the member that crossed the line).
+         */
+        private static boolean regroupBudgetReached(List<BatchMember> exec,
+                                                     long admittedTokens,
+                                                     int tokenBudget,
+                                                     int requestCap) {
+            if (exec.isEmpty()) {
+                return false;
+            }
+            if (tokenBudget > 0 && admittedTokens >= tokenBudget) {
+                return true;
+            }
+            return requestCap > 0 && exec.size() >= requestCap;
+        }
+
+        /**
+         * Compose ONE execution batch from the engine's waiting pools under
+         * the dual budget. Caller MUST hold {@code prefillQueueLock}.
+         *
+         * <p>Order: direct-path (generate_stream) requests drain FIRST —
+         * the pre-existing drain priority — then the master-batch queue,
+         * each pool FIFO and ACROSS master batches in arrival order (a
+         * partially consumed head batch stays at the queue head with its
+         * remainder; production scans waiting_streams_ as one FIFO list
+         * regardless of which EnqueueBatch delivered each stream). Finally
+         * {@code arrivals} — the members of a master batch meeting a free
+         * concurrency slot at enqueue time — join in logical tail order.
+         *
+         * <p>Cancelled members (no runningTasks entry) are dropped from the
+         * queues as encountered (their cancel already settled the
+         * per-request counters) and never occupy budget.
+         *
+         * <p>Unconsumed arrival tail members are handed back to the caller via
+         * {@code tailSink} (origin batchId/dpRank preserved on each member)
+         * — the caller decides WHICH pool requeues them (a master batch's
+         * overflow tail goes to prefillPendingQueue as ONE remainder batch,
+         * bypassing the waiting-batch cap: the batch already earned its
+         * execution right; a direct newcomer's tail goes back to
+         * directPrefillQueue head-first). waitingPrefillRequests is
+         * incremented INSIDE this method (the tail counts as waiting from
+         * this instant — arrivals had not queued before).
+         *
+         * @param arrivals members of a newly admitted master batch joining
+         *                 at the logical tail (may be null on drain)
+         * @param tailSink receives the unconsumed arrival tail (never
+         *                 invoked with an empty list)
+         * @return the composed execution batch (empty when nothing alive
+         *                 waited — the caller must not reserve a slot)
+         */
+        private List<BatchMember> pollRegroupBatchLocked(
+                List<BatchMember> arrivals,
+                java.util.function.Consumer<List<BatchMember>> tailSink) {
+            final int tokenBudget = performance.maxBatchTokens();
+            final int requestCap = performance.maxBatchRequests();
+            List<BatchMember> exec = new ArrayList<>();
+            long admittedTokens = 0L;
+            // Phase A: direct queue (FIFO, cancelled members dropped). The
+            // legacy directBatchSizeMax coalesce cap STAYS binding on this
+            // pool — regroup ADDS the token dimension to the direct path,
+            // it never loosens the direct request cap (counted on ALIVE
+            // members, matching the legacy coalesce loops).
+            final int directCap = performance.directBatchSizeMax();
+            while (!directPrefillQueue.isEmpty() && exec.size() < directCap) {
+                if (regroupBudgetReached(exec, admittedTokens, tokenBudget, requestCap)) {
+                    break;
+                }
+                MockPerformanceModel.RequestShape candidate = directPrefillQueue.pollFirst();
+                waitingPrefillRequests.decrementAndGet();
+                if (runningTasks.containsKey(candidate.input().getRequestId())) {
+                    exec.add(new BatchMember(candidate, -1L, 0));
+                    admittedTokens += regroupTokenCost(candidate);
+                }
+            }
+            // Phase B: master-batch queue — cross-batch FIFO with partial
+            // head consumption (a budget-stopped head keeps its remainder).
+            while (!prefillPendingQueue.isEmpty()) {
+                if (regroupBudgetReached(exec, admittedTokens, tokenBudget, requestCap)) {
+                    break;
+                }
+                PrefillPendingBatch head = prefillPendingQueue.peekFirst();
+                List<MockPerformanceModel.RequestShape> shapes = head.shapes();
+                int taken = 0; // members leaving the queue (admitted or dropped)
+                for (MockPerformanceModel.RequestShape shape : shapes) {
+                    if (runningTasks.containsKey(shape.input().getRequestId())) {
+                        if (regroupBudgetReached(exec, admittedTokens, tokenBudget, requestCap)) {
+                            break; // this live member stays for the NEXT batch
+                        }
+                        exec.add(new BatchMember(shape, head.batchId(), head.dpRank()));
+                        admittedTokens += regroupTokenCost(shape);
+                    }
+                    taken++; // cancelled members leave unconditionally
+                }
+                if (taken > 0) {
+                    prefillPendingQueue.pollFirst();
+                    waitingPrefillRequests.addAndGet(-taken);
+                    if (taken < shapes.size()) {
+                        prefillPendingQueue.addFirst(new PrefillPendingBatch(
+                                List.copyOf(shapes.subList(taken, shapes.size())),
+                                head.batchId(), head.dpRank()));
+                    }
+                }
+                if (taken == 0) {
+                    break; // defensive: head untouched (cannot happen with
+                    // a live head and a non-reached budget, but never loop)
+                }
+            }
+            // Phase C: arrival tail — members of the batch that just met the
+            // free slot, joining AFTER everything already waiting (FIFO).
+            if (arrivals != null && !arrivals.isEmpty()) {
+                int taken = 0;
+                for (BatchMember member : arrivals) {
+                    if (runningTasks.containsKey(member.shape().input().getRequestId())) {
+                        if (regroupBudgetReached(exec, admittedTokens, tokenBudget, requestCap)) {
+                            break;
+                        }
+                        exec.add(member);
+                        admittedTokens += regroupTokenCost(member.shape());
+                    }
+                    taken++;
+                }
+                if (taken < arrivals.size()) {
+                    List<BatchMember> tail = new ArrayList<>(arrivals.size() - taken);
+                    for (int i = taken; i < arrivals.size(); i++) {
+                        tail.add(arrivals.get(i));
+                    }
+                    // The tail enters the waiting pool now: its members count
+                    // as waiting from this instant (they never counted before
+                    // — arrivals had not queued).
+                    waitingPrefillRequests.addAndGet(tail.size());
+                    tailSink.accept(tail);
+                }
+            }
+            return exec;
+        }
+
+        /** Shapes view of a member list (pricing/ledger helper). */
+        private static List<MockPerformanceModel.RequestShape> shapesOf(List<BatchMember> members) {
+            List<MockPerformanceModel.RequestShape> shapes = new ArrayList<>(members.size());
+            for (BatchMember member : members) {
+                shapes.add(member.shape());
+            }
+            return shapes;
+        }
+
+        /** Legacy (regroup OFF) wrapper: a verbatim master batch as members. */
+        private static List<BatchMember> legacyMembers(
+                List<MockPerformanceModel.RequestShape> shapes, long batchId, int dpRank) {
+            List<BatchMember> members = new ArrayList<>(shapes.size());
+            for (MockPerformanceModel.RequestShape shape : shapes) {
+                members.add(new BatchMember(shape, batchId, dpRank));
+            }
+            return members;
+        }
+
         /**
          * Admission point for a direct (generate_stream / NON_BATCH) prefill
          * request. Mirrors {@link #schedulePrefillCompletion} but parks
-         * individual REQUESTS (not master-composed batches) and, whenever a
-         * concurrency slot is free, coalesces the queued requests with the
-         * newcomer into a single batch of up to
-         * {@code performance.directBatchSizeMax()} members — production engines
-         * run prefill continuous batching, so engine-side drain scales with
-         * batch size instead of one request per {@code prefillMs}.
+         * individual REQUESTS (not master-composed batches). Whenever a
+         * concurrency slot is free: with regroup ON (20260903 #8) the newcomer
+         * joins at the LOGICAL TAIL of ONE waiting pool — behind queued direct
+         * requests AND parked master-batch members — and one execution batch
+         * is composed under the dual budget (pollRegroupBatchLocked; direct
+         * members first, then master members cross-batch FIFO); with regroup
+         * OFF the legacy coalesce stays: queued requests merge with the
+         * newcomer into a batch of up to
+         * {@code performance.directBatchSizeMax()} members — production
+         * engines run prefill continuous batching, so engine-side drain
+         * scales with batch size instead of one request per
+         * {@code prefillMs}.
          *
          * <p>Counting contract identical to schedulePrefillCompletion: true →
          * pendingRequests/runningTasks claimed for every member (RECEIVED while
          * queued, RUNNING via {@link #startPrefillBatch}); waitingPrefillRequests
          * counts queued members of both waiting queues and is decremented when
-         * a request leaves the queue (drain), not at cancel time.
+         * a request leaves the queue (drain), not at cancel time. (Regroup path
+         * fix carried along: pendingRequests is incremented ONCE for the
+         * newcomer only — queued members were already counted at enqueue; the
+         * legacy immediate path's merged-wide increment double-counted queued
+         * members in a narrow race window, preserved verbatim below as part of
+         * the "regroup OFF = old behavior exactly" contract.)
          *
          * <p>Direct batches carry batchId -1 and dpRank 0 (single-dp mock).
          *
@@ -2513,8 +2837,8 @@ public final class JavaMockEngineCluster {
          *         was claimed and the caller must reject the request.
          */
         private boolean admitDirectPrefill(MockPerformanceModel.RequestShape shape) {
-            int maxBatch = performance.directBatchSizeMax();
-            List<MockPerformanceModel.RequestShape> merged;
+            List<MockPerformanceModel.RequestShape> merged = null;
+            List<BatchMember> regrouped = null;
             synchronized (prefillQueueLock) {
                 // Shutdown drain in progress — reject before claiming any counter.
                 if (shuttingDown) {
@@ -2533,28 +2857,62 @@ public final class JavaMockEngineCluster {
                             task(shape, -1L, 0, EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED));
                     return true;
                 }
-                merged = new ArrayList<>(Math.min(maxBatch, directPrefillQueue.size() + 1));
-                // Coalesce queued requests with the newcomer: every polled entry
-                // leaves the waiting queue (cancelled members have no
-                // runningTasks entry and are skipped, matching the BATCH-queue
-                // drain's anyAlive semantics).
-                while (!directPrefillQueue.isEmpty() && merged.size() < maxBatch - 1) {
-                    MockPerformanceModel.RequestShape candidate = directPrefillQueue.pollFirst();
-                    waitingPrefillRequests.decrementAndGet();
-                    if (runningTasks.containsKey(candidate.input().getRequestId())) {
-                        merged.add(candidate);
+                if (prefillRegroupEnabled()) {
+                    // One waiting pool, one FIFO order: the newcomer lands
+                    // behind everything already waiting. An unconsumed tail
+                    // requeues head-first (reverse addFirst preserves FIFO —
+                    // the FIRST tail member ends up at the queue head).
+                    // Claim BEFORE composing — same ordering contract as
+                    // schedulePrefillCompletion's regroup branch: the
+                    // composer's alive check must see the newcomer's
+                    // RECEIVED entry.
+                    pendingRequests.incrementAndGet();
+                    runningTasks.put(shape.input().getRequestId(),
+                            task(shape, -1L, 0, EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED));
+                    regrouped = pollRegroupBatchLocked(
+                            List.of(new BatchMember(shape, -1L, 0)),
+                            tail -> {
+                                for (int i = tail.size() - 1; i >= 0; i--) {
+                                    directPrefillQueue.addFirst(tail.get(i).shape());
+                                }
+                            });
+                    if (regrouped.isEmpty()) {
+                        // The newcomer itself was cancelled between the ack and
+                        // this admission (rare race) — cancel already settled
+                        // the counters; succeed without reserving a slot.
+                        return true;
+                    }
+                    activePrefillBatches.incrementAndGet();
+                    activePrefillRequests.addAndGet(regrouped.size());
+                } else {
+                    int maxBatch = performance.directBatchSizeMax();
+                    merged = new ArrayList<>(Math.min(maxBatch, directPrefillQueue.size() + 1));
+                    // Coalesce queued requests with the newcomer: every polled entry
+                    // leaves the waiting queue (cancelled members have no
+                    // runningTasks entry and are skipped, matching the BATCH-queue
+                    // drain's anyAlive semantics).
+                    while (!directPrefillQueue.isEmpty() && merged.size() < maxBatch - 1) {
+                        MockPerformanceModel.RequestShape candidate = directPrefillQueue.pollFirst();
+                        waitingPrefillRequests.decrementAndGet();
+                        if (runningTasks.containsKey(candidate.input().getRequestId())) {
+                            merged.add(candidate);
+                        }
+                    }
+                    merged.add(shape);
+                    activePrefillBatches.incrementAndGet();
+                    activePrefillRequests.addAndGet(merged.size());
+                    pendingRequests.addAndGet(merged.size());
+                    for (MockPerformanceModel.RequestShape member : merged) {
+                        runningTasks.put(member.input().getRequestId(),
+                                task(member, -1L, 0, EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED));
                     }
                 }
-                merged.add(shape);
-                activePrefillBatches.incrementAndGet();
-                activePrefillRequests.addAndGet(merged.size());
-                pendingRequests.addAndGet(merged.size());
-                for (MockPerformanceModel.RequestShape member : merged) {
-                    runningTasks.put(member.input().getRequestId(),
-                            task(member, -1L, 0, EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED));
-                }
             }
-            runPrefillBatch(merged, -1L, 0);
+            if (regrouped != null) {
+                runPrefillBatch(regrouped);
+            } else {
+                runPrefillBatch(legacyMembers(merged, -1L, 0));
+            }
             return true;
         }
 
@@ -2565,10 +2923,18 @@ public final class JavaMockEngineCluster {
          * this method must NOT touch activePrefillBatches, pendingRequests, nor
          * waitingPrefillRequests — only lane timing, runningTask phase, and the
          * completion callback (which frees the slot and drains the queue).
+         *
+         * <p>The batch is a per-MEMBER list (20260903 #8): a regrouped execution
+         * batch may span several origin master batches (or mix direct members
+         * with master-batch members), so every per-request ledger write below
+         * keys off each member's OWN batchId/dpRank — never a whole-batch
+         * identity. The lane is picked from the FIRST member (the execution
+         * batch is the lane unit; production FIFOScheduler likewise schedules
+         * one running batch regardless of which EnqueueBatch delivered each
+         * stream).
          */
-        private void runPrefillBatch(List<MockPerformanceModel.RequestShape> shapes,
-                                     long batchId,
-                                     int dpRank) {
+        private void runPrefillBatch(List<BatchMember> members) {
+            List<MockPerformanceModel.RequestShape> shapes = shapesOf(members);
             long executionMs = performance.prefillMs(shapes);
             long generateDelayMs = faultConfig.getGenerateDelayMs();
             long now = System.nanoTime();
@@ -2576,7 +2942,7 @@ public final class JavaMockEngineCluster {
             // When max_prefill_concurrency was explicitly configured via /set_perf, a
             // global lane pool models the Python prefill semaphore; otherwise keep the
             // legacy per-dp-rank serialization.
-            AtomicLong nextAvailable = pickPrefillLane(dpRank);
+            AtomicLong nextAvailable = pickPrefillLane(members.get(0).dpRank());
             long startNanos;
             long finishNanos;
             while (true) {
@@ -2589,6 +2955,10 @@ public final class JavaMockEngineCluster {
             }
 
             stats.recordPrefillBatch(shapes.size(), executionMs);
+            // Per-engine mirror of the same observation (see field comment).
+            prefillBatchesExecuted.increment();
+            prefillBatchRequestsExecuted.add(shapes.size());
+            maxPrefillBatchSizeExecuted.accumulateAndGet(shapes.size(), Math::max);
             // Per-engine prefill busy: one executionMs per scheduled batch (the
             // execution duration is known at schedule time in the mock model).
             busyMs.addAndGet(executionMs);
@@ -2598,11 +2968,11 @@ public final class JavaMockEngineCluster {
             final long epoch = crashEpoch.get();
             long startDelayNanos = Math.max(0, startNanos - now);
             if (startDelayNanos == 0) {
-                startPrefillBatch(shapes, batchId, dpRank);
+                startPrefillBatch(members);
             } else {
                 scheduler.schedule(() -> {
                     if (crashEpoch.get() == epoch) {
-                        startPrefillBatch(shapes, batchId, dpRank);
+                        startPrefillBatch(members);
                     }
                 }, startDelayNanos, TimeUnit.NANOSECONDS);
             }
@@ -2616,7 +2986,8 @@ public final class JavaMockEngineCluster {
                 // One wall-clock stamp for the whole batch: every member shares
                 // the same completion instant (the batch is the execution unit).
                 long doneTsMs = System.currentTimeMillis();
-                for (MockPerformanceModel.RequestShape shape : shapes) {
+                for (BatchMember member : members) {
+                    MockPerformanceModel.RequestShape shape = member.shape();
                     long requestId = shape.input().getRequestId();
                     boolean alreadyCancelled = cancelledRequests.containsKey(requestId);
                     EngineRpcService.TaskInfoPB removed = runningTasks.remove(requestId);
@@ -2637,7 +3008,7 @@ public final class JavaMockEngineCluster {
                     if (removed != null && !alreadyCancelled) {
                         activeCount++;
                     }
-                    recordCompletion(shape, batchId, executionMs, dpRank);
+                    recordCompletion(shape, member.batchId(), executionMs, member.dpRank());
                     // Per-rid prefill terminal event row (engine_events.jsonl,
                     // replaces the former mock_prefill_done stdout trace line —
                     // per-request data now streams as structured JSONL, not
@@ -2647,7 +3018,7 @@ public final class JavaMockEngineCluster {
                     // request-BIRTH axis (same axis as e2e/full_e2e); exec_ms is
                     // the BATCH execution duration — prefill runs whole batches,
                     // so every member of one batch logs the same value.
-                    writePrefillDoneEvent(shape, requestId, batchId, doneTsMs,
+                    writePrefillDoneEvent(shape, requestId, member.batchId(), doneTsMs,
                             executionMs, shapes.size(), alreadyCancelled);
                     if (!alreadyCancelled) {
                         // rtp_llm_context_tps accounting (production caliber):
@@ -2671,7 +3042,7 @@ public final class JavaMockEngineCluster {
                     // stream hangs until it times out.
                     boolean decodeStarted = false;
                     if (!alreadyCancelled && !faultConfig.isNoRespond()) {
-                        decodeStarted = startDecode(shape, batchId);
+                        decodeStarted = startDecode(shape, member.batchId());
                     }
                     if (decodeStarted) {
                         // Emit a first-token frame (finished=false) so the
@@ -2724,82 +3095,105 @@ public final class JavaMockEngineCluster {
                 pendingRequests.addAndGet(-activeCount);
                 // Drain one queued batch under the same lock that guards admission,
                 // handing this completion's freed slot to a queued batch atomically.
-                // Direct-path (generate_stream) requests drain first, coalesced into
-                // ONE batch of up to directBatchSizeMax() alive members (production
-                // prefill continuous batching); the legacy BATCH queue drains only
-                // when no direct batch claimed the slot.
+                // With regroup ON (20260903 #8) the freed slot triggers ONE
+                // budget-bounded recomposition across BOTH waiting pools
+                // (direct members first — the pre-existing drain priority — then
+                // master-batch members in cross-batch FIFO order; a partially
+                // consumed head batch keeps its remainder at the queue head).
+                // With regroup OFF the legacy verbatim behavior stays: direct
+                // requests coalesce into ONE batch of up to directBatchSizeMax()
+                // alive members (production prefill continuous batching); the
+                // BATCH queue drains only when no direct batch claimed the slot.
+                List<BatchMember> nextMembers = null;
                 List<MockPerformanceModel.RequestShape> directBatch = null;
                 PrefillPendingBatch nextBatch = null;
                 synchronized (prefillQueueLock) {
-                    if (activePrefillBatches.get() < maxPrefillConcurrency
-                            && !directPrefillQueue.isEmpty()) {
-                        int maxBatch = performance.directBatchSizeMax();
-                        directBatch = new ArrayList<>(
-                                Math.min(maxBatch, directPrefillQueue.size()));
-                        while (!directPrefillQueue.isEmpty()
-                                && directBatch.size() < maxBatch) {
-                            MockPerformanceModel.RequestShape candidate =
-                                    directPrefillQueue.pollFirst();
-                            waitingPrefillRequests.decrementAndGet();
-                            if (runningTasks.containsKey(candidate.input().getRequestId())) {
-                                directBatch.add(candidate);
+                    if (activePrefillBatches.get() < maxPrefillConcurrency) {
+                        if (prefillRegroupEnabled()) {
+                            // arrivals=null (nothing new lands here) — the
+                            // tailSink is never invoked, so null is safe.
+                            nextMembers = pollRegroupBatchLocked(null, null);
+                            if (nextMembers.isEmpty()) {
+                                nextMembers = null;
+                            } else {
+                                activePrefillBatches.incrementAndGet();
+                                activePrefillRequests.addAndGet(nextMembers.size());
                             }
-                        }
-                        if (directBatch.isEmpty()) {
-                            // Every member was cancelled while queued — the slot
-                            // stays free for the BATCH queue below.
-                            directBatch = null;
-                        } else {
-                            activePrefillBatches.incrementAndGet();
-                            activePrefillRequests.addAndGet(directBatch.size());
-                        }
-                    }
-                    if (directBatch == null) {
-                        while (!prefillPendingQueue.isEmpty()) {
-                            PrefillPendingBatch candidate = prefillPendingQueue.peekFirst();
-                            // Skip batches whose every member was cancelled while queued
-                            // (cancel removed their runningTasks entries and already
-                            // decremented pendingRequests). Drop them without reserving.
-                            boolean anyAlive = false;
-                            for (MockPerformanceModel.RequestShape s : candidate.shapes()) {
-                                if (runningTasks.containsKey(s.input().getRequestId())) {
-                                    anyAlive = true;
-                                    break;
+                        } else if (!directPrefillQueue.isEmpty()) {
+                            int maxBatch = performance.directBatchSizeMax();
+                            directBatch = new ArrayList<>(
+                                    Math.min(maxBatch, directPrefillQueue.size()));
+                            while (!directPrefillQueue.isEmpty()
+                                    && directBatch.size() < maxBatch) {
+                                MockPerformanceModel.RequestShape candidate =
+                                        directPrefillQueue.pollFirst();
+                                waitingPrefillRequests.decrementAndGet();
+                                if (runningTasks.containsKey(candidate.input().getRequestId())) {
+                                    directBatch.add(candidate);
                                 }
                             }
-                            if (!anyAlive) {
-                                prefillPendingQueue.pollFirst();
-                                waitingPrefillRequests.addAndGet(-candidate.shapes().size());
-                                continue;
+                            if (directBatch.isEmpty()) {
+                                // Every member was cancelled while queued — the slot
+                                // stays free for the BATCH queue below.
+                                directBatch = null;
+                            } else {
+                                activePrefillBatches.incrementAndGet();
+                                activePrefillRequests.addAndGet(directBatch.size());
                             }
-                            activePrefillBatches.incrementAndGet();
-                            activePrefillRequests.addAndGet(candidate.shapes().size());
-                            waitingPrefillRequests.addAndGet(-candidate.shapes().size());
-                            nextBatch = prefillPendingQueue.pollFirst();
-                            break;
+                        }
+                        if (directBatch == null && nextMembers == null) {
+                            while (!prefillPendingQueue.isEmpty()) {
+                                PrefillPendingBatch candidate = prefillPendingQueue.peekFirst();
+                                // Skip batches whose every member was cancelled while queued
+                                // (cancel removed their runningTasks entries and already
+                                // decremented pendingRequests). Drop them without reserving.
+                                boolean anyAlive = false;
+                                for (MockPerformanceModel.RequestShape s : candidate.shapes()) {
+                                    if (runningTasks.containsKey(s.input().getRequestId())) {
+                                        anyAlive = true;
+                                        break;
+                                    }
+                                }
+                                if (!anyAlive) {
+                                    prefillPendingQueue.pollFirst();
+                                    waitingPrefillRequests.addAndGet(-candidate.shapes().size());
+                                    continue;
+                                }
+                                activePrefillBatches.incrementAndGet();
+                                activePrefillRequests.addAndGet(candidate.shapes().size());
+                                waitingPrefillRequests.addAndGet(-candidate.shapes().size());
+                                nextBatch = prefillPendingQueue.pollFirst();
+                                break;
+                            }
                         }
                     }
                 }
-                if (directBatch != null) {
-                    runPrefillBatch(directBatch, -1L, 0);
+                if (nextMembers != null) {
+                    runPrefillBatch(nextMembers);
+                } else if (directBatch != null) {
+                    runPrefillBatch(legacyMembers(directBatch, -1L, 0));
                 } else if (nextBatch != null) {
-                    runPrefillBatch(nextBatch.shapes(), nextBatch.batchId(), nextBatch.dpRank());
+                    runPrefillBatch(legacyMembers(nextBatch.shapes(),
+                            nextBatch.batchId(), nextBatch.dpRank()));
                 }
             }, delayNanos, TimeUnit.NANOSECONDS);
         }
 
-        private void startPrefillBatch(List<MockPerformanceModel.RequestShape> shapes,
-                                       long batchId,
-                                       int dpRank) {
+        private void startPrefillBatch(List<BatchMember> members) {
             // activePrefillBatches is reserved at admission (schedulePrefillCompletion)
             // and drain time, not here, so maxPrefillConcurrency acts as a real hard
             // gate rather than a report-only value.
-            for (MockPerformanceModel.RequestShape shape : shapes) {
-                runningTasks.put(shape.input().getRequestId(),
-                        task(shape, batchId, dpRank, EngineRpcService.TaskPhase.TASK_PHASE_RUNNING));
+            for (BatchMember member : members) {
+                // Per-member origin identity: a regrouped batch writes RUNNING
+                // with each member's OWN batchId/dpRank (the master reconciles
+                // fetch_response against the delivery batch, not the engine's
+                // internal execution grouping).
+                runningTasks.put(member.shape().input().getRequestId(),
+                        task(member.shape(), member.batchId(), member.dpRank(),
+                                EngineRpcService.TaskPhase.TASK_PHASE_RUNNING));
                 // engine_events.jsonl: execution-start stamp (lane serialization
                 // actually begins for this batch member).
-                recordEventStart(shape.input().getRequestId());
+                recordEventStart(member.shape().input().getRequestId());
             }
         }
 
@@ -3872,7 +4266,42 @@ public final class JavaMockEngineCluster {
         @Override
         public void cancel(EngineRpcService.CancelRequestPB request,
                            StreamObserver<EngineRpcService.CancelResponsePB> observer) {
+            // Cancel-RPC fault injections (RPC-layer failures; the HTTP
+            // /cancel_request and in-process channel surfaces run the same
+            // arriveCancelRpc gate). Everything below short-circuits BEFORE
+            // cancelRequest so the engine state machine is never touched —
+            // production semantics "RPC failed = engine state unchanged"
+            // (no fences, no tombstones), and the master's one-shot cancel
+            // contract (never retries, 50ms ack timeout) is what turns
+            // these into failed futures master-side.
+            CancelFaultKind fault = arriveCancelRpc();
+            if (fault == CancelFaultKind.NO_RESPOND) {
+                // cancel_no_respond: hang the RPC — no onNext / onError /
+                // onCompleted ever, mirroring statusNoRespond's hang. The
+                // arrival was counted; the master's cancel-ack timeout
+                // fails the future with zero engine-side state change.
+                return;
+            }
             try {
+                if (fault == CancelFaultKind.ERROR) {
+                    // cancel_error: transport-layer failure (gRPC INTERNAL)
+                    // — the master's future fails; no fence is installed.
+                    observer.onError(io.grpc.Status.INTERNAL
+                            .withDescription("mock cancel error injection")
+                            .asException());
+                    return;
+                }
+                if (fault == CancelFaultKind.UNEXPECTED_STATUS) {
+                    // cancel_unexpected_status: the RPC succeeds but the ack
+                    // status sits outside the cancel contract (UNSPECIFIED)
+                    // — the master's response mapping must fail it, never
+                    // accept it.
+                    observer.onNext(EngineRpcService.CancelResponsePB.newBuilder()
+                            .setStatus(EngineRpcService.CancelStatusPB.CANCEL_STATUS_UNSPECIFIED)
+                            .build());
+                    observer.onCompleted();
+                    return;
+                }
                 CancelResult result = cancelRequest(request.getRequestId());
                 EngineRpcService.CancelStatusPB status;
                 if (result.found()) {
@@ -4752,6 +5181,15 @@ public final class JavaMockEngineCluster {
             // Cumulative per-engine busy time (ms): prefill batches (resp. decode
             // requests) executed by this engine — see busyMs field comment.
             snap.put("busy_ms", busyMs.get());
+            // Per-engine prefill batch composition (20260903 #8): the
+            // REGROUPED execution batches — prefill_batches counts batches
+            // executed, prefill_batch_requests the requests they carried
+            // (avg size = requests/batches), max_prefill_batch_size the
+            // largest. Batch-caliber consumers read these instead of
+            // inferring composition from per-request counters.
+            snap.put("prefill_batches", prefillBatchesExecuted.sum());
+            snap.put("prefill_batch_requests", prefillBatchRequestsExecuted.sum());
+            snap.put("max_prefill_batch_size", maxPrefillBatchSizeExecuted.get());
             // Production-caliber TPS observation: the rtp_llm_* /metrics
             // series read these. Window value = last settled scrape window +
             // events since (the /metrics handler drains first, so a scrape
@@ -4802,6 +5240,22 @@ public final class JavaMockEngineCluster {
     record CancelResult(boolean found, EngineRpcService.TaskPhase phase, boolean alreadyFinished) {
     }
 
+    /**
+     * Armed cancel-RPC fault injection kind returned by
+     * {@link FastRpcService#arriveCancelRpc} — the RPC-layer failure family
+     * ({@code cancel_no_respond} / {@code cancel_error} /
+     * {@code cancel_unexpected_status}) simulated before the engine cancel
+     * state machine is touched.
+     */
+    enum CancelFaultKind {
+        /** cancel_no_respond: the RPC hangs — no response ever (mirrors statusNoRespond). */
+        NO_RESPOND,
+        /** cancel_error: transport-layer failure (gRPC INTERNAL / HTTP 500). */
+        ERROR,
+        /** cancel_unexpected_status: ack status outside the contract (UNSPECIFIED). */
+        UNEXPECTED_STATUS
+    }
+
     static final class ClusterStats {
         private final LongAdder enqueueRpcs = new LongAdder();
         private final LongAdder enqueuedRequests = new LongAdder();
@@ -4819,6 +5273,13 @@ public final class JavaMockEngineCluster {
         final LongAdder cancelCensusAlreadyFinished = new LongAdder();
         final LongAdder cancelCensusUnknown = new LongAdder();
         final LongAdder cancelCensusTombstone = new LongAdder();
+        // Cancel-RPC fault-injection census: arrivals short-circuited by an
+        // armed cancel_no_respond / cancel_error / cancel_unexpected_status
+        // injection (arriveCancelRpc). Separate from the state-machine
+        // branches so the census family stays an exhaustive split of cancel
+        // RPC arrivals — an injected cancel is neither tracked, finished,
+        // unknown nor a tombstone: the engine state never saw it.
+        final LongAdder cancelCensusInjected = new LongAdder();
         // Autonomous client-gone cancellations (broken GenerateStream /
         // FetchResponse stream): how many in-flight requests the engine
         // cleaned up by itself because the client stream died, split from the
