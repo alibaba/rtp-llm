@@ -5,7 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.balance.prediction.PrefillTimeFormula;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.RoutingConfig.FormulaEstimatorConfig;
+import org.flexlb.config.RoutingConfig.EstimatorType;
 import org.flexlb.engine.grpc.EngineRpcService;
 
 import java.io.IOException;
@@ -111,9 +111,12 @@ final class MockPerformanceModel {
 
     /**
      * Production DSv4 prefill execution-time fit, verbatim from the
-     * RoutingConfig.FormulaEstimatorConfig.DEFAULT_EXPRESSION constant as it
-     * existed on the intake3 test line (commit 6980b3d508..91498cfa4f, where
-     * it briefly served as the production code default). The mock is a test
+     * FormulaEstimatorConfig.DEFAULT_EXPRESSION constant as it existed on
+     * the intake3 test line (commit 6980b3d508..91498cfa4f, where it briefly
+     * served as the production code default; the upstream RoutingConfig
+     * schema has since replaced FormulaEstimatorConfig with
+     * ExecutionTimeEstimatorConfig + EstimatorType and dropped that
+     * constant, so the fit is frozen here verbatim). The mock is a test
      * process, not bound by the production default: it keeps the production
      * fit as its own built-in fallback so a master config that omits the
      * estimator still boots on realistic prefill durations. Explicit FORMULA
@@ -360,8 +363,9 @@ final class MockPerformanceModel {
                 FlexlbConfig config = ConfigService.parse(item.get(1).asText());
                 var estimator = config.getRouter().getRoles().getPrefill()
                         .getExecutionTimeEstimator();
-                if (estimator instanceof FormulaEstimatorConfig formula) {
-                    String expression = formula.getExpression();
+                if (estimator != null
+                        && estimator.getType() == EstimatorType.FORMULA) {
+                    String expression = estimator.getExpression();
                     if (expression == null || expression.isBlank()) {
                         throw new IllegalStateException("Master config " + masterConfigFile
                                 + ": router.roles.prefill.executionTimeEstimator is FORMULA"

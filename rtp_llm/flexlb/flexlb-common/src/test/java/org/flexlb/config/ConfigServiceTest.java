@@ -27,10 +27,10 @@ class ConfigServiceTest {
         // (the legacy 1 ms/token sum). Test lines that need the production
         // DSv4 prefill fit inject it explicitly in their FLEXLB_CONFIG
         // documents (harness.py / master_fixed_window.json).
-        FormulaEstimatorConfig estimator = assertInstanceOf(
-                FormulaEstimatorConfig.class,
+        RoutingConfig.ExecutionTimeEstimatorConfig estimator =
                 config.getRouter().getRoles().getPrefill()
-                        .getExecutionTimeEstimator());
+                        .getExecutionTimeEstimator();
+        assertEquals(RoutingConfig.EstimatorType.FORMULA, estimator.getType());
         assertEquals("sum(computeTokens) + 0.3*sum(hitCacheTokens)",
                 estimator.getExpression());
     }
