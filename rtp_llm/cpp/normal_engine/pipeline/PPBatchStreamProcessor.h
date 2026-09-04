@@ -32,7 +32,8 @@ private:
 
     void dispatchSingleStream(const GenerateStreamPtr& stream,
                               const PPExecutionResult& result,
-                              int64_t                  index,
+                              int64_t                  batch_idx,
+                              int64_t                  stream_batch_size,
                               int64_t                  token_offset,
                               int64_t                  loss_offset,
                               std::optional<ErrorInfo> error_info) const;
