@@ -1464,6 +1464,24 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info) {
         const auto& full_dependencies = kv_cache_resource->cacheResource(batch_id).blockDependencies();
 
         if (!cp_active) {
+            const CPSlotMapper                      passthrough_mapper;
+            std::map<std::string, BlockIndicesType> blocks_by_key;
+            for (const auto& group : config_.groups()) {
+                auto& keyed_blocks = blocks_by_key[group.tag];
+                keyed_blocks.resize(full_keys.size(), NULL_BLOCK_IDX);
+                if (skipReuseCacheGroup(group.tag)) {
+                    continue;
+                }
+                const auto&  blocks              = kv_cache_resource->blocks(batch_id, group.tag);
+                const size_t keys_per_physical   = passthrough_mapper.cacheKeysPerPhysicalBlock(config_, group.tag);
+                const size_t max_physical_blocks = (full_keys.size() + keys_per_physical - 1) / keys_per_physical;
+                const auto   plan                = passthrough_mapper.buildCacheKeyBlockPlan(
+                    config_, group.tag, full_keys.size(), std::min(blocks.size(), max_physical_blocks));
+                for (const auto& pair : plan) {
+                    keyed_blocks[static_cast<size_t>(pair.key_index)] = blocks[static_cast<size_t>(pair.offset_index)];
+                }
+            }
+
             // Preserve the legacy non-CP GPU reuse surface: aggregate all groups
             // under one key. The prefix tree only receives extra dependency
             // metadata here.
@@ -1473,19 +1491,9 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info) {
                 std::map<std::string, BlockIdxType> groups;
                 bool                                has_valid = false;
                 for (const auto& group : config_.groups()) {
-                    const auto&  tag      = group.tag;
-                    BlockIdxType block_id = NULL_BLOCK_IDX;
-                    if (skipReuseCacheGroup(tag)) {
-                        groups.emplace(tag, block_id);
-                        continue;
-                    }
-                    const auto& blocks = kv_cache_resource->blocks(batch_id, tag);
-                    if (i >= blocks.size()) {
-                        groups.emplace(tag, block_id);
-                        continue;
-                    }
-                    if (!isNullBlockIdx(blocks[i])) {
-                        block_id  = blocks[i];
+                    const auto& tag      = group.tag;
+                    const auto  block_id = blocks_by_key.at(tag)[i];
+                    if (!isNullBlockIdx(block_id)) {
                         has_valid = true;
                     }
                     groups.emplace(tag, block_id);
