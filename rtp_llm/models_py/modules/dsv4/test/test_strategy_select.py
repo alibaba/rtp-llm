@@ -15,17 +15,31 @@ from contextlib import contextmanager
 from unittest import mock
 
 # Importing strategies populates the registry via ``register_strategy``.
+from rtp_llm.models_py.modules.dsv4.moe.mega_se_buf import (
+    _mega_moe_se_unavailable_reason,
+)
 from rtp_llm.models_py.modules.dsv4.moe.strategies import (
     DeepEPStrategy,
     GroupedFP4Strategy,
     LocalLoopStrategy,
+    MegaMoEFusedStrategy,
     MegaMoEStrategy,
     MegaMoEStrategySE,
     MoeCfg,
     _has_fp8_fp4_grouped_kernel,
     select_strategy,
 )
+from rtp_llm.models_py.modules.dsv4.moe.strategies import base as strategy_base
 from rtp_llm.models_py.modules.dsv4.moe.strategies.base import _resolve_forced
+
+
+_STRATEGY_ENV_NAMES = (
+    "DSV4_MOE_STRATEGY",
+    "DSV4_USE_MEGA_MOE",
+    "DSV4_USE_MEGA_MOE_SE",
+    "DSV4_USE_MEGA_MOE_FUSED",
+    "DSV4_USE_GROUPED_FP4",
+)
 
 
 def _cfg(ep_size: int = 1) -> MoeCfg:
@@ -70,15 +84,19 @@ class StrategySelectTest(unittest.TestCase):
     """Cover the (ep_size, kernel_avail, mega_avail) matrix."""
 
     def setUp(self):
-        # Ensure clean env baseline for every test.
-        for k in (
-            "DSV4_MOE_STRATEGY",
-            "DSV4_USE_MEGA_MOE",
-            "DSV4_USE_MEGA_MOE_SE",
-            "DSV4_USE_MEGA_MOE_FUSED",
-            "DSV4_USE_GROUPED_FP4",
-        ):
-            os.environ.pop(k, None)
+        self._saved_env = {
+            name: os.environ.pop(name, None) for name in _STRATEGY_ENV_NAMES
+        }
+        # Most tests retain the old routed-only baseline. Tests for automatic
+        # SE selection explicitly remove this opt-out.
+        os.environ["DSV4_USE_MEGA_MOE_SE"] = "0"
+        strategy_base._MEGA_SE_AUTO_FALLBACK_WARNED = False
+
+    def tearDown(self):
+        for name, value in self._saved_env.items():
+            os.environ.pop(name, None)
+            if value is not None:
+                os.environ[name] = value
 
     # --- auto-pick matrix --------------------------------------------------
 
@@ -134,15 +152,39 @@ class StrategySelectTest(unittest.TestCase):
         ):
             self.assertIs(select_strategy(_cfg(ep_size=1)), LocalLoopStrategy)
 
-    def test_ep_gt1_with_mega_picks_mega(self):
+    def test_ep_gt1_with_se_disabled_picks_mega(self):
         with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=True):
             self.assertIs(select_strategy(_cfg(ep_size=4)), MegaMoEStrategy)
 
-    def test_ep_gt1_default_stays_mega_when_se_is_capable(self):
-        with mock.patch.object(
+    def test_ep_gt1_default_picks_mega_se_when_capable(self):
+        with _env(DSV4_USE_MEGA_MOE_SE=None), mock.patch.object(
+            MegaMoEStrategySE, "can_handle", return_value=True
+        ), mock.patch.object(MegaMoEStrategy, "can_handle") as mega_can_handle:
+            self.assertIs(select_strategy(_cfg(ep_size=4)), MegaMoEStrategySE)
+        mega_can_handle.assert_not_called()
+
+    def test_ep_gt1_default_warns_and_uses_mega_when_se_is_incapable(self):
+        with _env(DSV4_USE_MEGA_MOE_SE=None), mock.patch.object(
+            MegaMoEStrategySE, "can_handle", return_value=False
+        ), mock.patch.object(
             MegaMoEStrategy, "can_handle", return_value=True
-        ), mock.patch.object(MegaMoEStrategySE, "can_handle", return_value=True):
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.mega_se_buf."
+            "_mega_moe_se_unavailable_reason",
+            return_value="missing shared-expert API",
+        ), mock.patch.object(strategy_base.logging, "warning") as warning:
             self.assertIs(select_strategy(_cfg(ep_size=4)), MegaMoEStrategy)
+        warning.assert_called_once()
+        self.assertIn("missing shared-expert API", warning.call_args.args)
+
+    def test_ep1_default_never_probes_mega_se(self):
+        with _env(DSV4_USE_MEGA_MOE_SE=None), mock.patch.object(
+            MegaMoEStrategySE, "can_handle"
+        ) as se_can_handle, mock.patch.object(
+            GroupedFP4Strategy, "can_handle", return_value=True
+        ):
+            self.assertIs(select_strategy(_cfg(ep_size=1)), GroupedFP4Strategy)
+        se_can_handle.assert_not_called()
 
     def test_ep_gt1_no_mega_raises(self):
         with mock.patch.object(MegaMoEStrategy, "can_handle", return_value=False):
@@ -186,6 +228,118 @@ class StrategySelectTest(unittest.TestCase):
         with _env(DSV4_MOE_STRATEGY="local_loop"):
             self.assertEqual(_resolve_forced(None), ("local_loop", True))
             self.assertEqual(_resolve_forced("mega"), ("local_loop", True))
+
+    def test_explicit_env_strategy_beats_default_se_and_legacy_fused(self):
+        with _env(
+            DSV4_MOE_STRATEGY="mega",
+            DSV4_USE_MEGA_MOE_SE=None,
+            DSV4_USE_MEGA_MOE_FUSED="1",
+        ), mock.patch.object(
+            MegaMoEStrategy, "can_handle", return_value=True
+        ), mock.patch.object(
+            MegaMoEStrategySE, "can_handle"
+        ) as se_can_handle, mock.patch.object(
+            MegaMoEFusedStrategy, "can_handle"
+        ) as fused_can_handle:
+            forced, strict = _resolve_forced(None)
+            self.assertEqual((forced, strict), ("mega", True))
+            self.assertIs(
+                select_strategy(_cfg(ep_size=4), forced=forced, strict=strict),
+                MegaMoEStrategy,
+            )
+        se_can_handle.assert_not_called()
+        fused_can_handle.assert_not_called()
+
+    def test_family_disable_rejects_named_mega_variants(self):
+        variants = (
+            ("mega", MegaMoEStrategy),
+            ("mega_se", MegaMoEStrategySE),
+            ("mega_fused", MegaMoEFusedStrategy),
+        )
+        for strategy_name, strategy_cls in variants:
+            for ep_size in (1, 2):
+                with self.subTest(strategy=strategy_name, ep_size=ep_size), _env(
+                    DSV4_MOE_STRATEGY=strategy_name,
+                    DSV4_USE_MEGA_MOE="0",
+                ), mock.patch.object(strategy_cls, "can_handle") as can_handle:
+                    forced, strict = _resolve_forced(None)
+                    with self.assertRaises(RuntimeError) as cm:
+                        select_strategy(
+                            _cfg(ep_size=ep_size), forced=forced, strict=strict
+                        )
+                can_handle.assert_not_called()
+                self.assertIn(
+                    "DSV4_USE_MEGA_MOE=0 disables the Mega MoE family",
+                    str(cm.exception),
+                )
+                self.assertIn(strategy_name, str(cm.exception))
+
+    def test_family_disable_rejects_constructor_forced_mega_variants(self):
+        variants = (
+            ("mega", MegaMoEStrategy),
+            ("mega_se", MegaMoEStrategySE),
+            ("mega_fused", MegaMoEFusedStrategy),
+        )
+        for strategy_name, strategy_cls in variants:
+            with self.subTest(strategy=strategy_name), _env(
+                DSV4_USE_MEGA_MOE="0"
+            ), mock.patch.object(strategy_cls, "can_handle") as can_handle:
+                with self.assertRaises(RuntimeError) as cm:
+                    select_strategy(
+                        _cfg(ep_size=2), forced=strategy_name, strict=True
+                    )
+            can_handle.assert_not_called()
+            self.assertIn(
+                "DSV4_USE_MEGA_MOE=0 disables the Mega MoE family",
+                str(cm.exception),
+            )
+
+    def test_family_disable_allows_named_non_mega_on_ep1(self):
+        with _env(
+            DSV4_MOE_STRATEGY="local_loop",
+            DSV4_USE_MEGA_MOE="0",
+        ), mock.patch.object(LocalLoopStrategy, "can_handle", return_value=True):
+            forced, strict = _resolve_forced(None)
+            self.assertIs(
+                select_strategy(_cfg(ep_size=1), forced=forced, strict=strict),
+                LocalLoopStrategy,
+            )
+
+    def test_explicit_variant_does_not_require_legacy_opt_in(self):
+        variants = (
+            (
+                "mega_se",
+                MegaMoEStrategySE,
+                "rtp_llm.models_py.modules.dsv4.moe.strategies.mega_se."
+                "_mega_moe_se_available",
+            ),
+            (
+                "mega_fused",
+                MegaMoEFusedStrategy,
+                "rtp_llm.models_py.modules.dsv4.moe.strategies.mega_fused."
+                "_mega_moe_fused_available",
+            ),
+        )
+        for strategy_name, strategy_cls, availability_probe in variants:
+            for source in ("env", "ctor"):
+                with self.subTest(strategy=strategy_name, source=source), _env(
+                    DSV4_MOE_STRATEGY=strategy_name if source == "env" else None,
+                    DSV4_USE_MEGA_MOE_SE=(
+                        None
+                        if strategy_name == "mega_fused" and source == "ctor"
+                        else "0"
+                    ),
+                    DSV4_USE_MEGA_MOE_FUSED="0",
+                ), mock.patch(availability_probe, return_value=True):
+                    forced, strict = _resolve_forced(
+                        strategy_name if source == "ctor" else None
+                    )
+                    self.assertIs(
+                        select_strategy(
+                            _cfg(ep_size=2), forced=forced, strict=strict
+                        ),
+                        strategy_cls,
+                    )
 
     def test_env_dsv4_moe_strategy_auto_falls_through(self):
         with _env(DSV4_MOE_STRATEGY="auto"):
@@ -234,20 +388,77 @@ class StrategySelectTest(unittest.TestCase):
     def test_mega_moe_se_unavailable_fails_loudly(self):
         with _env(DSV4_USE_MEGA_MOE_SE="1"), mock.patch.object(
             MegaMoEStrategySE, "can_handle", return_value=False
+        ), mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.mega_se_buf."
+            "_mega_moe_se_disabled_or_unavailable_reason",
+            return_value="torch.distributed is not initialized",
         ):
             forced, strict = _resolve_forced(None)
             with self.assertRaises(RuntimeError) as cm:
                 select_strategy(_cfg(ep_size=2), forced=forced, strict=strict)
         self.assertIn("Forced MoE strategy 'mega_se'", str(cm.exception))
+        self.assertIn("torch.distributed is not initialized", str(cm.exception))
 
-    def test_mega_moe_se_and_old_fused_conflict(self):
+    def test_mega_moe_se_explicit_enable_is_invalid_on_ep1(self):
+        with _env(DSV4_USE_MEGA_MOE_SE="1"):
+            forced, strict = _resolve_forced(None)
+            with self.assertRaisesRegex(RuntimeError, "requires ep_size > 1"):
+                select_strategy(_cfg(ep_size=1), forced=forced, strict=strict)
+
+    def test_default_or_explicit_mega_moe_se_and_old_fused_conflict(self):
+        for se_value in (None, "1"):
+            with self.subTest(se_value=se_value), _env(
+                DSV4_USE_MEGA_MOE_SE=se_value,
+                DSV4_USE_MEGA_MOE_FUSED="1",
+            ):
+                forced, strict = _resolve_forced(None)
+                with self.assertRaises(RuntimeError) as cm:
+                    select_strategy(_cfg(ep_size=2), forced=forced, strict=strict)
+            self.assertIn("set DSV4_USE_MEGA_MOE_SE=0", str(cm.exception))
+
+    def test_explicit_se_zero_allows_old_fused(self):
         with _env(
-            DSV4_USE_MEGA_MOE_SE="1",
+            DSV4_USE_MEGA_MOE_SE="0",
+            DSV4_USE_MEGA_MOE_FUSED="1",
+        ), mock.patch.object(
+            MegaMoEFusedStrategy, "can_handle", return_value=True
+        ):
+            self.assertIs(select_strategy(_cfg(ep_size=2)), MegaMoEFusedStrategy)
+
+    def test_family_disable_rejects_old_fused(self):
+        for ep_size in (1, 2):
+            with self.subTest(ep_size=ep_size), _env(
+                DSV4_USE_MEGA_MOE="0",
+                DSV4_USE_MEGA_MOE_SE="0",
+                DSV4_USE_MEGA_MOE_FUSED="1",
+            ):
+                with self.assertRaises(RuntimeError) as cm:
+                    select_strategy(_cfg(ep_size=ep_size))
+            self.assertIn(
+                "DSV4_USE_MEGA_MOE=0 disables the Mega MoE family",
+                str(cm.exception),
+            )
+            self.assertIn("DSV4_USE_MEGA_MOE_FUSED=1", str(cm.exception))
+
+    def test_old_fused_is_invalid_on_ep1(self):
+        with _env(
+            DSV4_USE_MEGA_MOE_SE="0",
             DSV4_USE_MEGA_MOE_FUSED="1",
         ):
-            with self.assertRaises(RuntimeError) as cm:
-                select_strategy(_cfg(ep_size=2))
-        self.assertIn("select exactly one Mega variant", str(cm.exception))
+            with self.assertRaisesRegex(RuntimeError, "requires ep_size > 1"):
+                select_strategy(_cfg(ep_size=1))
+
+    def test_grouped_fp4_is_invalid_on_ep_topology(self):
+        for se_value in (None, "0"):
+            with self.subTest(se_value=se_value), _env(
+                DSV4_USE_MEGA_MOE_SE=se_value,
+                DSV4_USE_GROUPED_FP4="1",
+            ):
+                forced, strict = _resolve_forced(None)
+                with self.assertRaisesRegex(
+                    RuntimeError, "incompatible with ep_size > 1"
+                ):
+                    select_strategy(_cfg(ep_size=2), forced=forced, strict=strict)
 
     def test_legacy_use_grouped_fp4_1_translates_to_grouped_nonstrict(self):
         with _env(DSV4_USE_GROUPED_FP4="1"):
@@ -271,11 +482,45 @@ class StrategySelectTest(unittest.TestCase):
         with _env(DSV4_USE_MEGA_MOE="0"):
             self.assertEqual(_resolve_forced(None), (None, False))
 
-    def test_legacy_negation_ep_gt1_raises(self):
-        with _env(DSV4_USE_MEGA_MOE="0"):
+    def test_legacy_negation_ep_gt1_raises_before_mega_probes(self):
+        with _env(
+            DSV4_USE_MEGA_MOE="0",
+            DSV4_USE_MEGA_MOE_SE=None,
+        ), mock.patch.object(
+            MegaMoEStrategySE, "can_handle"
+        ) as se_can_handle, mock.patch.object(
+            MegaMoEStrategy, "can_handle"
+        ) as mega_can_handle:
             with self.assertRaises(RuntimeError) as cm:
                 select_strategy(_cfg(ep_size=4))
-        self.assertIn("DSV4_USE_MEGA_MOE=0 disables Mega MoE", str(cm.exception))
+        se_can_handle.assert_not_called()
+        mega_can_handle.assert_not_called()
+        self.assertIn(
+            "DSV4_USE_MEGA_MOE=0 disables the Mega MoE family", str(cm.exception)
+        )
+
+    def test_legacy_negation_ep1_skips_all_mega_probes(self):
+        with _env(
+            DSV4_USE_MEGA_MOE="0",
+            DSV4_USE_MEGA_MOE_SE=None,
+        ), mock.patch.object(
+            MegaMoEStrategySE, "can_handle"
+        ) as se_can_handle, mock.patch.object(
+            MegaMoEFusedStrategy, "can_handle"
+        ) as fused_can_handle, mock.patch.object(
+            MegaMoEStrategy, "can_handle"
+        ) as mega_can_handle, mock.patch.object(
+            GroupedFP4Strategy, "can_handle", return_value=True
+        ):
+            self.assertIs(select_strategy(_cfg(ep_size=1)), GroupedFP4Strategy)
+        se_can_handle.assert_not_called()
+        fused_can_handle.assert_not_called()
+        mega_can_handle.assert_not_called()
+
+    def test_explicit_se_enable_conflicts_with_mega_family_disable(self):
+        with _env(DSV4_USE_MEGA_MOE="0", DSV4_USE_MEGA_MOE_SE="1"):
+            with self.assertRaisesRegex(RuntimeError, "conflicts"):
+                _resolve_forced(None)
 
     def test_legacy_force_nonstrict_falls_through_when_incapable(self):
         # Legacy DSV4_USE_MEGA_MOE=1 + ep_size=1 cfg: Mega.can_handle False
@@ -289,6 +534,50 @@ class StrategySelectTest(unittest.TestCase):
                 select_strategy(_cfg(ep_size=1), forced="mega", strict=False),
                 LocalLoopStrategy,
             )
+
+    def test_mega_se_capability_requires_distributed_initialization(self):
+        fake_deep_gemm = types.SimpleNamespace(fp8_fp4_mega_moe=object())
+        with _env(DSV4_USE_MEGA_MOE_SE=None), mock.patch.dict(
+            sys.modules, {"deep_gemm": fake_deep_gemm}
+        ), mock.patch("torch.distributed.is_initialized", return_value=False):
+            self.assertFalse(MegaMoEStrategySE.can_handle(_cfg(ep_size=2)))
+            self.assertEqual(
+                _mega_moe_se_unavailable_reason(),
+                "torch.distributed is not initialized",
+            )
+
+    def test_mega_se_capability_accepts_initialized_supported_runtime(self):
+        def fp8_fp4_mega_moe(
+            *args,
+            shared_l1_weights=None,
+            shared_l2_weights=None,
+            shared_recipe=None,
+        ):
+            pass
+
+        def get_symm_buffer_for_mega_moe(*args, num_shared_experts=None):
+            pass
+
+        fake_deep_gemm = types.SimpleNamespace(
+            fp8_fp4_mega_moe=fp8_fp4_mega_moe,
+            get_symm_buffer_for_mega_moe=get_symm_buffer_for_mega_moe,
+            get_block_m_for_mega_moe=object(),
+            transform_weights_for_mega_moe=object(),
+            transform_sf_into_required_layout=object(),
+        )
+        with _env(DSV4_USE_MEGA_MOE_SE=None), mock.patch.dict(
+            sys.modules, {"deep_gemm": fake_deep_gemm}
+        ), mock.patch(
+            "torch.distributed.is_initialized", return_value=True
+        ), mock.patch(
+            "torch.distributed.get_world_size", return_value=2
+        ), mock.patch(
+            "torch.cuda.is_available", return_value=True
+        ), mock.patch(
+            "torch.cuda.get_device_capability", return_value=(10, 0)
+        ):
+            self.assertIsNone(_mega_moe_se_unavailable_reason())
+            self.assertTrue(MegaMoEStrategySE.can_handle(_cfg(ep_size=2)))
 
 
 if __name__ == "__main__":
