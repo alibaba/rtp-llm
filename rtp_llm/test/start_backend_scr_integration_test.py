@@ -1,7 +1,8 @@
-"""Unit tests for rank-local Epsilon registration.
+"""Unit tests for rank-local Epsilon registration and barrier arrival.
 
-The RTP-LLM process does not start a checkpoint waiter or invoke the SCR
-controller.  Dump and restore are initiated by the external control plane.
+The RTP-LLM process never invokes the SCR controller. Dump and restore are
+initiated by the external control plane; a backend rank only registers state
+and announces its Epsilon barrier arrival.
 """
 
 from types import SimpleNamespace
@@ -28,7 +29,7 @@ class BackendScrIntegrationTest(unittest.TestCase):
             self.assertIsNone(backend._register_scr_resources(manager, self._config()))
         register.assert_not_called()
 
-    def test_registration_does_not_start_a_checkpoint_waiter(self):
+    def test_registration_does_not_start_checkpoint_arrival(self):
         manager = SimpleNamespace(engine=object())
         config = self._config(local_rank=2, world_rank=7)
         with mock.patch.dict(
@@ -39,8 +40,27 @@ class BackendScrIntegrationTest(unittest.TestCase):
             self.assertIs(backend._register_scr_resources(manager, config), manager.engine)
 
         register.assert_called_once_with(manager.engine, rank=7, local_rank=2)
-        self.assertFalse(hasattr(manager, "_scr_checkpoint_waiter"))
-        self.assertFalse(hasattr(backend, "_start_scr_worker_waiter"))
+        self.assertFalse(hasattr(manager, "_scr_checkpoint_arrival"))
+
+    def test_rank_arrival_uses_local_rank_and_local_world_size(self):
+        manager = SimpleNamespace(engine=object())
+        config = self._config(local_rank=2, world_rank=7)
+        thread = object()
+        with mock.patch.dict(
+            os.environ,
+            {"RTPLLM_ENABLE_SCR": "1", "LOCAL_WORLD_SIZE": "4"},
+            clear=True,
+        ), mock.patch.object(
+            backend, "start_scr_checkpoint_arrival_thread", return_value=thread
+        ) as start:
+            self.assertIs(backend._start_scr_rank_arrival(manager, config), thread)
+
+        start.assert_called_once_with(
+            worker_id=2,
+            worker_num=4,
+            name="scr-checkpoint-arrival-rank-2",
+        )
+        self.assertIs(manager._scr_checkpoint_arrival, thread)
 
     def test_registration_failure_remains_fail_open(self):
         manager = SimpleNamespace(engine=object())

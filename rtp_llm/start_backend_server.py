@@ -39,6 +39,7 @@ from rtp_llm.utils.scr_template_utils import (
     configure_scr_environment,
     is_scr_enabled,
     register_for_scr,
+    start_scr_checkpoint_arrival_thread,
 )
 from rtp_llm.utils.util import copy_gemm_config
 
@@ -165,6 +166,53 @@ def _register_scr_resources(backend_manager, py_env_configs):
         # SCR is optional and must never turn a normal model startup failure
         # into a process-wide outage.
         logging.exception("failed to initialize sCR worker integration")
+        return None
+
+
+def _scr_worker_num(py_env_configs: PyEnvConfigs) -> int:
+    """Return the Epsilon quorum size for this backend process's pod.
+
+    Epsilon's wait-mode barrier is rank-local. ``LOCAL_WORLD_SIZE`` is the
+    launcher-authoritative value; the parsed parallelism field is the fallback
+    for direct/single-rank starts. It is intentionally not ``WORLD_SIZE`` so a
+    controller sidecar on each pod does not wait for ranks in another pod.
+    """
+
+    raw = os.environ.get("LOCAL_WORLD_SIZE", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value > 0:
+        return value
+
+    value = int(getattr(py_env_configs.parallelism_config, "local_world_size", 0) or 0)
+    return value if value > 0 else 1
+
+
+def _start_scr_rank_arrival(backend_manager, py_env_configs):
+    """Start this CUDA rank's passive Epsilon snapshot-barrier arrival."""
+
+    if not is_scr_enabled() or backend_manager is None:
+        return None
+    try:
+        pc = py_env_configs.parallelism_config
+        worker_id = int(getattr(pc, "local_rank", 0))
+        worker_num = _scr_worker_num(py_env_configs)
+        thread = start_scr_checkpoint_arrival_thread(
+            worker_id=worker_id,
+            worker_num=worker_num,
+            name=f"scr-checkpoint-arrival-rank-{worker_id}",
+        )
+        if thread is not None:
+            # Keep a reference for diagnostics and make the lifecycle explicit;
+            # the daemon itself is deliberately not joined on shutdown.
+            setattr(backend_manager, "_scr_checkpoint_arrival", thread)
+        return thread
+    except Exception:
+        # The optional barrier must not turn a healthy model startup into an
+        # outage. The external controller can still use its fallback path.
+        logging.exception("failed to start sCR snapshot-barrier arrival")
         return None
 
 
@@ -321,6 +369,10 @@ def local_rank_start(
             "success",
             f"Backend server started successfully on rank {py_env_configs.parallelism_config.local_rank}",
         )
+        # Each CUDA rank announces its safe point independently. The daemon
+        # thread may block in Epsilon until the sidecar/controller progresses,
+        # while the rank remains available to serve traffic.
+        _start_scr_rank_arrival(backend_manager, py_env_configs)
         # Enter service loop to keep the process alive
         logging.info("Entering service loop to keep backend_manager alive")
         backend_manager.serve_forever()

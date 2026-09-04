@@ -1,9 +1,10 @@
 """Small, fail-open helpers for integrating RTP-LLM with Epsilon/sCR.
 
 The Epsilon API is deliberately kept at the rank boundary. A rank registers
-the CUDA-backed KV-cache tensors and leaves the complete dump/restore
-lifecycle to the external control plane. This module never enters a
-checkpoint barrier and never invokes ``scr_controller``.
+the CUDA-backed KV-cache tensors and, when enabled, arrives at Epsilon's
+process-side snapshot barrier. The complete dump/restore lifecycle remains
+owned by the external control plane; this module never invokes
+``scr_controller`` or performs a dump/restore operation itself.
 
 The helpers are inert unless ``RTPLLM_ENABLE_SCR`` (the historical spelling
 ``RTP_LLM_ENABLE_SCR`` is accepted as an alias) is enabled.  This is the
@@ -417,6 +418,96 @@ def register_for_scr(
     return ok
 
 
+def arrive_scr_checkpoint_barrier(
+    *, worker_id: int, worker_num: int
+) -> int | None:
+    """Arrive at Epsilon's rank-local snapshot barrier.
+
+    This is the one active-looking call that remains in RTP-LLM. It is not a
+    controller operation: ``scr_controller`` still initiates ``check`` /
+    ``block`` / ``dump`` / ``restore`` from the control plane. The native
+    Epsilon call lets each CUDA rank announce that its registered state is at
+    a safe point and then wait for the controller-driven snapshot lifecycle.
+
+    Every participating rank must call this once per snapshot generation with
+    a unique ``worker_id`` in ``[0, worker_num)`` and the same ``worker_num``.
+    Calls from different processes are expected to happen concurrently.
+    """
+
+    if not is_scr_enabled():
+        return None
+
+    try:
+        worker_id = int(worker_id)
+        worker_num = int(worker_num)
+    except (TypeError, ValueError):
+        LOGGER.error(
+            "invalid sCR worker mapping (worker_id=%r worker_num=%r)",
+            worker_id,
+            worker_num,
+        )
+        return None
+    if worker_num <= 0 or not 0 <= worker_id < worker_num:
+        LOGGER.error(
+            "invalid sCR worker mapping (worker_id=%d worker_num=%d)",
+            worker_id,
+            worker_num,
+        )
+        return None
+
+    epsilon = _load_epsilon()
+    if epsilon is None or not _epsilon_is_active(epsilon):
+        return None
+    checkpoint = getattr(epsilon, "snapstart_checkpoint", None)
+    if checkpoint is None:
+        LOGGER.warning("sCR active but Epsilon snapshot barrier is unavailable")
+        return None
+
+    try:
+        return _call_result(
+            checkpoint,
+            wait_mode=1,
+            worker_id=worker_id,
+            worker_num=worker_num,
+        )
+    except Exception:
+        # The barrier is optional. A timeout or an unavailable sidecar must
+        # not take down a serving rank; the control plane can use a fallback.
+        LOGGER.exception(
+            "sCR snapshot barrier arrival failed (worker_id=%d worker_num=%d)",
+            worker_id,
+            worker_num,
+        )
+        return None
+
+
+def start_scr_checkpoint_arrival_thread(
+    *, worker_id: int, worker_num: int, name: str = "scr-checkpoint-arrival"
+) -> threading.Thread | None:
+    """Start one daemon thread for this rank's Epsilon barrier arrival.
+
+    The thread is intentionally rank-local and unjoined. A blocking native
+    wait therefore cannot delay the rank's startup/serving loop, while the
+    external controller remains responsible for the snapshot action.
+    """
+
+    if not is_scr_enabled():
+        return None
+
+    def _arrive() -> None:
+        try:
+            arrive_scr_checkpoint_barrier(
+                worker_id=worker_id,
+                worker_num=worker_num,
+            )
+        except BaseException:
+            LOGGER.exception("sCR snapshot barrier arrival thread failed")
+
+    thread = threading.Thread(target=_arrive, name=name, daemon=True)
+    thread.start()
+    return thread
+
+
 def _reset_for_test() -> None:
     """Clear process-local registration state for unit tests."""
 
@@ -434,8 +525,10 @@ __all__ = [
     "SCR_PHASE_RESTORE",
     "SCR_SHIM_ENABLE_ENV",
     "ScrRegistration",
+    "arrive_scr_checkpoint_barrier",
     "epsilon_backend_mode",
     "configure_scr_environment",
     "is_scr_enabled",
     "register_for_scr",
+    "start_scr_checkpoint_arrival_thread",
 ]

@@ -46,6 +46,10 @@ class _FakeEpsilon:
         self.calls.append(("after", callback))
         return 0
 
+    def snapstart_checkpoint(self, **kwargs):
+        self.calls.append(("checkpoint", kwargs))
+        return 0
+
 
 class ScrTemplateUtilsTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -74,10 +78,41 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             self.assertEqual(os.environ[scr.SCR_SHIM_ENABLE_ENV], "1")
             self.assertEqual(os.environ[scr.SCR_PHASE_ENV], scr.SCR_PHASE_RESTORE)
 
-    def test_checkpoint_control_is_not_exposed_by_rtp_llm(self) -> None:
+    def test_control_plane_operations_are_not_exposed_by_rtp_llm(self) -> None:
         self.assertFalse(hasattr(scr, "start_scr_checkpoint"))
         self.assertFalse(hasattr(scr, "start_scr_checkpoint_thread"))
         self.assertFalse(hasattr(scr, "ScrParticipantManifest"))
+        self.assertTrue(hasattr(scr, "arrive_scr_checkpoint_barrier"))
+        self.assertTrue(hasattr(scr, "start_scr_checkpoint_arrival_thread"))
+
+    def test_rank_arrives_at_epsilon_barrier_with_explicit_mapping(self) -> None:
+        epsilon = _FakeEpsilon()
+        with mock.patch.dict(
+            os.environ, {scr.SCR_ENABLE_ENV: "1"}, clear=True
+        ), mock.patch.object(
+            scr.importlib, "import_module", return_value=epsilon
+        ):
+            self.assertEqual(
+                scr.arrive_scr_checkpoint_barrier(worker_id=1, worker_num=2),
+                0,
+            )
+
+        self.assertEqual(
+            epsilon.calls,
+            [("checkpoint", {"wait_mode": 1, "worker_id": 1, "worker_num": 2})],
+        )
+
+    def test_rank_barrier_rejects_out_of_range_mapping(self) -> None:
+        epsilon = _FakeEpsilon()
+        with mock.patch.dict(
+            os.environ, {scr.SCR_ENABLE_ENV: "1"}, clear=True
+        ), mock.patch.object(
+            scr.importlib, "import_module", return_value=epsilon
+        ):
+            self.assertIsNone(
+                scr.arrive_scr_checkpoint_barrier(worker_id=2, worker_num=2)
+            )
+        self.assertEqual(epsilon.calls, [])
 
     def test_backend_mode_keeps_app_gate_and_shim_gate_separate(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
