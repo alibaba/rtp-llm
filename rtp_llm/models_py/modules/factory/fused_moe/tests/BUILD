@@ -16,3 +16,12 @@ py_test(
     tags = ["open_skip"],
     exec_properties = {'gpu':'H20'},
 )
+
+py_test(
+    name = "test_batched_data_router_ep",
+    srcs = ["test_batched_data_router_ep.py"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'H20'},
+)
