@@ -148,6 +148,66 @@ class ShortestTTFTStrategyTest {
     }
 
     @Test
+    void cacheAffinityCanSelectOutsideBaselinePoolWithinTtftCap() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setShortestTtftCandidatePoolMode("FIXED");
+        config.setShortestTtftCandidatePoolSize(1);
+        config.setCacheAffinityEnabled(true);
+        config.setCacheAffinityMaxExtraTtftMs(150L);
+        config.setCacheAffinityMinHitRate(5.0);
+
+        Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 650));
+        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any()))
+                .thenReturn(Map.of("10.0.0.2:8080", 3));
+
+        ServerStatus result = strategy.select(
+                buildContext(1000, 11L, config), RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.2", result.getServerIp());
+        Mockito.verify(engineHealthReporter).reportCacheAffinityDecision(
+                RoleType.PREFILL, "10.0.0.2", "CACHE_LEADER");
+    }
+
+    @Test
+    void cacheAffinityDisabledKeepsCandidatePoolSelection() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setShortestTtftCandidatePoolMode("FIXED");
+        config.setShortestTtftCandidatePoolSize(1);
+        config.setCacheAffinityEnabled(false);
+        config.setCacheAffinityMaxExtraTtftMs(10_000L);
+
+        Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 650));
+        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any()))
+                .thenReturn(Map.of("10.0.0.2:8080", 3));
+
+        ServerStatus result = strategy.select(
+                buildContext(1000, 12L, config), RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.1", result.getServerIp());
+        Mockito.verify(engineHealthReporter, Mockito.never())
+                .reportCacheAffinityDecision(any(), any(), any());
+    }
+
+    @Test
+    void reportsSelectedEstimatesForBatchDelivery() {
+        Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+
+        ServerStatus result = strategy.select(
+                buildContext(1000, 13L), RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        Mockito.verify(engineHealthReporter).reportPrefillSelectedEstimates(
+                RoleType.PREFILL, "10.0.0.1", "BATCH", 1300L, 1000L);
+    }
+
+    @Test
     void rollBackReleasesInflight() {
         PrefillEndpoint mockEp = Mockito.mock(PrefillEndpoint.class);
         long requestId = 42L;

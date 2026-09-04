@@ -279,6 +279,35 @@ class ConfigServiceTest {
     }
 
     @Test
+    void cache_affinity_is_disabled_by_default_and_supports_env_overrides() {
+        FlexlbConfig defaults = new ConfigService(Map.of()).loadBalanceConfig();
+        assertFalse(defaults.isCacheAffinityEnabled());
+        assertEquals(0L, defaults.getCacheAffinityMaxExtraTtftMs());
+        assertEquals(5.0, defaults.getCacheAffinityMinHitRate());
+
+        FlexlbConfig configured = new ConfigService(Map.of(
+                "CACHE_AFFINITY_ENABLED", "true",
+                "CACHE_AFFINITY_MAX_EXTRA_TTFT_MS", "250",
+                "CACHE_AFFINITY_MIN_HIT_RATE", "12.5")).loadBalanceConfig();
+        assertTrue(configured.isCacheAffinityEnabled());
+        assertEquals(250L, configured.getCacheAffinityMaxExtraTtftMs());
+        assertEquals(12.5, configured.getCacheAffinityMinHitRate());
+    }
+
+    @Test
+    void invalid_cache_affinity_bounds_abort_startup() {
+        assertThrows(ConfigValidationException.class,
+                () -> new ConfigService(Map.of(
+                        "CACHE_AFFINITY_MAX_EXTRA_TTFT_MS", "-1")));
+        assertThrows(ConfigValidationException.class,
+                () -> new ConfigService(Map.of(
+                        "CACHE_AFFINITY_MIN_HIT_RATE", "101")));
+        assertThrows(ConfigValidationException.class,
+                () -> new ConfigService(Map.of(
+                        "CACHE_AFFINITY_MIN_HIT_RATE", "NaN")));
+    }
+
+    @Test
     void blank_slo_specs_pass_startup_validation() {
         // Blank means "use built-in default" and must not abort.
         ConfigService configService = new ConfigService(Map.of(

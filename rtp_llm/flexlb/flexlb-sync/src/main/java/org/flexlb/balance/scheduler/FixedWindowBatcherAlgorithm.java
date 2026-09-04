@@ -18,9 +18,6 @@ import java.util.concurrent.TimeUnit;
  *       {@code flexlbBatchEnqueueDeadlineMs}, drop it as expired. This runs
  *       before backpressure to ensure stale requests are cleared even when
  *       the engine is under sustained backpressure.</li>
- *   <li>Oversized request rejection: if the head request's seqLen exceeds
- *       {@code flexlbBatchMaxCapacity}, it can never be picked by any batch,
- *       so it is dropped immediately instead of waiting for the deadline.</li>
  *   <li>Engine backpressure: if inflight batches ≥ max, park briefly.</li>
  *   <li>Batch full: if queue size ≥ {@code flexlbBatchSizeMax}, dispatch
  *       immediately without waiting for the window to expire.</li>
@@ -39,11 +36,9 @@ import java.util.concurrent.TimeUnit;
  * would exceed the latest worker-reported KV budget, remain in the queue for
  * a later batch.
  * <p>
- * However, a request whose own seqLen already exceeds
- * {@code flexlbBatchMaxCapacity} can never be picked by any batch. Such
- * oversized requests are rejected immediately when they reach the head of
- * the queue (see step 0.5 below), rather than waiting for the queue
- * deadline to expire.
+ * The head request is always eligible to run by itself. Batch token capacity
+ * limits only the addition of further members; standalone validity remains
+ * governed by the Engine's max-sequence-length and KV checks.
  *
  * <h3>Key differences from {@link SloBudgetBatcherAlgorithm}</h3>
  * <ul>
@@ -131,14 +126,6 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         long predictThresholdMs = ctx.cfg().getFlexlbBatchPredictThresholdMs();
         long batchMaxTokens = ctx.batchTokenCapacity();
 
-        // The Engine admits a group only when padded context tokens are strictly
-        // below max_batch_tokens_size. Reject an impossible head explicitly so
-        // it cannot block the FIFO queue or cause an entire group to fast-fail.
-        if (!BatchShape.empty().add(head).fitsCompute(batchMaxTokens)) {
-            ctx.rejectForBatchTokenCapacity(head, batchMaxTokens);
-            return;
-        }
-
         // 0. Queue deadline: drop the head request if it has waited longer
         //     than the enqueue deadline. This runs BEFORE backpressure to
         //     ensure stale requests are cleared even when the engine is
@@ -214,17 +201,20 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
                                                        int maxCount,
                                                        long batchMaxTokens,
                                                        long batchKvTokens) {
+        List<BatchItem> items = ctx.sortedItems();
+        if (items.isEmpty() || maxCount <= 0) {
+            return List.of();
+        }
+
         List<BatchItem> picked = new ArrayList<>();
-        BatchShape shape = BatchShape.empty();
-        for (BatchItem item : ctx.sortedItems()) {
-            if (picked.size() >= maxCount) {
-                break;
-            }
+        BatchItem head = items.get(0);
+        picked.add(head);
+        BatchShape shape = BatchShape.empty().add(head);
+
+        for (int index = 1; index < items.size() && picked.size() < maxCount; index++) {
+            BatchItem item = items.get(index);
             BatchShape candidate = shape.add(item);
-            if (!candidate.fitsCompute(batchMaxTokens)) {
-                break;
-            }
-            if (!picked.isEmpty() && !candidate.fitsKv(batchKvTokens)) {
+            if (!candidate.fitsCompute(batchMaxTokens) || !candidate.fitsKv(batchKvTokens)) {
                 break;
             }
             picked.add(item);

@@ -19,6 +19,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.PriorityPreemptionProgress;
+import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -480,6 +481,170 @@ class FlexlbBatchSchedulerTest {
         Response response = item.future().get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), response.getCode());
+    }
+
+    @Test
+    void inflightTtlUsesLastWorkerObservationBeforeDispatch() {
+        config.setFlexlbInflightTtlMs(1_000L);
+        BatchItem item = offerFailureItem(63);
+        assertTrue(scheduler.registerInflight(item));
+
+        long observedAtMs = System.currentTimeMillis() + 10_000L;
+        TaskInfo running = new TaskInfo();
+        running.setRequestId(item.requestId());
+        running.setPhase(TaskPhase.RUNNING);
+        WorkerStatusResponse heartbeat = new WorkerStatusResponse();
+        heartbeat.setRole(RoleType.PREFILL);
+        heartbeat.setRunningTaskInfo(Map.of(Long.toString(item.requestId()), running));
+
+        scheduler.onWorkerStatusHeartbeat(heartbeat, observedAtMs);
+        scheduler.cleanupInflight(observedAtMs + 999L);
+        assertEquals(1, scheduler.getInflightSize(),
+                "a recently observed request must remain inflight regardless of total age");
+
+        scheduler.cleanupInflight(observedAtMs + 1_001L);
+        assertEquals(0, scheduler.getInflightSize());
+        assertTrue(item.future().isDone());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
+                item.future().getNow(null).getCode());
+        verify(cancelChannel, never()).cancel(any(), eq(item.requestId()), anyLong());
+    }
+
+    @Test
+    void inflightTtlBetweenDispatchClaimAndCommitPreventsLateCommitAndSend()
+            throws Exception {
+        long requestId = 64L;
+        long ttlMs = 1_000L;
+        config.setFlexlbInflightTtlMs(ttlMs);
+
+        CompletableFuture<EngineCancelChannel.CancelOutcome> cancelResult =
+                new CompletableFuture<>();
+        when(cancelChannel.cancel(any(), eq(requestId), anyLong())).thenReturn(cancelResult);
+
+        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
+        PrefillEndpoint blockingEndpoint = org.mockito.Mockito.spy(endpoint);
+        PrefillTimePredictor predictor = endpoint.getPredictor();
+        CountDownLatch dispatchClaimed = new CountDownLatch(1);
+        CountDownLatch allowCommit = new CountDownLatch(1);
+        when(blockingEndpoint.getPredictor()).thenAnswer(inv -> {
+            dispatchClaimed.countDown();
+            assertTrue(allowCommit.await(5, TimeUnit.SECONDS));
+            return predictor;
+        });
+
+        DecodeEndpoint decode = ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
+        decode.reserve(requestId, 128, 136, 50, 0);
+        decode.markQueuedPhase(requestId);
+        Response route = successRouteWithDecode(requestId, "10.0.0.2");
+        BatchItem item = new BatchItem(context(requestId), new CompletableFuture<>(), route,
+                FlexlbBatchScheduler.findServer(route, RoleType.PREFILL),
+                FlexlbBatchScheduler.findServer(route, RoleType.DECODE),
+                blockingEndpoint, decode, System.currentTimeMillis());
+        assertTrue(scheduler.registerInflight(item));
+
+        CompletableFuture<Void> flush = CompletableFuture.runAsync(() ->
+                scheduler.onBatchReady(List.of(item), new DispatchMeta("ttl_precommit_race", 0)));
+        assertTrue(dispatchClaimed.await(2, TimeUnit.SECONDS));
+        long batchId = scheduler.getRequestState(requestId, 0).batchId();
+        long cleanupAtMs = scheduler.getRequestState(requestId, batchId).createdAtMs()
+                + ttlMs + 1L;
+
+        scheduler.cleanupInflight(cleanupAtMs);
+        verify(cancelChannel).cancel(any(), eq(requestId), anyLong());
+        assertEquals(1, scheduler.getInflightSize());
+        assertEquals(0, endpoint.getInflightBatchCount(),
+                "reconciliation before commit cannot install an endpoint ledger fence yet");
+        assertTrue(decode.reservedView().containsKey(requestId));
+        assertFalse(item.future().isDone());
+
+        allowCommit.countDown();
+        flush.get(2, TimeUnit.SECONDS);
+        assertTrue(sentBatches.isEmpty(),
+                "a reconciliation owner must make the final commit/send validation fail");
+        assertEquals(0, endpoint.getInflightBatchCount());
+
+        cancelResult.complete(EngineCancelChannel.CancelOutcome.tombstoned());
+        awaitCondition(() -> scheduler.getInflightSize() == 0);
+        assertFalse(decode.reservedView().containsKey(requestId));
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
+                item.future().getNow(null).getCode());
+    }
+
+    @Test
+    void inflightTtlRacingRemoteSendRetainsLedgersUntilCancellationIsConfirmed()
+            throws Exception {
+        long requestId = 65L;
+        long ttlMs = 1_000L;
+        config.setFlexlbInflightTtlMs(ttlMs);
+        config.setFlexlbBatchSizeMax(1);
+
+        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> enqueueResult =
+                new CompletableFuture<>();
+        CompletableFuture<EngineCancelChannel.CancelOutcome> cancelResult =
+                new CompletableFuture<>();
+        CountDownLatch sendEntered = new CountDownLatch(1);
+        CountDownLatch releaseSend = new CountDownLatch(1);
+        when(cancelChannel.cancel(any(), eq(requestId), anyLong())).thenReturn(cancelResult);
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(inv -> {
+                    EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
+                    sentBatches.add(request);
+                    sendEntered.countDown();
+                    assertTrue(releaseSend.await(5, TimeUnit.SECONDS));
+                    return enqueueResult;
+                });
+
+        PrefillEndpoint prefill = endpointRegistry.getPrefill("10.0.0.1:8080");
+        DecodeEndpoint decode = ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
+        decode.reserve(requestId, 128, 136, 50, 0);
+        decode.markQueuedPhase(requestId);
+        Response route = successRouteWithDecode(requestId, "10.0.0.2");
+        BatchItem item = new BatchItem(context(requestId), new CompletableFuture<>(), route,
+                FlexlbBatchScheduler.findServer(route, RoleType.PREFILL),
+                FlexlbBatchScheduler.findServer(route, RoleType.DECODE),
+                prefill, decode, System.currentTimeMillis());
+        assertTrue(scheduler.registerInflight(item));
+
+        scheduler.onBatchReady(List.of(item), new DispatchMeta("ttl_send_race", 0));
+        assertTrue(sendEntered.await(2, TimeUnit.SECONDS));
+        long batchId = sentBatches.getFirst().getBatchId();
+        long cleanupAtMs = scheduler.getRequestState(requestId, batchId).createdAtMs()
+                + ttlMs + 1L;
+
+        CompletableFuture<Void> cleanup = CompletableFuture.runAsync(
+                () -> scheduler.cleanupInflight(cleanupAtMs));
+        cleanup.get(2, TimeUnit.SECONDS);
+
+        verify(cancelChannel, org.mockito.Mockito.timeout(1_000))
+                .cancel(any(), eq(requestId), anyLong());
+        assertEquals(1, scheduler.getInflightSize(),
+                "TTL must retain scheduler ownership while Engine cancellation is unresolved");
+        assertEquals(1, prefill.getInflightBatchCount());
+        assertTrue(decode.reservedView().containsKey(requestId));
+        assertFalse(item.future().isDone());
+
+        TaskInfo running = new TaskInfo();
+        running.setRequestId(requestId);
+        running.setPhase(TaskPhase.RUNNING);
+        WorkerStatusResponse heartbeat = new WorkerStatusResponse();
+        heartbeat.setRole(RoleType.DECODE);
+        heartbeat.setRunningTaskInfo(Map.of(Long.toString(requestId), running));
+        scheduler.onWorkerStatusHeartbeat(heartbeat, cleanupAtMs + 1L);
+        assertEquals(1, scheduler.getInflightSize(),
+                "observed remote ownership cannot clear a TTL cancellation fence");
+
+        releaseSend.countDown();
+        cancelResult.complete(EngineCancelChannel.CancelOutcome.tombstoned());
+        awaitCondition(() -> scheduler.getInflightSize() == 0);
+
+        assertEquals(0, prefill.getInflightBatchCount());
+        assertFalse(decode.reservedView().containsKey(requestId));
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
+                item.future().getNow(null).getCode());
+
+        enqueueResult.complete(ackFor(sentBatches.getFirst()));
+        assertEquals(RequestLifecycleState.TIMED_OUT,
+                scheduler.getRequestState(requestId, batchId).state());
     }
 
     private BatchItem offerFailureItem(long requestId) {

@@ -221,6 +221,19 @@ public class GrpcWorkerStatusRunner implements Runnable {
                         ep = null;
                     }
                 }
+                // running_task_info is a full snapshot even when the status
+                // version is unchanged. Preserve it as liveness evidence in
+                // both endpoint and scheduler ledgers without replaying the
+                // versioned finished-task delta. An older response is stale and
+                // must not extend task ownership.
+                if (currentVersion == responseVersion) {
+                    if (ep != null) {
+                        ep.onWorkerStatusHeartbeat(newWorkerStatus);
+                    }
+                    if (batchScheduler != null) {
+                        batchScheduler.onWorkerStatusHeartbeat(newWorkerStatus);
+                    }
+                }
             }
 
             engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus, ep,

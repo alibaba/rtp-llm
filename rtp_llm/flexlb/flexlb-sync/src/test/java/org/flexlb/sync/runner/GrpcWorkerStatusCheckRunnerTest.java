@@ -3,9 +3,14 @@ package org.flexlb.sync.runner;
 import io.grpc.Status;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.scheduler.BatchItem;
+import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -16,6 +21,7 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -29,6 +35,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -137,6 +144,114 @@ class GrpcWorkerStatusCheckRunnerTest {
     }
 
     @Test
+    void should_forward_same_version_running_snapshot_as_heartbeat_only() {
+        String ipPort = "127.0.0.1:8080";
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setIp("127.0.0.1");
+        workerStatus.setPort(8080);
+        workerStatus.getStatusVersion().set(100L);
+        FlexlbBatchScheduler batchScheduler = Mockito.mock(FlexlbBatchScheduler.class);
+
+        EngineRpcService.TaskInfoPB taskInfo = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId(123L)
+                .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
+                .build();
+        EngineRpcService.WorkerStatusPB response = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(RoleType.PREFILL.getCode())
+                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
+                .setStatusVersion(100L)
+                .setAlive(true)
+                .addRunningTaskInfo(taskInfo)
+                .build();
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                .thenReturn(CompletableFuture.completedFuture(response));
+
+        new GrpcWorkerStatusRunner(
+                "test-model", ipPort, "test-site", RoleType.PREFILL, "test-group",
+                workerStatus, Map.of(ipPort, workerStatus), engineHealthReporter,
+                engineGrpcService, 20L, batchScheduler, null, Runnable::run).run();
+
+        verify(batchScheduler).onWorkerStatusHeartbeat(any());
+        verify(batchScheduler, never()).onWorkerStatusUpdate(any());
+        assertNull(workerStatus.getRunningTaskList(),
+                "heartbeat-only forwarding must not replace the versioned task list");
+    }
+
+    @Test
+    void sameVersionHeartbeatRefreshesPrefillLedgerForScheduledEvictionWithoutReplayingFinishedDelta()
+            throws Exception {
+        String ipPort = "127.0.0.1:8080";
+        long ttlMs = 100L;
+        FlexlbConfig config = new FlexlbConfig();
+        config.setFlexlbInflightTtlMs(ttlMs);
+        ConfigService configService = Mockito.mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(config);
+        EndpointRegistry registry = new EndpointRegistry(
+                configService, () -> null, Mockito.mock(BatchSchedulerReporter.class));
+        FlexlbBatchScheduler batchScheduler = Mockito.mock(FlexlbBatchScheduler.class);
+
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setRole(RoleType.PREFILL);
+        workerStatus.setIp("127.0.0.1");
+        workerStatus.setPort(8080);
+        workerStatus.setGrpcPort(8081);
+        workerStatus.setAlive(true);
+        workerStatus.getStatusVersion().set(100L);
+        PrefillEndpoint endpoint = (PrefillEndpoint) registry.ensureEndpoint(
+                RoleType.PREFILL, ipPort, workerStatus);
+        endpoint.commitBatch(700L, 1_000L,
+                List.of(batchItem(123L), batchItem(124L)));
+
+        EngineRpcService.TaskInfoPB running = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId(123L)
+                .setBatchId(700L)
+                .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
+                .build();
+        EngineRpcService.TaskInfoPB staleFinishedDelta = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId(124L)
+                .setBatchId(700L)
+                .build();
+        EngineRpcService.WorkerStatusPB response = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(RoleType.PREFILL.getCode())
+                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
+                .setStatusVersion(100L)
+                .setLatestFinishedVersion(10L)
+                .setAlive(true)
+                .addRunningTaskInfo(running)
+                .addFinishedTaskList(staleFinishedDelta)
+                .build();
+        when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                .thenReturn(CompletableFuture.completedFuture(response));
+
+        try {
+            Thread.sleep(ttlMs + 50L);
+            new GrpcWorkerStatusRunner(
+                    "test-model", ipPort, "test-site", RoleType.PREFILL, "test-group",
+                    workerStatus, Map.of(ipPort, workerStatus), engineHealthReporter,
+                    engineGrpcService, 20L, batchScheduler, registry, Runnable::run).run();
+
+            registry.scheduledEviction();
+            assertEquals(1, endpoint.getInflightBatchCount(),
+                    "the same-version running snapshot must refresh endpoint batch activity");
+            assertEquals(2, endpoint.realPendingCount(),
+                    "the same-version finished delta must not be replayed into endpoint calibration");
+            assertEquals(-1L, workerStatus.getLatestFinishedTaskVersion().get(),
+                    "heartbeat-only handling must not consume the finished-task version");
+            verify(batchScheduler).onWorkerStatusHeartbeat(any());
+            verify(batchScheduler, never()).onWorkerStatusUpdate(any());
+
+            Thread.sleep(ttlMs + 50L);
+            registry.scheduledEviction();
+            assertEquals(0, endpoint.getInflightBatchCount(),
+                    "the batch remains eligible for scheduled eviction after heartbeat activity stops");
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
     void should_ignore_status_callback_from_expired_generation() {
         String ipPort = "127.0.0.1:8080";
         WorkerStatus expired = status(8080);
@@ -227,6 +342,16 @@ class GrpcWorkerStatusCheckRunnerTest {
         assertTrue(status.isAlive());
         assertSame(status, registry.get(RoleType.VIT, ipPort).getStatus());
         registry.close();
+    }
+
+    private static BatchItem batchItem(long requestId) {
+        Request request = new Request();
+        request.setRequestId(requestId);
+        request.setSeqLen(128L);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        return new BatchItem(context, null, null, null, null, null, null,
+                System.currentTimeMillis());
     }
 
     private static EndpointRegistry registry() {

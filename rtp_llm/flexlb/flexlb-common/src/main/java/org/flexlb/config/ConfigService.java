@@ -49,10 +49,14 @@ public class ConfigService {
             "autoTpmEnabled",
             "flexlbBatchQueueMaxSize",
             "autoTpmSloLengthBuckets",
-            "autoTpmPrioritySloMultipliers");
+            "autoTpmPrioritySloMultipliers",
+            "cacheAffinityEnabled",
+            "cacheAffinityMaxExtraTtftMs",
+            "cacheAffinityMinHitRate");
 
     /** Env prefixes owned by FlexLB config; scanned for unmatched names (F3/P0-3). */
-    private static final List<String> SCANNED_ENV_PREFIXES = List.of("FLEXLB_", "AUTO_TPM_", "COST_", "WORKER_");
+    private static final List<String> SCANNED_ENV_PREFIXES = List.of(
+            "FLEXLB_", "AUTO_TPM_", "COST_", "WORKER_", "CACHE_AFFINITY_");
 
     /** Deprecated env vars that already have dedicated warnings; excluded from the unmatched scan. */
     private static final Set<String> DEPRECATED_ENV_VARS = Set.of("FLEXLB_BATCH_ENABLED", "ENABLE_QUEUEING");
@@ -97,6 +101,7 @@ public class ConfigService {
         // throws IllegalArgumentException for invalid schedule mode values.
         config.getDefaultScheduleModeEnum();
         validateSloPolicySpecs(config);
+        validateCacheAffinityConfig(config);
 
         dumpEffectiveConfig(config);
         this.flexlbConfig = config;
@@ -307,6 +312,12 @@ public class ConfigService {
         log.info("===== FlexLB Effective Configuration =====");
         log.info("scheduleMode={}, batchAlgorithm={}",
             config.getDefaultScheduleMode(), config.getFlexlbBatchAlgorithm());
+        log.info("loadBalanceStrategy={}, cacheAffinityEnabled={}, "
+                        + "cacheAffinityMaxExtraTtftMs={}, cacheAffinityMinHitRate={}",
+            config.getLoadBalanceStrategy(),
+            config.isCacheAffinityEnabled(),
+            config.getCacheAffinityMaxExtraTtftMs(),
+            config.getCacheAffinityMinHitRate());
         log.info("batchMaxCapacity={}, batchMaxInflight={}",
             config.getFlexlbBatchMaxCapacity(), config.getFlexlbBatchMaxInflight());
         log.info("fixedMaxInflightBatches={}, sloMaxInflightBatches={}",
@@ -364,6 +375,18 @@ public class ConfigService {
             throw new ConfigValidationException("autoTpmPrioritySloMultipliers",
                     "Invalid priority SLO multiplier fragment '" + invalidMultiplier + "' in '" + multiplierSpec
                             + "'. Expected format like '30:2.0,40:1.5,50:1.0'");
+        }
+    }
+
+    private static void validateCacheAffinityConfig(FlexlbConfig config) {
+        if (config.getCacheAffinityMaxExtraTtftMs() < 0L) {
+            throw new ConfigValidationException(
+                    "cacheAffinityMaxExtraTtftMs", "must be greater than or equal to 0");
+        }
+        double minHitRate = config.getCacheAffinityMinHitRate();
+        if (!Double.isFinite(minHitRate) || minHitRate < 0.0 || minHitRate > 100.0) {
+            throw new ConfigValidationException(
+                    "cacheAffinityMinHitRate", "must be a finite percentage in [0, 100]");
         }
     }
 

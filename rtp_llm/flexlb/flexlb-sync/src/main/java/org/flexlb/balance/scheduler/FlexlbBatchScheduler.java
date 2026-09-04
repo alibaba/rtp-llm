@@ -708,19 +708,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         boolean isPrefill = response.getRole() == RoleType.PREFILL;
         boolean isDecode = response.getRole() == RoleType.DECODE;
 
-        // Decode KV_ALLOCATED/RUNNING is the authoritative acceptance signal
-        // for the post-success lease.  Close the lease immediately instead of
-        // retaining one active slot until its 30s fallback timer.  RECEIVED is
-        // deliberately excluded: the engine has seen the request but has not
-        // yet accepted Decode ownership/KV.
-        if (isDecode && response.getRunningTaskInfo() != null) {
-            for (TaskInfo task : response.getRunningTaskInfo().values()) {
-                TaskPhase phase = task.getPhase();
-                if (phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING) {
-                    markDecodeAccepted(task.getRequestId());
-                }
-            }
-        }
+        observeWorkerStatusActivity(response, System.currentTimeMillis());
 
         // NOT_FOUND_STALE is reopened only by a fresh active observation from
         // the original Prefill control owner.
@@ -758,8 +746,10 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                         // has been settled. Ordinary Prefill success/error may
                         // belong to normal execution (or stale status) and must
                         // not roll back the Master ledgers underneath it.
-                        reduceOrdinaryTerminalLocked(entry, DeferredTerminal.timeout(
-                                "EnqueueBatch reconciled by typed Prefill CANCELED"));
+                        reduceOrdinaryTerminalLocked(entry, DeferredTerminal.fencedTimeout(
+                                entry.ttlCleanupReconciliation
+                                        ? "inflight inactive TTL cancellation confirmed"
+                                        : "EnqueueBatch reconciled by typed Prefill CANCELED"));
                     } else {
                         Logger.debug("Ignoring non-authoritative Prefill terminal during "
                                         + "dispatch reconciliation: request_id={} "
@@ -805,6 +795,56 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         }
     }
 
+    /**
+     * Refresh active-request observations from a successful heartbeat whose
+     * status version did not advance. Finished-task reduction remains versioned,
+     * while the full running-task snapshot still prevents live requests from
+     * being mistaken for orphaned inflight entries.
+     */
+    public void onWorkerStatusHeartbeat(WorkerStatusResponse response) {
+        observeWorkerStatusActivity(response, System.currentTimeMillis());
+    }
+
+    /** Package-visible timestamp injection keeps inactivity-TTL tests deterministic. */
+    void onWorkerStatusHeartbeat(WorkerStatusResponse response, long observedAtMs) {
+        observeWorkerStatusActivity(response, observedAtMs);
+    }
+
+    private void observeWorkerStatusActivity(WorkerStatusResponse response, long observedAtMs) {
+        if (response == null || response.getRunningTaskInfo() == null) {
+            return;
+        }
+        boolean isDecode = response.getRole() == RoleType.DECODE;
+        for (TaskInfo task : response.getRunningTaskInfo().values()) {
+            if (task == null) {
+                continue;
+            }
+            InflightEntry entry = inflight.get(task.getRequestId());
+            if (entry == null) {
+                continue;
+            }
+            TaskPhase phase = task.getPhase();
+            boolean decodeAccepted = isDecode
+                    && (phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING);
+            synchronized (dispatchFence) {
+                synchronized (entry) {
+                    if (inflight.get(task.getRequestId()) != entry) {
+                        continue;
+                    }
+                    entry.observeWorkerStatus(observedAtMs);
+                    if (decodeAccepted) {
+                        markDecodeAcceptedLocked(entry);
+                        if (entry.dispatchReconciliation
+                                && !entry.ttlCleanupReconciliation) {
+                            clearDispatchReconciliation(entry);
+                            applyAcknowledgeLocked(entry, entry.lifecycle.snapshot().batchId());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private void markDecodeAccepted(long requestId) {
         InflightEntry entry = inflight.get(requestId);
         if (entry == null) {
@@ -816,11 +856,12 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     return;
                 }
                 markDecodeAcceptedLocked(entry);
-                if (entry.dispatchReconciliation) {
+                if (entry.dispatchReconciliation
+                        && !entry.ttlCleanupReconciliation) {
                     // Decode KV ownership is stronger than a missing Prefill
-                    // Enqueue ACK. Stop the Prefill cancel-fence retry chain
-                    // and publish the logical ACK while both ownership paths
-                    // are linearized by the same dispatch fence.
+                    // Enqueue ACK. Stop that reconciliation and publish the
+                    // logical ACK. A TTL-triggered cancellation fence, however,
+                    // must remain until cancellation or a terminal is confirmed.
                     clearDispatchReconciliation(entry);
                     applyAcknowledgeLocked(entry, entry.lifecycle.snapshot().batchId());
                 }
@@ -854,10 +895,12 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             return;
         }
         if (entry.dispatchOwnership == DispatchOwnership.DECODE_OWNED
-                && terminal.dispatchAckFailure()) {
+                && terminal.dispatchAckFailure()
+                && !terminal.engineOwnershipSettled()) {
             // KV_ALLOCATED/RUNNING is a stronger ownership observation than
             // an absent/failed Enqueue ACK. Preserve the live inflight entry,
-            // Decode accounting, and public schedule success.
+            // Decode accounting, and public schedule success unless an Engine
+            // cancellation tombstone or typed CANCELED terminal settled it.
             if (entry.preemption != null) {
                 PreemptionRegistration registration = entry.preemption;
                 long batchId = entry.lifecycle.snapshot().batchId();
@@ -1046,18 +1089,26 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
     @Scheduled(fixedRate = 60000L)
     public void cleanupInflight() {
+        cleanupInflight(System.currentTimeMillis());
+    }
+
+    /** Package-visible timestamp injection keeps inactivity-TTL tests deterministic. */
+    void cleanupInflight(long now) {
         long ttlMs = configService.loadBalanceConfig().getFlexlbInflightTtlMs();
-        long now = System.currentTimeMillis();
         int expiredCount = 0;
-        long oldestExpiredAgeMs = 0;
+        int locallyEvictedCount = 0;
+        int cancellationFencedCount = 0;
+        long oldestExpiredIdleMs = 0;
         List<Long> expiredRequestSamples = new ArrayList<>(3);
         for (Map.Entry<Long, InflightEntry> candidate : inflight.entrySet()) {
             InflightEntry entry = candidate.getValue();
-            long ageMs = now - entry.createdAtMs();
-            if (ageMs <= ttlMs) {
+            long idleMs = now - entry.lastWorkerStatusAtMs();
+            if (idleMs <= ttlMs) {
                 continue;
             }
-            synchronized (entry) {
+            boolean startReconciliation = false;
+            synchronized (dispatchFence) {
+              synchronized (entry) {
                 if (inflight.get(candidate.getKey()) != entry) {
                     continue;
                 }
@@ -1067,21 +1118,44 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     // the entry and must not be raced by TTL.
                     continue;
                 }
-                oldestExpiredAgeMs = Math.max(oldestExpiredAgeMs, ageMs);
+                idleMs = now - entry.lastWorkerStatusAtMs();
+                if (idleMs <= ttlMs) {
+                    continue;
+                }
+                oldestExpiredIdleMs = Math.max(oldestExpiredIdleMs, idleMs);
                 if (expiredRequestSamples.size() < 3) {
                     expiredRequestSamples.add(candidate.getKey());
                 }
-                timeoutEntry(entry, "inflight TTL expired");
+                if (entry.lifecycle.hasDispatchClaim()) {
+                    // A batch id means the dispatcher may already have handed
+                    // the request to the Engine. Reuse the dispatch cancellation
+                    // state machine and retain all ledgers until TOMBSTONED or a
+                    // typed CANCELED terminal proves ownership is gone.
+                    startReconciliation = startTtlReconciliationLocked(entry);
+                    if (startReconciliation) {
+                        cancellationFencedCount++;
+                    }
+                } else {
+                    // No dispatch claim can cross this same fence, so local
+                    // timeout and rollback are safe.
+                    timeoutEntry(entry, "inflight inactive TTL expired before dispatch");
+                    locallyEvictedCount++;
+                }
                 expiredCount++;
+              }
+            }
+            if (startReconciliation) {
+                reconcileUncertainDispatch(entry, 0);
             }
         }
         if (expiredCount > 0) {
             reporter.reportInflightTtlExpired(expiredCount);
-            Logger.info("event=scheduler_inflight_ttl_eviction evicted={} "
-                            + "oldest_age_ms={} ttl_ms={} request_samples={}",
-                    expiredCount, oldestExpiredAgeMs, ttlMs, expiredRequestSamples);
+            Logger.info("event=scheduler_inflight_ttl_expired expired={} locally_evicted={} "
+                            + "cancellation_fenced={} oldest_idle_ms={} ttl_ms={} request_samples={}",
+                    expiredCount, locallyEvictedCount, cancellationFencedCount,
+                    oldestExpiredIdleMs, ttlMs, expiredRequestSamples);
         }
-        long cutoff = System.currentTimeMillis() - ttlMs;
+        long cutoff = now - ttlMs;
         terminalStates.entrySet().removeIf(entry -> entry.getValue().updatedAtMs() < cutoff);
 
         // N1 (P1-4): reclaim orphan decode reservations — shadow entries past
@@ -1248,6 +1322,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     synchronized (entry) {
                         return inflight.get(item.requestId()) == entry
                                 && !entry.cleanupOwned
+                                && !entry.dispatchReconciliation
                                 && !entry.lifecycle.isTerminal()
                                 && entry.lifecycle.snapshot().batchId() == batchId;
                     }
@@ -1517,14 +1592,26 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
     /** Called with {@code entry} locked. */
     private boolean startDispatchReconciliationLocked(InflightEntry entry) {
+        return startDispatchReconciliationLocked(entry, false);
+    }
+
+    /** Called with {@code entry} locked while holding {@link #dispatchFence}. */
+    private boolean startTtlReconciliationLocked(InflightEntry entry) {
+        return startDispatchReconciliationLocked(entry, true);
+    }
+
+    /** Called with {@code entry} locked. */
+    private boolean startDispatchReconciliationLocked(InflightEntry entry,
+                                                       boolean ttlCleanup) {
         if (entry.dispatchReconciliation || entry.preemption != null) {
             return false;
         }
-        if (entry.dispatchOwnership == DispatchOwnership.DECODE_OWNED) {
+        if (!ttlCleanup && entry.dispatchOwnership == DispatchOwnership.DECODE_OWNED) {
             applyAcknowledgeLocked(entry, entry.lifecycle.snapshot().batchId());
             return false;
         }
         entry.dispatchReconciliation = true;
+        entry.ttlCleanupReconciliation = ttlCleanup;
         long batchId = entry.lifecycle.snapshot().batchId();
         PrefillEndpoint prefill = entry.item.prefillEp();
         if (prefill != null && batchId > 0) {
@@ -1598,8 +1685,10 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 }
                 switch (outcome.ack()) {
                     case TOMBSTONED -> {
-                        reduceOrdinaryTerminalLocked(entry, DeferredTerminal.timeout(
-                                "EnqueueBatch deadline exceeded; engine fenced late enqueue"));
+                        reduceOrdinaryTerminalLocked(entry, DeferredTerminal.fencedTimeout(
+                                entry.ttlCleanupReconciliation
+                                        ? "inflight inactive TTL cancellation confirmed"
+                                        : "EnqueueBatch deadline exceeded; engine fenced late enqueue"));
                     }
                     case ACCEPTED -> {
                         // ACCEPTED is deliberately a weak acknowledgement: it
@@ -1630,6 +1719,7 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             return;
         }
         entry.dispatchReconciliation = false;
+        entry.ttlCleanupReconciliation = false;
         long batchId = entry.lifecycle.snapshot().batchId();
         PrefillEndpoint prefill = entry.item.prefillEp();
         if (prefill != null && batchId > 0) {
@@ -1908,16 +1998,24 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         boolean cleanupOwned;
         PreemptionRegistration preemption;
         boolean dispatchReconciliation;
+        boolean ttlCleanupReconciliation;
+        /** Last full WorkerStatus snapshot which still listed this request as active. */
+        private volatile long lastWorkerStatusAtMs;
 
         InflightEntry(BatchItem item, boolean autoTpmAdmission) {
             this.item = Objects.requireNonNull(item);
             Objects.requireNonNull(item.prefill(), "BatchItem.prefill must not be null");
             this.lifecycle = new RequestLifecycle(item.requestId());
+            this.lastWorkerStatusAtMs = lifecycle.snapshot().createdAtMs();
             this.autoTpmAdmission = autoTpmAdmission;
         }
 
-        public long createdAtMs() {
-            return lifecycle.snapshot().createdAtMs();
+        long lastWorkerStatusAtMs() {
+            return lastWorkerStatusAtMs;
+        }
+
+        void observeWorkerStatus(long observedAtMs) {
+            lastWorkerStatusAtMs = Math.max(lastWorkerStatusAtMs, observedAtMs);
         }
 
         boolean hasPreemption(long attemptToken) {
@@ -1976,10 +2074,11 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                                     StrategyErrorType errorType,
                                     String detail,
                                     boolean removeFromPrefillBatch,
-                                    WorkerTerminalObservation workerObservation) {
+                                    WorkerTerminalObservation workerObservation,
+                                    boolean engineOwnershipSettled) {
         static DeferredTerminal admissionCleanup(String detail) {
             return new DeferredTerminal(DeferredTerminalKind.ADMISSION_CLEANUP,
-                    null, detail, false, null);
+                    null, detail, false, null, false);
         }
 
         static DeferredTerminal failure(StrategyErrorType errorType,
@@ -1987,17 +2086,22 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                                         boolean removeFromPrefillBatch) {
             return new DeferredTerminal(DeferredTerminalKind.FAILURE,
                     Objects.requireNonNull(errorType), detail,
-                    removeFromPrefillBatch, null);
+                    removeFromPrefillBatch, null, false);
         }
 
         static DeferredTerminal timeout(String detail) {
             return new DeferredTerminal(DeferredTerminalKind.TIMEOUT,
-                    StrategyErrorType.BATCH_SLO_EXPIRED, detail, true, null);
+                    StrategyErrorType.BATCH_SLO_EXPIRED, detail, true, null, false);
+        }
+
+        static DeferredTerminal fencedTimeout(String detail) {
+            return new DeferredTerminal(DeferredTerminalKind.TIMEOUT,
+                    StrategyErrorType.BATCH_SLO_EXPIRED, detail, true, null, true);
         }
 
         static DeferredTerminal worker(WorkerTerminalObservation observation) {
             return new DeferredTerminal(DeferredTerminalKind.WORKER,
-                    null, null, false, Objects.requireNonNull(observation));
+                    null, null, false, Objects.requireNonNull(observation), true);
         }
 
         boolean authoritativeWorker() {
