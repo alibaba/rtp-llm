@@ -516,9 +516,9 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsValidateCompactCpSlots) {
     CacheConfig config({makeRpcGroup("full"), std::move(compact)}, {{"full", "compact"}}, 1);
     config.seq_size_per_block = 8;
 
-    auto make_request = [](int compact_row_size) {
+    auto make_request = [](int compact_row_size, int prefill_cp_size = 2) {
         BroadcastLoadRequestPB request;
-        request.set_prefill_cp_size(2);
+        request.set_prefill_cp_size(prefill_cp_size);
         for (int i = 0; i < 5; ++i) {
             request.add_cache_keys(101 + i);
         }
@@ -540,6 +540,12 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsValidateCompactCpSlots) {
     EXPECT_EQ(error.code(), ErrorCode::LOAD_KV_CACHE_FAILED);
     EXPECT_NE(error.ToString().find("tag=compact"), std::string::npos);
     EXPECT_NE(error.ToString().find("required=3"), std::string::npos);
+
+    error = DecodeRpcServer::decodeGroupBlockIds(
+        make_request(/*compact_row_size=*/3, /*prefill_cp_size=*/1), config, decoded);
+    EXPECT_EQ(error.code(), ErrorCode::LOAD_KV_CACHE_FAILED);
+    EXPECT_NE(error.ToString().find("request_prefill_cp_size=1"), std::string::npos);
+    EXPECT_NE(error.ToString().find("local_cp_scale=2"), std::string::npos);
 
     EXPECT_TRUE(DecodeRpcServer::decodeGroupBlockIds(make_request(/*compact_row_size=*/3), config, decoded).ok());
 }

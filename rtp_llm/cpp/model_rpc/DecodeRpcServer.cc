@@ -1430,6 +1430,12 @@ ErrorInfo DecodeRpcServer::validateGroupBlockIdsGeometry(const CacheConfig&     
         const size_t group_span = group.seqSizePerBlock();
         const size_t cp_scale =
             base_span > 0 && group_span >= base_span && group_span % base_span == 0 ? group_span / base_span : 1;
+        if (group.policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK && cp_scale > 1
+            && static_cast<size_t>(prefill_cp_size) != cp_scale) {
+            return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                             "RPC cache CP geometry mismatch: tag=" + group.tag + ", request_prefill_cp_size="
+                                 + std::to_string(prefill_cp_size) + ", local_cp_scale=" + std::to_string(cp_scale));
+        }
         const bool compact = group.policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK && cp_scale > 1;
         // Only compact tables collapse global cache-key positions. Tail policies
         // retain their global offset even when the plan loads just one/two slots.
