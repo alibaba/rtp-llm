@@ -940,6 +940,8 @@ class MoEQuantizedDispatchTest(unittest.TestCase):
                 "down_proj.weight_packed": down,
                 "gate_up_proj.weight_scale": gate_up_scale,
                 "down_proj.weight_scale": down_scale,
+                "gate_up_proj.weight_shape": torch.tensor([[16, 8]], dtype=torch.int64),
+                "down_proj.weight_shape": torch.tensor([[8, 8]], dtype=torch.int64),
             }
         )
         layer._check_load_complete()
@@ -974,8 +976,12 @@ class MoEQuantizedDispatchTest(unittest.TestCase):
                 "0.gate_proj.weight_scale": gate_scale,
                 "0.up_proj.weight_scale": up_scale,
                 "0.down_proj.weight_scale": down_scale,
+                "0.gate_proj.weight_shape": torch.tensor([8, 8]),
+                "0.up_proj.weight_shape": torch.tensor([8, 8]),
+                "0.down_proj.weight_shape": torch.tensor([8, 8]),
             }
         )
+        layer._check_load_complete()
 
         calls = []
 
@@ -1019,12 +1025,74 @@ class MoEQuantizedDispatchTest(unittest.TestCase):
             quant_config=quant,
         )
         layer.load_weights(
-            {"0.down_proj.weight_shape": torch.tensor([8, 8], dtype=torch.int64)}
+            {
+                "0.down_proj.weight_shape": torch.tensor([8, 8], dtype=torch.int64),
+                "0.gate_up_proj.weight_shape": torch.tensor([16, 8], dtype=torch.int64),
+            }
         )
         with self.assertRaisesRegex(ValueError, "describes 56 elements"):
             layer.load_weights(
                 {"0.gate_proj.weight_shape": torch.tensor([7, 8], dtype=torch.int64)}
             )
+        invalid_fused = _make_experts(
+            num_experts=1,
+            hidden_size=8,
+            moe_intermediate_size=8,
+            quant_config=quant,
+        )
+        with self.assertRaisesRegex(ValueError, "expected 128"):
+            invalid_fused.load_weights(
+                {"0.gate_up_proj.weight_shape": torch.tensor([8, 8], dtype=torch.int64)}
+            )
+
+    def test_per_expert_w4a8_load_respects_ep_partition(self):
+        quant = QuantizationConfig(
+            "W4A8_INT4_PER_CHANNEL_COMPRESSED",
+            source_config=types.SimpleNamespace(group_size=lambda: 4),
+        )
+        layer = _make_experts(
+            num_experts=4,
+            hidden_size=8,
+            moe_intermediate_size=8,
+            ep_size=2,
+            ep_rank=1,
+            quant_config=quant,
+        )
+        weights = {}
+        for expert_id in range(4):
+            for projection in ("gate_proj", "up_proj", "down_proj"):
+                value = (
+                    expert_id * 10
+                    + {
+                        "gate_proj": 1,
+                        "up_proj": 2,
+                        "down_proj": 3,
+                    }[projection]
+                )
+                weights[f"{expert_id}.{projection}.weight_packed"] = torch.full(
+                    (8, 4), value, dtype=torch.int8
+                )
+                weights[f"{expert_id}.{projection}.weight_scale"] = torch.ones(
+                    8, 2, dtype=torch.bfloat16
+                )
+                weights[f"{expert_id}.{projection}.weight_shape"] = torch.tensor(
+                    [8, 8], dtype=torch.int64
+                )
+
+        layer.load_weights(weights)
+        layer._check_load_complete()
+        torch.testing.assert_close(
+            layer._w4a8_gate_packed[:, 0, 0],
+            torch.tensor([21, 31], dtype=torch.int8),
+        )
+        torch.testing.assert_close(
+            layer._w4a8_up_packed[:, 0, 0],
+            torch.tensor([22, 32], dtype=torch.int8),
+        )
+        torch.testing.assert_close(
+            layer._w4a8_down_packed[:, 0, 0],
+            torch.tensor([23, 33], dtype=torch.int8),
+        )
 
     def test_ignored_moe_layer_uses_unquantized_method_and_runtime_config(self):
         source_quant = types.SimpleNamespace(get_method=lambda: "FP8")
