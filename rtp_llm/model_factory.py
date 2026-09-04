@@ -43,9 +43,17 @@ class ModelFactory:
         ):
             return False
 
-        # The propose model is loaded without LoRA. Sharing a target global after
-        # merge_lora could silently change draft semantics if an adapter touched it.
-        if bool(getattr(model, "merge_lora", False)):
+        # ``model.merge_lora`` is only the user preference and defaults to true.
+        # The loader narrows it to ``database.has_lora() && preference``; use that
+        # effective value so a normal checkpoint is not mistaken for merged LoRA.
+        model_loader = getattr(model, "model_weights_loader", None)
+        load_config = getattr(model_loader, "_load_config", None)
+        effective_merge_lora = getattr(load_config, "merge_lora", None)
+        if effective_merge_lora is None:
+            # Keep fail-closed behavior for lightweight/custom model wrappers that
+            # do not expose the loader's effective configuration.
+            effective_merge_lora = bool(getattr(model, "merge_lora", False))
+        if bool(effective_merge_lora):
             logging.warning(
                 "skip GLM-5 MTP global weight sharing: target has merged LoRA"
             )

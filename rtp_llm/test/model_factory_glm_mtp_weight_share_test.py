@@ -9,7 +9,15 @@ from rtp_llm.model_factory import ModelFactory
 from rtp_llm.utils.model_weight import W
 
 
-def _make_model(model_type, ckpt_path, embedding, lm_head, mtp_layer_offset=0):
+def _make_model(
+    model_type,
+    ckpt_path,
+    embedding,
+    lm_head,
+    mtp_layer_offset=0,
+    merge_lora=False,
+    effective_merge_lora=None,
+):
     config = SimpleNamespace(
         model_type=model_type,
         ckpt_path=ckpt_path,
@@ -19,9 +27,14 @@ def _make_model(model_type, ckpt_path, embedding, lm_head, mtp_layer_offset=0):
         global_weights={W.embedding: embedding, W.lm_head: lm_head}
     )
     py_model = SimpleNamespace(embed_tokens=SimpleNamespace(weight=embedding))
-    return SimpleNamespace(
-        model_config=config, weight=weight, py_model=py_model, merge_lora=False
+    model = SimpleNamespace(
+        model_config=config, weight=weight, py_model=py_model, merge_lora=merge_lora
     )
+    if effective_merge_lora is not None:
+        model.model_weights_loader = SimpleNamespace(
+            _load_config=SimpleNamespace(merge_lora=effective_merge_lora)
+        )
+    return model
 
 
 class GlmMtpGlobalWeightShareTest(unittest.TestCase):
@@ -111,6 +124,9 @@ class GlmMtpGlobalWeightShareTest(unittest.TestCase):
     def test_merged_lora_target_is_not_shared(self):
         propose = self._make_propose()
         self.target.merge_lora = True
+        self.target.model_weights_loader = SimpleNamespace(
+            _load_config=SimpleNamespace(merge_lora=True)
+        )
 
         self.assertFalse(
             ModelFactory._share_glm5_mtp_global_weights(self.target, propose)
@@ -118,6 +134,19 @@ class GlmMtpGlobalWeightShareTest(unittest.TestCase):
         self.assertIs(
             propose.weight.global_weights[W.embedding], self.propose_embedding
         )
+
+    def test_merge_lora_preference_without_lora_still_shares(self):
+        propose = self._make_propose()
+        self.target.merge_lora = True
+        self.target.model_weights_loader = SimpleNamespace(
+            _load_config=SimpleNamespace(merge_lora=False)
+        )
+
+        self.assertTrue(
+            ModelFactory._share_glm5_mtp_global_weights(self.target, propose)
+        )
+        self.assertIs(propose.weight.global_weights[W.embedding], self.target_embedding)
+        self.assertIs(propose.weight.global_weights[W.lm_head], self.target_lm_head)
 
     def test_old_propose_storages_are_released(self):
         embedding = torch.empty_like(self.propose_embedding)
