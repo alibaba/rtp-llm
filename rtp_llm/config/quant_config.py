@@ -184,6 +184,10 @@ class QuantizationConfig(ABC):
         """Return the newloader quant-method key, or empty when unsupported."""
         return ""
 
+    def get_new_loader_moe_unsupported_reason(self) -> Optional[str]:
+        """Return why this quantization cannot be used by NewLoader MoE."""
+        return None
+
     @classmethod
     def load_from_ckpt(cls, ckpt_path: str) -> Optional["QuantizationConfig"]:
         """
@@ -639,6 +643,11 @@ class Fp8PerTensorCompressedQuantConfig(CompressedTensorsQuantConfig):
 
     def get_runtime_method_key(self) -> str:
         return "fp8" if self.is_quanted() else "fp8_online"
+
+    def get_new_loader_moe_unsupported_reason(self) -> Optional[str]:
+        if self.is_quanted() and not self.is_dynamic():
+            return "static-activation per-tensor FP8 MoE is unsupported by NewLoader"
+        return None
 
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
