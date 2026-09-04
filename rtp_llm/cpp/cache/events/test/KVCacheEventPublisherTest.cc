@@ -525,6 +525,37 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherHeartbeatsWhileSnapshotUploadKeepsF
     publisher.stop();
 }
 
+TEST(KVCacheEventPublisherTest, KVCMPublisherHeartbeatsWhileSnapshotUploadIsSlow) {
+    KVCacheEventPublisherConfig config;
+    config.queue_capacity        = 8;
+    config.report_batch_size     = 8;
+    config.flush_interval_ms     = 1;
+    config.heartbeat_interval_ms = 10;
+    config.snapshot_interval_ms  = 60000;
+    config.retry_interval_ms     = 1;
+
+    auto reporter = std::make_shared<BlockingReporter>();
+    reporter->blockNextSnapshot();
+    KVCMPublisher publisher(
+        config,
+        makeContext(),
+        [] {
+            return KVCacheSnapshot{1, {10, 20}};
+        },
+        reporter);
+
+    ASSERT_TRUE(publisher.start());
+    if (!reporter->waitUntilSnapshotBlocked(kAsyncTestTimeout)) {
+        reporter->releaseSnapshot();
+        publisher.stop();
+        FAIL() << "initial snapshot request did not reach the blocking reporter";
+    }
+    ASSERT_TRUE(reporter->waitForBodyCount("EVENT_HEARTBEAT", 2, kAsyncTestTimeout));
+    reporter->releaseSnapshot();
+    EXPECT_TRUE(waitForState(publisher, PublisherState::READY, kAsyncTestTimeout));
+    publisher.stop();
+}
+
 TEST(KVCacheEventPublisherTest, KVCMPublisherPreservesMutationsCreatedWhileSnapshotIsInFlight) {
     KVCacheEventPublisherConfig config;
     config.queue_capacity        = 8;
