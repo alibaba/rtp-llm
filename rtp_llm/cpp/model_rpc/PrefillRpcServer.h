@@ -76,6 +76,13 @@ private:
     void              remoteGenerate(PrefillGenerateContext& prefill_context);
     void              pollRemoteOutput(PrefillGenerateContext& prefill_context);
     static void       mergeMultimodalLengths(GenerateOutputsPB& response, const std::map<int, int>& multimodal_lengths);
+    static void       mergeCacheReuseInfo(AuxInfoPB& aux_info,
+                                          int        prefill_total_reuse_len,
+                                          int        prefill_local_reuse_len,
+                                          int        prefill_remote_reuse_len,
+                                          int        prefill_memory_reuse_len,
+                                          int        prefill_disk_reuse_len,
+                                          bool       use_independent_block_pools);
 
 private:
     std::string decode_cluster_name_;

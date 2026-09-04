@@ -415,6 +415,9 @@ message BroadcastLoadRequestPB {
 message BroadcastLoadResponsePB {
     RpcErrorPB error_info = 1;
     int64 done_time_us = 2;
+    // Number of contiguous logical cache-key blocks materialized on this
+    // decode rank by a completed P/D handoff. Zero means no proven handoff.
+    int64 loaded_cache_block_count = 3;
 }
 
 message RemoteFinishRequestPB {
