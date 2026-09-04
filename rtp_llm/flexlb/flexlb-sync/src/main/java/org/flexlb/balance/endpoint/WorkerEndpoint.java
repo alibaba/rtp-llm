@@ -83,6 +83,14 @@ public abstract class WorkerEndpoint {
         this.status = ws;
     }
 
+    /**
+     * Observe a successful status heartbeat without replaying versioned deltas.
+     * Stateful endpoints may use full-snapshot fields for liveness only.
+     */
+    public void onWorkerStatusHeartbeat(WorkerStatusResponse resp) {
+        // No heartbeat-only state by default.
+    }
+
     public void close() {
         // No resources by default. Stateful endpoints override when needed.
     }

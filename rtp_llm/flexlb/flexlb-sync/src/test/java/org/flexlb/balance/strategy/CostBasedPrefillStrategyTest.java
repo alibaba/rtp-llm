@@ -175,6 +175,70 @@ class CostBasedPrefillStrategyTest {
     }
 
     @Test
+    void cacheAffinitySelectsCacheLeaderOnlyWithinConfiguredTtftCap() {
+        Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 650));
+        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any()))
+                .thenReturn(Map.of("10.0.0.2:8080", 3));
+
+        FlexlbConfig config = new FlexlbConfig();
+        config.setCostSloMs(50_000L);
+        config.setScoreTieRandomEnabled(false);
+        config.setCacheAffinityEnabled(true);
+        config.setCacheAffinityMaxExtraTtftMs(150L);
+        config.setCacheAffinityMinHitRate(5.0);
+
+        ServerStatus result = strategy.select(
+                buildContext(1000, 32L, config), RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.2", result.getServerIp());
+        Mockito.verify(engineHealthReporter).reportCacheAffinityDecision(
+                RoleType.PREFILL, "10.0.0.2", "CACHE_LEADER");
+    }
+
+    @Test
+    void cacheAffinityDisabledKeepsBaselineCostSelection() {
+        Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 650));
+        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any()))
+                .thenReturn(Map.of("10.0.0.2:8080", 3));
+
+        FlexlbConfig config = new FlexlbConfig();
+        config.setCostSloMs(50_000L);
+        config.setScoreTieRandomEnabled(false);
+        config.setCacheAffinityEnabled(false);
+        config.setCacheAffinityMaxExtraTtftMs(10_000L);
+
+        ServerStatus result = strategy.select(
+                buildContext(1000, 33L, config), RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.1", result.getServerIp());
+        Mockito.verify(engineHealthReporter, Mockito.never())
+                .reportCacheAffinityDecision(any(), any(), any());
+    }
+
+    @Test
+    void selectedEstimateMetricUsesEffectiveDeliveryModeAndIsFailureIsolated() {
+        Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        Mockito.doThrow(new IllegalStateException("metrics unavailable"))
+                .when(engineHealthReporter).reportPrefillSelectedEstimates(
+                        any(), any(), any(), Mockito.anyLong(), Mockito.anyLong());
+        BalanceContext context = buildContext(1000, 34L);
+        context.setScheduleMode(org.flexlb.enums.ScheduleModeEnum.DIRECT);
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        Mockito.verify(engineHealthReporter).reportPrefillSelectedEstimates(
+                RoleType.PREFILL, "10.0.0.1", "NON_BATCH", 1000L, 1000L);
+    }
+
+    @Test
     void sloRiskFilterExcludesOverloadedWorker() {
         Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 2000));

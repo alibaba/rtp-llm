@@ -80,12 +80,9 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
             // Still has enough coarse budget — fall through to dispatch.
         }
 
-        if (!BatchShape.empty().add(head).fitsCompute(batchMaxTokens)) {
-            lastParkByRequest.remove(head.requestId());
-            ctx.rejectForBatchTokenCapacity(head, batchMaxTokens);
-            return;
-        }
-
+        // The Engine deliberately admits a valid first request even when it
+        // exceeds max_batch_tokens_size. That limit applies when adding more
+        // requests; max-sequence and KV validation remain Engine-authoritative.
         int maxInflightBatches = ctx.cfg().getFlexlbBatchSloMaxInflightBatches();
         if (maxInflightBatches > 0 && ctx.prefillEp().getInflightBatchCount() >= maxInflightBatches) {
             long inflightGuardMs = dispatchGuardMs(ctx, emergencyBudgetMs);

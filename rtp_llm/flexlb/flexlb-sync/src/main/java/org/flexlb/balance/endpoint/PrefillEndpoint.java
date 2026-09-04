@@ -181,6 +181,41 @@ public class PrefillEndpoint extends WorkerEndpoint {
         updateEngineUntrackedRequestCount(resp);
     }
 
+    @Override
+    public void onWorkerStatusHeartbeat(WorkerStatusResponse resp) {
+        if (resp == null) {
+            return;
+        }
+        touchRunningBatches(resp.getRunningTaskInfo(), System.currentTimeMillis());
+    }
+
+    /**
+     * Refresh only endpoint-ledger inactivity timestamps from a full running
+     * snapshot. Same-version heartbeats must not replay incremental finished
+     * task deltas or mutate prediction progress state.
+     */
+    private void touchRunningBatches(Map<String, TaskInfo> runningTaskInfo, long statusMs) {
+        if (runningTaskInfo == null || runningTaskInfo.isEmpty()) {
+            return;
+        }
+        Map<Long, Set<Long>> requestIdsByBatch = new HashMap<>();
+        for (TaskInfo task : runningTaskInfo.values()) {
+            if (task != null && task.getBatchId() >= 0) {
+                requestIdsByBatch.computeIfAbsent(task.getBatchId(), ignored -> new HashSet<>())
+                        .add(task.getRequestId());
+            }
+        }
+        requestIdsByBatch.forEach((batchId, requestIds) ->
+                inflightBatches.computeIfPresent(batchId, (id, batch) -> {
+                    boolean observedCurrentMember = batch.requests().stream()
+                            .anyMatch(item -> requestIds.contains(item.requestId()));
+                    if (observedCurrentMember) {
+                        batch.touch(statusMs);
+                    }
+                    return batch;
+                }));
+    }
+
     /**
      * Full calibration against worker status report.
      */
