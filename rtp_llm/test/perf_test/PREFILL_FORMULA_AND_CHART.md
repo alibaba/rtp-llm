@@ -88,9 +88,34 @@ SLA accuracy.
 - Dense 3D chart: `dsv4_corrected_v4/deepseek_v4_prefill_3d.svg`
 
 The chart uses X=measured prefill RT (TTFT, ms), Y=observed cached tokens,
-and Z=uncached compute tokens (`input_len - observed_cache_len`).  All usable
-physical geometries are plotted as points; the solid warm guide lines are
-near-fixed-cache median trends and the dashed cool guide lines are
-near-fixed-compute median trends.  Colour is used only to identify guide
-families, never to encode RT.  Failed rows and positive-cache requests with
+and Z=uncached compute tokens (`input_len - observed_cache_len`).  The updated
+3-D view is an isometric projection: the three axes are drawn from one origin,
+the dots are the measured physical geometries, and the guide lines show
+selected fixed-cache and fixed-compute slices.  Colour identifies the slice
+family; it does not encode RT.  Failed rows and positive-cache requests with
 zero observed reuse are excluded.
+
+## Cache-miss trend (2-D)
+
+The companion chart is separate from the 3-D view.  It keeps only
+`observed_cache_len=0`, so each dot answers one question: how does cold
+prefill RT change as `seq_len` grows?  The horizontal axis is linear in tokens,
+and the small inset magnifies 0–131K tokens because a 1M-wide axis compresses
+short sequences near the origin.  Each of the 489 dots is the median of the
+three successful measurements for that physical geometry.
+
+Run both charts together with:
+
+```bash
+python3 rtp_llm/test/perf_test/generate_prefill_3d_chart.py \
+  --input /data0/luoli.hn/work/glm52-prefill-perf-results/dsv4_corrected_v4/cache_grid_results.corrected_v4.json \
+  --output /data0/luoli.hn/work/glm52-prefill-perf-results/dsv4_corrected_v4/deepseek_v4_prefill_3d_readable.svg \
+  --cold-output /data0/luoli.hn/work/glm52-prefill-perf-results/dsv4_corrected_v4/deepseek_v4_prefill_cold_miss_2d.svg \
+  --batch-size 1
+```
+
+The generated files are `deepseek_v4_prefill_3d_readable.svg` and
+`deepseek_v4_prefill_cold_miss_2d.svg`.  In this DSV4 dataset the 1M cold point
+(`input_len=1,048,575`, `cache=0`) is 173.1 ms.  That value belongs to DSV4;
+it must not be compared with the earlier GLM5 1M result without changing the
+model label.

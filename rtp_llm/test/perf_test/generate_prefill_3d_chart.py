@@ -428,6 +428,177 @@ def data_metrics(path: pathlib.Path) -> list[Any]:
     return data.get("metrics", data.get("results", []))
 
 
+def render_cold_miss_2d(
+    rows: list[dict[str, float]], source: pathlib.Path, batch_size: int
+) -> str:
+    """Render the cache-miss sequence-length trend as a readable 2-D SVG.
+
+    Only rows whose observed cache is zero are included.  The main chart uses
+    a linear token axis so the 1M boundary is honest; an inset expands the
+    short-sequence region that would otherwise be compressed near the origin.
+    """
+    cold = sorted((row for row in rows if row["cache"] == 0), key=lambda row: row["input"])
+    if not cold:
+        raise SystemExit("no cache-miss rows for the requested batch size")
+    width, height = 1800, 1050
+    x0, y0, x1, y1 = 150.0, 180.0, 1430.0, 820.0
+    xmax = max(row["input"] for row in cold)
+    ymax = max(row["rt"] for row in cold) * 1.12
+
+    def esc_text(value: object) -> str:
+        return html.escape(str(value))
+
+    def sx(value: float, lo: float = 0.0, hi: float = xmax) -> float:
+        return x0 + (value - lo) / max(hi - lo, 1.0) * (x1 - x0)
+
+    def sy(value: float, lo: float = 0.0, hi: float = ymax) -> float:
+        return y1 - (value - lo) / max(hi - lo, 1.0) * (y1 - y0)
+
+    def line(
+        ax: float,
+        ay: float,
+        bx: float,
+        by: float,
+        stroke: str = "#cbd5e1",
+        sw: float = 1.0,
+        dash: str = "",
+        opacity: float = 1.0,
+    ) -> str:
+        dash_attr = f' stroke-dasharray="{dash}"' if dash else ""
+        return (
+            f'<line x1="{ax:.1f}" y1="{ay:.1f}" x2="{bx:.1f}" y2="{by:.1f}" '
+            f'stroke="{stroke}" stroke-width="{sw}" stroke-opacity="{opacity}"{dash_attr}/>'
+        )
+
+    def circle(cx: float, cy: float, radius: float = 3.0) -> str:
+        return (
+            f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{radius:.1f}" '
+            'fill="#2563eb" fill-opacity=".72" stroke="#ffffff" stroke-width=".55"/>'
+        )
+
+    points = [(sx(row["input"]), sy(row["rt"])) for row in cold]
+    out = [
+        f'''<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+<rect width="100%" height="100%" fill="#ffffff"/>
+<style>text{{font-family:Arial,"Noto Sans CJK SC","Microsoft YaHei",sans-serif;fill:#172033}}
+.title{{font-size:34px;font-weight:700}} .sub{{font-size:18px;fill:#475569}}
+.axis{{font-size:20px;fill:#334155;font-weight:600}} .tick{{font-size:15px;fill:#475569}}
+.paneltitle{{font-size:23px;font-weight:700}} .body{{font-size:17px;fill:#334155}}
+.note{{font-size:15px;fill:#64748b}}</style>
+<text x="70" y="55" class="title">DeepSeek-V4-Pro：Cache miss 的 seq_len–RT 趋势</text>
+<text x="70" y="88" class="sub">BS={batch_size} · observed cache_len=0 · 每个 seq_len 使用三次成功测量的中位 prefill RT / TTFT</text>'''
+    ]
+    out.append(line(x0, y1, x1, y1, "#0f172a", 2))
+    out.append(line(x0, y0, x0, y1, "#0f172a", 2))
+    for tick in (0, 64 * 1024, 128 * 1024, 256 * 1024, 384 * 1024, 512 * 1024, 768 * 1024, 1024 * 1024):
+        x = sx(min(tick, xmax))
+        out.append(line(x, y1, x, y1 + 9, "#0f172a", 1.3))
+        out.append(
+            f'<text x="{x:.1f}" y="{y1 + 34:.1f}" text-anchor="middle" class="tick">{esc_text(fmt_tokens(tick))}</text>'
+        )
+        if x < x1 - 1:
+            out.append(line(x, y0, x, y1, "#e2e8f0", 1, "5 7"))
+    for index in range(7):
+        value = ymax * index / 6
+        y = sy(value)
+        out.append(line(x0 - 8, y, x0, y, "#0f172a", 1.3))
+        out.append(line(x0, y, x1, y, "#e2e8f0", 1, "5 7"))
+        out.append(
+            f'<text x="{x0 - 15:.1f}" y="{y + 5:.1f}" text-anchor="end" class="tick">{value:.0f}</text>'
+        )
+    out.append(
+        '<polyline points="'
+        + " ".join(f"{x:.1f},{y:.1f}" for x, y in points)
+        + '" fill="none" stroke="#2563eb" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round"/>'
+    )
+    out.extend(circle(x, y, 2.8) for x, y in points)
+    out += [
+        f'<text x="{(x0 + x1) / 2:.1f}" y="{y1 + 78:.1f}" text-anchor="middle" class="axis">seq_len（tokens，线性轴）</text>',
+        f'<text x="42" y="{(y0 + y1) / 2:.1f}" text-anchor="middle" transform="rotate(-90 42 {(y0 + y1) / 2:.1f})" class="axis">中位 prefill RT / TTFT（ms）</text>',
+    ]
+
+    # Inset for the short-sequence region, where a full 1M linear axis hides
+    # useful detail.  It is a zoom of the same points, not a second dataset.
+    inset_x, inset_y, inset_w, inset_h = 980.0, 225.0, 400.0, 260.0
+    inset_xmax = min(131_072.0, xmax)
+    inset_rows = [row for row in cold if row["input"] <= inset_xmax]
+    inset_ymin = min(row["rt"] for row in inset_rows)
+    inset_ymax = max(row["rt"] for row in inset_rows) * 1.08
+    inset_left = inset_x + 45.0
+    inset_right = inset_x + inset_w - 15.0
+    inset_top = inset_y + 45.0
+    inset_bottom = inset_y + inset_h - 35.0
+
+    def ix(value: float) -> float:
+        return inset_left + value / max(inset_xmax, 1.0) * (inset_right - inset_left)
+
+    def iy(value: float) -> float:
+        return inset_bottom - (value - inset_ymin) / max(inset_ymax - inset_ymin, 1.0) * (inset_bottom - inset_top)
+
+    out.append(
+        f'<rect x="{inset_x:.1f}" y="{inset_y:.1f}" width="{inset_w:.1f}" height="{inset_h:.1f}" rx="10" fill="#f8fafc" stroke="#64748b" stroke-width="1.5"/>'
+    )
+    out.append(
+        f'<text x="{inset_x + 15:.1f}" y="{inset_y + 28:.1f}" class="body" font-weight="700">放大：0–{fmt_tokens(inset_xmax)} tokens</text>'
+    )
+    out.append(line(inset_left, inset_bottom, inset_right, inset_bottom, "#334155", 1.2))
+    out.append(line(inset_left, inset_top, inset_left, inset_bottom, "#334155", 1.2))
+    inset_points = [(ix(row["input"]), iy(row["rt"])) for row in inset_rows]
+    out.append(
+        '<polyline points="'
+        + " ".join(f"{x:.1f},{y:.1f}" for x, y in inset_points)
+        + '" fill="none" stroke="#2563eb" stroke-width="2"/>'
+    )
+    out.extend(
+        f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.2" fill="#2563eb" fill-opacity=".75"/>'
+        for x, y in inset_points
+    )
+    out.append(
+        f'<text x="{inset_x + inset_w / 2:.1f}" y="{inset_y + inset_h - 8:.1f}" text-anchor="middle" class="tick">seq_len</text>'
+    )
+    out.append(
+        f'<text x="{inset_x + 34:.1f}" y="{inset_y + inset_h / 2:.1f}" text-anchor="middle" transform="rotate(-90 {inset_x + 34:.1f} {inset_y + inset_h / 2:.1f})" class="tick">RT</text>'
+    )
+
+    one_m = max(cold, key=lambda row: row["input"])
+    out.append(
+        f'<line x1="{sx(one_m["input"]):.1f}" y1="{sy(one_m["rt"]):.1f}" x2="{x1 - 22:.1f}" y2="{sy(one_m["rt"]) - 44:.1f}" stroke="#b42318" stroke-width="1.8" stroke-dasharray="5 4"/>'
+    )
+    out.append(
+        f'<text x="{x1 - 15:.1f}" y="{sy(one_m["rt"]) - 52:.1f}" text-anchor="end" class="body" fill="#991b1b" font-weight="700">1M cold：{one_m["rt"]:.1f} ms</text>'
+    )
+
+    panel_x, panel_y, panel_w, panel_h = 1490.0, 150.0, 275.0, 670.0
+    out.append(
+        f'<rect x="{panel_x:.1f}" y="{panel_y:.1f}" width="{panel_w:.1f}" height="{panel_h:.1f}" rx="12" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>'
+    )
+    out.append(f'<text x="{panel_x + 20:.1f}" y="{panel_y + 42:.1f}" class="paneltitle">怎么读</text>')
+    median_rt = median(row["rt"] for row in cold)
+    sorted_rt = sorted(row["rt"] for row in cold)
+    p95_rt = sorted_rt[min(len(sorted_rt) - 1, int(len(sorted_rt) * 0.95))]
+    details = [
+        f"有效冷点：{len(cold):,}",
+        f"seq 范围：{fmt_tokens(min(row['input'] for row in cold))}–{fmt_tokens(xmax)}",
+        f"RT 中位数：{median_rt:.1f} ms",
+        f"RT P95：{p95_rt:.1f} ms",
+        f"1M 冷点：{one_m['rt']:.1f} ms",
+        "",
+        "每个圆点 = 一个 seq_len",
+        "蓝线 = 按 seq_len 排序",
+        "右上插图 = 放大短序列",
+        "RT 取三次成功测量中位数",
+    ]
+    for index, value in enumerate(details):
+        out.append(
+            f'<text x="{panel_x + 20:.1f}" y="{panel_y + 86 + index * 34:.1f}" class="body">{esc_text(value)}</text>'
+        )
+    out.append(
+        f'<text x="{panel_x + 20:.1f}" y="{panel_y + panel_h - 24:.1f}" class="note">source: {esc_text(source.name)}</text>'
+    )
+    out.append("</svg>")
+    return "".join(out)
+
+
 def render_clean(
     rows: list[dict[str, float]], source: pathlib.Path, batch_size: int
 ) -> str:
@@ -440,8 +611,10 @@ def render_clean(
     if not rows:
         raise SystemExit("no usable rows for the requested batch size")
     width, height = 2200, 1350
-    origin = (300.0, 1050.0)
-    vx, vy, vz = (900.0, -190.0), (350.0, 190.0), (0.0, -760.0)
+    # Use a true isometric projection. Tilting the compute axis left makes the
+    # three coordinates visibly separate instead of looking like a flat cloud.
+    origin = (360.0, 1060.0)
+    vx, vy, vz = (850.0, -205.0), (430.0, 235.0), (-150.0, -710.0)
     rt_max = max(row["rt"] for row in rows)
     cache_max = max(row["cache"] for row in rows)
     compute_max = max(row["compute"] for row in rows)
@@ -472,11 +645,11 @@ def render_clean(
         )
 
     def circle(
-        point: tuple[float, float], radius=2.2, fill="#64748b", opacity=0.28
+        point: tuple[float, float], radius=3.2, fill="#2563eb", opacity=0.50
     ) -> str:
         return (
             f'<circle cx="{point[0]:.1f}" cy="{point[1]:.1f}" r="{radius}" '
-            f'fill="{fill}" fill-opacity="{opacity}"/>'
+            f'fill="{fill}" fill-opacity="{opacity}" stroke="#ffffff" stroke-width=".55"/>'
         )
 
     def polyline(points: list[tuple[float, float]], stroke: str, dash: str = "") -> str:
@@ -497,7 +670,7 @@ def render_clean(
 .axis{{font-size:18px;fill:#334155;font-weight:600}} .tick{{font-size:15px;fill:#475569}}
 .paneltitle{{font-size:23px;font-weight:700}} .body{{font-size:17px;fill:#334155}}
 .note{{font-size:15px;fill:#64748b}} .legend{{font-size:16px;fill:#334155}}</style>
-<text x="1100" y="52" text-anchor="middle" class="title">DeepSeek-V4-Pro Prefill — readable 3D view</text>
+<text x="1100" y="52" text-anchor="middle" class="title">DeepSeek-V4-Pro：三轴等距投影</text>
 <text x="1100" y="85" text-anchor="middle" class="sub">X = TTFT / prefill RT (ms) · Y = observed cached tokens · Z = compute tokens · all {len(rows):,} geometries shown</text>"""
     ]
 
@@ -515,13 +688,24 @@ def render_clean(
 
     # Every point is kept, but dots are deliberately faint so the axes and
     # representative slices remain visible at report scale.
-    for row in sorted(rows, key=lambda item: item["compute"]):
-        out.append(
-            circle(
-                project(
-                    row["rt"] / xscale, row["cache"] / yscale, row["compute"] / zscale
+    for index, row in enumerate(sorted(rows, key=lambda item: item["compute"])):
+        # Keep every point. A regular sample of drop-lines supplies depth cues
+        # without turning the full cloud into a grey barcode.
+        nx = row["rt"] / xscale
+        ny = row["cache"] / yscale
+        nz = row["compute"] / zscale
+        if index % 8 == 0:
+            out.append(
+                line(
+                    project(nx, ny, 0),
+                    project(nx, ny, nz),
+                    "#94a3b8",
+                    0.55,
+                    opacity=0.28,
                 )
             )
+        out.append(
+            circle(project(nx, ny, nz))
         )
 
     # Solid warm lines are fixed-cache slices; dashed cool lines are
@@ -713,12 +897,23 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True, type=pathlib.Path)
     parser.add_argument("--output", required=True, type=pathlib.Path)
+    parser.add_argument(
+        "--cold-output",
+        type=pathlib.Path,
+        help="Optional cache-miss 2-D SVG. Defaults to <output stem>_cold_miss.svg.",
+    )
     parser.add_argument("--batch-size", default=1, type=int)
     args = parser.parse_args()
     rows = load_rows(args.input, args.batch_size)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
         render_clean(rows, args.input, args.batch_size), encoding="utf-8"
+    )
+    cold_output = args.cold_output or args.output.with_name(
+        f"{args.output.stem}_cold_miss{args.output.suffix}"
+    )
+    cold_output.write_text(
+        render_cold_miss_2d(rows, args.input, args.batch_size), encoding="utf-8"
     )
     print(
         json.dumps(
@@ -727,6 +922,8 @@ def main() -> None:
                 "rows": len(rows),
                 "all_rows": len(data_metrics(args.input)),
                 "output": str(args.output),
+                "cold_output": str(cold_output),
+                "cold_rows": sum(row["cache"] == 0 for row in rows),
             },
             ensure_ascii=False,
         )
