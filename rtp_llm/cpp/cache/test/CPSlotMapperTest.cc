@@ -428,5 +428,34 @@ TEST_F(CPSlotMapperTest, ConnectorProjectionUsesTagMappedBlocks) {
     EXPECT_EQ(projected.blocks("swa"), (BlockIndicesType{201, 203}));
 }
 
+TEST_F(CPSlotMapperTest, ConnectorProjectionKeepsCompactNoSliceBlocksInOrder) {
+    CacheConfig config;
+    config.seq_size_per_block = 8;
+
+    auto spec                       = std::make_shared<MHAKVCacheSpec>();
+    spec->seq_size_per_block        = 16;
+    spec->kernel_seq_size_per_block = 8;
+    CacheGroup compact;
+    compact.tag               = "compact";
+    compact.spec              = std::move(spec);
+    compact.policy            = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    compact.policy.cp_mapping = CpBlockMappingMode::COMPACT_LAST_RANK;
+    compact.policy.cp_slice   = CpBlockSliceMode::NONE;
+    config                    = CacheConfig({std::move(compact)}, {{"compact"}}, /*main_layer_num=*/1);
+    config.seq_size_per_block = 8;
+
+    KVCacheResource source;
+    source.initGroups(config);
+    source.setCacheKeys({10, 11, 12, 13});
+    source.setLastBlockAligned(true);
+    source.mutableBlockIds("compact").assign({200, 201});
+
+    CPSlotMapper mapper(/*cp_rank=*/1, /*cp_size=*/2, /*global key B=*/8);
+    auto projected = mapper.projectConnectorResource(source, config, mapper.canonicalCacheKeys(source.cacheKeys()));
+
+    EXPECT_EQ(projected.cacheKeys(), (CacheKeysType{11, 13}));
+    EXPECT_EQ(projected.blocks("compact"), (BlockIndicesType{200, 201}));
+}
+
 }  // namespace test
 }  // namespace rtp_llm

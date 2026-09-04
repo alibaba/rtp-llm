@@ -11,9 +11,9 @@
 namespace rtp_llm {
 namespace {
 
-bool isCompactFullBlockList(const KVCacheResource&  source,
-                            const BlockIndicesType& src_blocks,
-                            const CacheKeysType&    selected_keys) {
+bool isCompactBlockList(const KVCacheResource&  source,
+                        const BlockIndicesType& src_blocks,
+                        const CacheKeysType&    selected_keys) {
     return src_blocks.size() <= selected_keys.size() || src_blocks.size() < source.cacheKeys().size();
 }
 
@@ -365,20 +365,14 @@ KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& so
         dst_blocks.reserve(selected_keys.size());
 
         const auto layout = layoutForGroup(config, tag);
-        if (layout.slice != CpBlockSliceMode::NONE) {
+        if (layout.slice != CpBlockSliceMode::NONE || isCompactBlockList(source, src_blocks, selected_keys)) {
             for (size_t i = 0; i < selected_keys.size(); ++i) {
                 dst_blocks.push_back(i < src_blocks.size() ? src_blocks[i] : NULL_BLOCK_IDX);
             }
         } else if (layout.mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN) {
-            if (isCompactFullBlockList(source, src_blocks, selected_keys)) {
-                for (size_t i = 0; i < selected_keys.size(); ++i) {
-                    dst_blocks.push_back(i < src_blocks.size() ? src_blocks[i] : NULL_BLOCK_IDX);
-                }
-            } else {
-                for (size_t logical_pos = static_cast<size_t>(cp_size_ - 1); dst_blocks.size() < selected_keys.size();
-                     logical_pos += static_cast<size_t>(cp_size_)) {
-                    dst_blocks.push_back(logical_pos < src_blocks.size() ? src_blocks[logical_pos] : NULL_BLOCK_IDX);
-                }
+            for (size_t logical_pos = static_cast<size_t>(cp_size_ - 1); dst_blocks.size() < selected_keys.size();
+                 logical_pos += static_cast<size_t>(cp_size_)) {
+                dst_blocks.push_back(logical_pos < src_blocks.size() ? src_blocks[logical_pos] : NULL_BLOCK_IDX);
             }
         } else {
             for (size_t logical_pos = static_cast<size_t>(cp_size_ - 1); dst_blocks.size() < selected_keys.size();
