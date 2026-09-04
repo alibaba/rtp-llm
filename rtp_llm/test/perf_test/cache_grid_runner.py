@@ -241,6 +241,7 @@ class CacheGridRunner:
         measure_runs: int = 3,
         checkpoint_every: int = 1,
         cache_commit_tail_tokens: int = 4096,
+        fail_fast: bool = True,
     ):
         self.port = port
         self.factory = PrefixPromptFactory(tokenizer)
@@ -257,6 +258,7 @@ class CacheGridRunner:
         self.measure_runs = measure_runs
         self.checkpoint_every = max(1, checkpoint_every)
         self.cache_commit_tail_tokens = cache_commit_tail_tokens
+        self.fail_fast = fail_fast
         self.result_path = self.result_dir / "cache_grid_results.json"
         self._results: Dict[str, Dict[str, Any]] = {}
         self._http_session = _make_http_session()
@@ -287,7 +289,9 @@ class CacheGridRunner:
             "mode": "prefix_cache_grid",
             "complete": complete,
             "total_cases": len(self.cases),
-            "completed_cases": len(self._results),
+            "completed_cases": sum(
+                row.get("status") == "ok" for row in self._results.values()
+            ),
             "metrics": list(self._results.values()),
         }
         if asynchronous:
@@ -365,11 +369,15 @@ class CacheGridRunner:
         }
 
     def run(self) -> List[Dict[str, Any]]:
-        pending = [c for c in self.cases if self.case_key(c) not in self._results]
+        pending = [
+            case
+            for case in self.cases
+            if self._results.get(self.case_key(case), {}).get("status") != "ok"
+        ]
         logging.info(
             "cache grid: %d total cases, %d already complete, %d pending",
             len(self.cases),
-            len(self._results),
+            len(self.cases) - len(pending),
             len(pending),
         )
         if not pending:
@@ -516,7 +524,17 @@ class CacheGridRunner:
                         metric.get("status"),
                         metric.get("cache_len_observed", []),
                     )
-            self._save(complete=len(self._results) == len(self.cases))
+                    if self.fail_fast and metric.get("status") != "ok":
+                        self._save()
+                        raise RuntimeError(
+                            f"cache grid stopped at {key}: "
+                            f"status={metric.get('status')}"
+                        )
+            complete = all(
+                self._results.get(self.case_key(case), {}).get("status") == "ok"
+                for case in self.cases
+            )
+            self._save(complete=complete)
             return list(self._results.values())
         finally:
             self._close_resources()

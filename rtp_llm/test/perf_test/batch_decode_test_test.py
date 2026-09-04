@@ -178,6 +178,37 @@ class BatchDecodeTest(unittest.TestCase):
         self.assertTrue(rows[0]["timing_valid"])
         self.assertEqual(rows[0]["median_ttft_ms"], 11.0)
 
+    @patch("rtp_llm.test.perf_test.cache_grid_runner._post_prefill")
+    def test_runner_fails_fast_and_checkpoints_invalid_reuse(self, post):
+        post.side_effect = [
+            {"success": True},
+            *[
+                {
+                    "success": True,
+                    "input_len": 16,
+                    "output_len": 1,
+                    "reuse_len": 0,
+                    "ttft_ms": 10.0,
+                }
+                for _ in range(3)
+            ],
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = CacheGridRunner(
+                12345,
+                _WhitespaceTokenizer(),
+                [{"case_id": 1, "batch_size": 1, "input_len": 16, "cache_len": 8}],
+                tmp,
+                cache_commit_tail_tokens=8,
+            )
+            with self.assertRaisesRegex(RuntimeError, "invalid_reuse"):
+                runner.run()
+            with (Path(tmp) / "cache_grid_results.json").open() as f:
+                result = json.load(f)
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["completed_cases"], 0)
+        self.assertEqual(result["metrics"][0]["status"], "invalid_reuse")
+
 
 if __name__ == "__main__":
     unittest.main()
