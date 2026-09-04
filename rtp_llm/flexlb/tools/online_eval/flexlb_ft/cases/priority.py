@@ -1329,11 +1329,15 @@ def prio_normalize(ctx: CaseContext):
     Segment 2 (window env, Q1 — the PRIORITY axis): placeholder(no
     input) + C(no input → 50) + A(proto 70, header 30 — proto must win)
     + B(proto unset, header 70 — header must take effect) + G(explicit
-    70).  [EV-1-FIXED] Under the intake3 pull-based coordinator the wave
-    parks whole and dispatches [ph, C, A, B, G]: C (the wave's first
-    submitter) legitimately wins the first release slot, then the
-    70-group A/B/G follows in submit order (a failed channel reorders
-    the tail and flips the assertion).  The source's FIFO-profile half
+    70).  dsv4 v1 releases by PriorityOrdering.STRICT (priority desc +
+    enqueue-seq FIFO tie-break; the intake3 pull-model baseline, where
+    the wave's first parker C won the first release slot, does not
+    apply to this stack): the wave dispatches [ph, A, B, G, C] — the
+    70-group A/B/G in submit order, C (default 50) tailing.  The
+    three-channel normalization discrimination is preserved: A (proto
+    70 overriding header 30) and B (header 70 taking effect) must sit
+    in the 70-group ahead of C — a failed channel reorders the tail
+    and flips the assertion.  The source's FIFO-profile half
     (F1 control env) is not profile-reachable on this line; the FIFO
     control lives separately in atpm_comparator_frozen_weak's fifo_half.
     Implementation-period note: design §2.2 sketched this segment without
@@ -1423,16 +1427,21 @@ def prio_normalize(ctx: CaseContext):
         s2_fires.extend(_fire_batch(ops2, s2_specs))
         s2_outcomes = _drain(ops2, s2_fires)
         s2_order = _dispatch_order(ops2, s2_fires)
-        # [EV-1-FIXED] baseline flipped at intake3 PendingPlacementCoordinator
-        # (6ad0315f10): the four-request wave parks whole and dispatches
-        # [ph, C, A, B, G] — C (no input -> default 50) is the wave's first
-        # submitter and wins the first release slot, then the 70-group A/B/G
-        # follows in submit order (proto won for A, header took effect for
-        # B — a failed channel reorders the tail and flips the assertion).
-        # All four settle code=200.
+        # v1 STRICT calibre (dsv4): the intake3 pull-model baseline
+        # ([ph, C, A, B, G] — the wave's first parker C wins the first
+        # release slot, 6ad0315f10) does NOT apply to this stack.  dsv4
+        # v1 releases by PriorityOrdering.STRICT — priority desc,
+        # enqueue-seq FIFO tie-break — so the dispatch is
+        # [ph, A, B, G, C]: the 70-group A/B/G leads in submit order,
+        # C (no input -> default 50) tails.  The three-channel
+        # normalization discrimination is preserved: A (proto 70
+        # overriding header 30) and B (header 70 taking effect) must
+        # sit in the 70-group ahead of C — a failed channel (A falling
+        # to 30, B falling to unset) reorders the tail and flips the
+        # assertion.  All four settle code=200.
         s2_m = _outcome_map(s2_outcomes)
         s2_wave = [c_rid, a_rid, b_rid, g_rid]
-        s2_expected = [ph2, c_rid, a_rid, b_rid, g_rid]
+        s2_expected = [ph2, a_rid, b_rid, g_rid, c_rid]
         s2_ok = (
             s2_order == s2_expected
             and s2_m[ph2][0]
@@ -1442,7 +1451,7 @@ def prio_normalize(ctx: CaseContext):
             (
                 "proto_header_default_ev1_fixed",
                 s2_ok,
-                f"[EV-1-FIXED] dispatch==[ph,C,A,B,G]:"
+                f"dispatch==[ph,A,B,G,C]:"
                 f"{s2_order == s2_expected}, "
                 f"codes={[(r % 1_000_000, s2_m[r][1]) for r in s2_wave]}, "
                 f"order={[r % 1_000_000 for r in s2_order]}",
