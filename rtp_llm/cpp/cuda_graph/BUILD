@@ -87,6 +87,7 @@ cc_library(
             "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",
         ],
         "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",
             "@local_config_rocm//rocm:rocm_headers",
             "@local_config_rocm//rocm:rocm",
         ],

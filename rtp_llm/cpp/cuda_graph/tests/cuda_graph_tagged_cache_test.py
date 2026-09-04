@@ -408,53 +408,62 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         self.assertFalse(runner.canRun(non_prefill))
 
     def test_target_verify_uses_reserved_block_dummy_rows(self) -> None:
-        query_len = 5
-        prefix_len = 11
-        runner = CudaGraphRunner()
-        runner.init_decode(
-            TaggedSequenceLengthModel(),
-            HIDDEN_SIZE,
-            64,
-            TOKENS_PER_BLOCK,
-            TOKENS_PER_BLOCK,
-            [4],
-            GROUP_TAGS,
-            True,
-            query_len,
+        scenarios = (
+            (4, 5, 11, (4, 3, 2, 1, 4)),
+            # Production shape: DSpark proposes 7+1 tokens and a live batch of
+            # six replays the graph-eight bucket on MI308X.
+            (8, 8, 17, (8, 6, 2, 8)),
         )
+        for graph_size, query_len, prefix_len, batch_sizes in scenarios:
+            runner = CudaGraphRunner()
+            runner.init_decode(
+                TaggedSequenceLengthModel(),
+                HIDDEN_SIZE,
+                64,
+                TOKENS_PER_BLOCK,
+                TOKENS_PER_BLOCK,
+                [graph_size],
+                GROUP_TAGS,
+                True,
+                query_len,
+            )
 
-        # Exercise both growth and shrink on the same graph instance. The
-        # production failure appeared only after a full bucket lost a request.
-        for batch_size in (4, 3, 2, 1, 4):
-            with self.subTest(batch_size=batch_size):
-                inputs = _build_target_verify_inputs(
-                    GROUP_TAGS,
-                    {"full": 2, "aux": 1},
-                    batch_size=batch_size,
-                    query_len=query_len,
-                    prefix_len=prefix_len,
-                )
-                self.assertTrue(runner.canRun(inputs))
-                self.assertEqual(runner.getCurrentRealGraphSize(), 4)
+            # Exercise both growth and shrink on the same graph instance. The
+            # production failure appeared only after a full bucket lost a request.
+            for batch_size in batch_sizes:
+                with self.subTest(graph_size=graph_size, batch_size=batch_size):
+                    inputs = _build_target_verify_inputs(
+                        GROUP_TAGS,
+                        {"full": 2, "aux": 1},
+                        batch_size=batch_size,
+                        query_len=query_len,
+                        prefix_len=prefix_len,
+                    )
+                    self.assertTrue(runner.canRun(inputs))
+                    self.assertEqual(runner.getCurrentRealGraphSize(), graph_size)
 
-                output = runner.forward(inputs)
-                torch.cuda.synchronize()
-                total_query_length = batch_size * query_len
-                total_kv_length = batch_size * (query_len + prefix_len)
-                expected_signature = torch.tensor(
-                    [
-                        4 * query_len,
-                        total_kv_length + (4 - batch_size) * query_len,
-                        4 * query_len,
-                        prefix_len + 1 if batch_size == 4 else query_len,
-                    ],
-                    dtype=output.hidden_states.dtype,
-                    device=output.hidden_states.device,
-                )
-                torch.testing.assert_close(
-                    output.hidden_states,
-                    expected_signature.unsqueeze(0).expand_as(output.hidden_states),
-                )
+                    output = runner.forward(inputs)
+                    torch.cuda.synchronize()
+                    total_kv_length = batch_size * (query_len + prefix_len)
+                    expected_signature = torch.tensor(
+                        [
+                            graph_size * query_len,
+                            total_kv_length
+                            + (graph_size - batch_size) * query_len,
+                            graph_size * query_len,
+                            prefix_len + 1
+                            if batch_size == graph_size
+                            else query_len,
+                        ],
+                        dtype=output.hidden_states.dtype,
+                        device=output.hidden_states.device,
+                    )
+                    torch.testing.assert_close(
+                        output.hidden_states,
+                        expected_signature.unsqueeze(0).expand_as(
+                            output.hidden_states
+                        ),
+                    )
 
     def test_block_table_copy_clips_wider_hybrid_staging_rows(self) -> None:
         runner = CudaGraphRunner()

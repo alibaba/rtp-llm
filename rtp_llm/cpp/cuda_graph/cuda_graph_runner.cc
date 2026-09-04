@@ -10,7 +10,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
 #include "rtp_llm/models_py/bindings/cuda/kernels/cuda_graph_prepare.h"
 #endif
 using namespace torch_ext;
@@ -97,14 +97,15 @@ void callPrepareCudaGraph(py::object attn_pyobj, PyModelInputs& inputs) {
     }
 }
 
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
 void addCudaGraphPrepareFillRegion(
     CudaGraphPrepareFillParams& params, torch::Tensor& tensor, int64_t start, int64_t end, int32_t value) {
     if (!tensor.defined() || !tensor.is_cuda() || end <= start) {
         return;
     }
-    RTP_LLM_CHECK_WITH_INFO(tensor.scalar_type() == torch::kInt32, "cuda graph prepare fill expects int32 CUDA tensor");
-    RTP_LLM_CHECK_WITH_INFO(tensor.is_contiguous(), "cuda graph prepare fill expects contiguous tensor");
+    RTP_LLM_CHECK_WITH_INFO(tensor.scalar_type() == torch::kInt32,
+                            "cuda graph prepare fill expects int32 CUDA/HIP tensor");
+    RTP_LLM_CHECK_WITH_INFO(tensor.is_contiguous(), "cuda graph prepare fill expects contiguous CUDA/HIP tensor");
     RTP_LLM_CHECK_WITH_INFO(start >= 0 && end <= tensor.numel(),
                             "cuda graph prepare fill range [%ld, %ld) exceeds tensor numel %ld",
                             start,
@@ -135,7 +136,7 @@ void addCudaGraphPrepareFillRegionFromDevice(CudaGraphPrepareFillParams& params,
     RTP_LLM_CHECK_WITH_INFO(value_tensor.defined() && value_tensor.is_cuda()
                                 && value_tensor.scalar_type() == torch::kInt32 && value_index >= 0
                                 && value_index < value_tensor.numel(),
-                            "cuda graph prepare fill source must be a valid CUDA int32 element");
+                            "cuda graph prepare fill source must be a valid CUDA/HIP int32 element");
     auto& region        = params.regions[params.region_count - 1];
     region.value_ptr    = value_tensor.data_ptr<int32_t>() + value_index;
     region.value_offset = value_offset;
@@ -428,7 +429,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     };
 
     // Clear stale device ranges in one launch before copying the live portions.
-#if USING_CUDA
+#if USING_CUDA || USING_ROCM
     {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(fused_fill)");
         CudaGraphPrepareFillParams fill_params;
@@ -761,7 +762,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     };
 
     // Keep the host mirrors consistent with the device-side replay contract.
-    // CUDA device tails were already prepared by the single fused launch above.
+    // CUDA/HIP device tails were already prepared by the single fused launch above.
     if (has_padded_rows && is_target_verify_) {
         py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, selected_graph_batch_size)
             .fill_(0);
@@ -772,7 +773,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                 selected_graph_batch_size,
                                 state.seq_len_sum,
                                 num_tokens_per_bs_);
-#if !USING_CUDA
+#if !USING_CUDA && !USING_ROCM
         py_model_inputs_.attention_inputs.prefix_lengths_device
             .slice(0, state.current_batch_size, selected_graph_batch_size)
             .fill_(0);
@@ -801,7 +802,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         py_model_inputs_.attention_inputs.cu_seqlens
             .slice(0, state.current_batch_size + 1, selected_graph_batch_size + 1)
             .fill_(state.current_seq_len);
-#if !USING_CUDA
+#if !USING_CUDA && !USING_ROCM
         py_model_inputs_.attention_inputs.prefix_lengths_device
             .slice(0, state.current_batch_size, selected_graph_batch_size)
             .fill_(0);

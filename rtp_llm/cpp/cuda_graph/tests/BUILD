@@ -13,6 +13,24 @@ cc_test(
     ] + torch_deps(),
 )
 
+cc_test(
+    name = "cuda_graph_prepare_fill_rocm_test",
+    srcs = ["cuda_graph_prepare_fill_test.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",
+        "@local_config_rocm//rocm:hip",
+        "@local_config_rocm//rocm:rocm_headers",
+        "@com_google_googletest//:gtest_main",
+    ],
+    tags = ["rocm"],
+    target_compatible_with = select({
+        "@//:using_rocm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
+
 cc_library(
     name = "test_cuda_graph_runner_libs",
     srcs = [
