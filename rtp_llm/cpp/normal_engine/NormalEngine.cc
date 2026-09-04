@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/PDFusionRatioScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -369,14 +370,25 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     // value when the user passed --seq_size_per_block < 256.
     const int cache_gen_num_per_cycle =
         sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
-    auto cache_config = CacheConfigCreator::createBasicConfig(
-        model_config_, parallelism_config, false, cache_gen_num_per_cycle);
+    // Independent cache pools derive their physical and kernel block geometry
+    // from KVCacheConfig. Rebuilding them through createBasicConfig drops an
+    // explicit kernel block override (for example physical=1024, kernel=128),
+    // which makes CUDA-graph warmup feed the physical size to attention kernels.
+    const bool  use_independent_pools = model_config_.hybrid_attention_config.enable_independent_kv_cache_pools;
+    CacheConfig cache_config;
+    if (use_independent_pools) {
+        cache_config = HybridPoolConfigCreator::createConfig(
+            model_config_, parallelism_config, kv_cache_config, false, cache_gen_num_per_cycle);
+    } else {
+        cache_config =
+            CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, cache_gen_num_per_cycle);
+    }
     cache_config.block_num = 5;
     // createBasicConfig's SingleConfigCreator / HybridConfigCreator paths can
     // leave kernel_seq_size_per_block at 0 (only the real createConfig path
     // runs setupKernelSeqSize). PyWrappedModel asserts kernel_tokens_per_block
     // > 0, so apply the same default here: kernel block == physical block.
-    if (cache_config.kernel_seq_size_per_block == 0) {
+    if (!use_independent_pools && cache_config.kernel_seq_size_per_block == 0) {
         cache_config.kernel_seq_size_per_block = cache_config.seq_size_per_block;
     }
     ParallelismConfig temp_parallelism_config;
