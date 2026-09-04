@@ -135,13 +135,14 @@ class HybridKVCacheSpecTest(TestCase):
         with self.assertRaisesRegex(ValueError, "exactly 3 T/H/W sections"):
             Qwen35Moe._parse_rope_config({"rope_parameters": rope_parameters}, config)
 
-    def test_qwen3_vl_defaults_to_interleaved_mrope_sections(self):
+    def test_qwen3_vl_parses_explicit_mrope_sections(self):
         config = ModelConfig()
         QWen3_VL._from_config_json(
             config,
             {
                 "vision_start_token_id": 1,
                 "vision_end_token_id": 2,
+                "vision_config": {},
                 "text_config": {
                     "intermediate_size": 256,
                     "num_attention_heads": 2,
@@ -150,13 +151,53 @@ class HybridKVCacheSpecTest(TestCase):
                     "hidden_size": 256,
                     "num_hidden_layers": 2,
                     "vocab_size": 1024,
+                    "rope_scaling": {
+                        "mrope_section": [16, 24, 24],
+                        "mrope_interleaved": False,
+                    },
                 },
             },
         )
 
         rope_config = config.attn_config.rope_config
-        self.assertTrue(rope_config.mrope_interleaved)
+        self.assertFalse(rope_config.mrope_interleaved)
         self.assertEqual(rope_config.index_factor, 3)
+        self.assertEqual(
+            [
+                rope_config.mrope_dim1,
+                rope_config.mrope_dim2,
+                rope_config.mrope_dim3,
+            ],
+            [16, 24, 24],
+        )
+        self.assertEqual(
+            rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3,
+            rope_config.dim // 2,
+        )
+
+    def test_qwen3_vl_uses_official_mrope_fallback_with_warning(self):
+        config = ModelConfig()
+        with self.assertLogs(level="WARNING") as logs:
+            QWen3_VL._from_config_json(
+                config,
+                {
+                    "vision_start_token_id": 1,
+                    "vision_end_token_id": 2,
+                    "vision_config": {},
+                    "text_config": {
+                        "intermediate_size": 256,
+                        "num_attention_heads": 2,
+                        "num_key_value_heads": 1,
+                        "head_dim": 128,
+                        "hidden_size": 256,
+                        "num_hidden_layers": 2,
+                        "vocab_size": 1024,
+                        "rope_scaling": {},
+                    },
+                },
+            )
+
+        rope_config = config.attn_config.rope_config
         self.assertEqual(
             [
                 rope_config.mrope_dim1,
@@ -165,19 +206,19 @@ class HybridKVCacheSpecTest(TestCase):
             ],
             [24, 20, 20],
         )
-        self.assertEqual(
-            rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3,
-            rope_config.dim // 2,
+        self.assertTrue(
+            any("official 128-dim fallback" in message for message in logs.output)
         )
 
     def test_qwen3_vl_rejects_non_three_axis_mrope_section(self):
         config = ModelConfig()
-        with self.assertRaisesRegex(ValueError, "exactly 3 T/H/W sections"):
+        with self.assertRaisesRegex(ValueError, "three positive integers"):
             QWen3_VL._from_config_json(
                 config,
                 {
                     "vision_start_token_id": 1,
                     "vision_end_token_id": 2,
+                    "vision_config": {},
                     "text_config": {
                         "intermediate_size": 256,
                         "num_attention_heads": 2,

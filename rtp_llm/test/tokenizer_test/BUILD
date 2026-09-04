@@ -7,6 +7,12 @@ filegroup(
 )
 
 py_test(
+    name = "base_tokenizer_test",
+    srcs = ["base_tokenizer_test.py"],
+    deps = ["//rtp_llm:frontend"],
+)
+
+py_test(
     name = "chatglm3_tokenizer_test",
     srcs = [
         "chatglm3_tokenizer_test.py"

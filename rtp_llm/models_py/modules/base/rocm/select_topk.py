@@ -28,5 +28,5 @@ class SelectTopk(nn.Module):
             topk_ids,
             token_expert_indicies,
             router_logits_fp32,  # TODO(woosuk): Optimize this.
-            True,
+            self.config.has_moe_norm,
         )

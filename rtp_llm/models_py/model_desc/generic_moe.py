@@ -24,6 +24,7 @@ from rtp_llm.models_py.modules import (
     SelectTopk,
     SigmoidGateScaleAdd,
 )
+from rtp_llm.models_py.modules.base.common.moe_topk import group_topk_supported
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -142,6 +143,28 @@ class GenericMoeLayer(nn.Module):
 
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
+        self.group_topk = None
+        if self.correction_bias is not None:
+            self.renormalize = self.config.has_moe_norm
+            self.num_expert_group = self.config.moe_n_group
+            self.topk_group = self.config.moe_topk_group
+            self.n_routed_experts = self.config.expert_num
+            self.routed_scaling_factor = self.config.routed_scaling_factor
+            if not group_topk_supported(
+                num_experts=self.n_routed_experts,
+                n_group=self.num_expert_group,
+                topk_group=self.topk_group,
+                top_k=self.top_k,
+                renormalize=self.renormalize,
+            ):
+                raise ValueError(
+                    "unsupported fused GroupTopK routing: "
+                    f"num_experts={self.n_routed_experts}, "
+                    f"n_group={self.num_expert_group}, "
+                    f"topk_group={self.topk_group}, top_k={self.top_k}, "
+                    f"renormalize={self.renormalize}"
+                )
+            self.group_topk = GroupTopK()
 
     def _merge_shared_expert_output(
         self,
@@ -186,13 +209,8 @@ class GenericMoeLayer(nn.Module):
         )
 
         if self.correction_bias is not None:
-            self.group_topk = GroupTopK()
-            self.renormalize = self.config.has_moe_norm
-            self.num_expert_group = self.config.moe_n_group
-
-            self.topk_group = self.config.moe_topk_group
-            self.n_routed_experts = self.config.expert_num  # config.n_routed_experts
-            self.routed_scaling_factor = self.config.routed_scaling_factor
+            if self.group_topk is None:
+                raise RuntimeError("GroupTopK was not initialized")
             self.group_topk(
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,

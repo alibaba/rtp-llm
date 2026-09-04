@@ -150,18 +150,168 @@ py_library(
 )
 
 py_library(
+    name = "new_loader_core",
+    srcs = [
+        "__init__.py",
+        "model_loader.py",
+        "module_base.py",
+        "registry.py",
+        "weight_mapper.py",
+    ],
+    deps = [
+        "//rtp_llm:safetensors",
+        "//rtp_llm:torch",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "model_desc_base",
+    srcs = [
+        "model_desc/block_map.py",
+        "model_desc/module_base.py",
+    ],
+    deps = [
+        ":modules",
+        ":new_loader_core",
+        "//rtp_llm:config",
+        "//rtp_llm:device",
+        "//rtp_llm:ops",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "new_weight_loader",
+    srcs = glob([
+        "layers/*.py",
+        "new_models/*.py",
+        "new_models/bert/*.py",
+        "new_models/deepseek_v3/*.py",
+        "new_models/deepseek_v3_mtp/*.py",
+        "new_models/deepseek_vl2/*.py",
+        "new_models/llama/*.py",
+        "new_models/kimi_linear/*.py",
+        "new_models/mtp/*.py",
+        "new_models/qwen2/*.py",
+        "new_models/qwen2_moe/*.py",
+        "new_models/qwen2_vl/*.py",
+        "new_models/qwen3/*.py",
+        "new_models/qwen3_moe/*.py",
+        "new_models/qwen3_next/*.py",
+        "new_models/qwen3_vl/*.py",
+        "new_models/qwen3_vl_moe/*.py",
+        "quant_methods/*.py",
+    ], exclude = [
+        # Pack DeepSeek-VL2 vision only in deepseek_vl2_vision_loader below;
+        # config's existing multimodal dependency still makes its third-party
+        # packages transitively available to this target.
+        "new_models/deepseek_vl2/vision.py",
+    ]),
+    deps = [
+        ":model_desc_base",
+        ":new_loader_core",
+        ":kernels",
+        ":modules",
+        "//rtp_llm:_ft_pickler",
+        "//rtp_llm:config",
+        "//rtp_llm:device",
+        "//rtp_llm:ops",
+        "//rtp_llm:safetensors",
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
+        "//rtp_llm/models_py/distributed:collective_torch",
+        "//rtp_llm/models_py/triton_kernels:triton_kernels",
+    ],
+    data = [
+        "//:rtp_compute_ops",
+        "//:th_transformer",
+        "//:th_transformer_config",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "qwen2_vl_vision_loader",
+    srcs = [
+        "new_models/__init__.py",
+        "new_models/qwen2_vl/__init__.py",
+        "new_models/qwen2_vl/vision.py",
+    ],
+    deps = [
+        ":new_loader_core",
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
+    ] + select({
+        # CUDA 13 locks intentionally omit flash-attn; the ARM config also
+        # matches using_cuda12_arm, so keep the stricter branches explicit.
+        "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
+        "@//:using_cuda12_9_x86": flashattn,
+        "@//:using_cuda12_arm": flashattn,
+        "//conditions:default": [],
+    }),
+    visibility = ["//rtp_llm:__subpackages__"],
+)
+
+py_library(
+    name = "qwen3_vl_vision_loader",
+    srcs = [
+        "new_models/__init__.py",
+        "new_models/qwen3_vl/__init__.py",
+        "new_models/qwen3_vl/vision.py",
+    ],
+    deps = [
+        ":new_loader_core",
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
+    ] + select({
+        # CUDA 13 locks intentionally omit flash-attn; the ARM config also
+        # matches using_cuda12_arm, so keep the stricter branches explicit.
+        "@//:using_cuda13_x86": [],
+        "@//:using_cuda13_arm": [],
+        "@//:using_cuda12_9_x86": flashattn,
+        "@//:using_cuda12_arm": flashattn,
+        "//conditions:default": [],
+    }),
+    visibility = ["//rtp_llm:__subpackages__"],
+)
+
+py_library(
+    name = "deepseek_vl2_vision_loader",
+    srcs = [
+        "new_models/__init__.py",
+        "new_models/deepseek_vl2/__init__.py",
+        "new_models/deepseek_vl2/vision.py",
+    ],
+    deps = [
+        ":new_loader_core",
+        "//rtp_llm:Pillow",
+        "//rtp_llm:timm",
+        "//rtp_llm:torch",
+        "//rtp_llm:torchvision",
+    ],
+    visibility = ["//rtp_llm:__subpackages__"],
+)
+
+py_library(
     name = "models",
     srcs = glob([
         "model_desc/*.py",
         "model_desc/cuda_graph/*.py",
         "speculative/*.py",
+    ], exclude = [
+        "model_desc/block_map.py",
+        "model_desc/module_base.py",
     ]),
     deps = [
+        ":model_desc_base",
         ":utils",
         ":modules",
         ":kernels",
         ":configs",
         "//rtp_llm:warmup",
+        ":new_weight_loader",
         "//rtp_llm/model_loader:loader",
     ] + select({
         "@//:using_cuda12": [

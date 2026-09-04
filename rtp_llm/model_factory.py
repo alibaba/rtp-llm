@@ -106,6 +106,9 @@ class ModelFactory:
             force_cpu_load_weights=engine_config.load_config.force_cpu_load_weights,
             loader_recycle_handles=engine_config.load_config.loader_recycle_handles,
             moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
+            keep_mla_checkpoint_weights=(
+                engine_config.load_config.keep_mla_checkpoint_weights
+            ),
         )
         return model
 
@@ -192,10 +195,16 @@ class ModelFactory:
                 device_resource_config=engine_config.device_resource_config,
                 vit_config=None,  # Propose model doesn't need vit_config
                 merge_lora=False,  # Propose model doesn't need merge_lora
+                force_cpu_load_weights=(
+                    engine_config.load_config.force_cpu_load_weights
+                ),
                 loader_recycle_handles=engine_config.load_config.loader_recycle_handles,
                 moe_pure_tp_preshard=engine_config.load_config.moe_pure_tp_preshard,
                 weight_alias_owner=target_model if alias_names else None,
                 weight_alias_names=alias_names,
+                keep_mla_checkpoint_weights=(
+                    engine_config.load_config.keep_mla_checkpoint_weights
+                ),
             )
             aliased_local_bytes = 0
             for name in alias_names:
@@ -449,6 +458,8 @@ class ModelFactory:
         propose_model_args.act_type = model_args.act_type
         propose_model_args.mla_ops_type = model_args.mla_ops_type
         propose_model_args.enable_fp32_lm_head = model_args.enable_fp32_lm_head
+        propose_model_args.use_new_loader = model_args.use_new_loader
+        propose_model_args.require_weight_update = model_args.require_weight_update
 
         # Create propose ModelConfig using _create_config
         propose_model_cls = ModelFactory.get_model_cls(sp_config.model_type)

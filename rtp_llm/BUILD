@@ -76,6 +76,41 @@ arch_with_version_dep = select({
     "//conditions:default": ["decord==0.6.0", "av==16.1.0"],
 })
 
+# Not every platform pip repository exposes Bazel packages for these optional
+# dependencies. Missing platforms use the manager's polling fallback when
+# watchdog is unavailable and gzip snapshots when zstandard is unavailable.
+# PPU uses the gzip fallback so its runfiles remain isolated from CUDA pip
+# repositories. Pre-12.9 CUDA reuses the CUDA 12 zstandard package.
+py_library(
+    name = "watchdog",
+    deps = select({
+        "@//:using_ppu": [],
+        "@//:cuda_pre_12_9": [],
+        "@//:using_cuda13_x86": [],
+        "@//:using_cuda12_9_x86": ["@pip_gpu_cuda12_9_torch//watchdog"],
+        "@//:using_cuda13_arm": [],
+        "@//:using_cuda12_arm": [],
+        "@//:using_rocm": [],
+        "@//:using_arm": [],
+        "//conditions:default": [],
+    }),
+)
+
+py_library(
+    name = "zstandard",
+    deps = select({
+        "@//:using_ppu": [],
+        "@//:cuda_pre_12_9": ["@pip_gpu_cuda12_torch//zstandard"],
+        "@//:using_cuda13_x86": [],
+        "@//:using_cuda12_9_x86": ["@pip_gpu_cuda12_9_torch//zstandard"],
+        "@//:using_cuda13_arm": [],
+        "@//:using_cuda12_arm": [],
+        "@//:using_rocm": [],
+        "@//:using_arm": [],
+        "//conditions:default": [],
+    }),
+)
+
 requirement([
     "sentencepiece",
     "transformers",
@@ -137,8 +172,6 @@ requirement([
     "aiter",
     "fastsafetensors",
     "pybind11_stubgen",
-    "watchdog",
-    "zstandard",
     "xgrammar",
 ] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
 
@@ -264,6 +297,10 @@ py_library(
         ":torchvision",
         ":protobuf",
         ":pyOpenSSL",
+        "//rtp_llm/models_py:new_loader_core",
+        "//rtp_llm/models_py:deepseek_vl2_vision_loader",
+        "//rtp_llm/models_py:qwen2_vl_vision_loader",
+        "//rtp_llm/models_py:qwen3_vl_vision_loader",
     ] + select({
         "@//:using_arm": [],
 	    "@//:using_rocm": ["pyrsmi", "amdsmi"],
@@ -296,6 +333,8 @@ py_library(
         ":onnx",
         #":decord",
         "//rtp_llm/model_loader:loader",
+        "//rtp_llm/metrics:metrics",
+        "//rtp_llm/models_py:new_loader_core",
         "//rtp_llm/models_py:models",
         ":multimodal",
     ] + select({
@@ -376,7 +415,9 @@ py_library(
     ]),
     deps = [
         "//rtp_llm/distribute:distribute",
-        ":multimodal"
+        ":multimodal",
+        ":pydantic",
+        ":transformers",
     ],
     data = [":alog_config"]
 )

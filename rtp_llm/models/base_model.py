@@ -25,9 +25,11 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
     BaseTokenizer,
     TokenizerFactory,
 )
+from rtp_llm.metrics import GaugeMetrics, kmonitor
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.model_loader.loader import ModelLoader, get_model_loader
 from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeights
+from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.ops import (
@@ -41,7 +43,11 @@ from rtp_llm.ops import (
     ParallelismConfig,
 )
 from rtp_llm.utils.database import CkptDatabase
-from rtp_llm.utils.model_weight import sp_0_pad8_size
+from rtp_llm.utils.model_weight import identity, sp_0_pad8_size, sp_id
+from rtp_llm.utils.new_loader import (
+    is_new_loader_enabled,
+    new_loader_unsupported_reason,
+)
 from rtp_llm.utils.time_util import timer_wrapper
 
 
@@ -90,6 +96,7 @@ class BaseModel(object):
         force_cpu_load_weights: bool = False,
         loader_recycle_handles: bool = False,
         moe_pure_tp_preshard: bool = False,
+        keep_mla_checkpoint_weights: bool = False,
     ) -> None:
         """Initialize BaseModel with independent configuration objects.
         Args:
@@ -118,6 +125,7 @@ class BaseModel(object):
         self.force_cpu_load_weights = force_cpu_load_weights
         self.loader_recycle_handles = loader_recycle_handles
         self.moe_pure_tp_preshard = moe_pure_tp_preshard
+        self.keep_mla_checkpoint_weights = keep_mla_checkpoint_weights
         self.weight = None
         self.weight_manager = None
         # Keep the owner alive for the complete lifetime of any non-owning
@@ -132,6 +140,7 @@ class BaseModel(object):
         self.tokenizer: Optional[BaseTokenizer] = None
         self.custom_module: Optional[CustomModule] = None
         self.py_model = None
+        self._uses_new_loader = False
         self.default_generate_config: GenerateConfig = GenerateConfig()
         self.load_tokenizer()
         self._finalize_output_vocab_config()
@@ -169,6 +178,15 @@ class BaseModel(object):
         """Get device string from parallelism_config."""
         return f"cuda:{self.parallelism_config.local_rank}"
 
+    @staticmethod
+    def _configure_deep_gemm_remote_cache() -> None:
+        remote_jit_dir = os.environ.get("REMOTE_JIT_DIR")
+        logging.info("python model remote_jit_dir for deep_gemm: %s", remote_jit_dir)
+        if remote_jit_dir:
+            os.environ["DG_JIT_REMOTE_CACHE_DIR"] = os.path.join(
+                remote_jit_dir, "deep_gemm_python"
+            )
+
     @timer_wrapper(description="load model")
     def load(self, skip_python_model: bool = False):
         if (
@@ -177,7 +195,19 @@ class BaseModel(object):
         ):
             raise Exception("current model can't support cuda graph in py model mode")
 
+        self._configure_deep_gemm_remote_cache()
+
+        # Downstream modules describe additional checkpoint weights. Build the
+        # descriptor before routing so automatic NewLoader selection can verify
+        # that the registered Python model implements the required mapping.
         self.custom_module = self._init_custom_module()
+
+        if self._use_new_loader(skip_python_model=skip_python_model):
+            if skip_python_model:
+                raise ValueError("newloader requires the Python model runtime")
+            self._load_with_new_loader()
+            return
+
         self.model_weights_loader = self.create_model_loader()
         self.py_eplb = self.model_weights_loader._py_eplb
         device_str = self._get_device_str()
@@ -190,6 +220,7 @@ class BaseModel(object):
             self.model_weights_loader,
             non_owned_global_weights=self._weight_alias_names,
         )
+        self._report_update_weights_capability(available=True)
         if skip_python_model:
             return
         logging.info(
@@ -300,6 +331,7 @@ class BaseModel(object):
         merge_lora: bool,
         device_resource_config: DeviceResourceConfig,
         force_cpu_load_weights: bool = False,
+        keep_mla_checkpoint_weights: bool = False,
         skip_python_model: bool = False,
         loader_recycle_handles: bool = False,
         moe_pure_tp_preshard: bool = False,
@@ -318,6 +350,7 @@ class BaseModel(object):
             max_generate_batch_size: Maximum batch size for generation
             merge_lora: Whether to merge LoRA weights
             device_resource_config: DeviceResourceConfig for device resource configuration
+            keep_mla_checkpoint_weights: Keep superseded MLA checkpoint tensors for debugging
         """
         # All metadata is in model_config
         model = cls(
@@ -335,6 +368,7 @@ class BaseModel(object):
             force_cpu_load_weights=force_cpu_load_weights,
             loader_recycle_handles=loader_recycle_handles,
             moe_pure_tp_preshard=moe_pure_tp_preshard,
+            keep_mla_checkpoint_weights=keep_mla_checkpoint_weights,
         )
         if weight_alias_names and weight_alias_owner is None:
             raise ValueError(
@@ -471,6 +505,267 @@ class BaseModel(object):
     def _load_custom_module(self):
         if self.custom_module is not None:
             self.custom_module.init(self.weight)
+
+    def _new_loader_unsupported_reason(
+        self, *, skip_python_model: bool = False
+    ) -> Optional[str]:
+        """Return why this load configuration cannot use NewLoader yet."""
+        reason = new_loader_unsupported_reason(
+            self.model_config,
+            skip_python_model=skip_python_model,
+            force_cpu_load_weights=self.force_cpu_load_weights,
+            device_resource_config=self.device_resource_config,
+            parallelism_config=self.parallelism_config,
+        )
+        if reason is not None:
+            return reason
+
+        from rtp_llm.models_py.model_loader import NewLoaderLoadMethod, NewModelLoader
+
+        load_method = NewModelLoader.resolve_requested_load_method(self.load_method)
+        if load_method == NewLoaderLoadMethod.FASTSAFETENSORS:
+            return (
+                "fastsafetensors is not supported by this NewLoader version; "
+                "use scratch or the legacy loader"
+            )
+        return self._new_loader_custom_weight_unsupported_reason()
+
+    def _legacy_loader_unsupported_reason(self) -> Optional[str]:
+        """Return why this checkpoint cannot use the legacy loader."""
+        return None
+
+    def _use_new_loader(self, *, skip_python_model: bool = False) -> bool:
+        from rtp_llm.models_py.registry import is_model_registered
+
+        default_enabled = is_model_registered(self.model_config.model_type)
+        enabled = is_new_loader_enabled(
+            self.model_config, default_enabled=default_enabled
+        )
+        unsupported_reason = None
+        if enabled and self.model_config.use_new_loader is None:
+            unsupported_reason = self._new_loader_unsupported_reason(
+                skip_python_model=skip_python_model
+            )
+            if unsupported_reason is not None:
+                legacy_reason = self._legacy_loader_unsupported_reason()
+                if legacy_reason is not None:
+                    raise ValueError(
+                        "No compatible loader route is available: NewLoader is "
+                        f"unsupported because {unsupported_reason}; legacy loader "
+                        f"is unsupported because {legacy_reason}."
+                    )
+                enabled = False
+                logging.warning(
+                    "NewLoader is registered for model_type=%s but the current "
+                    "configuration is not supported (%s); using the legacy loader",
+                    self.model_config.model_type,
+                    unsupported_reason,
+                )
+        if not enabled:
+            legacy_reason = self._legacy_loader_unsupported_reason()
+            if legacy_reason is not None:
+                raise ValueError(
+                    "Legacy loader is not supported for this checkpoint: "
+                    f"{legacy_reason}."
+                )
+        source = (
+            "explicit override"
+            if self.model_config.use_new_loader is not None
+            else (
+                "automatic compatibility fallback"
+                if unsupported_reason is not None
+                else "NewLoader registry default"
+            )
+        )
+        logging.info(
+            "loader route for model_type=%s: %s (%s)",
+            self.model_config.model_type,
+            "newloader" if enabled else "legacy",
+            source,
+        )
+        self._uses_new_loader = enabled
+        return enabled
+
+    @property
+    def uses_new_loader(self) -> bool:
+        """The final loader route selected for this model instance."""
+        return self._uses_new_loader
+
+    def _report_update_weights_capability(self, *, available: bool) -> None:
+        if self.parallelism_config.world_rank != 0:
+            return
+        kmonitor.report(
+            GaugeMetrics.UPDATE_WEIGHTS_AVAILABLE_METRIC,
+            1 if available else 0,
+            {
+                "loader": "newloader" if self._uses_new_loader else "legacy",
+                "model_type": self.model_config.model_type,
+            },
+        )
+
+    def _new_loader_quant_type(self) -> str:
+        quant_config = self.model_config.quant_config
+        if quant_config is None:
+            return "none"
+        runtime_method = quant_config.get_runtime_method_key()
+        if not isinstance(runtime_method, str) or not runtime_method.strip():
+            raise ValueError(
+                f"Quantization config {type(quant_config).__name__} is not "
+                "supported by the registered newloader model"
+            )
+        return runtime_method.strip()
+
+    def _new_loader_custom_weight_mappings(self):
+        if self.custom_module is None:
+            return ()
+        mappings = []
+        for weight_info in self.custom_module.get_custom_weight_info():
+            if not isinstance(weight_info, CustomAtomicWeight):
+                raise TypeError(
+                    "NewLoader custom weights must use CustomAtomicWeight, got "
+                    f"{type(weight_info).__name__}"
+                )
+            if len(weight_info.weights) != 1:
+                raise NotImplementedError(
+                    f"NewLoader custom weight {weight_info.name!r} must map from "
+                    "exactly one checkpoint tensor"
+                )
+            checkpoint_weight = weight_info.weights[0]
+            if (
+                weight_info.process_fun is not identity
+                or checkpoint_weight.merge_fun is not identity
+                or weight_info.split_func is not sp_id
+                or weight_info.data_type is not None
+            ):
+                raise NotImplementedError(
+                    f"NewLoader custom weight {weight_info.name!r} uses a legacy "
+                    "transform, split, or dtype override that has not been adapted"
+                )
+            mappings.append((weight_info.name, checkpoint_weight.tensor_name(None)))
+        return tuple(mappings)
+
+    def _new_loader_custom_weight_unsupported_reason(self) -> Optional[str]:
+        if self.custom_module is None:
+            return None
+        try:
+            mappings = self._new_loader_custom_weight_mappings()
+        except (TypeError, ValueError, NotImplementedError) as exc:
+            return str(exc)
+        if not mappings:
+            return None
+
+        from rtp_llm.models_py.registry import get_model_class
+
+        try:
+            model_cls = get_model_class(self.model_config.model_type)
+        except KeyError:
+            return (
+                f"model_type={self.model_config.model_type!r} is not registered "
+                "with NewLoader"
+            )
+        if not model_cls.supports_custom_weight_mappings:
+            return f"{model_cls.__name__} does not support downstream custom weights"
+        return None
+
+    def _load_with_new_loader(self) -> None:
+        from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
+        from rtp_llm.models_py.quant_methods import QuantizationConfig
+
+        unsupported_reason = self._new_loader_unsupported_reason()
+        if unsupported_reason is not None:
+            raise ValueError(unsupported_reason)
+
+        parallelism = self.parallelism_config
+        attn_tp = (
+            parallelism.get_attn_tp_size(),
+            parallelism.get_attn_tp_rank(),
+        )
+        ffn_tp = (
+            parallelism.get_ffn_tp_size(),
+            parallelism.get_ffn_tp_rank(),
+        )
+        physical_tp = (parallelism.tp_size, parallelism.tp_rank)
+        custom_weight_mappings = self._new_loader_custom_weight_mappings()
+
+        load_method = NewModelLoader.resolve_requested_load_method(self.load_method)
+        device = self._get_device_str()
+        load_config = NewLoaderConfig(
+            tp_size=physical_tp[0],
+            tp_rank=physical_tp[1],
+            attn_tp_size=attn_tp[0],
+            attn_tp_rank=attn_tp[1],
+            ffn_tp_size=ffn_tp[0],
+            ffn_tp_rank=ffn_tp[1],
+            lm_head_tp_size=physical_tp[0],
+            lm_head_tp_rank=physical_tp[1],
+            ep_size=self.parallelism_config.ep_size,
+            ep_rank=self.parallelism_config.ep_rank,
+            compute_dtype=self.model_config.compute_dtype,
+            device=device,
+            load_method=load_method,
+            quant_config=QuantizationConfig(
+                self._new_loader_quant_type(),
+                source_config=self.model_config.quant_config,
+                hw_kernel_config=self.hw_kernel_config,
+            ),
+            parallelism_config=self.parallelism_config,
+            moe_config=self.moe_config,
+            fmha_config=self.fmha_config,
+            device_resource_config=self.device_resource_config,
+            keep_mla_checkpoint_weights=self.keep_mla_checkpoint_weights,
+            custom_weight_mappings=custom_weight_mappings,
+        )
+        loader = NewModelLoader(
+            model_config=self.model_config,
+            load_config=load_config,
+            model_path=self.model_config.ckpt_path,
+        )
+        self.device = device
+        self.py_model = loader.load()
+        self.weight = self._build_new_loader_weight_view(self.py_model)
+        self.py_model.weight = self.weight
+        self._load_custom_module()
+        self.model_weights_loader = loader
+        self.weight_manager = None
+        self.py_eplb = None
+        self._report_update_weights_capability(available=False)
+        if self.parallelism_config.world_rank == 0:
+            route_source = (
+                "automatic route"
+                if self.model_config.use_new_loader is None
+                else "explicit override"
+            )
+            logging.warning(
+                "CAPABILITY_DISABLED: NewLoader does not support the online "
+                "UpdateWeights RPC (model_type=%s, source=%s). Deployments that "
+                "require online updates must set --require_weight_update true; "
+                "use --use_new_loader false to force the legacy loader.",
+                self.model_config.model_type,
+                route_source,
+            )
+        logging.info("NewModelLoader: model loaded successfully")
+
+    def _build_new_loader_weight_view(self, module: torch.nn.Module) -> ModelWeights:
+        export = getattr(module, "runtime_weight_view", None)
+        if not callable(export):
+            raise TypeError(
+                f"{type(module).__name__} must define runtime_weight_view()"
+            )
+        runtime_weights = export()
+        if not isinstance(runtime_weights, dict) or not runtime_weights:
+            raise TypeError("runtime_weight_view() must return a non-empty dict")
+        weights = ModelWeights(
+            self.model_config.num_layers,
+            self.device,
+            self.model_config.compute_dtype,
+        )
+        for name, tensor in runtime_weights.items():
+            if not isinstance(name, str) or not name:
+                raise TypeError("Runtime weight names must be non-empty strings")
+            if not isinstance(tensor, torch.Tensor):
+                raise TypeError(f"Runtime weight {name!r} must be a torch.Tensor")
+            weights.set_global_weight(name, tensor)
+        return weights
 
     def create_model_loader(self) -> ModelLoader:
         # Create database locally, only used for model loading

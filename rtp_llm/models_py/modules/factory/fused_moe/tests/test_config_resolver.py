@@ -4,8 +4,9 @@ import unittest
 from unittest.mock import patch
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, Fp8PerTensorQuantConfig
 from rtp_llm.device.device_type import DeviceType
+from rtp_llm.models_py.distributed.deepep_wrapper import DeepepWrapperConfig
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -93,6 +94,69 @@ class TestMoeConfigResolver(unittest.TestCase):
         quant_config = Fp8BlockWiseQuantConfig()
         config = create_config_adapter(quant_config=quant_config)
         self.assertEqual(self.resolver.get_quant_method(config), "FP8_PER_BLOCK")
+
+    def test_get_quant_method_normalizes_online_fp8_for_execution(self):
+        quant_config = Fp8PerTensorQuantConfig(is_quanted=False)
+        config = create_config_adapter(quant_config=quant_config)
+
+        self.assertEqual(
+            self.resolver.get_quant_method(config), "FP8_DYNAMIC_PER_TENSOR"
+        )
+
+    def test_get_quant_method_normalizes_prequantized_fp8_for_execution(self):
+        quant_config = Fp8PerTensorQuantConfig(is_quanted=True)
+        config = create_config_adapter(quant_config=quant_config)
+
+        self.assertEqual(
+            self.resolver.get_quant_method(config), "FP8_DYNAMIC_PER_TENSOR"
+        )
+
+    def test_fp8_moe_and_deepep_low_latency_share_runtime_method(self):
+        quant_config = Fp8PerTensorQuantConfig(is_quanted=True)
+        config = create_config_adapter(
+            ep_size=2,
+            quant_config=quant_config,
+            use_deepep_low_latency=True,
+        )
+
+        self.assertEqual(
+            self.resolver.get_quant_method(config),
+            quant_config.get_moe_runtime_method_key(),
+        )
+        self.assertEqual(
+            DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
+                17, 2, quant_config
+            ),
+            16,
+        )
+
+    def test_ignored_fp8_moe_layer_uses_process_wide_deepep_capacity(self):
+        quant_config = Fp8PerTensorQuantConfig(
+            is_quanted=True,
+            ignored_layers=["model.layers.0.mlp"],
+        )
+        ignored_layer = create_config_adapter(
+            ep_size=2,
+            quant_config=None,
+            use_deepep_low_latency=True,
+        )
+        ignored_layer.model_config.quant_config = quant_config
+
+        quantized_capacity = DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
+            17, 2, quant_config
+        )
+        unquantized_capacity = DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
+            17, 2, None
+        )
+        process_capacity = (
+            DeepepWrapperConfig.calc_model_low_latency_max_token_per_rank(
+                17, 2, ignored_layer.model_config.quant_config
+            )
+        )
+
+        self.assertEqual(quantized_capacity, 16)
+        self.assertEqual(unquantized_capacity, 64)
+        self.assertEqual(process_capacity, unquantized_capacity)
 
     def test_is_bf16_false(self):
         """Test is_bf16 returns False for fp16"""

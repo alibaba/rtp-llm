@@ -1,0 +1,230 @@
+import os
+import tempfile
+import types
+import unittest
+from unittest import mock
+
+import torch
+import torch.nn as nn
+from rtp_llm.models_py.layers import activation
+from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
+from rtp_llm.models_py.module_base import RtpModule
+from rtp_llm.models_py.registry import register_model
+from safetensors.torch import save_file
+
+
+class _GpuModel(RtpModule):
+    def __init__(self, model_config, load_config):
+        super().__init__()
+        self.weight = nn.Parameter(torch.empty(2))
+        self.register_buffer("scale", torch.empty(1), persistent=True)
+        self.validation_devices = []
+
+    def validate_weights_loaded(self, loaded_tensor_ids=None):
+        self.validation_devices.append(self.scale.device.type)
+        super().validate_weights_loaded(loaded_tensor_ids)
+
+
+register_model("foundation_gpu_model")(_GpuModel)
+
+
+class _GpuAliasModel(RtpModule):
+    def __init__(self, model_config, load_config):
+        super().__init__()
+        same = torch.empty(1)
+        self.register_buffer("same", same, persistent=True)
+        self.register_buffer("same_alias", same, persistent=True)
+        self.child = RtpModule()
+        cross = torch.empty(1)
+        self.register_buffer("cross", cross, persistent=True)
+        self.child.register_buffer("cross_alias", cross, persistent=True)
+        mixed = nn.Parameter(torch.empty(1))
+        self.mixed_parameter = mixed
+        self.register_buffer("mixed_buffer", mixed, persistent=True)
+        parent_first = nn.Parameter(torch.empty(1))
+        self.register_buffer("parent_buffer", parent_first, persistent=True)
+        self.child.parent_parameter = parent_first
+        self.left = RtpModule()
+        self.right = RtpModule()
+        sibling = nn.Parameter(torch.empty(1))
+        self.left.register_buffer("sibling_buffer", sibling, persistent=True)
+        self.right.sibling_parameter = sibling
+
+
+register_model("foundation_gpu_alias_model")(_GpuAliasModel)
+
+
+class FoundationGpuTest(unittest.TestCase):
+    def test_fused_silu_uses_the_input_device_stream(self):
+        gate_up = torch.randn(2, 256, dtype=torch.bfloat16, device="cuda:0")
+        fake_stream = types.SimpleNamespace(cuda_stream=12345)
+
+        def fake_silu_and_mul(output, input_tensor, stream_id):
+            self.assertEqual(stream_id, fake_stream.cuda_stream)
+            gate, up = input_tensor.chunk(2, dim=-1)
+            output.copy_(
+                (torch.nn.functional.silu(gate.float()) * up.float()).to(output.dtype)
+            )
+
+        with mock.patch.object(
+            activation, "_SILU_FUSED_ENABLED", True
+        ), mock.patch.object(
+            torch.cuda, "current_stream", return_value=fake_stream
+        ) as current_stream, mock.patch(
+            "rtp_llm.ops.compute_ops.rtp_llm_ops.silu_and_mul",
+            side_effect=fake_silu_and_mul,
+        ):
+            output = activation.silu_and_mul(gate_up)
+
+        current_stream.assert_called_once_with(gate_up.device)
+        gate, up = gate_up.chunk(2, dim=-1)
+        expected = (torch.nn.functional.silu(gate.float()) * up.float()).to(
+            gate_up.dtype
+        )
+        torch.testing.assert_close(output, expected)
+
+    def test_persistent_buffer_marker_survives_device_migration(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file(
+                {"weight": torch.ones(2), "scale": torch.ones(1)},
+                os.path.join(model_path, "model.safetensors"),
+            )
+            model = NewModelLoader(
+                types.SimpleNamespace(model_type="foundation_gpu_model"),
+                NewLoaderConfig(device="cuda:0", compute_dtype=torch.float32),
+                model_path=model_path,
+            ).load()
+        self.assertEqual(model.scale.device.type, "cuda")
+        self.assertEqual(model.validation_devices, ["cpu", "cuda"])
+
+    def test_buffer_aliases_survive_device_migration(self):
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file(
+                {
+                    "same_alias": torch.ones(1),
+                    "child.cross_alias": torch.ones(1),
+                    "mixed_buffer": torch.ones(1),
+                    "parent_buffer": torch.ones(1),
+                    "left.sibling_buffer": torch.ones(1),
+                },
+                os.path.join(model_path, "model.safetensors"),
+            )
+            model = NewModelLoader(
+                types.SimpleNamespace(model_type="foundation_gpu_alias_model"),
+                NewLoaderConfig(device="cuda:0"),
+                model_path=model_path,
+            ).load()
+        self.assertIs(model.same, model.same_alias)
+        self.assertIs(model.cross, model.child.cross_alias)
+        self.assertIs(model.mixed_parameter, model.mixed_buffer)
+        self.assertIs(model.parent_buffer, model.child.parent_parameter)
+        self.assertIs(model.left.sibling_buffer, model.right.sibling_parameter)
+        self.assertIsInstance(model.child.parent_parameter, nn.Parameter)
+        self.assertIsInstance(model.right.sibling_parameter, nn.Parameter)
+        with torch.inference_mode():
+            model.same.add_(1)
+            model.child.cross_alias.add_(2)
+            model.mixed_parameter.add_(3)
+        self.assertEqual(model.same_alias.item(), 2)
+        self.assertEqual(model.cross.item(), 3)
+        self.assertEqual(model.mixed_buffer.item(), 4)
+        with torch.inference_mode():
+            model.to(dtype=torch.float16)
+        self.assertIs(model.parent_buffer, model.child.parent_parameter)
+        self.assertIs(model.left.sibling_buffer, model.right.sibling_parameter)
+        self.assertIsInstance(model.child.parent_parameter, nn.Parameter)
+        self.assertIsInstance(model.right.sibling_parameter, nn.Parameter)
+
+    def test_cross_device_copy_does_not_allocate_full_target_temporary(self):
+        class CudaTarget(RtpModule):
+            def __init__(self):
+                super().__init__()
+                self.weight = nn.Parameter(
+                    torch.empty(16 * 1024 * 1024, device="cuda", dtype=torch.float32)
+                )
+
+        model = CudaTarget()
+        source = torch.ones(model.weight.shape, dtype=torch.float32)
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        baseline = torch.cuda.memory_allocated()
+        model.load_weights({"weight": source})
+        torch.cuda.synchronize()
+        extra_peak = torch.cuda.max_memory_allocated() - baseline
+        self.assertLess(extra_peak, 8 * 1024 * 1024)
+
+    def test_shared_weight_migration_allocates_one_gpu_copy(self):
+        class LargeTiedModel(RtpModule):
+            def __init__(self):
+                super().__init__()
+                self.embed = RtpModule()
+                self.head = RtpModule()
+                shared = nn.Parameter(torch.empty(16 * 1024 * 1024))
+                self.embed.weight = shared
+                self.head.weight = shared
+                self.register_buffer("weight_alias", shared, persistent=True)
+
+        model = LargeTiedModel()
+        weight_bytes = model.embed.weight.numel() * model.embed.weight.element_size()
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        baseline = torch.cuda.memory_allocated()
+
+        with torch.inference_mode():
+            model.to("cuda")
+
+        torch.cuda.synchronize()
+        extra_peak = torch.cuda.max_memory_allocated() - baseline
+        self.assertLess(extra_peak, weight_bytes * 2)
+        self.assertIs(model.embed.weight, model.head.weight)
+        self.assertIs(model.embed.weight, model.weight_alias)
+        self.assertIsInstance(model.embed.weight, nn.Parameter)
+
+    def test_staged_postprocess_bounds_online_quantization_peak_memory(self):
+        class StagedLinear(RtpModule):
+            def __init__(self, numel):
+                super().__init__()
+                self.weight = nn.Parameter(
+                    torch.empty(numel, dtype=torch.bfloat16), requires_grad=False
+                )
+
+            def requires_staged_device_postprocess(self):
+                return True
+
+            def process_weights_after_loading(self):
+                compressed = self.weight.detach().to(torch.uint8)
+                del self.weight
+                self.register_parameter(
+                    "weight", nn.Parameter(compressed, requires_grad=False)
+                )
+
+        layer_count = 4
+        layer_numel = 16 * 1024 * 1024
+        model = RtpModule()
+        model.layers = nn.ModuleList(
+            [StagedLinear(layer_numel) for _ in range(layer_count)]
+        )
+        full_bf16_bytes = (
+            layer_count
+            * layer_numel
+            * torch.empty((), dtype=torch.bfloat16).element_size()
+        )
+
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        baseline = torch.cuda.memory_allocated()
+        with torch.inference_mode():
+            NewModelLoader._migrate_staged_modules(model, "cuda")
+            model.to("cuda")
+        torch.cuda.synchronize()
+        extra_peak = torch.cuda.max_memory_allocated() - baseline
+
+        self.assertLess(extra_peak, full_bf16_bytes)
+        self.assertTrue(
+            all(layer.weight.dtype == torch.uint8 for layer in model.layers)
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

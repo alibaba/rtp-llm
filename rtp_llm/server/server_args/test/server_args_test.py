@@ -75,6 +75,28 @@ class ServerArgsSetTest(TestCase):
         os.environ.update(self._environ_backup)
         sys.argv = self._argv_backup
 
+    def test_new_loader_defaults_to_model_registry_selection(self):
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertIsNone(py_env_configs.model_args.use_new_loader)
+        self.assertIsNone(py_env_configs.model_args.require_weight_update)
+
+    def test_weight_update_policy_accepts_explicit_env_false(self):
+        os.environ["REQUIRE_WEIGHT_UPDATE"] = "false"
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertIs(py_env_configs.model_args.require_weight_update, False)
+
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
         # Set environment variables
@@ -100,6 +122,9 @@ class ServerArgsSetTest(TestCase):
         os.environ["MM_VIDEO_MAX_FILE_SIZE_KB"] = "4096"
         os.environ["THINK_MODE"] = "adaptive"
         os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
+        os.environ["KEEP_MLA_CHECKPOINT_WEIGHTS"] = "1"
+        os.environ["USE_NEW_LOADER"] = "true"
+        os.environ["REQUIRE_WEIGHT_UPDATE"] = "true"
 
         sys.argv = ["prog"]
 
@@ -113,6 +138,8 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.model_args.model_type, "qwen")
         self.assertEqual(py_env_configs.model_args.ckpt_path, "/path/to/checkpoint")
         self.assertEqual(py_env_configs.model_args.act_type, "BF16")
+        self.assertIs(py_env_configs.model_args.use_new_loader, True)
+        self.assertTrue(py_env_configs.model_args.require_weight_update)
 
         # Verify parallelism_config
         self.assertEqual(py_env_configs.parallelism_config.tp_size, 4)
@@ -176,6 +203,7 @@ class ServerArgsSetTest(TestCase):
         self.assertFalse(py_env_configs.load_config.loader_recycle_handles)
         # MOE_PURE_TP_PRESHARD=true explicitly enables the opt-in path.
         self.assertTrue(py_env_configs.load_config.moe_pure_tp_preshard)
+        self.assertTrue(py_env_configs.load_config.keep_mla_checkpoint_weights)
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
         self.assertEqual(py_env_configs.vit_config.mm_image_max_file_size_kb, 2048)
@@ -233,6 +261,12 @@ class ServerArgsSetTest(TestCase):
             "true",
             "--disable_flashinfer_hybrid_prefill",
             "true",
+            "--use_new_loader",
+            "true",
+            "--require_weight_update",
+            "true",
+            "--keep_mla_checkpoint_weights",
+            "true",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -249,6 +283,8 @@ class ServerArgsSetTest(TestCase):
             py_env_configs.model_args.ckpt_path, "/path/to/llama/checkpoint"
         )
         self.assertEqual(py_env_configs.model_args.act_type, "FP16")
+        self.assertTrue(py_env_configs.model_args.use_new_loader)
+        self.assertTrue(py_env_configs.model_args.require_weight_update)
 
         # Verify parallelism_config
         self.assertEqual(py_env_configs.parallelism_config.tp_size, 8)
@@ -286,9 +322,10 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.runtime_config.warm_up_with_loss, False)
         self.assertEqual(py_env_configs.runtime_config.model_warm_up, True)
 
-        # Pins the shipped defaults: neither env nor argv sets the flags here.
+        # Pins the loader defaults and explicit CLI override.
         self.assertTrue(py_env_configs.load_config.loader_recycle_handles)
         self.assertFalse(py_env_configs.load_config.moe_pure_tp_preshard)
+        self.assertTrue(py_env_configs.load_config.keep_mla_checkpoint_weights)
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
 
@@ -352,6 +389,9 @@ class ServerArgsSetTest(TestCase):
         os.environ["TP_SIZE"] = "4"
         os.environ["CONCURRENCY_LIMIT"] = "32"
         os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
+        os.environ["USE_NEW_LOADER"] = "1"
+        os.environ["REQUIRE_WEIGHT_UPDATE"] = "1"
+        os.environ["KEEP_MLA_CHECKPOINT_WEIGHTS"] = "1"
 
         # Set command line arguments (should override env vars)
         sys.argv = [
@@ -367,6 +407,12 @@ class ServerArgsSetTest(TestCase):
             "--concurrency_limit",
             "64",
             "--disable_flashinfer_hybrid_prefill",
+            "false",
+            "--use_new_loader",
+            "false",
+            "--require_weight_update",
+            "false",
+            "--keep_mla_checkpoint_weights",
             "false",
         ]
 
@@ -389,6 +435,9 @@ class ServerArgsSetTest(TestCase):
         self.assertFalse(
             py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill
         )  # Overridden
+        self.assertIs(py_env_configs.model_args.use_new_loader, False)
+        self.assertFalse(py_env_configs.model_args.require_weight_update)
+        self.assertFalse(py_env_configs.load_config.keep_mla_checkpoint_weights)
 
     def test_mixed_env_and_cmd_args(self):
         """Test mixed environment variables and command line arguments."""

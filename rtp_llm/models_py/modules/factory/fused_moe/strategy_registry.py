@@ -72,13 +72,13 @@ class StrategyRegistry:
 
         if not candidates:
             quant_method = (
-                config.model_config.quant_config.get_method()
-                if config.model_config.quant_config is not None
+                config.quant_config.get_moe_runtime_method_key()
+                if config.quant_config is not None
                 else None
             )
             logger.error(
                 f"No suitable MOE strategy found. Config details: "
-                f"quant_config={config.model_config.quant_config}, "
+                f"effective_quant_config={config.quant_config}, "
                 f"ep_size={config.ep_size}, "
                 f"world_size={config.world_size}, "
                 f"tp_size={config.tp_size}, "

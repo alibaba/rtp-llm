@@ -7,6 +7,7 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <pybind11/embed.h>
 
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
@@ -30,6 +31,10 @@ public:
 
 class TestLocalRpcServer: public LocalRpcServer {
 public:
+    void setWeightManagerToNone() {
+        weight_manager_ = py::none();
+    }
+
     grpc::Status poll(std::shared_ptr<GenerateStream>& stream) {
         return pollStreamOutput(nullptr, "request", nullptr, stream);
     }
@@ -262,6 +267,40 @@ TEST(LocalRpcServerTest, PollWritesFinalLocalOutputBeforeRemoteHandoff) {
     EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
     EXPECT_FALSE(normal_stream->stream_cache_resource_->isResourceReleased());
     EXPECT_FALSE(normal_stream->hasOutput());
+}
+
+TEST(LocalRpcServerTest, UpdateWeightsRejectsEmptyWeightManagerAsUnimplemented) {
+    if (!Py_IsInitialized()) {
+        Py_Initialize();
+    }
+    TestLocalRpcServer     server;
+    grpc::ServerContext    context;
+    UpdateWeightsRequestPB request;
+    EmptyPB                response;
+
+    const auto status = server.UpdateWeights(&context, &request, &response);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::UNIMPLEMENTED);
+    EXPECT_THAT(status.error_message(), HasSubstr("--require_weight_update true"));
+}
+
+TEST(LocalRpcServerTest, UpdateWeightsRejectsPythonNoneManagerAsUnimplemented) {
+    if (!Py_IsInitialized()) {
+        Py_Initialize();
+    }
+    TestLocalRpcServer server;
+    {
+        py::gil_scoped_acquire acquire;
+        server.setWeightManagerToNone();
+    }
+    grpc::ServerContext    context;
+    UpdateWeightsRequestPB request;
+    EmptyPB                response;
+
+    const auto status = server.UpdateWeights(&context, &request, &response);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::UNIMPLEMENTED);
+    EXPECT_THAT(status.error_message(), HasSubstr("--use_new_loader false"));
 }
 
 }  // namespace rtp_llm

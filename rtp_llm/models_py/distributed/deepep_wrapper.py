@@ -219,24 +219,25 @@ class DeepepWrapperConfig:
     def calc_low_latency_max_token_per_rank(
         ll_num_max_token: int,
         tp_size: int,
-        quant_config: QuantizationConfig,
+        quant_config: Optional[QuantizationConfig],
     ) -> int:
         ll_num_max_token_per_rank = (ll_num_max_token + tp_size - 1) // tp_size
         # deepgemm masked with max_m < 64 get incorrect result, related: https://github.com/deepseek-ai/DeepGEMM/issues/268
         is_quantized = quant_config is not None and quant_config.is_quanted()
-        is_block_quantized = (
-            quant_config is not None and quant_config.get_method() == "FP8_PER_BLOCK"
+        quant_method = (
+            quant_config.get_moe_runtime_method_key()
+            if quant_config is not None
+            else None
         )
-        is_per_act_token = quant_config is not None and quant_config.get_method() in (
+        is_block_quantized = quant_method == "FP8_PER_BLOCK"
+        is_per_act_token = quant_method in (
             "FP8_PER_TENSOR_COMPRESSED",
             "FP8_DYNAMIC_PER_TENSOR",
             "W4A8_INT4_PER_CHANNEL",
             "W4A8_INT4_PER_CHANNEL_COMPRESSED",
             "W8A8_INT8_PER_CHANNEL_COMPRESSED",
         )
-        is_per_group_fp4 = (
-            quant_config is not None and quant_config.get_method() == "modelopt_fp4"
-        )
+        is_per_group_fp4 = quant_method == "modelopt_fp4"
         if not is_quantized or is_block_quantized or is_per_group_fp4:
             matched_tokens = [128] if allow_mnnvl() else [64, 128]
         elif is_per_act_token:
@@ -267,6 +268,34 @@ class DeepepWrapperConfig:
                 ll_num_max_token_per_rank = t
                 return ll_num_max_token_per_rank
         return 128
+
+    @staticmethod
+    def calc_model_low_latency_max_token_per_rank(
+        ll_num_max_token: int,
+        tp_size: int,
+        quant_config: Optional[QuantizationConfig],
+    ) -> int:
+        """Size the process-wide DeepEP buffer for every layer in the model.
+
+        DeepEP owns one process-wide low-latency buffer, while NewLoader may
+        disable quantization for individual MoE layers through checkpoint
+        exclusion patterns. In that case the buffer must satisfy both the
+        quantized and unquantized executors; sizing it from a layer's effective
+        quantization would make construction order affect the singleton config.
+        """
+        capacity = DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
+            ll_num_max_token, tp_size, quant_config
+        )
+        if quant_config is not None and (
+            quant_config.ignored_layers or quant_config.exclude_modules
+        ):
+            capacity = max(
+                capacity,
+                DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
+                    ll_num_max_token, tp_size, None
+                ),
+            )
+        return capacity
 
     def __str__(self) -> str:
         """Return a string representation of the DeepepWrapperConfig."""
@@ -695,7 +724,7 @@ def init_deepep_wrapper(
         if engine_config.sp_config.type != SpeculativeType.NONE:
             ll_num_max_token *= engine_config.sp_config.gen_num_per_cycle + 1
         ll_num_max_token_per_rank = (
-            DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
+            DeepepWrapperConfig.calc_model_low_latency_max_token_per_rank(
                 ll_num_max_token,
                 engine_config.parallelism_config.tp_size,
                 model_config.quant_config,

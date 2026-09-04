@@ -351,6 +351,36 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         self.assertTrue(attn_op.decode_wrapper._use_cuda_graph)
         logging.info("_fixed_batch_size correctly set after prepare()")
 
+    def test_planned_decode_padding_keeps_token_metadata_to_active_batch(self):
+        """Planner padding must not publish token metadata for inactive slots."""
+        params = rtp_llm_ops.FlashInferMlaAttnParams()
+        sequence_lengths = torch.tensor([63, 127], dtype=torch.int32)
+        input_lengths = torch.ones(2, dtype=torch.int32)
+        block_table = torch.tensor([[10, 11], [20, 21]], dtype=torch.int32)
+
+        params.fill_params(
+            torch.empty(0, dtype=torch.int32),
+            sequence_lengths,
+            input_lengths,
+            block_table,
+            64,
+            planned_batch_size=4,
+        )
+        torch.cuda.synchronize()
+
+        self.assertEqual(params.batch_indice_h.tolist(), [0, 1])
+        self.assertEqual(params.positions_h.tolist(), [63, 127])
+        self.assertEqual(params.qo_indptr_h.tolist(), [0, 1, 2, 2, 2])
+        self.assertEqual(params.decode_page_indptr_h.tolist(), [0, 1, 3, 4, 5])
+        self.assertEqual(
+            params.paged_kv_last_page_len_h.tolist(), [64, 64, 1, 1]
+        )
+        self.assertEqual(params.kvlen_h.tolist(), [64, 128, 0, 0])
+        self.assertEqual(params.page_indice_h.tolist(), [10, 20, 21, 0, 0])
+        self.assertEqual(
+            params.slot_mapping.cpu().tolist(), [10 * 64 + 63, 21 * 64 + 63]
+        )
+
     def test_replay_refreshes_plan_metadata(self):
         """Tensor-core replay must refresh FlashInfer plan metadata."""
         config = self._create_config()

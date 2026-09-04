@@ -38,3 +38,40 @@ def init_load_group_args(parser, load_config, model_args):
         default=False,
         help="默认关闭；设为 true 后在 pure TP 下预切分已支持的 MoE 权重；不支持的来源或布局回退为全量读取",
     )
+    load_group.add_argument(
+        "--use_new_loader",
+        env_name="USE_NEW_LOADER",
+        bind_to=(model_args, "use_new_loader"),
+        type=str2bool,
+        default=None,
+        help=(
+            "默认按模型注册表和加载能力选择：已适配且当前配置受支持时使用 "
+            "NewLoader，否则回退 legacy loader；显式置真强制 NewLoader，置假强制 "
+            "legacy loader"
+        ),
+    )
+    load_group.add_argument(
+        "--require_weight_update",
+        env_name="REQUIRE_WEIGHT_UPDATE",
+        bind_to=(model_args, "require_weight_update"),
+        type=str2bool,
+        default=None,
+        help=(
+            "声明部署是否需要在线 UpdateWeights RPC。未设置时保留 legacy loader；"
+            "true 使用支持热更的 legacy loader，false 确认不需要热更并允许自动"
+            "选择 NewLoader；"
+            "当它与 --use_new_loader 均为 true 时会在启动期报错"
+        ),
+    )
+    load_group.add_argument(
+        "--keep_mla_checkpoint_weights",
+        env_name="KEEP_MLA_CHECKPOINT_WEIGHTS",
+        bind_to=(load_config, "keep_mla_checkpoint_weights"),
+        type=str2bool,
+        default=False,
+        help=(
+            "需先启用 newloader；对 DeepSeek/Kimi MLA 生效：保留已转换为运行时 "
+            "布局的 checkpoint 权重。会增加显存占用并减少 KV cache 可用块，"
+            "仅用于调试"
+        ),
+    )
