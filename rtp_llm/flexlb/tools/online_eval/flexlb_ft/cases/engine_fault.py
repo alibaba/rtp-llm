@@ -885,10 +885,20 @@ def _recovery_env(ctx: CaseContext, suffix: str = ""):
 
 
 def _engine_ip_port(ops, engine_name: str) -> str:
-    """Master-facing address of *engine_name* (discovery-file http port,
-    i.e. grpc port - 1 — the ipPort the master logs and keys workerStatus
-    entries by)."""
+    """Master-facing address of *engine_name* — the ipPort the master logs
+    and keys workerStatus entries by.
+
+    With --unique-engine-ips (harness default on Linux) every engine
+    advertises a derived 127.x.y.z loopback host, NOT 127.0.0.1, and the
+    master keys/logs by that advertised pair — a hardcoded 127.0.0.1
+    needle matches nothing in the sync log or the inflight ledger.  The
+    mock /snapshot exposes the real pair as "http_addr" (advertised host
+    + http port = grpc port - 1); only when that field is absent (older
+    mock build) fall back to the legacy localhost form."""
     snap = ops.snapshot_by_name().get(engine_name, {})
+    addr = str(snap.get("http_addr") or "").strip()
+    if addr:
+        return addr
     grpc_port = int(snap.get("port", 0))
     if grpc_port <= 0:
         raise RuntimeError(f"no grpc port for engine {engine_name}: {snap!r}")
