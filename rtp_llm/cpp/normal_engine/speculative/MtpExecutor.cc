@@ -225,6 +225,77 @@ bool MtpExecutor::isTpRank0() const {
     return tp_rank_ == 0;
 }
 
+bool MtpExecutor::reduceDSparkCacheStoreStatus(bool local_ok) {
+    if (dspark_cache_store_status_reducer_for_test_) {
+        return dspark_cache_store_status_reducer_for_test_(local_ok);
+    }
+    if (parallelism_config_.tp_size <= 1) {
+        return local_ok;
+    }
+
+    RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(dspark_cache_store_tp_sync)");
+    cuda_graph::GraphStreamGuard stream_guard(cuda_graph::toGraphStream(dspark_cache_store_sync_stream_));
+    RTP_LLM_CHECK_WITH_INFO(dspark_cache_store_status_.defined(),
+                            "DSpARK cache-store TP status buffer is not initialized");
+    dspark_cache_store_status_.fill_(local_ok ? 1 : 0);
+    auto global_status = execAllReduce({dspark_cache_store_status_, ReduceOp::Min, false, ParallelMode::TP}).buffer;
+    return global_status.item<int32_t>() != 0;
+}
+
+bool MtpExecutor::finishDSparkPrefillCachePublication(const GptModelInputs&               model_input,
+                                                      const std::list<GenerateStreamPtr>& streams) {
+    if (!is_dspark_ || model_input.warmup || !model_input.pd_separation) {
+        return true;
+    }
+
+    RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(dspark_cache_store_publication)");
+    auto wait_for_publication = [this](ModelBase* model, const char* role) {
+        if (model == nullptr) {
+            return std::string(role) + " cache-store publication model is unavailable";
+        }
+        try {
+            return model->waitCacheStorePublication();
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("DSpARK %s cache-store publication wait threw on TP rank %d: %s", role, tp_rank_, e.what());
+            return std::string("wait threw: ") + e.what();
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("DSpARK %s cache-store publication wait threw on TP rank %d: unknown exception",
+                              role,
+                              tp_rank_);
+            return std::string("wait threw an unknown exception");
+        }
+    };
+
+    // Both waits are attempted independently. No local exception may skip the
+    // one status reduction that every TP rank must enter for this prefill step.
+    const std::string target_error = wait_for_publication(model_.get(), "target");
+    const std::string draft_error  = wait_for_publication(sp_prefill_draft_model_.get(), "draft");
+    const bool        local_ok     = target_error.empty() && draft_error.empty();
+    if (!local_ok) {
+        RTP_LLM_LOG_ERROR("DSpARK cache-store publication failed on TP rank %d: target=[%s], draft=[%s]",
+                          tp_rank_,
+                          target_error.c_str(),
+                          draft_error.c_str());
+    }
+
+    const bool global_ok = reduceDSparkCacheStoreStatus(local_ok);
+    if (!global_ok && isTpRank0()) {
+        std::string error_message = "DSpARK cache-store publication failed before decode dispatch";
+        if (!target_error.empty()) {
+            error_message += "; target: " + target_error;
+        }
+        if (!draft_error.empty()) {
+            error_message += "; draft: " + draft_error;
+        }
+        for (const auto& stream : streams) {
+            if (stream->isActive()) {
+                stream->reportError(ErrorCode::CACHE_STORE_STORE_FAILED, error_message);
+            }
+        }
+    }
+    return global_ok;
+}
+
 void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
                                                        ModelBase&      source,
                                                        bool            request_actual_rows) {
@@ -550,18 +621,24 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     draft_prefill_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_logits_verify_runner_(std::make_unique<SpecLogitsVerifyRunner>()),
     spec_logits_verify_async_runner_(cuda_graph::graphGetStreamFromPool(true)),
-    spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)) {
-    data_type_        = params.model_config_.data_type;
-    hidden_size_      = params.model_config_.hidden_size * params.model_config_.hc_mult;
-    propose_step_     = propose_params->gen_num_per_circle;
-    vocab_size_       = params.model_config_.vocab_size;
-    draft_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;
-    is_dspark_        = propose_params->sp_type == SP_TYPE_DSPARK;
+    spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)),
+    dspark_cache_store_sync_stream_(cuda_graph::graphGetStreamFromPool(true)) {
+    data_type_                  = params.model_config_.data_type;
+    hidden_size_                = params.model_config_.hidden_size * params.model_config_.hc_mult;
+    propose_step_               = propose_params->gen_num_per_circle;
+    vocab_size_                 = params.model_config_.vocab_size;
+    draft_vocab_size_           = propose_params->getEngineInitParams().model_config_.vocab_size;
+    is_dspark_                  = propose_params->sp_type == SP_TYPE_DSPARK;
+    dspark_prefill_commit_only_ = is_dspark_ && role_type_ == RoleType::PREFILL;
 
     RTP_LLM_LOG_INFO("[speculative decoding] vocab_size_ = %d, draft_vocab_size_ = %d", vocab_size_, draft_vocab_size_);
 
     if (is_dspark_) {
         RTP_LLM_CHECK_WITH_INFO(propose_step_ > 0, "dspark fixed proposal width must be positive");
+        RTP_LLM_CHECK_WITH_INFO(params.parallelism_config.role_type == role_type_,
+                                "DSpARK role mismatch between parallelism config (%d) and PD separation config (%d)",
+                                static_cast<int>(params.parallelism_config.role_type),
+                                static_cast<int>(role_type_));
         // DSpARK commit handles both replicated and byte-sharded prefill-CP
         // cache layouts after gathering the rank-local target features.
         RTP_LLM_CHECK_WITH_INFO(params.device_resource_config.enable_layer_micro_batch == 0,
@@ -588,6 +665,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
     tp_rank_            = params.parallelism_config.tp_rank;
     parallelism_config_ = params.parallelism_config;
+    if (is_dspark_ && parallelism_config_.tp_size > 1) {
+        dspark_cache_store_status_ =
+            torch::empty({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    }
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d, tp_rank_ = %d", enable_detail_log_, tp_rank_);
     if (params.profiling_debug_logging_config.enable_model_inputs_log) {
         model_inputs_logger_ =
@@ -664,6 +745,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          cache_manager,
          std::nullopt,
          params.model_config_.hc_mult});
+    model_init_params.metrics_reporter = metrics_reporter_;
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");
@@ -672,7 +754,13 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
-        model_.reset(new PyWrappedModel(model_init_params, params.py_model, false, true));
+        model_.reset(new PyWrappedModel(model_init_params,
+                                        params.py_model,
+                                        false,
+                                        true,
+                                        DSparkModelRole::NONE,
+                                        true,
+                                        dspark_prefill_commit_only_));
     }
 
     // when warmup, cache manager maybe nullptr
@@ -687,7 +775,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                               params.sp_config,
                                                               warm_up_));
 
-    LogitsProcessorFactory::init(params.model_config_, params.grammar_config, params.sp_config.tree_decode_config);
+    LogitsProcessorFactory::init(params.model_config_,
+                                 params.grammar_config,
+                                 params.sp_config.tree_decode_config,
+                                 params.parallelism_config.tp_rank == 0 && !warm_up_ ? metrics_reporter_ : nullptr);
     cudaProfilerBegin();
 
     for (auto& mtp_params : *propose_params->mtp_model_params_) {
@@ -714,6 +805,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 cache_manager,
                                 std::make_optional(0),
                                 mtp_params->model_config_.hc_mult});
+        model_params.metrics_reporter = metrics_reporter_;
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
             const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph;
@@ -723,12 +815,16 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             // graphs there only consumes graph-pool memory and can turn CP-RR
             // startup into an avoidable OOM.
             const bool draft_graph_allowed = dsparkDraftGraphAllowed(is_dspark_, role_type_);
-            draft_model_.reset(new PyWrappedModel(model_params,
-                                                  params.py_sp_model,
-                                                  false,
-                                                  false,
-                                                  is_dspark_ ? DSparkModelRole::PROPOSE : DSparkModelRole::NONE,
-                                                  draft_graph_allowed));
+            // PREFILL descriptors omit every proposal-only tensor, so do not
+            // instantiate a PROPOSE wrapper for that graph.
+            if (!dspark_prefill_commit_only_) {
+                draft_model_.reset(new PyWrappedModel(model_params,
+                                                      params.py_sp_model,
+                                                      false,
+                                                      false,
+                                                      is_dspark_ ? DSparkModelRole::PROPOSE : DSparkModelRole::NONE,
+                                                      draft_graph_allowed));
+            }
             // dspark use DSparkModelRole to call commit func, and token_per_bs is different
             // so another model is required
             if (enable_cuda_graph || is_dspark_) {
@@ -741,14 +837,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                        !is_dspark_,
                                        false,
                                        is_dspark_ ? DSparkModelRole::COMMIT : DSparkModelRole::NONE,
-                                       draft_graph_allowed));
+                                       draft_graph_allowed,
+                                       dspark_prefill_commit_only_));
             }
         }
         break;  // NOTE: only support one mtp model now
     }
     const auto& draft_weights = propose_params->getEngineInitParams().gpt_weights;
     d2t_map_                  = draft_model_ ? draft_model_->weights_.d2t_map : draft_weights.d2t_map;
-    if (is_dspark_) {
+    if (is_dspark_ && !dspark_prefill_commit_only_) {
         dspark_markov_w1_ = draft_weights.dspark_markov_w1;
         dspark_markov_w2_ = draft_weights.dspark_markov_w2;
         RTP_LLM_CHECK_WITH_INFO(dspark_markov_w1_.defined() && dspark_markov_w2_.defined(),
@@ -759,6 +856,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                     && dspark_markov_w1_.size(0) == static_cast<int64_t>(draft_vocab_size_)
                                     && dspark_markov_w1_.scalar_type() == dspark_markov_w2_.scalar_type(),
                                 "DSpARK Markov weights must be matching CUDA [vocab,rank] tensors");
+    } else if (dspark_prefill_commit_only_) {
+        RTP_LLM_LOG_INFO("[speculative decoding] DSpARK PREFILL commit-only worker: skipping proposal/Markov weights");
     }
     speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
     if (!is_dspark_) {
@@ -812,7 +911,23 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& streams,
                                       MtpMetricsCollector&                metrics_collector,
                                       int64_t                             schedule_time_us) {
-    RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.prefill_step(prefill_stream_size=%zu)", streams.size());
+    size_t total_prefix_length  = 0;
+    size_t total_execute_length = 0;
+    size_t total_length         = 0;
+    if (at::hasCallbacks()) {
+        for (const auto& stream : streams) {
+            total_prefix_length += static_cast<size_t>(stream->prefixLength());
+            total_execute_length += static_cast<size_t>(stream->contextLength());
+            total_length += static_cast<size_t>(stream->seqLength());
+        }
+    }
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC(
+        "executor.mtp.prefill_step(prefill_stream_size=%zu,total_prefix_length=%zu,total_execute_length=%zu,"
+        "total_length=%zu)",
+        streams.size(),
+        total_prefix_length,
+        total_execute_length,
+        total_length);
 
     RtpLLMExecutorMetricsCollector& executor_collector = metrics_collector.executor_collector;
     RtpLLMTokenPSMetricsCollector&  tps_collector      = metrics_collector.tps_collector;
@@ -852,6 +967,47 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     metrics_collector.not_skip = true;
+
+    // Any return or exception after DSpark PD work becomes possible must drain
+    // local publication state. The normal path performs the TP-wide check below
+    // and disarms this fallback; unwinding deliberately avoids collectives.
+    struct DSparkCacheStoreDrainGuard {
+        bool       armed;
+        ModelBase* target;
+        ModelBase* draft;
+
+        ~DSparkCacheStoreDrainGuard() {
+            if (!armed) {
+                return;
+            }
+            auto drain = [](ModelBase* model, const char* name) {
+                if (model == nullptr) {
+                    return;
+                }
+                try {
+                    const auto error = model->waitCacheStorePublication();
+                    if (!error.empty()) {
+                        RTP_LLM_LOG_ERROR("DSpARK local %s cache-store drain on prefill exit failed: %s",
+                                          name,
+                                          error.c_str());
+                    }
+                } catch (const std::exception& e) {
+                    RTP_LLM_LOG_ERROR("DSpARK local %s cache-store drain threw on prefill exit: %s", name, e.what());
+                } catch (...) {
+                    RTP_LLM_LOG_ERROR("DSpARK local %s cache-store drain threw an unknown exception on prefill exit",
+                                      name);
+                }
+            };
+            drain(target, "target");
+            drain(draft, "draft");
+        }
+
+        void disarm() {
+            armed = false;
+        }
+    } cache_store_drain_guard{is_dspark_ && !model_input.warmup && model_input.pd_separation,
+                              model_.get(),
+                              sp_prefill_draft_model_.get()};
 
     // release model input before forward
     releaseAllModelBuffers();
@@ -967,6 +1123,14 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             draft_model_output = std::move(forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT));
         }
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    }
+
+    const bool dspark_cache_store_ok = finishDSparkPrefillCachePublication(model_input, streams);
+    cache_store_drain_guard.disarm();
+    if (!dspark_cache_store_ok) {
+        cudaSyncAndCheck();
+        releaseAllModelBuffers();
+        return absl::OkStatus();
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
