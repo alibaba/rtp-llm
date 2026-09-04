@@ -221,6 +221,18 @@ void validateDescs(const ModelConfig& model_config, uint32_t kernel_tokens_per_b
                                         desc.tag.c_str(),
                                         desc.compression_ratio,
                                         kernel_tokens_per_block);
+                RTP_LLM_CHECK_WITH_INFO(desc.kernel_tokens_per_block_alignment > 0,
+                                        "desc tag=%s has invalid kernel_tokens_per_block_alignment=0",
+                                        desc.tag.c_str());
+                RTP_LLM_CHECK_WITH_INFO(
+                    kernel_tokens_per_block >= desc.kernel_tokens_per_block_alignment
+                        && kernel_tokens_per_block % desc.kernel_tokens_per_block_alignment == 0,
+                    "desc tag=%s derives entries from kernel block, so kernel_seq_size_per_block(%u) "
+                    "must be >= %u and a multiple of %u",
+                    desc.tag.c_str(),
+                    kernel_tokens_per_block,
+                    desc.kernel_tokens_per_block_alignment,
+                    desc.kernel_tokens_per_block_alignment);
             }
             if (desc.entry_count_mode == OpaqueBlockEntryCountMode::STATE_RING) {
                 RTP_LLM_CHECK_WITH_INFO(desc.compression_ratio > 0,

@@ -1815,6 +1815,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("entry_count_mode", &KVCacheSpecDesc::entry_count_mode)
         .def_readwrite("explicit_entry_count", &KVCacheSpecDesc::explicit_entry_count)
         .def_readwrite("compression_ratio", &KVCacheSpecDesc::compression_ratio)
+        .def_readwrite("kernel_tokens_per_block_alignment", &KVCacheSpecDesc::kernel_tokens_per_block_alignment)
         .def_readwrite("state_ring_overlap", &KVCacheSpecDesc::state_ring_overlap)
         .def_readwrite("state_ring_include_gen_num_per_cycle", &KVCacheSpecDesc::state_ring_include_gen_num_per_cycle)
         .def_readwrite("block_stride_bytes_override", &KVCacheSpecDesc::block_stride_bytes_override)
@@ -1845,13 +1846,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.reuse,
                                       self.capacity,
                                       self.tail,
-                                      self.cp);
+                                      self.cp,
+                                      self.kernel_tokens_per_block_alignment);
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
                 if (t.size() != 19 && t.size() != 20)
                     throw std::runtime_error("Invalid KVCacheSpecDesc state!");
-                const bool legacy_layout = t.size() == 20;
+                const bool current_layout = t.size() == 20 && py::isinstance<py::int_>(t[19]);
+                const bool legacy_layout  = t.size() == 20 && !current_layout;
                 if (legacy_layout && !t[17].is_none()) {
                     throw std::runtime_error("KVCacheSpecDesc legacy memory policy is not supported; "
                                              "convert the pickle offline with the previous RTP-LLM version");
@@ -1875,6 +1878,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.capacity                             = t[16].cast<std::optional<CacheCapacityPolicyDesc>>();
                 c.tail = t[legacy_layout ? 18 : 17].cast<std::optional<CacheTailPolicyDesc>>();
                 c.cp   = t[legacy_layout ? 19 : 18].cast<std::optional<CacheCpPolicyDesc>>();
+                if (current_layout) {
+                    c.kernel_tokens_per_block_alignment = t[19].cast<uint32_t>();
+                }
                 return c;
             }));
 

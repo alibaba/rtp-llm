@@ -60,6 +60,7 @@ struct KVCacheSpecDesc {
     OpaqueBlockEntryCountMode entry_count_mode                     = OpaqueBlockEntryCountMode::EXPLICIT;
     uint32_t                  explicit_entry_count                 = 0;
     uint32_t                  compression_ratio                    = 1;
+    uint32_t                  kernel_tokens_per_block_alignment    = 1;
     uint32_t                  state_ring_overlap                   = 0;
     bool                      state_ring_include_gen_num_per_cycle = false;
 

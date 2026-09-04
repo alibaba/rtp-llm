@@ -138,6 +138,7 @@ class Dsv4KvCacheSpecTest(TestCase):
             )
             self.assertEqual(by_tag[tag].dtype, DataType.TYPE_UINT8, tag)
             self.assertEqual(by_tag[tag].entry_dtype, DataType.TYPE_UINT8, tag)
+            self.assertEqual(by_tag[tag].kernel_tokens_per_block_alignment, 128, tag)
         for tag in (INDEXER_STATE_TAG, CSA_STATE_TAG, HCA_STATE_TAG, SWA_KV_TAG):
             self.assertEqual(by_tag[tag].cache_type, KVCacheSpecType.OPAQUE_STATE, tag)
             self.assertTrue(by_tag[tag].is_state_cache, tag)

@@ -99,7 +99,9 @@ class _PreviousKVCacheSpecDesc:
         tail.validate_tail_blocks = True
         desc.tail = tail
 
-        current_state = list(desc.__getstate__())
+        # Drop the newly restored alignment suffix to reproduce the preceding
+        # 19-item layout, then insert the removed memory policy field.
+        current_state = list(desc.__getstate__())[:-1]
         current_state[16] = _PreviousCacheCapacityPolicyDesc()
         current_state[18] = _PreviousCacheCpPolicyDesc()
         # Previous 20-item layout inserted memory between capacity and tail.
@@ -262,6 +264,7 @@ class CacheConfigPickleTest(unittest.TestCase):
         desc = KVCacheSpecDesc()
         desc.tag = "pickle-policy"
         desc.cache_type = KVCacheSpecType.OPAQUE_STATE
+        desc.kernel_tokens_per_block_alignment = 128
         desc.capacity = capacity
         desc.tail = tail
         desc.cp = cp
@@ -271,6 +274,7 @@ class CacheConfigPickleTest(unittest.TestCase):
         self.assertIs(type(restored), KVCacheSpecDesc)
         self.assertEqual(restored.tag, "pickle-policy")
         self.assertEqual(restored.cache_type, KVCacheSpecType.OPAQUE_STATE)
+        self.assertEqual(restored.kernel_tokens_per_block_alignment, 128)
         self.assertIs(type(restored.capacity), CacheCapacityPolicyDesc)
         self.assertIs(restored.capacity.reservable, True)
         self.assertEqual(restored.capacity.explicit_block_num, 409)
@@ -288,7 +292,14 @@ class CacheConfigPickleTest(unittest.TestCase):
     def test_current_policy_writers_keep_compact_layouts(self):
         self.assertEqual(len(CacheCapacityPolicyDesc().__getstate__()), 2)
         self.assertEqual(len(CacheCpPolicyDesc().__getstate__()), 4)
-        self.assertEqual(len(KVCacheSpecDesc().__getstate__()), 19)
+        self.assertEqual(len(KVCacheSpecDesc().__getstate__()), 20)
+
+    def test_previous_kv_cache_spec_without_alignment_is_loaded(self):
+        state = KVCacheSpecDesc().__getstate__()[:-1]
+        restored = _new_kv_cache_spec_desc()
+        restored.__setstate__(state)
+
+        self.assertEqual(restored.kernel_tokens_per_block_alignment, 1)
 
     def test_previous_kv_cache_spec_with_empty_memory_is_loaded(self):
         restored = pickle.loads(
@@ -325,7 +336,7 @@ class CacheConfigPickleTest(unittest.TestCase):
             (CacheCapacityPolicyDesc, (True, 1, False, None)),
             (CacheCpPolicyDesc, (None, None, None)),
             (CacheCpPolicyDesc, (None, None, None, None, None, None)),
-            (KVCacheSpecDesc, KVCacheSpecDesc().__getstate__()[:-1]),
+            (KVCacheSpecDesc, KVCacheSpecDesc().__getstate__()[:-2]),
             (KVCacheSpecDesc, KVCacheSpecDesc().__getstate__() + (None, None)),
         )
         for config_type, state in invalid_cases:

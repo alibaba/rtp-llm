@@ -243,6 +243,25 @@ TEST(CacheConfigCreatorTest, ZeroIsTheOnlyUnsetSequenceBlockSize) {
     EXPECT_THROW(CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0), std::runtime_error);
 }
 
+TEST(CacheConfigCreatorTest, CompressedDescriptorEnforcesKernelBlockAlignment) {
+    auto  model                                  = makeSparseMlaModel(/*layer_num=*/1);
+    auto& compressed                             = model.kv_cache_spec_descs[0][1];
+    compressed.entry_count_mode                  = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
+    compressed.compression_ratio                 = 4;
+    compressed.kernel_tokens_per_block_alignment = 128;
+
+    KVCacheConfig kv_cache;
+    kv_cache.seq_size_per_block        = 64;
+    kv_cache.kernel_seq_size_per_block = 64;
+    const auto error                   = runtimeErrorMessage(
+        [&]() { (void)CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0); });
+    EXPECT_NE(error.find("must be >= 128 and a multiple of 128"), std::string::npos) << error;
+
+    kv_cache.seq_size_per_block        = 128;
+    kv_cache.kernel_seq_size_per_block = 128;
+    EXPECT_NO_THROW((void)CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0));
+}
+
 TEST(CacheConfigCreatorTest, ExplicitSequenceBlockSizeIsSharedBySpeculativeConfigs) {
     auto score                           = makeMhaModel(/*layer_num=*/2, /*tag=*/"default");
     auto propose                         = makeMhaModel(/*layer_num=*/1, /*tag=*/"default");
