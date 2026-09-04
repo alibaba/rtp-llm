@@ -288,11 +288,12 @@ class ComprehensiveFaultInjectionTest {
             double beforeRatio = 1.0 - (double) before.getAvailableKvCache() / before.getTotalKvCache();
             assertEquals(0.0, beforeRatio, 0.001, "baseline KV ratio should be ~0");
 
-            // Set KV pressure via HTTP — using 4M tokens for >0.5 ratio
-            // (50000 as suggested in the task spec is insufficient for >0.5 with total=6,291,456)
+            // Set KV pressure via HTTP — absolute active_kv_tokens semantics,
+            // 4M tokens for >0.5 ratio (50000 as suggested in the task spec is
+            // insufficient for >0.5 with total=6,291,456)
             long pressureTokens = 4_000_000L;
             httpPost(controlServer.getPort(), "/set_kv_pressure",
-                    "{\"port\":" + prefillPort + ",\"tokens\":" + pressureTokens + "}");
+                    "{\"port\":" + prefillPort + ",\"active_kv_tokens\":" + pressureTokens + "}");
             assertEquals(pressureTokens, prefill.getFaultConfig().getKvPressureTokens());
 
             // Get worker status — verify pressure
@@ -305,9 +306,9 @@ class ComprehensiveFaultInjectionTest {
             assertTrue(after.getAvailableKvCache() < after.getTotalKvCache(),
                     "available KV should be less than total under pressure");
 
-            // Clear KV pressure
+            // Clear KV pressure (absolute zero)
             httpPost(controlServer.getPort(), "/set_kv_pressure",
-                    "{\"port\":" + prefillPort + ",\"tokens\":0}");
+                    "{\"port\":" + prefillPort + ",\"active_kv_tokens\":0}");
             assertEquals(0, prefill.getFaultConfig().getKvPressureTokens());
 
             // Verify recovery
@@ -619,9 +620,12 @@ class ComprehensiveFaultInjectionTest {
 
         for (int i = 0; i < nPrefill; i++) {
             int port = basePort + i;
+            // Pool sized ceil(TOTAL_KV_TOKENS / spb) = 6144 blocks so the
+            // engine's available capacity equals the reported TOTAL_KV_TOKENS
+            // exactly (capacity model v2: available = min(total, blocks x spb)).
             JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
                     "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                    port, services, scheduler, model, 100,
+                    port, services, scheduler, model, 6_144,
                     new JavaMockEngineCluster.ClusterStats());
             services.put(port, service);
             prefillServices.add(service);
@@ -630,7 +634,7 @@ class ComprehensiveFaultInjectionTest {
             int port = basePort + nPrefill + i;
             JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
                     "decode", EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                    port, services, scheduler, model, 100,
+                    port, services, scheduler, model, 6_144,
                     new JavaMockEngineCluster.ClusterStats());
             services.put(port, service);
             decodeServices.add(service);
@@ -662,9 +666,10 @@ class ComprehensiveFaultInjectionTest {
 
         for (int i = 0; i < nPrefill; i++) {
             int port = basePort + i;
+            // Same 6144-block pool as startCluster (see comment there).
             JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
                     "prefill", EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL,
-                    port, services, scheduler, model, 100,
+                    port, services, scheduler, model, 6_144,
                     new JavaMockEngineCluster.ClusterStats());
             services.put(port, service);
             prefillServices.add(service);
@@ -683,7 +688,7 @@ class ComprehensiveFaultInjectionTest {
             int port = basePort + nPrefill + i;
             JavaMockEngineCluster.FastRpcService service = new JavaMockEngineCluster.FastRpcService(
                     "decode", EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
-                    port, services, scheduler, model, 100,
+                    port, services, scheduler, model, 6_144,
                     new JavaMockEngineCluster.ClusterStats());
             services.put(port, service);
             decodeServices.add(service);

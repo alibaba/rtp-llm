@@ -36,7 +36,10 @@ class BaselineParityE2ETest {
     @Test
     @Timeout(90)
     void e_switches_off_priority_has_no_effect_and_dispatch_is_fifo() throws Exception {
-        // autoTpm=false：批队列用 LEGACY 序（构造时冻结），全部开关保持默认关闭
+        // autoTpm=false：批队列用 LEGACY 序（构造时冻结），全部开关保持默认关闭。
+        // dsv4 (v1) 适配：fixed_window 决策旋钮位于 DispatcherConfig（BatchDispatcherConfig），
+        // 运行时调整等价于 intake3 的 fixedWindowDecision()（DefaultBatchDispatcher 每次
+        // 调度都从 configService 现读，构造后修改仍生效）。
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 1, 1, "5", 1.0, false, false)) {
             h.config.batchDispatcher().setMaxCollectionWaitMs(5);
             h.config.batchDispatcher().setMaxRequests(2);
@@ -87,7 +90,7 @@ class BaselineParityE2ETest {
             assertEquals(submissionOrder, new ArrayList<>(h.engineArrivalOrder),
                     "with all switches off the dispatch order must be exactly FIFO");
 
-            // 无任何抢占痕迹
+            // 无任何抢占痕迹（dsv4：requestReporter 对应 PrioritySchedulerReporter）
             verify(h.priorityReporter, never()).reportVictim(anyInt(), anyInt(),
                     anyString(), anyString());
             verify(h.priorityReporter, never()).reportPriorityPreempt(anyString());

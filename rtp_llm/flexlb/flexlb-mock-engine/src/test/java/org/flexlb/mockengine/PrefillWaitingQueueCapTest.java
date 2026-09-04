@@ -1,7 +1,6 @@
 package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.grpc.stub.StreamObserver;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -9,18 +8,18 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 
+import static org.flexlb.mockengine.MockEngineTestSupport.batch;
+import static org.flexlb.mockengine.MockEngineTestSupport.enqueue;
+import static org.flexlb.mockengine.MockEngineTestSupport.input;
+import static org.flexlb.mockengine.MockEngineTestSupport.slot;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -78,7 +77,7 @@ class PrefillWaitingQueueCapTest {
 
         for (int i = 1; i <= 5; i++) {
             EngineRpcService.EnqueueBatchResponsePB response =
-                    enqueue(prefill, batch(1000 + i, slot(0, input(String.valueOf(i), 10))));
+                    enqueue(prefill, batch(1000 + i, slot(0, input(i, 10))));
             assertEquals(1, response.getSuccessesCount(), "batch " + i + " should be accepted");
             assertEquals(0, response.getErrorsCount(), "batch " + i + " should have no errors");
         }
@@ -87,7 +86,7 @@ class PrefillWaitingQueueCapTest {
                 "snapshot should report 4 queued batches");
 
         EngineRpcService.EnqueueBatchResponsePB rejected =
-                enqueue(prefill, batch(1006, slot(0, input("6", 10))));
+                enqueue(prefill, batch(1006, slot(0, input(6, 10))));
         assertEquals(0, rejected.getSuccessesCount(), "6th batch should not be accepted");
         assertEquals(1, rejected.getErrorsCount(), "6th batch should be rejected");
         String message = rejected.getErrors(0).getErrorInfo().getErrorMessage();
@@ -118,11 +117,11 @@ class PrefillWaitingQueueCapTest {
 
         // Fill: 1 running + 2 waiting (cap 2), 4th rejected.
         for (int i = 1; i <= 3; i++) {
-            assertEquals(1, enqueue(prefill, batch(2000 + i, slot(0, input(String.valueOf(i), 10))))
+            assertEquals(1, enqueue(prefill, batch(2000 + i, slot(0, input(i, 10))))
                     .getSuccessesCount());
         }
         EngineRpcService.EnqueueBatchResponsePB rejected =
-                enqueue(prefill, batch(2004, slot(0, input("4", 10))));
+                enqueue(prefill, batch(2004, slot(0, input(4, 10))));
         assertEquals(1, rejected.getErrorsCount(), "4th batch should hit the cap");
 
         awaitInflightZero(prefill, 5_000);
@@ -130,7 +129,7 @@ class PrefillWaitingQueueCapTest {
         // After the drain the queue is empty again: new enqueues are accepted
         // and complete normally (a rejection must not poison the queue).
         EngineRpcService.EnqueueBatchResponsePB retry =
-                enqueue(prefill, batch(2005, slot(0, input("5", 10))));
+                enqueue(prefill, batch(2005, slot(0, input(5, 10))));
         assertEquals(1, retry.getSuccessesCount(), "post-drain enqueue should be accepted");
         assertEquals(0, retry.getErrorsCount());
 
@@ -148,7 +147,7 @@ class PrefillWaitingQueueCapTest {
 
         for (int i = 1; i <= 10; i++) {
             EngineRpcService.EnqueueBatchResponsePB response =
-                    enqueue(prefill, batch(3000 + i, slot(0, input(String.valueOf(i), 10))));
+                    enqueue(prefill, batch(3000 + i, slot(0, input(i, 10))));
             assertEquals(1, response.getSuccessesCount(), "batch " + i + " should be accepted");
             assertEquals(0, response.getErrorsCount());
         }
@@ -171,16 +170,13 @@ class PrefillWaitingQueueCapTest {
 
     private MockPerformanceModel model(String prefillFormula, int maxWaitingBatches)
             throws Exception {
-        Path performance = tempDir.resolve("performance-" + System.nanoTime() + ".json");
-        Path master = tempDir.resolve("master-" + System.nanoTime() + ".json");
-        MAPPER.writeValue(performance.toFile(), Map.of(
-                "block_size", 1024,
-                "sleep_scale", 1.0,
-                "jitter_pct", 0.0,
-                "prefill", Map.of("scale", 1.0, "max_waiting_batches", maxWaitingBatches),
-                "decode", Map.of("scale", 1.0, "step_ms_by_batch", List.of(List.of(1, 1.0)))));
-        MockMasterConfig.writeWithPrefillExpression(master, prefillFormula);
-        return MockPerformanceModel.load(performance.toString(), master.toString());
+        return MockEngineTestSupport.performanceModel(
+                tempDir,
+                prefillFormula,
+                1.0,
+                1.0,
+                Map.of("max_waiting_batches", maxWaitingBatches),
+                Map.of());
     }
 
     private static void awaitInflightZero(JavaMockEngineCluster.FastRpcService service,
@@ -197,75 +193,4 @@ class PrefillWaitingQueueCapTest {
                 + " running=" + service.getRunningCount());
     }
 
-    // ──────────── Protobuf builders ────────────
-
-    private static EngineRpcService.GenerateInputPB input(String requestId, int inputTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
-                        .setMaxNewTokens(1)
-                        .build());
-        for (int token = 0; token < inputTokens; token++) {
-            input.addTokenIds(token);
-        }
-        return input.build();
-    }
-
-    private static EngineRpcService.EnqueueBatchDpSlotPB slot(
-            int dpRank, EngineRpcService.GenerateInputPB... inputs) {
-        EngineRpcService.EnqueueBatchDpSlotPB.Builder slot =
-                EngineRpcService.EnqueueBatchDpSlotPB.newBuilder().setDpRank(dpRank);
-        for (EngineRpcService.GenerateInputPB input : inputs) {
-            slot.addRequests(EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
-                    .setInput(input)
-                    .build());
-        }
-        return slot.build();
-    }
-
-    private static EngineRpcService.EnqueueBatchRequestPB batch(
-            long batchId, EngineRpcService.EnqueueBatchDpSlotPB... slots) {
-        return EngineRpcService.EnqueueBatchRequestPB.newBuilder()
-                .setBatchId(batchId)
-                .addAllDpSlots(List.of(slots))
-                .build();
-    }
-
-    // ──────────── RPC helpers ────────────
-
-    private static EngineRpcService.EnqueueBatchResponsePB enqueue(
-            JavaMockEngineCluster.FastRpcService service,
-            EngineRpcService.EnqueueBatchRequestPB request) {
-        AtomicReference<EngineRpcService.EnqueueBatchResponsePB> response = new AtomicReference<>();
-        AtomicReference<Throwable> error = new AtomicReference<>();
-        CountDownLatch latch = new CountDownLatch(1);
-        service.enqueueBatch(request, new StreamObserver<>() {
-            @Override
-            public void onNext(EngineRpcService.EnqueueBatchResponsePB value) {
-                response.set(value);
-            }
-
-            @Override
-            public void onError(Throwable throwable) {
-                error.set(throwable);
-                latch.countDown();
-            }
-
-            @Override
-            public void onCompleted() {
-                latch.countDown();
-            }
-        });
-        try {
-            if (!latch.await(5, TimeUnit.SECONDS)) {
-                fail("enqueue response timeout");
-            }
-        } catch (InterruptedException e) {
-            fail("interrupted waiting for enqueue response");
-        }
-        if (error.get() != null) {
-            throw new AssertionError(error.get());
-        }
-        assertNotNull(response.get(), "enqueue response");
-        return response.get();
-    }
 }
