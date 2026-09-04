@@ -46,13 +46,13 @@ class ProductionRoutingDeadlineE2ETest {
             long nearDeadlineId = 88_001L;
             long batchFollowerId = 88_002L;
             BalanceContext nearDeadline = h.context(
-                    nearDeadlineId, 50, 10_000L, 8);
+                    String.valueOf(nearDeadlineId), 50, 10_000L, 8);
             nearDeadline.setSchedulingMetadata(SchedulingMetadata.explicit(
                     50, System.currentTimeMillis() + 2_000L));
 
             CompletableFuture<Response> first = h.scheduler.submit(nearDeadline);
             CompletableFuture<Response> second = h.scheduler.submit(
-                    h.context(batchFollowerId, 50, 10_000L, 8));
+                    h.context(String.valueOf(batchFollowerId), 50, 10_000L, 8));
             Response firstResponse = first.get(1, TimeUnit.SECONDS);
             Response secondResponse = second.get(1, TimeUnit.SECONDS);
 

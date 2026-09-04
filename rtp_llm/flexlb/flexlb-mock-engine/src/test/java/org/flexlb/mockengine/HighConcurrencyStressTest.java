@@ -98,7 +98,7 @@ class HighConcurrencyStressTest {
                         int decodePort = decodeServices
                                 .get((decodeStart + i) % decodeServices.size())
                                 .getGrpcPort();
-                        inputs[i] = inputWithDecode(startRequestId + i, 10, decodePort);
+                        inputs[i] = inputWithDecode(String.valueOf(startRequestId + i), 10, decodePort);
                     }
                     EngineRpcService.EnqueueBatchResponsePB response =
                             enqueue(prefill, batch(batchId, slot(0, inputs)));

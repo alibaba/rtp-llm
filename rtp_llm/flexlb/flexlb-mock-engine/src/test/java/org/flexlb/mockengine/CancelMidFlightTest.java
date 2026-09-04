@@ -58,7 +58,7 @@ class CancelMidFlightTest {
         EngineRpcService.GenerateInputPB[] inputs = new EngineRpcService.GenerateInputPB[n];
         for (int i = 0; i < n; i++) {
             int decodePort = decodeServices.get(i % 2).getGrpcPort();
-            inputs[i] = inputWithDecode(i + 1, 10, decodePort);
+            inputs[i] = inputWithDecode(String.valueOf(i + 1), 10, decodePort);
         }
         EngineRpcService.EnqueueBatchResponsePB response =
                 enqueue(prefillServices.get(0), batch(7000, slot(0, inputs)));

@@ -1087,7 +1087,7 @@ public final class JavaLoadClient {
             TraceRecord record, EngineRpcService.GenerateInputPB inputPb) {
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB.Builder builder =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(record.requestId)
+                .setRequestId(String.valueOf(record.requestId))
                 .setGenerateInput(inputPb.toByteString())
                 .addAllBlockCacheKeys(record.blockKeys)
                 .setSeqLen(record.inputLen)

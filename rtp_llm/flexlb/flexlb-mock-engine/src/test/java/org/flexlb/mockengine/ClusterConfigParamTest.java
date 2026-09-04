@@ -180,8 +180,8 @@ class ClusterConfigParamTest {
         assertFalse(roleEndpoint.has("decode_endpoint"));
         JsonNode prefillDiscovery = roleEndpoint.get("prefill_endpoint").get("discovery");
         assertEquals("static-env", prefillDiscovery.get("type").asText());
-        assertEquals(config.host + ":63999", prefillDiscovery.get("hosts").get(0).asText());
-        assertEquals(config.host + ":64000", prefillDiscovery.get("hosts").get(1).asText());
+        assertEquals("127.1.0.1:63999", prefillDiscovery.get("hosts").get(0).asText());
+        assertEquals("127.1.1.1:64000", prefillDiscovery.get("hosts").get(1).asText());
         ServiceRoute serviceRoute = MAPPER.readValue(
                 env.get("MODEL_SERVICE_CONFIG").asText(), ServiceRoute.class);
         StaticServiceDiscoveryProvider provider = new StaticServiceDiscoveryProvider();
@@ -210,7 +210,7 @@ class ClusterConfigParamTest {
                 decodePayload.get("env").get("MODEL_SERVICE_CONFIG").asText());
         JsonNode decodeRoleEndpoint = decodeModelConfig.get("role_endpoints").get(0);
         assertFalse(decodeRoleEndpoint.has("prefill_endpoint"));
-        assertEquals(decodeOnly.host + ":63999", decodeRoleEndpoint.get("decode_endpoint")
+        assertEquals("127.1.0.1:63999", decodeRoleEndpoint.get("decode_endpoint")
                 .get("discovery").get("hosts").get(0).asText());
         ServiceRoute decodeServiceRoute = MAPPER.readValue(
                 decodePayload.get("env").get("MODEL_SERVICE_CONFIG").asText(),

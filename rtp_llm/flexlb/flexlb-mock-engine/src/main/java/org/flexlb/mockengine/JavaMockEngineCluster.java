@@ -31,6 +31,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -443,22 +444,18 @@ public final class JavaMockEngineCluster {
     }
 
     static void writeDiscoveryFiles(Config config) throws IOException {
-        String prefillAddresses = addressList(config, 0, config.baseGrpcPort, config.nPrefill);
-        String decodeAddresses = addressList(
+        List<String> prefillAddresses = addressList(config, 0, config.baseGrpcPort, config.nPrefill);
+        List<String> decodeAddresses = addressList(
                 config, config.nPrefill, config.baseGrpcPort + config.nPrefill, config.nDecode);
 
-        Map<String, Object> prefillEndpoint = new LinkedHashMap<>();
-        prefillEndpoint.put("address", config.prefillDomain);
-        prefillEndpoint.put("protocol", "http");
-        prefillEndpoint.put("path", "/");
-        Map<String, Object> decodeEndpoint = new LinkedHashMap<>();
-        decodeEndpoint.put("address", config.decodeDomain);
-        decodeEndpoint.put("protocol", "http");
-        decodeEndpoint.put("path", "/");
         Map<String, Object> roleEndpoint = new LinkedHashMap<>();
         roleEndpoint.put("group", "mock");
-        roleEndpoint.put("prefill_endpoint", prefillEndpoint);
-        roleEndpoint.put("decode_endpoint", decodeEndpoint);
+        if (!prefillAddresses.isEmpty()) {
+            roleEndpoint.put("prefill_endpoint", staticEndpoint(config.prefillDomain, prefillAddresses));
+        }
+        if (!decodeAddresses.isEmpty()) {
+            roleEndpoint.put("decode_endpoint", staticEndpoint(config.decodeDomain, decodeAddresses));
+        }
         Map<String, Object> serviceConfig = new LinkedHashMap<>();
         serviceConfig.put("service_id", "aigc.text-generation.generation.engine_service");
         serviceConfig.put("load_balance", true);
@@ -466,8 +463,6 @@ public final class JavaMockEngineCluster {
 
         Map<String, String> env = new LinkedHashMap<>();
         env.put("MODEL_SERVICE_CONFIG", OBJECT_MAPPER.writeValueAsString(serviceConfig));
-        env.put("DOMAIN_ADDRESS:" + config.prefillDomain, prefillAddresses);
-        env.put("DOMAIN_ADDRESS:" + config.decodeDomain, decodeAddresses);
 
         List<Map<String, Object>> engines = new ArrayList<>(config.nPrefill + config.nDecode);
         addEngineRecords(engines, config, 0, config.nPrefill, "prefill");
@@ -543,16 +538,25 @@ public final class JavaMockEngineCluster {
                 "Invalid boolean value for " + flag + ": " + value + " (expected true|false)");
     }
 
-    private static String addressList(Config config, int firstEngineIndex, int firstGrpcPort, int count) {
-        StringBuilder addresses = new StringBuilder(count * 20);
+    private static Map<String, Object> staticEndpoint(String address, List<String> hosts) {
+        Map<String, Object> discovery = new LinkedHashMap<>();
+        discovery.put("type", "static-env");
+        discovery.put("hosts", hosts);
+
+        Map<String, Object> endpoint = new LinkedHashMap<>();
+        endpoint.put("address", address);
+        endpoint.put("protocol", "http");
+        endpoint.put("path", "/");
+        endpoint.put("discovery", discovery);
+        return endpoint;
+    }
+
+    private static List<String> addressList(Config config, int firstEngineIndex, int firstGrpcPort, int count) {
+        List<String> addresses = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
-            if (i > 0) {
-                addresses.append(',');
-            }
-            addresses.append(declaredHost(config, firstEngineIndex + i))
-                    .append(':').append(firstGrpcPort + i - 1);
+            addresses.add(declaredHost(config, firstEngineIndex + i) + ":" + (firstGrpcPort + i - 1));
         }
-        return addresses.toString();
+        return addresses;
     }
 
     private static void addEngineRecords(List<Map<String, Object>> engines,
@@ -1477,12 +1481,12 @@ public final class JavaMockEngineCluster {
             if (!suppressRids.isEmpty()) {
                 for (long rid : suppressRids) {
                     for (int i = status.getRunningTaskInfoCount() - 1; i >= 0; i--) {
-                        if (status.getRunningTaskInfo(i).getRequestId() == rid) {
+                        if (Objects.equals(status.getRunningTaskInfo(i).getRequestId(), String.valueOf(rid))) {
                             status.removeRunningTaskInfo(i);
                         }
                     }
                     for (int i = status.getFinishedTaskListCount() - 1; i >= 0; i--) {
-                        if (status.getFinishedTaskList(i).getRequestId() == rid) {
+                        if (Objects.equals(status.getFinishedTaskList(i).getRequestId(), String.valueOf(rid))) {
                             status.removeFinishedTaskList(i);
                         }
                     }
@@ -1500,7 +1504,7 @@ public final class JavaMockEngineCluster {
                 if (fake.isFinishedForm()) {
                     EngineRpcService.TaskInfoPB.Builder finished =
                             EngineRpcService.TaskInfoPB.newBuilder()
-                                    .setRequestId(fake.requestId())
+                                    .setRequestId(String.valueOf(fake.requestId()))
                                     .setInputLength(1)
                                     .setPrefixLength(0)
                                     .setBatchId(fake.batchId())
@@ -1519,7 +1523,7 @@ public final class JavaMockEngineCluster {
                 } else {
                     status.addRunningTaskInfo(withLegacyTaskState(
                             EngineRpcService.TaskInfoPB.newBuilder()
-                                    .setRequestId(fake.requestId())
+                                    .setRequestId(String.valueOf(fake.requestId()))
                                     .setInputLength(1)
                                     .setPrefixLength(0)
                                     .setBatchId(fake.batchId())
@@ -1994,7 +1998,7 @@ public final class JavaMockEngineCluster {
             requestStates.put(requestId, "cancelled");
             cancelledCount.incrementAndGet();
             EngineRpcService.TaskInfoPB.Builder taskBuilder = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(requestId)
+                    .setRequestId(String.valueOf(requestId))
                     // Pass the ACTUAL phase the request was cancelled in through
                     // to the finished entry (P2-1): a queued opt-in decode
                     // request surfaces KV_ALLOCATED, a queued prefill RECEIVED.
@@ -2392,7 +2396,7 @@ public final class JavaMockEngineCluster {
         private void recordClientGoneCanceled(long requestId,
                                               EngineRpcService.TaskPhase phase) {
             EngineRpcService.TaskInfoPB.Builder task = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(requestId)
+                    .setRequestId(String.valueOf(requestId))
                     .setPhase(phase)
                     .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
                             .setErrorCode(EngineRpcService.ErrorCodePB.CANCELLED.getNumber())
@@ -2412,7 +2416,7 @@ public final class JavaMockEngineCluster {
                                                       EngineRpcService.TaskPhase phase) {
             addPriorityCancelTombstone(requestId);
             EngineRpcService.TaskInfoPB.Builder task = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(requestId)
+                    .setRequestId(String.valueOf(requestId))
                     .setPhase(phase)
                     .setPriorityPreemptionProgress(EngineRpcService.PriorityPreemptionProgressPB
                             .PRIORITY_PREEMPTION_CANCELED)
@@ -3770,7 +3774,7 @@ public final class JavaMockEngineCluster {
                 LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue,
                 String stage) {
             EngineRpcService.TaskInfoPB.Builder task = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(requestId)
+                    .setRequestId(String.valueOf(requestId))
                     .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
                     .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
                             .setErrorCode(DECODE_LACK_MEM_ERROR_CODE)
@@ -3844,7 +3848,7 @@ public final class JavaMockEngineCluster {
                                                  int dpRank,
                                                  EngineRpcService.TaskPhase phase) {
             return EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(shape.input().getRequestId())
+                    .setRequestId(String.valueOf(shape.input().getRequestId()))
                     .setInputLength(shape.inputLen())
                     .setPrefixLength(shape.hitTokens())
                     .setBatchId(batchId)
@@ -3867,7 +3871,7 @@ public final class JavaMockEngineCluster {
                                       int dpRank) {
             recordRecentExecutionTime(executionMs);
             EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(shape.input().getRequestId())
+                    .setRequestId(String.valueOf(shape.input().getRequestId()))
                     .setInputLength(shape.inputLen())
                     .setPrefixLength(shape.hitTokens())
                     .setBatchId(batchId)

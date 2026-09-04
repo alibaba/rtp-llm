@@ -124,7 +124,7 @@ class CodeReviewFixTest {
         // Block-pool caliber: inputLen=10 rounds up to ceil(10/1024)=1 block,
         // so the lease pins 1 x spb = 1024 tokens.
         long expectedKvTokens = 1024L;
-        MockPerformanceModel.RequestShape shape = shapeOf(model, requestId, inputLen);
+        MockPerformanceModel.RequestShape shape = shapeOf(model, String.valueOf(requestId), inputLen);
 
         // Directly invoke the private scheduleDecodeCompletion via reflection.
         invokeScheduleDecodeCompletion(decode, shape, -1, null);
@@ -178,7 +178,7 @@ class CodeReviewFixTest {
         int decodePort = decode.getGrpcPort();
 
         // Enqueue a single request with decode routing.
-        EngineRpcService.GenerateInputPB input = inputWithDecode(requestId, 10, decodePort);
+        EngineRpcService.GenerateInputPB input = inputWithDecode(String.valueOf(requestId), 10, decodePort);
         EngineRpcService.EnqueueBatchResponsePB response =
                 enqueue(prefill, batch(9000, slot(0, input)));
         assertEquals(0, response.getErrorsCount(), "enqueue should have 0 errors");
@@ -235,7 +235,7 @@ class CodeReviewFixTest {
         int inputLen = 10;
         // Block-pool caliber: inputLen=10 rounds up to 1 block = 1024 tokens.
         long expectedKvTokens = 1024L;
-        MockPerformanceModel.RequestShape shape = shapeOf(model, requestId, inputLen);
+        MockPerformanceModel.RequestShape shape = shapeOf(model, String.valueOf(requestId), inputLen);
 
         int nThreads = 50;
         CountDownLatch startGate = new CountDownLatch(1);
@@ -394,9 +394,8 @@ class CodeReviewFixTest {
 
     // ──────────── Protobuf builders ────────────
 
-    private static EngineRpcService.GenerateInputPB input(long requestId, int inputTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+    private static EngineRpcService.GenerateInputPB input(String requestId, int inputTokens) {
+        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(1)
                         .build());
@@ -407,9 +406,8 @@ class CodeReviewFixTest {
     }
 
     private static EngineRpcService.GenerateInputPB inputWithDecode(
-            long requestId, int inputTokens, int decodePort) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+            String requestId, int inputTokens, int decodePort) {
+        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(1)
                         .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
@@ -451,7 +449,7 @@ class CodeReviewFixTest {
      * and input length, using a fresh empty cache (no prefix hits).
      */
     private static MockPerformanceModel.RequestShape shapeOf(
-            MockPerformanceModel model, long requestId, int inputTokens) {
+            MockPerformanceModel model, String requestId, int inputTokens) {
         EngineRpcService.GenerateInputPB input = input(requestId, inputTokens);
         return model.shape(input, new MockLruBlockCache(100));
     }

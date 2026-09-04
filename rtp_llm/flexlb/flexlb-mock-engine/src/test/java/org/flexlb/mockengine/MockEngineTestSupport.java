@@ -35,16 +35,30 @@ final class MockEngineTestSupport {
     }
 
     static EngineRpcService.GenerateInputPB input(long requestId, int inputTokens) {
+        return input(String.valueOf(requestId), inputTokens);
+    }
+
+    static EngineRpcService.GenerateInputPB input(String requestId, int inputTokens) {
         return input(requestId, inputTokens, 1, null);
     }
 
     static EngineRpcService.GenerateInputPB inputWithDecode(
             long requestId, int inputTokens, int decodePort) {
+        return inputWithDecode(String.valueOf(requestId), inputTokens, decodePort);
+    }
+
+    static EngineRpcService.GenerateInputPB inputWithDecode(
+            String requestId, int inputTokens, int decodePort) {
         return input(requestId, inputTokens, 1, decodePort);
     }
 
     static EngineRpcService.GenerateInputPB inputWithDecode(
             long requestId, int inputTokens, int decodePort, int outputTokens) {
+        return inputWithDecode(String.valueOf(requestId), inputTokens, decodePort, outputTokens);
+    }
+
+    static EngineRpcService.GenerateInputPB inputWithDecode(
+            String requestId, int inputTokens, int decodePort, int outputTokens) {
         return input(requestId, inputTokens, outputTokens, decodePort);
     }
 
@@ -56,6 +70,11 @@ final class MockEngineTestSupport {
      */
     static EngineRpcService.GenerateInputPB inputWithBlockKeys(
             long requestId, int inputTokens, List<Long> blockKeys) {
+        return inputWithBlockKeys(String.valueOf(requestId), inputTokens, blockKeys);
+    }
+
+    static EngineRpcService.GenerateInputPB inputWithBlockKeys(
+            String requestId, int inputTokens, List<Long> blockKeys) {
         String uniqueKey;
         try {
             uniqueKey = MAPPER.writeValueAsString(Map.of(
@@ -68,10 +87,9 @@ final class MockEngineTestSupport {
                 EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(1)
                         .setUniqueKey(uniqueKey);
-        EngineRpcService.GenerateInputPB.Builder input =
-                EngineRpcService.GenerateInputPB.newBuilder()
-                        .setRequestId(requestId)
-                        .setGenerateConfig(config.build());
+        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(
+                EngineRpcService.GenerateInputPB.newBuilder(), requestId)
+                .setGenerateConfig(config.build());
         for (int token = 0; token < inputTokens; token++) {
             input.addTokenIds(token);
         }
@@ -79,7 +97,7 @@ final class MockEngineTestSupport {
     }
 
     private static EngineRpcService.GenerateInputPB input(
-            long requestId, int inputTokens, int outputTokens, Integer decodePort) {
+            String requestId, int inputTokens, int outputTokens, Integer decodePort) {
         EngineRpcService.GenerateConfigPB.Builder config =
                 EngineRpcService.GenerateConfigPB.newBuilder().setMaxNewTokens(outputTokens);
         if (decodePort != null) {
@@ -89,10 +107,9 @@ final class MockEngineTestSupport {
                     .setGrpcPort(decodePort)
                     .build());
         }
-        EngineRpcService.GenerateInputPB.Builder input =
-                EngineRpcService.GenerateInputPB.newBuilder()
-                        .setRequestId(requestId)
-                        .setGenerateConfig(config.build());
+        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(
+                EngineRpcService.GenerateInputPB.newBuilder(), requestId)
+                .setGenerateConfig(config.build());
         for (int token = 0; token < inputTokens; token++) {
             input.addTokenIds(token);
         }
@@ -237,6 +254,11 @@ final class MockEngineTestSupport {
 
     static MockPerformanceModel.RequestShape requestShape(
             MockPerformanceModel model, long requestId, int inputTokens) {
+        return requestShape(model, String.valueOf(requestId), inputTokens);
+    }
+
+    static MockPerformanceModel.RequestShape requestShape(
+            MockPerformanceModel model, String requestId, int inputTokens) {
         return model.shape(input(requestId, inputTokens), new MockLruBlockCache(100));
     }
 

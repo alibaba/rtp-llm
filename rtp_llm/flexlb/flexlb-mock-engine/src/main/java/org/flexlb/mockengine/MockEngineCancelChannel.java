@@ -52,7 +52,7 @@ public final class MockEngineCancelChannel implements EngineCancelChannel {
     }
 
     @Override
-    public CompletableFuture<CancelOutcome> cancel(CancelTarget target, long requestId,
+    public CompletableFuture<CancelOutcome> cancel(CancelTarget target, String requestId,
                                                    long timeoutMs) {
         JavaMockEngineCluster.FastRpcService service = target == null
                 ? null : services.get(target.prefillGrpcPort());
@@ -89,7 +89,7 @@ public final class MockEngineCancelChannel implements EngineCancelChannel {
         try {
             // Deliberately inspect only the addressed Prefill. Scanning other
             // workers would hide an incorrect Prefill route in tests.
-            JavaMockEngineCluster.CancelResult result = service.cancelRequest(requestId);
+            JavaMockEngineCluster.CancelResult result = service.cancelRequest(Long.parseLong(requestId));
             if (result.found()) {
                 return CompletableFuture.completedFuture(CancelOutcome.accepted());
             }

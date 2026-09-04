@@ -472,7 +472,7 @@ class StreamCancelAutonomousTest {
                                              long rid) {
         return MockEngineTestSupport.workerStatus(service, 0)
                 .getFinishedTaskListList().stream()
-                .filter(task -> task.getRequestId() == rid)
+                .filter(task -> task.getRequestId().equals(String.valueOf(rid)))
                 .filter(task -> task.hasErrorInfo()
                         && task.getErrorInfo().getErrorCode()
                                 == EngineRpcService.ErrorCodePB.CANCELLED.getNumber())
