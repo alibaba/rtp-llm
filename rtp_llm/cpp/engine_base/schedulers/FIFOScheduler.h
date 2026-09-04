@@ -111,6 +111,8 @@ private:
     bool    hasExtraStreams() const override;
     int64_t extraOnflightStreams() const override;
     void    fillExtraMetrics(RtpLLMSchedulerMetricsCollector& collector) const override;
+    void    appendExtraRunningTaskList(std::vector<EngineScheduleInfo::TaskInfo>& task_list) const override;
+    bool    partitionChunkContinuations();
 
     // Explicit request groups (enqueueGroup). Each group is admitted as a whole
     // to an isolated execution boundary; a partially admitted group keeps its
@@ -132,6 +134,7 @@ private:
     bool                         prefer_group_next_            = false;
 
     // TODO @wangyin support different beams run togather
+    std::list<GenerateStreamPtr> pending_decode_streams_;
 };
 
 }  // namespace rtp_llm
