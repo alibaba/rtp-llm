@@ -35,6 +35,8 @@ struct PrefillCPConfig {
     bool kv_cache_sharded = false;
     // Explicit prefill CP size for decode-side fixed/SWA ring sizing; 0 = unset.
     int64_t prefill_cp_size = 0;
+    // Token alignment required by each of the 2 * CP zigzag segments.
+    size_t segment_size_alignment = 1;
     bool           is_enabled() const {
         return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
                && method != CPRotateMethod::PREFILL_CP;

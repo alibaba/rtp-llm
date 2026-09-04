@@ -290,7 +290,8 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     for (size_t p = 0; p < num_prefill_stream; ++p) {
         int num_prefill_token = input_lengths.data_ptr<int32_t>()[num_decode_stream + p];
 
-        const auto token_layout = makeZigzagTokenLayout(num_prefill_token, prefill_cp_size);
+        const auto token_layout = makeZigzagTokenLayout(
+            num_prefill_token, prefill_cp_size, parallelism_config_.prefill_cp_config.segment_size_alignment);
 
         prefill_cp_split_tokens_size += token_layout.token_count_per_rank;
         padding_lengths[p] = token_layout.padding_token_count;

@@ -2,6 +2,17 @@ import torch
 from flashinfer import BatchPrefillWithPagedKVCacheWrapper
 
 
+def resolve_kv_cache_block_id(attn_inputs) -> torch.Tensor:
+    """Prefill warm-up runs before any KV cache exists, but the ``fill_mla_params``
+    pybind signature requires a Tensor, so substitute an empty int32 tensor."""
+    block_id = attn_inputs.kv_cache_kernel_block_id
+    if block_id is None or block_id.numel() == 0:
+        block_id = attn_inputs.kv_cache_kernel_block_id_device
+    if block_id is None:
+        block_id = torch.empty(0, dtype=torch.int32)
+    return block_id
+
+
 def plan_prefix_paged_attention(
     wrapper: BatchPrefillWithPagedKVCacheWrapper,
     qo_indptr: torch.Tensor,

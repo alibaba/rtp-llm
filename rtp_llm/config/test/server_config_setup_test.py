@@ -9,6 +9,7 @@ from unittest.mock import patch
 from rtp_llm.config.engine_config import EngineConfig, setup_pd_sep_config
 from rtp_llm.config.py_config_modules import PyEnvConfigs, ServerConfig
 from rtp_llm.config.server_config_setup import (
+    _configure_model_prefill_cp,
     set_parallelism_config,
     setup_and_configure_server,
 )
@@ -57,6 +58,80 @@ class ServerConfigPortLayoutTest(TestCase):
 
 
 class GenerateConfigTest(TestCase):
+
+    @staticmethod
+    def _qwen_cp_configs() -> PyEnvConfigs:
+        configs = PyEnvConfigs()
+        configs.model_args.model_type = "qwen35_dense"
+        configs.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+        configs.kv_cache_config.seq_size_per_block = 256
+        parallelism = configs.parallelism_config
+        parallelism.tp_size = 4
+        parallelism.world_size = 4
+        parallelism.dp_size = 1
+        parallelism.ep_size = 1
+        parallelism.pp_size = 1
+        parallelism.ffn_sp_size = 1
+        configs.role_config.role_type = RoleType.PDFUSION
+        set_parallelism_config(
+            parallelism, py_prefill_cp_config=configs.prefill_cp_config
+        )
+        return configs
+
+    def test_qwen_cp_alignment_propagates(self):
+        from rtp_llm.models.qwen3_next.qwen3_next import Qwen3NextBase
+
+        configs = self._qwen_cp_configs()
+        with patch(
+            "rtp_llm.model_factory.ModelFactory.get_model_cls",
+            return_value=Qwen3NextBase,
+        ):
+            _configure_model_prefill_cp(configs)
+
+        self.assertEqual(configs.prefill_cp_config.segment_size_alignment, 64)
+        self.assertEqual(
+            configs.parallelism_config.prefill_cp_config.segment_size_alignment, 64
+        )
+
+    def test_cp_rejects_invalid_alignment_and_cache_block_size(self):
+        configs = PyEnvConfigs()
+        configs.prefill_cp_config.segment_size_alignment = 0
+        with self.assertRaisesRegex(ValueError, "must be greater than 0"):
+            set_parallelism_config(
+                configs.parallelism_config,
+                py_prefill_cp_config=configs.prefill_cp_config,
+            )
+
+        from rtp_llm.models.qwen3_next.qwen3_next import Qwen3NextBase
+
+        configs = self._qwen_cp_configs()
+        configs.kv_cache_config.seq_size_per_block = 96
+        with patch(
+            "rtp_llm.model_factory.ModelFactory.get_model_cls",
+            return_value=Qwen3NextBase,
+        ), self.assertRaisesRegex(ValueError, "KV cache block size 96"):
+            _configure_model_prefill_cp(configs)
+
+    def test_cp_registry_errors_skip_only_non_model_roles(self):
+        for role_type in (RoleType.FRONTEND, RoleType.VIT):
+            configs = PyEnvConfigs()
+            configs.model_args.model_type = "missing_model"
+            configs.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+            configs.role_config.role_type = role_type
+            with patch(
+                "rtp_llm.model_factory.ModelFactory.get_model_cls"
+            ) as get_model_cls:
+                _configure_model_prefill_cp(configs)
+            get_model_cls.assert_not_called()
+
+        configs = PyEnvConfigs()
+        configs.model_args.model_type = "missing_model"
+        configs.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+        with patch(
+            "rtp_llm.model_factory.ModelFactory.get_model_cls",
+            side_effect=KeyError("missing_model"),
+        ), self.assertRaisesRegex(ValueError, "unknown model_type=missing_model"):
+            _configure_model_prefill_cp(configs)
 
     @patch.dict(
         "os.environ",

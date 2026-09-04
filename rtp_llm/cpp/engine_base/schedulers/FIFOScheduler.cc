@@ -33,15 +33,18 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
         std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
     prefill_cp_size_(parallelism_config.prefill_cp_config.is_enabled() ?
                          static_cast<size_t>(std::max<int64_t>(parallelism_config.tp_size, 1)) :
-                         1) {
+                         1),
+    prefill_cp_segment_alignment_(parallelism_config.prefill_cp_config.segment_size_alignment) {
     RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu], "
                      "max_batch_tokens_without_cache is [%zu], cp_force_single_prefill is [%d], "
-                     "prefill_cp_size is [%zu], max_inited_kv_cache_streams is [%zu]",
+                     "prefill_cp_size is [%zu], prefill_cp_segment_alignment is [%zu], "
+                     "max_inited_kv_cache_streams is [%zu]",
                      max_generate_batch_size_,
                      max_batch_tokens_size_,
                      max_batch_tokens_without_cache_,
                      cp_force_single_prefill_,
                      prefill_cp_size_,
+                     prefill_cp_segment_alignment_,
                      max_inited_kv_cache_streams_);
 }
 
@@ -239,7 +242,8 @@ size_t FIFOScheduler::prefillTokenCostWithoutCache(const GenerateStreamPtr& stre
     // Match the token count that CP presents to the model after per-sequence padding.
     auto token_count = static_cast<size_t>(std::max(stream->contextLength(), 0));
     if (prefill_cp_size_ > 1) {
-        token_count = makeZigzagTokenLayout(token_count, prefill_cp_size_).padded_token_count;
+        token_count =
+            makeZigzagTokenLayout(token_count, prefill_cp_size_, prefill_cp_segment_alignment_).padded_token_count;
     }
     return token_count * static_cast<size_t>(stream->currentBatchSize());
 }

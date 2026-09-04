@@ -14,6 +14,7 @@ logging.basicConfig(level=logging.INFO)
 import torch
 import torch.distributed as dist
 
+from rtp_llm.models_py.distributed import user_buffers
 from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     init_distributed_environment,
@@ -175,6 +176,47 @@ class TestUserBufferCommunicator(unittest.TestCase):
         except RuntimeError:
             pass  # Already set
         self.port_manager = PortManager()
+
+    def test_send_recv_preserves_producer_and_consumer_stream_order(self):
+        comm = object.__new__(UserBufferCommunicator)
+        comm.local_rank = 0
+        comm.per_rank_buffer_size = 1024
+        comm._ub_handle = 1
+        comm._communicator_ptr = 2
+        comm._rank_offsets = {0: 0, 1: 512}
+        send_stream = mock.Mock(cuda_stream=11)
+        recv_stream = mock.Mock(cuda_stream=12)
+        current_stream = mock.Mock()
+        comm._send_streams = {1: send_stream}
+        comm._recv_stream = recv_stream
+        comm.cleanup = mock.Mock()
+
+        timeline = []
+        send_stream.wait_stream.side_effect = lambda _: timeline.append("send-ready")
+        recv_stream.wait_stream.side_effect = lambda _: timeline.append("recv-ready")
+        current_stream.wait_stream.side_effect = lambda stream: timeline.append(
+            "send-done" if stream is send_stream else "recv-done"
+        )
+
+        with mock.patch.object(
+            torch.cuda, "current_stream", return_value=current_stream
+        ), mock.patch.object(
+            user_buffers,
+            "userbuffers_send",
+            side_effect=lambda *args: timeline.append("send"),
+        ), mock.patch.object(
+            user_buffers,
+            "userbuffers_recv",
+            side_effect=lambda *args: timeline.append("recv"),
+        ):
+            send_tensor = torch.empty(4, device="cuda")
+            recv_tensor = torch.empty_like(send_tensor)
+            self.assertTrue(comm.send_recv(send_tensor, 1, recv_tensor, 1))
+
+        self.assertEqual(
+            timeline,
+            ["send-ready", "send", "recv-ready", "recv", "send-done", "recv-done"],
+        )
 
     def _run_multi_process_test(self, worker_func, world_size: int, test_name: str):
         """Helper to run a multi-process test"""

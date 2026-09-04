@@ -15,6 +15,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
     generate_half_kv_indices,
     generate_half_q_indices,
     plan_prefix_paged_attention,
+    resolve_kv_cache_block_id,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     get_py_flashinfer_workspace_buffer,
@@ -73,7 +74,9 @@ class PCPAll2AllAttnOp:
         self.comm_events = [torch.cuda.Event() for _ in range(self.prefill_cp_size)]
         self.math_events = [torch.cuda.Event() for _ in range(self.prefill_cp_size)]
 
-        self.all_shuffle_indices = None
+        self.cache_append_indices = None
+        self.cache_append_batch_indices = None
+        self.cache_append_positions = None
         self.half_q_idx = self.half_kv_idx = None
 
         # Init flashinfer attention wrappers
@@ -104,7 +107,7 @@ class PCPAll2AllAttnOp:
         ]
         prefill_cp_chunk_lengths = self.cp_info.prefill_cp_chunk_lengths
         shuffle_indices = self.cp_info.prefill_shuffle_indices
-        self.all_shuffle_indices = all_gather(shuffle_indices, group=Group.TP).reshape(
+        all_shuffle_indices = all_gather(shuffle_indices, group=Group.TP).reshape(
             -1, shuffle_indices.shape[0]
         )
 
@@ -147,17 +150,39 @@ class PCPAll2AllAttnOp:
             self.attn_inputs.prefix_lengths,
             self.attn_inputs.sequence_lengths,
             self.cp_info.prefill_actual_input_lengths_cpu,
-            self.attn_inputs.kv_cache_kernel_block_id,
+            resolve_kv_cache_block_id(self.attn_inputs),
             self.attn_configs.kernel_tokens_per_block,
         )
 
         chunk_lens = prefill_cp_chunk_lengths.tolist()
-        self.append_batch_indice = torch.cat(
+        append_batch_indice = torch.cat(
             [
                 torch.full((cl,), i, dtype=torch.int32, device=self.device)
                 for i, cl in enumerate(chunk_lens)
             ]
         )
+        token_actual_lengths = self.cp_info.prefill_actual_input_lengths_cpu.to(
+            self.device
+        )[append_batch_indice.long()]
+        token_prefix_lengths = self.attn_inputs.prefix_lengths.to(self.device)[
+            append_batch_indice.long()
+        ]
+        self.cache_append_indices = []
+        self.cache_append_batch_indices = []
+        self.cache_append_positions = []
+        for shuffle_positions in all_shuffle_indices:
+            valid_indices = torch.nonzero(
+                (shuffle_positions >= 0) & (shuffle_positions < token_actual_lengths),
+                as_tuple=False,
+            ).flatten()
+            self.cache_append_indices.append(valid_indices)
+            self.cache_append_batch_indices.append(
+                append_batch_indice.index_select(0, valid_indices)
+            )
+            self.cache_append_positions.append(
+                shuffle_positions.index_select(0, valid_indices)
+                + token_prefix_lengths.index_select(0, valid_indices)
+            )
 
         self.has_prefix = self.attn_inputs.prefix_lengths.any().item()
         if self.has_prefix:
@@ -174,6 +199,31 @@ class PCPAll2AllAttnOp:
             )
 
         return params
+
+    def _append_kv_cache(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        source_rank: int,
+        kv_cache_tensor: Optional[torch.Tensor],
+        params: ParamsBase,
+    ) -> None:
+        if kv_cache_tensor is None:
+            return
+        valid_indices = self.cache_append_indices[source_rank]
+        if valid_indices.numel() == 0:
+            return
+        append_paged_kv_cache(
+            append_key=key.index_select(0, valid_indices),
+            append_value=value.index_select(0, valid_indices),
+            batch_indices=self.cache_append_batch_indices[source_rank],
+            positions=self.cache_append_positions[source_rank],
+            paged_kv_cache=kv_cache_tensor,
+            kv_indices=params.page_indice_d,
+            kv_indptr=params.decode_page_indptr_d,
+            kv_last_page_len=params.paged_kv_last_page_len_d,
+            kv_layout="HND",
+        )
 
     def forward(
         self,
@@ -209,9 +259,13 @@ class PCPAll2AllAttnOp:
             dtype=torch.float32,
             device=q.device,
         )
-        kv_cache_tensor = kv_cache.kv_cache_base.view(
-            -1, 2, self.num_kv_heads, self.seq_size_per_block, self.head_dim
-        )
+        # Warm-up runs before any KV cache is allocated, so there is nothing to
+        # write to; prefix attention cannot be active without a cache either.
+        kv_cache_tensor = None
+        if kv_cache is not None:
+            kv_cache_tensor = kv_cache.kv_cache_base.view(
+                -1, 2, self.num_kv_heads, self.seq_size_per_block, self.head_dim
+            )
         for round_id in range(0, self.prefill_cp_size):
             if round_id > 0:
                 out_buffer.zero_()
@@ -230,8 +284,12 @@ class PCPAll2AllAttnOp:
                     if self.use_ub and self.ub_communicator.can_handle_tensor(
                         kv_buffer
                     ):
-                        self.ub_communicator.send(kv_buffer, dst=next_rank_id)
-                        self.ub_communicator.recv(recv_buf, src=prev_rank_id)
+                        self.ub_communicator.send_recv(
+                            kv_buffer,
+                            dst=next_rank_id,
+                            recv_tensor=recv_buf,
+                            src=prev_rank_id,
+                        )
                     else:
                         if self.prefill_cp_rank < next_rank_id:
                             send(kv_buffer, dst=next_rank_id, group=Group.TP)
@@ -247,16 +305,12 @@ class PCPAll2AllAttnOp:
                 k = k.reshape(-1, self.num_kv_heads, self.head_dim)
                 v = v.reshape(-1, self.num_kv_heads, self.head_dim)
 
-                append_paged_kv_cache(
-                    append_key=k,
-                    append_value=v,
-                    batch_indices=self.append_batch_indice,
-                    positions=self.all_shuffle_indices[self.prefill_cp_rank],
-                    paged_kv_cache=kv_cache_tensor,
-                    kv_indices=params.page_indice_d,
-                    kv_indptr=params.decode_page_indptr_d,
-                    kv_last_page_len=params.paged_kv_last_page_len_d,
-                    kv_layout="HND",
+                self._append_kv_cache(
+                    k,
+                    v,
+                    self.prefill_cp_rank,
+                    kv_cache_tensor,
+                    params,
                 )
 
                 q_reshaped = q.reshape(-1, self.num_qo_heads, self.head_dim)
@@ -294,16 +348,12 @@ class PCPAll2AllAttnOp:
                 )
                 # TODO: make write local kvcache async
                 src_rank = (self.prefill_cp_rank - round_id) % self.prefill_cp_size
-                append_paged_kv_cache(
-                    append_key=remote_k,
-                    append_value=remote_v,
-                    batch_indices=self.append_batch_indice,
-                    positions=self.all_shuffle_indices[src_rank],
-                    paged_kv_cache=kv_cache_tensor,
-                    kv_indices=params.page_indice_d,
-                    kv_indptr=params.decode_page_indptr_d,
-                    kv_last_page_len=params.paged_kv_last_page_len_d,
-                    kv_layout="HND",
+                self._append_kv_cache(
+                    remote_k,
+                    remote_v,
+                    src_rank,
+                    kv_cache_tensor,
+                    params,
                 )
                 if round_id > self.prefill_cp_rank:
                     q_split = (

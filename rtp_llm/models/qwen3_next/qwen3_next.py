@@ -16,6 +16,13 @@ from rtp_llm.ops import HybridAttentionType, KVCacheSpecType
 
 
 class Qwen3NextBase(BaseModel):
+    @classmethod
+    def prefill_cp_alignment(cls) -> int:
+        """Align CP segments and cache blocks to the GDN state chunk size."""
+        from rtp_llm.models_py.model_desc.qwen3_next import GDN_STATE_CHUNK_SIZE
+
+        return GDN_STATE_CHUNK_SIZE
+
     def _create_python_model(self):
         model_config = self.model_config
         parallelism_config = self.parallelism_config

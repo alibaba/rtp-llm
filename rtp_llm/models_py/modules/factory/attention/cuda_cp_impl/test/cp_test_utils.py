@@ -68,8 +68,28 @@ def build_restore_indices(cp_chunk_lengths: List[int], cp_size: int) -> torch.Te
     return torch.tensor(restore, dtype=torch.int32)
 
 
-def build_padding_mask(cp_chunk_lengths: List[int], cp_size: int) -> torch.Tensor:
-    return torch.ones(sum(cp_chunk_lengths) * cp_size, dtype=torch.int32)
+def build_padding_mask(
+    cp_chunk_lengths: List[int],
+    cp_size: int,
+    padding_lengths: List[int] | None = None,
+) -> torch.Tensor:
+    if padding_lengths is None:
+        padding_lengths = [0] * len(cp_chunk_lengths)
+    masks = []
+    for chunk_length, padding_length in zip(cp_chunk_lengths, padding_lengths):
+        padded_length = chunk_length * cp_size
+        valid_length = padded_length - padding_length
+        if valid_length < 0:
+            raise ValueError("padding length exceeds padded sequence length")
+        masks.append(
+            torch.cat(
+                [
+                    torch.ones(valid_length, dtype=torch.int32),
+                    torch.zeros(padding_length, dtype=torch.int32),
+                ]
+            )
+        )
+    return torch.cat(masks)
 
 
 # ---------------------------------------------------------------------------
@@ -164,10 +184,13 @@ def build_cp_attn_inputs(
     tokens_per_block: int,
     prefix_lengths: List[int] | None = None,
     device: torch.device = torch.device("cuda"),
+    warmup: bool = False,
 ) -> PyAttentionInputs:
     """Build ``PyAttentionInputs`` with properly populated CP info.
 
     ``prefix_lengths``: per-batch prefix cache lengths (default all-zero).
+    ``warmup``: reproduce prefill warm-up, which runs before any KV cache exists
+    and therefore leaves the block-table fields unset.
     """
     batch_size = len(cp_chunk_lengths)
     if prefix_lengths is None:
@@ -189,27 +212,36 @@ def build_cp_attn_inputs(
         cu.append(cu[-1] + cl)
     inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32, device=device)
 
-    max_blocks = max(math.ceil(sl / tokens_per_block) for sl in sequence_lengths)
-    block_ids = torch.zeros(batch_size, max_blocks, dtype=torch.int32)
-    offset = 0
-    for i, sl in enumerate(sequence_lengths):
-        nb = math.ceil(sl / tokens_per_block)
-        block_ids[i, :nb] = torch.arange(offset, offset + nb, dtype=torch.int32)
-        offset += nb
-    inp.kv_cache_block_id = block_ids
-    inp.kv_cache_kernel_block_id = block_ids
-    inp.kv_cache_block_id_device = block_ids.to(device)
+    if not warmup:
+        max_blocks = max(math.ceil(sl / tokens_per_block) for sl in sequence_lengths)
+        block_ids = torch.zeros(batch_size, max_blocks, dtype=torch.int32)
+        offset = 0
+        for i, sl in enumerate(sequence_lengths):
+            nb = math.ceil(sl / tokens_per_block)
+            block_ids[i, :nb] = torch.arange(offset, offset + nb, dtype=torch.int32)
+            offset += nb
+        inp.kv_cache_block_id = block_ids
+        inp.kv_cache_kernel_block_id = block_ids
+        inp.kv_cache_block_id_device = block_ids.to(device)
     inp.dtype = get_typemeta(torch.zeros(1, dtype=torch.bfloat16))
 
     # new_lengths = sequence_lengths - prefix_lengths (total new tokens per batch)
     new_lengths = [sl - pl for sl, pl in zip(sequence_lengths, prefix_lengths)]
+    padded_new_lengths = [cl * cp_size for cl in cp_chunk_lengths]
+    padding_lengths = [
+        padded - actual for padded, actual in zip(padded_new_lengths, new_lengths)
+    ]
+    if any(padding < 0 for padding in padding_lengths):
+        raise ValueError("CP chunk length is smaller than the real input length")
 
     cp_info = PyContextParallelParams()
     cp_info.prefill_cp_chunk_lengths = torch.tensor(cp_chunk_lengths, dtype=torch.int32)
-    cp_info.prefill_cp_padding_lengths = torch.zeros(batch_size, dtype=torch.int32)
-    cp_info.prefill_qkv_padding_mask = build_padding_mask(cp_chunk_lengths, cp_size).to(
-        device
+    cp_info.prefill_cp_padding_lengths = torch.tensor(
+        padding_lengths, dtype=torch.int32
     )
+    cp_info.prefill_qkv_padding_mask = build_padding_mask(
+        cp_chunk_lengths, cp_size, padding_lengths
+    ).to(device)
     cp_info.prefill_qkv_restore_indice = build_restore_indices(
         cp_chunk_lengths, cp_size
     ).to(device)
@@ -370,8 +402,14 @@ class CPAttnTestBase(unittest.TestCase):
         tokens_per_block: int = 16,
         rtol: float = 1e-2,
         atol: float = 1e-2,
+        warmup: bool = False,
     ):
-        """Test CP attention **without** prefix cache."""
+        """Test CP attention **without** prefix cache.
+
+        ``warmup``: run as prefill warm-up, which happens before any KV cache is
+        allocated.  Attention output must still be correct; there is no cache to
+        verify.
+        """
         assert all(sl % cp_size == 0 for sl in sequence_lengths)
         cp_chunk_lengths = [sl // cp_size for sl in sequence_lengths]
         assert all(cl % 2 == 0 for cl in cp_chunk_lengths)
@@ -439,11 +477,20 @@ class CPAttnTestBase(unittest.TestCase):
             cp_size,
             tokens_per_block,
             device=self.device,
+            warmup=warmup,
         )
-        total_blocks = sum(math.ceil(s / tokens_per_block) for s in sequence_lengths)
-        kv_cache = make_kv_cache(
-            total_blocks, kv_head_num, tokens_per_block, head_dim, device=self.device
-        )
+        kv_cache = None
+        if not warmup:
+            total_blocks = sum(
+                math.ceil(s / tokens_per_block) for s in sequence_lengths
+            )
+            kv_cache = make_kv_cache(
+                total_blocks,
+                kv_head_num,
+                tokens_per_block,
+                head_dim,
+                device=self.device,
+            )
 
         call_idx = [0]
 
@@ -463,6 +510,9 @@ class CPAttnTestBase(unittest.TestCase):
             output = op.forward(qkv, kv_cache, params)
 
         self._assert_close(output, ref_output[rank_idx], rtol=rtol, atol=atol)
+
+        if warmup:
+            return
 
         cache_k, cache_v = extract_kv_from_paged_cache(
             kv_cache, sequence_lengths, tokens_per_block

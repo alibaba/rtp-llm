@@ -69,15 +69,14 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
         new_lengths: List[int],
         cp_size: int,
         rank: int,
-        prefix_lengths: List[int] | None = None,
+        padded_lengths: List[int] | None = None,
         device: torch.device = torch.device("cuda"),
     ) -> torch.Tensor:
-        if prefix_lengths is None:
-            prefix_lengths = [0] * len(new_lengths)
+        if padded_lengths is None:
+            padded_lengths = new_lengths
         indices: List[int] = []
-        for new_len, pl in zip(new_lengths, prefix_lengths):
-            positions = zigzag_positions_for_rank(new_len, cp_size, rank)
-            indices.extend(p + pl for p in positions)
+        for padded_length in padded_lengths:
+            indices.extend(zigzag_positions_for_rank(padded_length, cp_size, rank))
         return torch.tensor(indices, dtype=torch.int32, device=device)
 
     # ---- mock builders ----
@@ -132,6 +131,7 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
         kv_head_num: int = 2,
         head_dim: int = 64,
         tokens_per_block: int = 16,
+        warmup: bool = False,
     ):
         assert all(sl % cp_size == 0 for sl in sequence_lengths)
         cp_chunk_lengths = [sl // cp_size for sl in sequence_lengths]
@@ -208,18 +208,23 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
             cp_size,
             tokens_per_block,
             device=self.device,
+            warmup=warmup,
         )
         attn_inputs.context_parallel_info.prefill_shuffle_indices = all_shuffle[
             cp_rank
         ].cpu()
-        total_blocks = sum(math.ceil(s / tokens_per_block) for s in sequence_lengths)
-        kv_cache = make_kv_cache(
-            total_blocks,
-            kv_head_num,
-            tokens_per_block,
-            head_dim,
-            device=self.device,
-        )
+        kv_cache = None
+        if not warmup:
+            total_blocks = sum(
+                math.ceil(s / tokens_per_block) for s in sequence_lengths
+            )
+            kv_cache = make_kv_cache(
+                total_blocks,
+                kv_head_num,
+                tokens_per_block,
+                head_dim,
+                device=self.device,
+            )
 
         output = self._run_with_mocks(
             attn_cfg,
@@ -231,6 +236,9 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
             all_kv_buffers,
         )
         self._assert_close(output, ref_output[rank_idx])
+
+        if warmup:
+            return
 
         cache_k, cache_v = extract_kv_from_paged_cache(
             kv_cache, sequence_lengths, tokens_per_block
@@ -345,7 +353,6 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
                 new_lengths,
                 cp_size,
                 r,
-                prefix_lengths=prefix_lengths,
                 device=self.device,
             )
             for r in range(cp_size)
@@ -505,6 +512,78 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
             cp_size=4,
             cp_rank=2,
             tokens_per_block=16,
+        )
+
+    def test_cache_append_offsets_prefix_and_filters_production_padding(self):
+        cp_size = 4
+        actual_lengths = [1, 257]
+        prefix_lengths = [64, 128]
+        sequence_lengths = [
+            prefix + actual for prefix, actual in zip(prefix_lengths, actual_lengths)
+        ]
+        chunk_lengths = [128, 128]
+        padded_lengths = [chunk * cp_size for chunk in chunk_lengths]
+        all_shuffle = [
+            self._build_shuffle_indices(
+                actual_lengths,
+                cp_size,
+                rank,
+                padded_lengths=padded_lengths,
+                device=self.device,
+            )
+            for rank in range(cp_size)
+        ]
+        attn_cfg, par_cfg = make_configs(cp_size=cp_size, cp_rank=0)
+        attn_inputs = build_cp_attn_inputs(
+            sequence_lengths,
+            chunk_lengths,
+            cp_size,
+            tokens_per_block=16,
+            prefix_lengths=prefix_lengths,
+            device=self.device,
+        )
+        attn_inputs.context_parallel_info.prefill_shuffle_indices = all_shuffle[0]
+
+        with patch(
+            f"{_A2A_MODULE}.all_gather", return_value=torch.cat(all_shuffle)
+        ), patch(f"{_A2A_MODULE}.get_user_buffers_communicator", return_value=None):
+            op = PCPAll2AllAttnOp(attn_cfg, attn_inputs, par_cfg)
+            params = op.prepare(attn_inputs)
+
+        keys = torch.arange(
+            sum(chunk_lengths), dtype=torch.float32, device=self.device
+        ).reshape(-1, 1, 1)
+        values = -keys
+        for rank, expected_count in enumerate((65, 64, 64, 65)):
+            batch_indices = op.cache_append_batch_indices[rank]
+            positions = op.cache_append_positions[rank]
+            self.assertEqual(positions.numel(), expected_count)
+            for batch, (prefix, actual) in enumerate(
+                zip(prefix_lengths, actual_lengths)
+            ):
+                batch_positions = positions[batch_indices == batch]
+                self.assertTrue(torch.all(batch_positions >= prefix))
+                self.assertTrue(torch.all(batch_positions < prefix + actual))
+
+            with patch(f"{_A2A_MODULE}.append_paged_kv_cache") as append_mock:
+                op._append_kv_cache(
+                    keys,
+                    values,
+                    rank,
+                    torch.empty(0, device=self.device),
+                    params,
+                )
+            append_mock.assert_called_once()
+            expected_indices = op.cache_append_indices[rank]
+            kwargs = append_mock.call_args.kwargs
+            self.assertTrue(torch.equal(kwargs["append_key"], keys[expected_indices]))
+            self.assertTrue(
+                torch.equal(kwargs["append_value"], values[expected_indices])
+            )
+
+    def test_warmup_without_kv_cache(self):
+        self.run_no_prefix(
+            batch_size=1, sequence_lengths=[32], cp_size=4, cp_rank=0, warmup=True
         )
 
 
