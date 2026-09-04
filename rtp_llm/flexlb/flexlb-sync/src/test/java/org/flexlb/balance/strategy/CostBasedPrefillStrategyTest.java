@@ -203,6 +203,26 @@ class CostBasedPrefillStrategyTest {
     }
 
     @Test
+    void weakSharedPrefixDoesNotSuppressSessionPlacement() {
+        FlexlbConfig config = sessionAffinityConfig(1_000);
+        RoutingConfig.CacheAffinityConfig cacheAffinity = new RoutingConfig.CacheAffinityConfig();
+        cacheAffinity.setMaxExtraTtftMs(1_000);
+        cacheAffinity.setMinPrefixHitPercent(5);
+        config.getRouter().getRoles().getPrefill().setCacheAffinity(cacheAffinity);
+        addWorker("10.0.0.1", 0);
+        addWorker("10.0.0.2", 50);
+        recordSession("10.0.0.2:8080");
+        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any()))
+                .thenReturn(Map.of("10.0.0.1:8080", 1));
+        BalanceContext context = establishedSessionContext(20_000, 110L, config);
+
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.2", result.getServerIp());
+    }
+
+    @Test
     void unavailableSessionPlacementUsesBaseline() {
         FlexlbConfig config = sessionAffinityConfig(100);
         addWorker("10.0.0.1", 0);
