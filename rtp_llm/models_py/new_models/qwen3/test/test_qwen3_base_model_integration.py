@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import tempfile
 import types
 import unittest
@@ -17,6 +18,7 @@ from rtp_llm.config.quant_config import (
 from rtp_llm.config.quant_config import QuantizationConfig as SourceQuantizationConfig
 from rtp_llm.config.quant_config import WeightOnlyInt8PerChannelQuantConfig
 from rtp_llm.metrics import GaugeMetrics
+from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.models.base_model import BaseModel
@@ -24,7 +26,7 @@ from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.new_models.qwen3.language import Qwen3ForCausalLM
 from rtp_llm.models_py.quant_methods.unquantized import UnquantizedLinearMethod
-from rtp_llm.ops import TaskType
+from rtp_llm.ops import SpeculativeType, TaskType
 from rtp_llm.utils.model_weight import CkptWeightInfo
 
 
@@ -123,6 +125,86 @@ def _weights():
 
 
 class Qwen3BaseModelIntegrationTest(unittest.TestCase):
+    def test_force_cpu_load_weights_keeps_target_and_draft_on_legacy_loader(self):
+        routes = []
+
+        class RouteProbeModel:
+            @classmethod
+            def from_config(cls, **kwargs):
+                probe = object.__new__(BaseModel)
+                probe.model_config = kwargs["model_config"]
+                probe.parallelism_config = kwargs["parallelism_config"]
+                probe.device_resource_config = kwargs["device_resource_config"]
+                probe.load_method = kwargs["load_method"]
+                probe.force_cpu_load_weights = kwargs["force_cpu_load_weights"]
+                probe.custom_module = None
+                uses_new_loader = probe._use_new_loader()
+                routes.append((probe.force_cpu_load_weights, uses_new_loader))
+                return types.SimpleNamespace(
+                    weight=None,
+                    force_cpu_load_weights=probe.force_cpu_load_weights,
+                    uses_new_loader=uses_new_loader,
+                )
+
+            @staticmethod
+            def speculative_weight_alias_names(_target_model, _draft_config):
+                return ()
+
+        class FakeProposeModel:
+            def __init__(self, _sp_type, _gen_num_per_circle, gpt_model):
+                self.gpt_model = gpt_model
+
+        main_config = _model_config()
+        main_config.model_name = ""
+        main_config.max_seq_len = 128
+        main_config.gen_num_per_cycle = 1
+        main_config.use_new_loader = None
+        draft_config = _model_config()
+        draft_config.max_seq_len = 64
+        draft_config.use_new_loader = None
+        engine_config = types.SimpleNamespace(
+            parallelism_config=_parallelism_config(),
+            hw_kernel_config=None,
+            kv_cache_config=None,
+            fmha_config=None,
+            moe_config=None,
+            device_resource_config=None,
+            runtime_config=types.SimpleNamespace(
+                warm_up=False,
+                model_warm_up=False,
+                model_name="",
+                max_generate_batch_size=0,
+            ),
+            load_config=types.SimpleNamespace(
+                load_method=LoadMethod.SCRATCH,
+                force_cpu_load_weights=True,
+                loader_recycle_handles=False,
+                moe_pure_tp_preshard=False,
+                keep_mla_checkpoint_weights=False,
+            ),
+            sp_config=types.SimpleNamespace(
+                type=SpeculativeType.VANILLA,
+                gen_num_per_cycle=1,
+            ),
+        )
+        propose_module = types.ModuleType("rtp_llm.models.propose_model.propose_model")
+        propose_module.ProposeModel = FakeProposeModel
+
+        with patch.object(
+            ModelFactory, "get_model_cls", return_value=RouteProbeModel
+        ), patch("rtp_llm.model_factory.configure_warmup"), patch.dict(
+            sys.modules,
+            {"rtp_llm.models.propose_model.propose_model": propose_module},
+        ):
+            target = ModelFactory._create_model(main_config, engine_config)
+            draft = ModelFactory.get_sp_model(
+                main_config, draft_config, engine_config, target_model=target
+            ).gpt_model
+
+        self.assertEqual(routes, [(True, False), (True, False)])
+        self.assertFalse(target.uses_new_loader)
+        self.assertFalse(draft.uses_new_loader)
+
     def test_base_model_loader_route_uses_registry_default_and_explicit_override(self):
         model = object.__new__(BaseModel)
         model.model_config = types.SimpleNamespace(
