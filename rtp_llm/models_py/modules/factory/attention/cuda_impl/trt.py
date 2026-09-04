@@ -507,10 +507,17 @@ class FlashInferNativePrefillImpl(FMHAImplBase):
     ) -> None:
         self.need_rope = attn_configs.rope_config.style != RopeStyle.No
         self.attn_configs = attn_configs
-        self.fmha_impl = PyFlashinferPrefillAttnOp(attn_configs, backend="fa2")
+        sm_scale = (
+            attn_configs.softmax_extra_scale
+            / attn_configs.q_scaling
+            * attn_configs.size_per_head**-0.5
+        )
+        self.fmha_impl = PyFlashinferPrefillAttnOp(
+            attn_configs, backend="fa2", sm_scale=sm_scale
+        )
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
         self.attn_inputs = attn_inputs
-        self.fmha_params = self.fmha_impl.prepare(attn_inputs)
+        self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
@@ -518,12 +525,20 @@ class FlashInferNativePrefillImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        # Mirrors the TRT FMHA v2 arch/dtype/head-dim gate so this only replaces
-        # the attention kernel on configurations already known to work, and adds
-        # the native op's own ragged (prefix-free) requirement.
-        return _supports_trtllm_fmha_v2(
-            attn_configs
-        ) and PyFlashinferPrefillAttnOp.support(attn_inputs)
+        if getattr(attn_inputs, "is_cuda_graph", False):
+            return False
+        return (
+            is_sm12x()
+            and attn_configs.dtype == torch.bfloat16
+            and attn_configs.kv_cache_dtype == KvCacheDataType.BASE
+            and not attn_configs.use_mla
+            and attn_configs.is_causal
+            and attn_configs.kv_head_num > 0
+            and attn_configs.head_num > attn_configs.kv_head_num
+            and attn_configs.head_num % attn_configs.kv_head_num == 0
+            and attn_configs.size_per_head == 256
+            and PyFlashinferPrefillAttnOp.support(attn_inputs)
+        )
 
     def support_cuda_graph(self) -> bool:
         return False
