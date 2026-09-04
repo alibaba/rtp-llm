@@ -208,7 +208,11 @@ class EndpointRegistryRoleTest {
                 "same-address replacement must retain the address membership");
         assertSame(first, originalDirectory.getFirst().endpoint(),
                 "an in-flight traversal keeps its advisory old generation");
-        assertSame(replacement, replacementDirectory.getFirst().endpoint());
+        assertSame(replacement, replacementDirectory.stream()
+                .filter(entry -> entry.address().equals(firstAddress))
+                .findFirst()
+                .orElseThrow()
+                .endpoint());
         WorkerEndpoint.GenerationPin replacementPin =
                 registry.capture(
                         RoleType.PREFILL,

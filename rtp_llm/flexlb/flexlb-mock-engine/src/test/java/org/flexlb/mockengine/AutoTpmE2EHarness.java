@@ -10,15 +10,14 @@ import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.DefaultRouter;
-import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.scheduler.PlacementKey;
 import org.flexlb.balance.scheduler.QueueRouteAdmission;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.RequestSchedulerTestRuntime;
 import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
-import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.ConfigService;
@@ -75,7 +74,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * Shared E2E harness (task35): a real FlexLB scheduler, eviction manager,
+ * Shared E2E harness for the real FlexLB scheduler, eviction manager,
  * endpoint runtime, and batch dispatcher wired to an in-process Java mock
  * engine cluster.
  *
@@ -87,7 +86,7 @@ import static org.mockito.Mockito.when;
  * prepared-status transaction, closing the calibrate/settle loop exactly like
  * production polling would.
  *
- * <p>By default, {@code ConfigService}/{@code Router}/{@code EngineGrpcClient}/reporters
+ * <p>By default, {@code ConfigService}/{@code DefaultRouter}/{@code EngineGrpcClient}/reporters
  * are Mockito stand-ins — identical to the flexlb-sync unit-test harness pattern.
  * Routing-regression scenarios can opt into the production {@link DefaultRouter}
  * and endpoint-selection strategies while retaining the in-process transport.
@@ -119,9 +118,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     /** requestId -> first enqueueBatch arrival time (nanos), for latency measurements. */
     final Map<Long, Long> engineArrivalNanos = new ConcurrentHashMap<>();
 
-    /** Route stand-in, swappable per scenario. Default: capacity-aware, prefill[0]+decode[0]. */
-    volatile Function<BalanceContext, Response> routeFn;
-    /** Prefill index chosen by the default routeFn, swappable per scenario. */
+    /** Prefill index chosen by the deterministic fixture route. */
     volatile Function<BalanceContext, Integer> prefillSelector = ctx -> 0;
 
     private final Map<Integer, WorkerStatus> statusByPort = new ConcurrentHashMap<>();
@@ -205,7 +202,6 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         config.queueScheduler().getCapacity().setMaxWaitingRequestsPerPrefillWorker(1024);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
-        routeFn = this::defaultRoute;
         when(router.routeForQueue(any(BalanceContext.class)))
                 .thenAnswer(inv -> routeResult(inv.getArgument(0)));
         // ---- E2E bridge: mocked gRPC transport → real in-process mock engine ----
@@ -266,36 +262,12 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         EngineCancelChannel cancelChannel = realCancelChannel
                 ? new MockEngineCancelChannel(services)
                 : new UnsupportedCancelStub();
-        CostBasedPrefillStrategy evictionPrefillSelection =
-                new CostBasedPrefillStrategy(
-                        mock(WorkerDirectory.class),
-                        mock(CacheAwareService.class),
-                        mock(EngineHealthReporter.class)) {
-            @Override
-            public SelectedRole select(
-                    BalanceContext context, RoleType role, String group) {
-                int selectedIndex = prefillSelector.apply(context);
-                PrefillEndpoint endpoint = prefillEndpoint(selectedIndex);
-                org.flexlb.balance.endpoint.WorkerEndpoint.GenerationPin pin =
-                        endpoint.tryPinGeneration();
-                if (pin == null) {
-                    return null;
-                }
-                return SelectedRole.prefill(
-                        pin,
-                        prefillServer(
-                                selectedIndex,
-                                context.getRequestId()),
-                        0L);
-            }
-        };
         schedulerRuntime = new RequestSchedulerTestRuntime(
                 configService,
                 dispatcher::tryPrepareSubmission,
                 reporter,
                 requestReporter,
-                cancelChannel,
-                evictionPrefillSelection);
+                cancelChannel);
         endpointRegistry = schedulerRuntime.endpointRegistry();
         scheduler = schedulerRuntime.scheduler();
 
@@ -448,18 +420,13 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                 requestId);
     }
 
-    /** Capacity-aware route stand-in mirroring the production decode hard filter. */
+    /**
+     * Deterministic full-route stand-in for queue tests. Transient Decode
+     * capacity is deliberately not filtered here: production queue routing
+     * selects a physically valid winner first, and the commit boundary turns
+     * an exact capacity miss into either a wait or a preemption transaction.
+     */
     Response defaultRoute(BalanceContext ctx) {
-        DecodeEndpoint decodeEp = decodeEndpoint(0);
-        Long decodeConcurrencyLimit = config.getRouter().getRoles().getDecode()
-                .getAvailability().getMaxEngineRequests();
-        if (decodeConcurrencyLimit != null && decodeConcurrencyLimit > 0
-                && decodeEp.routingView().engineLoad() + 1 > decodeConcurrencyLimit) {
-            return Response.error(StrategyErrorType.NO_DECODE_WORKER);
-        }
-        if (decodeEp.realKvTotal() > 0 && decodeEp.realKvAvailable() < 128) {
-            return Response.error(StrategyErrorType.NO_DECODE_WORKER);
-        }
         int prefillIndex = prefillSelector.apply(ctx);
         ServerStatus prefill = prefillServer(prefillIndex, ctx.getRequestId());
         Response response = new Response();
@@ -471,20 +438,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     }
 
     private PlacementResult<QueueRouteAdmission, PlacementKey> routeResult(BalanceContext context) {
-        Response response = routeFn.apply(context);
-        if (!response.isSuccess()
-                && response.getCode()
-                        == StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode()) {
-            return PlacementResult.blocked(
-                    PlacementKey.anyGroup(RoleType.PREFILL));
-        }
-        if (!response.isSuccess()
-                && response.getCode()
-                        == StrategyErrorType.NO_DECODE_WORKER.getErrorCode()) {
-            return PlacementResult.blocked(
-                    PlacementKey.anyGroup(RoleType.DECODE));
-        }
-        return schedulerRuntime.routeResult(context, response);
+        return schedulerRuntime.routeResult(context, defaultRoute(context));
     }
 
     private DefaultRouter productionRouter() {

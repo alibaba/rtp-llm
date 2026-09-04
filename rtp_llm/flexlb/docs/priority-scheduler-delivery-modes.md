@@ -30,7 +30,8 @@ match the configuration model; there is no separate "priority scheduler" service
 classDiagram
     class RouteService
     class DefaultRouter
-    class ConfiguredLoadBalanceSelector
+    class CostBasedPrefillStrategy
+    class CostBasedDecodeStrategy
     class RequestScheduler {
         +submit(context) Future~Response~
     }
@@ -49,7 +50,8 @@ classDiagram
 
     RouteService --> DefaultRouter : DIRECT
     RouteService --> RequestScheduler : QUEUE
-    DefaultRouter --> ConfiguredLoadBalanceSelector : exactly-one selector
+    DefaultRouter --> CostBasedPrefillStrategy : full-fleet Prefill selection
+    DefaultRouter --> CostBasedDecodeStrategy : full-fleet Decode selection
     RequestScheduler --> GlobalQueueCoordinator : ordered placement
     GlobalQueueCoordinator --> RequestRegistry : lifecycle/admission
     GlobalQueueCoordinator --> DefaultRouter : ordinary placement
@@ -63,7 +65,7 @@ classDiagram
     RequestRegistry --> DecodeEndpoint : exact reservation/accounting
 ```
 
-`DIRECT` skips QUEUE admission and the per-generation queue runtime, but it uses the same
+`DIRECT` skips QUEUE admission, the ordered active index, and the endpoint worker thread, but it uses the same
 `router.groupSelector` and `router.roles` worker-selection configuration as
 QUEUE. PDFUSION follows the prefill role configuration.
 
@@ -135,6 +137,11 @@ bounds allow. Use `SINGLE` when every decision must contain exactly one request.
 A request the worker cannot take yet because of KV pressure or engine
 backpressure remains QUEUE-owned. There is no SLO-budget batching policy.
 
+PRIORITY preemption consumes the same exact Prefill and Decode route selected
+by ordinary placement. It may replace lower-priority owners on those endpoints,
+but it never calls the router or a selector again and never falls back to a
+different endpoint.
+
 The current online `LEARNING` estimator updates from completed `EnqueueBatch`
 groups. NON_BATCH decisions can read its published model, but route-request
 terminals do not contribute training samples; use a `FORMULA` estimator when a
@@ -146,12 +153,13 @@ FIFO orders by enqueue sequence. PRIORITY orders by normalized priority
 (1–100, higher first) and then by enqueue sequence. `defaultPriority` is used
 only when the caller did not supply a priority.
 
-Ordering is global to one model's `GlobalQueueCoordinator`. Its ordered snapshot
-is the placement boundary for one decision. A queue insertion that linearizes
-after that snapshot belongs to the next decision and does not revoke the
-captured route. An exact-capacity conflict is retried only when the selected
-endpoint's placement version proves that the plan is stale; an unchanged
-capacity miss parks on that endpoint immediately. Delivery callbacks are
+Ordering is global to one model's `GlobalQueueCoordinator`. Its rolling
+planning frontier is an implementation pipeline, not a decision group. Before
+each commit, PRIORITY revalidates that no newer higher-priority request is
+eligible, so planner count cannot change ordering semantics. An exact-capacity
+conflict is replanned only when the selected endpoint's placement version proves
+that the captured generation is stale; an unchanged capacity miss parks on that
+endpoint immediately. Delivery callbacks are
 serialized by the endpoint worker thread; asynchronous Engine
 ACK/completion order is not a FIFO or priority guarantee.
 
@@ -175,7 +183,8 @@ expires_at_ms = flexlb_admission_time_ms + scheduler.queueTimeoutMs
 ```
 
 The deadline covers queueing, routing, and delivery acknowledgement. Prompt
-length, priority, queue movement, retries, and preemption never extend or
+length, priority, queue movement, generation replanning, and preemption never
+extend or
 multiply it. DIRECT does not queue and therefore does not apply a scheduling
 timeout. The caller's protobuf `generate_timeout` remains a transport/engine
 field and does not control FlexLB scheduling. Consequently there are no SLO
@@ -379,14 +388,18 @@ any of these valid modes. Role algorithms themselves are fixed.
 7. The absolute request expiration remains unchanged through queueing,
    preemption, delivery, and reconciliation.
 8. The decision policy produces candidates, not a capacity-free intermediate
-   state. Capacity admission reserves the ordered frontier independently for
-   each exact endpoint. A request whose hard capacity is unavailable remains
-   queued with its original FIFO/priority key and parks on that endpoint; a
-   suffix member may bypass only when its route does not use the parked endpoint.
-9. A request enters the delivery callback only after all of its hard capacity
-   is reserved. The typed callback payload transfers that exact reservation to
-   endpoint lifecycle ownership without another capacity check. A transferred
-   Decode permit never returns to queued ownership.
+   state. Publication reserves the ordered frontier independently for each
+   exact Prefill endpoint and records the selected Decode generation. When
+   placement-time capacity is unavailable, the request remains queued with its
+   original FIFO/priority key and parks on that endpoint; a suffix member may
+   bypass only when its route does not use the parked endpoint.
+9. NON_BATCH deliberately acquires the exact Decode engine-facing permit at
+   delivery, after Prefill queueing, so a long Prefill backlog cannot consume
+   idle Decode execution capacity. Permit failure waits on that same Decode
+   endpoint and never reselects a route. Once transferred to delivery, a Decode
+   permit never returns to queued ownership. Preemptive Decode admission instead
+   reserves its exact capacity in the placement transaction because a typed
+   capacity miss is required to plan victims on that same endpoint.
 10. For `QUEUE + BATCH`, admission atomically owns both one captured
     `maxInflightBatchesPerPrefillWorker` slot and one task already accepted by
     the bounded local dispatcher. Before the admitted members leave `ACTIVE`,

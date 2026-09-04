@@ -6,9 +6,9 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.SchedulerConfig;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.QueueOrderingConfig;
+import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -309,7 +309,7 @@ class CostBasedDecodeStrategyTest {
     }
 
     @Test
-    void nonPreemptiveQueueCanPlaceBehindTransientKvPressure_whilePreemptionKeepsAdmissionGate() {
+    void queuePlanningSelectsExactEndpointWithoutTakingCapacity() {
         registerWorker("127.0.0.1", 1_000, 1_000);
         EndpointRegistry registry = decodeRegistry();
         DecodeEndpoint endpoint = decodeEndpoint(
@@ -344,10 +344,13 @@ class CostBasedDecodeStrategyTest {
         configService.loadBalanceConfig().queueScheduler()
                 .setOrdering(preemptiveOrdering);
         request.setRequestId(4L);
-        ServerStatus priorityResult = selectStatus(
-                strategy, context, RoleType.DECODE, null);
-        Assertions.assertNull(priorityResult,
-                "preemption must preserve the inclusive admission gate for victim planning");
+        PlacementResult<SelectedRole, RoleType> priorityPlacement =
+                strategy.select(context, RoleType.DECODE, null);
+        Assertions.assertEquals(
+                PlacementResult.Status.SUCCESS, priorityPlacement.status());
+        Assertions.assertFalse(endpoint.layeredAdmissionView().isQueued(4L),
+                "priority planning must leave capacity acquisition to commit");
+        priorityPlacement.value().close();
     }
 
     @Test

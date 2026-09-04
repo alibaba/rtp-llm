@@ -20,9 +20,22 @@ import java.util.concurrent.atomic.AtomicLong;
 @Component
 public final class PlacementAvailability {
 
+    enum ChangeKind {
+        CAPACITY,
+        TOPOLOGY
+    }
+
+    record Event(PlacementKey key, long sequence, ChangeKind kind) {
+
+        Event {
+            Objects.requireNonNull(key, "key");
+            Objects.requireNonNull(kind, "kind");
+        }
+    }
+
     @FunctionalInterface
     interface Listener {
-        void onCapacityChanged(PlacementKey key, long sequence);
+        void onAvailabilityChanged(Event event);
     }
 
     private final AtomicLong sequence = new AtomicLong();
@@ -44,6 +57,15 @@ public final class PlacementAvailability {
 
     /** Notify that a fresh placement in this domain may now succeed. */
     public void capacityChanged(PlacementKey key) {
+        publish(key, ChangeKind.CAPACITY);
+    }
+
+    /** Notify that an endpoint generation was published, replaced, or removed. */
+    public void topologyChanged(PlacementKey key) {
+        publish(key, ChangeKind.TOPOLOGY);
+    }
+
+    private void publish(PlacementKey key, ChangeKind kind) {
         Objects.requireNonNull(key, "key");
         long next = sequence.incrementAndGet();
         lastChanged.put(key, next);
@@ -53,12 +75,13 @@ public final class PlacementAvailability {
         if (key.group() != null) {
             lastChanged.put(PlacementKey.anyGroup(key.role()), next);
         }
+        Event event = new Event(key, next, kind);
         // One physical capacity edge produces one callback. The exact key is
         // sufficient for group/role waiters through their relevance match and
         // avoids three global-lock acquisitions for every endpoint release.
         for (Listener listener : listeners.keySet()) {
             try {
-                listener.onCapacityChanged(key, next);
+                listener.onAvailabilityChanged(event);
             } catch (Throwable failure) {
                 Logger.warn(
                         "Placement availability listener failed", failure);
@@ -75,6 +98,13 @@ public final class PlacementAvailability {
             String group,
             String endpoint) {
         capacityChanged(PlacementKey.exact(role, group, endpoint));
+    }
+
+    public void topologyChanged(
+            RoleType role,
+            String group,
+            String endpoint) {
+        topologyChanged(PlacementKey.exact(role, group, endpoint));
     }
 
     long sequence() {

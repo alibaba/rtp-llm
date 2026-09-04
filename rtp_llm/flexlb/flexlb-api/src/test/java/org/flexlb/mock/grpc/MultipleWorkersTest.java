@@ -29,7 +29,7 @@ import static org.mockito.Mockito.when;
  * <p>Flow:
  * 1. Worker A is started by the base class (default behavior)
  * 2. Worker B is started via {@link #addPrefillWorker} (registered in EndpointRegistry)
- * 3. Reconfigure the mock Router to alternate between A and B
+ * 3. Reconfigure the mock DefaultRouter to alternate between A and B
  * 4. Submit 4 requests
  * 5. Verify: both workers received at least 1 EnqueueBatch call
  * 6. Verify: total EnqueueBatch count matches the number of submitted requests
@@ -40,7 +40,7 @@ import static org.mockito.Mockito.when;
  *       {@code EndpointRegistry} and {@code WorkerDirectory}</li>
  *   <li>{@link #addPrefillWorker} starts an additional worker B, creates its
  *       {@code WorkerStatus} and {@code PrefillEndpoint}, and registers both</li>
- *   <li>The mock {@code Router} is reset and reconfigured to return routing
+ *   <li>The mock {@code DefaultRouter} is reset and reconfigured to return routing
  *       responses that alternate between A and B</li>
  *   <li>Each routing response contains {@code ServerStatus} entries for the
  *       selected prefill worker and the shared decode worker</li>
@@ -69,7 +69,7 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
         workerBHttpPort = workerB.getHttpPort();
         workerBIpPort = workerIpPort(workerB);
 
-        // 2. Reconfigure the Router to alternate between worker A and B
+        // 2. Reconfigure DefaultRouter to alternate between worker A and B
         AtomicInteger routeCounter = new AtomicInteger(0);
         reset(router);
         when(router.routeForQueue(any(BalanceContext.class))).thenAnswer(inv -> {

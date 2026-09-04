@@ -5,10 +5,9 @@ package org.flexlb.enums;
  * (design doc 10.1). Ordinal order is the eviction stage order
  * (design doc 11.3): earlier phases are cheaper to evict.
  *
- * <p>The first two values deliberately split the old ambiguous shadow layer:
- * a request still in the Master queue can be removed locally, while a request
- * whose dispatch may have reached Prefill must use the same Cancel protocol as
- * an accepted/running request.</p>
+ * <p>A request still in the Master queue can be removed locally. Once its
+ * dispatch may have reached Prefill, eviction must use the same Cancel
+ * protocol as an accepted or running request.</p>
  */
 public enum DecodeTaskPhase {
 
@@ -18,7 +17,7 @@ public enum DecodeTaskPhase {
     /** Dispatch started or is in flight; original Prefill must handle Cancel. */
     ENGINE_MAY_HAVE_SEEN,
 
-    /** Engine accepted (KV allocated) but not yet running. Phase 5 only. */
+    /** Engine accepted the request and allocated KV, but has not started it. */
     ACCEPTED_NOT_RUNNING,
 
     /** Engine is running the request. Eviction requires Cancel and release confirmation. */

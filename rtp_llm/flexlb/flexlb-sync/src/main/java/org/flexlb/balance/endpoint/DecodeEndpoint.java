@@ -35,10 +35,9 @@ import java.util.function.Predicate;
  * place, preserving the exact reservation token used by fences and terminal
  * reconciliation.
  *
- * <p><b>Known accepted cost:</b> the admission lock and version bump on every
- * reserve/release/calibrate stay active even when Auto-TPM is disabled; the
- * uncontended ReentrantLock + AtomicLong overhead is negligible and keeping it
- * unconditional avoids divergent code paths (task10 P2-9, no structural change).
+ * <p>The same admission lock and version counter protect every
+ * reserve/release/calibrate transition, including when Auto-TPM is disabled.
+ * Keeping one ownership protocol avoids mode-dependent state paths.
  */
 public class DecodeEndpoint extends WorkerEndpoint {
 
@@ -86,24 +85,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private int engineFenceHeldSlotCount;
 
     /**
-     * Reserved entries whose request is still sitting in a prefill queue —
-     * committed by the scheduler but not yet dispatched to the engine (N2,
-     * plan-commit redesign). These reservations keep protecting KV against
-     * oversell, but must not count against the decode concurrency limit:
-     * counting them produced the shadow-saturation 8400 storm (root cause C —
-     * queued reservations saturating {@code getTotalLoad()} while the engine
-     * sat idle). Queue schedulers mark an exact reservation before queue
-     * publication and unmark through an acquired
-     * {@link EngineDispatchPermit}; release/calibrate prune it
-     * alongside {@code decodeRequests}. DIRECT paths never mark, so their
-     * accounting is unchanged.
-     */
-    /**
-     * O(1) mirror of queued reservations in {@link #decodeRequests} (PR-C):
-     * incremented when a reservation is marked queued and decremented when
-     * it is dispatched / released / calibrated out, so {@link #getEngineLoad}
-     * avoids the per-call O(n) scan of the former full-scan formula. Read lock-free;
-     * written under {@link #admissionLock}.
+     * O(1) mirror of reservations whose request is still waiting in a Prefill
+     * queue. Such reservations protect KV, but do not consume Decode engine
+     * concurrency until delivery obtains an {@link EngineDispatchPermit}.
+     * Queue publication increments the counter; dispatch, release, and status
+     * reconciliation decrement it under {@link #admissionLock}.
      */
     private final AtomicInteger queuedPhaseCount = new AtomicInteger(0);
 
@@ -114,20 +100,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private final AtomicLong queuedExpectedKvReservedTotal = new AtomicLong(0);
 
     /**
-     * Decode slots reserved before a queued request is irreversibly exposed to
-     * its Prefill/Decode delivery path. The request remains in
-     * Their reservation owner is marked queued, so {@link #getEngineLoad()}
-     * continues to describe
-     * only engine-facing work. Capacity acquisition instead uses
-     * {@code getEngineLoad() + activeEngineDispatchPermitCount} under
-     * {@link #admissionLock}.
-     *
-     * <p>Each entry carries both the immutable reservation identity and a
-     * monotonic token. The pair fences request-id reuse while the slot is
-     * reserved. A successful commit removes the lease permanently: committed
-     * Decode ownership is never rolled back by a delivery token.
+     * Hard prompt KV already committed to acquired pre-delivery permits.
+     * Permit identities carry the request generation and monotonic reservation
+     * token, so a stale release cannot affect request-id reuse.
      */
-    /** Hard prompt KV already committed to acquired pre-delivery permits. */
     private final AtomicLong engineDispatchPermitHardKvReservedTotal = new AtomicLong();
     /** Expected KV already committed to acquired pre-delivery permits. */
     private final AtomicLong engineDispatchPermitExpectedKvReservedTotal = new AtomicLong();
@@ -676,6 +652,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
         DecodeRequestState newReservation =
                 new DecodeRequestState(
                         kvTokens, expectedKvTokens, priority, reservationToken);
+        ReservationHandle handle = new ReservationHandle(
+                getStatus().getGenerationId(), requestId, reservationToken);
         if (decodeRequests.putIfAbsent(requestId, newReservation) != null) {
             throw new IllegalStateException(
                     "Decode reservation appeared while admissionLock was held: "
@@ -685,8 +663,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         inflightKvReservedTotal.addAndGet(kvTokens);
         inflightExpectedKvReservedTotal.addAndGet(expectedKvTokens);
         admissionVersion.incrementAndGet();
-        return new ReservationHandle(
-                getStatus().getGenerationId(), requestId, reservationToken);
+        return handle;
     }
 
     /**
@@ -1626,20 +1603,20 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     DecodeRoutingView routingViewSnapshot(String address) {
         long version = admissionVersion.get();
+        WorkerStatus status = getStatus();
+        WorkerStatus.TopologySnapshot topology = status.topologySnapshot();
         DecodeRoutingView cached = routingViewCache;
-        if (routingViewMatches(cached, address, version)) {
+        if (routingViewMatches(cached, address, version, topology)) {
             return cached;
         }
-        WorkerStatus status = getStatus();
         admissionLock.lock();
         try {
             WorkerStatus.CommittedWorkerStatus committed =
                     status.committedWorkerStatus();
-            WorkerStatus.TopologySnapshot topology =
-                    status.topologySnapshot();
+            topology = status.topologySnapshot();
             version = admissionVersion.get();
             cached = routingViewCache;
-            if (routingViewMatches(cached, address, version)) {
+            if (routingViewMatches(cached, address, version, topology)) {
                 return cached;
             }
             DecodeRoutingView routing = routingViewLocked(
@@ -1654,10 +1631,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private static boolean routingViewMatches(
             DecodeRoutingView cached,
             String address,
-            long version) {
+            long version,
+            WorkerStatus.TopologySnapshot topology) {
         return cached != null
                 && cached.address().equals(address)
-                && cached.admissionVersion() == version;
+                && cached.admissionVersion() == version
+                && cached.topology() == topology;
     }
 
     /** Caller holds {@link #admissionLock}. */
@@ -1859,26 +1838,66 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 return PreemptionBeginResult.INFEASIBLE;
             }
 
-            // Provisional incoming ownership closes the free-pool race while
-            // Cancel runs.  It is not visible to the prefill queue yet.
-            ReservationHandle incomingReservation = reserveLocked(
-                    incomingRequestId, incomingKvTokens,
-                    incomingExpectedKvTokens, incomingPriority);
+            // Allocate every victim claim before installing any incoming or
+            // protocol ownership. The endpoint lock keeps these exact states
+            // stable through the subsequent allocation-free installation.
+            Map<Long, PreemptionClaim> preparedClaims = new HashMap<>();
             for (ReservationHandle victim : victims) {
                 long victimId = victim.requestId();
                 DecodeRequestState request = ownedRequest(victimId);
                 long hardKv = request.kvTokens();
                 long expectedKv = request.confirmed()
                         ? hardKv : request.expectedKvTokens();
-                request.preemptionClaim = new PreemptionClaim(
-                                attemptToken, owners.get(victimId),
-                                hardKv, expectedKv);
+                preparedClaims.put(
+                        victimId,
+                        new PreemptionClaim(
+                                attemptToken,
+                                owners.get(victimId),
+                                hardKv,
+                                expectedKv));
             }
-            preemptionAttempts.put(attemptToken,
-                    new EndpointPreemptionAttempt(
-                            incomingRequestId,
-                            incomingReservation.reservationToken(),
-                            exactVictims));
+
+            // Provisional incoming ownership closes the free-pool race while
+            // Cancel runs.  It is not visible to the prefill queue yet.
+            ReservationHandle incomingReservation = reserveLocked(
+                    incomingRequestId, incomingKvTokens,
+                    incomingExpectedKvTokens, incomingPriority);
+            EndpointPreemptionAttempt preparedAttempt = null;
+            try {
+                preparedAttempt = new EndpointPreemptionAttempt(
+                        incomingRequestId,
+                        incomingReservation.reservationToken(),
+                        exactVictims);
+                EndpointPreemptionAttempt previous = preemptionAttempts.put(
+                        attemptToken, preparedAttempt);
+                if (previous != null) {
+                    throw new IllegalStateException(
+                            "priority attempt appeared while admissionLock was held");
+                }
+                for (Map.Entry<Long, PreemptionClaim> claim
+                        : preparedClaims.entrySet()) {
+                    DecodeRequestState request = ownedRequest(claim.getKey());
+                    if (request == null || request.preemptionClaim != null) {
+                        throw new IllegalStateException(
+                                "validated priority victim changed before claim installation");
+                    }
+                    request.preemptionClaim = claim.getValue();
+                }
+            } catch (RuntimeException | Error installationFailure) {
+                if (preparedAttempt != null) {
+                    preemptionAttempts.remove(attemptToken, preparedAttempt);
+                }
+                for (Map.Entry<Long, PreemptionClaim> claim
+                        : preparedClaims.entrySet()) {
+                    removePreemptionClaimLocked(claim.getKey(), claim.getValue());
+                }
+                DecodeRequestState incoming =
+                        shadowReservation(incomingRequestId);
+                if (isExactReservation(incoming, incomingReservation)) {
+                    removeShadowExactLocked(incomingRequestId, incoming);
+                }
+                throw installationFailure;
+            }
             admissionVersion.incrementAndGet();
             return PreemptionBeginResult.SUCCESS;
         } finally {
@@ -2943,14 +2962,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /**
-     * Engine-facing load (N2): confirmed running/accepted requests plus
+     * Engine-facing load: confirmed running/accepted requests plus
      * reserved entries that are <b>not</b> parked in a prefill queue. Queued
      * reservations remain in the full placement/priority view, but they must
      * not close the Decode concurrency gate while work is still waiting in
      * Prefill. {@link #getTotalLoad()} keeps the full shadow view for
      * observability and eviction planning.
      *
-     * <p>O(1) formula (PR-C): {@code confirmedEngineOwnedCount
+     * <p>The O(1) formula is {@code confirmedEngineOwnedCount
      * + max(0, reservedRequestCount − queuedPhaseCount)}. The
      * {@link #queuedPhaseCount} counter is updated with every queued-phase
      * transition, so this admission read does not scan the queued set.

@@ -29,6 +29,8 @@ public final class QueueRouteAdmission implements AutoCloseable {
 
     private final long requestId;
     private final Response response;
+    private final PrefillEndpoint selectedPrefillEndpoint;
+    private final DecodeEndpoint selectedDecodeEndpoint;
     private OwnedRoute ownedRoute;
     /** Exact endpoint which rejected the last publication attempt. */
     private WorkerEndpoint blockedEndpoint;
@@ -40,6 +42,8 @@ public final class QueueRouteAdmission implements AutoCloseable {
         this.requestId = requestId;
         this.response = Objects.requireNonNull(response, "response");
         this.ownedRoute = Objects.requireNonNull(ownedRoute, "ownedRoute");
+        this.selectedPrefillEndpoint = ownedRoute.prefillEndpoint();
+        this.selectedDecodeEndpoint = ownedRoute.decodeEndpoint();
     }
 
     static QueueRouteAdmission prepare(
@@ -126,82 +130,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
         }
     }
 
-    /**
-     * Move a Decode reservation produced by the asynchronous preemption
-     * protocol into the ordinary queue-admission owner.  The fresh exact
-     * Decode pin closes the retirement race between the typed preemption
-     * result and ACTIVE publication. A retired generation returns null after
-     * rolling the moved reservation back.
-     */
-    static QueueRouteAdmission tryPrepareExistingDecode(
-            SelectedRole prefillSelection,
-            DecodeEndpoint decodeEndpoint,
-            DecodeEndpoint.ReservationHandle decodeReservation,
-            ServerStatus decodeStatus,
-            Response response) {
-        long requestId = decodeReservation.requestId();
-
-        WorkerEndpoint.GenerationPin prefillPin = null;
-        WorkerEndpoint.GenerationPin decodePin = null;
-        try {
-            ServerStatus prefillStatus = prefillSelection.serverStatus();
-            if (prefillStatus.getRequestId() != requestId
-                    || decodeStatus.getRequestId() != requestId) {
-                throw new IllegalStateException(
-                        "decode eviction statuses belong to another request");
-            }
-            if (decodeStatus.getRole() != RoleType.DECODE
-                    || !Objects.equals(
-                            decodeStatus.getServerIp(), decodeEndpoint.getIp())
-                    || decodeStatus.getHttpPort()
-                            != decodeEndpoint.getHttpPort()) {
-                throw new IllegalStateException(
-                        "decode eviction metadata does not match exact endpoint");
-            }
-            prefillPin = prefillSelection.takeGenerationPin();
-            if (!(prefillPin.endpoint() instanceof PrefillEndpoint prefillEndpoint)
-                    || prefillStatus.getRole() != RoleType.PREFILL
-                            && prefillStatus.getRole() != RoleType.PDFUSION) {
-                throw new IllegalStateException(
-                        "decode eviction requires one exact Prefill selection");
-            }
-            decodePin = decodeEndpoint.tryPinGeneration();
-            if (decodePin != null) {
-                decodeEndpoint.requirePinnedGeneration(decodePin);
-                if (decodeEndpoint.markQueuedExact(
-                        decodePin, decodeReservation)) {
-                    return new QueueRouteAdmission(
-                            requestId,
-                            response,
-                            new OwnedRoute(
-                                    prefillEndpoint,
-                                    prefillPin,
-                                    prefillStatus,
-                                    prefillSelection.placementVersion(),
-                                    decodeEndpoint,
-                                    decodePin,
-                                    decodeReservation,
-                                    decodeStatus,
-                                    decodeEndpoint.placementVersion()));
-                }
-            }
-        } catch (RuntimeException | Error failure) {
-            WorkerEndpoint.GenerationPin ownedPrefillPin = prefillPin;
-            WorkerEndpoint.GenerationPin ownedDecodePin = decodePin;
-            try (ownedPrefillPin; ownedDecodePin) {
-                decodeEndpoint.releaseReservationExact(decodeReservation);
-                throw failure;
-            }
-        }
-        WorkerEndpoint.GenerationPin ownedPrefillPin = prefillPin;
-        WorkerEndpoint.GenerationPin ownedDecodePin = decodePin;
-        try (ownedPrefillPin; ownedDecodePin) {
-            decodeEndpoint.releaseReservationExact(decodeReservation);
-        }
-        return null;
-    }
-
-    public Response response() {
+    Response response() {
         return response;
     }
 
@@ -229,22 +158,53 @@ public final class QueueRouteAdmission implements AutoCloseable {
         return false;
     }
 
-    WorkerBatcher.QueueSnapshot capturePrefillQueueSnapshot() {
+    public WorkerBatcher.QueueSnapshot capturePrefillQueueSnapshot() {
         return requireOwned().prefillEndpoint().captureQueueSnapshot();
     }
 
-    long selectedDecodeTotalKv() {
+    public long selectedDecodeTotalKv() {
         DecodeEndpoint endpoint = requireOwned().decodeEndpoint();
         return endpoint == null ? 0L : endpoint.realKvTotal();
     }
 
-    /** Whether this still-owned route contends with the supplied endpoint. */
-    boolean usesEndpoint(WorkerEndpoint endpoint) {
-        if (endpoint == null || ownedRoute == null) {
+    /** Exact Decode selected by the only routing decision, if this model has one. */
+    DecodeEndpoint selectedDecodeEndpoint() {
+        return selectedDecodeEndpoint;
+    }
+
+    PrefillEndpoint selectedPrefillEndpoint() {
+        return selectedPrefillEndpoint;
+    }
+
+    /**
+     * Consume the reservation created by exact-endpoint preemption without
+     * selecting either role again. Failure releases the supplied reservation.
+     */
+    public boolean adoptDecodeReservation(
+            DecodeEndpoint endpoint,
+            DecodeEndpoint.ReservationHandle reservation) {
+        OwnedRoute route = requireOwned();
+        if (endpoint == null || reservation == null
+                || endpoint != route.decodeEndpoint()
+                || reservation.requestId() != requestId
+                || route.decodeReservation() != null) {
+            if (endpoint != null && reservation != null) {
+                endpoint.releaseReservationExact(reservation);
+            }
             return false;
         }
-        return ownedRoute.prefillEndpoint() == endpoint
-                || ownedRoute.decodeEndpoint() == endpoint;
+        try {
+            endpoint.requirePinnedGeneration(route.decodePin());
+            if (!endpoint.markQueuedExact(route.decodePin(), reservation)) {
+                endpoint.releaseReservationExact(reservation);
+                return false;
+            }
+            ownedRoute = route.withDecodeReservation(reservation);
+            return true;
+        } catch (RuntimeException | Error failure) {
+            endpoint.releaseReservationExact(reservation);
+            throw failure;
+        }
     }
 
     public ScheduledRequest buildItem(

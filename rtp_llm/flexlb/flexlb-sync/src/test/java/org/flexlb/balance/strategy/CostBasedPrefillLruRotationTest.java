@@ -53,8 +53,6 @@ class CostBasedPrefillLruRotationTest {
                 .getRoles().getPrefill().getCandidateChoice();
         candidateChoice.setType(
                 RoutingConfig.CandidateChoiceType.LEAST_RECENTLY_USED_IN_POOL);
-        // FIXED/3 over three endpoints makes shortestTtftCandidateCount == size,
-        // which is the only shape baselinePoolMask fills with every candidate.
         candidateChoice.getPool().setType(
                 RoutingConfig.CandidatePoolType.FIXED);
         candidateChoice.getPool().setWorkers(ADDRESSES.size());
@@ -109,9 +107,32 @@ class CostBasedPrefillLruRotationTest {
                         + "actual order " + picks);
     }
 
+    @Test
+    void boundedPoolRetainsKShortestCandidatesInsteadOfCollapsingToOne() {
+        config.getRouter().getRoles().getPrefill().getCandidateChoice()
+                .getPool().setWorkers(2);
+
+        List<String> picks = new ArrayList<>();
+        for (int index = 0; index < 4; index++) {
+            context.getRequest().setRequestId(31_001L + index);
+            try (SelectedRole selected = select()) {
+                picks.add(selected.serverStatus().getServerIp());
+            }
+        }
+
+        Map<String, Integer> histogram = new LinkedHashMap<>();
+        for (String ip : picks) {
+            histogram.merge(ip, 1, Integer::sum);
+        }
+        assertEquals(2, histogram.size(),
+                "a two-worker pool must retain two full-fleet winners: " + picks);
+        assertEquals(List.of(2, 2), histogram.values().stream().sorted().toList(),
+                "LRU must rotate evenly inside the selected pool: " + picks);
+    }
+
     private SelectedRole select() {
         PlacementResult<SelectedRole, RoleType> result =
-                strategy.selectForQueue(context, RoleType.PREFILL, null);
+                strategy.select(context, RoleType.PREFILL, null);
         assertEquals(PlacementResult.Status.SUCCESS, result.status());
         return result.value();
     }

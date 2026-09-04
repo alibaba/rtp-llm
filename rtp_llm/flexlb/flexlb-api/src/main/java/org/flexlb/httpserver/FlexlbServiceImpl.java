@@ -697,9 +697,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     /**
-     * priority scheduling Phase 0 observability: per-request one-line schedule log plus
-     * {@code auto_tpm.schedule.latency_ms}. Shared by the legacy path and the
-     * priority scheduler path (both funnel through completeSchedule).
+     * Per-request schedule summary plus
+     * {@code auto_tpm.schedule.latency_ms} for every scheduler mode.
      */
     private void reportPrioritySchedule(BalanceContext ctx,
                                        FlexlbScheduleProtocol.FlexlbScheduleResponsePB response) {
@@ -712,7 +711,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             // Approximate TTFT: schedule-complete minus arrival, as seen by
             // FlexLB. The true TTFT (first token emitted by the engine) is not
             // observable here, so this proxy omits engine-side prefill
-            // execution time (task10 P2-8).
+            // execution time.
             requestSchedulerReporter.reportTtft(ctx.getPriority(), latencyMs);
             String selectedPrefill = "";
             String selectedDecode = "";
@@ -726,16 +725,15 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 }
             }
             // Metrics above stay always-on; the per-request log line drops to
-            // DEBUG when priority scheduling is disabled to avoid INFO noise on the
-            // legacy path (task10 P2-7).
+            // Keep non-priority request summaries at DEBUG to avoid INFO noise.
             String logFormat = "[priority-scheduler] request_id={} priority={} seq_len={} max_new_tokens={} "
-                    + "request_expires_at_ms={} schedule_attempt={} plan_type={} plan_cost={} "
+                    + "request_expires_at_ms={} plan_type={} plan_cost={} "
                     + "victim_count={} selected_prefill={} selected_decode={} failure_reason={} commit_result={}";
             Object[] logArgs = {
                     ctx.getRequestId(), ctx.getPriority(), ctx.getRequest().getSeqLen(),
                     ctx.getRequest().getMaxNewTokens(),
                     ctx.getRequestExpiresAtMs(),
-                    ctx.getScheduleAttempt(), ctx.getPlanType(), ctx.getPlanCost(), ctx.getVictimCount(),
+                    ctx.getPlanType(), ctx.getPlanCost(), ctx.getVictimCount(),
                     selectedPrefill, selectedDecode,
                     success ? "" : response.getErrorMessage(),
                     result};

@@ -127,7 +127,7 @@ public final class EvictionPlanner {
 
     /**
      * Candidate preference for slot eviction (design doc 11.3, first = evicted
-     * first): priority asc → stage asc (reserved before accepted, Phase 5) →
+     * first): priority asc → stage asc (reserved before accepted) →
      * requestId asc.
      */
     static final Comparator<DecodeRequestView> DECODE_SLOT_ORDER = Comparator
@@ -137,7 +137,7 @@ public final class EvictionPlanner {
 
     /**
      * Candidate preference for KV eviction (design doc 12.4): priority asc →
-     * stage asc (reserved before accepted, Phase 5) → kvBucket desc (bigger
+     * stage asc (reserved before accepted) → kvBucket desc (bigger
      * releases first, fewer victims) → requestId asc.
      */
     static final Comparator<DecodeRequestView> DECODE_KV_ORDER = Comparator
@@ -202,10 +202,9 @@ public final class EvictionPlanner {
     }
 
     /**
-     * 11.1: slots to free so engineLoad + 1 fits the limit (0 = unlimited).
-     * P1-3: measured against the engine-facing load — the same measure the
-     * N2 concurrency gate uses — so queued-phase reservations neither create
-     * a phantom deficit nor hide a real one.
+     * Slots to free so engineLoad + 1 fits the limit (0 = unlimited).
+     * The engine-facing load is also used by the concurrency gate, so queued
+     * reservations neither create a phantom deficit nor hide a real one.
      */
     static long slotDeficit(DecodeEndpointSnapshot ep) {
         long limit = ep.concurrencyLimit();
@@ -305,7 +304,7 @@ public final class EvictionPlanner {
                 : null;
         DecodeVictimSet kvOnly = selectKvVictims(
                 envelope, ep, kvDeficit, Set.of(), ownership);
-        // P1-3: only non-queued victims free an engine slot — queued ones
+        // Only non-queued victims free an engine slot; queued ones
         // never counted against the engine load in the first place.
         DecodeEvictionProposal kvSide = kvOnly.ok() && nonQueuedCount(kvOnly.victims()) >= slotDeficit
                 ? buildDecodeProposal(ep, DecodeEvictionProposal.CASE_KV,
@@ -443,13 +442,13 @@ public final class EvictionPlanner {
     }
 
     /**
-     * 3.3 + 10.1: only strictly lower-priority entries are candidates. The
+     * Only strictly lower-priority entries are candidates. The
      * base pool is the reserved (engine-unconfirmed) entries; both confirmed
-     * layers join only behind the Phase 5 gate ({@code includeAccepted}), with
+     * layers join only when engine-owned eviction is enabled, with
      * the same strict priority boundary. The stage comparator/cost makes
      * {@code ACCEPTED_NOT_RUNNING} cheaper than {@code RUNNING}.
      * Priority-neutral entries (priority 0) never qualify.
-     * P1-3: slot selection additionally skips queued-phase reservations
+     * Slot selection additionally skips queued-phase reservations
      * ({@code excludeQueued}) — they hold no engine slot, so evicting them
      * cannot reduce a slot deficit; KV selection keeps them (their hard KV
      * is releasable either way).
@@ -509,7 +508,7 @@ public final class EvictionPlanner {
         return ids;
     }
 
-    /** P1-3: victims that actually hold an engine slot (non-queued). */
+    /** Count victims that actually hold an engine slot. */
     private static long nonQueuedCount(List<DecodeRequestView> victims) {
         long count = 0;
         for (DecodeRequestView victim : victims) {

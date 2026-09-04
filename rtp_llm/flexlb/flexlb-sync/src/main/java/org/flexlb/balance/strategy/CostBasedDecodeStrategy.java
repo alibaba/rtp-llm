@@ -29,6 +29,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public class CostBasedDecodeStrategy {
 
     private static final int SNAPSHOT_CAPTURE_ATTEMPTS = 2;
+    private static final int INITIAL_CANDIDATE_CAPACITY = 16;
     private static final ThreadLocal<CandidateBuffer> CANDIDATES =
             ThreadLocal.withInitial(CandidateBuffer::new);
 
@@ -47,11 +48,11 @@ public class CostBasedDecodeStrategy {
         RoutingConfig.DecodeConfig selector = config.getRouter()
                 .getRoles().getDecode();
 
-        // Queues without preemption retain transient Decode pressure at the
-        // exact pre-delivery permit. Only preemptive placement needs a miss here
-        // in order to enter victim planning.
-        boolean softQueuePlacement =
-                config.defersDecodeCapacityUntilDispatch();
+        // QUEUE placement always chooses one best-cost endpoint from the full
+        // physically valid fleet. Exact transient capacity belongs to commit;
+        // a preemptive miss must target this same winner rather than invoking a
+        // second selector in the eviction path.
+        boolean queuePlacement = config.isQueue();
         for (int attempt = 0; attempt < SNAPSHOT_CAPTURE_ATTEMPTS; attempt++) {
             List<DecodeRoutingView> snapshots =
                     workerDirectory.decodeRoutingSnapshot(group);
@@ -64,7 +65,7 @@ public class CostBasedDecodeStrategy {
             CandidateBuffer candidates = CANDIDATES.get();
             captureCandidates(
                     candidates, snapshots, seqLen,
-                    selector, softQueuePlacement, config);
+                    selector, queuePlacement, config);
             Response staticRejection = validateFleet(candidates, seqLen);
             if (staticRejection != null) {
                 return PlacementResult.rejected(staticRejection);
@@ -86,7 +87,7 @@ public class CostBasedDecodeStrategy {
             }
             double kvDecay = selector.getDecayPerToken();
             double loadDecay = selector.getLoadDecayPerRequest();
-            if (softQueuePlacement) {
+            if (queuePlacement) {
                 preferImmediatelyDispatchable(
                         candidates, balanceContext, kvDecay, loadDecay);
             }
@@ -619,7 +620,8 @@ public class CostBasedDecodeStrategy {
                 return;
             }
             int capacity = Math.max(expected,
-                    Math.max(16, values.length << 1));
+                    Math.max(INITIAL_CANDIDATE_CAPACITY,
+                            values.length << 1));
             values = java.util.Arrays.copyOf(values, capacity);
             weights = java.util.Arrays.copyOf(weights, capacity);
             tierWeights = java.util.Arrays.copyOf(

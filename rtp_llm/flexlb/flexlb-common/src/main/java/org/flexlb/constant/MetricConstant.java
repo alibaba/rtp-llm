@@ -544,7 +544,7 @@ public class MetricConstant {
     /**
      * Auto-TPM TTFT approximation in ms (timer), tags: priority.
      * Approximated as request arrival → schedule completion on the Master;
-     * true TTFT (first token on the engine) is not observable here (§19.2).
+     * true TTFT (first token on the engine) is not observable here.
      */
     public static final String AUTO_TPM_TTFT_MS = "auto_tpm.ttft_ms";
 
@@ -556,24 +556,14 @@ public class MetricConstant {
 
     /**
      * Auto-TPM decode confirmed running request count (gauge), tags: endpoint.
-     * Dashboard migration note on the value semantics:
-     * <ul>
-     *   <li>Phase 4 and earlier: equalled the merged confirmed Engine-owned
-     *       count, i.e. the
-     *       accepted and running layers merged into one gauge.</li>
-     *   <li>Phase 5+: counts ONLY engine-reported {@code RUNNING} tasks; the
-     *       accepted layer moved to {@link #AUTO_TPM_DECODE_ACCEPTED_COUNT}.
-     *       The former merged value = running.count + accepted.count.</li>
-     * </ul>
+     * Counts only engine-reported {@code RUNNING} tasks. Accepted-not-running
+     * ownership is reported by {@link #AUTO_TPM_DECODE_ACCEPTED_COUNT}.
      */
     public static final String AUTO_TPM_DECODE_RUNNING_COUNT = "auto_tpm.decode.running.count";
 
     /**
      * Auto-TPM decode accepted-not-running (engine KV-allocated) request
-     * count (gauge), tags: endpoint. Introduced by the Phase 5 layered view:
-     * before Phase 5 this layer was folded into
-     * {@link #AUTO_TPM_DECODE_RUNNING_COUNT}; from Phase 5 on, the former
-     * merged value = running.count + accepted.count (dashboard migration).
+     * count (gauge), tags: endpoint.
      */
     public static final String AUTO_TPM_DECODE_ACCEPTED_COUNT = "auto_tpm.decode.accepted.count";
 
@@ -612,15 +602,15 @@ public class MetricConstant {
 
     /**
      * Auto-TPM decode engine-facing load (gauge): confirmed + dispatched
-     * reservations, excluding queued-phase shadow entries (redesign N2/§3.8
-     * decode_shadow_load vs decode_engine_running), tags: endpoint. Compare
-     * against {@link #AUTO_TPM_DECODE_RESERVED_COUNT} to monitor root cause C.
+     * reservations, excluding queued-phase shadow entries, tags: endpoint.
+     * Compare with {@link #AUTO_TPM_DECODE_RESERVED_COUNT} to distinguish
+     * engine-facing load from Prefill-queued reservations.
      */
     public static final String AUTO_TPM_DECODE_ENGINE_LOAD = "auto_tpm.decode.engine_load";
 
     /**
      * Auto-TPM inflight settle misses (QPS): a finishYielded/PreemptedById
-     * found no inflight entry (review P2-2), tags: kind (yielded/preempted).
+     * found no inflight entry, tags: kind (yielded/preempted).
      * Harmless in isolation, but a burst points at a registration/cleanup
      * race — alert-worthy where a warn log is not.
      */

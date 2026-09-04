@@ -302,11 +302,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return prefillState.mutationVersion();
     }
 
-    /** Diagnostic view of one explicit NON_BATCH request limit. */
-    public int availableRouteDecisionSlots(int maximumRequests) {
-        return prefillState.availableRouteDecisionSlots(maximumRequests);
-    }
-
     /**
      * Register through the exact route pin and return the sole provisional
      * rollback capability. The caller commits it only after every DIRECT role

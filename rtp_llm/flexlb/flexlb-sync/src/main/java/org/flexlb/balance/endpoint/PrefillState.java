@@ -20,10 +20,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.Set;
-import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
-import java.util.function.LongPredicate;
 import java.util.function.LongSupplier;
 
 /**
@@ -613,7 +611,7 @@ public final class PrefillState {
 
     private final ReentrantLock lock;
     /** Non-owning index containing only ACTIVE ScheduledRequest identities. */
-    private final PriorityBlockingQueue<ScheduledRequest> activeIndex;
+    private final PrefillActiveIndex activeIndex;
     /** Canonical ownership table; replaced only by an exact ACTIVE transaction. */
     private Map<Long, RequestEntry> requests = new HashMap<>();
     private final LongSupplier clock;
@@ -625,13 +623,13 @@ public final class PrefillState {
     private int batchLeasesInUse;
 
     public PrefillState(ReentrantLock lock,
-                        PriorityBlockingQueue<ScheduledRequest> activeIndex,
+                        PrefillActiveIndex activeIndex,
                         Runnable capacityAvailable) {
         this(lock, activeIndex, System::currentTimeMillis, capacityAvailable);
     }
 
     public PrefillState(ReentrantLock lock,
-                        PriorityBlockingQueue<ScheduledRequest> activeIndex,
+                        PrefillActiveIndex activeIndex,
                         LongSupplier clock,
                         Runnable capacityAvailable) {
         this.lock = Objects.requireNonNull(lock, "lock");
@@ -708,9 +706,26 @@ public final class PrefillState {
             }
         }
 
-        // Validation above is the transaction boundary. The queue never
-        // exposes this intermediate state because the caller owns lock, and a
-        // replacement always removes at least one index before adding one.
+        RequestEntry incomingEntry = new RequestEntry(incoming);
+        // Complete every allocation and fallible insertion before changing a
+        // victim. The temporary extra index entry is invisible while the
+        // ownership lock is held and can still be rolled back exactly.
+        activeIndex.add(incoming);
+        try {
+            RequestEntry previous = requests.put(
+                    incoming.requestId(), incomingEntry);
+            if (previous != null) {
+                requests.put(incoming.requestId(), previous);
+                activeIndex.remove(incoming);
+                return false;
+            }
+        } catch (RuntimeException | Error insertionFailure) {
+            activeIndex.remove(incoming);
+            throw insertionFailure;
+        }
+
+        // The point of no return contains only validated, allocation-free
+        // removals, so an allocation failure cannot expose a half replacement.
         for (int index = 0; index < victims.size(); index++) {
             ScheduledRequest victim = victims.get(index);
             RequestEntry entry = victimEntries.get(index);
@@ -720,12 +735,99 @@ public final class PrefillState {
                             + victim.requestId());
             requests.remove(victim.requestId(), entry);
         }
-        RequestEntry previous = requests.put(
-                incoming.requestId(), new RequestEntry(incoming));
-        requireState(previous == null, "validated incoming request already exists");
-        activeIndex.add(incoming);
         mutationVersion++;
         return true;
+    }
+
+    /**
+     * Atomically replace exact NON_BATCH ACTIVE owners and their route credits.
+     * Every allocation and fallible index insertion completes before victim
+     * ownership is changed; after the first victim lease closes, the remainder
+     * of the transaction is allocation-free.
+     *
+     * @return the incoming OPEN credit, or {@code null} when an exact victim or
+     *         capacity precondition changed
+     */
+    public RouteReservation replaceActiveRoutesExact(
+            List<ScheduledRequest> exactVictims,
+            List<RouteReservation> exactReservations,
+            ScheduledRequest incoming,
+            int maximumRequests) {
+        requireLock();
+        if (exactVictims.isEmpty()
+                || exactVictims.size() != exactReservations.size()) {
+            return null;
+        }
+
+        Set<Long> victimIds = new HashSet<>();
+        List<RequestEntry> victimEntries =
+                new ArrayList<>(exactVictims.size());
+        Set<RouteReservation> uniqueReservations =
+                java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+        for (int index = 0; index < exactVictims.size(); index++) {
+            ScheduledRequest victim = exactVictims.get(index);
+            RouteReservation reservation = exactReservations.get(index);
+            if (victim == null
+                    || reservation == null
+                    || reservation.owner != this
+                    || reservation.state != LeaseState.OPEN
+                    || !victimIds.add(victim.requestId())
+                    || !uniqueReservations.add(reservation)) {
+                return null;
+            }
+            RequestEntry entry = requests.get(victim.requestId());
+            if (entry == null
+                    || !entry.activeIdentity(victim)
+                    || entry.reservation != reservation
+                    || !activeIndex.contains(victim)) {
+                return null;
+            }
+            victimEntries.add(entry);
+        }
+        if (victimIds.contains(incoming.requestId())
+                || requests.containsKey(incoming.requestId())) {
+            return null;
+        }
+        long usedAfterRelease = Math.max(
+                0L, routeCapacityUsedUnderLock() - exactReservations.size());
+        if (maximumRequests > 0 && usedAfterRelease >= maximumRequests) {
+            return null;
+        }
+
+        RequestEntry incomingEntry = new RequestEntry(incoming);
+        RouteReservation incomingReservation = new RouteReservation(
+                incomingEntry, incoming.requestId(), 0L);
+        // Insert the incoming identity before the point of no return. These
+        // operations may allocate, but are invisible while the caller holds
+        // the ownership lock and can still be rolled back exactly.
+        activeIndex.add(incoming);
+        try {
+            RequestEntry previous = requests.put(
+                    incoming.requestId(), incomingEntry);
+            if (previous != null) {
+                requests.put(incoming.requestId(), previous);
+                activeIndex.remove(incoming);
+                return null;
+            }
+        } catch (RuntimeException | Error insertionFailure) {
+            activeIndex.remove(incoming);
+            throw insertionFailure;
+        }
+
+        incomingEntry.reservation = incomingReservation;
+        routeLeasesInUse++;
+        for (int index = 0; index < exactVictims.size(); index++) {
+            ScheduledRequest victim = exactVictims.get(index);
+            RequestEntry entry = victimEntries.get(index);
+            closeOpenLeaseUnderLock(exactReservations.get(index));
+            boolean removed = activeIndex.remove(victim);
+            requireState(removed,
+                    "validated ACTIVE victim disappeared during route replacement"
+                            + " request_id=" + victim.requestId());
+            requests.remove(victim.requestId(), entry);
+        }
+        mutationVersion++;
+        return incomingReservation;
     }
 
     public boolean terminalizeActiveUnderLock(ScheduledRequest item) {
@@ -928,7 +1030,7 @@ public final class PrefillState {
      * the number of groups that may be in flight. Already ACTIVE requests are
      * staged against those same future groups and therefore deducted once.
      */
-    public int availableBatchPublicationSlots(
+    public int availableBatchPublicationCredits(
             int maximumInflightBatches,
             int maximumRequestsPerGroup,
             int maximumQueuedRequests) {
@@ -971,7 +1073,7 @@ public final class PrefillState {
      * Committed route leases and requests awaiting delivery consume the same
      * dispatcher-owned request capacity, so both must be deducted.
      */
-    public int availableRouteDecisionSlots(int maximumRequests) {
+    public int availableRoutePublicationCredits(int maximumRequests) {
         if (maximumRequests <= 0) {
             return Integer.MAX_VALUE;
         }
@@ -990,42 +1092,6 @@ public final class PrefillState {
 
     public CapacityBoundary.Availability batchAvailability(int maximum) {
         return new CapacityAvailability(maximum);
-    }
-
-    /** Remove one already-detached ACTIVE route credit under the ownership lock. */
-    public void releaseOpenRouteReservationUnderLock(
-            RouteReservation exactReservation) {
-        requireLock();
-        if (exactReservation == null
-                || exactReservation.owner != this) {
-            throw new IllegalArgumentException(
-                    "route reservation belongs to another Prefill ledger");
-        }
-        closeOpenLeaseUnderLock(exactReservation);
-    }
-
-    /** Whether one incoming route credit fits after exact victim credits leave. */
-    public boolean routeCapacityAvailableAfterReleasingUnderLock(
-            List<RouteReservation> exactVictims,
-            int maximumRequests) {
-        requireLock();
-        Set<RouteReservation> unique = java.util.Collections.newSetFromMap(
-                new IdentityHashMap<>());
-        for (RouteReservation reservation : exactVictims) {
-            if (reservation == null
-                    || reservation.owner != this
-                    || reservation.state != LeaseState.OPEN
-                    || !unique.add(reservation)
-                    || openLeaseOwnerUnderLock(reservation) == null) {
-                return false;
-            }
-        }
-        if (maximumRequests <= 0) {
-            return true;
-        }
-        long usedAfterRelease = Math.max(
-                0L, routeCapacityUsedUnderLock() - exactVictims.size());
-        return usedAfterRelease < maximumRequests;
     }
 
     /** Exact wake capability permanently paired with this worker runtime. */

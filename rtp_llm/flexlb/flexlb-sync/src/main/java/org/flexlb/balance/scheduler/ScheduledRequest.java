@@ -166,8 +166,7 @@ public final class ScheduledRequest implements Prioritized {
 
     /**
      * Normalized request priority. Satisfies {@link Prioritized#priority()}
-     * for the per-worker batcher
-     * queue's {@code PriorityBlockingQueue}.
+     * for the per-worker ordered active index.
      */
     @Override
     public int priority() {

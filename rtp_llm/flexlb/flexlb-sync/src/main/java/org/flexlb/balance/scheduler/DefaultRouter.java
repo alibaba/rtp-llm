@@ -1,9 +1,7 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
-import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
-
 import org.apache.commons.lang3.StringUtils;
+import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
@@ -21,11 +19,12 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Logger;
-import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 @Component
 public class DefaultRouter {
@@ -44,16 +43,16 @@ public class DefaultRouter {
             RandomStrategy vitSelector,
             ConfigService configService,
             ModelMetaConfig modelMetaConfig) {
-        this.prefillSelector = java.util.Objects.requireNonNull(
+        this.prefillSelector = Objects.requireNonNull(
                 prefillSelector, "prefillSelector");
-        this.decodeSelector = java.util.Objects.requireNonNull(
+        this.decodeSelector = Objects.requireNonNull(
                 decodeSelector, "decodeSelector");
-        this.vitSelector = java.util.Objects.requireNonNull(
+        this.vitSelector = Objects.requireNonNull(
                 vitSelector, "vitSelector");
-        this.configService = java.util.Objects.requireNonNull(
+        this.configService = Objects.requireNonNull(
                 configService, "configService");
         this.requiredRoles = List.copyOf(
-                java.util.Objects.requireNonNull(
+                Objects.requireNonNull(
                         modelMetaConfig, "modelMetaConfig").requiredRoles());
         this.queueAdmissionRole = requiredRoles.stream()
                 .filter(role -> role == RoleType.PREFILL
@@ -67,8 +66,7 @@ public class DefaultRouter {
         if (validationFailure != null) {
             return validationFailure;
         }
-        try (PinnedRouting routing = selectAll(
-                context, requiredRoles, false)) {
+        try (PinnedRouting routing = selectAll(context, requiredRoles)) {
             if (routing.rejection() != null) {
                 return routing.rejection();
             }
@@ -85,8 +83,7 @@ public class DefaultRouter {
         if (validationFailure != null) {
             return PlacementResult.rejected(validationFailure);
         }
-        try (PinnedRouting routing = selectAll(
-                context, requiredRoles, true)) {
+        try (PinnedRouting routing = selectAll(context, requiredRoles)) {
             if (routing.rejection() != null) {
                 return PlacementResult.rejected(routing.rejection());
             }
@@ -114,8 +111,7 @@ public class DefaultRouter {
 
     private PinnedRouting selectAll(
             BalanceContext context,
-            List<RoleType> roles,
-            boolean queueSelection) {
+            List<RoleType> roles) {
         List<SelectedRole> selected = new ArrayList<>(roles.size());
         String policyGroup = resolvePolicyGroup(context);
         String group = policyGroup;
@@ -129,9 +125,8 @@ public class DefaultRouter {
 
         try {
             for (RoleType role : roles) {
-                PlacementResult<SelectedRole, RoleType> result = queueSelection
-                        ? queueSelection(context, role, group)
-                        : directSelection(context, role, group);
+                PlacementResult<SelectedRole, RoleType> result =
+                        selectRole(context, role, group);
                 if (result.status() != PlacementResult.Status.SUCCESS) {
                     Logger.debug(
                             "Failed to select {} worker for request {}",
@@ -179,12 +174,11 @@ public class DefaultRouter {
                 .orElse(null);
     }
 
-    private PlacementResult<SelectedRole, RoleType> directSelection(
+    private PlacementResult<SelectedRole, RoleType> selectRole(
             BalanceContext context, RoleType role, String group) {
         return switch (role) {
             case PREFILL, PDFUSION ->
-                    selectedOrBlocked(
-                            prefillSelector.select(context, role, group), role);
+                    prefillSelector.select(context, role, group);
             case DECODE -> decodeSelector.select(context, role, group);
             case VIT -> selectedOrBlocked(
                     vitSelector.select(context, role, group), role);
@@ -198,21 +192,6 @@ public class DefaultRouter {
         return selected == null
                 ? PlacementResult.blocked(role)
                 : PlacementResult.success(selected);
-    }
-
-    private PlacementResult<SelectedRole, RoleType> queueSelection(
-            BalanceContext context,
-            RoleType role,
-            String group) {
-        return switch (role) {
-            case PREFILL, PDFUSION ->
-                    prefillSelector.selectForQueue(context, role, group);
-            case DECODE ->
-                    decodeSelector.select(context, role, group);
-            case VIT -> directSelection(context, role, group);
-            case FRONTEND -> throw new IllegalArgumentException(
-                    "Endpoint selection is not supported for FRONTEND");
-        };
     }
 
     private Response commitDirect(BalanceContext context, List<SelectedRole> selections) {
@@ -425,7 +404,8 @@ public class DefaultRouter {
 
     private static Response buildFailureResponse(RoleType failedRole) {
         StrategyErrorType errorType = failedRole == null
-                ? NO_AVAILABLE_WORKER : failedRole.getErrorType();
+                ? StrategyErrorType.NO_AVAILABLE_WORKER
+                : failedRole.getErrorType();
         Response response = new Response();
         response.setSuccess(false);
         response.setCode(errorType.getErrorCode());

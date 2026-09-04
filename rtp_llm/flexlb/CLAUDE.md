@@ -35,8 +35,8 @@ Key classes:
 - `ServerStatus`: Worker node status representation
 - `Request`/`Response`: API request/response models
 - `RoleType`: Enum defining worker roles (PREFILL, DECODE, PDFUSION, VIT, FRONTEND)
-- `RoutingConfig.EndpointSelectorConfig`: Sealed, role-specific selector configuration
-- `ConfigService`: Configuration loader, migration, binding, and validation
+- `RoutingConfig`: Role-specific Prefill/Decode selection configuration
+- `ConfigService`: Strict schema-v2 configuration loader and validator
 
 Role-derived routing policy lives in `RoutingConfig.PrefillConfig` and
 `RoutingConfig.DecodeConfig`. Their selection pipelines read role-specific availability
@@ -51,13 +51,12 @@ gRPC client implementation for model service communication. Contains protocol bu
 Core load balancing logic, scheduling strategies, and worker status synchronization. This is the heart of the load balancing system.
 
 Key concepts:
-- **Router pattern**: `Router` interface + `DefaultRouter` implementation for multi-role request routing
-- **LoadBalanceStrategy pattern**: Strategy interface for worker selection (`RandomStrategy`, cost-based Prefill/Decode, and `ShortestTTFTStrategy`)
+- **Routing**: `DefaultRouter` composes the cost-based Prefill/Decode selectors and the VIT random selector for multi-role requests
 - **Queue-based scheduling**: `RequestScheduler` facade + `GlobalQueueCoordinator` ordered placement owner + per-generation `WorkerBatcher` delivery runtime
 - **Resource measurement**: Endpoint resource views used by routing strategies
 - **Worker synchronization**: Periodic gRPC-based status sync (`GrpcWorkerStatusRunner`)
 - **Master election**: ZooKeeper-based leader election (`ZookeeperMasterElectService`)
-- **Graceful lifecycle**: Hook-based online/shutdown management
+- **Graceful lifecycle**: `ApplicationLifecycle` owns the fixed online, health, and shutdown workflow
 
 Queue scheduling components:
 - `RequestScheduler`: Public QUEUE submission/cancellation/query facade with no request-state ownership
@@ -67,18 +66,8 @@ Queue scheduling components:
 - `RouteService`: High-level service that delegates queued work to `RequestScheduler`
 
 Capacity management components:
-- Prefill and Decode selection pipelines perform snapshot-based availability filtering.
+- Prefill and Decode selection pipelines evaluate immutable full-fleet snapshots.
 - Endpoint admission and dispatch own exact capacity, one-shot permits, and capacity-change signals.
-
-Lifecycle hook interfaces:
-- `AppOnlineHooker`: Online service hooks (replaces OnlineListener)
-- `AppShutDownHooker`: Shutdown service hooks (replaces ShutdownListener)
-
-Hook implementations:
-- `ActiveRequestShutdownHooker`: Waits for active requests to complete
-- `HealthCheckHooker`: Manages health check state during lifecycle
-- `LbConsistencyHooker`: Manages ZooKeeper consistency during lifecycle
-- `QueryWarmerHooker`: Warms up routing cache on startup
 
 See flexlb-sync/CLAUDE.md for detailed module-specific guidance.
 
@@ -173,20 +162,12 @@ The `DefaultRouter` orchestrates routing across these stages. If a later stage f
 
 ### Load Balancing Strategies
 
-Four baseline strategies are available as Spring leaf beans selected by `ConfiguredLoadBalanceSelector`:
-
-- **RANDOM**: Random worker selection
-- **COST_BASED_PREFILL**: Select worker with lowest cost for prefill requests
-- **COST_BASED_DECODE**: Select worker with lowest cost for decode requests
-- **SHORTEST_TTFT**: Project each worker's incoming-request TTFT from its frozen queue/work view, then select the least-recently-used endpoint within the configured RATIO/FIXED candidate pool
-
-Each `RoleType` can use a different compatible strategy. The public choices are tagged
-selectors under `FLEXLB_CONFIG.router.roles`: PREFILL/PDFUSION use `RANDOM` or
-`ESTIMATED_TTFT`, DECODE uses `RANDOM` or `KV_USAGE_WEIGHTED_RANDOM`, and VIT uses
-`RANDOM`. Under `ESTIMATED_TTFT`, `LEAST_RECENTLY_USED_IN_POOL` maps to the shortest-TTFT
-candidate-pool path; the other candidate choices map to cost-based prefill selection.
-Cache affinity is enabled only by including `router.roles.prefill.cacheAffinity`, with
-`maxExtraTtftMs` and `minPrefixHitPercent`; omit the object to disable it.
+`DefaultRouter` uses explicit role selectors: `CostBasedPrefillStrategy` for
+PREFILL/PDFUSION, `CostBasedDecodeStrategy` for DECODE, and `RandomStrategy`
+for VIT. Both cost-based selectors evaluate the complete live fleet before
+reducing to one configured-policy winner. Prefill candidate choice controls
+best-only, TTFT tolerance, or LRU within the shortest-TTFT pool. Optional cache
+affinity is configured with `router.roles.prefill.cacheAffinity`.
 
 ### Queue-Based Request Scheduling
 
@@ -212,7 +193,7 @@ on their delivery-capacity, window, and deadline predicates.
 Worker health and capacity information is synchronized asynchronously:
 
 - `GrpcWorkerStatusRunner`: Periodically fetches worker status via gRPC
-- `EndpointRegistry`: Generation-fenced endpoint owner; `EngineWorkerStatus` exposes immutable routing snapshots and exact captures
+- `EndpointRegistry`: Generation-fenced endpoint owner; `WorkerDirectory` exposes immutable routing snapshots and exact captures
 - `GrpcCacheStatusCheckRunner`: Syncs KV cache information with `KvCacheManager`
 
 Routing reads from these shared data structures which are concurrently updated by background threads.
@@ -226,30 +207,12 @@ The flexlb-cache module maintains a two-level hash table:
 
 During routing, the system queries matching cache blocks to prefer workers with relevant cached data, reducing computation overhead.
 
-### Graceful Lifecycle Hooks
+### Graceful Lifecycle
 
-FlexLB provides a hook-based system for managing application lifecycle events gracefully:
-
-- **Lifecycle interfaces**:
-  - `AppOnlineHooker`: Hooks executed during online phase
-  - `AppShutDownHooker`: Hooks executed during shutdown phase
-
-- **Lifecycle services**:
-  - `GracefulLifecycleReporter`: Reports lifecycle events to metrics
-  - `GracefulOnlineService`: Manages online phase with priority-ordered hook listeners
-  - `GracefulShutdownService`: Manages shutdown phase with hook listeners
-
-- **Hook implementations** (executed in priority order):
-  - `ActiveRequestShutdownHooker`: Waits for active requests to complete before shutdown
-  - `HealthCheckHooker`: Manages health check state during lifecycle transitions
-  - `LbConsistencyHooker`: Manages ZooKeeper consistency during lifecycle
-  - `QueryWarmerHooker`: Warms up routing cache on startup
-
-**Lifecycle Flow**:
-1. **Online phase**: `GracefulOnlineService` executes `AppOnlineHooker` implementations
-2. **Shutdown phase**: `GracefulShutdownService` executes `AppShutDownHooker` implementations
-3. Each hook reports status via `GracefulLifecycleReporter`
-4. Hooks execute in priority order; a failed hook may prevent subsequent hooks
+`ApplicationLifecycle` owns the fixed online/offline state machine. It starts
+and stops consistency registration, exposes health state, waits for the active
+request counter to remain quiet, and reports each phase through
+`GracefulLifecycleReporter`. There is no dynamic hook registry.
 
 ### Master Election and Consistency
 
@@ -297,11 +260,11 @@ ZooKeeper connection configuration for distributed coordination.
 
 ## Important Implementation Details
 
-### LoadBalanceStrategy Selection
-Each `LoadBalanceStrategy` is a Spring leaf bean whose `supports(role, selectorConfig)`
-domain must be mutually exclusive. `ConfiguredLoadBalanceSelector` requires exactly one
-matching bean for every request; zero or multiple matches fail immediately. Do not add a
-static registry, bean-name lookup, fallback strategy, or `@DependsOn` ordering contract.
+### Endpoint Selection
+`DefaultRouter` calls the explicit selector for each required role. Prefill and
+Decode selectors consume complete immutable fleet snapshots and return an exact
+generation capability; do not add a second selector pass or endpoint fallback
+after ordered QUEUE commit begins.
 
 ### Rollback Mechanism
 When multi-stage routing partially fails, `DefaultRouter` closes the exact
@@ -388,7 +351,7 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`
 Examples:
 - `feat(router): add cache-aware routing strategy`
 - `fix(grpc): handle connection timeout gracefully`
-- `refactor(LoadBalanceStrategy): rename method getLoadBalanceStrategy to getLoadBalancer`
+- `refactor(router): simplify role selection`
 
 ## Java Version and Dependencies
 

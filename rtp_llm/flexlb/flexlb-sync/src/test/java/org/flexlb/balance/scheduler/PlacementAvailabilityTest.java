@@ -14,14 +14,17 @@ class PlacementAvailabilityTest {
     @Test
     void exactReleaseAdvancesExactGroupAndRoleEdges() {
         PlacementAvailability availability = new PlacementAvailability();
-        List<PlacementKey> changed = new ArrayList<>();
-        availability.addListener((key, ignored) -> changed.add(key));
+        List<PlacementAvailability.Event> changed = new ArrayList<>();
+        availability.addListener(changed::add);
 
         PlacementKey exact = PlacementKey.exact(
                 RoleType.PREFILL, "g1", "127.0.0.1:8000");
         availability.capacityChanged(exact);
 
-        assertEquals(List.of(exact), changed);
+        assertEquals(List.of(new PlacementAvailability.Event(
+                exact,
+                availability.lastChangedSequence(exact),
+                PlacementAvailability.ChangeKind.CAPACITY)), changed);
         assertTrue(availability.lastChangedSequence(exact) > 0L);
         assertEquals(availability.lastChangedSequence(exact),
                 availability.lastChangedSequence(
@@ -41,5 +44,21 @@ class PlacementAvailabilityTest {
                 RoleType.PREFILL, "g1", "127.0.0.2:8000"));
 
         assertEquals(0L, availability.lastChangedSequence(waiting));
+    }
+
+    @Test
+    void topologyChangeIsDistinctFromCapacityRelease() {
+        PlacementAvailability availability = new PlacementAvailability();
+        List<PlacementAvailability.Event> changed = new ArrayList<>();
+        availability.addListener(changed::add);
+        PlacementKey exact = PlacementKey.exact(
+                RoleType.DECODE, "g1", "127.0.0.1:9000");
+
+        availability.topologyChanged(exact);
+
+        assertEquals(1, changed.size());
+        assertEquals(exact, changed.getFirst().key());
+        assertEquals(PlacementAvailability.ChangeKind.TOPOLOGY,
+                changed.getFirst().kind());
     }
 }

@@ -87,7 +87,8 @@ class DefaultRouterTest {
         SelectionFixture decode = selection(RoleType.DECODE, 7L, "d", 8002, "g1");
         PrefillState.DirectRegistration registration = mock(PrefillState.DirectRegistration.class);
         DecodeEndpoint.ReservationHandle reservation = new DecodeEndpoint.ReservationHandle(1L, 7L, 2L);
-        when(prefillSelector.select(context, RoleType.PREFILL, null)).thenReturn(prefill.selection);
+        when(prefillSelector.select(context, RoleType.PREFILL, null))
+                .thenReturn(PlacementResult.success(prefill.selection));
         when(decodeSelector.select(context, RoleType.DECODE, "g1"))
                 .thenReturn(PlacementResult.success(decode.selection));
         when(((PrefillEndpoint) prefill.endpoint).registerDirectRequest(
@@ -118,7 +119,8 @@ class DefaultRouterTest {
         SelectionFixture prefill = selection(RoleType.PREFILL, 8L, "p", 8001, "g1");
         SelectionFixture decode = selection(RoleType.DECODE, 8L, "d", 8002, "g1");
         PrefillState.DirectRegistration registration = mock(PrefillState.DirectRegistration.class);
-        when(prefillSelector.select(context, RoleType.PREFILL, null)).thenReturn(prefill.selection);
+        when(prefillSelector.select(context, RoleType.PREFILL, null))
+                .thenReturn(PlacementResult.success(prefill.selection));
         when(decodeSelector.select(context, RoleType.DECODE, "g1"))
                 .thenReturn(PlacementResult.success(decode.selection));
         when(((PrefillEndpoint) prefill.endpoint).registerDirectRequest(
@@ -157,7 +159,7 @@ class DefaultRouterTest {
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.PREFILL));
         DefaultRouter router = router();
         BalanceContext context = context(111L);
-        when(prefillSelector.selectForQueue(
+        when(prefillSelector.select(
                 context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.blocked(RoleType.DECODE));
 
@@ -176,7 +178,7 @@ class DefaultRouterTest {
         BalanceContext context = context(12L);
         SelectionFixture prefill = selection(
                 RoleType.PREFILL, 12L, "p", 8001, "g1");
-        when(prefillSelector.selectForQueue(
+        when(prefillSelector.select(
                 context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
         when(decodeSelector.select(
@@ -199,7 +201,7 @@ class DefaultRouterTest {
         BalanceContext context = context(21L);
         SelectionFixture prefill = selection(
                 RoleType.PREFILL, context.getRequestId(), "p", 8001, "g1");
-        when(prefillSelector.selectForQueue(
+        when(prefillSelector.select(
                 context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
 
@@ -229,7 +231,7 @@ class DefaultRouterTest {
                 RoleType.DECODE, 22L, "d", 8002, "g1");
         DecodeEndpoint.ReservationHandle reservation =
                 new DecodeEndpoint.ReservationHandle(1L, 22L, 2L);
-        when(prefillSelector.selectForQueue(
+        when(prefillSelector.select(
                 context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
         when(decodeSelector.select(context, RoleType.DECODE, "g1"))
@@ -286,7 +288,7 @@ class DefaultRouterTest {
                 RoleType.PREFILL, 31L, "p", 8001, "selected-group");
         SelectionFixture vit = selection(
                 RoleType.VIT, 31L, "v", 8002, "selected-group");
-        when(prefillSelector.selectForQueue(
+        when(prefillSelector.select(
                 context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
         when(vitSelector.select(context, RoleType.VIT, "selected-group"))
@@ -296,7 +298,7 @@ class DefaultRouterTest {
         assertEquals(PlacementResult.Status.SUCCESS, admitted.status());
         admitted.value().close();
 
-        verify(prefillSelector).selectForQueue(
+        verify(prefillSelector).select(
                 context, RoleType.PREFILL, null);
         verify(vitSelector).select(
                 context, RoleType.VIT, "selected-group");
@@ -318,7 +320,7 @@ class DefaultRouterTest {
                 RoleType.PREFILL, 41L, "p", 8001, "other");
         SelectionFixture vit = selection(
                 RoleType.VIT, 41L, "v", 8002, "other");
-        when(prefillSelector.selectForQueue(
+        when(prefillSelector.select(
                 context, RoleType.PREFILL, "forced"))
                 .thenReturn(PlacementResult.success(prefill.selection));
         when(vitSelector.select(context, RoleType.VIT, "forced"))
@@ -328,7 +330,7 @@ class DefaultRouterTest {
         assertEquals(PlacementResult.Status.SUCCESS, admitted.status());
         admitted.value().close();
 
-        verify(prefillSelector).selectForQueue(
+        verify(prefillSelector).select(
                 context, RoleType.PREFILL, "forced");
         verify(vitSelector).select(context, RoleType.VIT, "forced");
     }
@@ -341,7 +343,7 @@ class DefaultRouterTest {
         BalanceContext context = context(51L);
         SelectionFixture prefill = selection(
                 RoleType.PREFILL, 51L, "p", 8001, "g1");
-        when(prefillSelector.selectForQueue(
+        when(prefillSelector.select(
                 context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
         when(vitSelector.select(context, RoleType.VIT, "g1"))
@@ -363,7 +365,7 @@ class DefaultRouterTest {
         BalanceContext context = context(52L);
         SelectionFixture prefill = selection(
                 RoleType.PREFILL, 52L, "p", 8001, "g1");
-        when(prefillSelector.selectForQueue(
+        when(prefillSelector.select(
                 context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
         when(decodeSelector.select(
@@ -386,7 +388,7 @@ class DefaultRouterTest {
         BalanceContext context = context(61L);
         SelectionFixture foreign = selection(
                 RoleType.PREFILL, 999L, "p", 8001, "g1");
-        when(prefillSelector.selectForQueue(
+        when(prefillSelector.select(
                 context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(foreign.selection));
 
@@ -407,7 +409,7 @@ class DefaultRouterTest {
         BalanceContext context = context(71L);
         SelectionFixture prefill = selection(
                 RoleType.PREFILL, 71L, "p", 8001, "g1");
-        when(prefillSelector.selectForQueue(
+        when(prefillSelector.select(
                 context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
 
@@ -415,7 +417,7 @@ class DefaultRouterTest {
         assertEquals(PlacementResult.Status.SUCCESS, admitted.status());
         admitted.value().close();
 
-        verify(prefillSelector).selectForQueue(
+        verify(prefillSelector).select(
                 context, RoleType.PREFILL, null);
     }
 
@@ -434,7 +436,7 @@ class DefaultRouterTest {
             String group,
             PlacementResult<SelectedRole, RoleType> result) {
         switch (role) {
-            case PREFILL, PDFUSION -> when(prefillSelector.selectForQueue(
+            case PREFILL, PDFUSION -> when(prefillSelector.select(
                     context, role, group)).thenReturn(result);
             case DECODE -> when(decodeSelector.select(
                     context, role, group)).thenReturn(result);

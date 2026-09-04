@@ -1,13 +1,13 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.delivery.DeliveryResult;
-import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.DispatcherConfig;
+import org.flexlb.balance.scheduler.RequestRegistry;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.DecisionPolicyConfig;
+import org.flexlb.config.DispatcherConfig;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
@@ -35,10 +35,9 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -123,15 +122,20 @@ class PrefillEndpointTest {
         routeConfig.setDispatcher(DispatcherConfig.nonBatch());
         routeConfig.getDispatcher()
                 .setMaxInflightRequestsPerPrefillWorker(3);
-        assertEquals(3, endpoint.availableRouteDecisionSlots(3));
+        PrefillEndpoint routeEndpoint = routeEndpoint(routeConfig, "127.0.0.4");
+        try {
+            assertEquals(3, routeEndpoint.availableDeliveryCredits());
 
-        ScheduledRequest queued = createScheduledRequest(
-                endpoint, routeConfig, 1L, 500, 200);
-        assertTrue(EndpointTestSupport.offer(endpoint, queued));
-        assertEquals(2, endpoint.availableRouteDecisionSlots(3));
+            ScheduledRequest queued = createScheduledRequest(
+                    routeEndpoint, routeConfig, 1L, 500, 200);
+            assertTrue(EndpointTestSupport.offer(routeEndpoint, queued));
+            assertEquals(2, routeEndpoint.availableDeliveryCredits());
 
-        assertTrue(endpoint.removeQueued(queued, "test cleanup"));
-        assertEquals(3, endpoint.availableRouteDecisionSlots(3));
+            assertTrue(routeEndpoint.removeQueued(queued, "test cleanup"));
+            assertEquals(3, routeEndpoint.availableDeliveryCredits());
+        } finally {
+            routeEndpoint.close();
+        }
     }
 
     @Test
@@ -140,18 +144,35 @@ class PrefillEndpointTest {
         routeConfig.setDispatcher(DispatcherConfig.nonBatch());
         routeConfig.getDispatcher()
                 .setMaxInflightRequestsPerPrefillWorker(1);
-        ScheduledRequest first = createScheduledRequest(
-                endpoint, routeConfig, 1L, 500, 200);
-        ScheduledRequest second = createScheduledRequest(
-                endpoint, routeConfig, 2L, 500, 200);
+        PrefillEndpoint routeEndpoint = routeEndpoint(routeConfig, "127.0.0.5");
+        try {
+            ScheduledRequest first = createScheduledRequest(
+                    routeEndpoint, routeConfig, 1L, 500, 200);
+            ScheduledRequest second = createScheduledRequest(
+                    routeEndpoint, routeConfig, 2L, 500, 200);
 
-        assertTrue(EndpointTestSupport.offer(endpoint, first));
-        assertFalse(EndpointTestSupport.offer(endpoint, second));
-        assertEquals(1, endpoint.queuedRequestCount());
-        assertEquals(0, endpoint.availableRouteDecisionSlots(1));
+            assertTrue(EndpointTestSupport.offer(routeEndpoint, first));
+            assertFalse(EndpointTestSupport.offer(routeEndpoint, second));
+            assertEquals(1, routeEndpoint.queuedRequestCount());
+            assertEquals(0, routeEndpoint.availableDeliveryCredits());
 
-        assertTrue(endpoint.removeQueued(first, "test cleanup"));
-        assertEquals(1, endpoint.availableRouteDecisionSlots(1));
+            assertTrue(routeEndpoint.removeQueued(first, "test cleanup"));
+            assertEquals(1, routeEndpoint.availableDeliveryCredits());
+        } finally {
+            routeEndpoint.close();
+        }
+    }
+
+    private PrefillEndpoint routeEndpoint(FlexlbConfig routeConfig, String ip) {
+        PrefillEndpoint routeEndpoint = new PrefillEndpoint(
+                EndpointTestSupport.workerStatus(
+                        RoleType.PREFILL, ip, 8080, 8090),
+                routeConfig,
+                EndpointTestSupport.routeStrategy(requestRuntime),
+                requestRuntime.events(),
+                endpointReporter);
+        routeEndpoint.startGeneration();
+        return routeEndpoint;
     }
 
     @Test

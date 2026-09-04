@@ -26,11 +26,18 @@ import java.util.Set;
 @Service
 public class DefaultCacheAwareService implements CacheAwareService {
 
-    @Autowired
-    private KvCacheManager kvCacheManager;
+    private final KvCacheManager kvCacheManager;
+    private final CacheMetricsReporter cacheMetricsReporter;
 
     @Autowired
-    private CacheMetricsReporter cacheMetricsReporter;
+    public DefaultCacheAwareService(
+            KvCacheManager kvCacheManager,
+            CacheMetricsReporter cacheMetricsReporter) {
+        this.kvCacheManager = java.util.Objects.requireNonNull(
+                kvCacheManager, "kvCacheManager");
+        this.cacheMetricsReporter = java.util.Objects.requireNonNull(
+                cacheMetricsReporter, "cacheMetricsReporter");
+    }
 
     @Override
     public Map<String, Integer> findMatchingEngines(
@@ -40,22 +47,31 @@ public class DefaultCacheAwareService implements CacheAwareService {
 
         long startTime = System.nanoTime() / 1000;
 
-        try {
-            if (blockCacheKeys == null || blockCacheKeys.isEmpty()) {
-                return Collections.emptyMap();
-            }
-
-            Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> resultMap
-                = kvCacheManager.findMatchingEngines(
-                        blockCacheKeys, candidateEngineIpPorts);
-
-            cacheMetricsReporter.reportFindMatchingEnginesRT(roleType, startTime, "0");
-
-            return resultMap;
-        } catch (Exception e) {
-            cacheMetricsReporter.reportFindMatchingEnginesRT(roleType, startTime, "1");
-            log.error("Error finding matching engines for role: {}", roleType, e);
+        if (blockCacheKeys == null || blockCacheKeys.isEmpty()) {
             return Collections.emptyMap();
+        }
+
+        final Map<String, Integer> resultMap;
+        try {
+            resultMap = kvCacheManager.findMatchingEngines(
+                    blockCacheKeys, candidateEngineIpPorts);
+        } catch (RuntimeException e) {
+            reportFindLatency(roleType, startTime, "1");
+            log.error("Error finding matching engines for role: {}", roleType, e);
+            throw e;
+        }
+        reportFindLatency(roleType, startTime, "0");
+        return resultMap;
+    }
+
+    private void reportFindLatency(
+            RoleType roleType, long startTime, String result) {
+        try {
+            cacheMetricsReporter.reportFindMatchingEnginesRT(
+                    roleType, startTime, result);
+        } catch (RuntimeException metricFailure) {
+            log.warn("Failed to report cache lookup latency for role: {}",
+                    roleType, metricFailure);
         }
     }
 

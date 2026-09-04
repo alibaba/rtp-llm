@@ -274,18 +274,12 @@ public class EndpointRegistry {
      */
     public List<DecodeEndpoint.DecodeRoutingView> decodeRoutingSnapshot() {
         List<Map.Entry<String, DecodeEndpoint>> directory = decodeDirectory;
-        return new AbstractList<>() {
-            @Override
-            public DecodeEndpoint.DecodeRoutingView get(int index) {
-                Map.Entry<String, DecodeEndpoint> entry = directory.get(index);
-                return entry.getValue().routingViewSnapshot(entry.getKey());
-            }
-
-            @Override
-            public int size() {
-                return directory.size();
-            }
-        };
+        List<DecodeEndpoint.DecodeRoutingView> snapshot =
+                new ArrayList<>(directory.size());
+        for (Map.Entry<String, DecodeEndpoint> entry : directory) {
+            snapshot.add(entry.getValue().routingViewSnapshot(entry.getKey()));
+        }
+        return List.copyOf(snapshot);
     }
 
     /**
@@ -293,9 +287,9 @@ public class EndpointRegistry {
      *
      * <p>The routing values are advisory and may change after selection. The
      * subsequent reservation/dispatch transaction revalidates capacity under
-     * the endpoint admission lock. Requiring an identical admission version
-     * Every rejected or exceptional capture is closed here; a successful
-     * caller owns the returned generation pin.</p>
+     * the endpoint admission lock. This method authorizes only an identical
+     * endpoint generation; every rejected or exceptional capture is closed
+     * here, while a successful caller owns the returned generation pin.</p>
      */
     public WorkerEndpoint.GenerationPin captureDecodeGeneration(
             DecodeEndpoint.DecodeRoutingView expected) {
@@ -688,7 +682,7 @@ public class EndpointRegistry {
         if (detached != null) {
             WorkerStatus.TopologySnapshot topology =
                     detached.endpoint.getStatus().topologySnapshot();
-            placementAvailability.capacityChanged(
+            placementAvailability.topologyChanged(
                     roleType, topology.group(), ipPort);
         }
         return detached;
@@ -790,7 +784,7 @@ public class EndpointRegistry {
         }
         WorkerStatus.TopologySnapshot topology =
                 endpoint.getStatus().topologySnapshot();
-        placementAvailability.capacityChanged(
+        placementAvailability.topologyChanged(
                 endpoint.getStatus().getRole(), topology.group(),
                 endpoint.ipPort());
     }

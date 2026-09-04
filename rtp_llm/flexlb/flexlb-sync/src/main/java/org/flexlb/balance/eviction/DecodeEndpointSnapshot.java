@@ -15,7 +15,7 @@ import java.util.List;
  * capabilities and capacity policy to the endpoint, which revalidates the
  * current canonical owners under that same lock before any mutation.
  *
- * <p><b>Layered view (Phase 5):</b> {@link #reserved} holds only
+ * <p><b>Layered view:</b> {@link #reserved} holds only
  * Master-queued and Engine-may-have-seen shadow entries; {@link #accepted} holds
  * engine-confirmed {@code ACCEPTED_NOT_RUNNING} entries without a pending
  * cancel; {@link #running} holds engine-confirmed {@code RUNNING} entries
@@ -29,17 +29,17 @@ import java.util.List;
  * @param realKvTotal        engine-reported total KV capacity
  * @param totalLoad          confirmed running + local inflight request count
  * @param engineLoad         engine-facing load: confirmed running + non-queued
- *                           inflight (N2/P1-3 — slot-deficit planning must use
- *                           the same measure as the concurrency gate)
+ *                           inflight; slot-deficit planning uses the same
+ *                           measure as the concurrency gate
  * @param concurrencyLimit   configured decode concurrency limit (0 = unlimited)
  * @param hardKvReserved     sum of reserved hard KV tokens (shadow, 10.2)
  * @param expectedKvReserved sum of reserved expected KV tokens (shadow, 10.2)
  * @param reserved           reserved (engine-unconfirmed) entry details for
  *                           eviction planning; confirmed requests never appear
  * @param accepted           engine-confirmed accepted-not-running entries with
- *                           no pending cancel (Phase 5 candidates behind gate)
+ *                           no pending cancel when engine-owned eviction is enabled
  * @param running            engine-confirmed running entries with no pending
- *                           cancel (Phase 5 candidates behind the same gate)
+ *                           cancel when engine-owned eviction is enabled
  */
 public record DecodeEndpointSnapshot(
         DecodeEndpoint endpoint,

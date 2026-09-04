@@ -48,13 +48,20 @@ public final class FlexlbConfig {
      * <p>A queue without a preemption policy cannot make a useful placement-time
      * decision when Decode is temporarily full. It should retain the request on
      * its selected Prefill queue and let the exact pre-delivery permit wait for
-     * Decode capacity. A configured preemption policy is the only queue policy
-     * which needs a placement-time miss in order to plan victim replacement.
+     * Decode capacity. Only a policy which can replace Decode victims needs a
+     * placement-time miss; Prefill-only preemption must not change this
+     * boundary.
      */
     @JsonIgnore
     public boolean defersDecodeCapacityUntilDispatch() {
-        return isQueue()
-                && queueScheduler().getOrdering().preemptionPolicy().isEmpty();
+        if (!isQueue()) {
+            return false;
+        }
+        return queueScheduler().getOrdering().preemptionPolicy()
+                .map(preemption ->
+                        !preemption.allows(VictimStage.DECODE_RESERVED)
+                        && !preemption.allows(VictimStage.DECODE_ENGINE_OWNED))
+                .orElse(true);
     }
 
     /** Resolve the QUEUE decision policy from its single configuration owner. */

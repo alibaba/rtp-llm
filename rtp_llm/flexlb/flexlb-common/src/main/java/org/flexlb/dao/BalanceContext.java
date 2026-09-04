@@ -84,30 +84,16 @@ public class BalanceContext {
     private SchedulingMetadata schedulingMetadata;
 
     /**
-     * Number of priority scheduling plan attempts consumed for this request (1-based).
-     * 0 when the priority scheduling path did not schedule it (§19.1 schedule_attempt).
-     */
-    private int scheduleAttempt;
-
-    /**
      * priority scheduling plan type that finally placed the request:
-     * normal / prefill_evict / decode_evict. Empty when not applicable
-     * (§19.1 plan_type).
+     * normal / prefill_evict / decode_evict. Empty when not applicable.
      */
     private String planType = "";
 
-    /** Cost of the committed eviction plan; 0 for a normal placement (§19.1 plan_cost). */
+    /** Cost of the committed eviction plan; 0 for normal placement. */
     private long planCost;
 
-    /** Victims preempted to place this request; 0 for a normal placement (§19.1 victim_count). */
+    /** Victims preempted to place this request; 0 for normal placement. */
     private int victimCount;
-
-    /**
-     * Prefill endpoint ("ip:httpPort") that the committed plan placed this
-     * request on. Empty until a plan commits; used by rescue logging to
-     * report the migration target.
-     */
-    private String scheduledPrefillEndpoint = "";
 
     //===================== Method ===================//
 

@@ -49,14 +49,23 @@ class FlexlbConfigSchedulingModeTest {
     }
 
     @Test
-    void only_preemption_requires_decode_capacity_during_placement() {
+    void only_decode_preemption_requires_decode_capacity_during_placement() {
         FlexlbConfig fifo = parseQueue("FIFO", "SINGLE", "BATCH");
         FlexlbConfig priority = parseQueue("PRIORITY", "SINGLE", "BATCH");
-        FlexlbConfig preemptive = ConfigService.parse("""
+        FlexlbConfig prefillPreemptive = ConfigService.parse("""
                 {
                   "scheduler":{"type":"QUEUE",
                     "ordering":{"type":"PRIORITY","preemption":{
                       "allowedVictimStages":["PREFILL_QUEUED"]}},
+                    "decision":{"type":"SINGLE"}},
+                  "dispatcher":{"type":"BATCH"}
+                }
+                """);
+        FlexlbConfig decodePreemptive = ConfigService.parse("""
+                {
+                  "scheduler":{"type":"QUEUE",
+                    "ordering":{"type":"PRIORITY","preemption":{
+                      "allowedVictimStages":["DECODE_RESERVED"]}},
                     "decision":{"type":"SINGLE"}},
                   "dispatcher":{"type":"BATCH"}
                 }
@@ -70,7 +79,8 @@ class FlexlbConfigSchedulingModeTest {
 
         assertTrue(fifo.defersDecodeCapacityUntilDispatch());
         assertTrue(priority.defersDecodeCapacityUntilDispatch());
-        assertFalse(preemptive.defersDecodeCapacityUntilDispatch());
+        assertTrue(prefillPreemptive.defersDecodeCapacityUntilDispatch());
+        assertFalse(decodePreemptive.defersDecodeCapacityUntilDispatch());
         assertFalse(direct.defersDecodeCapacityUntilDispatch());
     }
 

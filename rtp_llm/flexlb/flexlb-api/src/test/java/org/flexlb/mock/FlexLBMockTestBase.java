@@ -71,7 +71,7 @@ import static org.mockito.Mockito.when;
  *   │     MockPrefillWorker (gRPC server, no model)
  *   │     MockDecodeWorker  (gRPC server, no model)
  *   ├── Real EndpointRegistry
- *   └── Mock Router (returns mock worker addresses)
+ *   └── Mock DefaultRouter (returns mock worker addresses)
  * </pre>
  */
 public abstract class FlexLBMockTestBase {

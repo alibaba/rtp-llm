@@ -33,6 +33,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -170,7 +171,7 @@ class CostBasedPrefillSelectionMetricTest {
 
     @ParameterizedTest
     @CsvSource({"400,5.0,OVER_CAP", "600,60.0,LOW_CACHE_HIT"})
-    void cacheAffinityGateFallsBackToTheBaselineCandidate(
+    void cacheAffinityGateUsesTheConfiguredBaselineCandidate(
             long maxExtraTtftMs, double minPrefixHitPercent, String reason) {
         configureAffinity(maxExtraTtftMs, minPrefixHitPercent,
                 RoutingConfig.CandidateChoiceType.BEST_ONLY);
@@ -183,7 +184,7 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @Test
-    void lruUsesCachePreferenceThenFallsBackToItsBaselinePool() {
+    void lruNeverLeavesANonEmptyCachePreferredPool() {
         configureAffinity(600L, 5.0,
                 RoutingConfig.CandidateChoiceType.LEAST_RECENTLY_USED_IN_POOL);
 
@@ -196,16 +197,17 @@ class CostBasedPrefillSelectionMetricTest {
         context.getRequest().setRequestId(20_002L);
 
         try (SelectedRole selected = select()) {
-            assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
+            assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
         }
         assertEquals(Long.MAX_VALUE, cacheEndpoint.getLastSelectedTime().get());
-        verify(reporter).reportCacheAffinityDecision(
-                RoleType.PREFILL, "10.0.0.1", "CACHE_AFFINITY_FALLBACK");
+        verify(reporter, times(2))
+                .reportCacheAffinityDecision(
+                        RoleType.PREFILL, "10.0.0.2", "CACHE_LEADER");
     }
 
     private SelectedRole select() {
         PlacementResult<SelectedRole, RoleType> result =
-                strategy.selectForQueue(context, RoleType.PREFILL, null);
+                strategy.select(context, RoleType.PREFILL, null);
         assertEquals(PlacementResult.Status.SUCCESS, result.status());
         return result.value();
     }

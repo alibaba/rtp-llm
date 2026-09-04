@@ -115,7 +115,7 @@ public class RequestSchedulerReporter {
 
     /**
      * Report an inflight settle miss via {@code auto_tpm.inflight_settle_miss.count}
-     * (review P2-2): a finishYielded/PreemptedById found no inflight entry.
+     * when finishYielded/PreemptedById found no inflight entry.
      *
      * @param kind settle kind ("yielded" / "preempted")
      */
@@ -207,7 +207,7 @@ public class RequestSchedulerReporter {
     }
 
     /**
-     * Report the TTFT approximation via {@code auto_tpm.ttft_ms} (§19.2).
+     * Report the TTFT approximation via {@code auto_tpm.ttft_ms}.
      * Approximated as "request arrival → schedule completion" on the Master;
      * the engine-side first-token time is not observable here, so this is a
      * lower bound of the real TTFT.
@@ -219,7 +219,7 @@ public class RequestSchedulerReporter {
 
     /**
      * Report one priority preemption via
-     * {@code auto_tpm.priority_preempt.count} (§19.2).
+     * {@code auto_tpm.priority_preempt.count}.
      *
      * @param stage victim scheduling stage (prefill_queued / decode_reserved)
      */
@@ -229,12 +229,9 @@ public class RequestSchedulerReporter {
     }
 
     /**
-     * Report a decode endpoint's true running-layer request count via
-     * {@code auto_tpm.decode.running.count} (Phase 5 layered view). Before
-     * Phase 5 this gauge equalled the merged confirmed Engine-owned count
-     * (accepted + running merged); it now counts only engine-reported
-     * {@code RUNNING} tasks —
-     * the accepted layer is reported separately via
+     * Report a decode endpoint's engine-reported {@code RUNNING} request
+     * count via {@code auto_tpm.decode.running.count}. The accepted layer is
+     * reported separately via
      * {@link #reportDecodeAcceptedCount}.
      */
     public void reportDecodeRunningCount(String endpoint, int count) {
@@ -244,9 +241,7 @@ public class RequestSchedulerReporter {
 
     /**
      * Report a decode endpoint's accepted-not-running (engine KV-allocated)
-     * request count via {@code auto_tpm.decode.accepted.count} (Phase 5
-     * layered view). Together with the running gauge this splits the former
-     * merged confirmed Engine-owned count without changing its total.
+     * request count via {@code auto_tpm.decode.accepted.count}.
      */
     public void reportDecodeAcceptedCount(String endpoint, int count) {
         monitor.report(AUTO_TPM_DECODE_ACCEPTED_COUNT,
@@ -269,7 +264,7 @@ public class RequestSchedulerReporter {
 
     /**
      * Report one engine cancel request issued via
-     * {@code auto_tpm.cancel.request.count} (Phase 5 accepted eviction).
+     * {@code auto_tpm.cancel.request.count}.
      *
      * @param victimPriority normalized priority of the cancelled victim
      */
@@ -309,9 +304,9 @@ public class RequestSchedulerReporter {
 
     /**
      * Report a decode endpoint's engine-facing load (dispatched, excludes
-     * queued-phase shadow reservations) via {@code auto_tpm.decode.engine_load}
-     * (N2 observability). Contrast against the reserved-count gauge to watch
-     * root cause C (shadow saturation while the engine is idle).
+     * queued-phase shadow reservations) via {@code auto_tpm.decode.engine_load}.
+     * Compare it with the reserved-count gauge to distinguish engine-facing
+     * load from Prefill-queued ownership.
      */
     public void reportDecodeEngineLoad(String endpoint, int load) {
         monitor.report(AUTO_TPM_DECODE_ENGINE_LOAD,

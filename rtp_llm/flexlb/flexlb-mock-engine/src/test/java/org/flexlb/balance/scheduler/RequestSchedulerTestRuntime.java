@@ -51,8 +51,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                     prepareBatchSubmission,
             BatchSchedulerReporter batchReporter,
             RequestSchedulerReporter requestReporter,
-            EngineCancelChannel cancelChannel,
-            CostBasedPrefillStrategy evictionPrefillSelector) {
+            EngineCancelChannel cancelChannel) {
         Objects.requireNonNull(
                 prepareBatchSubmission, "prepareBatchSubmission");
         this.lifecycle = new RequestRegistry(
@@ -69,18 +68,12 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                         lifecycle,
                         new DeliveryMetrics(batchReporter)),
                 placementAvailability);
-        EvictionPlacement placement = new EvictionPlacement(
-                router,
-                evictionPrefillSelector,
-                lifecycle,
-                batchReporter);
         this.evictionManager = new EvictionManager(
-                registry,
                 requestReporter,
                 cancelChannel,
                 new DecodePreemptionCoordinator(cancelChannel, lifecycle),
                 lifecycle,
-                placement);
+                batchReporter);
         this.scheduler = new RequestScheduler(
                 configService,
                 router,
