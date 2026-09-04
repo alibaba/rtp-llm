@@ -265,7 +265,6 @@ master 自身进程级故障与冷启动行为，以及双实例 HA 链路（冻
 
 - `DECODE_ENGINE_OWNED` 的 **ENGINE_MAY_HAVE_SEEN** 子相位为已知不可覆盖缺口——连 Java 白盒 PreemptionPhasesE2ETest 都无该相位的 case；黑盒下 cancel 发出与 engine 认领之间的竞态窗口不可控，不硬造（成本 4 的低置信相位，语义上仅影响 coordinator 的 ack 等待起点）。
 - **ACCEPTED_NOT_RUNNING** 子相位在黑盒下同样不可行：该窗口要求请求已进 engine 队列但尚未 RUNNING，而 mock 的 decodeMaxConcurrency=128 无法在稳定时序下打满出队窗口，且 reportQueuedAsKvAllocated 投影需要性能 JSON 注入——构造面不可控，注记跳过。
-- `cases/cancel.py` 的 victim 终态门“非完成→精确 8429”一行硬化留待后续（该文件另一会话活跃，本轮不碰）；live 家族的 TOMBSTONED case 已在抢占协议侧钉住同一终态。
 
 ## 新增用例
 

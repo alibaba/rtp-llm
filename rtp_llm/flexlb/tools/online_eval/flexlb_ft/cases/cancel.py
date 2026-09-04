@@ -73,6 +73,14 @@ from ..harness import (
     wait_for_port,
 )
 
+# Typed preemption-terminal codes (StrategyErrorType): 8429
+# PRIORITY_PREEMPTED is the DECODE_ENGINE_OWNED victim's terminal.  The
+# client stream's in-band error frame carries the proto enum CANCELLED (2),
+# never the 8429 numeric (that rides the TaskInfoPB master channel only) —
+# the mapping mirrors priority.py's _StreamTerminal (A1, Ryan P1-1).
+_PB_ERROR_CANCELLED = 2
+CODE_ENGINE_CANCELLED = 8429
+
 CANCEL_CASES: list[CaseDef] = []
 
 
@@ -1294,9 +1302,22 @@ def cancel_preemption_victim(ctx: CaseContext):
             ops, _all_engine_names(ops), 15.0
         )
         recovery_ok, recovery_msg = ops.verify_recovery()
+        # Victim terminal hard gate: EXACTLY the typed 8429 engine-cancelled
+        # terminal, not merely "not completed".  Stage discriminator 8400 vs
+        # 8429: 8400 is the master-local atomic eviction (PREFILL_QUEUED /
+        # DECODE_RESERVED victims — never engine-confirmed, settles on the
+        # schedule RPC before any stream exists), while this RUNNING victim
+        # is DECODE_ENGINE_OWNED, so eviction must ride the engine Cancel and
+        # surface as the stream's in-band CANCELLED frame (raw enum 2 = the
+        # 8429 family's client-side form; the numeric rides the TaskInfoPB
+        # master channel only — same mapping as priority.py's
+        # _StreamTerminal).
+        victim_typed = victim_handle.snap.stream_error_code
+        if victim_typed == _PB_ERROR_CANCELLED:
+            victim_typed = CODE_ENGINE_CANCELLED
         passed = (
             victim_ended
-            and not victim_handle.snap.completed
+            and victim_typed == CODE_ENGINE_CANCELLED
             and victim_cancelled
             and weak_cancel_delta >= 1
             and high_handle.snap.completed
@@ -1308,7 +1329,7 @@ def cancel_preemption_victim(ctx: CaseContext):
         return passed, (
             f"preemption_victim: victim_terminated={victim_ended}"
             f"(completed={victim_handle.snap.completed}, "
-            f"error={victim_handle.snap.error}), "
+            f"typed={victim_typed}, error={victim_handle.snap.error}), "
             f"victim_engine_cancelled={victim_cancelled}"
             f"({victim_cancel_detail}), weak_cancel_delta={weak_cancel_delta}, "
             f"high_completed={high_handle.snap.completed}"
