@@ -236,20 +236,19 @@ def gemm_reduce_scatter(
     implementation = implementations[
         int(state.enabled and should_use_gemm_reduce_scatter(physical_m))
     ]
-    return implementation(x, weight, state, physical_m)
+    return implementation(x, weight, state)
 
 
 def _torch_gemm_reduce_scatter(
     x: torch.Tensor,
     weight: torch.Tensor,
     state: _GemmReduceScatterState,
-    physical_m: int,
 ) -> torch.Tensor:
     with torch.profiler.record_function("RTP::kimi_k3.gemm_reduce_scatter.torch"):
         partial = torch.mm(x, weight)
         if state.world_size == 1:
             return partial
-        output = partial.new_empty((physical_m // state.world_size, state.n))
+        output = partial.new_empty((x.shape[0] // state.world_size, state.n))
         dist.reduce_scatter_tensor(
             output,
             partial.contiguous(),
@@ -263,16 +262,11 @@ def _deepgemm_reduce_scatter(
     x: torch.Tensor,
     weight: torch.Tensor,
     state: _GemmReduceScatterState,
-    physical_m: int,
 ) -> torch.Tensor:
-    if physical_m != x.shape[0]:
-        padded = x.new_zeros((physical_m, x.shape[1]))
-        padded.narrow(0, 0, x.shape[0]).copy_(x)
-        x = padded
-    elif not x.is_contiguous():
+    if not x.is_contiguous():
         x = x.contiguous()
 
-    output = x.new_empty((physical_m // state.world_size, state.n))
+    output = x.new_empty((x.shape[0] // state.world_size, state.n))
     assert state.deep_gemm is not None and state.workspace is not None
     with torch.profiler.record_function("RTP::kimi_k3.gemm_reduce_scatter.fused"):
         state.deep_gemm.bf16_gemm_rs_nn(
