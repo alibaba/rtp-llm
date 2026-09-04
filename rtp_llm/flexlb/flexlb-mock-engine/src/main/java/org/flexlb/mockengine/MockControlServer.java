@@ -587,7 +587,8 @@ final class MockControlServer {
                 injected.put("engine", service.getEngineName());
                 injected.put("port", service.getGrpcPort());
                 injected.put("request_id", requestId);
-                return injected;
+                sendJson(exchange, 200, injected);
+                return;
             }
             JavaMockEngineCluster.CancelResult result;
             try {
