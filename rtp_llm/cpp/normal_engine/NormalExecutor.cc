@@ -73,6 +73,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
     is_propose_(is_propose),
     propose_model_index_(propose_model_index),
+    execution_policy_(loadExecutionPolicy()),
     profile_step_start_(std::move(profile_step_start)),
     profile_step_finish_(std::move(profile_step_finish)),
     dispatch_runner_(cuda_graph::graphGetStreamFromPool(true)) {
@@ -155,7 +156,9 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     }
     if (!params.py_model.is_none()) {
         RTP_LLM_LOG_INFO("init executor with python model");
-        model_.reset(new PyWrappedModel(model_init_params, params.py_model));
+        PyWrappedModelOptions model_options;
+        model_options.replay_prepare_policy = execution_policy_.replay_prepare_policy;
+        model_.reset(new PyWrappedModel(model_init_params, params.py_model, model_options));
     } else if (test_model_factory) {
         RTP_LLM_LOG_INFO("init executor with test model factory");
         model_ = test_model_factory(model_init_params);
@@ -169,8 +172,12 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                   cache_manager->cacheConfig()) :
                                    CacheConfig();
 
-    batch_stream_processor_.reset(new NormalBatchStreamProcessor(
-        params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
+    batch_stream_processor_.reset(new NormalBatchStreamProcessor(params.model_config_,
+                                                                 params.pd_sep_config,
+                                                                 params.profiling_debug_logging_config,
+                                                                 cache_config,
+                                                                 warm_up_,
+                                                                 execution_policy_.model_input_placement));
     LogitsProcessorFactory::init(params.model_config_, params.grammar_config, params.sp_config.tree_decode_config);
     cudaProfilerBegin();
 }
@@ -194,7 +201,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     // Still sync when gatherModelInput lacks NormalAsyncDeviceState; host
     // token/seq_len fallbacks race the previous worker.
     bool worker_synced = false;
-    if (useStreamAsync() && !useDropBroadSync()) {
+    if (execution_policy_.waitForPreviousDispatchBeforeGather()) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch(stream_count=%zu)", streams.size());
         dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
         worker_synced = true;
@@ -203,7 +210,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     StreamGroups stream_groups(streams);
     prepareGrpcNormalDeviceState(stream_groups);
 
-    if (useStreamAsync() && useDropBroadSync() && !gatherCanUseDeviceState(stream_groups)) {
+    if (execution_policy_.tryGatherWhileBookkeepingRuns() && !gatherCanUseDeviceState(stream_groups)) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch(stream_count=%zu)", streams.size());
         dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
         worker_synced = true;
@@ -303,7 +310,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // Sampler input still reads CPU stream state mutated by the previous
         // worker. DROP_BROAD_SYNC therefore needs this narrow sync unless an
         // earlier host-fallback gather already waited.
-        if (useStreamAsync() && useDropBroadSync() && !worker_synced) {
+        if (execution_policy_.tryGatherWhileBookkeepingRuns() && !worker_synced) {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.wait_prev_dispatch_pre_sampler(stream_count=%zu)", streams.size());
             dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
             worker_synced = true;
@@ -328,7 +335,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     if (metrics_reporter_ && tp_rank_ == 0) {
         token_counts_by_priority = stream_groups.tokenCountsByPriority();
     }
-    if (useStreamAsync() && is_decode_only) {
+    if (execution_policy_.useAsyncDispatch(is_decode_only)) {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output(stream_async)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
@@ -340,7 +347,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // Metrics and KV release stay on the main thread; dispatch_output_us
         // now measures launch cost, while worker time is in async_runner.thread.
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }
@@ -357,12 +364,12 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output");
         int64_t      start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         MergedOutput merge_outputs{std::move(model_output), std::move(sampler_output)};
-        if (useDeviceInput()) {
+        if (execution_policy_.use_device_input) {
             publishNormalDeviceState(stream_groups, merge_outputs.sampler_output);
         }
         auto result                           = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }
@@ -414,36 +421,26 @@ bool NormalExecutor::updateEplbConfig(const EPLBConfig& config) {
     return true;
 }
 
-bool NormalExecutor::useStreamAsync() const {
-    static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_STREAM_ASYNC", "normal-stream-async", "useStreamAsync");
-    }();
-    return enabled;
-}
-
-bool NormalExecutor::useDropBroadSync() const {
-    static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_DROP_BROAD_SYNC", "normal-drop-broad-sync", "enabled");
-    }();
-    return enabled;
-}
-
-bool NormalExecutor::useDeviceInput() const {
-    static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_DEVICE_INPUT", "normal-device-input", "enabled");
-    }();
-    return enabled;
-}
-
-bool NormalExecutor::checkDeviceInput() const {
-    static const bool enabled = []() {
-        return readEnvFlagOnce("RTP_LLM_DEVICE_INPUT_CHECK", "normal-device-input", "enabled");
-    }();
-    return enabled;
+NormalExecutor::ExecutionPolicy NormalExecutor::loadExecutionPolicy() {
+    ExecutionPolicy policy;
+    policy.dispatch_async = readEnvFlagOnce("RTP_LLM_STREAM_ASYNC", "normal-execution-policy", "dispatch_async");
+    const bool drop_broad_sync =
+        readEnvFlagOnce("RTP_LLM_DROP_BROAD_SYNC", "normal-execution-policy", "drop_broad_sync");
+    policy.overlap_bookkeeping = policy.dispatch_async && drop_broad_sync;
+    policy.use_device_input    = readEnvFlagOnce("RTP_LLM_DEVICE_INPUT", "normal-execution-policy", "use_device_input");
+    policy.validate_device_input =
+        policy.use_device_input
+        && readEnvFlagOnce("RTP_LLM_DEVICE_INPUT_CHECK", "normal-execution-policy", "validate_device_input");
+    policy.model_input_placement = !policy.use_device_input ? ModelInputPlacement::HOST :
+                                   policy.dispatch_async    ? ModelInputPlacement::DEVICE_WITH_HOST_PLANNING_METADATA :
+                                                              ModelInputPlacement::DEVICE;
+    policy.replay_prepare_policy = policy.dispatch_async ? CudaGraphReplayPreparePolicy::OVERLAP_WITH_PREVIOUS_REPLAY :
+                                                           CudaGraphReplayPreparePolicy::WAIT_FOR_PREVIOUS_REPLAY;
+    return policy;
 }
 
 void NormalExecutor::ensureModelInputsOnCuda(GptModelInputs& model_input, const char* tag) {
-    if (!useDeviceInput()) {
+    if (!execution_policy_.use_device_input) {
         return;
     }
 
@@ -472,16 +469,18 @@ void NormalExecutor::ensureModelInputsOnCuda(GptModelInputs& model_input, const 
     };
 
     to_cuda(model_input.combo_tokens, "combo_tokens");
-    to_cuda(model_input.input_lengths, "input_lengths");
-    to_cuda(model_input.sequence_lengths, "sequence_lengths");
-    to_cuda(model_input.prefix_lengths, "prefix_lengths");
-    to_cuda(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
+    if (execution_policy_.model_input_placement == ModelInputPlacement::DEVICE) {
+        to_cuda(model_input.input_lengths, "input_lengths");
+        to_cuda(model_input.sequence_lengths, "sequence_lengths");
+        to_cuda(model_input.prefix_lengths, "prefix_lengths");
+        to_cuda(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
+    }
     to_cuda(model_input.lm_output_indexes, "lm_output_indexes");
     checkModelInputsOnCuda(model_input, tag);
 }
 
 void NormalExecutor::checkModelInputsOnCuda(const GptModelInputs& model_input, const char* tag) const {
-    if (!checkDeviceInput()) {
+    if (!execution_policy_.validate_device_input) {
         return;
     }
     auto check = [tag](const torch::Tensor& tensor, const char* name) {
@@ -496,10 +495,12 @@ void NormalExecutor::checkModelInputsOnCuda(const GptModelInputs& model_input, c
                                 tensor.numel());
     };
     check(model_input.combo_tokens, "combo_tokens");
-    check(model_input.input_lengths, "input_lengths");
-    check(model_input.sequence_lengths, "sequence_lengths");
-    check(model_input.prefix_lengths, "prefix_lengths");
-    check(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
+    if (execution_policy_.model_input_placement == ModelInputPlacement::DEVICE) {
+        check(model_input.input_lengths, "input_lengths");
+        check(model_input.sequence_lengths, "sequence_lengths");
+        check(model_input.prefix_lengths, "prefix_lengths");
+        check(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
+    }
     check(model_input.lm_output_indexes, "lm_output_indexes");
 }
 
@@ -538,11 +539,11 @@ bool NormalExecutor::gatherCanUseDeviceState(const StreamGroups& stream_groups) 
 }
 
 void NormalExecutor::prepareGrpcNormalDeviceState(const StreamGroups& stream_groups) {
-    // publishNormalDeviceState (the per-step refresher) is gated on
-    // useDeviceInput(); without the same gate here the published snapshot goes
+    // publishNormalDeviceState (the per-step refresher) uses the same policy;
+    // without the same gate here the published snapshot goes
     // stale and GenerateStateMachine overrides incrKVBlock with an old seq_len,
     // skipping block-boundary allocation on PD decode.
-    if (!useDeviceInput()) {
+    if (!execution_policy_.use_device_input) {
         return;
     }
     if (role_type_ != RoleType::DECODE || stream_groups.totalContextBatchSize() != 0
@@ -682,7 +683,7 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           s
                                                  std::function<void()>         profile_step_finish) {
     RTP_LLM_PROFILE_SCOPE("executor.dispatch_output_async");
 
-    if (useDeviceInput()) {
+    if (execution_policy_.use_device_input) {
         publishNormalDeviceState(stream_groups, sampler_output);
     }
 

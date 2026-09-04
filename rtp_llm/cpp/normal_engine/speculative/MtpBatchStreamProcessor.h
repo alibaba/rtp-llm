@@ -14,8 +14,10 @@ public:
                             const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                             const CacheConfig&                 cache_config,
                             const SpeculativeExecutionConfig&  sp_config,
-                            bool                               warm_up):
-        NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
+                            bool                               warm_up,
+                            ModelInputPlacement                model_input_placement = ModelInputPlacement::HOST):
+        NormalBatchStreamProcessor(
+            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up, model_input_placement),
         propose_step_(sp_config.gen_num_per_cycle),
         vocab_size_(model_config.vocab_size),
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),

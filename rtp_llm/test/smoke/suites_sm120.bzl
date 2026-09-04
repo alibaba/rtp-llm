@@ -84,5 +84,18 @@ def sm120_suites():
                 smoke_args = "--moe_strategy auto --quantization FP8_PER_BLOCK --warm_up 0 --act_type BF16 --tp_size 2 --world_size 2 --reserver_runtime_mem_mb 16005 --seq_size_per_block 64 --concurrency_limit 64 --enable_cuda_graph 1 --decode_capture_config '1,2'",
                 gpu_type = ["RTX_5000_PRO"],
             ),
+            smoke_test(
+                name = "moe_fp8pb_async_tp2_sm120",
+                task_info = "data/model/qwen3_moe/q_r_30b_fp8pb_sm120.json",
+                envs = [
+                    "LOAD_PYTHON_MODEL=1",
+                    "RTP_LLM_STREAM_ASYNC=1",
+                    "RTP_LLM_DROP_BROAD_SYNC=1",
+                    "RTP_LLM_DEVICE_INPUT=1",
+                    "RTP_LLM_DEVICE_INPUT_CHECK=1",
+                ],
+                smoke_args = "--moe_strategy auto --quantization FP8_PER_BLOCK --warm_up 0 --act_type BF16 --tp_size 2 --world_size 2 --reserver_runtime_mem_mb 16005 --seq_size_per_block 64 --concurrency_limit 64 --enable_cuda_graph 1 --decode_capture_config '1,2'",
+                gpu_type = ["RTX_5000_PRO"],
+            ),
         ],
     )

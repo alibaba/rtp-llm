@@ -22,7 +22,8 @@ public:
                                const PDSepConfig&                 pd_sep_config,
                                const ProfilingDebugLoggingConfig& profiling_debug_logging_config,
                                const CacheConfig&                 cache_config,
-                               bool                               warm_up);
+                               bool                               warm_up,
+                               ModelInputPlacement                model_input_placement = ModelInputPlacement::HOST);
 
     virtual absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
     virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups,

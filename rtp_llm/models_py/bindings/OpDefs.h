@@ -313,6 +313,7 @@ struct PyAttentionInputs {
     bool                                       is_s_padded = false;
     // Device-side mirrors of host tensors, managed by C++ for fused D2D copy in CUDA graph.
     torch::Tensor prefix_lengths_device;
+    torch::Tensor sequence_lengths_device;
     torch::Tensor sequence_lengths_plus_1_device;
     torch::Tensor input_lengths_device;
     torch::Tensor decode_cu_seqlens_device;

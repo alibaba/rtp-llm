@@ -56,15 +56,18 @@ enum class DSparkModelRole : uint8_t {
     COMMIT,
 };
 
+struct PyWrappedModelOptions {
+    bool                         is_prefill_cuda_graph_mode{false};
+    bool                         use_spec_decoding{false};
+    DSparkModelRole              dspark_model_role{DSparkModelRole::NONE};
+    bool                         allow_cuda_graph{true};
+    CudaGraphReplayPreparePolicy replay_prepare_policy{CudaGraphReplayPreparePolicy::WAIT_FOR_PREVIOUS_REPLAY};
+};
+
 class PyWrappedModel: public ModelBase {
 public:
     // py_instance is `py_model` indeedly.
-    PyWrappedModel(const GptModelInitParams& params,
-                   py::object                py_instance,
-                   bool                      is_prefill_cuda_graph_mode = false,
-                   bool                      use_spec_decoding          = false,
-                   DSparkModelRole           dspark_model_role          = DSparkModelRole::NONE,
-                   bool                      allow_cuda_graph           = true);
+    PyWrappedModel(const GptModelInitParams& params, py::object py_instance, PyWrappedModelOptions options = {});
     ~PyWrappedModel();
 
     GptModelOutputs forward(const GptModelInputs& inputs) override;
@@ -74,7 +77,7 @@ public:
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
     bool            hasMtpTargetHiddenBuffer() const override;
     void            prepareAttentionInputs(const GptModelInputs& inputs) override;
-    void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
+    void            prepareAttentionInputs(const GptModelInputs& inputs, bool caller_allows_replay_overlap);
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
 
 private:
@@ -159,10 +162,7 @@ private:
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
 inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                       py::object                py_instance,
-                                      bool                      is_prefill_cuda_graph_mode,
-                                      bool                      use_spec_decoding,
-                                      DSparkModelRole           dspark_model_role,
-                                      bool                      allow_cuda_graph):
+                                      PyWrappedModelOptions     options):
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
     // Every prefill-shaped forward of a CP-enabled model goes through the
     // standard split/gather path — including the DSpARK draft commit, whose
@@ -172,14 +172,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     // run only on decode roles, where prefill CP is off (colocated CP is
     // rejected at executor construction).
     enable_prefill_cp_(device_props_.enable_prefill_cp),
-    dspark_model_role_(dspark_model_role),
+    dspark_model_role_(options.dspark_model_role),
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
     description_(params.description),
     cache_manager_(params.cache_manager),
-    enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && allow_cuda_graph),
-    is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
-    use_spec_decoding_(use_spec_decoding),
+    enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && options.allow_cuda_graph),
+    is_prefill_cuda_graph_mode_(options.is_prefill_cuda_graph_mode),
+    use_spec_decoding_(options.use_spec_decoding),
     enable_device_perf_(params.profile_debug_logging_config.enable_device_perf),
     check_nan_(params.profile_debug_logging_config.check_nan) {
 
@@ -250,7 +250,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     const bool is_deepseek_v4_python_model = py_model_class_name == "DeepSeekV4Model"
                                              || py_model_class_name == "DeepSeekV4MtpModel"
                                              || py_model_class_name == "DeepSeekV4DSparkModel";
-    if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value() && !is_prefill_cuda_graph_mode) {
+    if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value() && !is_prefill_cuda_graph_mode_) {
         RTP_LLM_LOG_WARNING(
             "CUDA graph enabled but kv_cache_layer_layout not available (warmup?), skipping graph capture");
         enable_cuda_graph_ = false;
@@ -270,7 +270,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         GraphParams graph_params;
         graph_params.enable_cuda_graph            = params.hw_kernel_config.enable_cuda_graph;
         graph_params.enable_cuda_graph_debug_mode = params.hw_kernel_config.enable_cuda_graph_debug_mode;
-        graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode;
+        graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode_;
+        graph_params.replay_prepare_policy        = options.replay_prepare_policy;
         graph_params.max_seq_len                  = params.max_seq_len;
         graph_params.tokens_per_block             = params.tokens_per_block;
         graph_params.kernel_tokens_per_block      = params.kernel_tokens_per_block;
@@ -320,11 +321,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle;
         } else if (dspark_model_role_ == DSparkModelRole::COMMIT) {
             graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle + 1;
-        } else if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
+        } else if (is_prefill_cuda_graph_mode_ && params.sp_config.type == SP_TYPE_NONE) {
             // for embedding model
             graph_params.num_tokens_per_bs = params.max_seq_len;
         } else if (params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 0
-                   && (!params.model_id || is_prefill_cuda_graph_mode)) {
+                   && (!params.model_id || is_prefill_cuda_graph_mode_)) {
             // for target model verify and draft model prefill
             graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle + 1;
         } else {
@@ -336,9 +337,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // Python model sees is_prefill=true and incorrectly enters prefill.
         const bool is_target_verify_decode = params.sp_config.type != SP_TYPE_NONE
                                              && params.sp_config.gen_num_per_cycle > 0 && !params.model_id
-                                             && !is_prefill_cuda_graph_mode;
+                                             && !is_prefill_cuda_graph_mode_;
         graph_params.is_target_verify =
-            dspark_model_role_ != DSparkModelRole::NONE || use_spec_decoding || is_target_verify_decode;
+            dspark_model_role_ != DSparkModelRole::NONE || use_spec_decoding_ || is_target_verify_decode;
         if (params.sp_config.type != SP_TYPE_NONE) {
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }

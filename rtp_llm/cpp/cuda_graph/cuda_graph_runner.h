@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 #include <pybind11/embed.h>
@@ -26,6 +27,7 @@ public:
         enable_cuda_graph_(graph_params.enable_cuda_graph),
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
         is_target_verify_(graph_params.is_target_verify),
+        replay_prepare_policy_(graph_params.replay_prepare_policy),
         capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
         num_tokens_per_bs_(graph_params.num_tokens_per_bs),
@@ -83,7 +85,7 @@ public:
     void           prepareInputData(const PyModelInputs& inputs, CudaGraphState& state);
     void           prepareAttentionInputs(const PyModelInputs& inputs,
                                           CudaGraphState&      state,
-                                          bool                 skip_forward_event_sync = false) override;
+                                          bool                 caller_allows_replay_overlap = false) override;
     void           updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) override;
     bool           canRun(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           replayGraph(int key);
@@ -117,6 +119,9 @@ private:
         // captureOneGraphInstance.
         return isMtpDraftPrefillCudaGraph() && hc_mult_ > 1;
     }
+    bool replayPreparationMayOverlap() const {
+        return replay_prepare_policy_ == CudaGraphReplayPreparePolicy::OVERLAP_WITH_PREVIOUS_REPLAY;
+    }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
     // Common memory hold creation logic
@@ -133,35 +138,36 @@ private:
     /// Select graph key for decode; false if no captured graph can serve current_batch_size (e.g. lower_bound hit end).
     bool tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, CudaGraphState& state);
     /// Select graph key for prefill; false if capture_range_ empty or seq_len above max captured (lower_bound hit end).
-    bool                    tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state);
-    bool                    validateComboPositionIds(const PyModelInputs&  inputs,
-                                                     const CudaGraphState& state,
-                                                     const torch::Tensor&  captured_position_ids,
-                                                     size_t&               copy_numel) const;
-    bool                    canReplaySelectedGraph(const PyModelInputs& inputs, const CudaGraphState& state) const;
-    void                    initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
-    void                    initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
-    void                    initCaptureAttentionInputsPost();
-    py::object              py_forward_method_;
-    py::object              py_attn_pyobj_method_;
-    bool                    enable_cuda_graph_{false};
-    bool                    is_prefill_cuda_graph_mode_{false};
-    bool                    is_target_verify_{false};
-    cuda_graph::GraphStream capture_stream_;
-    bool                    enable_cuda_graph_debug_mode_{false};
-    size_t                  max_bs_{1};
-    int                     num_tokens_per_bs_{1};
-    int                     max_num_token_{1};
-    int                     max_seq_len_{0};
-    int                     seq_size_per_block_{0};
-    int                     kernel_seq_size_per_block_{0};
-    int                     hidden_size_{0};
-    size_t                  input_hidden_size_{0};
-    int                     hc_mult_{1};
-    int                     sp_steps_{0};
-    std::vector<int>        capture_range_;
-    std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
-    std::vector<int>        decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
+    bool                         tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state);
+    bool                         validateComboPositionIds(const PyModelInputs&  inputs,
+                                                          const CudaGraphState& state,
+                                                          const torch::Tensor&  captured_position_ids,
+                                                          size_t&               copy_numel) const;
+    bool                         canReplaySelectedGraph(const PyModelInputs& inputs, const CudaGraphState& state) const;
+    void                         initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
+    void                         initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
+    void                         initCaptureAttentionInputsPost();
+    py::object                   py_forward_method_;
+    py::object                   py_attn_pyobj_method_;
+    bool                         enable_cuda_graph_{false};
+    bool                         is_prefill_cuda_graph_mode_{false};
+    bool                         is_target_verify_{false};
+    CudaGraphReplayPreparePolicy replay_prepare_policy_{CudaGraphReplayPreparePolicy::WAIT_FOR_PREVIOUS_REPLAY};
+    cuda_graph::GraphStream      capture_stream_;
+    bool                         enable_cuda_graph_debug_mode_{false};
+    size_t                       max_bs_{1};
+    int                          num_tokens_per_bs_{1};
+    int                          max_num_token_{1};
+    int                          max_seq_len_{0};
+    int                          seq_size_per_block_{0};
+    int                          kernel_seq_size_per_block_{0};
+    int                          hidden_size_{0};
+    size_t                       input_hidden_size_{0};
+    int                          hc_mult_{1};
+    int                          sp_steps_{0};
+    std::vector<int>             capture_range_;
+    std::vector<int>             prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
+    std::vector<int>             decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
     // capture seqLen -> GraphInstance (prefill)
     // batch_size -> GraphInstance (decode)
     std::unordered_map<int, GraphInstance> graph_instances_;
@@ -181,6 +187,9 @@ private:
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();
+    // Present after the first replay preparation has queued its copies. The
+    // overlap policy waits on it before reusing pinned capture mirrors.
+    std::optional<torch::Event> prepare_staging_copy_done_event_;
 
     std::atomic<bool> prepared_attention_inputs_ = false;
 };

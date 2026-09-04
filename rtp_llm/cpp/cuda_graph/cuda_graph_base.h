@@ -8,6 +8,14 @@ namespace rtp_llm {
 
 using namespace torch_ext;
 
+// Construction-time policy for replay preparation. The caller decides whether
+// this runner may prepare step N+1 while step N is still executing; the graph
+// implementation only enforces the required buffer-lifetime ordering.
+enum class CudaGraphReplayPreparePolicy : uint8_t {
+    WAIT_FOR_PREVIOUS_REPLAY,
+    OVERLAP_WITH_PREVIOUS_REPLAY,
+};
+
 // Current state of CUDA graph execution (used when calling canRun/forward with graph runner)
 struct CudaGraphState {
     int current_batch_size{1};
@@ -18,13 +26,14 @@ struct CudaGraphState {
 };
 
 struct GraphParams {
-    bool             enable_cuda_graph            = false;
-    bool             enable_cuda_graph_debug_mode = false;
-    bool             is_prefill_cuda_graph_mode   = false;
-    bool             is_target_verify             = false;
-    int              max_seq_len                  = 0;
-    int              tokens_per_block             = 0;  // physical kv block size
-    int              kernel_tokens_per_block      = 0;  // must be explicitly configured
+    bool                         enable_cuda_graph            = false;
+    bool                         enable_cuda_graph_debug_mode = false;
+    bool                         is_prefill_cuda_graph_mode   = false;
+    bool                         is_target_verify             = false;
+    CudaGraphReplayPreparePolicy replay_prepare_policy        = CudaGraphReplayPreparePolicy::WAIT_FOR_PREVIOUS_REPLAY;
+    int                          max_seq_len                  = 0;
+    int                          tokens_per_block             = 0;  // physical kv block size
+    int                          kernel_tokens_per_block      = 0;  // must be explicitly configured
     int              num_tokens_per_bs      = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
     int              sp_steps               = 0;
     size_t           max_context_batch_size = 128;
@@ -51,15 +60,15 @@ class GraphBase {
 public:
     GraphBase(py::object py_instance): py_instance_(std::move(py_instance)) {}
     virtual ~GraphBase() {}
-    virtual void           initCapture()                                                = 0;
-    virtual PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state)  = 0;
-    virtual void           setPositionEncoding(torch::Tensor position_encoding)         = 0;
-    virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding)    = 0;
-    virtual void           setInputEmbeddingScalar(float input_embedding_scalar)        = 0;
-    virtual bool           canRun(const PyModelInputs& inputs, CudaGraphState& state)   = 0;
+    virtual void           initCapture()                                                     = 0;
+    virtual PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state)       = 0;
+    virtual void           setPositionEncoding(torch::Tensor position_encoding)              = 0;
+    virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding)         = 0;
+    virtual void           setInputEmbeddingScalar(float input_embedding_scalar)             = 0;
+    virtual bool           canRun(const PyModelInputs& inputs, CudaGraphState& state)        = 0;
     virtual void           prepareAttentionInputs(const PyModelInputs& inputs,
                                                   CudaGraphState&      state,
-                                                  bool                 skip_forward_event_sync = false) = 0;
+                                                  bool                 caller_allows_replay_overlap = false) = 0;
 
     // Refresh only captured kv_cache_kernel_block_id state and FlashInfer plan
     // buffers after page-table changes. Other captured fields stay untouched.

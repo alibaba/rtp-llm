@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include "kmonitor/client/MetricsReporter.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 #include "rtp_llm/cpp/engine_base/Executor.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
@@ -54,16 +55,6 @@ public:
     bool updateEplbConfig(const EPLBConfig& config) override;
 
 protected:
-    // Stream-async dispatch gate. Reuses the same env var as MtpExecutor so a
-    // single launcher knob (`RTP_LLM_STREAM_ASYNC=1`) flips both paths.
-    // Default off — production behaviour unchanged unless explicitly enabled.
-    bool useStreamAsync() const;
-
-    // Skip the front-loaded previous-worker sync when DROP_BROAD_SYNC=1.
-    // Host stream state may still be mutating; NormalAsyncDeviceState only
-    // covers sampled token and seq_len for batch-1 decode.
-    bool useDropBroadSync() const;
-
     // Stream-async dispatch. Records sampler_event on the main stream after
     // sampler_->forward, then forks the bookkeeping worker to wait on the
     // event and run dispatch + per-stream update off the main thread.
@@ -81,15 +72,39 @@ protected:
     // worker, so callers must sync before gather.
     bool gatherCanUseDeviceState(const StreamGroups& stream_groups) const;
 
-    // Env-gated path that moves metadata tensors to CUDA before tpSyncModelInputs.
-    // This routes them through one GPU packed-buffer broadcast instead of CPU
-    // execBroadcastCpu plus per-rank unpack/copy work.
-    bool useDeviceInput() const;
-    bool checkDeviceInput() const;
+    // Moves the tensors selected by execution_policy_.model_input_placement to
+    // CUDA before tpSyncModelInputs. This routes them through one GPU packed-
+    // buffer broadcast instead of CPU execBroadcastCpu plus unpack/copy work.
     void ensureModelInputsOnCuda(GptModelInputs& model_input, const char* tag);
     void checkModelInputsOnCuda(const GptModelInputs& model_input, const char* tag) const;
 
 private:
+    // Immutable policy resolved once when the executor is constructed. Runtime
+    // code asks semantic questions instead of repeatedly combining environment
+    // gates, while lower layers receive only their relevant derived policy.
+    struct ExecutionPolicy {
+        bool                         dispatch_async{false};
+        bool                         overlap_bookkeeping{false};
+        bool                         use_device_input{false};
+        bool                         validate_device_input{false};
+        ModelInputPlacement          model_input_placement{ModelInputPlacement::HOST};
+        CudaGraphReplayPreparePolicy replay_prepare_policy{CudaGraphReplayPreparePolicy::WAIT_FOR_PREVIOUS_REPLAY};
+
+        bool waitForPreviousDispatchBeforeGather() const {
+            return dispatch_async && !overlap_bookkeeping;
+        }
+
+        bool tryGatherWhileBookkeepingRuns() const {
+            return overlap_bookkeeping;
+        }
+
+        bool useAsyncDispatch(bool is_decode_only) const {
+            return dispatch_async && is_decode_only;
+        }
+    };
+
+    static ExecutionPolicy loadExecutionPolicy();
+
     std::unique_ptr<ModelBase>                                               model_;
     std::unique_ptr<Sampler>                                                 sampler_;
     std::unique_ptr<NormalBatchStreamProcessor>                              batch_stream_processor_;
@@ -100,16 +115,16 @@ private:
     bool                                                                     use_all_gather_;
     kmonitor::MetricsReporterPtr                                             metrics_reporter_ = nullptr;
     MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
-    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>
-        wall_tps_reporter_;
-    bool                                                                     enable_ffn_disaggregate_ = false;
-    bool                                                                     enable_detail_log_       = false;
+    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> wall_tps_reporter_;
+    bool enable_ffn_disaggregate_ = false;
+    bool enable_detail_log_       = false;
 
     bool                  is_propose_          = false;
     int                   propose_model_index_ = 0;
     int                   tp_rank_             = 0;
     ParallelismConfig     parallelism_config_;
-    RoleType              role_type_           = RoleType::PDFUSION;
+    RoleType              role_type_ = RoleType::PDFUSION;
+    const ExecutionPolicy execution_policy_;
     std::function<void()> profile_step_start_;
     std::function<void()> profile_step_finish_;
 

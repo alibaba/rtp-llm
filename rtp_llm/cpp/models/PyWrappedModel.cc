@@ -208,8 +208,9 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         && py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.is_cuda()) {
         py_attn_inputs.prefix_lengths = normalize_i32(py_attn_inputs.prefix_lengths.cpu());
     }
-    py_attn_inputs.prefix_lengths_device = to_device_i32(py_attn_inputs.prefix_lengths);
-    py_attn_inputs.input_lengths_device  = to_device_i32(py_attn_inputs.input_lengths);
+    py_attn_inputs.prefix_lengths_device   = to_device_i32(py_attn_inputs.prefix_lengths);
+    py_attn_inputs.sequence_lengths_device = to_device_i32(py_attn_inputs.sequence_lengths);
+    py_attn_inputs.input_lengths_device    = to_device_i32(py_attn_inputs.input_lengths);
 
     if (inputs.combo_position_ids.defined()) {
         py_attn_inputs.combo_position_ids = tensorHoldHostAndToCuda(inputs.combo_position_ids);
@@ -659,7 +660,7 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs) {
     prepareAttentionInputs(inputs, false);
 }
 
-void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync) {
+void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool caller_allows_replay_overlap) {
     RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs");
     d2d_copies_.clear();
     if (pinned_check_remaining_ > 0) {
@@ -715,7 +716,7 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
                                           torch_ext::BertEmbeddingInputs()});
     if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
-        graph_runner_->prepareAttentionInputs(py_model_inputs, graph_state_, skip_forward_event_sync);
+        graph_runner_->prepareAttentionInputs(py_model_inputs, graph_state_, caller_allows_replay_overlap);
     }
 }
 
@@ -799,7 +800,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         auto multimodal_inputs     = buildPyMultimodalInputs(inputs);
         auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
         if (!prepared_attention_inputs_.load(std::memory_order_acquire)) {
-            prepareAttentionInputs(inputs, /*skip_forward_event_sync=*/true);
+            prepareAttentionInputs(inputs, /*caller_allows_replay_overlap=*/true);
         }
         if (device_props_.enable_prefill_cp && has_context_request) {
             attention_inputs_.context_parallel_info = cp_params;
@@ -1206,11 +1207,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
     size_t                      prefill_batch_idx      = 0;
     // TODO(async): micro-batch token slicing still computes CPU scalar sums.
     // Convert explicitly and keep all sliced GptModelInputs device-resident.
-    const auto input_lengths_host = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda() ?
-                                        inputs.input_lengths.cpu().pin_memory() :
-                                        inputs.input_lengths;
-    const auto* input_lengths_ptr =
-        input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
+    const auto  input_lengths_host = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda() ?
+                                         inputs.input_lengths.cpu().pin_memory() :
+                                         inputs.input_lengths;
+    const auto* input_lengths_ptr  = input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
 
     if (!micro_batch_plan.enable) {
         RTP_LLM_LOG_DEBUG("micro batch disable when enable is false, use fake");

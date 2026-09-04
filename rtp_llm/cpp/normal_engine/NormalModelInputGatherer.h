@@ -16,6 +16,15 @@ namespace rtp_llm {
 
 struct TensorHolder;
 
+// Placement policy is resolved once by the executor. The gatherer does not
+// read feature-gate environment variables and only materializes the requested
+// host/device representation.
+enum class ModelInputPlacement : uint8_t {
+    HOST,
+    DEVICE,
+    DEVICE_WITH_HOST_PLANNING_METADATA,
+};
+
 struct NormalModelInputGathererConfig {
     size_t                      num_layers{};
     size_t                      vocab_size{};
@@ -38,6 +47,7 @@ struct NormalModelInputGathererConfig {
     bool                        warm_up{};
     bool                        enable_detail_log{};
     bool                        enable_model_inputs_log{};
+    ModelInputPlacement         model_input_placement{ModelInputPlacement::HOST};
 };
 
 class NormalModelInputGatherer {

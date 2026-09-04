@@ -1032,6 +1032,10 @@ class PyFlashinferDecodeAttnOp(object):
         # Snapshot of the page indptr used by the last CUDA-core graph plan.
         # Dtype, head counts, and page size are fixed for this op's lifetime.
         self._cuda_core_plan_page_indptr_h: Optional[torch.Tensor] = None
+        # FlashInfer plan(non_blocking=True) queues copies from reusable pinned
+        # planning buffers. Do not let the next CPU plan overwrite those buffers
+        # until their preceding copies have entered the current graph replay.
+        self._plan_copy_done_event: Optional[torch.cuda.Event] = None
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
 
     def __del__(self):
@@ -1072,13 +1076,29 @@ class PyFlashinferDecodeAttnOp(object):
             or self._cuda_core_cuda_graph_needs_replan()
         )
 
+    def _wait_for_plan_copies(self) -> None:
+        if (
+            self._plan_copy_done_event is not None
+            and not self._plan_copy_done_event.query()
+        ):
+            self._plan_copy_done_event.synchronize()
+
     def _plan_decode_wrapper(self, attn_inputs: PyAttentionInputs) -> None:
         use_cuda_core_graph_plan_cache = self._uses_cuda_core_graph_plan_cache()
         if self.use_tensor_core:
             # Tensor-core decode plans from host mirrors in both eager and graph
             # modes; only replay decides whether another plan call is required.
+            # In graph mode the wrapper's indices buffer already aliases
+            # page_indice_d, which fill_params refreshed on the current stream.
+            # Passing that device alias makes FlashInfer's internal copy a
+            # no-op; passing page_indice_h forces non_blocking=False in
+            # FlashInfer and synchronizes behind the preceding graph.
             page_indptr = self.fmha_params.decode_page_indptr_h
-            page_indice = self.fmha_params.page_indice_h
+            page_indice = (
+                self.fmha_params.page_indice_d
+                if self.enable_cuda_graph
+                else self.fmha_params.page_indice_h
+            )
             last_page_len = self.fmha_params.paged_kv_last_page_len_h
             plan_kwargs = {"non_blocking": True}
         elif use_cuda_core_graph_plan_cache:
@@ -1118,6 +1138,10 @@ class PyFlashinferDecodeAttnOp(object):
             self._cuda_core_plan_page_indptr_h = (
                 self.fmha_params.decode_page_indptr_h.clone()
             )
+        if self.enable_cuda_graph:
+            if self._plan_copy_done_event is None:
+                self._plan_copy_done_event = torch.cuda.Event(blocking=False)
+            self._plan_copy_done_event.record()
 
     def prepare(
         self,
@@ -1129,6 +1153,7 @@ class PyFlashinferDecodeAttnOp(object):
 
         forbid_realloc: True only when called from prepare_cuda_graph (replay); forbids buffer realloc.
         """
+        self._wait_for_plan_copies()
         # Graph planning uses HOST mirrors for tensor-core decode and for the
         # CUDA-core topology cache. The device fill leaves those mirrors at
         # their stale capacity sizes (MIN_CACHE_BATCH_SIZE), which corrupts
@@ -1189,6 +1214,7 @@ class PyFlashinferDecodeAttnOp(object):
 
     def prepare_for_cuda_graph_replay(self, attn_inputs: PyAttentionInputs) -> None:
         """Refresh FlashInfer runtime buffers before replaying the captured graph."""
+        self._wait_for_plan_copies()
         if not attn_inputs.sequence_lengths.is_cuda:
             # Host pipeline: refresh the host mirrors and re-plan when the
             # selected backend's cached metadata no longer matches them.
@@ -1273,11 +1299,15 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
         """Prepare FlashInfer/RoPE buffers and metadata for CUDA graph replay."""
         self.fmha_impl.prepare_for_cuda_graph_replay(attn_inputs)
-        # Update rope params for correct position encoding during cuda graph replay
-        new_rope_params = self.rope_impl.prepare(attn_inputs)
-        common.copy_kv_cache_offset(
-            self.rope_params.kv_cache_offset, new_rope_params.kv_cache_offset
-        )
+        if self.need_rope_kv_cache:
+            # Update stable RoPE params for correct positions during replay.
+            new_rope_params = self.rope_impl.prepare(
+                attn_inputs, forbid_reallocation=True
+            )
+            common.copy_kv_cache_offset(
+                self.rope_params.kv_cache_offset, new_rope_params.kv_cache_offset
+            )
+            self.rope_params.sequence_lengths = new_rope_params.sequence_lengths
 
     def support_cuda_graph(self) -> bool:
         return True
