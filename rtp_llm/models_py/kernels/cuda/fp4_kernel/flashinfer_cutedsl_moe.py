@@ -1,9 +1,16 @@
 from typing import Optional
 
 import torch
+
+from rtp_llm.models_py.utils.cutlass import setup_cutlass_import_path
+
+setup_cutlass_import_path()
+
+from flashinfer import (
+    scaled_fp4_grouped_quantize,
+    silu_and_mul_scaled_nvfp4_experts_quantize,
+)
 from flashinfer.cute_dsl.blockscaled_gemm import grouped_gemm_nt_masked
-from flashinfer import (scaled_fp4_grouped_quantize,
-                        silu_and_mul_scaled_nvfp4_experts_quantize)
 
 try:
     from rtp_llm.ops.compute_ops import (
@@ -13,6 +20,7 @@ try:
 except ImportError:
     scaled_fp4_experts_quant = None
     silu_and_mul_scaled_fp4_experts_quant = None
+
 
 def scaled_fp4_grouped_quant(
     input_tensor: torch.Tensor,
@@ -40,7 +48,7 @@ def scaled_fp4_grouped_quant(
     """
     if silu_and_mul_scaled_fp4_experts_quant is None:
         raise ImportError("silu_and_mul_scaled_fp4_experts_quant is not available")
-    
+
     device = input_tensor.device
     l, m, k = input_tensor.shape
     sf_vec_size = 16
@@ -105,7 +113,7 @@ def silu_and_mul_scaled_fp4_grouped_quant(
     """
     if silu_and_mul_scaled_fp4_experts_quant is None:
         raise ImportError("silu_and_mul_scaled_fp4_experts_quant is not available")
-    
+
     device = input_tensor.device
     l, m, k_by_2 = input_tensor.shape
     k = k_by_2 // 2

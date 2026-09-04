@@ -72,7 +72,12 @@ class ModelConfig(CppModelConfig):
         "model_name",
         "quant_config",
         "inter_size",
+        "dense_inter_size",
         "moe_inter_size",
+        "moe_w1_layout",
+        "moe_prefill_max_tokens_per_rank",
+        "n_shared_experts",
+        "dsv4_fixed_pool_use_memory",
         "generate_env_config",
         "render_config",
         "phy2log_path",
@@ -369,19 +374,25 @@ class ModelConfig(CppModelConfig):
         # Use isGatedActivation() to determine if we need 3 weights (gated) or 2 weights (non-gated like GELU)
         ffn_w_count = 3 if self.isGatedActivation() else 2
         if self.moe_style == 1:
-            # Pure MOE: all layers use routed experts with moe_inter_size
+            # Routed-only MoE models may still have dense layers before (or
+            # between) their routed layers.  Count each set with its own
+            # intermediate width instead of treating every layer as MoE.
+            moe_layer_count = len(self.moe_layer_index)
+            dense_layer_count = self.num_layers - moe_layer_count
+            dense_inter_size = self.dense_inter_size or self.inter_size
             layer_weight_param_count = (
                 layer_weight_param_count
-                + self.num_layers
+                + moe_layer_count
                 * self.moe_inter_size
                 * hidden_size
                 * ffn_w_count
                 * ffn_expert_num
+                + dense_layer_count * dense_inter_size * hidden_size * ffn_w_count
             )
             # Gate weights for MOE layers
             layer_weight_param_count = (
                 layer_weight_param_count
-                + self.num_layers * hidden_size * ffn_expert_num
+                + moe_layer_count * hidden_size * ffn_expert_num
             )
         elif self.moe_style == 2:
             # Hybrid MOE: shared experts + routed experts
@@ -429,9 +440,10 @@ class ModelConfig(CppModelConfig):
         ffn_w_count = 3 if self.isGatedActivation() else 2
 
         if self.moe_style == 1:
-            # Pure MOE: all layers use routed experts
+            # Routed-only models can retain dense layers outside
+            # ``moe_layer_index``; only count routed expert weights here.
             return (
-                self.num_layers
+                len(self.moe_layer_index)
                 * self.moe_inter_size
                 * hidden_size
                 * ffn_w_count
@@ -554,9 +566,16 @@ class ModelConfig(CppModelConfig):
 
         # Model architecture fields
         self.inter_size: int = 0  # FFN intermediate size (for regular FFN layers)
+        self.dense_inter_size: int = 0  # Dense FFN width in mixed dense/MoE models
         self.moe_inter_size: int = (
             0  # MOE intermediate size (for MOE expert FFN layers)
         )
+        # Canonical W.moe_w1 producers stack up_proj before gate_proj.
+        self.moe_w1_layout: str = "up_gate"
+        self.n_shared_experts: int = 0
+        self.dsv4_fixed_pool_use_memory: Optional[bool] = None
+        # None uses max_seq_len until ModelFactory finalizes the scheduler bound.
+        self.moe_prefill_max_tokens_per_rank: Optional[int] = None
 
         # Renderer configuration fields
         self.generate_env_config: Optional[Any] = (
@@ -899,6 +918,9 @@ def build_model_config(
         kv_cache_config=kv_cache_config, act_type=model_args.act_type
     )
     model_config.attn_config.tokens_per_block = kv_cache_config.seq_size_per_block
+    model_config.dsv4_fixed_pool_use_memory = bool(
+        kv_cache_config.dsv4_fixed_pool_use_memory
+    )
     model_config.attn_config.kernel_tokens_per_block = (
         kv_cache_config.kernel_seq_size_per_block
         if kv_cache_config.kernel_seq_size_per_block > 0

@@ -3,6 +3,18 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "qwen3_next_moe_test",
+    srcs = ["qwen3_next_moe_test.py"],
+    deps = py_test_deps + [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+    ],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "A10", "gpu_count": "1"},
+)
+
+py_test(
     name = "generic_moe_allreduce_test",
     srcs = ["generic_moe_allreduce_test.py"],
     deps = py_test_deps + [
