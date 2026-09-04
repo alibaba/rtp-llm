@@ -31,9 +31,6 @@ PPSamplingPlan PPBatchStreamProcessor::gatherSamplingPlan(const StreamGroups& st
                                 "PP sampling does not support beam search, "
                                 "request_id=%ld",
                                 stream->streamId());
-        RTP_LLM_CHECK_WITH_INFO(!config.return_prompt_logits,
-                                "PP does not support return_prompt_logits, request_id=%ld",
-                                stream->streamId());
         const auto grammar_count = config.json_schema.has_value() + config.regex.has_value() + config.ebnf.has_value()
                                    + config.structural_tag.has_value();
         RTP_LLM_CHECK_WITH_INFO(
@@ -144,13 +141,21 @@ PPSamplingPlan PPBatchStreamProcessor::gatherSamplingPlan(const StreamGroups& st
 PPOutputConfig PPBatchStreamProcessor::gatherOutputConfig(const StreamGroups& stream_groups) const {
     PPOutputConfig output_config;
     output_config.return_all_probs = stream_groups.needReturnAllProbs();
-    for (const auto& stream : stream_groups.allStreams()) {
+    const auto all_streams         = stream_groups.allStreams();
+    output_config.prompt_logits_requests.reserve(all_streams.size());
+    for (const auto& stream : all_streams) {
+        const auto& config = *stream->generateConfig();
         output_config.return_logits |= stream->returnLogits();
         output_config.return_softmax_probs |= stream->calculateSoftmaxProbs();
         output_config.return_cum_log_probs |= stream->returnCumLogProbs();
         output_config.calculate_loss |= stream->calculateLoss();
-        output_config.return_hidden_states |= stream->generateConfig()->return_hidden_states;
+        output_config.return_hidden_states |= config.return_hidden_states;
         output_config.return_all_hidden_states |= stream->needReturnHiddenStates();
+        output_config.prompt_logits_requests.push_back(PPPromptLogitsRequest{config.return_prompt_logits,
+                                                                             config.prompt_logits_top_k,
+                                                                             config.prompt_logits_start,
+                                                                             config.prompt_logits_end,
+                                                                             config.return_target_logprob});
     }
     return output_config;
 }
@@ -213,8 +218,12 @@ absl::StatusOr<PPExecutionResult> PPBatchStreamProcessor::makeExecutionResult(
     if (plan.output_config.return_all_hidden_states) {
         result.all_hidden_states = model_output.all_hidden_states.to(torch::kCPU).contiguous();
     }
-    /** Prompt loss is stream-level; all return sequences share the first batch row's prompt loss. */
-    if (plan.output_config.calculate_loss) {
+    result.prompt_logits.resize(stream_count);
+
+    /** Prompt loss and prompt logits are stream-level; return sequences share the first batch row. */
+    if (plan.model_input.need_all_logits) {
+        const int64_t decode_batch_size =
+            plan.model_input.sequence_lengths.defined() ? plan.model_input.sequence_lengths.size(0) : 0;
         const auto lm_output_indexes = plan.model_input.lm_output_indexes.to(torch::kCPU, torch::kInt64).contiguous();
         RTP_LLM_CHECK(lm_output_indexes.numel() == total_batch_size);
         const auto*                indexes = lm_output_indexes.data_ptr<int64_t>();
@@ -225,8 +234,9 @@ absl::StatusOr<PPExecutionResult> PPBatchStreamProcessor::makeExecutionResult(
             const int64_t stream_batch_size = std::max(plan.sampling_plan.num_return_sequences[stream_idx], 1);
             const int64_t start             = batch_idx == 0 ? 0 : indexes[batch_idx - 1] + 1;
             const int64_t end               = indexes[batch_idx] + 1;
-            const int64_t loss_size         = end - start - 1;
-            if (loss_size > 0) {
+            const int64_t token_size        = end - start;
+            const int64_t loss_size         = token_size - 1;
+            if (plan.output_config.calculate_loss && loss_size > 0) {
                 auto labels = plan.model_input.combo_tokens.narrow(0, start + 1, loss_size)
                                   .to(model_output.all_logits.device(), torch::kLong);
                 losses.push_back(torch::cross_entropy_loss(model_output.all_logits.narrow(0, start, loss_size),
@@ -235,9 +245,25 @@ absl::StatusOr<PPExecutionResult> PPBatchStreamProcessor::makeExecutionResult(
                                                            at::Reduction::None)
                                      .to(torch::kFloat32));
             }
+
+            const auto& prompt_request = plan.output_config.prompt_logits_requests[stream_idx];
+            if (batch_idx >= decode_batch_size && prompt_request.enabled) {
+                auto request_logits = model_output.all_logits.narrow(0, start, token_size);
+                auto request_tokens = plan.model_input.combo_tokens.narrow(0, start, token_size);
+                auto output         = makePromptLogitsOutput(request_logits,
+                                                     request_tokens,
+                                                     prompt_request.top_k,
+                                                     prompt_request.start,
+                                                     prompt_request.end,
+                                                     prompt_request.return_target_logprob);
+                if (output.has_value()) {
+                    result.prompt_logits[stream_idx] = std::move(output.value());
+                }
+            }
             batch_idx += stream_batch_size;
         }
-        if (!losses.empty()) {
+
+        if (plan.output_config.calculate_loss && !losses.empty()) {
             result.loss = torch::cat(losses).to(torch::kCPU).contiguous();
         }
     }
@@ -254,10 +280,12 @@ void PPBatchStreamProcessor::validateExecutionResult(const std::list<GenerateStr
     RTP_LLM_CHECK_WITH_INFO(result.request_ids.defined() && result.request_ids.dim() == 1
                                 && result.request_ids.size(0) == stream_count,
                             "PP execution result request count does not match the inflight stream count");
+    RTP_LLM_CHECK_WITH_INFO(result.prompt_logits.size() == static_cast<size_t>(stream_count),
+                            "PP prompt-logits result count does not match the inflight stream count");
 
-    int64_t     total_batch_size = 0;
     int64_t     total_token_size = 0;
     int64_t     total_loss_size  = 0;
+    int64_t     total_batch_size = 0;
     const auto* request_ids      = result.request_ids.data_ptr<int64_t>();
     int64_t     stream_idx       = 0;
     for (const auto& stream : all_streams) {
@@ -306,6 +334,7 @@ absl::Status PPBatchStreamProcessor::dispatchExecutionResult(const StreamGroups&
     validateExecutionResult(all_streams, output_config, result);
 
     int64_t batch_idx    = 0;
+    int64_t stream_idx   = 0;
     int64_t token_offset = 0;
     int64_t loss_offset  = 0;
     for (const auto& stream : all_streams) {
@@ -315,8 +344,9 @@ absl::Status PPBatchStreamProcessor::dispatchExecutionResult(const StreamGroups&
         auto       error_info =
             collectStreamSamplerError(result.processor_errors, result.sample_success, batch_idx, stream_batch_size);
         dispatchSingleStream(
-            stream, result, batch_idx, stream_batch_size, token_offset, loss_offset, std::move(error_info));
+            stream, result, stream_idx, batch_idx, stream_batch_size, token_offset, loss_offset, std::move(error_info));
         stream->clearPPInflight();
+        ++stream_idx;
         batch_idx += stream_batch_size;
         token_offset += token_size;
         loss_offset += loss_size;
@@ -327,6 +357,7 @@ absl::Status PPBatchStreamProcessor::dispatchExecutionResult(const StreamGroups&
 
 void PPBatchStreamProcessor::dispatchSingleStream(const GenerateStreamPtr& stream,
                                                   const PPExecutionResult& result,
+                                                  int64_t                  stream_idx,
                                                   int64_t                  batch_idx,
                                                   int64_t                  stream_batch_size,
                                                   int64_t                  token_offset,
@@ -363,6 +394,7 @@ void PPBatchStreamProcessor::dispatchSingleStream(const GenerateStreamPtr& strea
     if (stream->needReturnHiddenStates()) {
         all_hidden_states = result.all_hidden_states.narrow(0, token_offset, token_size).clone();
     }
+    auto prompt_logits = result.prompt_logits[stream_idx];
 
     stream->updateFromPP({result.new_token_ids.narrow(0, batch_idx, stream_batch_size),
                           1,
@@ -376,7 +408,7 @@ void PPBatchStreamProcessor::dispatchSingleStream(const GenerateStreamPtr& strea
                           std::move(all_hidden_states),
                           true,
                           false,
-                          std::nullopt,
+                          std::move(prompt_logits),
                           std::move(error_info)});
 }
 

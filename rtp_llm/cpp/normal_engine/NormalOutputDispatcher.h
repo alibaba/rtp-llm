@@ -6,10 +6,18 @@
 #include <utility>
 #include <vector>
 #include "absl/status/status.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 
 namespace rtp_llm {
+
+std::optional<PromptLogitsOutput> makePromptLogitsOutput(const torch::Tensor& request_logits,
+                                                         const torch::Tensor& request_tokens,
+                                                         int                  top_k,
+                                                         int                  start,
+                                                         int                  end,
+                                                         bool                 return_target_logprob);
 
 std::optional<ErrorInfo> collectStreamSamplerError(const std::vector<std::optional<ErrorInfo>>& processor_errors,
                                                    const torch::Tensor&                         success_cpu,

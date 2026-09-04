@@ -9,6 +9,7 @@
 #include <torch/torch.h>
 
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 
@@ -47,7 +48,15 @@ struct PPSamplingPlan {
     torch::Tensor finished_mask;         // [total_batch_size]
 };
 
-/** Batch-aggregated output configuration for the lm-head stage. */
+struct PPPromptLogitsRequest {
+    bool enabled               = false;
+    int  top_k                 = 64;
+    int  start                 = -1;
+    int  end                   = -1;
+    bool return_target_logprob = true;
+};
+
+/** Output configuration for the lm-head stage. */
 struct PPOutputConfig {
     bool               return_logits            = false;
     bool               return_softmax_probs     = false;
@@ -56,6 +65,9 @@ struct PPOutputConfig {
     bool               return_hidden_states     = false;
     bool               return_all_hidden_states = false;
     ReturnAllProbsMode return_all_probs         = ReturnAllProbsMode::NONE;
+
+    /** Per-stream configuration, aligned with PPSamplingPlan::request_ids. */
+    std::vector<PPPromptLogitsRequest> prompt_logits_requests;
 };
 
 struct PPExecutionPlan {
@@ -85,7 +97,8 @@ struct PPExecutionResult {
     torch::Tensor hidden_states;      // optional [total_batch_size, hidden_size]
     torch::Tensor all_hidden_states;  // optional [executed_token_count, hidden_size]
 
-    std::vector<std::optional<ErrorInfo>> processor_errors;  // [total_batch_size]
+    std::vector<std::optional<PromptLogitsOutput>> prompt_logits;     // [stream_count]
+    std::vector<std::optional<ErrorInfo>>          processor_errors;  // [total_batch_size]
 };
 
 }  // namespace rtp_llm
