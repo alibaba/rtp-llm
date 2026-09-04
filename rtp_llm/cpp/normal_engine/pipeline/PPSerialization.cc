@@ -14,7 +14,7 @@ namespace {
 /* Versioned byte stream; readers bounds-check every field. The tensor
    presence flag encodes definedness so defined-but-empty tensors survive;
    host tensors are rebuilt pinned to match gatherModelInput plan tensors. */
-constexpr uint32_t kVersion = 2;
+constexpr uint32_t kVersion = 3;
 
 struct ByteWriter {
     std::vector<uint8_t> buf;
@@ -269,6 +269,12 @@ void writeSamplingPlan(ByteWriter& w, const PPSamplingPlan& s) {
         for (const auto id : cfg.end_think_token_ids) {
             w.val<int32_t>(id);
         }
+        w.flag(cfg.enable_cross_sequence_ban);
+        w.val<int32_t>(cfg.cross_seq_diverge_start_combo);
+    }
+    w.val<uint64_t>(s.num_return_sequences.size());
+    for (const auto count : s.num_return_sequences) {
+        w.val<int32_t>(count);
     }
     w.tensor(s.request_ids);
     w.tensor(s.token_ids);
@@ -314,6 +320,13 @@ void readSamplingPlan(ByteReader& r, PPSamplingPlan& s) {
         for (uint64_t k = 0; k < end_num; ++k) {
             cfg.end_think_token_ids[k] = r.val<int32_t>();
         }
+        cfg.enable_cross_sequence_ban     = r.flag();
+        cfg.cross_seq_diverge_start_combo = r.val<int32_t>();
+    }
+    const auto num_return_sequences_size = r.val<uint64_t>();
+    s.num_return_sequences.resize(num_return_sequences_size);
+    for (uint64_t i = 0; i < num_return_sequences_size; ++i) {
+        s.num_return_sequences[i] = r.val<int32_t>();
     }
     s.request_ids          = r.tensor();
     s.token_ids            = r.tensor();

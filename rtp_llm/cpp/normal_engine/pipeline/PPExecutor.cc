@@ -289,16 +289,18 @@ absl::StatusOr<PPExecutionPlan> PPExecutor::buildPlan(const StreamGroups&       
 absl::StatusOr<SamplerInputs> PPExecutor::makeSamplerInputs(const PPSamplingPlan& sampling_plan,
                                                             const PPOutputConfig& output_config,
                                                             const torch::Tensor&  logits) {
-    const auto batch_size = sampling_plan.logits_processor_configs.size();
-    RTP_LLM_CHECK(logits.dim() == 2 && logits.size(0) == sampling_plan.request_ids.size(0));
+    const auto stream_count     = sampling_plan.request_ids.size(0);
+    const auto total_batch_size = sampling_plan.token_ids.size(0);
+    RTP_LLM_CHECK(logits.dim() == 2 && logits.size(0) == total_batch_size);
+    RTP_LLM_CHECK(sampling_plan.num_return_sequences.size() == static_cast<size_t>(stream_count));
 
     SamplerInputs inputs;
     inputs.logits        = output_config.return_logits || output_config.return_softmax_probs ? logits.clone() : logits;
     inputs.token_ids     = sampling_plan.token_ids;
     inputs.input_lengths = sampling_plan.input_lengths;
     inputs.sequence_lengths     = sampling_plan.sequence_lengths;
-    inputs.num_beams_in         = torch::ones(sampling_plan.request_ids.sizes(), torch::kLong);
-    inputs.num_beams_out        = torch::ones(sampling_plan.request_ids.sizes(), torch::kLong);
+    inputs.num_beams_in         = torch::ones({total_batch_size}, torch::kLong);
+    inputs.num_beams_out        = torch::ones({total_batch_size}, torch::kLong);
     inputs.top_k                = sampling_plan.top_k.clone();
     inputs.top_p                = sampling_plan.top_p;
     inputs.temperature          = sampling_plan.temperature;
@@ -309,33 +311,37 @@ absl::StatusOr<SamplerInputs> PPExecutor::makeSamplerInputs(const PPSamplingPlan
     inputs.do_sample            = sampling_plan.do_sample;
     inputs.finished_mask        = sampling_plan.finished_mask;
     if (output_config.return_cum_log_probs) {
-        inputs.cum_log_probs = torch::empty(sampling_plan.request_ids.sizes(), torch::kFloat32);
+        inputs.cum_log_probs = torch::empty({total_batch_size}, torch::kFloat32);
     }
     if (output_config.return_all_probs != ReturnAllProbsMode::NONE) {
-        inputs.all_probs =
-            torch::zeros({sampling_plan.request_ids.size(0), logits.size(1)}, logits.options().dtype(torch::kFloat32));
+        inputs.all_probs = torch::zeros({total_batch_size, logits.size(1)}, logits.options().dtype(torch::kFloat32));
         inputs.return_original_all_probs = output_config.return_all_probs == ReturnAllProbsMode::ORIGINAL;
     }
 
-    inputs.batch_size     = batch_size;
-    inputs.batch_size_out = batch_size;
+    inputs.batch_size     = total_batch_size;
+    inputs.batch_size_out = total_batch_size;
     inputs.step           = sampling_plan.token_ids.size(1) - 1;
     inputs.vocab_size     = logits.size(-1);
-    inputs.generator.resize(batch_size);
+    inputs.generator.resize(total_batch_size);
     auto processor_states = std::make_shared<LogitsProcessorStates>();
 
     auto*       top_k         = inputs.top_k.data_ptr<int32_t>();
-    auto*       cum_log_probs = inputs.cum_log_probs.defined() ? inputs.cum_log_probs.data_ptr<float>() : nullptr;
     const auto* request_ids   = sampling_plan.request_ids.data_ptr<int64_t>();
     const auto* input_lengths = sampling_plan.input_lengths.data_ptr<int32_t>();
-    for (size_t index = 0; index < batch_size; ++index) {
-        if (top_k[index] > 0) {
-            top_k[index] = std::min(top_k[index], static_cast<int32_t>(logits.size(-1)));
+    for (int64_t batch_idx = 0; batch_idx < total_batch_size; ++batch_idx) {
+        if (top_k[batch_idx] > 0) {
+            top_k[batch_idx] = std::min(top_k[batch_idx], static_cast<int32_t>(logits.size(-1)));
         }
+    }
 
-        auto state_it = sampling_states_.find(request_ids[index]);
+    int64_t batch_idx = 0;
+    for (int64_t stream_idx = 0; stream_idx < stream_count; ++stream_idx) {
+        const int64_t stream_batch_size = std::max<int32_t>(sampling_plan.num_return_sequences[stream_idx], 1);
+        RTP_LLM_CHECK(batch_idx + stream_batch_size <= total_batch_size);
+
+        auto state_it = sampling_states_.find(request_ids[stream_idx]);
         if (state_it == sampling_states_.end()) {
-            const auto& processor_config = sampling_plan.logits_processor_configs[index];
+            const auto& processor_config = sampling_plan.logits_processor_configs[stream_idx];
             auto        config           = std::make_shared<GenerateConfig>();
             if (processor_config.grammar_type == "json") {
                 config->json_schema = processor_config.grammar_value;
@@ -348,43 +354,51 @@ absl::StatusOr<SamplerInputs> PPExecutor::makeSamplerInputs(const PPSamplingPlan
             } else if (!processor_config.grammar_type.empty()) {
                 return absl::InvalidArgumentError("unsupported grammar type: " + processor_config.grammar_type);
             }
-            config->combo_token_size       = processor_config.combo_token_size;
-            config->banned_combo_token_ids = processor_config.banned_combo_token_ids;
-            config->end_think_token_ids    = processor_config.end_think_token_ids;
+            config->combo_token_size              = processor_config.combo_token_size;
+            config->banned_combo_token_ids        = processor_config.banned_combo_token_ids;
+            config->end_think_token_ids           = processor_config.end_think_token_ids;
+            config->num_return_sequences          = sampling_plan.num_return_sequences[stream_idx];
+            config->enable_cross_sequence_ban     = processor_config.enable_cross_sequence_ban;
+            config->cross_seq_diverge_start_combo = processor_config.cross_seq_diverge_start_combo;
 
             auto generate_input             = std::make_shared<GenerateInput>();
             generate_input->generate_config = config;
-            generate_input->input_ids       = sampling_plan.token_ids[index].narrow(0, 0, input_lengths[index]).clone();
-            auto processors_result          = LogitsProcessorFactory::createLogitsProcessors(
-                std::move(generate_input), 1, 1, processor_eos_token_id_);
+            generate_input->input_ids =
+                sampling_plan.token_ids[batch_idx].narrow(0, 0, input_lengths[batch_idx]).clone();
+            auto processors_result = LogitsProcessorFactory::createLogitsProcessors(
+                std::move(generate_input), stream_batch_size, stream_batch_size, processor_eos_token_id_);
             if (!processors_result.ok()) {
                 return absl::InvalidArgumentError("failed to initialize sampling state for request_id="
-                                                  + std::to_string(request_ids[index]) + ": "
+                                                  + std::to_string(request_ids[stream_idx]) + ": "
                                                   + processors_result.status().ToString());
             }
 
             SamplingState state;
             state.logits_processors = std::move(processors_result.value());
-            state.cum_log_probs     = torch::zeros({1}, torch::kFloat32);
-            if (sampling_plan.random_seeds[index].has_value()) {
+            state.cum_log_probs     = torch::zeros({stream_batch_size}, torch::kFloat32);
+            if (sampling_plan.random_seeds[stream_idx].has_value()) {
 #if defined(USING_CUDA) || defined(USING_ROCM)
                 state.generator = torch::make_generator<torch::CUDAGeneratorImpl>();
 #else
                 state.generator = torch::make_generator<torch::CPUGeneratorImpl>();
 #endif
-                state.generator.set_current_seed(sampling_plan.random_seeds[index].value());
+                state.generator.set_current_seed(sampling_plan.random_seeds[stream_idx].value());
             }
-            state_it = sampling_states_.emplace(request_ids[index], std::move(state)).first;
+            state_it = sampling_states_.emplace(request_ids[stream_idx], std::move(state)).first;
         }
 
-        inputs.generator[index] = state_it->second.generator;
-        if (cum_log_probs != nullptr) {
-            cum_log_probs[index] = state_it->second.cum_log_probs.data_ptr<float>()[0];
+        for (int64_t sequence_idx = 0; sequence_idx < stream_batch_size; ++sequence_idx) {
+            inputs.generator[batch_idx + sequence_idx] = state_it->second.generator;
+        }
+        if (inputs.cum_log_probs.defined()) {
+            inputs.cum_log_probs.narrow(0, batch_idx, stream_batch_size).copy_(state_it->second.cum_log_probs);
         }
         for (const auto& processor : state_it->second.logits_processors) {
-            processor_states->insert(processor, index, index + 1);
+            processor_states->insert(processor, batch_idx, batch_idx + stream_batch_size);
         }
+        batch_idx += stream_batch_size;
     }
+    RTP_LLM_CHECK(batch_idx == total_batch_size);
     inputs.logits_processor_states_ptr = std::move(processor_states);
     return std::move(inputs);
 }
@@ -392,32 +406,43 @@ absl::StatusOr<SamplerInputs> PPExecutor::makeSamplerInputs(const PPSamplingPlan
 void PPExecutor::advanceSamplingStates(const PPSamplingPlan& sampling_plan,
                                        const SamplerOutput&  sampler_output,
                                        PPExecutionResult&    result) {
-    const auto batch_size = sampling_plan.request_ids.size(0);
+    const auto stream_count     = sampling_plan.request_ids.size(0);
+    const auto total_batch_size = result.new_token_ids.size(0);
 
     const auto*   request_ids      = sampling_plan.request_ids.data_ptr<int64_t>();
     const auto*   input_lengths    = sampling_plan.input_lengths.data_ptr<int32_t>();
     const auto*   sequence_lengths = sampling_plan.sequence_lengths.data_ptr<int32_t>();
     torch::Tensor cum_log_probs;
     if (sampler_output.cum_log_probs.defined()) {
-        RTP_LLM_CHECK(sampler_output.cum_log_probs.dim() == 1 && sampler_output.cum_log_probs.size(0) == batch_size);
+        RTP_LLM_CHECK(sampler_output.cum_log_probs.dim() == 1
+                      && sampler_output.cum_log_probs.size(0) == total_batch_size);
         cum_log_probs = sampler_output.cum_log_probs.to(torch::kCPU).contiguous();
     }
-    const auto* success = result.sample_success.data_ptr<bool>();
-    for (int64_t index = 0; index < batch_size; ++index) {
-        if (!success[index] || result.processor_errors[index].has_value()) {
+    const auto* success   = result.sample_success.data_ptr<bool>();
+    int64_t     batch_idx = 0;
+    for (int64_t stream_idx = 0; stream_idx < stream_count; ++stream_idx) {
+        const int64_t stream_batch_size = std::max<int32_t>(sampling_plan.num_return_sequences[stream_idx], 1);
+
+        bool stream_succeeded = true;
+        for (int64_t sequence_idx = 0; sequence_idx < stream_batch_size; ++sequence_idx) {
+            const int64_t row = batch_idx + sequence_idx;
+            stream_succeeded  = stream_succeeded && success[row] && !result.processor_errors[row].has_value();
+        }
+        if (!stream_succeeded) {
+            batch_idx += stream_batch_size;
             continue;
         }
-        auto& state = sampling_states_.at(request_ids[index]);
+        auto& state = sampling_states_.at(request_ids[stream_idx]);
 
         std::optional<ErrorInfo> error;
-        const auto               new_token = result.new_token_ids.narrow(0, index, 1);
+        const auto               new_tokens = result.new_token_ids.narrow(0, batch_idx, stream_batch_size);
         for (const auto& processor : state.logits_processors) {
-            error = processor->updateStatus(new_token, 1);
+            error = processor->updateStatus(new_tokens, 1);
             if (error.has_value()) {
                 break;
             }
         }
-        const int64_t expected_output_len = sequence_lengths[index] - input_lengths[index] + 1;
+        const int64_t expected_output_len = sequence_lengths[batch_idx] - input_lengths[batch_idx] + 1;
         if (!error.has_value()) {
             for (size_t processor_index = 0; processor_index < state.logits_processors.size(); ++processor_index) {
                 const auto processor_output_len = state.logits_processors[processor_index]->committedOutputLen();
@@ -432,10 +457,13 @@ void PPExecutor::advanceSamplingStates(const PPSamplingPlan& sampling_plan,
             }
         }
         if (error.has_value()) {
-            result.processor_errors[index] = std::move(error);
+            for (int64_t sequence_idx = 0; sequence_idx < stream_batch_size; ++sequence_idx) {
+                result.processor_errors[batch_idx + sequence_idx] = error;
+            }
         } else if (cum_log_probs.defined()) {
-            state.cum_log_probs.copy_(cum_log_probs.narrow(0, index, 1));
+            state.cum_log_probs.copy_(cum_log_probs.narrow(0, batch_idx, stream_batch_size));
         }
+        batch_idx += stream_batch_size;
     }
 }
 

@@ -15,33 +15,36 @@
 namespace rtp_llm {
 
 struct RequestLogitsProcessorConfig {
-    std::string grammar_type;
-    std::string grammar_value;
+    std::string grammar_type;   // scalar per stream
+    std::string grammar_value;  // scalar per stream
 
-    int                           combo_token_size = 0;
-    std::vector<std::vector<int>> banned_combo_token_ids;
-    std::vector<int>              end_think_token_ids;
+    int                           combo_token_size = 0;                   // scalar per stream
+    std::vector<std::vector<int>> banned_combo_token_ids;                 // [banned_combo_count, combo_token_size]
+    std::vector<int>              end_think_token_ids;                    // [end_think_token_count]
+    bool                          enable_cross_sequence_ban     = false;  // scalar per stream
+    int                           cross_seq_diverge_start_combo = 0;      // scalar per stream
 };
 
 struct PPSamplingPlan {
-    std::vector<std::optional<int>>           random_seeds;
-    std::vector<RequestLogitsProcessorConfig> logits_processor_configs;
+    std::vector<std::optional<int>>           random_seeds;              // [stream_count]
+    std::vector<RequestLogitsProcessorConfig> logits_processor_configs;  // [stream_count]
+    std::vector<int32_t>                      num_return_sequences;      // [stream_count]
 
-    torch::Tensor request_ids;
+    torch::Tensor request_ids;  // [stream_count]
 
-    torch::Tensor token_ids;
-    torch::Tensor input_lengths;
-    torch::Tensor sequence_lengths;
+    torch::Tensor token_ids;         // [total_batch_size, max_sequence_length + 1]
+    torch::Tensor input_lengths;     // [total_batch_size]
+    torch::Tensor sequence_lengths;  // [total_batch_size]
 
-    torch::Tensor top_k;
-    torch::Tensor top_p;
-    torch::Tensor temperature;
-    torch::Tensor repetition_penalty;
-    torch::Tensor presence_penalty;
-    torch::Tensor frequency_penalty;
-    torch::Tensor no_repeat_ngram_size;
-    torch::Tensor do_sample;
-    torch::Tensor finished_mask;
+    torch::Tensor top_k;                 // [total_batch_size]
+    torch::Tensor top_p;                 // [total_batch_size]
+    torch::Tensor temperature;           // [total_batch_size]
+    torch::Tensor repetition_penalty;    // [total_batch_size]
+    torch::Tensor presence_penalty;      // [total_batch_size]
+    torch::Tensor frequency_penalty;     // [total_batch_size]
+    torch::Tensor no_repeat_ngram_size;  // [total_batch_size]
+    torch::Tensor do_sample;             // [total_batch_size]
+    torch::Tensor finished_mask;         // [total_batch_size]
 };
 
 /** Batch-aggregated output configuration for the lm-head stage. */
@@ -66,23 +69,23 @@ struct PPIntermediateTensors {
     std::map<std::string, torch::Tensor> tensors;
 };
 
-/** Final per-request outputs produced by the lm-head stage TP root. */
+/** Final outputs produced by the lm-head stage TP root. */
 struct PPExecutionResult {
-    torch::Tensor request_ids;     // [batch_size]
-    torch::Tensor new_token_ids;   // [batch_size, 1]
-    torch::Tensor sample_success;  // [batch_size]
+    torch::Tensor request_ids;     // [stream_count]
+    torch::Tensor new_token_ids;   // [total_batch_size, 1]
+    torch::Tensor sample_success;  // [total_batch_size]
 
-    torch::Tensor logits;
-    torch::Tensor softmax_probs;
-    torch::Tensor cum_log_probs;
-    torch::Tensor all_probs;
+    torch::Tensor logits;         // optional [total_batch_size, vocab_size]
+    torch::Tensor softmax_probs;  // optional [total_batch_size, 1]
+    torch::Tensor cum_log_probs;  // optional [total_batch_size]
+    torch::Tensor all_probs;      // optional [total_batch_size, vocab_size]
 
-    torch::Tensor loss;
+    torch::Tensor loss;  // optional [loss_token_count]
 
-    torch::Tensor hidden_states;
-    torch::Tensor all_hidden_states;
+    torch::Tensor hidden_states;      // optional [total_batch_size, hidden_size]
+    torch::Tensor all_hidden_states;  // optional [executed_token_count, hidden_size]
 
-    std::vector<std::optional<ErrorInfo>> processor_errors;
+    std::vector<std::optional<ErrorInfo>> processor_errors;  // [total_batch_size]
 };
 
 }  // namespace rtp_llm

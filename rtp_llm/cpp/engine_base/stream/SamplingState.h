@@ -12,7 +12,7 @@ namespace rtp_llm {
 
 /**
  * Request-level sampling state and retained sampling results.
- * Retained tensors are stored on CPU. In the current PP path, cum_log_probs contains one float32 value per request.
+ * Retained tensors are stored on CPU. cum_log_probs contains one float32 value per batch row.
  */
 struct SamplingState {
     std::vector<BaseLogitsProcessorPtr> logits_processors;
