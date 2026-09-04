@@ -16,7 +16,6 @@ import org.springframework.test.util.ReflectionTestUtils;
 import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 
 import java.io.IOException;
-import java.net.ConnectException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -39,7 +38,6 @@ import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
@@ -48,10 +46,12 @@ class UniConfigConfigSourceTest {
     private static final String CONFIG_PATH = "/v2/configs/modelstudio.spectrum.deployment."
             + "df4a7748.flexlb-test-wlcb.runtime.meta";
     private static final String INITIAL_CONFIG = """
-            {"schemaVersion":1,"router":{"availabilityHysteresisPercent":9}}
+            {"schemaVersion":1,"consistency":{"type":"NONE"},
+            "router":{"availabilityHysteresisPercent":9}}
             """;
     private static final String UPDATED_CONFIG = """
-            {"schemaVersion":1,"router":{"availabilityHysteresisPercent":10}}
+            {"schemaVersion":1,"consistency":{"type":"NONE"},
+            "router":{"availabilityHysteresisPercent":10}}
             """;
 
     private final ScheduledExecutorService executor = mock(ScheduledExecutorService.class);
@@ -99,7 +99,8 @@ class UniConfigConfigSourceTest {
 
     @Test
     void fetchesRawDocumentsAndHotUpdatesThroughBothExistingParsers() throws Exception {
-        String legacyConfig = "{\"schemaVersion\":0,\"enableQueueing\":true}";
+        String legacyConfig = "{\"schemaVersion\":0,\"enableQueueing\":true,"
+                + "\"flexlbSyncConsistencyConfig\":{\"needConsistency\":false}}";
         response.set(new Response(200, legacyConfig));
         initializeSource();
         initializeConfigService();
@@ -119,7 +120,8 @@ class UniConfigConfigSourceTest {
         assertThat(updates).hasValue(1);
         String currentConfig = """
                 {"schemaVersion":1,"scheduler":{"type":"DIRECT"},
-                "dispatcher":{"type":"NON_BATCH"},"router":{"availabilityHysteresisPercent":9}}
+                "dispatcher":{"type":"NON_BATCH"},"consistency":{"type":"NONE"},
+                "router":{"availabilityHysteresisPercent":9}}
                 """;
         response.set(new Response(200, currentConfig));
         poll.run();
@@ -198,17 +200,19 @@ class UniConfigConfigSourceTest {
 
     @ParameterizedTest
     @ValueSource(ints = {404, 503})
-    void failsStartupWhenSelectedConfigCannotBeFetched(int status) {
+    void retriesHttpErrorsUntilConfigurationBecomesAvailable(int status) throws Exception {
         response.set(new Response(status, "{\"error\":\"config unavailable\"}"));
+        prepareRetryingSource();
+        doAnswer(invocation -> {
+            response.set(new Response(200, INITIAL_CONFIG));
+            return null;
+        }).when(source).waitForStartupRetry();
 
-        assertThatThrownBy(this::initializeSource)
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("Failed to initialize UniConfig")
-                .hasRootCauseInstanceOf(IOException.class)
-                .hasRootCauseMessage("UniConfig returned HTTP " + status + " for http://127.0.0.1:"
-                        + server.getAddress().getPort() + CONFIG_PATH);
+        source.initialize();
 
-        verify(executor).shutdownNow();
+        assertThat(source.load()).isEqualTo(INITIAL_CONFIG);
+        assertThat(requests).hasValue(2);
+        verify(source).waitForStartupRetry();
     }
 
     @Test
@@ -229,17 +233,21 @@ class UniConfigConfigSourceTest {
     }
 
     @Test
-    void failsStartupAfterBoundedRetriesWhenAgentNeverStarts() throws Exception {
+    void keepsRetryingPastPreviousAttemptLimitUntilAgentStarts() throws Exception {
+        InetSocketAddress address = server.getAddress();
         prepareUnavailableAgent();
+        AtomicInteger waits = new AtomicInteger();
+        doAnswer(invocation -> {
+            if (waits.incrementAndGet() == 31) {
+                startAgent(address);
+            }
+            return null;
+        }).when(source).waitForStartupRetry();
 
-        assertThatThrownBy(source::initialize)
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("Failed to initialize UniConfig")
-                .hasRootCauseInstanceOf(ConnectException.class);
+        source.initialize();
 
-        verify(source, times(29)).waitForStartupRetry();
-        verify(executor).shutdownNow();
-        assertThat(source.load()).isNull();
+        assertThat(waits).hasValue(31);
+        assertThat(source.load()).isEqualTo(INITIAL_CONFIG);
     }
 
     @Test
@@ -260,16 +268,21 @@ class UniConfigConfigSourceTest {
         verify(executor).shutdownNow();
     }
 
-    @Test
-    void failsStartupAndStopsPollingWhenInitialDocumentIsInvalid() throws Exception {
-        response.set(new Response(200, "{\"schemaVersion\":1,\"unknown\":true}"));
-        initializeSource();
+    @ParameterizedTest
+    @ValueSource(strings = {"not-json", "[]", "{}", "{\"schemaVersion\":1,\"unknown\":true}"})
+    void retriesInvalidOrIncompleteDocumentsUntilConfigurationBecomesAvailable(String invalidConfig) throws Exception {
+        response.set(new Response(200, invalidConfig));
+        prepareRetryingSource();
+        doAnswer(invocation -> {
+            response.set(new Response(200, INITIAL_CONFIG));
+            return null;
+        }).when(source).waitForStartupRetry();
 
-        assertThatThrownBy(this::initializeConfigService)
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("UniConfig");
+        source.initialize();
 
-        verify(executor).shutdownNow();
+        assertThat(source.load()).isEqualTo(INITIAL_CONFIG);
+        assertThat(requests).hasValue(2);
+        verify(source).waitForStartupRetry();
     }
 
     @ParameterizedTest
@@ -333,9 +346,13 @@ class UniConfigConfigSourceTest {
     }
 
     private void prepareUnavailableAgent() throws Exception {
-        spectrumEnvironment().execute(() -> prepareSource(spy(new UniConfigConfigSource(new DeploymentIdentity()))));
+        prepareRetryingSource();
         server.stop(0);
         doNothing().when(source).waitForStartupRetry();
+    }
+
+    private void prepareRetryingSource() throws Exception {
+        spectrumEnvironment().execute(() -> prepareSource(spy(new UniConfigConfigSource(new DeploymentIdentity()))));
     }
 
     private void initializeConfigService() {

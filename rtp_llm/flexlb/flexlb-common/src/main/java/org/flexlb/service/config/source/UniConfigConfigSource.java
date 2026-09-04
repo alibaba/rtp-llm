@@ -1,16 +1,17 @@
 package org.flexlb.service.config.source;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DeploymentIdentity;
 import org.flexlb.service.config.ConfigSource;
+import org.flexlb.util.JsonUtils;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 import java.io.IOException;
 import java.io.InputStream;
-import java.net.ConnectException;
 import java.net.HttpURLConnection;
 import java.net.Proxy;
 import java.net.URI;
@@ -27,9 +28,8 @@ import java.util.function.Consumer;
 final class UniConfigConfigSource implements ConfigSource {
 
     private static final int CONFIG_READ_TIMEOUT_MS = 3000;
-    private static final int STARTUP_MAX_ATTEMPTS = 30;
     private static final int STARTUP_RETRY_INTERVAL_SECONDS = 1;
-        private static final int POLL_INTERVAL_SECONDS = 30;
+    private static final int POLL_INTERVAL_SECONDS = 30;
     private static final int PRIORITY = 3;
 
     private final URI configUri;
@@ -113,12 +113,9 @@ final class UniConfigConfigSource implements ConfigSource {
         for (int attempt = 1; ; attempt++) {
             try {
                 return fetchConfig();
-            } catch (ConnectException error) {
-                if (attempt >= STARTUP_MAX_ATTEMPTS) {
-                    throw error;
-                }
-                log.warn("UniConfig agent is not accepting connections; retrying startup ({}/{}): {}",
-                        attempt, STARTUP_MAX_ATTEMPTS, error.toString());
+            } catch (IOException error) {
+                log.warn("UniConfig configuration is not ready; retrying startup (attempt {}): {}",
+                        attempt, error.toString());
                 try {
                     waitForStartupRetry();
                 } catch (InterruptedException interrupted) {
@@ -145,10 +142,27 @@ final class UniConfigConfigSource implements ConfigSource {
                 throw new IOException("UniConfig returned HTTP " + status + " for " + configUri);
             }
             try (InputStream response = connection.getInputStream()) {
-                return new String(response.readAllBytes(), StandardCharsets.UTF_8);
+                String content = new String(response.readAllBytes(), StandardCharsets.UTF_8);
+                validateConfigDocument(content);
+                return content;
             }
         } finally {
             connection.disconnect();
+        }
+    }
+
+    private static void validateConfigDocument(String content) throws IOException {
+        JsonNode document;
+        try {
+            document = JsonUtils.readStrictTree(content);
+        } catch (Exception error) {
+            throw new IOException("UniConfig returned invalid configuration JSON", error);
+        }
+        if (document == null || !document.isObject()) {
+            throw new IOException("UniConfig configuration must be a JSON object");
+        }
+        if (!document.has("consistency") && !document.has("flexlbSyncConsistencyConfig")) {
+            throw new IOException("UniConfig configuration must contain consistency or flexlbSyncConsistencyConfig");
         }
     }
 
