@@ -497,6 +497,197 @@ def formula_text(coefficients: Sequence[float]) -> str:
     return "".join(terms) if terms else "0"
 
 
+def write_fit_gap_svg(predictions: Sequence[dict[str, Any]], path: pathlib.Path) -> None:
+    """Write an all-point measured-vs-predicted and absolute-error chart."""
+    if not predictions:
+        return
+    width, height = 1800, 860
+    panel_width, panel_height = 670.0, 590.0
+    left_x, right_x, top = 120.0, 1010.0, 150.0
+    targets = [float(row["target_ms"]) for row in predictions]
+    estimates = [float(row["predicted_ms"]) for row in predictions]
+    errors = [
+        abs(estimate - target) for estimate, target in zip(estimates, targets)
+    ]
+    latency_max = max(max(targets), max(estimates), 1.0)
+    error_max = max(max(errors), 1.0)
+    p95_abs = _quantile(errors, 0.95)
+
+    def point(panel_x: float, x: float, y: float, ymax: float) -> tuple[float, float]:
+        return (
+            panel_x + panel_width * x / latency_max,
+            top + panel_height * (1.0 - y / ymax),
+        )
+
+    def line(x1: float, y1: float, x2: float, y2: float, **attrs: Any) -> str:
+        values = " ".join(
+            f'{key.replace("_", "-")}="{value}"' for key, value in attrs.items()
+        )
+        return (
+            f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" '
+            f'y2="{y2:.1f}" {values}/>'
+        )
+
+    out = [
+        (
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" '
+            f'height="{height}" viewBox="0 0 {width} {height}">'
+        ),
+        '<rect width="100%" height="100%" fill="#fff"/>',
+        (
+            '<style>text{font-family:Arial,"Noto Sans CJK SC","Microsoft YaHei",'
+            'sans-serif;fill:#172033}.title{font-size:32px;font-weight:700}'
+            '.sub{font-size:17px;fill:#475569}.panel{font-size:22px;font-weight:700}'
+            '.axis{font-size:17px;fill:#334155}.tick{font-size:14px;fill:#64748b}'
+            '.legend{font-size:15px;fill:#334155}</style>'
+        ),
+        (
+            '<text x="900" y="48" text-anchor="middle" class="title">'
+            'DeepSeek-V4-Pro：实测 TTFT 与拟合误差</text>'
+        ),
+        (
+            f'<text x="900" y="82" text-anchor="middle" class="sub">'
+            f'{len(predictions):,} 个严格有效 geometry；'
+            '每个点取 3 次成功请求的 TTFT 中位数</text>'
+        ),
+        (
+            f'<text x="{left_x + panel_width / 2:.1f}" y="120" '
+            'text-anchor="middle" class="panel">实测值 vs 拟合值</text>'
+        ),
+        (
+            f'<text x="{right_x + panel_width / 2:.1f}" y="120" '
+            'text-anchor="middle" class="panel">绝对误差 vs 实测值</text>'
+        ),
+    ]
+    for panel_x in (left_x, right_x):
+        out.append(
+            f'<rect x="{panel_x}" y="{top}" width="{panel_width}" '
+            f'height="{panel_height}" fill="#f8fafc" stroke="#cbd5e1"/>'
+        )
+        for index in range(6):
+            ratio = index / 5
+            x = panel_x + ratio * panel_width
+            y = top + (1.0 - ratio) * panel_height
+            out.append(
+                line(
+                    x,
+                    top,
+                    x,
+                    top + panel_height,
+                    stroke="#e2e8f0",
+                    stroke_width="1",
+                )
+            )
+            out.append(
+                line(
+                    panel_x,
+                    y,
+                    panel_x + panel_width,
+                    y,
+                    stroke="#e2e8f0",
+                    stroke_width="1",
+                )
+            )
+            out.append(
+                f'<text x="{x:.1f}" y="{top + panel_height + 27:.1f}" '
+                f'text-anchor="middle" class="tick">{latency_max * ratio:.0f}</text>'
+            )
+    for index in range(6):
+        ratio = index / 5
+        y = top + (1.0 - ratio) * panel_height
+        out.append(
+            f'<text x="{left_x - 14:.1f}" y="{y + 5:.1f}" '
+            f'text-anchor="end" class="tick">{latency_max * ratio:.0f}</text>'
+        )
+        out.append(
+            f'<text x="{right_x - 14:.1f}" y="{y + 5:.1f}" '
+            f'text-anchor="end" class="tick">{error_max * ratio:.0f}</text>'
+        )
+
+    out.append(
+        line(
+            left_x,
+            top + panel_height,
+            left_x + panel_width,
+            top,
+            stroke="#16a34a",
+            stroke_width="2.5",
+            stroke_dasharray="9 7",
+        )
+    )
+    for row, target, estimate, error in zip(predictions, targets, estimates, errors):
+        colour = "#2563eb" if int(row["cache_len"]) == 0 else "#d97706"
+        x, y = point(left_x, target, estimate, latency_max)
+        out.append(
+            f'<circle cx="{x:.2f}" cy="{y:.2f}" r="2.0" '
+            f'fill="{colour}" fill-opacity=".42"/>'
+        )
+        x, y = point(right_x, target, error, error_max)
+        out.append(
+            f'<circle cx="{x:.2f}" cy="{y:.2f}" r="2.0" '
+            f'fill="{colour}" fill-opacity=".42"/>'
+        )
+
+    p95_y = top + panel_height * (1.0 - p95_abs / error_max)
+    out.append(
+        line(
+            right_x,
+            p95_y,
+            right_x + panel_width,
+            p95_y,
+            stroke="#dc2626",
+            stroke_width="2.2",
+            stroke_dasharray="8 6",
+        )
+    )
+    out.append(
+        f'<text x="{right_x + panel_width - 8:.1f}" y="{p95_y - 8:.1f}" '
+        f'text-anchor="end" class="legend">p95 absolute error = {p95_abs:.1f} ms</text>'
+    )
+    out.extend(
+        [
+            (
+                f'<text x="{left_x + panel_width / 2:.1f}" '
+                f'y="{top + panel_height + 64:.1f}" text-anchor="middle" '
+                'class="axis">实测 TTFT（ms）</text>'
+            ),
+            (
+                f'<text x="{right_x + panel_width / 2:.1f}" '
+                f'y="{top + panel_height + 64:.1f}" text-anchor="middle" '
+                'class="axis">实测 TTFT（ms）</text>'
+            ),
+            (
+                f'<text x="35" y="{top + panel_height / 2:.1f}" '
+                'text-anchor="middle" '
+                f'transform="rotate(-90 35 {top + panel_height / 2:.1f})" '
+                'class="axis">拟合 TTFT（ms）</text>'
+            ),
+            (
+                f'<text x="925" y="{top + panel_height / 2:.1f}" '
+                'text-anchor="middle" '
+                f'transform="rotate(-90 925 {top + panel_height / 2:.1f})" '
+                'class="axis">绝对误差（ms）</text>'
+            ),
+            (
+                '<circle cx="690" cy="817" r="5" fill="#2563eb"/>'
+                '<text x="704" y="822" class="legend">cache miss</text>'
+            ),
+            (
+                '<circle cx="825" cy="817" r="5" fill="#d97706"/>'
+                '<text x="839" y="822" class="legend">cache hit</text>'
+            ),
+            (
+                '<line x1="980" y1="817" x2="1020" y2="817" '
+                'stroke="#16a34a" stroke-width="2.5" '
+                'stroke-dasharray="9 7"/>'
+                '<text x="1030" y="822" class="legend">理想线 y=x</text>'
+            ),
+            "</svg>",
+        ]
+    )
+    path.write_text("".join(out), encoding="utf-8")
+
+
 def run_fit(args: argparse.Namespace) -> int:
     paths = [pathlib.Path(value) for value in args.inputs]
     rows, audit = load_observations(paths, batch_size=args.batch_size)
@@ -539,6 +730,8 @@ def run_fit(args: argparse.Namespace) -> int:
                 "compute_len": row.compute_len,
                 "target_ms": row.target_ms,
                 "predicted_ms": predicted,
+                "signed_error_ms": predicted - row.target_ms,
+                "abs_error_ms": abs(predicted - row.target_ms),
                 "ape_pct": 100.0 * abs(predicted - row.target_ms) / row.target_ms,
                 "source": row.source,
             }
@@ -549,6 +742,7 @@ def run_fit(args: argparse.Namespace) -> int:
         )
         writer.writeheader()
         writer.writerows(predictions)
+    write_fit_gap_svg(predictions, output / "fit_gap.svg")
     report = {
         "schema_version": 1,
         "model": "DeepSeek-V4-Pro",
