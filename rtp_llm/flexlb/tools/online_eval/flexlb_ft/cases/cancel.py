@@ -726,8 +726,13 @@ def cancel_phase_timing(ctx: CaseContext):
         engine_recv_a, _ = ops.verify_engine_received(rid_a, method_a)
         engine_recv_b, _ = ops.verify_engine_received(rid_b, method_b)
         if resp_a.enqueued_by_master or resp_b.enqueued_by_master:
+            # Same window-insufficient fix as the three unstable cases: the
+            # cancelled A/B tasks linger on the master ledger until the
+            # stale-inflight drain (~90s physical) completes, so the default
+            # 10s inflight-clean window aborts early. Aligned to the
+            # TTL_DRAIN_TIMEOUT_S standard; assertion semantics unchanged.
             inflight_ok, inflight_detail = AssertUtils.inflight_clean(
-                _master_http(ops), 10.0
+                _master_http(ops), TTL_DRAIN_TIMEOUT_S
             )
         else:
             inflight_ok, inflight_detail = True, "N/A"
