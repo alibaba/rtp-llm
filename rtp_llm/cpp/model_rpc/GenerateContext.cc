@@ -3,9 +3,6 @@
 namespace rtp_llm {
 
 GenerateContext::~GenerateContext() {
-    if (stream_ && stream_->getStatus() != StreamState::FINISHED) {
-        stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
-    }
     stopStream();
     reportTime();
 }
@@ -63,7 +60,7 @@ void GenerateContext::collectBasicMetrics(RpcMetricsCollector& collector) {
     } else if (hasError()) {
         collector.error_code = ErrorCode::UNKNOWN_ERROR;
     }
-    collector.onflight_request   = onflight_requests;
+    collector.onflight_request   = onflight_requests ? static_cast<int64_t>(onflight_requests->load()) : 0;
     collector.total_rt_us        = executeTimeMs() * 1000;
     collector.retry_times        = retry_times;
     collector.retry_cost_time_ms = retry_cost_time_ms;
@@ -86,8 +83,22 @@ void GenerateContext::stopStream() {
     if (stream_) {
         // if is waiting, cancel it
         meta->dequeue(request_id, stream_);
-        if (stream_->getStatus() != StreamState::FINISHED) {
-            stream_->reportError(ErrorCode::CANCELLED, "cancel stream");
+        if (stream_->getStatus() != StreamState::FINISHED && !stream_->hasError()) {
+            if (error_info.hasError()) {
+                RTP_LLM_LOG_WARNING("request [%s] stopping stream with terminal source=context_error, code=%d, err=%s",
+                                    request_key.c_str(),
+                                    static_cast<int>(error_info.code()),
+                                    error_info.ToString().c_str());
+                stream_->reportError(error_info.code(), error_info.ToString());
+            } else if (cancelled() || isRequestCancelled()) {
+                RTP_LLM_LOG_WARNING("request [%s] stopping stream with terminal source=client_cancel",
+                                    request_key.c_str());
+                stream_->reportError(ErrorCode::CANCELLED, "request cancelled by client");
+            } else {
+                RTP_LLM_LOG_WARNING("request [%s] stopping unfinished stream with terminal source=context_cleanup",
+                                    request_key.c_str());
+                stream_->reportError(ErrorCode::CANCELLED, "context cleanup before stream finished");
+            }
         }
         // if is running, waiting util done
         while (stream_->getStatus() == StreamState::RUNNING) {

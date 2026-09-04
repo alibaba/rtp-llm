@@ -624,8 +624,11 @@ class ServerArgsGrammarConfigTest(TestCase):
 
         self.assertEqual(g.constrained_json_disable_any_whitespace, False)
         self.assertEqual(g.terminate_without_stop_token, False)
-        self.assertEqual(g.num_workers, 8)
-        self.assertEqual(g.compiler_cache_bytes, 512 * 1024 * 1024)
+        self.assertEqual(g.num_workers, 0)
+        self.assertEqual(g.compile_timeout_ms, 2000)
+        self.assertEqual(g.compile_concurrency, 1)
+        self.assertEqual(g.compile_queue_size, 2)
+        self.assertEqual(g.compiler_cache_bytes, 2 * 1024 * 1024 * 1024)
 
     def test_grammar_parser_defaults_override_config_initial_values(self):
         """The CLI declaration is the source of truth for grammar defaults."""
@@ -640,6 +643,9 @@ class ServerArgsGrammarConfigTest(TestCase):
         g.constrained_json_disable_any_whitespace = True
         g.terminate_without_stop_token = True
         g.num_workers = 17
+        g.compile_timeout_ms = 1
+        g.compile_concurrency = 2
+        g.compile_queue_size = 3
         g.compiler_cache_bytes = 1
 
         parser = EnvArgumentParser()
@@ -649,8 +655,11 @@ class ServerArgsGrammarConfigTest(TestCase):
 
         self.assertEqual(g.constrained_json_disable_any_whitespace, False)
         self.assertEqual(g.terminate_without_stop_token, False)
-        self.assertEqual(g.num_workers, 8)
-        self.assertEqual(g.compiler_cache_bytes, 512 * 1024 * 1024)
+        self.assertEqual(g.num_workers, 0)
+        self.assertEqual(g.compile_timeout_ms, 2000)
+        self.assertEqual(g.compile_concurrency, 1)
+        self.assertEqual(g.compile_queue_size, 2)
+        self.assertEqual(g.compiler_cache_bytes, 2 * 1024 * 1024 * 1024)
 
     def test_grammar_cmd_args(self):
         """Every CLI flag binds to the right config field, with correct types."""
@@ -662,6 +671,12 @@ class ServerArgsGrammarConfigTest(TestCase):
             "1",
             "--grammar_num_workers",
             "7",
+            "--grammar_compile_timeout_ms",
+            "1234",
+            "--grammar_compile_concurrency",
+            "3",
+            "--grammar_compile_queue_size",
+            "5",
             "--grammar_compiler_cache_bytes",
             "67108864",
         ]
@@ -671,7 +686,39 @@ class ServerArgsGrammarConfigTest(TestCase):
         self.assertEqual(g.constrained_json_disable_any_whitespace, True)
         self.assertEqual(g.terminate_without_stop_token, True)
         self.assertEqual(g.num_workers, 7)
+        self.assertEqual(g.compile_timeout_ms, 1234)
+        self.assertEqual(g.compile_concurrency, 3)
+        self.assertEqual(g.compile_queue_size, 5)
         self.assertEqual(g.compiler_cache_bytes, 67108864)
+
+    def test_grammar_env_args(self):
+        os.environ.update(
+            {
+                "GRAMMAR_NUM_WORKERS": "9",
+                "GRAMMAR_COMPILE_TIMEOUT_MS": "3456",
+                "GRAMMAR_COMPILE_CONCURRENCY": "4",
+                "GRAMMAR_COMPILE_QUEUE_SIZE": "6",
+                "GRAMMAR_COMPILER_CACHE_BYTES": "33554432",
+            }
+        )
+
+        g = self._setup().grammar_config
+        self.assertEqual(g.num_workers, 9)
+        self.assertEqual(g.compile_timeout_ms, 3456)
+        self.assertEqual(g.compile_concurrency, 4)
+        self.assertEqual(g.compile_queue_size, 6)
+        self.assertEqual(g.compiler_cache_bytes, 33554432)
+
+    def test_non_positive_bounded_compile_args_are_rejected(self):
+        for flag in (
+            "--grammar_compile_timeout_ms",
+            "--grammar_compile_concurrency",
+            "--grammar_compile_queue_size",
+        ):
+            with self.subTest(flag=flag):
+                sys.argv = ["prog", flag, "0"]
+                with self.assertRaises(SystemExit):
+                    self._setup()
 
 
 if __name__ == "__main__":
