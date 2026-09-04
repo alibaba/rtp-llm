@@ -2330,14 +2330,23 @@ def admission_engine_kv_lack_mem_fast_reject(ctx: CaseContext):
     completes the request terminal — synchronous, typed, no park, no
     queue (the non-waitable complement of admission_slo_queue_deadline,
     where the SAME master KV surface parks because that squeeze is a
-    WAIT condition).  The rejected request leaves no residue (lease
-    acquisition rolled back, requestStates -> "rejected").
+    WAIT condition).  Dual surface (v1 run calibration): on dsv4 v1
+    the master propagates the engine's EnqueueBatch ack error through
+    the schedule RPC itself — the probe's FIRE is synchronously
+    rejected (8510, "EnqueueBatch rejected ... LACK_MEM ..."), which
+    is the same contract as the 602 ack-to-terminal stream shape:
+    typed LACK_MEM family, fast, no park, no residue.  The rejected
+    request leaves no residue (lease acquisition rolled back,
+    requestStates -> "rejected").
 
     Expected (contract): the probe terminates FAST (< 3s from fire,
-    no park residence) with the LACK_MEM family in its terminal error
+    no park residence) with the LACK_MEM family in its rejection
     ("lack_mem" + "insufficient kv cache" + the master's
-    "enqueuebatch rejected" wrapper — the actual ack-to-terminal
-    transparent path); the two occupants complete normally and their
+    "enqueuebatch rejected" wrapper) on EITHER surface — the v1
+    fire-level 8510 typed fast reject (the schedule RPC itself
+    failing, no stream handle) or the 602 ack-to-terminal stream
+    error (the transparent path); the two occupants complete normally
+    and their
     leases hand back to the LRU on completion (pool recovery —
     pure-LRU blocks count as available again); a fresh 8-block
     request on the recovered pool succeeds; the master inflight and
@@ -2408,8 +2417,16 @@ def admission_engine_kv_lack_mem_fast_reject(ctx: CaseContext):
                 f"(held_max={held_seen}/{LACKMEM_POOL_BLOCKS})"
             )
 
-        # Probe: 602 LACK_MEM synchronous fast reject (no park, no queue).
+        # Probe: typed LACK_MEM synchronous fast reject (no park, no
+        # queue) — dual surface.  The v1 run-observed shape: the master
+        # propagates the engine's EnqueueBatch ack error through the
+        # schedule RPC itself, so the FIRE is synchronously rejected
+        # (8510 "EnqueueBatch rejected ... LACK_MEM ...") — path A; the
+        # v2 shape carries the same rejection as a stream terminal
+        # error (602 ack-to-terminal) — path B.  Both surfaces pin the
+        # same contract: typed LACK_MEM family, fast, no residue.
         rid3 = ops.next_request_id(base)
+        t_probe = time.monotonic()
         fire_err3 = _fire_tracked(
             ops,
             rid3,
@@ -2418,19 +2435,41 @@ def admission_engine_kv_lack_mem_fast_reject(ctx: CaseContext):
             output_len=2,
             block_keys=_lease_keys(rid3),
         )
+        probe_fire_s = time.monotonic() - t_probe
         if fire_err3 is not None:
-            return False, f"probe fire failed: {fire_err3}"
-        _, r3_handle, r3_t0 = fired[-1]
-        r3_ended = r3_handle.wait_end(10.0)
-        r3_err = str(r3_handle.snap.error or "") if r3_ended else "no terminal"
-        reject_latency = time.monotonic() - r3_t0
-        err_low = r3_err.lower()
-        rejected = (
-            "lack_mem" in err_low
-            and "insufficient kv cache" in err_low
-            and "enqueuebatch rejected" in err_low
-            and reject_latency < 3.0
-        )
+            # Path A (v1 observed): the fire itself is the typed fast
+            # reject — rid3 was never admitted (no stream handle, no
+            # ledger entry), and the reject latency is the schedule
+            # RPC's own duration.  The typed chain: 8510 /
+            # "schedule failed" wrapping the engine's
+            # "EnqueueBatch rejected ... LACK_MEM: insufficient KV
+            # cache ..." text.
+            probe_surface = "fire_reject(8510)"
+            reject_latency = probe_fire_s
+            r3_err = str(fire_err3)
+            err_low = r3_err.lower()
+            rejected = (
+                "lack_mem" in err_low
+                and "insufficient kv cache" in err_low
+                and "enqueuebatch rejected" in err_low
+                and ("8510" in err_low or "schedule failed" in err_low)
+                and reject_latency < 3.0
+            )
+        else:
+            # Path B (v2 shape): the fire succeeds and the rejection
+            # rides the stream terminal (602 ack-to-terminal).
+            probe_surface = "stream_terminal"
+            _, r3_handle, r3_t0 = fired[-1]
+            r3_ended = r3_handle.wait_end(10.0)
+            r3_err = str(r3_handle.snap.error or "") if r3_ended else "no terminal"
+            reject_latency = time.monotonic() - r3_t0
+            err_low = r3_err.lower()
+            rejected = (
+                "lack_mem" in err_low
+                and "insufficient kv cache" in err_low
+                and "enqueuebatch rejected" in err_low
+                and reject_latency < 3.0
+            )
 
         # Occupants complete; their leases hand back to the LRU on
         # completion — the pool recovers (pure-LRU counts as available).
@@ -2496,6 +2535,7 @@ def admission_engine_kv_lack_mem_fast_reject(ctx: CaseContext):
         return passed, (
             f"pool_observed={pool_observed} "
             f"(held={held_seen}/{LACKMEM_POOL_BLOCKS}), "
+            f"probe_surface={probe_surface}, "
             f"probe_rejected={rejected} "
             f"(latency={reject_latency:.2f}s, err={r3_err[:80]}), "
             f"occupants_completed={occupant_ok}, "
