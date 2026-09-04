@@ -255,7 +255,7 @@ master 自身进程级故障与冷启动行为，以及双实例 HA 链路（冻
 | `atpm_error_code_family` | 三段独立构造 8400/8402/8403/8429/8511 触发条件 | 各码只在自身触发下出现、互不串扰（AT4 带类型终端可观测） |
 | `atpm_config_strict_reject` | 3 个非法 FLEXLB_CONFIG 原始 JSON 变体（removed 字段 / FIFO+defaultPriority / owned 无 engineCancellation） | master 启动失败 + 严格解析器报文族命中；rejected 后 current=None（AT1） |
 | `atpm_decode_reservation_priority` | decode 面三波：30<70 / 50==50 / kvBucket 偏好（D1 共享 env，kv_pressure 注入时序纪律） | [EV-2] 三波零驱逐、victim metric delta=0；[EV-1-FIXED] incoming 8511 park 终态（AT7 跨阶段一致性） |
-| `atpm_observability_integrity` | ENV-O1 复合编排（debug 日志 + FLEXLB_MONITOR_MODE=all） | 客户面形状 + `auto_tpm.request.count` 分桶 4/3/2/1 + latency success 桶 + `[priority-scheduler]` 日志 + pv.log admissionRejectReason 全在场（AT8/AT6） |
+| `atpm_observability_integrity` | ENV-O1 复合编排（debug 日志 + `flexlb_auto_tpm` 白名单） | 客户面形状 + `auto_tpm.request.count` 分桶 4/3/2/1 + latency success 桶 + `[priority-scheduler]` 日志 + pv.log admissionRejectReason 全在场（AT8/AT6） |
 | `atpm_preempt_prefill_queued_live` | BATCH 投递 + PREFILL_QUEUED-only 抢占 + maxWaiting=2：P50 占位引擎、双 P30 排队（MASTER_QUEUED）、P70 溢队触发换队 | 真实换队驱逐：victim 精确 8400 且引擎从未见过 rid（master 本地原子事务）+ 幸存者全完成 + `victim.count{stage=prefill_queued}`=1（PR10/PR5/PR6/P6） |
 | `atpm_preempt_decode_reserved_live` | BATCH + 生产基线 stage 组合 {PREFILL_QUEUED, DECODE_RESERVED} + 单 decode 4 块 KV 池：P90/P30 影子各 512 占池、P70 input=3500 溢出 hardAvailable | 真实影子预留驱逐：victim 8400 且非 8429（stage 判别性特征）+ `victim.kv_tokens{stage=decode_reserved}`≥428（影子覆盖 deficit）+ 幸存者完成 |
 | `atpm_preempt_cancel_not_found` | victim 已完成（decode 侧 clearUpstreamOwnership + prefill 侧 lifecycle completed）时抢占 Cancel 才到原 prefill（status_no_respond 冻结 master 视图撑过 3s 窗口） | incoming 精确 8431（cleanSingleNotFound abort 语义）、victim 正常完成未被取消、Cancel RPC delta≥1、解除注入后账目排空 + 恢复 |

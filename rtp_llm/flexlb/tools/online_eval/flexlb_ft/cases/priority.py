@@ -868,11 +868,14 @@ def _d1_spec(ctx: CaseContext) -> EnvSpec:
     victims themselves with NO_DECODE_WORKER(8403) and leaves nothing to
     evict.
 
-    FLEXLB_MONITOR_MODE=all (behaviour-neutral for scheduling): the
-    default critical-only metrics filter hides auto_tpm.*
-    (application.yml flexlb.monitor.mode); atpm_decode_reservation_priority
-    asserts the auto_tpm.victim.count priority tags, which need the
-    env-level switch.
+    Metric exposure (behaviour-neutral for scheduling): the default
+    critical-only whitelist hides auto_tpm.* (the single configurable
+    filter is flexlb.monitor.metric-whitelist — see _q3_spec; the legacy
+    FLEXLB_MONITOR_MODE switch is dead on this line);
+    atpm_decode_reservation_priority asserts the auto_tpm.victim.count
+    priority tags, so the shared family-prefix entry flexlb_auto_tpm
+    (_MONITOR_AUTO_TPM_ENV — a promName.startsWith match covering the
+    whole auto_tpm family) carries the exposure.
     """
     return _spec(
         ctx,
@@ -881,7 +884,7 @@ def _d1_spec(ctx: CaseContext) -> EnvSpec:
         config=_prio_config(
             preemption=_PREEMPT_DECODE, max_inflight=3, queue_timeout_ms=60_000
         ),
-        extra_env={"FLEXLB_MONITOR_MODE": "all"},
+        extra_env=_MONITOR_AUTO_TPM_ENV,
     )
 
 
@@ -909,7 +912,7 @@ def _f1_spec(ctx: CaseContext) -> EnvSpec:
 def _o1_spec(ctx: CaseContext) -> EnvSpec:
     """ENV-O1: observability env — Q2-shaped config with a SHORT queueTimeout
     (7s, so the choreography yields timeout-attribution samples), debug log
-    on, and FLEXLB_MONITOR_MODE=all.
+    on, and the auto_tpm family metric whitelist.
 
     [EV-1-FIXED] queueTimeout 7s (was 8s, flipped at intake3
     PendingPlacementCoordinator 6ad0315f10): under the pull model the
@@ -921,16 +924,17 @@ def _o1_spec(ctx: CaseContext) -> EnvSpec:
     dispatch and complete, the remaining seven expire 8511.
 
     Implementation-period corrections over the design's env sketch: the
-    critical-only metrics filter (the default) does not expose auto_tpm.*,
-    so FLEXLB_MONITOR_MODE=all is required; pv.log writes at INFO level by
-    default on the harness line (FLEXLB_PV_LOG is a load-client-line knob
-    with no consumer here)."""
+    default critical-only whitelist does not expose auto_tpm.*, so the
+    FLEXLB_MONITOR_METRIC_WHITELIST family entry is required (the legacy
+    FLEXLB_MONITOR_MODE switch is dead on this line — see _q3_spec);
+    pv.log writes at INFO level by default on the harness line
+    (FLEXLB_PV_LOG is a load-client-line knob with no consumer here)."""
     return _spec(
         ctx,
         "atpm_o1",
         config=_prio_config(preemption=_PREEMPT_PQ, queue_timeout_ms=7_000),
         master_debug_log=True,
-        extra_env={"FLEXLB_MONITOR_MODE": "all"},
+        extra_env=_MONITOR_AUTO_TPM_ENV,
     )
 
 
@@ -3615,8 +3619,8 @@ def atpm_decode_reservation_priority(ctx: CaseContext):
     side — that pair is the cross-stage consistency evidence).
 
     ENV-D1 (shared fingerprint with atpm_preempt_decode_engine_owned;
-    FLEXLB_MONITOR_MODE=all so auto_tpm.victim.count is exposed — the
-    default critical-only filter hides auto_tpm.*).  Every wave follows
+    the auto_tpm family whitelist so auto_tpm.victim.count is exposed —
+    the default critical-only filter hides auto_tpm.*).  Every wave follows
     the corrected injection order (see the D1 spec docstring): victims
     route FIRST under normal KV, kv_pressure goes in only once every
     victim is observable at its target stage, then the incoming fires.
@@ -3912,11 +3916,12 @@ def atpm_observability_integrity(ctx: CaseContext):
     wave's third release slot lands at t=9s, which raced the 8s deadline
     of the 4th submitter (70a); 7s puts every non-dispatched deadline
     strictly before the third slot, making the client shape
-    deterministic) + master debug log + FLEXLB_MONITOR_MODE=all.
+    deterministic) + master debug log + the auto_tpm family whitelist.
     Implementation-period corrections over the design's env sketch: the
-    DEFAULT critical-only metrics filter hides auto_tpm.*
-    (application.yml flexlb.monitor.mode), so the env-level switch is
-    required; FLEXLB_PV_LOG is a load-client-line knob with no consumer
+    DEFAULT critical-only whitelist hides auto_tpm.* (the legacy
+    flexlb.monitor.mode switch is dead on this line), so the
+    FLEXLB_MONITOR_METRIC_WHITELIST entry is required; FLEXLB_PV_LOG is
+    a load-client-line knob with no consumer
     on the harness line — the pvLogger writes at INFO by default, so
     the pv.log plane needs no extra knob.  The master_env + debug-log
     differences give O1 its own fingerprint (exclusive env — the metric
