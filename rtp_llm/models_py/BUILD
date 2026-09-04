@@ -13,11 +13,13 @@ deep = ["deep_gemm", "deep_ep"]
 flashmla = ["fast-hadamard-transform", "flash-mla", "tilelang"]
 rtp_kernel = ["rtp-kernel"]
 flashattn = ["flash_attn","flash-attn-3"]
+linear_attention = ["cuda-linear-attention", "flash-linear-attention"]
 requirement(flashinfer)
 requirement(deep)
 requirement(flashmla)
 requirement(rtp_kernel)
 requirement(flashattn)
+requirement(linear_attention)
 
 
 filegroup(
@@ -80,6 +82,10 @@ py_library(
         "@//:using_cuda13_arm": [],
         "@//:using_cuda12_9_x86": flashattn,
         "@//:using_cuda12_arm": flashattn,
+        "//conditions:default": [],
+    }) + select({
+        # cuLA fused KDA prefill and its patched FLA runtime.
+        "@//:using_cuda13_x86": linear_attention,
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

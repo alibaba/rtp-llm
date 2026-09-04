@@ -49,10 +49,13 @@ from rtp_llm.models_py.triton_kernels.fla.block import (
     store_ssm_state_to_block_map,
 )
 from rtp_llm.models_py.triton_kernels.kimi_kda import (
+    KDARecurrentCheckpointMetadata,
     chunk_kda,
     fused_kda_gate,
     fused_recurrent_kda,
     get_kda_chunk_size,
+    prepare_kda_recurrent_checkpoint_metadata,
+    store_kda_recurrent_checkpoints,
 )
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
@@ -72,6 +75,8 @@ from rtp_llm.ops.compute_ops import (
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.util import to_torch_dtype
 
+_CULA_LOGGED_DEVICES: set[int] = set()
+
 
 class KimiLinearMetadata(object):
     def __init__(
@@ -83,6 +88,10 @@ class KimiLinearMetadata(object):
         self.prefill_conv1d_meta = prefill_conv1d_meta
         self.is_target_verify = is_target_verify
         self.fuse_kda_state_recurrence = fuse_kda_state_recurrence
+        self.kda_checkpoint_meta: Optional[KDARecurrentCheckpointMetadata] = None
+        self.kda_checkpoint_states: Optional[torch.Tensor] = None
+        self.kda_cu_seqlens_host: Optional[torch.Tensor] = None
+        self.kda_checkpoint_page_size = 0
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
         return self.prefill_conv1d_meta
@@ -196,6 +205,124 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             linear_attn_config, parallelism_config, weights, gate_lower_bound
         )
 
+    @staticmethod
+    def _backend() -> str:
+        backend = os.environ.get("GLM5_KDA_PREFILL_BACKEND", "cula").lower()
+        if backend not in ("cula", "triton"):
+            raise ValueError(
+                "GLM5_KDA_PREFILL_BACKEND must be 'cula' or 'triton', "
+                f"got {backend!r}"
+            )
+        return backend
+
+    @staticmethod
+    def _host_lengths(
+        attn_inputs: PyAttentionInputs,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        sequence_count = int(attn_inputs.input_lengths.numel())
+        cu_seqlens_host = getattr(attn_inputs, "cu_seqlens_host", None)
+        if cu_seqlens_host is None or cu_seqlens_host.numel() < sequence_count + 1:
+            input_lengths_host = attn_inputs.input_lengths.cpu().to(dtype=torch.int32)
+            cu_seqlens_host = torch.cat(
+                (
+                    torch.zeros(1, dtype=torch.int32),
+                    torch.cumsum(input_lengths_host, dim=0, dtype=torch.int32),
+                )
+            ).contiguous()
+        else:
+            cu_seqlens_host = (
+                cu_seqlens_host[: sequence_count + 1].to(dtype=torch.int32).contiguous()
+            )
+            input_lengths_host = torch.diff(cu_seqlens_host)
+        prefix_lengths_host = (
+            attn_inputs.prefix_lengths.cpu().to(dtype=torch.int32).contiguous()
+        )
+        return cu_seqlens_host, input_lengths_host, prefix_lengths_host
+
+    def _cula_checkpoint_prefill(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        raw_gate: torch.Tensor,
+        raw_beta: torch.Tensor,
+        initial_states: torch.Tensor,
+        *,
+        cu_seqlens: torch.Tensor,
+        cu_seqlens_host: torch.Tensor,
+        checkpoint_interval: int,
+        checkpoint_states: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run cuLA once and publish page-aligned recurrent checkpoints."""
+
+        if not query.is_cuda:
+            raise RuntimeError("GLM5 cuLA KDA prefill requires CUDA")
+        if checkpoint_interval <= 0:
+            raise ValueError("cuLA KDA checkpoint interval must be positive")
+        if initial_states.dtype != torch.float32 or not initial_states.is_contiguous():
+            raise ValueError("cuLA KDA initial state must be contiguous FP32")
+        if (
+            checkpoint_states.dtype != torch.float32
+            or not checkpoint_states.is_contiguous()
+        ):
+            raise ValueError("cuLA KDA checkpoints must be contiguous FP32")
+        try:
+            import cula
+            from cula.kda import chunk_kda as cula_chunk_kda
+        except Exception as error:
+            raise RuntimeError(
+                "GLM5 KDA prefill requires cuda-linear-attention; "
+                f"import failed with {type(error).__name__}: {error}"
+            ) from error
+        if self.gate_lower_bound is None:
+            raise RuntimeError("cuLA requires a finite KDA gate lower bound")
+
+        device_index = query.device.index if query.device.index is not None else 0
+        if device_index not in _CULA_LOGGED_DEVICES:
+            logging.info(
+                "[GLM5 KDA cuLA] device=%s package=%s version=%s",
+                query.device,
+                getattr(cula, "__file__", "<unknown>"),
+                getattr(cula, "__version__", "<unknown>"),
+            )
+            _CULA_LOGGED_DEVICES.add(device_index)
+
+        packed_cu_seqlens = (
+            None if int(cu_seqlens.numel()) == 2 else cu_seqlens.contiguous()
+        )
+        with torch.inference_mode():
+            output, final_state, published_checkpoints = cula_chunk_kda(
+                query.contiguous(),
+                key.contiguous(),
+                value.contiguous(),
+                raw_gate.to(dtype=query.dtype).contiguous(),
+                raw_beta.to(dtype=query.dtype).contiguous(),
+                scale=self.head_k_dim**-0.5,
+                initial_state=initial_states,
+                output_final_state=False,
+                use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=True,
+                use_beta_sigmoid_in_kernel=True,
+                cu_seqlens=packed_cu_seqlens,
+                cu_seqlens_cpu=(None if packed_cu_seqlens is None else cu_seqlens_host),
+                safe_gate=True,
+                lower_bound=float(self.gate_lower_bound),
+                disable_recompute=False,
+                use_intracard_cp=False,
+                A_log=self.alog.float().contiguous(),
+                dt_bias=self.dt_bias.float().contiguous(),
+                checkpoint_interval=checkpoint_interval,
+                checkpoint_states=checkpoint_states,
+            )
+        if (
+            published_checkpoints is None
+            or published_checkpoints.data_ptr() != checkpoint_states.data_ptr()
+        ):
+            raise RuntimeError("cuLA did not publish into the checkpoint buffer")
+        if final_state is not None:
+            raise RuntimeError("cuLA unexpectedly returned a final state")
+        return output.to(dtype=query.dtype)
+
     def _conv1d(
         self,
         mixed_qkv: torch.Tensor,
@@ -237,9 +364,6 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
         g = forget_gate.view(
             1, forget_gate.shape[0], self.local_num_v_heads, self.head_k_dim
         ).contiguous()
-        # beta: [token, H] -> apply sigmoid in float32 -> [1, token, H]
-        beta_reshaped = beta.float().sigmoid().unsqueeze(0)
-
         ssm_states = (
             self._get_ssm_states(kv_cache_tensor)
             if kv_cache_tensor is not None
@@ -284,6 +408,68 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             1, value.shape[0], self.local_num_v_heads, self.head_v_dim
         ).contiguous()
 
+        if self._backend() == "cula":
+            if initial_states is None:
+                initial_states = torch.zeros(
+                    context_batch_size,
+                    self.local_num_v_heads,
+                    self.head_k_dim,
+                    self.head_v_dim,
+                    device=mixed_qkv.device,
+                    dtype=torch.float32,
+                )
+            if (
+                attn_meta.kda_checkpoint_meta is None
+                or attn_meta.kda_checkpoint_page_size != seq_size_per_block
+            ):
+                cu_seqlens_host, input_lengths_host, prefix_lengths_host = (
+                    self._host_lengths(attn_inputs)
+                )
+                attn_meta.kda_checkpoint_meta = (
+                    prepare_kda_recurrent_checkpoint_metadata(
+                        input_lengths_host,
+                        prefix_lengths_host,
+                        seq_size_per_block,
+                        mixed_qkv.device,
+                    )
+                )
+                attn_meta.kda_checkpoint_states = torch.empty(
+                    1,
+                    attn_meta.kda_checkpoint_meta.total_checkpoints,
+                    self.local_num_v_heads,
+                    self.head_k_dim,
+                    self.head_v_dim,
+                    device=mixed_qkv.device,
+                    dtype=torch.float32,
+                )
+                attn_meta.kda_cu_seqlens_host = cu_seqlens_host
+                attn_meta.kda_checkpoint_page_size = seq_size_per_block
+            assert attn_meta.kda_checkpoint_states is not None
+            assert attn_meta.kda_cu_seqlens_host is not None
+            attn_out = self._cula_checkpoint_prefill(
+                query,
+                key,
+                value,
+                g,
+                beta.unsqueeze(0),
+                initial_states.contiguous(),
+                cu_seqlens=cu_seqlens_without_padding,
+                cu_seqlens_host=attn_meta.kda_cu_seqlens_host,
+                checkpoint_interval=seq_size_per_block,
+                checkpoint_states=attn_meta.kda_checkpoint_states,
+            )
+            if ssm_states is not None:
+                store_kda_recurrent_checkpoints(
+                    attn_meta.kda_checkpoint_states,
+                    attn_meta.kda_checkpoint_meta,
+                    attn_inputs.kv_cache_kernel_block_id_device,
+                    ssm_states,
+                )
+            return attn_out.squeeze(0)
+
+        # Legacy Triton fallback keeps KDA_CHUNK_SIZE available for comparison.
+        beta_reshaped = beta.float().sigmoid().unsqueeze(0)
+
         q_len = query.shape[1]
         kda_chunk_size = get_kda_chunk_size()
         cache_alignment = seq_size_per_block
@@ -297,7 +483,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
 
         # A compact-cache hit leaves at most one TP-wide alignment unit. Fuse
         # its 64-token chunk-state recurrence into one launch.
-        fuse_kda_state_recurrence = fuse_kda_state_recurrence and q_len <= (
+        fuse_kda_state_recurrence = attn_meta.fuse_kda_state_recurrence and q_len <= (
             seq_size_per_block * int(self.parallelism_config.get_attn_tp_size())
         )
         attn_out, final_state, h_from_chunk = chunk_kda(
@@ -376,7 +562,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             kv_cache_tensor,
             seq_size_per_block,
             attn_inputs,
-            attn_meta.fuse_kda_state_recurrence,
+            attn_meta,
         )
         if kv_cache is not None:
             kv_cache.cache_store_segment_sizes = list(self.cache_store_segment_sizes)

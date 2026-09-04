@@ -1,5 +1,8 @@
 import os
+import sys
 import unittest
+from pathlib import Path
+from unittest import mock
 
 import torch
 import torch.nn.functional as F
@@ -19,6 +22,9 @@ from rtp_llm.models_py.triton_kernels.kimi_kda import (
     chunk_kda,
     fused_kda_gate,
     fused_recurrent_kda,
+    get_kda_chunk_size,
+    prepare_kda_recurrent_checkpoint_metadata,
+    store_kda_recurrent_checkpoints,
 )
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 
@@ -51,6 +57,204 @@ class Glm5KdaOpsTest(unittest.TestCase):
             expected.float().flatten(),
             dim=0,
         ).item()
+
+    def test_kda_chunk_size_env(self):
+        with mock.patch.dict(os.environ, {"KDA_CHUNK_SIZE": "256"}):
+            self.assertEqual(get_kda_chunk_size(), 256)
+        with mock.patch.dict(os.environ, {"KDA_CHUNK_SIZE": "63"}):
+            with self.assertRaisesRegex(ValueError, "64, 128, 256"):
+                get_kda_chunk_size()
+
+    @staticmethod
+    def _cula_chunk_kda():
+        for root in tuple(sys.path):
+            cutlass_packages = Path(root) / "nvidia_cutlass_dsl" / "python_packages"
+            if (cutlass_packages / "cutlass" / "__init__.py").is_file():
+                sys.path.insert(0, str(cutlass_packages))
+                break
+        from cula.kda import chunk_kda
+
+        return chunk_kda
+
+    @torch.inference_mode()
+    def test_cula_checkpoint_api_is_stable_without_final_state(self):
+        cula_chunk_kda = self._cula_chunk_kda()
+        lengths = [70, 130]
+        interval = 64
+        token_count = sum(lengths)
+        heads = 2
+        state_dim = self.HEAD_DIM
+        shape = (1, token_count, heads, state_dim)
+        q = torch.randn(shape, dtype=torch.bfloat16, device="cuda")
+        k = torch.randn_like(q)
+        v = torch.randn_like(q)
+        gate = torch.randn_like(q)
+        beta = torch.randn(shape[:-1], dtype=torch.bfloat16, device="cuda")
+        initial = torch.randn(
+            len(lengths),
+            heads,
+            state_dim,
+            state_dim,
+            dtype=torch.float32,
+            device="cuda",
+        )
+        cu_host = torch.tensor([0, lengths[0], token_count], dtype=torch.int32)
+        cu_device = cu_host.cuda()
+        checkpoint_count = sum(
+            (length + interval - 1) // interval for length in lengths
+        )
+        alog = torch.randn(heads, dtype=torch.float32, device="cuda")
+        dt_bias = torch.randn(heads * state_dim, dtype=torch.float32, device="cuda")
+
+        def run(output_final_state):
+            checkpoints = torch.empty(
+                1,
+                checkpoint_count,
+                heads,
+                state_dim,
+                state_dim,
+                dtype=torch.float32,
+                device="cuda",
+            )
+            output, final_state, published = cula_chunk_kda(
+                q,
+                k,
+                v,
+                gate,
+                beta,
+                scale=state_dim**-0.5,
+                initial_state=initial,
+                output_final_state=output_final_state,
+                use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=True,
+                use_beta_sigmoid_in_kernel=True,
+                cu_seqlens=cu_device,
+                cu_seqlens_cpu=cu_host,
+                safe_gate=True,
+                lower_bound=-5.0,
+                disable_recompute=False,
+                use_intracard_cp=False,
+                A_log=alog,
+                dt_bias=dt_bias,
+                checkpoint_interval=interval,
+                checkpoint_states=checkpoints,
+            )
+            self.assertEqual(published.data_ptr(), checkpoints.data_ptr())
+            return output, final_state, checkpoints
+
+        output, no_final_state, checkpoints = run(False)
+        expected_output, final_state, expected_checkpoints = run(True)
+        self.assertIsNone(no_final_state)
+        self.assertIsNotNone(final_state)
+        torch.testing.assert_close(output, expected_output, rtol=0, atol=0)
+        torch.testing.assert_close(checkpoints, expected_checkpoints, rtol=0, atol=0)
+        torch.testing.assert_close(final_state[0], checkpoints[0, 1], rtol=0, atol=0)
+        torch.testing.assert_close(final_state[1], checkpoints[0, 4], rtol=0, atol=0)
+
+    def test_cula_checkpoint_store_skips_compact_null_pages(self):
+        metadata = prepare_kda_recurrent_checkpoint_metadata(
+            torch.tensor([256], dtype=torch.int32),
+            torch.tensor([0], dtype=torch.int32),
+            128,
+            torch.device("cuda"),
+        )
+        checkpoints = torch.stack(
+            [
+                torch.full((1, 4, 4), 11.0, dtype=torch.float32, device="cuda"),
+                torch.full((1, 4, 4), 22.0, dtype=torch.float32, device="cuda"),
+            ]
+        )
+        cache = torch.zeros(5, 1, 4, 4, dtype=torch.float32, device="cuda")
+        store_kda_recurrent_checkpoints(
+            checkpoints,
+            metadata,
+            torch.tensor([[0, 4]], dtype=torch.int32, device="cuda"),
+            cache,
+        )
+        torch.cuda.synchronize()
+        torch.testing.assert_close(cache[4], checkpoints[1], rtol=0, atol=0)
+        torch.testing.assert_close(
+            cache[:4], torch.zeros_like(cache[:4]), rtol=0, atol=0
+        )
+
+    def test_chunk256_matches_chunk64_for_packed_varlen(self):
+        lengths = [73, 227]
+        token_count = sum(lengths)
+        shape = (1, token_count, self.HEADS, self.HEAD_DIM)
+        q = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+        k = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+        v = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+        g = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+        beta = torch.randn(shape[:-1], device="cuda", dtype=torch.bfloat16).sigmoid()
+        cu_seqlens = torch.tensor(
+            [0, lengths[0], token_count], device="cuda", dtype=torch.int32
+        )
+        initial_state = torch.zeros(
+            len(lengths),
+            self.HEADS,
+            self.HEAD_DIM,
+            self.HEAD_DIM,
+            device="cuda",
+            dtype=torch.float32,
+        )
+        common = {
+            "initial_state": initial_state,
+            "output_final_state": True,
+            "cu_seqlens": cu_seqlens,
+            "use_qk_l2norm_in_kernel": True,
+            "use_gate_in_kernel": True,
+            "A_log": self.a_log,
+            "dt_bias": self.dt_bias.flatten(),
+            "safe_gate": True,
+            "lower_bound": -5.0,
+        }
+
+        output64, state64 = chunk_kda(q, k, v, g, beta, chunk_size=64, **common)
+        output256, state256 = chunk_kda(q, k, v, g, beta, chunk_size=256, **common)
+
+        self.assertGreater(self._cosine(output256, output64), 0.999)
+        self.assertGreater(self._cosine(state256, state64), 0.999)
+
+    def test_chunk256_store_writes_first_completed_chunk(self):
+        chunk_states = torch.stack(
+            [
+                torch.full(
+                    (self.HEADS, self.HEAD_DIM, self.HEAD_DIM),
+                    value,
+                    device="cuda",
+                    dtype=torch.float32,
+                )
+                for value in (10.0, 20.0, 30.0)
+            ]
+        ).unsqueeze(0)
+        final_state = torch.full(
+            (1, self.HEADS, self.HEAD_DIM, self.HEAD_DIM),
+            99.0,
+            device="cuda",
+            dtype=torch.float32,
+        )
+        cache = torch.zeros(
+            6,
+            self.HEADS,
+            self.HEAD_DIM,
+            self.HEAD_DIM,
+            device="cuda",
+            dtype=torch.float32,
+        )
+        store_ssm_state_to_block_map(
+            chunk_states,
+            final_state,
+            torch.zeros(1, device="cuda", dtype=torch.int32),
+            torch.tensor([0, 600], device="cuda", dtype=torch.int32),
+            torch.tensor([[1, 2, 3, 4, 5]], device="cuda", dtype=torch.int32),
+            cache,
+            seq_size_per_block=128,
+            chunk_size=256,
+        )
+
+        torch.testing.assert_close(cache[2], chunk_states[0, 1])
+        torch.testing.assert_close(cache[4], chunk_states[0, 2])
+        torch.testing.assert_close(cache[5], final_state[0])
 
     def _reference(self, lower_bound=None):
         q = F.normalize(self.q.float(), dim=-1).mul_(self.HEAD_DIM**-0.5)
@@ -96,9 +300,7 @@ class Glm5KdaOpsTest(unittest.TestCase):
 
     def test_packed_varlen_conv_matches_serial_sequences(self):
         lengths = [5, 9, 3]
-        cu_seqlens = torch.tensor(
-            [0, 5, 14, 17], device="cuda", dtype=torch.int32
-        )
+        cu_seqlens = torch.tensor([0, 5, 14, 17], device="cuda", dtype=torch.int32)
         channels = 64
         inputs = torch.randn(
             sum(lengths), channels, device="cuda", dtype=torch.bfloat16
@@ -136,12 +338,8 @@ class Glm5KdaOpsTest(unittest.TestCase):
 
     def test_mixed_prefix_shared_block_conv_matches_serial_sequences(self):
         lengths = [5, 7, 7]
-        cu_seqlens = torch.tensor(
-            [0, 5, 12, 19], device="cuda", dtype=torch.int32
-        )
-        prefix_lengths = torch.tensor(
-            [0, 64, 64], device="cuda", dtype=torch.int32
-        )
+        cu_seqlens = torch.tensor([0, 5, 12, 19], device="cuda", dtype=torch.int32)
+        prefix_lengths = torch.tensor([0, 64, 64], device="cuda", dtype=torch.int32)
         block_map = torch.tensor(
             [[1, -1], [2, 3], [2, 4]], device="cuda", dtype=torch.int32
         )
@@ -187,9 +385,7 @@ class Glm5KdaOpsTest(unittest.TestCase):
             serial_caches.append(cache)
             offset += length
 
-        torch.testing.assert_close(
-            packed, torch.cat(serial_outputs), rtol=0, atol=0
-        )
+        torch.testing.assert_close(packed, torch.cat(serial_outputs), rtol=0, atol=0)
         torch.testing.assert_close(packed_cache[1], serial_caches[0][1])
         torch.testing.assert_close(packed_cache[3], serial_caches[1][3])
         torch.testing.assert_close(packed_cache[4], serial_caches[2][4])
@@ -203,12 +399,8 @@ class Glm5KdaOpsTest(unittest.TestCase):
         k = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
         v = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
         g = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
-        beta = torch.randn(
-            shape[:-1], device="cuda", dtype=torch.bfloat16
-        ).sigmoid()
-        cu_seqlens = torch.tensor(
-            [0, 5, 14, 17], device="cuda", dtype=torch.int32
-        )
+        beta = torch.randn(shape[:-1], device="cuda", dtype=torch.bfloat16).sigmoid()
+        cu_seqlens = torch.tensor([0, 5, 14, 17], device="cuda", dtype=torch.int32)
         initial_state = torch.zeros(
             len(lengths),
             self.HEADS,
@@ -264,12 +456,8 @@ class Glm5KdaOpsTest(unittest.TestCase):
     def test_mixed_prefix_shared_block_kda_cache_matches_serial_sequences(self):
         lengths = [5, 7, 7]
         token_count = sum(lengths)
-        cu_seqlens = torch.tensor(
-            [0, 5, 12, 19], device="cuda", dtype=torch.int32
-        )
-        prefix_lengths = torch.tensor(
-            [0, 64, 64], device="cuda", dtype=torch.int32
-        )
+        cu_seqlens = torch.tensor([0, 5, 12, 19], device="cuda", dtype=torch.int32)
+        prefix_lengths = torch.tensor([0, 64, 64], device="cuda", dtype=torch.int32)
         block_map = torch.tensor(
             [[1, -1], [2, 3], [2, 4]], device="cuda", dtype=torch.int32
         )
@@ -278,9 +466,7 @@ class Glm5KdaOpsTest(unittest.TestCase):
         k = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
         v = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
         g = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
-        beta = torch.randn(
-            shape[:-1], device="cuda", dtype=torch.bfloat16
-        ).sigmoid()
+        beta = torch.randn(shape[:-1], device="cuda", dtype=torch.bfloat16).sigmoid()
         original_cache = torch.randn(
             5,
             self.HEADS,
@@ -366,9 +552,7 @@ class Glm5KdaOpsTest(unittest.TestCase):
                 **common,
             )
             cache = original_cache.clone()
-            local_cu = torch.tensor(
-                [0, length], device="cuda", dtype=torch.int32
-            )
+            local_cu = torch.tensor([0, length], device="cuda", dtype=torch.int32)
             store_ssm_state_to_block_map(
                 intermediate.float(),
                 final.float(),
@@ -793,6 +977,89 @@ class Glm5KdaOpsTest(unittest.TestCase):
 
         self.assertGreater(self._cosine(actual, expected), 0.999)
         self.assertGreater(self._cosine(actual_state, expected_state), 0.999)
+
+    def test_reuse_tail_fused_state_matches_cublas(self):
+        """The one-launch chunk-state path must preserve CUBLAS numerics."""
+        initial_state = torch.randn(
+            1,
+            self.HEADS,
+            self.HEAD_DIM,
+            self.HEAD_DIM,
+            device="cuda",
+            dtype=torch.float32,
+        ).mul_(0.01)
+        common = {
+            "use_qk_l2norm_in_kernel": True,
+            "use_gate_in_kernel": True,
+            "A_log": self.a_log,
+            "dt_bias": self.dt_bias.flatten(),
+            "lower_bound": -5.0,
+        }
+
+        for token_count in (1, 6, 73, 128, 585):
+            with self.subTest(token_count=token_count):
+                shape = (1, token_count, self.HEADS, self.HEAD_DIM)
+                q = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+                k = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+                v = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+                g = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+                beta = (
+                    torch.randn(shape[:-1], device="cuda", dtype=torch.bfloat16)
+                    .float()
+                    .sigmoid()
+                )
+                cu_seqlens = torch.tensor(
+                    [0, token_count], device="cuda", dtype=torch.int32
+                )
+
+                chunk_output, chunk_state, chunk_h = chunk_kda(
+                    q,
+                    k,
+                    v,
+                    g,
+                    beta,
+                    initial_state=initial_state.clone(),
+                    output_final_state=True,
+                    return_intermediate_states=True,
+                    cu_seqlens=cu_seqlens,
+                    safe_gate=True,
+                    **common,
+                )
+                fused_output, fused_state, fused_h = chunk_kda(
+                    q,
+                    k,
+                    v,
+                    g,
+                    beta,
+                    initial_state=initial_state.clone(),
+                    output_final_state=True,
+                    return_intermediate_states=True,
+                    cu_seqlens=cu_seqlens,
+                    safe_gate=True,
+                    fuse_state_recurrence=True,
+                    **common,
+                )
+
+                output_cosine = self._cosine(fused_output, chunk_output)
+                state_cosine = self._cosine(fused_state, chunk_state)
+                h_cosine = self._cosine(fused_h, chunk_h)
+                print(
+                    "reuse-tail fused-state/cublas",
+                    token_count,
+                    "output_cosine=",
+                    output_cosine,
+                    "state_cosine=",
+                    state_cosine,
+                    "h_cosine=",
+                    h_cosine,
+                    "output_max_abs=",
+                    (fused_output.float() - chunk_output.float()).abs().max().item(),
+                    "state_max_abs=",
+                    (fused_state - chunk_state).abs().max().item(),
+                )
+                self.assertGreater(output_cosine, 0.999)
+                self.assertGreater(state_cosine, 0.999)
+                self.assertGreater(h_cosine, 0.999)
 
     def _reference_prefix_state(self):
         q, k, v, g, beta = self.q, self.k, self.v, self.g, self.beta

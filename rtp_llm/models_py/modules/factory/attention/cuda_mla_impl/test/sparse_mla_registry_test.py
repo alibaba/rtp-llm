@@ -173,7 +173,7 @@ class SparseMlaRegistryTest(unittest.TestCase):
             tilelang_kernels, "sparse_attn", return_value=expected.unsqueeze(0)
         ) as sparse_attn, patch(
             "rtp_llm.models_py.modules.factory.attention.cuda_mla_impl."
-            "flashmla_sparse_impl.all_gather"
+            "flashmla_sparse_cp_impl.all_gather"
         ) as gather:
             actual = op._forward_sparse_prefill(q, kv, indices)
 

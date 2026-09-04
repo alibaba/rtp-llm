@@ -446,7 +446,7 @@ TEST_F(LinearKVCacheGroupTest, FixedCapKeepsNewestReuseSnapshotsAndRequiredTail)
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());
 
-    auto spec = makeLinearSpec(/*seq_size_per_block=*/4);
+    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
     LinearKVCacheGroup group(
         /*layer_ids=*/{},
         spec,
@@ -471,6 +471,77 @@ TEST_F(LinearKVCacheGroupTest, FixedCapKeepsNewestReuseSnapshotsAndRequiredTail)
     ASSERT_EQ(blocks.blocksNum(), 10u);
     for (int pos = 0; pos < 10; ++pos) {
         const bool expected = pos == 5 || pos == 7 || pos == 8 || pos == 9;
+        EXPECT_EQ(!isNullBlockIdx(blocks.blocks()[pos]), expected) << "pos=" << pos;
+    }
+}
+
+TEST_F(LinearKVCacheGroupTest, LegacyModePreservesStepSnapshotsAndCapacityAccounting) {
+    auto block_pool = createBlockPool();
+    ASSERT_TRUE(block_pool->init());
+
+    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    group.setRequestCacheMode(false);
+    ASSERT_TRUE(group.init());
+
+    const auto need =
+        group.getNeedBlocks(/*common_seq_len=*/8, /*seq_len=*/12, /*reserve_step=*/2, /*reuse_blocks_len=*/0, true);
+    EXPECT_EQ(need.common_blocks, 2);
+    EXPECT_EQ(need.extra_blocks, 2);
+
+    BlockIds blocks;
+    ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/24, /*enable_reuse_cache=*/true));
+    group.removeSkippedBlocks(blocks, /*enable_reuse_cache=*/true);
+    ASSERT_EQ(blocks.blocksNum(), 6u);
+    for (int pos = 0; pos < 6; ++pos) {
+        const bool expected = pos == 1 || pos == 3 || pos == 4 || pos == 5;
+        EXPECT_EQ(!isNullBlockIdx(blocks.blocks()[pos]), expected) << "pos=" << pos;
+    }
+}
+
+TEST_F(LinearKVCacheGroupTest, BlockRolloverReclaimsOldStateBeforeAllocatingNewTail) {
+    auto block_pool = createBlockPool();
+    ASSERT_TRUE(block_pool->init());
+
+    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0);
+    group.setRequestCacheMode(true);
+    ASSERT_TRUE(group.init());
+
+    BlockIds blocks;
+    ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/8));
+    EXPECT_EQ(block_pool->freeBlocksNum(), 7u);
+
+    ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/12));
+    ASSERT_EQ(blocks.blocksNum(), 3u);
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[0]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[1]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[2]));
+    EXPECT_EQ(block_pool->freeBlocksNum(), 7u);
+}
+
+TEST_F(LinearKVCacheGroupTest, RequestCacheKeepsOnlyLatestAlignedCandidateAndTwoBlockTail) {
+    auto block_pool = createBlockPool();
+    ASSERT_TRUE(block_pool->init());
+
+    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0);
+    group.setRequestCacheMode(true);
+    group.setRequestCacheAlignmentBlocks(2);
+    ASSERT_TRUE(group.init());
+
+    BlockIds blocks;
+    ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/14, /*enable_reuse_cache=*/true));
+    ASSERT_EQ(blocks.blocksNum(), 4u);
+    for (int pos = 0; pos < 4; ++pos) {
+        const bool expected = pos == 1 || pos == 2 || pos == 3;
+        EXPECT_EQ(!isNullBlockIdx(blocks.blocks()[pos]), expected) << "pos=" << pos;
+    }
+
+    ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/22, /*enable_reuse_cache=*/true));
+    ASSERT_EQ(blocks.blocksNum(), 6u);
+    for (int pos = 0; pos < 6; ++pos) {
+        const bool expected = pos == 3 || pos == 4 || pos == 5;
         EXPECT_EQ(!isNullBlockIdx(blocks.blocks()[pos]), expected) << "pos=" << pos;
     }
 }
