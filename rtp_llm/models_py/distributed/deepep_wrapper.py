@@ -224,19 +224,20 @@ class DeepepWrapperConfig:
         ll_num_max_token_per_rank = (ll_num_max_token + tp_size - 1) // tp_size
         # deepgemm masked with max_m < 64 get incorrect result, related: https://github.com/deepseek-ai/DeepGEMM/issues/268
         is_quantized = quant_config is not None and quant_config.is_quanted()
-        is_block_quantized = (
-            quant_config is not None and quant_config.get_method() == "FP8_PER_BLOCK"
+        quant_method = (
+            quant_config.get_moe_runtime_method_key()
+            if quant_config is not None
+            else None
         )
-        is_per_act_token = quant_config is not None and quant_config.get_method() in (
+        is_block_quantized = quant_method == "FP8_PER_BLOCK"
+        is_per_act_token = quant_method in (
             "FP8_PER_TENSOR_COMPRESSED",
             "FP8_DYNAMIC_PER_TENSOR",
             "W4A8_INT4_PER_CHANNEL",
             "W4A8_INT4_PER_CHANNEL_COMPRESSED",
             "W8A8_INT8_PER_CHANNEL_COMPRESSED",
         )
-        is_per_group_fp4 = (
-            quant_config is not None and quant_config.get_method() == "modelopt_fp4"
-        )
+        is_per_group_fp4 = quant_method == "modelopt_fp4"
         if not is_quantized or is_block_quantized or is_per_group_fp4:
             matched_tokens = [128] if allow_mnnvl() else [64, 128]
         elif is_per_act_token:

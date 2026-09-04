@@ -184,6 +184,22 @@ class QuantizationConfig(ABC):
         """Return the newloader quant-method key, or empty when unsupported."""
         return ""
 
+    def get_moe_runtime_method_key(self) -> str:
+        """Return the canonical fused-MoE execution method.
+
+        ``get_method()`` describes the checkpoint representation, while
+        ``get_runtime_method_key()`` selects the NewLoader quantization
+        implementation. Fused-MoE strategy selection and DeepEP planning must
+        consume one execution-level name so that they cannot interpret the
+        same checkpoint differently.
+        """
+        runtime_method = self.get_runtime_method_key()
+        if runtime_method in ("fp8", "fp8_online"):
+            # Both prequantized and load-time-quantized per-tensor FP8 weights
+            # use dynamic per-token activation quantization at execution time.
+            return "FP8_DYNAMIC_PER_TENSOR"
+        return self.get_method()
+
     def get_new_loader_moe_unsupported_reason(self) -> Optional[str]:
         """Return why this quantization cannot be used by NewLoader MoE."""
         return None
