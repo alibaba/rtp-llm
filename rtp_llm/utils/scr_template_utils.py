@@ -1,9 +1,9 @@
 """Small, fail-open helpers for integrating RTP-LLM with Epsilon/sCR.
 
-The Epsilon API is deliberately kept at the rank boundary.  A rank registers
-the CUDA-backed KV-cache tensors, then enters Epsilon's
-steady-point barrier.  ``scr_controller`` remains an out-of-process control
-client; this module does not invoke it from every rank.
+The Epsilon API is deliberately kept at the rank boundary. A rank registers
+the CUDA-backed KV-cache tensors and leaves the complete dump/restore
+lifecycle to the external control plane. This module never enters a
+checkpoint barrier and never invokes ``scr_controller``.
 
 The helpers are inert unless ``RTPLLM_ENABLE_SCR`` (the historical spelling
 ``RTP_LLM_ENABLE_SCR`` is accepted as an alias) is enabled.  This is the
@@ -21,10 +21,9 @@ import os
 import platform
 import sys
 import threading
-import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator, Mapping as TypingMapping, Optional
+from typing import Any, Callable, Iterator, Optional
 
 
 LOGGER = logging.getLogger(__name__)
@@ -43,17 +42,6 @@ SCR_EPSILON_DIR = "/etc/scr/epsilon"
 SCR_PHASE_CHECKPOINT = "checkpoint"
 SCR_PHASE_RESTORE = "restore"
 SCR_PHASE_NORMAL = "normal"
-
-SCR_WORKER_ID_ENV = "RTP_LLM_SCR_WORKER_ID"
-SCR_WORKER_NUM_ENV = "RTP_LLM_SCR_WORKER_NUM"
-SCR_WORKER_OFFSET_ENV = "RTP_LLM_SCR_WORKER_OFFSET"
-SCR_TIMEOUT_ENV = "RTP_LLM_SCR_TIMEOUT"
-SCR_INACTIVITY_TIMEOUT_ENV = "RTP_LLM_SCR_INACTIVITY_TIMEOUT"
-SCR_TRIGGER_FILE_ENV = "RTP_LLM_SCR_TRIGGER_FILE"
-
-DEFAULT_TIMEOUT_SECONDS = 900
-DEFAULT_INACTIVITY_TIMEOUT_SECONDS = 10
-
 
 def _flag(value: Optional[str]) -> bool:
     return value is not None and value.strip().lower() in {
@@ -265,55 +253,6 @@ class ScrRegistration:
     ok: bool
 
 
-@dataclass(frozen=True)
-class ScrParticipantManifest:
-    """Frozen process-wide Epsilon quorum membership.
-
-    Epsilon's ``wait_mode=1`` barrier is positional: every participant must
-    use one unique ID in ``[0, worker_num)``.  A local ``multiprocessing``
-    barrier cannot represent the complete process tree (the launcher owns
-    direct children while the backend manager owns GPU-rank children), so the
-    launcher computes this immutable mapping once and passes it to every
-    process.  Keys are stable role/instance strings and do not contain PIDs.
-    """
-
-    worker_num: int
-    participant_ids: TypingMapping[str, int]
-
-    def worker_id(self, role: str, instance: Any = "0") -> int:
-        key = f"{role}:{instance}"
-        try:
-            return int(self.participant_ids[key])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise KeyError(
-                f"sCR participant {key!r} is not present in the frozen manifest"
-            ) from exc
-
-    def validate(self) -> None:
-        ids = sorted(int(value) for value in self.participant_ids.values())
-        if self.worker_num <= 0 or ids != list(range(self.worker_num)):
-            raise ValueError(
-                "invalid sCR participant manifest: "
-                f"worker_num={self.worker_num}, ids={ids}"
-            )
-
-
-def build_scr_participant_manifest(
-    participants: list[tuple[str, Any]],
-) -> ScrParticipantManifest:
-    """Assign contiguous IDs to an ordered ``(role, instance)`` sequence."""
-
-    mapping: dict[str, int] = {}
-    for worker_id, (role, instance) in enumerate(participants):
-        key = f"{role}:{instance}"
-        if key in mapping:
-            raise ValueError(f"duplicate sCR participant {key!r}")
-        mapping[key] = worker_id
-    manifest = ScrParticipantManifest(len(mapping), mapping)
-    manifest.validate()
-    return manifest
-
-
 _registration_lock = threading.Lock()
 _registrations: dict[int, ScrRegistration] = {}
 
@@ -410,9 +349,8 @@ def register_for_scr(
     if epsilon is None or not _epsilon_is_active(epsilon):
         return False
 
-    # Startup can install both a formal coordinator and a hot hook.  Avoid
-    # registering the callback twice when they happen to observe the same
-    # engine object.
+    # Registration may be retried when the cache is initialized lazily. Avoid
+    # registering the Epsilon callback twice for the same engine object.
     engine_key = id(engine)
     with _registration_lock:
         previous = _registrations.get(engine_key)
@@ -479,202 +417,6 @@ def register_for_scr(
     return ok
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        LOGGER.warning("invalid %s=%r; using %d", name, raw, default)
-        return default
-
-
-def _default_local_rank() -> int:
-    # LOCAL_RANK is the canonical rank-local identity.  RANK is only a
-    # fallback for single-node launchers that do not export LOCAL_RANK.
-    return _env_int("LOCAL_RANK", _env_int("RANK", 0))
-
-
-def _resolve_worker_id(worker_id: int | None) -> int:
-    # Explicit manifest IDs are authoritative.  The environment override is
-    # retained for legacy/direct callers (for example PD roles sharing one
-    # scheduler) that do not receive a manifest.
-    if worker_id is not None:
-        return int(worker_id)
-    if os.environ.get(SCR_WORKER_ID_ENV) is not None:
-        return _env_int(SCR_WORKER_ID_ENV, 0)
-    return _env_int(SCR_WORKER_ID_ENV, _default_local_rank())
-
-
-def _resolve_worker_num(worker_num: int | None) -> int:
-    if worker_num is not None and int(worker_num) > 0:
-        return int(worker_num)
-    # Epsilon's wait_mode=1 is scoped to workers in this Pod.  LOCAL_WORLD_SIZE
-    # is therefore preferred over global WORLD_SIZE.
-    value = _env_int(SCR_WORKER_NUM_ENV, 0)
-    if value > 0:
-        return value
-    value = _env_int("LOCAL_WORLD_SIZE", 0)
-    return value if value > 0 else 1
-
-
-def start_scr_checkpoint(
-    *,
-    worker_id: int | None = None,
-    worker_num: int | None = None,
-    timeout: int | None = None,
-    inactivity_timeout: int | None = None,
-) -> int | None:
-    """Enter Epsilon's process-wide steady-point barrier.
-
-    The launcher calls this once in every process that belongs to the frozen
-    restore unit (parent, backend manager/ranks, frontend, and DashSc).  It
-    does not execute ``scr_controller``; the controller/coordinator separately
-    performs ``check``/``dump``/``restore`` over the scheduler UDS.
-    ``None`` means the optional integration was inactive or unavailable.
-    """
-
-    if not is_scr_enabled():
-        return None
-    epsilon = _load_epsilon()
-    if epsilon is None or not _epsilon_is_active(epsilon):
-        return None
-
-    resolved_timeout = (
-        int(timeout)
-        if timeout is not None
-        else _env_int(SCR_TIMEOUT_ENV, DEFAULT_TIMEOUT_SECONDS)
-    )
-    resolved_inactivity = (
-        int(inactivity_timeout)
-        if inactivity_timeout is not None
-        else _env_int(
-            SCR_INACTIVITY_TIMEOUT_ENV, DEFAULT_INACTIVITY_TIMEOUT_SECONDS
-        )
-    )
-    resolved_timeout = max(1, resolved_timeout)
-    resolved_inactivity = max(0, resolved_inactivity)
-    resolved_worker_num = _resolve_worker_num(worker_num)
-    resolved_worker_id = _resolve_worker_id(worker_id)
-    # The scheduler quorum is positional: IDs must be unique and cover
-    # [0, worker_num).  Refuse an invalid mapping instead of allowing a rank
-    # to poison the shared scope or wait forever for a missing worker.
-    if resolved_worker_num <= 0 or not 0 <= resolved_worker_id < resolved_worker_num:
-        LOGGER.error(
-            "invalid sCR worker mapping (worker_id=%d worker_num=%d); "
-            "falling back to normal startup",
-            resolved_worker_id,
-            resolved_worker_num,
-        )
-        return None
-
-    try:
-        return _call_result(
-            epsilon.snapstart_checkpoint,
-            wait_mode=1,
-            worker_id=resolved_worker_id,
-            worker_num=resolved_worker_num,
-            timeout=resolved_timeout,
-            inactivity_timeout=resolved_inactivity,
-        )
-    except Exception:
-        # The caller may still serve traffic or let the external controller
-        # choose a cold-start fallback.
-        LOGGER.exception(
-            "sCR snapstart_checkpoint failed (worker_id=%d worker_num=%d)",
-            resolved_worker_id,
-            resolved_worker_num,
-        )
-        return None
-
-
-def _shutdown_requested(manager: Any) -> bool:
-    try:
-        if bool(getattr(manager, "shutdown_requested", False)):
-            return True
-    except Exception:
-        pass
-    event = getattr(manager, "_shutdown_requested", None) if manager else None
-    try:
-        return bool(event is not None and event.is_set())
-    except Exception:
-        return False
-
-
-def start_scr_checkpoint_thread(
-    manager: Any = None,
-    *,
-    engine: Any = None,
-    worker_id: int | None = None,
-    worker_num: int | None = None,
-    timeout: int | None = None,
-    inactivity_timeout: int | None = None,
-    trigger_file: str | None = None,
-    idle_grace_seconds: float = 0.0,
-    poll_interval_seconds: float = 0.25,
-    name: str = "scr-checkpoint-waiter",
-) -> threading.Thread | None:
-    """Start a fail-open daemon waiter for one process's checkpoint call.
-
-    ``trigger_file`` is optional and intended for tests/controlled template
-    production.  With no trigger, the thread enters Epsilon immediately after
-    the caller has registered model/cache state.  A manager with a
-    ``_shutdown_requested`` event can stop the wait before the trigger arrives.
-    """
-
-    if not is_scr_enabled():
-        return None
-
-    if trigger_file is None:
-        trigger_file = os.environ.get(SCR_TRIGGER_FILE_ENV)
-
-    def _wait_and_checkpoint() -> None:
-        try:
-            if trigger_file:
-                while not os.path.exists(trigger_file):
-                    if _shutdown_requested(manager):
-                        return
-                    time.sleep(max(0.01, poll_interval_seconds))
-            if idle_grace_seconds > 0:
-                deadline = time.monotonic() + idle_grace_seconds
-                while True:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        break
-                    if _shutdown_requested(manager):
-                        return
-                    time.sleep(min(max(0.01, poll_interval_seconds), remaining))
-            # Re-run registration here as well as at startup.  This supports
-            # launchers that switch SCR_PHASE from ``normal`` to ``checkpoint``
-            # immediately before touching the trigger file.
-            if engine is not None:
-                if not register_for_scr(engine, local_rank=worker_id):
-                    # Registration is an optimization for CUDA KV-cache
-                    # restore, not membership.  Every process in the frozen
-                    # manifest must still arrive at the common barrier;
-                    # otherwise CPU participants would wait forever for a GPU
-                    # rank that failed to expose a cache hint.
-                    LOGGER.warning(
-                        "sCR registration unavailable; entering common checkpoint "
-                        "barrier without KV-cache hint"
-                    )
-            start_scr_checkpoint(
-                worker_id=worker_id,
-                worker_num=worker_num,
-                timeout=timeout,
-                inactivity_timeout=inactivity_timeout,
-            )
-        except BaseException:
-            # Daemon-thread failures must never turn into a backend startup
-            # failure.  Log the traceback and leave controller fallback intact.
-            LOGGER.exception("sCR checkpoint waiter terminated unexpectedly")
-
-    thread = threading.Thread(target=_wait_and_checkpoint, name=name, daemon=True)
-    thread.start()
-    return thread
-
-
 def _reset_for_test() -> None:
     """Clear process-local registration state for unit tests."""
 
@@ -683,8 +425,6 @@ def _reset_for_test() -> None:
 
 
 __all__ = [
-    "DEFAULT_INACTIVITY_TIMEOUT_SECONDS",
-    "DEFAULT_TIMEOUT_SECONDS",
     "RTPLLM_ENABLE_SCR_ENV",
     "SCR_ENABLE_ALIAS_ENV",
     "SCR_ENABLE_ENV",
@@ -692,20 +432,10 @@ __all__ = [
     "SCR_PHASE_ENV",
     "SCR_PHASE_NORMAL",
     "SCR_PHASE_RESTORE",
-    "SCR_INACTIVITY_TIMEOUT_ENV",
     "SCR_SHIM_ENABLE_ENV",
-    "SCR_TIMEOUT_ENV",
-    "SCR_TRIGGER_FILE_ENV",
-    "SCR_WORKER_ID_ENV",
-    "SCR_WORKER_NUM_ENV",
-    "SCR_WORKER_OFFSET_ENV",
-    "ScrParticipantManifest",
     "ScrRegistration",
-    "build_scr_participant_manifest",
     "epsilon_backend_mode",
     "configure_scr_environment",
     "is_scr_enabled",
     "register_for_scr",
-    "start_scr_checkpoint",
-    "start_scr_checkpoint_thread",
 ]

@@ -122,51 +122,6 @@ class BindBarrierTest(TestCase):
         self.assertEqual(events, ["barrier", "start_on_loop"])
         app._grpc_server.start_on_loop.assert_called_once()
 
-    def test_app_prebind_barrier_runs_before_local_bind_barrier(self) -> None:
-        app = bg_app.DashScApp.__new__(bg_app.DashScApp)
-        app.server_config = SimpleNamespace(
-            dash_sc_grpc_server_port=26818,
-            rank_id=2,
-            frontend_server_id=7,
-        )
-        app.py_env_configs = SimpleNamespace(
-            profiling_debug_logging_config=SimpleNamespace(log_file_backup_count=1)
-        )
-        app._grpc_server = Mock()
-        app._shutdown_manager = Mock()
-        app._shutdown_event = Mock()
-        app._install_signal_handlers = Mock()
-        app._start_enqueue_loop = Mock(return_value=Mock())
-        app.stop = Mock()
-        events = []
-        app._app_prebind_barrier = Mock()
-        app._app_prebind_barrier.prebind_ready.side_effect = lambda *_args, **_kwargs: (
-            events.append("app_barrier") or True
-        )
-        barrier = Mock()
-        barrier.wait.side_effect = lambda **_kwargs: events.append("bind_barrier")
-        app._grpc_server.start_on_loop.side_effect = lambda *_args, **_kwargs: (
-            events.append("start_on_loop")
-        )
-        servicer = Mock()
-
-        def submit(coroutine, _loop):
-            coroutine.close()
-            future = Mock()
-            future.result.return_value = servicer
-            return future
-
-        with patch.object(bg_app, "_is_proxy_mode_enabled", return_value=True), patch(
-            "rtp_llm.dash_sc.app.asyncio.run_coroutine_threadsafe",
-            side_effect=submit,
-        ), patch("rtp_llm.dash_sc.app.kmonitor.init"), patch(
-            "rtp_llm.dash_sc.app.get_log_path", return_value="/tmp"
-        ):
-            app.start(bind_barrier=barrier)
-
-        self.assertEqual(events, ["app_barrier", "bind_barrier", "start_on_loop"])
-        app._app_prebind_barrier.prebind_ready.assert_called_once()
-
 
 class DeriveEchoPrefixIdsTest(TestCase):
     def test_encodes_think_start_tag(self) -> None:

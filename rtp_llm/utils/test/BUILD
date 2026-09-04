@@ -180,22 +180,6 @@ py_test(
 )
 
 py_test(
-    name = "app_prebind_barrier_test",
-    srcs = ["app_prebind_barrier_test.py"],
-    deps = ["//rtp_llm:utils"],
-)
-
-py_test(
-    name = "scr_controller_client_test",
-    srcs = [
-        "scr_controller_client_test.py",
-    ],
-    deps = [
-        "//rtp_llm:utils",
-    ],
-)
-
-py_test(
     name = "duplicated_kv_test",
     srcs = [
         "duplicated_kv_test.py",

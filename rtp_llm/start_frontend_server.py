@@ -18,7 +18,6 @@ from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
-from rtp_llm.utils.scr_template_utils import ScrParticipantManifest
 
 setup_logging()
 
@@ -38,7 +37,6 @@ def start_frontend_server(
     server_id: int,
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
-    scr_manifest: ScrParticipantManifest | None = None,
 ):
     _install_hot_hook_runtime(f"frontend_rank_{rank_id}_server_{server_id}")
     # Set rank_id and server_id on the passed config so port properties match this rank
@@ -70,17 +68,7 @@ def start_frontend_server(
     try:
         set_global_controller(global_controller)
         separated_frontend = py_env_configs.role_config.role_type == RoleType.FRONTEND
-        scr_worker_id = None
-        scr_worker_num = None
-        if scr_manifest is not None:
-            scr_worker_id = scr_manifest.worker_id("frontend", f"{rank_id}:{server_id}")
-            scr_worker_num = scr_manifest.worker_num
-        app = FrontendApp(
-            py_env_configs,
-            separated_frontend,
-            scr_worker_id=scr_worker_id,
-            scr_worker_num=scr_worker_num,
-        )
+        app = FrontendApp(py_env_configs, separated_frontend)
         app.start()
     except BaseException as e:
         logging.error(

@@ -178,9 +178,9 @@ export REMOTE_SERVER_PORT="$REMOTE_PORT_VALUE"
 export REMOTE_RPC_SERVER_IP=localhost
 export MODEL_SERVICE_CONFIG='{"service_id":"test","role_endpoints":[{"group":"default","prefill_endpoint":{"type":"Vipserver","address":"127.0.0.1:18630","protocol":"http","path":"/"},"decode_endpoint":{"type":"Vipserver","address":"127.0.0.1:18530","protocol":"http","path":"/"}}],"use_local":true}'
 
-# The integrated worker/CPU manifest owns the Epsilon call.  Do not install
-# the historical backend-only hot hook: it would call snapstart_checkpoint a
-# second time with worker_num=2 and create a second, incompatible quorum.
+# RTP-LLM only registers rank-local Epsilon resources.  The sidecar control
+# plane owns all checkpoint, dump, and restore operations, so do not enable a
+# local hot hook that could issue an app-side checkpoint call.
 export RTP_HOT_HOOK=0
 unset RTP_HOT_HOOK_FILE RTP_HOT_HOOK_CONFIG RTP_HOT_HOOK_DUMP_DIR
 export CMD_BEFORE_START='export LD_PRELOAD=/etc/scr/shadow/libnccl.so:/usr/lib64/librt.so.1'

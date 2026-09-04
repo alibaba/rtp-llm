@@ -36,8 +36,6 @@ from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.server.misc import format_exception
 from rtp_llm.utils.concurrency_controller import ConcurrencyException
 from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
-from rtp_llm.utils.app_prebind_barrier import get_app_prebind_barrier_client
-from rtp_llm.utils.scr_template_utils import start_scr_checkpoint
 from rtp_llm.utils.util import async_request_server
 from rtp_llm.utils.version_info import VersionInfo
 
@@ -282,9 +280,6 @@ class FrontendApp(object):
         self,
         py_env_configs: PyEnvConfigs,
         separated_frontend: bool = False,
-        *,
-        scr_worker_id: int | None = None,
-        scr_worker_num: int | None = None,
     ):
         self.py_env_configs = py_env_configs
         self.server_config = py_env_configs.server_config
@@ -295,19 +290,6 @@ class FrontendApp(object):
         )
         self.shutdown_manager = FrontendShutdownManager()
         self.separated_frontend = separated_frontend
-        self._scr_worker_id = scr_worker_id
-        self._scr_worker_num = scr_worker_num
-        # Optional application-level sCR gate.  ``None`` keeps the legacy
-        # startup path byte-for-byte: the socket is created immediately after
-        # FrontendServer/create_app initialization.
-        self._app_prebind_barrier = (
-            None
-            if scr_worker_id is not None and scr_worker_num is not None
-            else get_app_prebind_barrier_client(
-                "frontend",
-                f"{self.server_config.rank_id}:{self.server_config.frontend_server_id}",
-            )
-        )
 
         # Compute all DP addresses for broadcast operations (e.g. update_scheduler_info)
         engine_config = EngineConfig.create(py_env_configs, nccl_comm_config=None)
@@ -360,47 +342,6 @@ class FrontendApp(object):
             "Backend health_check did not become ready within %ds" % timeout_s
         )
 
-    def _wait_for_app_prebind(self) -> None:
-        """Join the unified Epsilon barrier before creating the HTTP listener.
-
-        The AppPreBind UDS remains a compatibility fallback for older launchers
-        that construct ``FrontendApp`` directly without a manifest.  Production
-        startup passes explicit IDs and therefore has exactly one external
-        barrier shared with backend and DashSc processes.
-        """
-        worker_id = getattr(self, "_scr_worker_id", None)
-        worker_num = getattr(self, "_scr_worker_num", None)
-        if worker_id is not None and worker_num is not None:
-            result = start_scr_checkpoint(
-                worker_id=worker_id,
-                worker_num=worker_num,
-            )
-            logging.info(
-                "frontend reached unified sCR barrier worker_id=%s worker_num=%s result=%s",
-                worker_id,
-                worker_num,
-                result,
-            )
-            return
-
-        barrier = getattr(self, "_app_prebind_barrier", None)
-        if barrier is None:
-            return
-        released = barrier.prebind_ready(
-            metadata={
-                "rank_id": self.server_config.rank_id,
-                "server_id": self.server_config.frontend_server_id,
-                "port": self.server_config.server_port,
-                "listener": "frontend-http",
-            }
-        )
-        if not released:
-            # sCR is an optimization; a broken coordinator must not make the
-            # ordinary cold-start path unavailable.
-            logging.warning(
-                "App pre-bind barrier did not release frontend; continuing cold startup"
-            )
-
     def start(self):
         self.frontend_server.start()
         app = self.create_app()
@@ -411,8 +352,6 @@ class FrontendApp(object):
             loop = "none"
             auto_loop_setup()
             asyncio.set_event_loop(asyncio.new_event_loop())
-
-        self._wait_for_app_prebind()
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
