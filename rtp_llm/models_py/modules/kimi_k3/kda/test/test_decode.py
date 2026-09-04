@@ -68,7 +68,6 @@ class KimiK3KDATargetVerifyTest(TestCase):
             local_heads=1,
             head_dim=projection_size,
             projection_size=projection_size,
-            history_size=1,
             gate_lower_bound=-20.0,
             fused_conv=torch.empty(0),
         )

@@ -21,17 +21,6 @@ if TYPE_CHECKING:
 _MLA_LATENT_NORM_EPS = 1e-6
 
 
-def _select_mla_attention_inputs(
-    explicit_inputs: Optional[PyAttentionInputs],
-    fmha_impl: Any,
-) -> Optional[PyAttentionInputs]:
-    """Select the group-current attention-input view for K3 MLA."""
-
-    if explicit_inputs is not None:
-        return explicit_inputs
-    return getattr(fmha_impl, "attn_inputs", None)
-
-
 class KimiK3MLA(MlaAttention):
     """K3 NoPE MLA over RTP's packed-token and compressed-cache layouts.
 
@@ -143,8 +132,6 @@ class KimiK3MLA(MlaAttention):
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
     ) -> torch.Tensor:
-        if not hidden_states.is_cuda:
-            raise RuntimeError("Kimi K3 MLA requires CUDA")
         return super().forward(hidden_states, fmha_impl, kv_cache)
 
 

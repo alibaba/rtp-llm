@@ -54,8 +54,6 @@ class KimiKDACurrentStateRegistry:
     """Temporary per-request KDA state shared by internal Prefill rounds."""
 
     def __init__(self, original_batch_size: int) -> None:
-        if original_batch_size <= 0:
-            raise ValueError("KDA current-state registry requires a non-empty batch")
         self.original_batch_size = original_batch_size
         self._layers: dict[int, KimiKDACurrentLayerState] = {}
 
@@ -107,53 +105,17 @@ def prepare_kimi_kda_prefill_metadata(
     continuation_mask: Optional[Sequence[bool]] = None,
     materialized_block_maps_host: Optional[Sequence[torch.Tensor]] = None,
 ) -> KimiKDAPrefillMetadata:
-    """Validate host request metadata once and allocate one round workspace."""
+    """Build the round-scoped metadata and checkpoint workspace once."""
 
-    host_tensors = {
-        "cu_seqlens_host": cu_seqlens_host,
-        "input_lengths_host": input_lengths_host,
-        "prefix_lengths_host": prefix_lengths_host,
-    }
-    for name, tensor in host_tensors.items():
-        if tensor is None or tensor.device.type != "cpu" or tensor.ndim != 1:
-            raise ValueError(f"KDA Prefill requires one-dimensional CPU {name}")
     if page_size <= 0 or page_size % 64:
         raise ValueError(
             "KDA Prefill page size must be a positive multiple of 64, "
             f"got {page_size}"
         )
-    if local_heads <= 0 or head_dim <= 0:
-        raise ValueError(
-            f"KDA Prefill state shape must be positive, got H={local_heads} "
-            f"D={head_dim}"
-        )
-
     sequence_count = int(cu_seqlens_host.numel()) - 1
-    if (
-        sequence_count <= 0
-        or input_lengths_host.numel() != sequence_count
-        or prefix_lengths_host.numel() != sequence_count
-    ):
-        raise ValueError(
-            "KDA Prefill host metadata batch mismatch: "
-            f"cu={tuple(cu_seqlens_host.shape)} "
-            f"input={tuple(input_lengths_host.shape)} "
-            f"prefix={tuple(prefix_lengths_host.shape)}"
-        )
     cu_seqlens_cpu = cu_seqlens_host.to(dtype=torch.int32).contiguous()
     input_lengths_cpu = input_lengths_host.to(dtype=torch.int64)
     prefix_lengths_cpu = prefix_lengths_host.to(dtype=torch.int64)
-    if int(cu_seqlens_cpu[0]) != 0 or not torch.equal(
-        torch.diff(cu_seqlens_cpu).to(dtype=torch.int64), input_lengths_cpu
-    ):
-        raise ValueError(
-            "KDA Prefill cu_seqlens do not match input lengths: "
-            f"cu={cu_seqlens_cpu.tolist()} input={input_lengths_cpu.tolist()}"
-        )
-    if torch.any(input_lengths_cpu <= 0):
-        raise ValueError(
-            f"KDA Prefill input lengths must be positive: {input_lengths_cpu.tolist()}"
-        )
     if torch.any(prefix_lengths_cpu < 0) or torch.any(
         prefix_lengths_cpu % page_size != 0
     ):
@@ -194,16 +156,6 @@ def prepare_kimi_kda_prefill_metadata(
         if continuation_mask is None
         else continuation_mask
     )
-    if len(active_indices) != sequence_count or len(continuing) != sequence_count:
-        raise ValueError(
-            "KDA active request metadata must contain one value per sequence"
-        )
-    if len(set(active_indices)) != sequence_count or any(
-        index < 0 for index in active_indices
-    ):
-        raise ValueError(
-            "KDA active original request indices must be unique and non-negative"
-        )
     return KimiKDAPrefillMetadata(
         cu_seqlens_cpu=cu_seqlens_cpu,
         sequence_count=sequence_count,
@@ -353,13 +305,6 @@ class KimiK3KDAPrefill(nn.Module):
         """Run fused paged conv, packed cuLA, and recurrent-only state store."""
 
         token_count = int(mixed_qkv.shape[0])
-        if token_count <= 0:
-            raise ValueError("cuLA checkpoint prefill requires at least one token")
-        if tuple(mixed_qkv.shape) != (token_count, 3 * self.projection_size):
-            raise ValueError(
-                "KDA fused projection must be [tokens,3*projection_size], got "
-                f"{tuple(mixed_qkv.shape)}"
-            )
         _, conv_cache = self.cache.get_views(kv_cache)
         current_conv = (
             current_state.conv.index_select(
@@ -432,7 +377,6 @@ class KimiK3KDAPrefill(nn.Module):
             linear_block_map,
         )
         if current_state is not None:
-            assert final_conv is not None
             current_state.conv.index_copy_(
                 0, metadata.active_original_batch_indices, final_conv
             )
@@ -455,43 +399,12 @@ class KimiK3KDAPrefill(nn.Module):
         raw_beta: torch.Tensor,
         cu_seqlens: torch.Tensor,
         *,
-        kv_cache: Optional[LayerKVCache],
-        attention_inputs: Optional[PyAttentionInputs],
-        metadata: Optional[KimiKDAPrefillMetadata],
+        kv_cache: LayerKVCache,
+        attention_inputs: PyAttentionInputs,
+        metadata: KimiKDAPrefillMetadata,
         current_state_registry: Optional[KimiKDACurrentStateRegistry] = None,
         layer_idx: int = -1,
     ) -> torch.Tensor:
-        if attention_inputs is not None and getattr(
-            attention_inputs, "is_target_verify", False
-        ):
-            raise RuntimeError(
-                "Kimi K3 target verify requires the direct paged Decode path"
-            )
-        if kv_cache is None or attention_inputs is None:
-            raise RuntimeError(
-                "Kimi K3 Prefill requires direct paged LayerKVCache; "
-                "the legacy explicit-state path has been removed"
-            )
-        if metadata is None:
-            raise RuntimeError(
-                "cache-backed KDA Prefill requires round-scoped metadata"
-            )
-        sequence_count = int(cu_seqlens.numel()) - 1
-        page_size = int(kv_cache.seq_size_per_block)
-        prefix_lengths = attention_inputs.prefix_lengths
-        if (
-            metadata.sequence_count != sequence_count
-            or metadata.page_size != page_size
-            or prefix_lengths is None
-            or prefix_lengths.ndim != 1
-            or prefix_lengths.numel() != sequence_count
-        ):
-            raise ValueError(
-                "KDA Prefill metadata does not match the active cache batch: "
-                f"metadata_sequences={metadata.sequence_count} "
-                f"active_sequences={sequence_count} "
-                f"metadata_page={metadata.page_size} cache_page={page_size}"
-            )
         linear_block_map = self.cache.linear_state_block_map_device(attention_inputs)
         if metadata.required_pages > linear_block_map.shape[1]:
             raise ValueError(
@@ -512,13 +425,6 @@ class KimiK3KDAPrefill(nn.Module):
             if current_state_registry is not None
             else None
         )
-        if current_state_registry is not None and any(
-            index >= current_state_registry.original_batch_size
-            for index in metadata.active_original_batch_indices_host
-        ):
-            raise ValueError(
-                "KDA active request index exceeds the current-state registry batch"
-            )
         return self._packed_checkpoint_prefill(
             mixed_qkv,
             raw_gate,

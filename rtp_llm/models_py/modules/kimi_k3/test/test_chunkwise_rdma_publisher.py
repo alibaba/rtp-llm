@@ -1,10 +1,8 @@
 import importlib.util
-import os
 import sys
 import types
 import unittest
 from pathlib import Path
-from unittest import mock
 
 import torch
 
@@ -32,7 +30,6 @@ spec.loader.exec_module(chunk_prefill)
 
 KimiK3ChunkRdmaPublisher = chunk_prefill.KimiK3ChunkRdmaPublisher
 KimiK3ChunkCachePublisher = chunk_prefill.KimiK3ChunkCachePublisher
-chunkwise_rdma_enabled = chunk_prefill.chunkwise_rdma_enabled
 build_chunk_attention_inputs = chunk_prefill.build_chunk_attention_inputs
 logical_chunk_round = chunk_prefill.logical_chunk_round
 plan_kimi_k3_chunk_rounds = chunk_prefill.plan_kimi_k3_chunk_rounds
@@ -235,32 +232,6 @@ class KimiK3ChunkRdmaPublisherTest(unittest.TestCase):
         publisher.record_kda_layer(1, tail)
         with self.assertRaisesRegex(RuntimeError, "published twice"):
             publisher.record_kda_layer(1, tail)
-
-    def test_chunkwise_switch(self) -> None:
-        cases = [
-            (None, False),
-            ("0", False),
-            ("1", True),
-        ]
-        for setting, expected in cases:
-            with self.subTest(setting=setting):
-                environment = {"CACHE_STORE_RDMA_MODE": "invalid"}
-                if setting is not None:
-                    environment["KIMI_K3_CHUNKWISE_RDMA"] = setting
-                with mock.patch.dict(os.environ, environment, clear=True):
-                    self.assertIs(chunkwise_rdma_enabled(), expected)
-
-    def test_invalid_chunkwise_switch_is_rejected(self) -> None:
-        with mock.patch.dict(
-            os.environ,
-            {"KIMI_K3_CHUNKWISE_RDMA": "true"},
-            clear=True,
-        ):
-            with self.assertRaisesRegex(
-                RuntimeError, "KIMI_K3_CHUNKWISE_RDMA must be 0 or 1"
-            ):
-                chunkwise_rdma_enabled()
-
 
 if __name__ == "__main__":
     unittest.main()

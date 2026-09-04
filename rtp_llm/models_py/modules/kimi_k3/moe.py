@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import logging
 import os
-from typing import TYPE_CHECKING, Dict
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
 import torch.nn.functional as F
@@ -23,6 +23,20 @@ if TYPE_CHECKING:
 
 _DEEPGEMM_MEGA_LOGGED_DEVICES: set[int] = set()
 _K3_MEGA_PRE_KERNEL_BARRIER_ENV = "DSV4_MEGA_MOE_PRE_KERNEL_BARRIER"
+
+
+def resolve_kimi_k3_moe_strategy(moe_config: Optional[Any]) -> str:
+    """Resolve K3's explicit MegaMoE strategy while preserving ``auto``."""
+
+    strategy = str(getattr(moe_config, "moe_strategy", "auto") or "auto")
+    if strategy == "auto":
+        return "mega_moe"
+    if strategy not in ("mega_moe", "mega_moe_se"):
+        raise ValueError(
+            "Kimi K3 supports only moe_strategy=mega_moe or mega_moe_se "
+            f"(auto aliases mega_moe); got {strategy!r}"
+        )
+    return strategy
 
 
 def _transient_full_native_column_weight(
@@ -576,4 +590,5 @@ class KimiK3LatentMoE(nn.Module):
 
 __all__ = [
     "KimiK3LatentMoE",
+    "resolve_kimi_k3_moe_strategy",
 ]

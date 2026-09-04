@@ -38,25 +38,9 @@ class KimiK3AttentionResidual(nn.Module):
         num_blocks: Optional[int] = None,
         block_write_idx: int = -1,
     ) -> torch.Tensor:
-        if prefix_sum.ndim != 2:
-            raise ValueError("AttnRes prefix_sum must have shape [tokens, hidden]")
-        if (
-            block_residual.ndim != 3
-            or block_residual.shape[0] != prefix_sum.shape[0]
-            or block_residual.shape[2] != prefix_sum.shape[1]
-        ):
-            raise ValueError(
-                "AttnRes block_residual must have shape [tokens, blocks, hidden]: "
-                f"prefix_sum={tuple(prefix_sum.shape)}, "
-                f"block_residual={tuple(block_residual.shape)}"
-            )
         active_blocks = (
             block_residual.shape[1] if num_blocks is None else int(num_blocks)
         )
-        if active_blocks < 0 or active_blocks > block_residual.shape[1]:
-            raise ValueError("AttnRes valid block count is outside the residual bank")
-        if block_write_idx < -1 or block_write_idx >= block_residual.shape[1]:
-            raise ValueError("AttnRes block write index is outside the residual bank")
         if is_kimi_k3_attn_res_supported(
             prefix_sum,
             block_residual,
@@ -106,10 +90,6 @@ class KimiK3AttentionResidual(nn.Module):
             ).to(dtype=prefix_sum.dtype)
         if output_norm_weight is None:
             return output
-        if output_norm_eps is None:
-            raise ValueError(
-                "output_norm_eps is required when output RMSNorm is requested"
-            )
         output_float = output.float()
         normalized = output_float * torch.rsqrt(
             output_float.square().mean(dim=-1, keepdim=True) + output_norm_eps

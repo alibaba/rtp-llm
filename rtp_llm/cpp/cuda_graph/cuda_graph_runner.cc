@@ -1141,15 +1141,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             cuda_graph::graphCaptureBegin(graph, shared_graph_pool_);
             CudaGraphCaptureGuard capture_guard;
             try {
-                auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
-                if (py::isinstance<py::tuple>(py_outputs_obj)) {
-                    auto tuple = py_outputs_obj.cast<py::tuple>();
-                    RTP_LLM_CHECK_WITH_INFO(tuple.size() == 1,
-                                            "target-verify hidden tuple must contain one tensor");
-                    outputs.hidden_states = tuple[0].cast<torch::Tensor>();
-                } else {
-                    outputs = py_outputs_obj.cast<PyModelOutputs>();
-                }
+                outputs = py_forward_method_(inputs, attn_pyobj).cast<PyModelOutputs>();
             } catch (const py::error_already_set& e) {
                 RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
                 throw;

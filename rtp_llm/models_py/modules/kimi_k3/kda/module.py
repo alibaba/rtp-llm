@@ -100,10 +100,8 @@ class KimiK3KDA(nn.Module):
 
         self.kda_fused_w = fused_projection
 
-        fused_conv = weights[W.linear_attn_conv1d_w].squeeze(1)     # 这里为什么要squeeze(1)？？
+        fused_conv = weights[W.linear_attn_conv1d_w].squeeze(1)
 
-        self.prefill_executor: Optional[KimiK3KDAPrefill]
-        self.decode_executor: Optional[KimiK3KDADecode]
         self.prefill_executor = KimiK3KDAPrefill(
             weights=weights,
             cache=self.cache,
@@ -120,7 +118,6 @@ class KimiK3KDA(nn.Module):
             local_heads=self.local_heads,
             head_dim=self.head_dim,
             projection_size=self.projection_size,
-            history_size=self.history_size,
             gate_lower_bound=self.gate_lower_bound,
             fused_conv=fused_conv,
         )
@@ -256,7 +253,6 @@ class KimiK3KDA(nn.Module):
         )
 
         if mode == "prefill":
-            assert self.prefill_executor is not None
             output = self.prefill_executor(
                 mixed_qkv_projected,
                 raw_gate,
@@ -269,8 +265,6 @@ class KimiK3KDA(nn.Module):
                 layer_idx=self.layer_idx,
             )
         else:
-            assert kv_cache is not None and attention_inputs is not None
-            assert self.decode_executor is not None
             output = self.decode_executor(
                 q_projected,
                 k_projected,
