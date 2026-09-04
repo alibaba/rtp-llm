@@ -238,7 +238,7 @@ h1{margin:0 0 6px;font-size:22px}
   <div class="detail-body" id="detail-body"></div>
 </details>
 <div class="grid" id="grid"></div>
-<div class="hint" id="hint">Chart.js 4.4.7 · legend 单击可切换单条系列，双击隔离；tooltip 随鼠标移动；隐藏后 y 轴按剩余可见系列自适应。</div>
+<div class="hint" id="hint">Chart.js 4.4.7 · legend 单击 = 切换单条 ｜ 双击 = 隔离该条（再双击恢复全显）｜ tooltip 随鼠标移动 ｜ 隐藏后 y 轴自适应。</div>
 <script>
 const SPEC = __SPEC_JSON__;
 document.getElementById('title').textContent = SPEC.summary.title;
@@ -368,8 +368,11 @@ if (SPEC.summary.kpis.length)
 })();
 // y 轴自适应：只按 legend 可见系列重算 max（beginAtZero），legend/双击后 update()。
 // 时间轴面板数据点为 {x, y}（linear x 轴），此处兼容两种形态。
-// 双击隔离用手写 handler：默认 Chart.js 只支持单击切换单条，双击这里定义为"只留这条"，
-// 再双击同一条恢复"全显"。
+// 双击隔离：单击 = toggle 单条；双击 = 隔离该条（只留这条）；再双击同一条 = 恢复全显。
+// 实现：单击时先保存"是否处于隔离态"快照（$snap.wasIso）再 toggle；
+// 双击第二击读快照（而非当前状态，因为第一击的 toggle 已改变状态）判断该恢复还是该隔离。
+// 死开关：SHOW_SELECT_ALL 控制是否显示面板右上角"⟲ 全选"按钮（默认关）。
+const SHOW_SELECT_ALL = false;
 function visibleMax(chart){
   let m = 0; const ds = chart.data.datasets;
   chart.data.datasets.forEach((d,i)=>{
@@ -427,20 +430,23 @@ SPEC.panels.forEach(p=>{
           position:'bottom', labels:{boxWidth:10,font:{size:11}},
           onClick:(e,item,legend)=>{
             const ch=legend.chart; const idx=item.datasetIndex;
-            // 双击（<300ms 同 idx）= 隔离该系列 / 恢复全显
             const now=Date.now();
-            ch.$lastClick = ch.$lastClick || {};
-            const last = ch.$lastClick[idx] || 0;
-            ch.$lastClick[idx] = now;
-            const others = ch.data.datasets.map((_,i)=>i).filter(i=>i!==idx);
-            if(now - last < 300){
-              // double click: toggle isolate
-              const alreadyIsolated = others.every(i=>ch.getDatasetMeta(i).hidden)
-                                   && !ch.getDatasetMeta(idx).hidden;
-              others.forEach(i=>ch.getDatasetMeta(i).hidden = !alreadyIsolated);
-              ch.getDatasetMeta(idx).hidden = false;
+            const lastIdx = ch.$lc ? ch.$lc.idx : -1;
+            const lastTime = ch.$lc ? ch.$lc.time : 0;
+            const isDbl = (lastIdx===idx) && (now-lastTime<400);
+            ch.$lc = {idx, time: now};
+            if(isDbl && ch.$snap){
+              const wasIso = ch.$snap.wasIso;
+              ch.$snap = null;
+              if(wasIso){
+                ch.data.datasets.forEach((_,i)=>{ch.getDatasetMeta(i).hidden=false;});
+              }else{
+                ch.data.datasets.forEach((_,i)=>{ch.getDatasetMeta(i).hidden=(i!==idx);});
+              }
             }else{
-              // single click: toggle visibility of this series
+              const others = ch.data.datasets.map((_,i)=>i).filter(i=>i!==idx);
+              const wasIso = !ch.getDatasetMeta(idx).hidden && others.every(i=>ch.getDatasetMeta(i).hidden);
+              ch.$snap = {wasIso};
               const meta = ch.getDatasetMeta(idx);
               meta.hidden = meta.hidden===null ? !ch.data.datasets[idx].hidden : !meta.hidden;
             }
@@ -464,6 +470,20 @@ SPEC.panels.forEach(p=>{
   });
   // 初次 render 后按当前可见系列锁一次 max
   rescaleY(chart);
+  if (SHOW_SELECT_ALL){
+    const btn=document.createElement('span');
+    btn.textContent='⟲ 全选';
+    btn.title='一键恢复该面板全部序列';
+    btn.style.cssText='position:absolute;top:34px;right:10px;font-size:10px;color:#888;cursor:pointer;padding:2px 6px;border:1px solid #ddd;border-radius:10px;background:rgba(255,255,255,.9);z-index:5;user-select:none;transition:all .15s';
+    btn.onmouseenter=()=>{btn.style.color='#333';btn.style.borderColor='#999';};
+    btn.onmouseleave=()=>{btn.style.color='#888';btn.style.borderColor='#ddd';};
+    btn.onclick=()=>{
+      chart.data.datasets.forEach((_,i)=>{chart.getDatasetMeta(i).hidden=false;});
+      rescaleY(chart);
+    };
+    wrap.style.position='relative';
+    wrap.appendChild(btn);
+  }
 });
 if (TIME_AXIS){
   // 页脚时间轴口径声明（与头部元数据面板标注一致，防止报告被断章取义）
