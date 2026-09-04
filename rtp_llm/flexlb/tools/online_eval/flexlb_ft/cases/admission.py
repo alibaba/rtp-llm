@@ -2646,6 +2646,37 @@ def _timed_wave_start(ops, base: int, n: int = 4, **kwargs):
     return rids, pool, futures
 
 
+def _two_cluster_split(values: list, sep: float = 1000.0) -> tuple:
+    """Two-execution-batch separation check (arrival-order robust).
+
+    The engine composes execution batches in ARRIVAL order — with the
+    concurrent wave the arrival order is nondeterministic, so rids[:2]
+    vs rids[2:] is NOT the batch split (observed in a live run: r3,r4
+    composed batch #1 and finished 3s BEFORE the rids[:2] members).
+    The ORDER contract the split actually pins: the two batches run
+    SERIALLY — the four completion stamps cluster into two pairs, the
+    pairs separated by > *sep* (each execution batch runs 3000ms) with
+    the members INSIDE a pair settling together (an execution batch
+    settles atomically on the engine; client-side the pair gaps are
+    poll-granularity, orders of magnitude under sep).  *values* may be
+    seconds (client done stamps) or milliseconds (engine end_ms) —
+    *sep* is in the caller's unit.  Returns (ok, detail).
+    """
+    vals = sorted(v for v in values if v is not None and v > 0)
+    if len(vals) != 4:
+        return False, f"need 4 stamps, got {len(vals)}"
+    early_pair_gap = vals[1] - vals[0]
+    batch_gap = vals[2] - vals[1]
+    late_pair_gap = vals[3] - vals[2]
+    ok = batch_gap > sep and early_pair_gap <= sep and late_pair_gap <= sep
+    return ok, (
+        f"clusters=[[{vals[0]:.3f},{vals[1]:.3f}],"
+        f"[{vals[2]:.3f},{vals[3]:.3f}]] "
+        f"(intra {early_pair_gap:.3f}/{late_pair_gap:.3f} <= {sep}, "
+        f"inter {batch_gap:.3f} > {sep})"
+    )
+
+
 @case(
     "engine_prefill_token_budget_split_fifo",
     profiles=["batch-window"],
@@ -2666,29 +2697,30 @@ def engine_prefill_token_budget_split_fifo(ctx: CaseContext):
     fresh wave of rids.
 
     Construction (gate, not verdict): the composer admits members while
-    admitted < budget — prefix [r1, r2] forms execution batch #1, tail
-    [r3, r4] parks until the prefix drains; the engine lifecycle end_ms
-    must show the tail finishing STRICTLY after the prefix with >1s
-    separation (each execution batch runs 3000ms; a reshuffled or
-    interleaved composition collapses the gap).  The executed-batch
-    counters should grow 2b/4r/max2.  Gate misses are recorded in the
-    detail, not the verdict.
+    admitted < budget — the first two ARRIVALS form execution batch #1,
+    the rest parks until that batch drains; the engine lifecycle end_ms
+    must show TWO serial execution batches (two-cluster separation,
+    _two_cluster_split — the concurrent wave's arrival order is
+    nondeterministic, so the split is NOT rids[:2] vs rids[2:]).  The
+    executed-batch counters should grow 2b/4r/max2.  Gate misses are
+    recorded in the detail, not the verdict.
 
     Verdict (master/client linkage, the point of the case):
-      * CLIENT FIFO chain — the four fired requests are consumed
-        CONCURRENTLY; the prefix members' client-visible completion
-        timestamps must precede the tail members' (the master dispatched
-        ONE batch and the engine executed its members in arrival order —
-        a master re-dispatch or an engine reshuffle would reorder the
-        client completions);
+      * CLIENT two-batch chain — consumed CONCURRENTLY (each stamp is
+        the true completion instant), the four client completion
+        stamps cluster into the same TWO serial batches with ~3s
+        separation: arrival-order execution must propagate to what
+        the client sees, and a master re-dispatch / an engine
+        reshuffle / an interleaved composition would each collapse
+        the two-cluster structure;
       * the same master ledger linkage as the split case: peak
-        inflight_batches == 1, member accounting stepping down through an
-        intermediate plateau, scheduler_inflight never climbing;
+        inflight_batches == 1, member accounting stepping down through
+        an intermediate plateau, scheduler_inflight never climbing;
       * the master inflight ledger is clean and a fresh request succeeds.
 
-    Prediction: expected to pass — the FIFO contract is structural
-    (the composer consumes the master batch head-first, the tail parks
-    behind it) and the ~3s execution gap dwarfs any scheduling jitter.
+    Prediction: expected to pass — the serial two-batch structure is
+    structural (the parked tail only starts after the running batch
+    drains) and the ~3s execution gap dwarfs any scheduling jitter.
     """
     env = ctx.env_manager.ensure(_regroup_spec(ctx, 1024, 0))
     ops = ctx.engine_ops(env)
@@ -2723,13 +2755,12 @@ def engine_prefill_token_budget_split_fifo(ctx: CaseContext):
         completed = [rid for rid, ok, _, _ in outcomes if ok]
         drain_errors = [(rid, err) for rid, ok, err, _ in outcomes if not ok]
         done_ts = {rid: done for rid, _, _, done in outcomes}
-        prefix_vals = [done_ts.get(r) for r in rids[:2]]
-        tail_vals = [done_ts.get(r) for r in rids[2:]]
-        all_done = all(v is not None for v in prefix_vals + tail_vals)
-        prefix_done = max(prefix_vals) if all_done else None
-        tail_done = min(tail_vals) if all_done else None
-        client_fifo_ok = all_done and prefix_done < tail_done
-        client_fifo_gap_s = tail_done - prefix_done if client_fifo_ok else float("nan")
+        # CLIENT two-batch chain (arrival-order robust): the four stamps
+        # must cluster into two serial batches, NOT rids[:2] before
+        # rids[2:] — the wave's arrival order is nondeterministic.
+        client_two_batch_ok, client_two_batch_detail = _two_cluster_split(
+            [done_ts.get(r) for r in rids], sep=1.0
+        )
 
         after_counters = _prefill_batch_counters(ops, names[0])
         delta_batches = after_counters[0] - base_counters[0]
@@ -2738,21 +2769,15 @@ def engine_prefill_token_budget_split_fifo(ctx: CaseContext):
             delta_batches, delta_requests, after_counters[2], (2, 4, 2)
         )
 
-        # ENGINE order (construction gate): prefix members' prefill-
-        # completion timestamps must sit strictly before the tail's,
-        # with a >1s gap (the parked tail only starts after the prefix's
-        # 3s batch drains).
+        # ENGINE order (construction gate): the lifecycle end_ms must show
+        # the same two serial execution batches (two-cluster separation —
+        # same arrival-order caveat as the client leg).
         rows = _lifecycle_rows(ops, names[0], rids)
         end_ms = {
             rid: int(row.get("end_ms", 0)) if row else 0 for rid, row in rows.items()
         }
-        prefix_end = max(end_ms[rids[0]], end_ms[rids[1]])
-        tail_end = min(end_ms[rids[2]], end_ms[rids[3]])
-        engine_fifo_gap_ms = tail_end - prefix_end
-        engine_fifo_ok = (
-            all(v > 0 for v in end_ms.values())
-            and prefix_end < tail_end
-            and engine_fifo_gap_ms > 1000
+        engine_two_batch_ok, engine_two_batch_detail = _two_cluster_split(
+            list(end_ms.values()), sep=1000.0
         )
 
         settled = wait_for(lambda: _park_settled(ops, names), 10.0, 0.2)
@@ -2765,7 +2790,7 @@ def engine_prefill_token_budget_split_fifo(ctx: CaseContext):
             not fire_errors
             and len(completed) == len(rids)
             and not drain_errors
-            and client_fifo_ok
+            and client_two_batch_ok
             and ledger_ok
             and settled
             and inflight_ok
@@ -2775,11 +2800,10 @@ def engine_prefill_token_budget_split_fifo(ctx: CaseContext):
             f"fired={len(rids)} (fire_errors={fire_errors[:1]}), "
             f"completed={len(completed)}/{len(rids)} "
             f"(drain_errors={drain_errors[:1]}), "
-            f"client_fifo(prefix_max<tail_min)={client_fifo_ok}, "
-            f"gap_s={client_fifo_gap_s:.2f}, "
+            f"client_two_batches={client_two_batch_ok}({client_two_batch_detail}), "
             f"{shape_detail}, "
-            f"engine_fifo(gate): gap_ms={engine_fifo_gap_ms} "
-            f"(ok={engine_fifo_ok}, expect >1000), "
+            f"engine_two_batches(gate)={engine_two_batch_ok}"
+            f"({engine_two_batch_detail}), "
             f"master_linkage={ledger_ok}({ledger_detail}), "
             f"park_settled_empty={settled}, "
             f"inflight_clean={inflight_ok}({inflight_detail}), "
