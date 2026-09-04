@@ -73,7 +73,7 @@ class KvAllocatedReportOptInTest {
 
     @Test
     void defaultOffKeepsQueuedTasksReportedAsRunning() throws Exception {
-        MockPerformanceModel model = decodeModel(tempDir, 10_000.0, 3, false);
+        MockPerformanceModel model = decodeModel(tempDir, 10_000.0, null, false);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 1);
 
         // 1 running + 2 queued behind the concurrency gate.
@@ -93,9 +93,10 @@ class KvAllocatedReportOptInTest {
                 "all admitted requests keep their runningTasks claim");
         // KV accounting, flag OFF (P2-5 byte-for-byte guard): only the one
         // truly RUNNING request holds KV — queued requests stay uncounted
-        // until run start, exactly today's behavior.
-        assertEquals(8, decode.getActiveKvTokens(),
-                "default OFF: only the running request's input tokens are counted");
+        // until run start, exactly today's behavior. Block-pool caliber:
+        // inputLen=8 rounds up to ceil(8/1024)=1 block = 1024 tokens.
+        assertEquals(1024, decode.getActiveKvTokens(),
+                "default OFF: only the running request's block lease is counted");
 
         awaitDecodeQuiescence(decode, 30_000);
         assertEquals(3, decode.getCompletedCount());
@@ -108,7 +109,7 @@ class KvAllocatedReportOptInTest {
 
     @Test
     void optInReportsQueuedAsKvAllocatedAndFlipsBackWhenRunning() throws Exception {
-        MockPerformanceModel model = decodeModel(tempDir, 10_000.0, 3, true);
+        MockPerformanceModel model = decodeModel(tempDir, 10_000.0, null, true);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 1);
 
         for (long rid = 1; rid <= 3; rid++) {
@@ -126,8 +127,9 @@ class KvAllocatedReportOptInTest {
                 "runningQueryLen must not count KV_ALLOCATED (queued) tasks");
         // KV accounting, flag ON (P2-5): KV_ALLOCATED means "KV reserved", so
         // the two queued requests hold their reservation from enqueue — all
-        // three requests (1 running + 2 queued) are counted.
-        assertEquals(24, decode.getActiveKvTokens(),
+        // three requests (1 running + 2 queued) are counted. Block-pool
+        // caliber: 3 leases x 1 block = 3 x 1024 tokens.
+        assertEquals(3 * 1024, decode.getActiveKvTokens(),
                 "opt-in: queued requests must hold their KV reservation from enqueue");
 
         // As slots free, queued requests drain and their phase flips to
@@ -144,12 +146,12 @@ class KvAllocatedReportOptInTest {
 
     @Test
     void optInCancelOfQueuedRequestReportsKvAllocatedPhase() throws Exception {
-        MockPerformanceModel model = decodeModel(tempDir, 10_000.0, 3, true);
+        MockPerformanceModel model = decodeModel(tempDir, 10_000.0, null, true);
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 1);
 
         assertTrue(scheduleDecodeCompletion(decode, requestShape(model, 1L, 8), -1, null));
         assertTrue(scheduleDecodeCompletion(decode, requestShape(model, 2L, 8), -1, null));
-        assertEquals(16, decode.getActiveKvTokens(),
+        assertEquals(2 * 1024, decode.getActiveKvTokens(),
                 "opt-in: running + queued requests both hold KV before the cancel");
 
         // Cancel the QUEUED request (rid=2) through Decode's ordinary internal
@@ -158,8 +160,9 @@ class KvAllocatedReportOptInTest {
         assertEquals(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED, phase,
                 "cancel of a queued request must report the KV_ALLOCATED phase");
         // Cancel of a queued opt-in request must release its enqueue-time KV
-        // reservation immediately (P2-5), leaving only the running request's.
-        assertEquals(8, decode.getActiveKvTokens(),
+        // reservation immediately (P2-5), leaving only the running request's
+        // block lease (1 block = 1024 tokens).
+        assertEquals(1024, decode.getActiveKvTokens(),
                 "cancelling the queued request must release its KV reservation");
 
         // Iron rule 4: CANCELLED terminal surfaces in the next WorkerStatus.
