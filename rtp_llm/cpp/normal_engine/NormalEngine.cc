@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include <c10/core/InferenceMode.h>
@@ -21,12 +22,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <list>
+#include <limits>
 #include <memory>
+#include <mutex>
 #include <thread>
-#include <random>
 
 #if USING_CUDA
 #include "c10/cuda/CUDACachingAllocator.h"
+#include "c10/cuda/CUDAGuard.h"
 #endif
 
 #ifdef __linux__
@@ -83,6 +86,44 @@ bool shouldRefreshCacheStatusSnapshot(RoleType role_type, const std::list<Genera
         return stream && !stream->isFakeStream() && stream->isContextStream();
     });
 }
+
+#if USING_CUDA
+std::mutex warmup_memory_tracker_mutex;
+
+class WarmupMemoryTracker {
+public:
+    WarmupMemoryTracker(): lock_(warmup_memory_tracker_mutex), device_(at::cuda::current_device()) {
+        baseline_free_bytes_ = getGpuExecStatus().device_memory_status.free_bytes;
+        const auto stats    = c10::cuda::CUDACachingAllocator::getDeviceStats(device_);
+        baseline_allocated_ = stats.allocated_bytes[0].current;
+        baseline_reserved_  = stats.reserved_bytes[0].current;
+        c10::cuda::CUDACachingAllocator::resetPeakStats(device_);
+    }
+
+    size_t maxConsumedBytes() const {
+        at::cuda::CUDAGuard device_guard(device_);
+        const size_t current_free_bytes = getGpuExecStatus().device_memory_status.free_bytes;
+        const auto   stats              = c10::cuda::CUDACachingAllocator::getDeviceStats(device_);
+
+        const auto positive_delta = [](int64_t peak, int64_t baseline) -> size_t {
+            return peak > baseline ? static_cast<size_t>(peak - baseline) : 0;
+        };
+        const size_t driver_consumed = baseline_free_bytes_ - std::min(baseline_free_bytes_, current_free_bytes);
+        const size_t allocated_peak = positive_delta(stats.allocated_bytes[0].peak, baseline_allocated_);
+        const size_t reserved_peak  = positive_delta(stats.reserved_bytes[0].peak, baseline_reserved_);
+        return std::max({driver_consumed, allocated_peak, reserved_peak});
+    }
+
+private:
+    // PyTorch peak stats are device-global. Serialize the new startup-warmup trackers so one
+    // engine cannot reset another engine's in-flight measurement.
+    std::unique_lock<std::mutex> lock_;
+    c10::DeviceIndex             device_;
+    size_t                       baseline_free_bytes_ = 0;
+    int64_t                      baseline_allocated_  = 0;
+    int64_t                      baseline_reserved_   = 0;
+};
+#endif
 }  // anonymous namespace
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
@@ -247,9 +288,14 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
                                                        preRunMode                            mode) {
     c10::InferenceMode inference_guard(true);
 
+    // Chunked activation warmup is handled by runPrefillWarmupShape(). All preRun callers
+    // require whole-segment semantics.
+    RuntimeConfig stream_runtime_config = runtime_config;
+    stream_runtime_config.fifo_scheduler_config.prefill_chunk_size = 0;
+
     auto stream = std::make_shared<NormalGenerateStream>(generate_input,
                                                          model_config_,
-                                                         runtime_config,
+                                                         stream_runtime_config,
                                                          resource_context_,
                                                          nullptr,
                                                          0,
@@ -272,6 +318,82 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
     }
 #endif
     return stream;
+}
+
+absl::StatusOr<GenerateStreamPtr> NormalEngine::runPrefillWarmupShape(
+    const std::shared_ptr<GenerateInput>& generate_input,
+    const ResourceContext&                resource_context,
+    int                                   reuse_length,
+    int64_t                               token_budget) {
+    c10::InferenceMode inference_guard(true);
+
+    const int block_size = model_config_.attn_config.tokens_per_block;
+    if (block_size <= 0) {
+        return absl::InvalidArgumentError("prefill warmup requires a positive KV block size");
+    }
+
+    RuntimeConfig stream_runtime_config = runtime_config;
+    stream_runtime_config.fifo_scheduler_config.prefill_chunk_size = token_budget;
+    auto stream = std::make_shared<NormalGenerateStream>(
+        generate_input, model_config_, stream_runtime_config, resource_context, nullptr, 0, true);
+    if (token_budget > 0 && !stream->chunkedPrefillEnabled()) {
+        return absl::FailedPreconditionError("chunked prefill warmup stream is not chunk-enabled");
+    }
+    if (reuse_length < 0 || reuse_length >= stream->seqLength() || reuse_length % block_size != 0) {
+        return absl::InvalidArgumentError("prefill warmup reuse length is invalid or not block-aligned");
+    }
+
+    stream->setReuseLength(reuse_length);
+    // The temporary manager owns valid physical block 0. Alias the logical prompt table to that
+    // block so the warmup shapes exercise the production paged-attention path without reserving
+    // a production-sized KV cache before capacity is sampled.
+    stream->fakeInitKVBlock(
+        (static_cast<size_t>(stream->seqLength()) + static_cast<size_t>(block_size) - 1) / block_size);
+
+    std::list<GenerateStreamPtr> streams{stream};
+    if (token_budget <= 0) {
+        RETURN_IF_STATUS_ERROR(executor_->process(streams));
+        return stream;
+    }
+
+    stream->enableWarmupChunkWindow();
+    while (true) {
+        const int64_t remaining = static_cast<int64_t>(stream->seqLength()) - stream->reuseLength();
+        const int64_t grant = computeChunkGrant(token_budget, stream->currentBatchSize(), remaining, block_size);
+        if (grant <= 0) {
+            return absl::InvalidArgumentError(
+                "chunked prefill warmup shape cannot make progress within the global token budget");
+        }
+        stream->setChunkSize(static_cast<int>(grant));
+
+        RETURN_IF_STATUS_ERROR(executor_->process(streams));
+        if (stream->isLastChunk()) {
+            return stream;
+        }
+        stream->advanceChunk();
+        if (stream->hasError()) {
+            return absl::InternalError(stream->stopReason());
+        }
+    }
+}
+
+std::shared_ptr<KVCacheManager> NormalEngine::createWarmupCacheManager() {
+    // Keep the temporary warmup cache on the same physical/kernel block layout as production,
+    // including DSV4's promoted physical block size.
+    const int cache_gen_num_per_cycle =
+        sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
+    auto cache_config = CacheConfigCreator::createBasicConfig(
+        model_config_, parallelism_config, false, cache_gen_num_per_cycle);
+    cache_config.block_num = 5;
+    if (cache_config.kernel_seq_size_per_block == 0) {
+        cache_config.kernel_seq_size_per_block = cache_config.seq_size_per_block;
+    }
+    ParallelismConfig temp_parallelism_config;
+    RuntimeConfig     temp_runtime_config;
+    auto              cache_manager = make_shared<KVCacheManager>(
+        cache_config, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
+    RTP_LLM_CHECK_WITH_INFO(cache_manager->init(), "init warmup kv cache manager failed");
+    return cache_manager;
 }
 
 int64_t NormalEngine::getLastScheduleTime() {
@@ -334,19 +456,74 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     RTP_LLM_FAIL("prefillWarmUp is not supported on non-CUDA platforms");
     return {};
 #else
-    auto fake_input                                   = makeFakeInput(getWarmUpInputLength());
-    fake_input->generate_config->num_return_sequences = runtime_config.fifo_scheduler_config.max_context_batch_size;
+    const int64_t token_budget             = runtime_config.fifo_scheduler_config.prefill_chunk_size;
+    const bool    use_global_budget_warmup = token_budget > 0 && !runtime_config.warm_up_with_loss;
+    const int64_t token_heavy_seq_len = std::max<int64_t>(1, static_cast<int64_t>(getWarmUpInputLength()));
+
+    auto fake_input = makeFakeInput(static_cast<size_t>(token_heavy_seq_len));
+    fake_input->generate_config->num_return_sequences =
+        use_global_budget_warmup ? 1 : runtime_config.fifo_scheduler_config.max_context_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
-    rtp_llm::setTraceMemory(true);
-    executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_));
-    THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
-    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
-    rtp_llm::setTraceMemory(false);
-    (void)executor_.reset(nullptr);
+    size_t max_consumed                               = 0;
+    {
+        auto warmup_cache_manager = use_global_budget_warmup ? createWarmupCacheManager() : nullptr;
+        ResourceContext warmup_resource_context = resource_context_;
+        warmup_resource_context.cache_manager    = warmup_cache_manager;
+        // The temporary paged cache is warmup infrastructure, not runtime activation memory.
+        // Create it before tracing and destroy it before sampling production cache capacity.
+        rtp_llm::setTraceMemory(true);
+        auto memory_tracker = use_global_budget_warmup ? std::make_unique<WarmupMemoryTracker>() : nullptr;
+        executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0, mla_ops_type_));
+        if (use_global_budget_warmup) {
+            auto token_heavy_result = runPrefillWarmupShape(fake_input, warmup_resource_context, 0, token_budget);
+            THROW_IF_STATUSOR_ERROR(token_heavy_result);
+            max_consumed = memory_tracker->maxConsumedBytes();
+            token_heavy_result.value().reset();
+
+            const int64_t block_size = model_config_.attn_config.tokens_per_block;
+            const int64_t row_count =
+                std::min(token_budget, static_cast<int64_t>(std::numeric_limits<int>::max()));
+            const int64_t row_heavy_reuse = (token_heavy_seq_len - 1) / block_size * block_size;
+            auto          row_heavy_input = makeFakeInput(static_cast<size_t>(row_heavy_reuse + 1));
+            row_heavy_input->generate_config->num_return_sequences = static_cast<int>(row_count);
+
+            // Maximize runtime-admissible final rows while retaining a long block-aligned prefix.
+            auto row_heavy_result = runPrefillWarmupShape(
+                row_heavy_input, warmup_resource_context, static_cast<int>(row_heavy_reuse), token_budget);
+            THROW_IF_STATUSOR_ERROR(row_heavy_result);
+            max_consumed = std::max(max_consumed, memory_tracker->maxConsumedBytes());
+            row_heavy_result.value().reset();
+
+            const auto longest_system_prompt = std::max_element(
+                kv_cache_config.multi_task_prompt_tokens.begin(),
+                kv_cache_config.multi_task_prompt_tokens.end(),
+                [](const auto& lhs, const auto& rhs) { return lhs.second.size() < rhs.second.size(); });
+            if (longest_system_prompt != kv_cache_config.multi_task_prompt_tokens.end()
+                && !longest_system_prompt->second.empty()) {
+                auto system_prompt_input = makeFakeInput(longest_system_prompt->second.size());
+                auto system_prompt_result =
+                    runPrefillWarmupShape(system_prompt_input, warmup_resource_context, 0, 0);
+                THROW_IF_STATUSOR_ERROR(system_prompt_result);
+                max_consumed = std::max(max_consumed, memory_tracker->maxConsumedBytes());
+            }
+        } else {
+            auto pre_run_result = preRun(fake_input, preRunMode::prefill_warm_up);
+            THROW_IF_STATUSOR_ERROR(pre_run_result);
+            max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
+        }
+
+        if (warmup_cache_manager && !params.py_model.is_none()) {
+            // PyWrappedModel initializes the shared Python model in place, so destroying the
+            // wrapper alone does not clear Python's references to the temporary KV tensors.
+            pybind11::gil_scoped_acquire gil;
+            params.py_model.attr("initialize")(torch_ext::PyModelInitResources{});
+        }
+        (void)executor_.reset(nullptr);
+        rtp_llm::setTraceMemory(false);
+    }
     cudaDeviceSynchronize();
     c10::cuda::CUDACachingAllocator::emptyCache();
-    const auto device_status = getGpuExecStatus();
-    return WarmUpResult({device_status.device_memory_status.available_bytes, max_consumed});
+    return WarmUpResult({getGpuExecStatus().device_memory_status.available_bytes, max_consumed});
 #endif
 }
 
@@ -360,31 +537,7 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
 
-    // Do NOT override seq_size_per_block here. createBasicConfig already
-    // returns the correct value: model_config.attn_config.tokens_per_block
-    // for non-DSV4 (via SingleConfigCreator / HybridConfigCreator), and the
-    // 256-token physical block for DSV4 (via DSV4CacheConfigHelper). Forcing
-    // it back to attn_config.tokens_per_block would clobber DSV4's promoted
-    // value when the user passed --seq_size_per_block < 256.
-    const int cache_gen_num_per_cycle =
-        sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
-    auto cache_config = CacheConfigCreator::createBasicConfig(
-        model_config_, parallelism_config, false, cache_gen_num_per_cycle);
-    cache_config.block_num = 5;
-    // createBasicConfig's SingleConfigCreator / HybridConfigCreator paths can
-    // leave kernel_seq_size_per_block at 0 (only the real createConfig path
-    // runs setupKernelSeqSize). PyWrappedModel asserts kernel_tokens_per_block
-    // > 0, so apply the same default here: kernel block == physical block.
-    if (cache_config.kernel_seq_size_per_block == 0) {
-        cache_config.kernel_seq_size_per_block = cache_config.seq_size_per_block;
-    }
-    ParallelismConfig temp_parallelism_config;
-    RuntimeConfig     temp_runtime_config;
-    auto              cache_manager = make_shared<KVCacheManager>(
-        cache_config, true, nullptr, KVCacheConfig{}, temp_parallelism_config, temp_runtime_config);
-    if (!cache_manager->init()) {
-        RTP_LLM_FAIL("init kv cache manager failed in decodeWarmUp");
-    }
+    auto cache_manager = createWarmupCacheManager();
     executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0, mla_ops_type_));
     THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::decode_warm_up));
     const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;

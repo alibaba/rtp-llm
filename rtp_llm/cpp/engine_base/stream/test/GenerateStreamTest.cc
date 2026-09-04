@@ -14,12 +14,15 @@
 #include <chrono>
 #include <future>
 #include <mutex>
+#include <numeric>
 #include <thread>
 #include <vector>
 
 using namespace std;
 
 namespace rtp_llm {
+
+using ChunkedInputConfigurer = void (*)(GenerateInput&, GenerateConfig&);
 
 class GenerateStreamBuilder {
 public:
@@ -33,17 +36,22 @@ public:
             /*layer_num=*/3, /*block_num=*/9, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
     }
 
-    GenerateStreamPtr createContextStream(std::vector<int> input_ids) {
-        std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
-        std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
-        ResourceContext                 resource_context;
-        generate_input->generate_config = generate_config;
-        generate_input->begin_time_us   = autil::TimeUtility::currentTimeInMicroSeconds();
-        generate_input->input_ids =
-            torch::tensor(std::vector<int32_t>(input_ids.begin(), input_ids.end()), torch::kInt32);
-        return std::make_shared<NormalGenerateStream>(
-            generate_input, model_config_, runtime_config_, resource_context, nullptr);
+    GenerateStreamPtr createContextStream(const std::vector<int>& input_ids) {
+        return createContextStreamImpl(input_ids, runtime_config_, ResourceContext{}, nullptr);
     };
+
+    GenerateStreamPtr createChunkedContextStream(const std::vector<int>& input_ids,
+                                                 RoleType                role_type  = RoleType::PREFILL,
+                                                 int64_t                 chunk_size = 8,
+                                                 ChunkedInputConfigurer  configure  = nullptr) {
+        RuntimeConfig runtime_config = runtime_config_;
+        runtime_config.fifo_scheduler_config.prefill_chunk_size = chunk_size;
+
+        ResourceContext resource_context;
+        resource_context.cache_manager = std::make_shared<KVCacheManager>(init_config());
+        resource_context.role_type      = role_type;
+        return createContextStreamImpl(input_ids, runtime_config, resource_context, configure);
+    }
 
     GenerateStreamPtr createComplexContextStream(std::vector<int> input_ids) {
         autil::EnvGuard perf_scope("PERF_TEST", "1");
@@ -94,12 +102,64 @@ public:
     };
 
 private:
+    GenerateStreamPtr createContextStreamImpl(const std::vector<int>& input_ids,
+                                              const RuntimeConfig&   runtime_config,
+                                              const ResourceContext& resource_context,
+                                              ChunkedInputConfigurer configure) {
+        auto generate_input             = std::make_shared<GenerateInput>();
+        generate_input->generate_config = std::make_shared<GenerateConfig>();
+        generate_input->begin_time_us   = autil::TimeUtility::currentTimeInMicroSeconds();
+        generate_input->input_ids =
+            torch::tensor(std::vector<int32_t>(input_ids.begin(), input_ids.end()), torch::kInt32);
+        if (configure) {
+            configure(*generate_input, *generate_input->generate_config);
+        }
+        return std::make_shared<NormalGenerateStream>(
+            generate_input, model_config_, runtime_config, resource_context, nullptr);
+    }
+
     ModelConfig   model_config_;
     RuntimeConfig runtime_config_;
 };
 
 class GenerateStreamTest: public DeviceTestBase {
 protected:
+    // Chunk windows are active only after the stream reaches RUNNING.
+    static void markRunning(const GenerateStreamPtr& stream) {
+        stream->generate_status_->status = StreamState::RUNNING;
+    }
+
+    static std::vector<int> makeInputIds(int count) {
+        std::vector<int> input_ids(count);
+        std::iota(input_ids.begin(), input_ids.end(), 1);
+        return input_ids;
+    }
+
+    static GenerateStreamPtr createRunningMiddleChunk() {
+        GenerateStreamBuilder builder;
+        auto                  stream = builder.createChunkedContextStream(makeInputIds(10));
+        markRunning(stream);
+        EXPECT_TRUE(stream->isMiddleChunk());
+        return stream;
+    }
+
+    static void expectChunkWindow(const GenerateStreamPtr& stream, int prefix, int length, bool is_last) {
+        EXPECT_EQ(stream->prefixLength(), prefix);
+        EXPECT_EQ(stream->currentChunkLen(), length);
+        EXPECT_EQ(stream->contextLength(), length);
+        EXPECT_EQ(stream->isLastChunk(), is_last);
+        EXPECT_EQ(stream->isMiddleChunk(), !is_last);
+    }
+
+    static void expectMiddleChunkWorkerError(const GenerateStreamPtr& stream,
+                                             int                      original_reuse_length,
+                                             int                      original_seq_length) {
+        EXPECT_TRUE(stream->hasError());
+        EXPECT_EQ(stream->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+        EXPECT_EQ(stream->reuseLength(), original_reuse_length);
+        EXPECT_EQ(stream->seqLength(), original_seq_length);
+        EXPECT_TRUE(stream->isContextStream());
+    }
 };
 
 template<typename T>
@@ -1015,6 +1075,136 @@ TEST_F(GenerateStreamTest, timeInfoSnapshotIsCoherentDuringLifecyclePublication)
     EXPECT_TRUE(final_info.running_started);
     EXPECT_TRUE(final_info.first_token_committed);
     EXPECT_TRUE(final_info.generation_done);
+}
+
+TEST_F(GenerateStreamTest, testChunkedPrefillWindowAndUpdate) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createChunkedContextStream(makeInputIds(10));
+
+    ASSERT_FALSE(stream->useChunkWindow());
+    ASSERT_EQ(stream->contextLength(), 10);
+
+    markRunning(stream);
+    expectChunkWindow(stream, /*prefix=*/0, /*length=*/8, /*is_last=*/false);
+
+    const int original_seq_len = stream->seqLength();
+    updateOneToken(stream, 101);
+    ASSERT_TRUE(stream->isContextStream());
+    ASSERT_EQ(stream->seqLength(), original_seq_len);
+    expectChunkWindow(stream, /*prefix=*/8, /*length=*/2, /*is_last=*/true);
+
+    updateOneToken(stream, 101);
+    ASSERT_FALSE(stream->isContextStream());
+    ASSERT_EQ(stream->seqLength(), original_seq_len + 1);
+}
+
+TEST_F(GenerateStreamTest, testChunkedPrefillMiddleChunkPropagatesWorkerError) {
+    auto      stream                = createRunningMiddleChunk();
+    const int original_reuse_length = stream->reuseLength();
+    const int original_seq_length   = stream->seqLength();
+    StreamUpdateInfo update_info{};
+    update_info.error_info = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "middle chunk worker failed");
+
+    stream->update(update_info);
+
+    expectMiddleChunkWorkerError(stream, original_reuse_length, original_seq_length);
+}
+
+TEST_F(GenerateStreamTest, testChunkedPrefillReuseStartAndInitialReuseFrozen) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = builder.createChunkedContextStream(makeInputIds(18));
+    stream->setReuseLength(8);
+    stream->setInitialReuseLength(8);
+    markRunning(stream);
+
+    expectChunkWindow(stream, /*prefix=*/8, /*length=*/8, /*is_last=*/false);
+    stream->advanceChunk();
+    expectChunkWindow(stream, /*prefix=*/16, /*length=*/2, /*is_last=*/true);
+    ASSERT_EQ(stream->initialReuseLength(), 8);
+}
+
+TEST_F(GenerateStreamTest, testChunkedPrefillSpecUpdateMiddleChunkDiscards) {
+    auto      stream           = createRunningMiddleChunk();
+    const int original_seq_len = stream->seqLength();
+
+    auto new_tokens = torch::tensor(std::vector<int32_t>{101}, torch::kInt32).reshape({1, 1});
+    stream->specUpdate({new_tokens, 1, /*draft_token=*/42, torch::Tensor(), torch::Tensor()});
+    ASSERT_TRUE(stream->isContextStream());
+    ASSERT_EQ(stream->seqLength(), original_seq_len);
+    expectChunkWindow(stream, /*prefix=*/8, /*length=*/2, /*is_last=*/true);
+}
+
+TEST_F(GenerateStreamTest, testChunkedPrefillSpecUpdateMiddleChunkPropagatesWorkerError) {
+    auto      stream                = createRunningMiddleChunk();
+    const int original_reuse_length = stream->reuseLength();
+    const int original_seq_length   = stream->seqLength();
+    StreamSpecUpdateInfo update_info{};
+    update_info.error_info = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "middle chunk worker failed");
+
+    stream->specUpdate(update_info);
+
+    expectMiddleChunkWorkerError(stream, original_reuse_length, original_seq_length);
+}
+
+TEST_F(GenerateStreamTest, testChunkedPrefillActivationGates) {
+    GenerateStreamBuilder builder;
+    const auto            input_ids = makeInputIds(9);
+
+    struct RoleCase {
+        const char* name;
+        RoleType    role;
+        bool        enabled;
+    };
+    const RoleCase role_cases[] = {{"prefill", RoleType::PREFILL, true},
+                                   {"pdfusion", RoleType::PDFUSION, true},
+                                   {"decode", RoleType::DECODE, false}};
+    for (const auto& test_case : role_cases) {
+        SCOPED_TRACE(test_case.name);
+        auto stream = builder.createChunkedContextStream(input_ids, test_case.role);
+        EXPECT_EQ(stream->chunkedPrefillEnabled(), test_case.enabled);
+    }
+
+    struct RejectionCase {
+        const char*            name;
+        ChunkedInputConfigurer configure;
+    };
+    const std::vector<RejectionCase> rejection_cases{
+        {"force_batch",
+         [](GenerateInput& input, GenerateConfig&) {
+             input.group_id   = 1;
+             input.group_size = 1;
+         }},
+        {"num_beams", [](GenerateInput&, GenerateConfig& config) { config.num_beams = 2; }},
+        {"return_logits", [](GenerateInput&, GenerateConfig& config) { config.return_logits = true; }},
+        {"calculate_loss", [](GenerateInput&, GenerateConfig& config) { config.calculate_loss = 1; }},
+        {"return_hidden_states", [](GenerateInput&, GenerateConfig& config) { config.return_hidden_states = true; }},
+        {"return_all_hidden_states",
+         [](GenerateInput&, GenerateConfig& config) { config.return_all_hidden_states = true; }},
+        {"return_all_probs",
+         [](GenerateInput&, GenerateConfig& config) { config.return_all_probs = ReturnAllProbsMode::DEFAULT; }},
+        {"multimodal",
+         [](GenerateInput& input, GenerateConfig&) {
+             input.multimodal_features = std::vector<torch::Tensor>{torch::Tensor()};
+         }},
+    };
+    for (const auto& test_case : rejection_cases) {
+        SCOPED_TRACE(test_case.name);
+        auto stream = builder.createChunkedContextStream(
+            input_ids, RoleType::PREFILL, /*chunk_size=*/8, test_case.configure);
+        EXPECT_FALSE(stream->chunkedPrefillEnabled());
+        EXPECT_EQ(stream->stopReason(), "chunked prefill incompatible: " + std::string(test_case.name));
+    }
+
+    auto non_chunked_force_batch_stream = builder.createChunkedContextStream(
+        input_ids,
+        RoleType::PREFILL,
+        /*chunk_size=*/0,
+        [](GenerateInput& input, GenerateConfig&) {
+            input.group_id   = 1;
+            input.group_size = 1;
+        });
+    ASSERT_FALSE(non_chunked_force_batch_stream->chunkedPrefillEnabled());
+    ASSERT_FALSE(non_chunked_force_batch_stream->hasError());
 }
 
 }  // namespace rtp_llm
