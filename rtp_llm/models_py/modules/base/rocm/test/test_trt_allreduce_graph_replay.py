@@ -127,6 +127,62 @@ def _worker_graph_pure_allreduce(
         _teardown()
 
 
+def _worker_graph_fused_rmsnorm(
+    rank, world_size, port, num_replays, num_tokens, fp8_out
+):
+    try:
+        _setup(rank, world_size, port)
+        from rtp_llm.models_py.modules.base.rocm.trt_allreduce import TrtllmDistEnv
+
+        dev = torch.device(f"cuda:{rank}")
+        env = TrtllmDistEnv(group=dist.group.WORLD, device_id=rank)
+        torch.manual_seed(42 + rank)
+        ar = torch.randn(num_tokens, 4096, dtype=torch.bfloat16, device=dev)
+        residual = torch.randn_like(ar)
+        weight = torch.randn(4096, dtype=torch.bfloat16, device=dev)
+        stream = torch.cuda.Stream(device=dev)
+        stream.wait_stream(torch.cuda.current_stream(dev))
+        with torch.cuda.stream(stream):
+            env.allreduce_add_rms_fused(
+                ar.clone(), residual.clone(), weight, 1e-6, fp8_out
+            )
+            stream.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            graph_ar, graph_residual = ar.clone(), residual.clone()
+            with torch.cuda.graph(graph, stream=stream):
+                graph_res, graph_norm, graph_scale = env.allreduce_add_rms_fused(
+                    graph_ar, graph_residual, weight, 1e-6, fp8_out
+                )
+        stream.synchronize()
+        env.consume_capture_if_needed()
+
+        for i in range(num_replays):
+            replay_ar = torch.roll(ar, i + 1, -1)
+            replay_residual = torch.roll(residual, i + 1, -1)
+            ref_res, ref_norm, ref_scale = env.allreduce_add_rms_native(
+                replay_ar.clone(), replay_residual.clone(), weight, 1e-6, fp8_out
+            )
+            stream.wait_stream(torch.cuda.current_stream(dev))
+            with torch.cuda.stream(stream):
+                graph_ar.copy_(replay_ar)
+                graph_residual.copy_(replay_residual)
+                graph.replay()
+            stream.synchronize()
+            assert torch.equal(graph_ar, replay_ar)
+            assert torch.equal(graph_residual, replay_residual)
+            torch.testing.assert_close(graph_res, ref_res, atol=2e-2, rtol=1e-2)
+            if fp8_out:
+                torch.testing.assert_close(graph_scale, ref_scale, atol=1e-5, rtol=0.1)
+                got = graph_norm.float() * graph_scale
+                want = ref_norm.float() * ref_scale
+                diff = (got - want).abs().max().item()
+                assert diff < 0.05 or diff / want.abs().max().item() < 0.1
+            else:
+                torch.testing.assert_close(graph_norm, ref_norm, atol=2e-2, rtol=1e-2)
+    finally:
+        _teardown()
+
+
 class TestTrtAllReduceGraphReplay(unittest.TestCase):
 
     def setUp(self):
@@ -158,6 +214,17 @@ class TestTrtAllReduceGraphReplay(unittest.TestCase):
                     hidden_size=3072,
                     num_tokens=num_tokens,
                 )
+
+    def test_graph_replay_fused_rmsnorm(self):
+        for num_tokens in (8, 128):
+            for fp8_out in (False, True):
+                with self.subTest(num_tokens=num_tokens, fp8_out=fp8_out):
+                    _launch(
+                        _worker_graph_fused_rmsnorm,
+                        num_replays=4,
+                        num_tokens=num_tokens,
+                        fp8_out=fp8_out,
+                    )
 
 
 if __name__ == "__main__":

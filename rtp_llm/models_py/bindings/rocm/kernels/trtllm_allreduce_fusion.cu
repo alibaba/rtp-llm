@@ -25,14 +25,18 @@
 using namespace std;
 using namespace at;
 
-#define NBLOCKS_PER_GPU 256
-
 namespace rtp_llm {
 
 namespace cg     = cooperative_groups;
 using __bfloat16 = __hip_bfloat16;
 
 static_assert(sizeof(void*) == sizeof(fptr_t));
+static_assert(shouldUseOneStageAllReduce(64, 2, 160 * 1024));
+static_assert(shouldUseOneStageAllReduce(64, 4, 160 * 1024 - 1));
+static_assert(!shouldUseOneStageAllReduce(64, 4, 160 * 1024));
+static_assert(shouldUseOneStageAllReduce(64, 8, 80 * 1024 - 1));
+static_assert(!shouldUseOneStageAllReduce(65, 8, 80 * 1024 - 1));
+static_assert(!shouldUseOneStageAllReduce(64, 8, 80 * 1024));
 
 namespace details {
 
@@ -517,7 +521,7 @@ void allreduce_fusion_kernel_1stage_launcher(AllReduceFusionParams<T> const& par
     constexpr int VEC_SIZE   = details::kBytesPerAccess / sizeof(T);
     constexpr int BLOCK_SIZE = HIDDEN_DIM / VEC_SIZE;
     int           token_num  = params.size / params.hidden_dim;
-    TORCH_CHECK(token_num <= NBLOCKS_PER_GPU);
+    TORCH_CHECK(token_num <= kAllReduceMaxBlocksPerGpu);
     dim3 threadsPerBlock(BLOCK_SIZE);
     dim3 numBlocks(token_num);
     allreduce_fusion_kernel_1stage<T, NRanks, BLOCK_SIZE, QUANT_TYPE>
@@ -532,7 +536,7 @@ void allreduce_kernel_1stage_launcher(AllReduceFusionParams<T> const& params,
     constexpr int VEC_SIZE   = details::kBytesPerAccess / sizeof(T);
     constexpr int BLOCK_SIZE = HIDDEN_DIM / VEC_SIZE;
     int           token_num  = params.size / params.hidden_dim;
-    TORCH_CHECK(token_num <= NBLOCKS_PER_GPU);
+    TORCH_CHECK(token_num <= kAllReduceMaxBlocksPerGpu);
     dim3 threadsPerBlock(BLOCK_SIZE);
     dim3 numBlocks(token_num);
     allreduce_kernel_1stage<T, NRanks, BLOCK_SIZE, QUANT_TYPE>
@@ -669,9 +673,9 @@ void allreduce_fusion_kernel_2stage_launcher(AllReduceFusionParams<T> const& par
                                              gpuStream_t                     stream) {
     constexpr int VEC_SIZE   = details::kBytesPerAccess / sizeof(T);
     constexpr int BLOCK_SIZE = HIDDEN_DIM / VEC_SIZE;
-    int           token_num  = params.size / params.hidden_dim;
+    int64_t       token_num  = params.size / params.hidden_dim;
     dim3          threadsPerBlock(BLOCK_SIZE);
-    token_num = std::min(token_num, NBLOCKS_PER_GPU);
+    token_num = std::min(token_num, kAllReduceMaxBlocksPerGpu);
     dim3 numBlocks(token_num);
     allreduce_fusion_kernel_2stage<T, NRanks, BLOCK_SIZE, QUANT_TYPE>
         <<<numBlocks, threadsPerBlock, 0, stream>>>(params, meta, cptrs);
@@ -684,9 +688,9 @@ void allreduce_kernel_2stage_launcher(AllReduceFusionParams<T> const& params,
                                       gpuStream_t                     stream) {
     constexpr int VEC_SIZE   = details::kBytesPerAccess / sizeof(T);
     constexpr int BLOCK_SIZE = HIDDEN_DIM / VEC_SIZE;
-    int           token_num  = params.size / params.hidden_dim;
+    int64_t       token_num  = params.size / params.hidden_dim;
     dim3          threadsPerBlock(BLOCK_SIZE);
-    token_num = std::min(token_num, NBLOCKS_PER_GPU);
+    token_num = std::min(token_num, kAllReduceMaxBlocksPerGpu);
     dim3 numBlocks(token_num);
     allreduce_kernel_2stage<T, NRanks, BLOCK_SIZE, QUANT_TYPE>
         <<<numBlocks, threadsPerBlock, 0, stream>>>(params, meta, cptrs);
@@ -706,10 +710,8 @@ void allreduce_fusion_kernel_launcher_(AllReduceFusionParams<T> const& params,
     TORCH_CHECK(params.size % params.hidden_dim == 0);
     TORCH_CHECK(params.hidden_dim % VEC_SIZE == 0);
     TORCH_CHECK(params.hidden_dim == HIDDEN_DIM);
-    auto bytes  = params.size * sizeof(T);
-    bool use_1s = token_num <= (NBLOCKS_PER_GPU / 4);
-    use_1s = use_1s && ((NRanks <= 2) || (NRanks <= 4 && bytes < 160 * 1024) || (NRanks <= 8 && bytes < 80 * 1024));
-    if (use_1s) {
+    auto bytes = params.size * sizeof(T);
+    if (shouldUseOneStageAllReduce(token_num, NRanks, bytes)) {
         allreduce_fusion_kernel_1stage_launcher<T, NRanks, HIDDEN_DIM, QUANT_TYPE>(params, meta, cptrs, stream);
     } else {
         allreduce_fusion_kernel_2stage_launcher<T, NRanks, HIDDEN_DIM, QUANT_TYPE>(params, meta, cptrs, stream);
@@ -726,10 +728,8 @@ void allreduce_kernel_launcher_(AllReduceFusionParams<T> const& params,
     TORCH_CHECK(params.size % params.hidden_dim == 0);
     TORCH_CHECK(params.hidden_dim % VEC_SIZE == 0);
     TORCH_CHECK(params.hidden_dim == HIDDEN_DIM);
-    auto bytes  = params.size * sizeof(T);
-    bool use_1s = token_num <= (NBLOCKS_PER_GPU / 4);
-    use_1s = use_1s && ((NRanks <= 2) || (NRanks <= 4 && bytes < 160 * 1024) || (NRanks <= 8 && bytes < 80 * 1024));
-    if (use_1s) {
+    auto bytes = params.size * sizeof(T);
+    if (shouldUseOneStageAllReduce(token_num, NRanks, bytes)) {
         allreduce_kernel_1stage_launcher<T, NRanks, HIDDEN_DIM, QUANT_TYPE>(params, meta, cptrs, stream);
     } else {
         allreduce_kernel_2stage_launcher<T, NRanks, HIDDEN_DIM, QUANT_TYPE>(params, meta, cptrs, stream);
@@ -995,7 +995,7 @@ public:
                   int64_t world_size,
                   int64_t size_in_bytes,
                   int64_t comm_ptrs_buf_len,
-                  int64_t max_thread_blocks = NBLOCKS_PER_GPU,
+                  int64_t max_thread_blocks = kAllReduceMaxBlocksPerGpu,
                   bool    round_robin       = true) {
         TORCH_CHECK(rank < world_size);
         gpuSetDevice(device_id);
@@ -1096,10 +1096,8 @@ public:
         meta.rank       = rank_;
         meta.nranks     = world_size_;
 
-        int64_t token_num = input.numel() / input.size(-1);
-        bool    direct_input =
-            token_num <= (NBLOCKS_PER_GPU / 4)
-            && (world_size_ <= 2 || (world_size_ <= 4 && size < 160 * 1024) || (world_size_ <= 8 && size < 80 * 1024));
+        int64_t   token_num    = input.numel() / input.size(-1);
+        bool      direct_input = shouldUseOneStageAllReduce(token_num, world_size_, size);
         CommPtrs* cptrs;
         bool      cache_hit = false;
         auto      it        = direct_input ? ptr_to_comm_ptrs_.find(ptr) : ptr_to_comm_ptrs_.end();
