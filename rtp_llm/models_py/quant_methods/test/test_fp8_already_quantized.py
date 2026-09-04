@@ -1360,6 +1360,34 @@ class TestFp8BlockLoad(_LoadBackendMixin, unittest.TestCase):
 
         self._assert_runtime_state(layer, expected_scale)
 
+    def test_qkv_tp1_rejects_truncated_block_scale_shard(self):
+        hidden = 256
+        head_dim = 128
+        num_heads = 4
+        num_kv_heads = 2
+        layer = QKVParallelLinear(
+            hidden_size=hidden,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            tp_size=1,
+            tp_rank=0,
+            quant_config=_make_qc("fp8_block"),
+            prefix="qkv_proj",
+            params_dtype=torch.bfloat16,
+        )
+        truncated_q_scale = torch.ones(3, 2, dtype=torch.float32)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"qkv_proj\.q\.weight_scale_inv checkpoint shape must be \(4, 2\)",
+        ):
+            layer.load_weights(
+                {
+                    "qkv_proj.q_proj.weight_scale_inv": truncated_q_scale,
+                }
+            )
+
     def test_qkv_tp2_square_q_weight_keeps_output_row_layout(self):
         hidden = 256
         head_dim = 128
