@@ -126,7 +126,7 @@ def parse_args():
         type=float,
         default=0.0,
         help=(
-            "When >0, prefill grid mode seeds a shared prefix before each run and "
+            "When >0, grid mode seeds a shared prefix before each run and "
             "measures prompts whose target prefix-cache hit rate is this value."
         ),
     )
@@ -357,7 +357,7 @@ def main() -> str:
 
         input_query_dict = create_query(input_len_list=input_len_list)
         reuse_cache_query_dict = None
-        if args.prefill_reuse_cache_hit_rate > 0.0 and args.partial in (0, 2):
+        if args.prefill_reuse_cache_hit_rate > 0.0:
             tokenizer_path = (
                 extract_arg(remaining, "tokenizer_path")
                 or extract_arg(remaining, "checkpoint_path")
@@ -391,6 +391,7 @@ def main() -> str:
                 decode_test_length=args.decode_test_length,
                 generate_config=generate_config,
                 grid_cases=grid_cases,
+                reuse_cache_query_dict=reuse_cache_query_dict,
             ).run()
         if args.partial in (0, 2):
             GridRunner(

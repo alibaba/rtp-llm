@@ -32,6 +32,7 @@ def get_mla_impl(
     is_cuda_graph: bool = False,
     max_seq_len: int = 0,
     parallelism_config: Optional[ParallelismConfig] = None,
+    force_sparse_mla: bool = False,
 ) -> MlaImplBase:
 
     # MTP target-verify arrives with is_prefill=True (sequence_lengths is empty in
@@ -82,13 +83,19 @@ def get_mla_impl(
             attn_inputs.is_prefill
             and not use_decode_mla
             and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
+            and not force_sparse_mla
             and not (
                 parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
             )
         )
 
-        if not use_fast_path and not impl.support_parallelism_config(
-            parallelism_config
+        # Prefill CP capability filtering applies only to real prefill. Normal
+        # decode and prefill-shaped multi-token decode do not run prefill CP.
+        if (
+            not use_fast_path
+            and attn_inputs.is_prefill
+            and not use_decode_mla
+            and not impl.support_parallelism_config(parallelism_config)
         ):
             continue
 
@@ -191,6 +198,7 @@ def get_fmha_impl(
     is_cuda_graph: bool = False,
     max_seq_len: int = 0,
     parallelism_config: Optional[ParallelismConfig] = None,
+    _force_sparse_mla: bool = False,
 ) -> FMHAImplBase:
     # Set is_cuda_graph as dynamic attribute on attn_inputs for base class to read
     attn_inputs.is_cuda_graph = is_cuda_graph
@@ -265,6 +273,7 @@ class AttnImplFactory(object):
             is_cuda_graph,
             model_config.max_seq_len,
             parallelism_config,
+            model_config.force_sparse_mla,
         )
         logging.debug(f"get fmha impl: {type(instance).__name__}")
         return instance

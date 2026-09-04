@@ -214,6 +214,7 @@ class IndexerOp(nn.Module):
         block_size: int = 128,
         scale_fmt: str = "ue8m0",
         is_neox_style: bool = True,
+        use_hadamard: bool = True,
     ):
         """
         Initialize IndexerOp.
@@ -238,6 +239,10 @@ class IndexerOp(nn.Module):
         self.block_size = block_size
         self.scale_fmt = scale_fmt
         self.is_neox_style = is_neox_style
+        self.use_hadamard = use_hadamard
+        # vLLM HY4 uses the quantizer default (1e-10). The legacy shared
+        # indexer path uses 1e-4 and retains that behavior.
+        self.q_quant_eps = 1e-4 if use_hadamard else 1e-10
 
         glm5_topk_backend = (
             os.environ.get("GLM5_INDEXER_TOPK_BACKEND", "dsv4_persistent")
@@ -325,16 +330,17 @@ class IndexerOp(nn.Module):
         """
         # Fast path: fused Triton kernel + cuBLAS GEMM (2 launches instead of 4)
         # Empirical: 2.35x at T=4096, up to 4.2x at T=16384 on DSV3.2 (eager mode).
-        fused = _try_fused_prefill_rope_hadamard_qk(
-            q,
-            k,
-            positions,
-            self.cos_sin_cache,
-            self.rope_head_dim,
-            self.is_neox_style,
-        )
-        if fused is not None:
-            return fused
+        if self.use_hadamard:
+            fused = _try_fused_prefill_rope_hadamard_qk(
+                q,
+                k,
+                positions,
+                self.cos_sin_cache,
+                self.rope_head_dim,
+                self.is_neox_style,
+            )
+            if fused is not None:
+                return fused
 
         # Fallback: unfused 4-op chain (rope_q + rope_k + had_q + had_k)
         # Extract position embedding part (exclude rope_head_dim from the end)
@@ -353,8 +359,8 @@ class IndexerOp(nn.Module):
                 interleave=not self.is_neox_style,
             )
 
-        query = _rotate_activation(q)
-        key = _rotate_activation(k)
+        query = _rotate_activation(q) if self.use_hadamard else q
+        key = _rotate_activation(k) if self.use_hadamard else k
 
         return query, key
 
@@ -384,16 +390,17 @@ class IndexerOp(nn.Module):
         """
         # Fast path: fused Triton kernel + cuBLAS GEMM (2 launches instead of 4)
         # Skips when full_rope_pos_ids is None (CP edge case: n_q == 0).
-        fused = _try_fused_prefill_rope_hadamard_qk(
-            q,
-            k,
-            full_rope_pos_ids,
-            self.cos_sin_cache,
-            self.rope_head_dim,
-            self.is_neox_style,
-        )
-        if fused is not None:
-            return fused
+        if self.use_hadamard:
+            fused = _try_fused_prefill_rope_hadamard_qk(
+                q,
+                k,
+                full_rope_pos_ids,
+                self.cos_sin_cache,
+                self.rope_head_dim,
+                self.is_neox_style,
+            )
+            if fused is not None:
+                return fused
 
         # Fallback: unfused 4-op chain
         q_pe = q[:, :, : self.index_head_dim - self.rope_head_dim]
@@ -410,8 +417,8 @@ class IndexerOp(nn.Module):
                 interleave=not self.is_neox_style,
             )
 
-        query = _rotate_activation(q)
-        key = _rotate_activation(k)
+        query = _rotate_activation(q) if self.use_hadamard else q
+        key = _rotate_activation(k) if self.use_hadamard else k
 
         return query, key
 
@@ -444,7 +451,7 @@ class IndexerOp(nn.Module):
                 interleave=not self.is_neox_style,
             )
 
-        key = _rotate_activation(k)
+        key = _rotate_activation(k) if self.use_hadamard else k
 
         return key
 
@@ -517,7 +524,7 @@ class IndexerOp(nn.Module):
         q_fp8, q_scale = sgl_per_token_group_quant_fp8(
             query_flat,
             group_size=self.block_size,
-            eps=1e-4,
+            eps=self.q_quant_eps,
             column_major_scales=True,
             scale_tma_aligned=True,
             scale_ue8m0=(self.scale_fmt == "ue8m0"),
@@ -549,7 +556,7 @@ class IndexerOp(nn.Module):
         q_fp8, q_scale = sgl_per_token_group_quant_fp8(
             query_flat,
             group_size=self.block_size,
-            eps=1e-4,
+            eps=self.q_quant_eps,
             column_major_scales=True,
             scale_tma_aligned=True,
             scale_ue8m0=(self.scale_fmt == "ue8m0"),
@@ -672,7 +679,7 @@ class IndexerOp(nn.Module):
         q_fp8, q_scale = sgl_per_token_group_quant_fp8(
             query_flat,
             group_size=self.block_size,
-            eps=1e-4,
+            eps=self.q_quant_eps,
             column_major_scales=True,
             scale_tma_aligned=True,
             scale_ue8m0=(self.scale_fmt == "ue8m0"),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Optional, Tuple
 
 import torch
 
@@ -15,11 +16,78 @@ from .mega_moe import (
     _mega_output_capacity,
     _sync_cuda_graph_warmup_ranks,
 )
-from .quant_layouts import FP4_BLOCK, prepare_fp8_weight_scale_for_deepgemm
+from .quant_layouts import (
+    FP4_BLOCK,
+    FP8_BLOCK,
+    MXFP8_BLOCK,
+    prepare_fp8_weight_scale_for_deepgemm,
+)
 
 logger = logging.getLogger(__name__)
 
 _CUDA_GRAPH_CLONE_FP8_BUF_CACHE: dict[tuple, object] = {}
+
+
+def _ceil_div(x: int, y: int) -> int:
+    return (x + y - 1) // y
+
+
+def _infer_fp8_scale_recipe(
+    scale: torch.Tensor, mn: int, k: int
+) -> Tuple[int, int]:
+    """Infer a raw MegaMoE weight-scale recipe from its trailing shape."""
+    # Packed scales do not retain enough logical shape information. Existing
+    # callers only prepack the legacy 128x128 format; MXFP8 stays raw FP32
+    # until this module packs it on the owning CUDA rank.
+    if scale.dtype == torch.int32:
+        return (FP8_BLOCK, FP8_BLOCK)
+
+    trailing = tuple(scale.shape[-2:])
+    recipe_1x32 = (1, MXFP8_BLOCK)
+    expected_1x32 = (mn, _ceil_div(k, MXFP8_BLOCK))
+    if trailing == expected_1x32 or scale.numel() == mn * expected_1x32[1]:
+        return recipe_1x32
+
+    recipe_128x128 = (FP8_BLOCK, FP8_BLOCK)
+    expected_128x128 = (
+        _ceil_div(mn, FP8_BLOCK),
+        _ceil_div(k, FP8_BLOCK),
+    )
+    if trailing == expected_128x128 or scale.numel() == (
+        expected_128x128[0] * expected_128x128[1]
+    ):
+        return recipe_128x128
+
+    raise ValueError(
+        "Cannot infer FP8 MegaMoE weight scale recipe from "
+        f"shape={tuple(scale.shape)} for mn={mn}, k={k}. Expected trailing "
+        f"dims {expected_1x32} for 1x32 or {expected_128x128} for 128x128."
+    )
+
+
+def _reshape_fp8_scale_for_recipe(
+    scale: torch.Tensor,
+    num_groups: int,
+    mn: int,
+    k: int,
+    recipe: Tuple[int, int],
+) -> torch.Tensor:
+    if scale.dtype == torch.int32:
+        return scale
+    gran_mn, gran_k = recipe
+    expected = (
+        num_groups,
+        _ceil_div(mn, gran_mn),
+        _ceil_div(k, gran_k),
+    )
+    if tuple(scale.shape) == expected:
+        return scale
+    if scale.numel() == expected[0] * expected[1] * expected[2]:
+        return scale.reshape(expected)
+    raise ValueError(
+        "FP8 MegaMoE scale shape does not match inferred recipe. Got "
+        f"shape={tuple(scale.shape)}, expected={expected}, recipe={recipe}."
+    )
 
 
 def _get_or_create_cuda_graph_clone_buf_fp8(
@@ -71,6 +139,10 @@ def _get_or_create_cuda_graph_clone_buf_fp8(
 class GLM5MegaMoEFP8(GLM5MegaMoE):
     """GLM-5 MegaMoE wrapper for DeepGEMM ``fp8_fp8_mega_moe``."""
 
+    def __init__(self, cfg: GLM5MegaMoeCfg):
+        super().__init__(cfg)
+        self._fp8_weight_recipe: Tuple[int, int] = (FP8_BLOCK, FP8_BLOCK)
+
     def clone_for_cuda_graph(self) -> "GLM5MegaMoEFP8":
         clone = object.__new__(type(self))
         torch.nn.Module.__init__(clone)
@@ -91,7 +163,25 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
         )
         clone._input_packer = get_mega_moe_input_packer()
         clone._mega_group = self._mega_group
+        clone._fp8_weight_recipe = self._fp8_weight_recipe
         return clone
+
+    def _prepare_fp8_scale(
+        self,
+        scale: torch.Tensor,
+        mn: int,
+        k: int,
+        num_groups: int,
+        recipe: Tuple[int, int],
+    ) -> torch.Tensor:
+        scale = _reshape_fp8_scale_for_recipe(scale, num_groups, mn, k, recipe)
+        return prepare_fp8_weight_scale_for_deepgemm(
+            scale,
+            mn,
+            k,
+            num_groups=num_groups,
+            recipe=recipe,
+        )
 
     def setup_weights_from_fp8(
         self,
@@ -102,11 +192,11 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
         w3_fp8: torch.Tensor,
         w3_scale: torch.Tensor,
     ) -> None:
-        """Setup pre-quantized FP8 per-block expert weights for fp8_fp8_mega_moe.
+        """Setup pre-quantized FP8 expert weights for fp8_fp8_mega_moe.
 
         Inputs follow DeepGEMM convention: w1 is gate, w3 is up, w2 is down.
-        Weight scales are either raw 128x128 per-block scales or DeepGEMM's
-        packed int32 layout from the FP8 loader.
+        Raw scales may use either 128x128 block FP8 or MXFP8's per-row 1x32
+        layout. Packed int32 scales retain the legacy 128x128 interpretation.
         """
         import deep_gemm
 
@@ -137,7 +227,18 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
         s13 = torch.cat([w1_scale, w3_scale], dim=1).contiguous()
         del w1_fp8, w1_scale, w3_fp8, w3_scale
 
-        if s13.dtype == torch.float32 or w2_scale.dtype == torch.float32:
+        l1_recipe = _infer_fp8_scale_recipe(s13, 2 * inter, D)
+        l2_recipe = _infer_fp8_scale_recipe(w2_scale, D, inter)
+        if l1_recipe != l2_recipe:
+            raise ValueError(
+                "fp8_fp8_mega_moe requires L1/L2 weights to use the same "
+                f"FP8 weight recipe, got L1={l1_recipe}, L2={l2_recipe}"
+            )
+        self._fp8_weight_recipe = l1_recipe
+
+        if l1_recipe == (FP8_BLOCK, FP8_BLOCK) and (
+            s13.dtype == torch.float32 or w2_scale.dtype == torch.float32
+        ):
             if s13.dtype != torch.float32 or w2_scale.dtype != torch.float32:
                 raise TypeError(
                     "mega_moe_fp8 requires both FP8 MoE scales to be raw "
@@ -158,15 +259,28 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
             del w2_scale
             torch.cuda.empty_cache()
         else:
-            s13_int = prepare_fp8_weight_scale_for_deepgemm(s13, 2 * inter, D, E)
-            s2_int = prepare_fp8_weight_scale_for_deepgemm(w2_scale, D, inter, E)
+            s13_int = self._prepare_fp8_scale(s13, 2 * inter, D, E, l1_recipe)
+            s2_int = self._prepare_fp8_scale(w2_scale, D, inter, E, l2_recipe)
             del s13, w2_scale
         torch.cuda.empty_cache()
 
-        (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe_fp8(
-            (w13_fp8, s13_int),
-            (w2_fp8.contiguous(), s2_int),
+        logger.info(
+            "[GLM5 MegaMoE FP8] transforming weights: layer=%d weight_recipe=%s",
+            cfg.layer_id,
+            self._fp8_weight_recipe,
         )
+
+        def _transform_weights():
+            return deep_gemm.transform_weights_for_mega_moe_fp8(
+                (w13_fp8, s13_int),
+                (w2_fp8.contiguous(), s2_int),
+            )
+
+        if w13_fp8.is_cuda:
+            with torch.cuda.device(w13_fp8.device):
+                (l1_w, l1_sf), (l2_w, l2_sf) = _transform_weights()
+        else:
+            (l1_w, l1_sf), (l2_w, l2_sf) = _transform_weights()
         del w13_fp8, s13_int, w2_fp8, s2_int
         torch.cuda.empty_cache()
 
@@ -218,11 +332,24 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
         x: torch.Tensor,
         weights: torch.Tensor,
         indices: torch.Tensor,
+        activation_clamp: Optional[float] = None,
     ) -> torch.Tensor:
-        return self._forward_impl(x, weights, indices, inputs_prepacked=False)
+        return self._forward_impl(
+            x,
+            weights,
+            indices,
+            inputs_prepacked=False,
+            activation_clamp=activation_clamp,
+        )
 
     def forward_prepacked(self, x: torch.Tensor) -> torch.Tensor:
-        return self._forward_impl(x, None, None, inputs_prepacked=True)
+        return self._forward_impl(
+            x,
+            None,
+            None,
+            inputs_prepacked=True,
+            activation_clamp=None,
+        )
 
     def _forward_impl(
         self,
@@ -231,6 +358,7 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
         indices: torch.Tensor | None,
         *,
         inputs_prepacked: bool,
+        activation_clamp: Optional[float],
     ) -> torch.Tensor:
         import deep_gemm
 
@@ -259,15 +387,23 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
         )
 
         y = self._mega_y[:T]
-        deep_gemm.fp8_fp8_mega_moe(
-            y,
-            (self._mega_l1_w, self._mega_l1_sf),
-            (self._mega_l2_w, self._mega_l2_sf),
-            buf,
-            recipe=(1, 1, FP4_BLOCK),
-            activation="swiglu",
-            activation_clamp=None,  # (self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None),
-            fast_math=False,
-            assume_all_topk_valid=True,
-        )
+        def _run_mega_moe() -> None:
+            deep_gemm.fp8_fp8_mega_moe(
+                y,
+                (self._mega_l1_w, self._mega_l1_sf),
+                (self._mega_l2_w, self._mega_l2_sf),
+                buf,
+                recipe=(1, 1, FP4_BLOCK),
+                weight_recipe=self._fp8_weight_recipe,
+                activation="swiglu",
+                activation_clamp=activation_clamp,
+                fast_math=False,
+                assume_all_topk_valid=True,
+            )
+
+        if x.is_cuda:
+            with torch.cuda.device(x.device):
+                _run_mega_moe()
+        else:
+            _run_mega_moe()
         return y

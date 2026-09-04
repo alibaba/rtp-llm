@@ -12,7 +12,10 @@ from unittest.mock import MagicMock
 
 import torch
 
-from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.config.quant_config import (
+    Fp8BlockWiseQuantConfig,
+    Fp8MxBlockWiseQuantConfig,
+)
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import (
     FfnAtomicWeight,
@@ -29,12 +32,23 @@ from rtp_llm.model_loader.offline_modelopt_fp4_quant_weight import (
     wrap_for_offline_fp4,
     wrap_shared_expert_for_offline_fp4,
 )
+from rtp_llm.model_loader.mxfp8_quant_weight import Mxfp8Weight
+from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
+    OnlineMegaMoeFp4FromFp8Weight,
+    wrap_moe_for_mega_moe,
+)
 from rtp_llm.model_loader.per_block_fp8_quant_weight import (
     PerBlockFp8Weight,
     V4PerBlockFp8Weight,
 )
 from rtp_llm.model_loader.tensor_source import StackSplitTensorSource, TensorSource
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, concat_0, identity
+
+
+def _swap_stacked_halves(ts: List[torch.Tensor]) -> torch.Tensor:
+    stacked = torch.stack(ts)
+    first, second = stacked.chunk(2, dim=1)
+    return torch.cat((second, first), dim=1)
 
 
 class FakeTensorSource(TensorSource):
@@ -87,6 +101,88 @@ class TestV4SharedExpertW13Weight(unittest.TestCase):
         )
         self.assertIs(wrapped.kernel.process_fun, concat_0)
         self.assertIs(wrapped.scale.process_fun, concat_0)
+
+
+class TestDirectModelOptMxfp4Weight(unittest.TestCase):
+    def test_fused_weight_and_raw_ue8m0_scale_are_loaded_byte_exact(self):
+        src = MoeAtomicWeight(
+            W.moe_w1,
+            [CkptWeightInfo("model.layers.{i}.mlp.experts.w13_weight")],
+            _swap_stacked_halves,
+            config=MoeConfig(expert_num=2),
+            stacked_ckpt_keys=True,
+        )
+        offline = OfflineMegaMoeFp4MoeWeight(
+            src, scale_dtype=torch.float8_e8m0fnu
+        )
+        self.assertEqual(
+            offline.scale.weights[0].name,
+            "model.layers.{i}.mlp.experts.w13_weight_scale",
+        )
+        self.assertTrue(offline.scale.stacked_ckpt_keys)
+        self.assertEqual(offline.scale.data_type, torch.uint8)
+
+        packed = torch.arange(2 * 4 * 2, dtype=torch.uint8).reshape(2, 4, 2)
+        scale_bits = torch.tensor(
+            [
+                [[123], [124], [125], [126]],
+                [[127], [128], [129], [130]],
+            ],
+            dtype=torch.uint8,
+        )
+        source = FakeTensorSource(
+            {
+                "model.layers.0.mlp.experts.w13_weight": packed,
+                "model.layers.0.mlp.experts.w13_weight_scale": scale_bits,
+            }
+        )
+        load_config = MagicMock()
+        load_config.get_selected_experts.return_value = [0, 1]
+        load_config.compute_dtype = torch.bfloat16
+
+        raw = offline._load_raw_tensor(source, 0, "cpu", load_config)
+        processed = offline._postprocess(raw, "cpu", load_config)
+        expected_packed = torch.cat((packed[:, 2:], packed[:, :2]), dim=1)
+        expected_scale_bits = torch.cat(
+            (scale_bits[:, 2:], scale_bits[:, :2]), dim=1
+        )
+        torch.testing.assert_close(
+            processed[W.moe_w1].view(torch.uint8), expected_packed
+        )
+        self.assertEqual(processed[W.moe_s1].dtype, torch.float8_e8m0fnu)
+        torch.testing.assert_close(
+            processed[W.moe_s1].view(torch.uint8), expected_scale_bits
+        )
+
+
+class TestOnlineMxfp8ToMegaMoeFp4Weight(unittest.TestCase):
+    def test_routed_expert_selects_1x32_fp4_converter(self):
+        src = MoeAtomicWeight(
+            W.moe_w1,
+            [CkptWeightInfo("model.layers.{i}.mlp.experts.gate_up_proj")],
+            identity,
+            config=MoeConfig(expert_num=256),
+            stacked_ckpt_keys=True,
+        )
+        mxfp8 = Mxfp8Weight(
+            src,
+            Fp8MxBlockWiseQuantConfig(
+                is_quanted=True,
+                checkpoint_scale_suffix=".weight_scale",
+                packed_scale_suffix="_scale",
+            ),
+            name=src.name,
+        )
+
+        wrapped = wrap_moe_for_mega_moe(mxfp8)
+
+        self.assertIsInstance(wrapped, OnlineMegaMoeFp4FromFp8Weight)
+        self.assertEqual(wrapped._source_block_size, 32)
+        self.assertTrue(wrapped._scale_is_ue8m0_exponent)
+        self.assertEqual(
+            [item.name for item in wrapped.fp8_scale.weights],
+            ["model.layers.{i}.mlp.experts.gate_up_proj_scale"],
+        )
 
 
 class TestOfflineFp4SharedExpertWeight(unittest.TestCase):
@@ -239,6 +335,36 @@ class TestOfflineFp4SharedExpertWeight(unittest.TestCase):
         self.assertIs(split[offline.kernel.name], kernel)
         self.assertIs(split[offline.scale.name], scale)
         self.assertEqual(split[offline.scale.name].dtype, torch.float8_e8m0fnu)
+
+    def test_modelopt_mxfp8_down_proj_split_uses_ffn_tp(self):
+        ffn = self._make_shared_ffn()
+        mxfp8 = Mxfp8Weight(
+            ffn.w2,
+            Fp8MxBlockWiseQuantConfig(
+                is_quanted=True,
+                checkpoint_scale_suffix=".weight_scale",
+            ),
+            name=ffn.w2.name,
+        )
+        kernel = torch.empty((8, 64), dtype=torch.float8_e4m3fn)
+        scale = torch.empty((8, 2), dtype=torch.float32)
+        load_config = MagicMock(
+            tp_size=8,
+            tp_rank=3,
+            ffn_tp_size=1,
+            ffn_tp_rank=0,
+            ep_size=8,
+            ep_rank=3,
+            dp_size=1,
+            dp_rank=0,
+        )
+
+        split = mxfp8._split(
+            {mxfp8.kernel.name: kernel, mxfp8.scale.name: scale}, load_config
+        )
+
+        self.assertEqual(tuple(split[mxfp8.kernel.name].shape), (8, 64))
+        self.assertEqual(tuple(split[mxfp8.scale.name].shape), (8, 2))
 
 
 class TestStackSplitTensorSource(unittest.TestCase):

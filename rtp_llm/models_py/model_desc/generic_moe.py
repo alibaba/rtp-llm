@@ -60,6 +60,66 @@ class _FusedSharedExpertSentinel(nn.Module):
         raise RuntimeError("shared expert is fused into MegaMoE")
 
 
+def _validate_hy4_mxfp8_moe_strategy(
+    config: ModelConfig, moe_config: MoeConfig, layer_idx: int = 0
+) -> None:
+    """Validate HY4 expert quantization against the selected MoE backend.
+
+    HY4 applies ``swiglu_limit`` only to routed experts. Both ``mega_moe_fp8``
+    and plain ``mega_moe`` leave the shared expert on its separate, unclamped
+    path. Plain ``mega_moe`` accepts either checkpoint-native routed MXFP4 or
+    routed MXFP8 converted to FP4 at load time. A fused-shared strategy cannot
+    represent routed-clamped/shared-unclamped.
+    """
+    if config.model_type not in ("hy_v4", "hy_v4_mtp"):
+        return
+    quant_config = config.quant_config
+    quant_method = quant_config.get_method() if quant_config is not None else None
+    if quant_method != "MXFP8" or float(config.swiglu_limit) <= 0:
+        return
+
+    routed_quant_method = quant_method
+    quantized_layers = getattr(quant_config, "quantized_layers", {}) or {}
+    if quantized_layers:
+        routed_prefix = (
+            "model.mtp_layers.0.mlp.experts"
+            if config.model_type == "hy_v4_mtp"
+            else f"model.layers.{layer_idx}.mlp.experts"
+        )
+        routed_info = quantized_layers.get(routed_prefix)
+        if not isinstance(routed_info, dict):
+            raise ValueError(
+                "HY V4 ModelOpt MIXED_PRECISION is missing routed expert "
+                f"configuration for {routed_prefix}"
+            )
+        routed_quant_method = str(routed_info.get("quant_algo", "")).upper()
+
+    if moe_config.moe_strategy in {
+        "mega_moe_se",
+        "mega_moe_fused",
+        "mega_moe_fp8_se",
+    }:
+        raise ValueError(
+            f"HY V4 does not support moe_strategy={moe_config.moe_strategy}: "
+            "the fused MegaMoE kernel applies one activation_clamp to routed "
+            "and shared experts, while HY V4 clamps routed experts only"
+        )
+    if routed_quant_method == "MXFP4":
+        if moe_config.moe_strategy != "mega_moe":
+            raise ValueError(
+                "HY V4 checkpoint-native MXFP4 routed experts require "
+                "moe_strategy=mega_moe with a separate shared expert: "
+                f"got moe_strategy={moe_config.moe_strategy!r}"
+            )
+        return
+    if moe_config.moe_strategy not in {"mega_moe_fp8", "mega_moe"}:
+        raise ValueError(
+            "HY V4 MXFP8 routed experts require mega_moe_fp8, or mega_moe "
+            "with online FP8-to-FP4 weight conversion: "
+            f"got moe_strategy={moe_config.moe_strategy!r}"
+        )
+
+
 class GenericMoeLayer(nn.Module):
     """Generic MoE layer supporting both Qwen3 and internal model."""
 
@@ -120,9 +180,29 @@ class GenericMoeLayer(nn.Module):
 
         # Get quant_config from model_config
         quant_config = config.quant_config
-        self.gate = LinearFactory.create_linear_from_weights(
-            weights, W.moe_gate, None, None, quant_config, hw_kernel_config
+        _validate_hy4_mxfp8_moe_strategy(config, moe_config, layer_idx)
+        self._hy4_fp32_router = getattr(config, "model_type", "") in (
+            "hy_v4",
+            "hy_v4_mtp",
         )
+        if self._hy4_fp32_router:
+            self.gate = None
+            self.gate_weight = weights[W.moe_gate]
+            if self.gate_weight.dtype != torch.float32:
+                raise TypeError(
+                    f"HY V4 router weight must be fp32, got {self.gate_weight.dtype}"
+                )
+            expected_router_shape = (self.hidden_dim, config.expert_num)
+            if tuple(self.gate_weight.shape) != expected_router_shape:
+                raise ValueError(
+                    "HY V4 router weight must have runtime shape "
+                    f"{expected_router_shape}, got {tuple(self.gate_weight.shape)}"
+                )
+        else:
+            self.gate = LinearFactory.create_linear_from_weights(
+                weights, W.moe_gate, None, None, quant_config, hw_kernel_config
+            )
+            self.gate_weight = None
         self.select_topk = SelectTopk(config=config)
         if moe_config.fake_balance_expert:
             self.fake_balance_expert = FakeBalanceExpert(
@@ -256,6 +336,19 @@ class GenericMoeLayer(nn.Module):
 
         # for group topk
         self.correction_bias = weights.get(W.e_score_correction_b, None)
+        if self._hy4_fp32_router:
+            if self.correction_bias is None:
+                raise KeyError("HY V4 MoE requires e_score_correction_bias")
+            if self.correction_bias.dtype != torch.float32:
+                raise TypeError(
+                    "HY V4 correction bias must be fp32, got "
+                    f"{self.correction_bias.dtype}"
+                )
+            if self.correction_bias.numel() != config.expert_num:
+                raise ValueError(
+                    "HY V4 correction bias must contain one value per expert, got "
+                    f"{self.correction_bias.numel()} for {config.expert_num} experts"
+                )
 
     def clone_for_cuda_graph(self) -> "GenericMoeLayer":
         clone = object.__new__(type(self))
@@ -269,6 +362,8 @@ class GenericMoeLayer(nn.Module):
         clone.top_k = self.top_k
         clone.gate_chunk_rows = self.gate_chunk_rows
         clone.gate = self.gate
+        clone.gate_weight = self.gate_weight
+        clone._hy4_fp32_router = self._hy4_fp32_router
         clone.select_topk = self.select_topk
         clone.fake_balance_expert = self.fake_balance_expert
         if hasattr(self.fused_moe, "clone_for_cuda_graph"):
@@ -309,7 +404,9 @@ class GenericMoeLayer(nn.Module):
         x_scale: "Optional[torch.Tensor]" = None,
     ) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
-        if self.gate_chunk_rows > 0 and num_tokens > 0:
+        if self._hy4_fp32_router:
+            router_logits = torch.matmul(hidden_states.float(), self.gate_weight)
+        elif self.gate_chunk_rows > 0 and num_tokens > 0:
             router_logits = fixed_m_linear(
                 self.gate, hidden_states, self.gate_chunk_rows
             )
@@ -376,6 +473,14 @@ class GenericMoeLayer(nn.Module):
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation="SiGLU",
+            extra_expert_args={
+                "swiglu_limit": (
+                    float(getattr(self.config, "swiglu_limit", 0.0))
+                    if getattr(self.config, "model_type", "")
+                    in ("hy_v4", "hy_v4_mtp")
+                    else 0.0
+                )
+            },
         )
         if use_mega_moe_fused_shared:
             return experts_output
@@ -455,6 +560,13 @@ class GenericMoeDecoderLayer(nn.Module):
                 global_weights=global_weights,
                 has_indexer=dsa_layer_has_indexer(config, layer_idx),
                 reuse_topk_indices=dsa_layer_skips_topk(config, layer_idx),
+                indexer_layernorm_eps=getattr(
+                    config, "indexer_layernorm_eps", None
+                ),
+                indexer_scale_fmt=getattr(config, "indexer_scale_fmt", None),
+                indexer_use_hadamard=getattr(
+                    config, "indexer_use_hadamard", True
+                ),
             )
         else:
             attn_configs = config.getAttentionConfigs(

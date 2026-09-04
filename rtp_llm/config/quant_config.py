@@ -160,6 +160,38 @@ class QuantizationConfig(ABC):
 
         group_size = quant_config["group_size"] if "group_size" in quant_config else 0
         bits = quant_config["bits"] if "bits" in quant_config else 0
+        if quant_method == "mxfp8":
+            result = Fp8MxBlockWiseQuantConfig.from_config(
+                {
+                    "bits": 8,
+                    "method": Fp8MxBlockWiseQuantConfig.get_method(),
+                    # C++ QuantAlgo currently validates group size against
+                    # {16, 64, 128}; the actual MX micro-block remains 1x32.
+                    "group_size": 128,
+                    "is_quanted": True,
+                    "checkpoint_scale_suffix": ".weight_scale_inv",
+                    "packed_scale_suffix": "_scale_inv",
+                }
+            )
+            weight_block_size = list(
+                quant_config.get("weight_block_size", [1, 32])
+            )
+            if weight_block_size != [1, Fp8MxBlockWiseQuantConfig.MX_BLOCK]:
+                raise ValueError(
+                    "MXFP8 weight_block_size must be [1, 32], got "
+                    f"{weight_block_size}"
+                )
+            result.weight_block_size = weight_block_size
+            result.activation_scheme = quant_config.get(
+                "activation_scheme", "dynamic"
+            )
+            ignored = (
+                quant_config.get("ignored_layers")
+                or quant_config.get("modules_to_not_convert")
+                or []
+            )
+            result.exclude_modules = set(ignored)
+            return result
         if quant_method == "fp8":
             bits = 8
             if "weight_block_size" in quant_config:
@@ -227,6 +259,74 @@ class QuantizationConfig(ABC):
                 quant_method = Fp8PerChannelQuarkQuantConfig.get_method()
 
         if quant_method == "modelopt":
+            modelopt_quant = quant_config.get("quantization", {})
+            modelopt_algo = str(modelopt_quant.get("quant_algo", "")).upper()
+            if modelopt_algo in ("MXFP8", "MIXED_PRECISION"):
+                quantized_layers = modelopt_quant.get("quantized_layers", {}) or {}
+                if modelopt_algo == "MIXED_PRECISION":
+                    if not isinstance(quantized_layers, dict) or not quantized_layers:
+                        raise ValueError(
+                            "ModelOpt MIXED_PRECISION requires a non-empty "
+                            "quantized_layers mapping"
+                        )
+                    invalid_entries = [
+                        name
+                        for name, info in quantized_layers.items()
+                        if not isinstance(info, dict) or not info.get("quant_algo")
+                    ]
+                    if invalid_entries:
+                        raise ValueError(
+                            "ModelOpt MIXED_PRECISION quantized_layers entries must "
+                            "contain quant_algo, invalid entries: "
+                            f"{invalid_entries[:8]}"
+                        )
+                    layer_algos = {
+                        str(info["quant_algo"]).upper()
+                        for info in quantized_layers.values()
+                    }
+                    unsupported = layer_algos - {"MXFP8", "MXFP4"}
+                    if unsupported:
+                        raise ValueError(
+                            "RTP-LLM ModelOpt MIXED_PRECISION currently supports "
+                            "MXFP8 linears with MXFP4 routed experts, got "
+                            f"{sorted(unsupported)}"
+                        )
+                    invalid_fp4_modules = [
+                        name
+                        for name, info in quantized_layers.items()
+                        if str(info["quant_algo"]).upper() == "MXFP4"
+                        and not name.endswith(".mlp.experts")
+                    ]
+                    if invalid_fp4_modules:
+                        raise ValueError(
+                            "ModelOpt MIXED_PRECISION only supports MXFP4 on routed "
+                            "expert modules, got "
+                            f"{invalid_fp4_modules[:8]}"
+                        )
+                result = Fp8MxBlockWiseQuantConfig.from_config(
+                    {
+                        "bits": 8,
+                        "method": Fp8MxBlockWiseQuantConfig.get_method(),
+                        "group_size": 128,
+                        "is_quanted": True,
+                        # HY4 ModelOpt tensors use ``foo.weight_scale`` and
+                        # packed expert tensors use ``foo_scale``.
+                        "checkpoint_scale_suffix": ".weight_scale",
+                        "packed_scale_suffix": "_scale",
+                        # ModelOpt stores MX scale factors as raw UE8M0 bytes.
+                        # The MXFP8 loader materializes fp32 powers of two;
+                        # the offline MXFP4 MoE loader preserves the bit pattern.
+                        "scale_fmt": "ue8m0",
+                    }
+                )
+                result.exclude_modules = set(
+                    modelopt_quant.get("exclude_modules", []) or []
+                )
+                # MIXED_PRECISION is an authoritative per-module allowlist.
+                # The legacy all-MXFP8 format omits it or leaves it empty.
+                result.quantized_layers = dict(quantized_layers)
+                result.modelopt_quant_algo = modelopt_algo
+                return result
             config_groups = quant_config["config_groups"]
             weights_config = config_groups["group_0"]["weights"]
             activation_config = config_groups["group_0"]["input_activations"]
@@ -408,6 +508,47 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return Fp8BlockWiseQuantConfig(**config)
+
+
+class Fp8MxBlockWiseQuantConfig(Fp8BlockWiseQuantConfig):
+    """OCP MXFP8: E4M3 values with one UE8M0 scale per row and 32 K values."""
+
+    MX_BLOCK = 32
+
+    def __init__(
+        self,
+        bits: int = 8,
+        group_size: int = 128,
+        is_quanted: bool = True,
+        **kwargs: Any,
+    ):
+        super().__init__(
+            bits=bits, group_size=128, is_quanted=is_quanted, **kwargs
+        )
+        self.mx_block_size = self.MX_BLOCK
+        self.weight_block_size = [1, self.MX_BLOCK]
+        self.activation_scheme = "dynamic"
+        self.use_mxfp8 = True
+        self.checkpoint_scale_suffix = kwargs.get(
+            "checkpoint_scale_suffix", ".weight_scale_inv"
+        )
+        self.packed_scale_suffix = kwargs.get(
+            "packed_scale_suffix", "_scale_inv"
+        )
+        self.quantized_layers = dict(kwargs.get("quantized_layers", {}) or {})
+        self.modelopt_quant_algo = kwargs.get("modelopt_quant_algo", "MXFP8")
+
+    @classmethod
+    def get_method(cls) -> str:
+        return "MXFP8"
+
+    @classmethod
+    def get_algo(cls) -> str:
+        return "fp8"
+
+    @classmethod
+    def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
+        return Fp8MxBlockWiseQuantConfig(**config)
 
 
 class CompressedTensorsQuantConfig(QuantizationConfig):
@@ -800,6 +941,9 @@ DEFAULT_FP8_BLOCK_WISE_QUANT_CONFIG = Fp8BlockWiseQuantConfig(
     group_size=Fp8BlockWiseQuantConfig.DEFAULT_FP8_QUANT_BLOCK_SIZE,
     is_quanted=False,
 )
+DEFAULT_FP8_MX_BLOCK_WISE_QUANT_CONFIG = Fp8MxBlockWiseQuantConfig(
+    is_quanted=True
+)
 DEFAULT_FP8_BLOCK_WISE_NO_MOE_QUANT_CONFIG = Fp8BlockWiseQuantConfig(
     bits=8,
     group_size=Fp8BlockWiseQuantConfig.DEFAULT_FP8_QUANT_BLOCK_SIZE,
@@ -831,6 +975,7 @@ DEFAULT_COMPRESSED_W4A8_INT4_PER_CHANNEL_QUANT_CONFIG = (
 )
 
 preset_quant_config = {
+    "MXFP8": DEFAULT_FP8_MX_BLOCK_WISE_QUANT_CONFIG,
     "INT8": DEFAULT_WEIGHT_ONLY_INT8_PER_CHANNEL_QUANT_CONFIG,
     "FP8": DEFAULT_FP8_PER_TENSOR_QUANT_CONFIG,
     "FP8_DYNAMIC_PER_TENSOR": DEFAULT_FP8_DYNAMIC_PER_TENSOR_QUANT_CONFIG,

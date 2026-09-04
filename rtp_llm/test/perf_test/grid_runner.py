@@ -111,7 +111,13 @@ class GridRunner:
                 query_variants = (
                     reuse_cache_query.hit_queries if reuse_cache_query else None
                 )
-                seed_query = reuse_cache_query.seed_query if reuse_cache_query else None
+                # Prefix caches are rank-local in DP mode. Seed one identical prefix
+                # request per DP rank so every measured decode request can hit it.
+                seed_query = (
+                    [reuse_cache_query.seed_query] * self._dp_size
+                    if reuse_cache_query
+                    else None
+                )
                 target_reuse_len = (
                     reuse_cache_query.target_reuse_len if reuse_cache_query else 0
                 )

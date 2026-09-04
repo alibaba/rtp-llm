@@ -1174,6 +1174,13 @@ makeFakeSPOutputBuffer(DataType data_type, size_t hidden_size, size_t vocab_size
     return sp_buffer;
 }
 
+static size_t mtpHiddenSize(const ModelConfig& model_config) {
+    // Match vLLM's MTP hand-off contract: only DeepSeek V4, identified by its
+    // layer compression schedule, consumes the wide pre-hc_head residual.
+    const int64_t hc_mult = model_config.attn_config.layer_compress_ratios.empty() ? 1 : model_config.hc_mult;
+    return model_config.hidden_size * hc_mult;
+}
+
 static void ensureSpOutputTokenGpuMirrors(const SpeculativeExecutorStreamOutputPtr& sp_buffer) {
     // Mirrors should already be device-resident from the buffer's construction
     // site (MtpExecutor::prepareStreams + makeFakeSPOutputBuffer). Only the
@@ -1208,13 +1215,8 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
     auto fake_stream =
         makeFakeStream(max_new_tokens, 1 + max_new_tokens, model_config, runtime_config, resource_context);
 
-    // Fake SP buffer's hidden_states stands in for the target's pre-output
-    // residual that the draft consumes (DSv4: [T, hc_mult*hidden_size];
-    // non-DSv4 keeps hc_mult=1 so the shape is plain [T, hidden_size]).
-    auto sp_buffer = makeFakeSPOutputBuffer(model_config.data_type,
-                                            model_config.hidden_size * model_config.hc_mult,
-                                            model_config.vocab_size,
-                                            max_new_tokens);
+    auto sp_buffer = makeFakeSPOutputBuffer(
+        model_config.data_type, mtpHiddenSize(model_config), model_config.vocab_size, max_new_tokens);
 
     auto new_tokens = torch::zeros({1, 1}, torch::kInt32);
 
@@ -1296,7 +1298,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     // being recorded.
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true), false) {
     data_type_        = params.model_config_.data_type;
-    hidden_size_      = params.model_config_.hidden_size * params.model_config_.hc_mult;
+    hidden_size_      = mtpHiddenSize(params.model_config_);
     propose_step_     = propose_params->gen_num_per_circle;
     vocab_size_       = params.model_config_.vocab_size;
     draft_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;

@@ -37,6 +37,7 @@ class Indexer(nn.Module):
         hw_kernel_config: Optional["HWKernelConfig"] = None,
         parallelism_config: Optional[ParallelismConfig] = None,
         scale_fmt: Optional[str] = "none",
+        use_hadamard: bool = True,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -59,6 +60,7 @@ class Indexer(nn.Module):
         self.block_size = 128  # quantization block size (128)
         self.head_kv = 1
         self.scale_fmt = scale_fmt  # FP8 quantization format
+        self.use_hadamard = use_hadamard
         self.softmax_scale = self.index_head_dim**-0.5
         self.weights_scale = self.index_n_heads**-0.5
         self.blocksize = attn_config.kernel_tokens_per_block  # page size, typically 64
@@ -135,6 +137,7 @@ class Indexer(nn.Module):
             block_size=self.block_size,
             scale_fmt=self.scale_fmt,
             is_neox_style=self.is_neox_style,
+            use_hadamard=self.use_hadamard,
         )
 
     def _prefill_cp_enabled(self) -> bool:
@@ -147,8 +150,18 @@ class Indexer(nn.Module):
             "DSV4_CP_PREFILL_INDEXER_FUSED_QUANT", "1"
         ).strip().lower() in ("1", "true", "yes", "on")
 
+    @staticmethod
+    def _is_multi_token_decode(attention_inputs: Any) -> bool:
+        return bool(getattr(attention_inputs, "is_target_verify", False)) or bool(
+            getattr(attention_inputs, "is_draft_extend", False)
+        )
+
     def _is_sparse_prefill_cp(self, attention_inputs: Any) -> bool:
-        return bool(attention_inputs.is_prefill) and self._prefill_cp_enabled()
+        return (
+            bool(attention_inputs.is_prefill)
+            and not self._is_multi_token_decode(attention_inputs)
+            and self._prefill_cp_enabled()
+        )
 
     def _get_logits_head_gate(
         self, x: torch.Tensor, q_scale: torch.Tensor
@@ -164,6 +177,10 @@ class Indexer(nn.Module):
                 self.weights_proj.weight,
                 scale,
                 fallback_proj=self.weights_proj,
+                # HY4 disables the legacy Hadamard path. Its per-head weights
+                # feed a discrete top-k, so do not use the single-pass TF32
+                # approximation that can replace boundary entries.
+                high_precision=not self.use_hadamard,
             )
         x = x.float()
         weights = self.weights_proj(x)
@@ -252,6 +269,7 @@ class Indexer(nn.Module):
         q_lora: torch.Tensor,
         x: torch.Tensor,
         flashmla_params: Any,
+        attention_inputs: Any,
         cp_params: Optional[Any],
         x_fp8: Optional[torch.Tensor] = None,
         x_scale: Optional[torch.Tensor] = None,
@@ -270,7 +288,7 @@ class Indexer(nn.Module):
             k = self.wk(x)
         k = self.k_norm(k)
 
-        if self._prefill_cp_enabled():
+        if self._is_sparse_prefill_cp(attention_inputs):
             assert cp_params is not None
             query, key = self.indexer_op.apply_rope_and_rotate_q_k_cp(
                 q,
@@ -326,9 +344,7 @@ class Indexer(nn.Module):
         attention_inputs: Any,
         cp_params: Optional[Any],
     ) -> torch.Tensor:
-        is_multi_token_decode = bool(
-            getattr(attention_inputs, "is_target_verify", False)
-        ) or bool(getattr(attention_inputs, "is_draft_extend", False))
+        is_multi_token_decode = self._is_multi_token_decode(attention_inputs)
         if not attention_inputs.is_prefill or is_multi_token_decode:
             return self.indexer_op._get_topk_paged(
                 q_fp8, weights, kv_cache, fmha_params, attention_inputs
@@ -391,7 +407,8 @@ class Indexer(nn.Module):
         # Fused Q-RoPE-Hadamard-Quant path: single Triton kernel does
         # RoPE + 128-pt Hadamard + ue8m0 FP8 quant for Q (decode only).
         if (
-            self._is_sparse_prefill_cp(attention_inputs)
+            self.use_hadamard
+            and self._is_sparse_prefill_cp(attention_inputs)
             and self._prefill_cp_fused_quant_enabled()
             and cp_params.full_rope_pos_ids is not None
         ):
@@ -407,8 +424,12 @@ class Indexer(nn.Module):
                 q_c_scale,
             )
         elif (
-            self._fuse_logits_head_gate
-            and not attention_inputs.is_prefill
+            self.use_hadamard
+            and self._fuse_logits_head_gate
+            and (
+                not attention_inputs.is_prefill
+                or self._is_multi_token_decode(attention_inputs)
+            )
             and cp_params is None
         ):
             q_fp8, q_scale = self._fused_forward_decode(
@@ -426,6 +447,7 @@ class Indexer(nn.Module):
                 q_lora,
                 hidden_states,
                 fmha_params,
+                attention_inputs,
                 cp_params,
                 x_fp8,
                 x_scale,

@@ -232,6 +232,7 @@ class LinearFactory:
         fp8_methods = [
             "FP8",
             "FP8_PER_BLOCK",
+            "MXFP8",
             "FP8_PER_CHANNEL_COMPRESSED",
             "FP8_PER_TENSOR_COMPRESSED",
         ]

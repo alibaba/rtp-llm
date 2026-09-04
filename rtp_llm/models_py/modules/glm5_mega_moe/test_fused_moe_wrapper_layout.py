@@ -1,15 +1,20 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
 from rtp_llm.models_py.modules.glm5_mega_moe import (
     mega_moe,
+    mega_moe_fp8,
     mega_moe_fp8_se_wrapper,
     mega_moe_fp8_wrapper,
     mega_moe_fused_wrapper,
     mega_moe_wrapper,
+    quant_layouts,
+)
+from rtp_llm.models_py.model_desc.generic_moe import (
+    _validate_hy4_mxfp8_moe_strategy,
 )
 from rtp_llm.utils.model_weight import W
 
@@ -36,6 +41,20 @@ class _FakeMegaMoE:
         self.fused_shared_jit_warmed = True
 
 
+class _FakeForwardMegaMoE(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.calls = []
+
+    def forward(self, hidden_states, topk_weights, topk_ids, **kwargs):
+        self.calls.append(kwargs)
+        return hidden_states
+
+    def forward_prepacked(self, hidden_states, **kwargs):
+        self.calls.append(kwargs)
+        return hidden_states
+
+
 def _config(
     hidden_size=8,
     inter=4,
@@ -59,6 +78,204 @@ def _parallelism(role_type=None):
 
 
 class MegaMoeWrapperLayoutTest(unittest.TestCase):
+    def test_hy4_mxfp8_rejects_backend_that_drops_routed_clamp(self):
+        config = _config(swiglu_limit=10.0)
+        config.model_type = "hy_v4"
+        config.quant_config = SimpleNamespace(get_method=lambda: "MXFP8")
+        with self.assertRaisesRegex(ValueError, "online FP8-to-FP4"):
+            _validate_hy4_mxfp8_moe_strategy(
+                config, SimpleNamespace(moe_strategy="auto")
+            )
+
+        _validate_hy4_mxfp8_moe_strategy(
+            config, SimpleNamespace(moe_strategy="mega_moe_fp8")
+        )
+        _validate_hy4_mxfp8_moe_strategy(
+            config, SimpleNamespace(moe_strategy="mega_moe")
+        )
+        with self.assertRaisesRegex(ValueError, "clamps routed experts only"):
+            _validate_hy4_mxfp8_moe_strategy(
+                config, SimpleNamespace(moe_strategy="mega_moe_se")
+            )
+
+    def test_hy4_native_mxfp4_requires_plain_mega_moe(self):
+        config = _config(swiglu_limit=10.0)
+        config.model_type = "hy_v4"
+        config.quant_config = SimpleNamespace(
+            get_method=lambda: "MXFP8",
+            quantized_layers={
+                "model.layers.3.mlp.experts": {"quant_algo": "MXFP4"}
+            },
+        )
+
+        _validate_hy4_mxfp8_moe_strategy(
+            config, SimpleNamespace(moe_strategy="mega_moe"), layer_idx=3
+        )
+        with self.assertRaisesRegex(ValueError, "checkpoint-native MXFP4"):
+            _validate_hy4_mxfp8_moe_strategy(
+                config,
+                SimpleNamespace(moe_strategy="mega_moe_fp8"),
+                layer_idx=3,
+            )
+        with self.assertRaisesRegex(ValueError, "clamps routed experts only"):
+            _validate_hy4_mxfp8_moe_strategy(
+                config,
+                SimpleNamespace(moe_strategy="mega_moe_se"),
+                layer_idx=3,
+            )
+
+    def test_fp4_wrapper_forwards_routed_clamp(self):
+        wrapper = object.__new__(mega_moe_wrapper.MegaMoeWrapper)
+        torch.nn.Module.__init__(wrapper)
+        fake_mega_moe = _FakeForwardMegaMoE()
+        wrapper.mega_moe = fake_mega_moe
+        wrapper._activation_clamp = 10.0
+
+        hidden = torch.zeros((2, 8), dtype=torch.bfloat16)
+        topk_weights = torch.ones((2, 1), dtype=torch.float32)
+        topk_ids = torch.zeros((2, 1), dtype=torch.int64)
+        wrapper(
+            hidden,
+            topk_weights,
+            topk_ids,
+            extra_expert_args={"swiglu_limit": 10.0},
+        )
+
+        self.assertEqual(fake_mega_moe.calls[0]["activation_clamp"], 10.0)
+
+    def test_fp4_prepacked_path_forwards_routed_clamp(self):
+        wrapper = object.__new__(mega_moe_wrapper.MegaMoeWrapper)
+        torch.nn.Module.__init__(wrapper)
+        fake_mega_moe = _FakeForwardMegaMoE()
+        wrapper.mega_moe = fake_mega_moe
+        wrapper._activation_clamp = 10.0
+
+        hidden = torch.zeros((2, 8), dtype=torch.bfloat16)
+        wrapper.forward_prepacked(hidden)
+
+        self.assertEqual(fake_mega_moe.calls[0]["activation_clamp"], 10.0)
+
+    def test_fp8_scale_recipe_infers_mxfp8_and_legacy_block_fp8(self):
+        mxfp8_scale = torch.empty((2, 64, 4), dtype=torch.float32)
+        self.assertEqual(
+            mega_moe_fp8._infer_fp8_scale_recipe(mxfp8_scale, mn=64, k=128),
+            (1, 32),
+        )
+
+        block_fp8_scale = torch.empty((2, 2, 3), dtype=torch.float32)
+        self.assertEqual(
+            mega_moe_fp8._infer_fp8_scale_recipe(
+                block_fp8_scale, mn=256, k=384
+            ),
+            (128, 128),
+        )
+
+    def test_fp8_scale_layout_transform_receives_mxfp8_recipe(self):
+        scale = torch.ones((2, 64, 4), dtype=torch.float32)
+        packed = torch.ones((2, 64, 1), dtype=torch.int32)
+        transform = Mock(return_value=packed)
+        fake_deep_gemm = SimpleNamespace(
+            transform_sf_into_required_layout=transform,
+        )
+
+        with patch.dict("sys.modules", {"deep_gemm": fake_deep_gemm}):
+            actual = quant_layouts.prepare_fp8_weight_scale_for_deepgemm(
+                scale,
+                mn=64,
+                k=128,
+                num_groups=2,
+                recipe=(1, 32),
+            )
+
+        self.assertIs(actual, packed)
+        transform.assert_called_once_with(scale, 64, 128, (1, 32), 2)
+
+    def test_fp8_wrapper_only_enables_clamp_when_explicitly_requested(self):
+        wrapper = object.__new__(mega_moe_fp8_wrapper.MegaMoeFp8Wrapper)
+        torch.nn.Module.__init__(wrapper)
+        fake_mega_moe = _FakeForwardMegaMoE()
+        wrapper.mega_moe = fake_mega_moe
+
+        hidden = torch.zeros((2, 8), dtype=torch.bfloat16)
+        topk_weights = torch.ones((2, 1), dtype=torch.float32)
+        topk_ids = torch.zeros((2, 1), dtype=torch.int64)
+        wrapper(hidden, topk_weights, topk_ids, extra_expert_args={})
+        wrapper(
+            hidden,
+            topk_weights,
+            topk_ids,
+            extra_expert_args={"swiglu_limit": 10.0},
+        )
+
+        self.assertIsNone(fake_mega_moe.calls[0]["activation_clamp"])
+        self.assertEqual(fake_mega_moe.calls[1]["activation_clamp"], 10.0)
+
+    def test_fp8_mega_forward_passes_inferred_weight_recipe(self):
+        moe = mega_moe_fp8.GLM5MegaMoEFP8.from_params(
+            layer_id=0,
+            dim=8,
+            moe_inter_dim=4,
+            n_routed_experts=2,
+            n_activated_experts=1,
+            ep_size=1,
+            ep_rank=0,
+            max_tokens_per_rank=4,
+        )
+        moe._fp8_weight_recipe = (1, 32)
+        moe._mega_l1_w = torch.empty((2, 8, 8))
+        moe._mega_l1_sf = torch.empty((2, 8, 1), dtype=torch.int32)
+        moe._mega_l2_w = torch.empty((2, 8, 4))
+        moe._mega_l2_sf = torch.empty((2, 8, 1), dtype=torch.int32)
+        moe._mega_buf = SimpleNamespace(num_max_tokens_per_rank=4)
+        moe._mega_y = torch.empty((4, 8), dtype=torch.bfloat16)
+        moe._input_packer = SimpleNamespace(pack=Mock())
+        moe._maybe_pre_kernel_barrier = Mock()
+
+        run_mega = Mock()
+        fake_deep_gemm = SimpleNamespace(fp8_fp8_mega_moe=run_mega)
+        x = torch.zeros((2, 8), dtype=torch.bfloat16)
+        topk_weights = torch.ones((2, 1), dtype=torch.float32)
+        topk_ids = torch.zeros((2, 1), dtype=torch.int64)
+        with patch.dict("sys.modules", {"deep_gemm": fake_deep_gemm}), patch.object(
+            mega_moe_fp8, "_sync_cuda_graph_warmup_ranks"
+        ):
+            moe(x, topk_weights, topk_ids, activation_clamp=10.0)
+
+        self.assertEqual(run_mega.call_args.kwargs["weight_recipe"], (1, 32))
+        self.assertEqual(run_mega.call_args.kwargs["activation_clamp"], 10.0)
+
+    def test_fp4_mega_forward_passes_activation_clamp(self):
+        moe = mega_moe.GLM5MegaMoE.from_params(
+            layer_id=0,
+            dim=8,
+            moe_inter_dim=4,
+            n_routed_experts=2,
+            n_activated_experts=1,
+            ep_size=1,
+            ep_rank=0,
+            max_tokens_per_rank=4,
+        )
+        moe._mega_l1_w = torch.empty((2, 8, 4), dtype=torch.int8)
+        moe._mega_l1_sf = torch.empty((2, 8, 1), dtype=torch.int32)
+        moe._mega_l2_w = torch.empty((2, 8, 2), dtype=torch.int8)
+        moe._mega_l2_sf = torch.empty((2, 8, 1), dtype=torch.int32)
+        moe._mega_buf = SimpleNamespace(num_max_tokens_per_rank=4)
+        moe._mega_y = torch.empty((4, 8), dtype=torch.bfloat16)
+        moe._input_packer = SimpleNamespace(pack=Mock())
+        moe._maybe_pre_kernel_barrier = Mock()
+
+        run_mega = Mock()
+        fake_deep_gemm = SimpleNamespace(fp8_fp4_mega_moe=run_mega)
+        x = torch.zeros((2, 8), dtype=torch.bfloat16)
+        topk_weights = torch.ones((2, 1), dtype=torch.float32)
+        topk_ids = torch.zeros((2, 1), dtype=torch.int64)
+        with patch.dict("sys.modules", {"deep_gemm": fake_deep_gemm}), patch.object(
+            mega_moe, "_sync_cuda_graph_warmup_ranks"
+        ):
+            moe(x, topk_weights, topk_ids, activation_clamp=10.0)
+
+        self.assertEqual(run_mega.call_args.kwargs["activation_clamp"], 10.0)
+
     def test_bf16_stacked_moe_w1_is_rejected(self):
         config = _config(hidden_size=8, inter=4)
         up = torch.full((2, 4, 8), 3, dtype=torch.bfloat16)
