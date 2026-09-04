@@ -1,5 +1,6 @@
 package org.flexlb.dao;
 
+import io.opentelemetry.context.Context;
 import lombok.Data;
 import lombok.ToString;
 import org.flexlb.config.FlexlbConfig;
@@ -30,6 +31,10 @@ public class BalanceContext implements Prioritized {
 
     @ToString.Exclude
     private byte[] generateInputPbBytes;
+
+    /** OTel context captured at the Schedule RPC boundary for async batch work. */
+    @ToString.Exclude
+    private Context traceContext;
 
     private volatile ScheduleModeEnum scheduleMode = ScheduleModeEnum.BATCH;
 

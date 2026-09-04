@@ -788,6 +788,7 @@ _CLIENT_ERROR_DESCRIPTIONS = {
     "Cancelled": "Client operation was cancelled",
     "RpcError": "Model RPC request failed",
     "TrafficLimit": "Request routing was rejected by traffic limits",
+    "FlexlbBusinessRejected": "Master rejected the schedule request",
 }
 
 
@@ -984,6 +985,13 @@ CURRENT_TRACE_STATE: ContextVar[Optional[RequestTraceState]] = ContextVar(
     "rtp_llm_current_trace_state", default=None
 )
 
+# A short-lived child context used by in-process orchestration.  This lets a
+# real outbound RPC started inside an INTERNAL span inherit that span without
+# mutating the request root or relying on implicit thread-local propagation.
+CURRENT_INTERNAL_CONTEXT: ContextVar[Optional[Any]] = ContextVar(
+    "rtp_llm_current_internal_context", default=None
+)
+
 
 def reset_telemetry_for_test(deadline_ms: int = 2000) -> bool:
     """Reset process telemetry state for test isolation only."""
@@ -995,6 +1003,7 @@ def reset_telemetry_for_test(deadline_ms: int = 2000) -> bool:
         _provider = None
         _state = TelemetryState.UNINITIALIZED
     CURRENT_TRACE_STATE.set(None)
+    CURRENT_INTERNAL_CONTEXT.set(None)
     return True
 
 
@@ -1005,9 +1014,11 @@ class ClientSpanHandle:
         self,
         span: Any,
         error_description: Callable[[str], str] = _client_error_description,
+        context_token: Any = None,
     ):
         self._span = span
         self._error_description = error_description
+        self._context_token = context_token
         self._finished = False
         self._lock = threading.Lock()
 
@@ -1027,6 +1038,13 @@ class ClientSpanHandle:
                 if self._finished:
                     return
                 self._finished = True
+                context_token = self._context_token
+                self._context_token = None
+            if context_token is not None:
+                try:
+                    CURRENT_INTERNAL_CONTEXT.reset(context_token)
+                except Exception:  # noqa: BLE001 - context cleanup is fail-open
+                    pass
             if error is not None or error_type:
                 resolved_error_type = error_type or type(error).__name__
                 if OTEL_AVAILABLE:
@@ -1092,9 +1110,10 @@ def start_client_span(
         tracer = get_tracer()
         if tracer is None:
             return None, []
+        parent_context = CURRENT_INTERNAL_CONTEXT.get() or state.server_context
         span = tracer.start_span(
             span_name,
-            context=state.server_context,
+            context=parent_context,
             kind=trace.SpanKind.CLIENT,
             attributes=_parse_server_endpoint(target_address) or None,
         )
@@ -1132,7 +1151,8 @@ def start_internal_span(span_name: str) -> Optional[ClientSpanHandle]:
             context=state.server_context,
             kind=trace.SpanKind.INTERNAL,
         )
-        return ClientSpanHandle(span, _internal_error_description)
+        context_token = CURRENT_INTERNAL_CONTEXT.set(trace.set_span_in_context(span))
+        return ClientSpanHandle(span, _internal_error_description, context_token)
     except Exception:  # noqa: BLE001 - fail-open
         return None
 

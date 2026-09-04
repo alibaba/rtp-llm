@@ -28,6 +28,7 @@ import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.balance.scheduler.priority.InflightRegistrar.PriorityCanceledObservation;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.env.Environment;
@@ -176,7 +177,12 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 return future;
             }
 
-            Response routeResponse = router.route(ctx);
+            Response routeResponse;
+            try {
+                routeResponse = router.route(ctx);
+            } catch (RuntimeException | Error routeFailure) {
+                throw routeFailure;
+            }
             if (routeResponse == null || !routeResponse.isSuccess()) {
                 if (routeResponse != null) {
                     future.complete(routeResponse);
@@ -188,6 +194,14 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
             ServerStatus prefill = findServer(routeResponse, RoleType.PREFILL);
             ServerStatus decode = findServer(routeResponse, RoleType.DECODE);
+            if (prefill != null) {
+                FlexlbTrace.setScheduleAttribute(ctx.getTraceContext(), FlexlbTrace.PREFILL_ADDRESS,
+                        prefill.getServerIp() + ":" + prefill.getHttpPort());
+            }
+            if (decode != null) {
+                FlexlbTrace.setScheduleAttribute(ctx.getTraceContext(), FlexlbTrace.DECODE_ADDRESS,
+                        decode.getServerIp() + ":" + decode.getHttpPort());
+            }
             if (prefill == null) {
                 rollback(routeResponse);
                 completeError(future, StrategyErrorType.NO_PREFILL_WORKER, null);
@@ -224,6 +238,8 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             WorkerBatcher batcher = prefillEp.getBatcher();
             ctx.setRouteSubmittedNanos(System.nanoTime());
             batcher.offer(item);
+            FlexlbTrace.setScheduleDuration(ctx.getTraceContext(), FlexlbTrace.ROUTE_SUBMIT_MS,
+                    ctx.getServiceStartNanos(), ctx.getRouteSubmittedNanos());
 
             // Report route+submit time: from schedule() entry (ctx.startTime) to batcher offer completion
             reporter.reportRouteSubmitTimeMs(
@@ -1288,6 +1304,16 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     if (entry != null) {
                         entry.lifecycle.markDispatched();
                         item.ctx().setBatchDispatchedNanos(System.nanoTime());
+                        FlexlbTrace.setScheduleAttribute(item.ctx().getTraceContext(),
+                                FlexlbTrace.BATCH_ID, batchId);
+                        FlexlbTrace.setScheduleAttribute(item.ctx().getTraceContext(),
+                                FlexlbTrace.BATCH_SIZE, dispatchable.size());
+                        FlexlbTrace.setScheduleAttribute(item.ctx().getTraceContext(),
+                                FlexlbTrace.DISPATCH_REASON, reason);
+                        FlexlbTrace.setScheduleDuration(item.ctx().getTraceContext(),
+                                FlexlbTrace.BATCH_WAIT_MS,
+                                item.ctx().getRouteSubmittedNanos(),
+                                item.ctx().getBatchDispatchedNanos());
                     }
                 }
 
@@ -1406,6 +1432,9 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         // Record ACK timestamp for ack_to_response_time_ms metric (reported in FlexlbServiceImpl.completeSchedule)
         item.ctx().setAckAtMs(System.currentTimeMillis());
         item.ctx().setAckAtNanos(System.nanoTime());
+        FlexlbTrace.setScheduleDuration(item.ctx().getTraceContext(),
+                FlexlbTrace.ENQUEUE_BATCH_MS,
+                item.ctx().getBatchDispatchedNanos(), item.ctx().getAckAtNanos());
 
         long dispatchedAtMs = entry.lifecycle.getDispatchedAtMs();
         if (dispatchedAtMs > 0) {

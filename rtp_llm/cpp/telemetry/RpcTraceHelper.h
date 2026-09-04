@@ -151,6 +151,23 @@ inline const char* grpcStatusDescription(grpc::StatusCode code) noexcept {
     }
 }
 
+inline const char* requestStatusDescription(grpc::StatusCode code) noexcept {
+    switch (code) {
+        case grpc::StatusCode::CANCELLED:
+            return "Request processing was cancelled";
+        case grpc::StatusCode::DEADLINE_EXCEEDED:
+            return "Request processing exceeded its deadline";
+        case grpc::StatusCode::RESOURCE_EXHAUSTED:
+            return "Request processing exhausted available resources";
+        case grpc::StatusCode::UNAVAILABLE:
+            return "Request processing dependency was unavailable";
+        case grpc::StatusCode::OK:
+            return "";
+        default:
+            return "Request processing failed";
+    }
+}
+
 // Starts a gRPC SERVER span with the remote parent extracted from server
 // metadata (W3C traceparent). Returns an empty shared_ptr when telemetry is
 // inactive so callers pay near-zero cost on the disabled path; never throws.
@@ -292,11 +309,20 @@ inline void setUsageTokenAttributes(SpanLike& span_like, int64_t input_tokens, i
 // status owner (e.g. GenerateContext) so it destructs first and the pointed-to
 // status is still alive. Covers CHECK_ERROR_STATUS / EXECUTE_STAGE_FUNC early
 // returns and exceptions via stack unwinding.
+enum class SpanStatusSemantics {
+    Rpc,
+    Logical,
+};
+
 class GrpcStatusSpanGuard {
 public:
     GrpcStatusSpanGuard(opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> span,
-                        const grpc::Status*                                          final_status):
-        guard_(std::move(span)), final_status_(final_status), uncaught_exceptions_(std::uncaught_exceptions()) {}
+                        const grpc::Status*                                          final_status,
+                        SpanStatusSemantics semantics = SpanStatusSemantics::Rpc):
+        guard_(std::move(span)),
+        final_status_(final_status),
+        semantics_(semantics),
+        uncaught_exceptions_(std::uncaught_exceptions()) {}
 
     GrpcStatusSpanGuard(const GrpcStatusSpanGuard&)            = delete;
     GrpcStatusSpanGuard& operator=(const GrpcStatusSpanGuard&) = delete;
@@ -318,6 +344,14 @@ public:
         guard_.addEvent(name, epoch_us);
     }
 
+    void setLogicalErrorType(opentelemetry::nostd::string_view error_type) noexcept {
+        try {
+            if (semantics_ == SpanStatusSemantics::Logical) {
+                logical_error_type_.assign(error_type.data(), error_type.size());
+            }
+        } catch (...) {}
+    }
+
     opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span> sharedSpan() const {
         return guard_.sharedSpan();
     }
@@ -328,16 +362,27 @@ public:
                 return;
             }
             if (final_status_ != nullptr && !final_status_->ok()) {
-                guard_.setAttribute(kAttrRpcResponseStatusCode, grpcStatusCodeValue(final_status_->error_code()));
-                guard_.setAttribute(kAttrErrorType, grpcStatusCodeName(final_status_->error_code()));
-                guard_.setAttribute(kAttrRtpLlmGrpcStatusCode, (int64_t)final_status_->error_code());
+                const auto error_type = logical_error_type_.empty() ? grpcStatusCodeName(final_status_->error_code()) :
+                                                                      logical_error_type_.c_str();
+                guard_.setAttribute(kAttrErrorType, error_type);
+                if (semantics_ == SpanStatusSemantics::Rpc) {
+                    guard_.setAttribute(kAttrRpcResponseStatusCode, grpcStatusCodeValue(final_status_->error_code()));
+                    guard_.setAttribute(kAttrRtpLlmGrpcStatusCode, (int64_t)final_status_->error_code());
+                }
                 guard_.finish(opentelemetry::trace::StatusCode::kError,
-                              grpcStatusDescription(final_status_->error_code()));
+                              semantics_ == SpanStatusSemantics::Rpc ?
+                                  grpcStatusDescription(final_status_->error_code()) :
+                                  (logical_error_type_.empty() ? requestStatusDescription(final_status_->error_code()) :
+                                                                 logical_error_type_.c_str()));
             } else if (std::uncaught_exceptions() > uncaught_exceptions_) {
                 guard_.setAttribute(kAttrErrorType, "Exception");
-                guard_.finish(opentelemetry::trace::StatusCode::kError, "RPC handler raised an exception");
+                guard_.finish(opentelemetry::trace::StatusCode::kError,
+                              semantics_ == SpanStatusSemantics::Rpc ? "RPC handler raised an exception" :
+                                                                       "Request processing raised an exception");
             } else {
-                guard_.setAttribute(kAttrRpcResponseStatusCode, grpcStatusCodeValue(grpc::StatusCode::OK));
+                if (semantics_ == SpanStatusSemantics::Rpc) {
+                    guard_.setAttribute(kAttrRpcResponseStatusCode, grpcStatusCodeValue(grpc::StatusCode::OK));
+                }
                 guard_.finish(opentelemetry::trace::StatusCode::kOk);
             }
         } catch (...) {}
@@ -346,7 +391,9 @@ public:
 private:
     RequestSpanGuard    guard_;
     const grpc::Status* final_status_;
+    SpanStatusSemantics semantics_;
     int                 uncaught_exceptions_;
+    std::string         logical_error_type_;
 };
 
 }  // namespace telemetry

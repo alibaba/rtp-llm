@@ -1,5 +1,7 @@
 package org.flexlb.httpserver;
 
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.context.Context;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
@@ -17,12 +19,14 @@ import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
+import org.flexlb.interceptor.GrpcTraceInterceptor;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
 import org.flexlb.config.ConfigService;
+import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
@@ -215,6 +219,24 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                                   FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
                                   StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer,
                                   ScheduleOrigin origin) {
+        if (ctx != null && response != null) {
+            FlexlbTrace.setScheduleAttribute(ctx.getTraceContext(),
+                    FlexlbTrace.SCHEDULE_CODE, response.getCode());
+            FlexlbTrace.setScheduleAttribute(ctx.getTraceContext(),
+                    FlexlbTrace.ENQUEUED_BY_MASTER, response.getEnqueuedByMaster());
+            if (ctx.getAckAtNanos() > 0) {
+                FlexlbTrace.setScheduleDuration(ctx.getTraceContext(),
+                        FlexlbTrace.ACK_TO_RESPONSE_MS, ctx.getAckAtNanos(), System.nanoTime());
+            }
+        }
+        if (response != null && !response.getSuccess()) {
+            // This is an expected business response, not a transport or
+            // Java exception. The interceptor converts it to an ERROR span
+            // without recording an exception event.
+            FlexlbTrace.markBusinessError(
+                    ctx == null ? null : ctx.getTraceContext(),
+                    response.getCode(), "FLEXLB_BUSINESS_REJECTED");
+        }
         // Report ACK-to-response time for BATCH path (only when engine ACK was received)
         if (ctx != null && ctx.getAckAtMs() > 0) {
             long ackToResponseMs = System.currentTimeMillis() - ctx.getAckAtMs();
@@ -379,6 +401,11 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
     private BalanceContext buildContext(FlexlbScheduleProtocol.FlexlbScheduleRequestPB pb) {
         BalanceContext ctx = new BalanceContext();
+        Context traceContext = GrpcTraceInterceptor.getOtelContext();
+        ctx.setTraceContext(traceContext != null ? traceContext : Context.current());
+        Span scheduleSpan = Span.fromContext(ctx.getTraceContext());
+        FlexlbTrace.setRequestAttributes(scheduleSpan, pb.getRequestId());
+        FlexlbTrace.setAttribute(scheduleSpan, "flexlb.schedule.priority", pb.getPriority());
 
         Request request = new Request();
         request.setRequestId(pb.getRequestId());

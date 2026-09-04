@@ -1,15 +1,21 @@
 package org.flexlb.httpserver;
 
 import io.grpc.ManagedChannel;
+import io.grpc.Metadata;
 import io.grpc.StatusRuntimeException;
 import io.grpc.netty.NettyChannelBuilder;
+import io.grpc.stub.MetadataUtils;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.context.Context;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.interceptor.GrpcTraceInterceptor;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.config.ConfigService;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
@@ -18,6 +24,9 @@ import javax.annotation.PreDestroy;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 @Component
 public class FlexlbGrpcForwarder {
@@ -45,6 +54,14 @@ public class FlexlbGrpcForwarder {
 
     public MasterForwardResult forwardToMaster(
             FlexlbScheduleProtocol.FlexlbScheduleRequestPB request) {
+        Context traceContext = GrpcTraceInterceptor.getOtelContext();
+        return forwardToMaster(request,
+                traceContext != null ? traceContext : Context.current());
+    }
+
+    public MasterForwardResult forwardToMaster(
+            FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
+            Context traceContext) {
         ForwardGuard guard = applyForwardGuard(
                 request.getRequestId(), request.getForwardHop(),
                 ForwardOperation.SCHEDULE);
@@ -61,6 +78,13 @@ public class FlexlbGrpcForwarder {
             return MasterForwardResult.noMaster();
         }
 
+        AtomicReference<Span> forwardSpan = new AtomicReference<>();
+        AtomicBoolean forwardSpanFinished = new AtomicBoolean(false);
+        Consumer<Throwable> finishForwardSpan = error -> {
+            if (forwardSpanFinished.compareAndSet(false, true)) {
+                FlexlbTrace.finish(forwardSpan.get(), error);
+            }
+        };
         try {
             int grpcPort = resolveGrpcPort(masterHostIpPort);
             String ip = masterHostIpPort.split(":")[0];
@@ -71,13 +95,31 @@ public class FlexlbGrpcForwarder {
             // not replace the request TTL with a load-balancer timeout.
             FlexlbServiceGrpc.FlexlbServiceBlockingStub stub =
                     FlexlbServiceGrpc.newBlockingStub(channel);
+            forwardSpan.set(FlexlbTrace.startClient(
+                    "rtp_llm.flexlb.forward_schedule", traceContext));
+            FlexlbTrace.setRequestAttributes(forwardSpan.get(), request.getRequestId());
+            FlexlbTrace.setAttribute(forwardSpan.get(), "server.address", ip);
+            FlexlbTrace.setAttribute(forwardSpan.get(), "server.port", grpcPort);
+            stub = withTraceHeaders(stub,
+                    FlexlbTrace.withSpan(forwardSpan.get(), Context.current()));
             FlexlbScheduleProtocol.FlexlbScheduleRequestPB forwardedRequest =
                     request.toBuilder().setForwardHop(guard.nextHop()).build();
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB response =
                     stub.schedule(forwardedRequest);
             engineHealthReporter.reportForwardToMasterResult(ip, String.valueOf(response.getCode()));
+            // Transport succeeded but the master may still have rejected the
+            // request. Route that through the same business-error channel
+            // completeSchedule() uses, otherwise this span closes OK while the
+            // health report above already recorded the rejecting code.
+            if (!response.getSuccess()) {
+                FlexlbTrace.markBusinessError(
+                        FlexlbTrace.withSpan(forwardSpan.get(), Context.current()),
+                        response.getCode(), "FLEXLB_BUSINESS_REJECTED");
+            }
+            finishForwardSpan.accept(null);
             return MasterForwardResult.forwarded(response, masterHostIpPort);
         } catch (StatusRuntimeException e) {
+            finishForwardSpan.accept(e);
             Logger.warn(
                     "event=flexlb_forward_failed request_id={} forward_hop={} master={} "
                             + "local_ip={} status={}",
@@ -90,6 +132,7 @@ public class FlexlbGrpcForwarder {
             return MasterForwardResult.failed(
                     e.getStatus().getCode().name(), masterHostIpPort);
         } catch (Exception e) {
+            finishForwardSpan.accept(e);
             Logger.error("gRPC forward to master error: request_id={} master={}",
                     request.getRequestId(), masterHostIpPort, e);
             engineHealthReporter.reportForwardToMasterResult(
@@ -97,6 +140,15 @@ public class FlexlbGrpcForwarder {
             return MasterForwardResult.failed(
                     e.getClass().getSimpleName(), masterHostIpPort);
         }
+    }
+
+    private static FlexlbServiceGrpc.FlexlbServiceBlockingStub withTraceHeaders(
+            FlexlbServiceGrpc.FlexlbServiceBlockingStub stub,
+            Context context) {
+        Metadata metadata = new Metadata();
+        FlexlbTrace.inject(context).forEach((key, value) -> metadata.put(
+                Metadata.Key.of(key, Metadata.ASCII_STRING_MARSHALLER), value));
+        return stub.withInterceptors(MetadataUtils.newAttachHeadersInterceptor(metadata));
     }
 
     public record MasterForwardResult(
@@ -135,9 +187,24 @@ public class FlexlbGrpcForwarder {
         }
         FlexlbScheduleProtocol.GetRequestStateRequestPB forwardedRequest =
                 request.toBuilder().setForwardHop(guard.nextHop()).build();
+        Context traceContext = GrpcTraceInterceptor.getOtelContext();
+        if (traceContext == null) {
+            traceContext = Context.current();
+        }
+        Span stateSpan = FlexlbTrace.startClient(
+                "rtp_llm.flexlb.get_request_state", traceContext);
+        FlexlbTrace.setRequestAttributes(stateSpan, request.getRequestId());
+        FlexlbTrace.setAttribute(stateSpan, "server.address", ipOf(masterHostIpPort));
+        FlexlbTrace.setAttribute(stateSpan, "server.port", resolveGrpcPort(masterHostIpPort));
         try {
-            return stub.getRequestState(forwardedRequest);
+            stub = withTraceHeaders(stub,
+                    FlexlbTrace.withSpan(stateSpan, traceContext));
+            FlexlbScheduleProtocol.GetRequestStateResponsePB response =
+                    stub.getRequestState(forwardedRequest);
+            FlexlbTrace.finish(stateSpan);
+            return response;
         } catch (RuntimeException e) {
+            FlexlbTrace.finish(stateSpan, e);
             Logger.debug("Failed to forward FlexLB state query to master, request_id={}",
                     request.getRequestId(), e);
             return null;
