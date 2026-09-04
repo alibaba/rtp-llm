@@ -78,6 +78,15 @@ public final class JavaLoadClient {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BLOCK_SIZE = 1024;
     /**
+     * gRPC client keepalive interval. Must stay >= the server-side default
+     * permitKeepAliveTime (5 minutes in grpc-java NettyServerBuilder, which the
+     * FlexLB master does not override): a shorter interval makes the server's
+     * KeepAliveEnforcer flag too_many_pings and kill all in-flight RPCs on the
+     * channel with GOAWAY(ENHANCE_YOUR_CALM) (observed as 36/360 lost requests
+     * in twin r5). 6 minutes is the smallest safe multiple.
+     */
+    private static final long KEEPALIVE_TIME_MINUTES = 6;
+    /**
      * Sweep cadence for the outstanding-result collector: completed futures are
      * harvested at this granularity while slow RPCs are still in flight. All
      * latency timestamps are stamped inside handleRequest when the event
@@ -154,7 +163,7 @@ public final class JavaLoadClient {
                     .channelType(NioSocketChannel.class)
                     .maxInboundMessageSize(16 * 1024 * 1024)
                     .flowControlWindow(1024 * 1024)
-                    .keepAliveTime(30, TimeUnit.SECONDS)
+                    .keepAliveTime(KEEPALIVE_TIME_MINUTES, TimeUnit.MINUTES)
                     .keepAliveTimeout(10, TimeUnit.SECONDS)
                     .usePlaintext()
                     .build();
@@ -1152,7 +1161,7 @@ public final class JavaLoadClient {
                         .channelType(NioSocketChannel.class)
                         .maxInboundMessageSize(16 * 1024 * 1024)
                         .flowControlWindow(1024 * 1024)
-                        .keepAliveTime(30, TimeUnit.SECONDS)
+                        .keepAliveTime(KEEPALIVE_TIME_MINUTES, TimeUnit.MINUTES)
                         .keepAliveTimeout(10, TimeUnit.SECONDS)
                         .usePlaintext()
                         .build();
