@@ -14,6 +14,17 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+# pytest is only present in the ROCm lock file. Keep its repository-specific
+# label out of non-ROCm dependency graphs so CUDA/CPU analysis remains valid.
+py_library(
+    name = "pytest_rocm",
+    deps = select({
+        "@rtp_llm//:using_rocm": [requirement_gpu_rocm("pytest")],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
 py_test(
     name = "test_gdn_block_prefill",
     srcs = [
@@ -141,6 +152,18 @@ py_test(
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
     ] + [":triton", ":torch", ":numpy", ":einops", ":packaging", ":flydsl"],
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X-ROCM7'},
+)
+
+py_test(
+    name = "test_aiter_flydsl_gdn_prefill",
+    srcs = ["test_aiter_flydsl_gdn_prefill.py"],
+    main = "test_aiter_flydsl_gdn_prefill.py",
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:fla",
+    ] + [":triton", ":torch", ":numpy", ":einops", ":packaging", ":pytest_rocm", ":flydsl"],
     visibility = ["//visibility:public"],
     tags = ["rocm"],
     exec_properties = {'gpu':'MI308X-ROCM7'},
