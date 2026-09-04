@@ -60,6 +60,7 @@ class Pipeline(object):
         ] = None,  # mm_related_params from ModelConfig (optional)
         grpc_config: Optional[Any] = None,  # grpc_config from PyEnvConfigs (optional)
         vit_separation: Optional[VitSeparation] = None,  # Optional VitSeparation
+        mm_model_config: Optional[Any] = None,  # mm_model_config from ModelConfig
         server_config=None,
         master_config=None,
         parallelism_config=None,
@@ -82,6 +83,7 @@ class Pipeline(object):
             sp_config=sp_config,
             grpc_config=grpc_config,
             vit_separation=vit_separation,
+            mm_model_config=mm_model_config,
             server_config=server_config,
             master_config=master_config,
             parallelism_config=parallelism_config,
