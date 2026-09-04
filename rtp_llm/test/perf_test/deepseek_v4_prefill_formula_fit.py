@@ -34,6 +34,7 @@ import hashlib
 import json
 import math
 import pathlib
+import random
 import statistics
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
@@ -397,8 +398,82 @@ def fit_lad_coefficients(
     return [coefficient / scale for coefficient, scale in zip(coefficients, scales)]
 
 
+def fit_hybrid_coefficients(
+    rows: Sequence[Observation],
+    *,
+    seed: int,
+    steps: int = 8000,
+    learning_rate: float = 0.03,
+) -> list[float]:
+    """Fit with torch autograd against absolute and relative error together.
+
+    MAE is divided by the median training latency so the millisecond term and
+    the relative-error term have comparable scale.  The optimized loss is::
+
+        0.5 * mean(abs(pred-target)) / median(target)
+      + 0.5 * mean(abs(pred-target) / target)
+
+    Feature columns are scaled only while optimizing; exported coefficients
+    are converted back to the original FlexLB-compatible expressions.
+    """
+    try:
+        import torch  # type: ignore
+    except ImportError as error:
+        raise RuntimeError("hybrid objective requires CPU PyTorch") from error
+
+    torch.manual_seed(seed)
+    x = torch.tensor(
+        [feature_values(row) for row in rows], dtype=torch.float64, device="cpu"
+    )
+    y = torch.tensor(
+        [row.target_ms for row in rows], dtype=torch.float64, device="cpu"
+    )
+    scales = torch.amax(torch.abs(x), dim=0).clamp_min(1.0)
+    scaled_x = x / scales
+    # Start from the exact coordinate-descent MAE fit.  It is a materially
+    # better starting point than least squares for the long TTFT tail, and we
+    # retain it unless autograd lowers the requested combined loss.
+    lad = fit_lad_coefficients(rows)
+    beta = torch.nn.Parameter(
+        torch.tensor(lad, dtype=torch.float64, device="cpu") * scales
+    )
+    optimizer = torch.optim.Adam([beta], lr=learning_rate)
+    latency_scale = torch.median(y).clamp_min(1e-9)
+    with torch.no_grad():
+        initial_error = torch.abs(scaled_x.mv(beta) - y)
+        best_loss = float(
+            0.5 * initial_error.mean() / latency_scale
+            + 0.5 * (initial_error / y.clamp_min(1e-9)).mean()
+        )
+    best_beta = beta.detach().clone()
+    stale_steps = 0
+    for _ in range(steps):
+        optimizer.zero_grad(set_to_none=True)
+        with torch.enable_grad():
+            absolute_error = torch.abs(scaled_x.mv(beta) - y)
+            loss = 0.5 * absolute_error.mean() / latency_scale + 0.5 * (
+                absolute_error / y.clamp_min(1e-9)
+            ).mean()
+            loss.backward()
+        optimizer.step()
+        value = float(loss.detach())
+        if value + 1e-12 < best_loss:
+            best_loss = value
+            best_beta = beta.detach().clone()
+            stale_steps = 0
+        else:
+            stale_steps += 1
+        if stale_steps >= 1200:
+            break
+    return [float(value) for value in (best_beta / scales).tolist()]
+
+
 def fit_coefficients(
-    rows: Sequence[Observation], *, objective: str = "mae", ridge: float = 1e-8
+    rows: Sequence[Observation],
+    *,
+    objective: str = "mae",
+    ridge: float = 1e-8,
+    seed: int = 20260904,
 ) -> tuple[list[float], str]:
     if len(rows) < len(FEATURE_NAMES):
         raise ValueError(
@@ -406,6 +481,11 @@ def fit_coefficients(
         )
     if objective == "mae":
         return fit_lad_coefficients(rows), "python_coordinate_descent_lad"
+    if objective == "hybrid":
+        return (
+            fit_hybrid_coefficients(rows, seed=seed),
+            "torch_cpu_autograd_hybrid_absolute_relative",
+        )
     if objective != "mse":
         raise ValueError(f"unsupported objective: {objective}")
     # Prefer CPU torch when available, but keep the tool runnable in the
@@ -475,7 +555,23 @@ def error_metrics(
     }
 
 
-def split_rows(rows: Sequence[Observation]) -> dict[str, list[Observation]]:
+def split_rows(
+    rows: Sequence[Observation],
+    *,
+    mode: str = "seq-hash-70-15-15",
+    seed: int = 20260904,
+) -> dict[str, list[Observation]]:
+    if mode == "random-50-50":
+        shuffled = list(rows)
+        random.Random(seed).shuffle(shuffled)
+        midpoint = len(shuffled) // 2
+        return {
+            "train": shuffled[:midpoint],
+            "validation": [],
+            "test": shuffled[midpoint:],
+        }
+    if mode != "seq-hash-70-15-15":
+        raise ValueError(f"unsupported split mode: {mode}")
     groups: dict[int, list[Observation]] = {}
     for row in rows:
         groups.setdefault(row.input_len, []).append(row)
@@ -719,14 +815,21 @@ def run_fit(args: argparse.Namespace) -> int:
         print(json.dumps(report, ensure_ascii=False))
         return 2
 
-    splits = split_rows(rows)
+    splits = split_rows(rows, mode=args.split_mode, seed=args.split_seed)
     fit_rows = splits["train"] if len(splits["train"]) >= len(FEATURE_NAMES) else rows
-    coefficients, backend = fit_coefficients(fit_rows, objective=args.objective)
+    coefficients, backend = fit_coefficients(
+        fit_rows, objective=args.objective, seed=args.split_seed
+    )
     formula = formula_text(coefficients)
     metrics = {
         name: error_metrics(group, coefficients) for name, group in splits.items()
     }
     metrics["all"] = error_metrics(rows, coefficients)
+    split_by_geometry = {
+        (row.batch_size, row.input_len, row.cache_len): name
+        for name, group in splits.items()
+        for row in group
+    }
     predictions = []
     for row in rows:
         predicted = predict(coefficients, row)
@@ -742,6 +845,9 @@ def run_fit(args: argparse.Namespace) -> int:
                 "signed_error_ms": predicted - row.target_ms,
                 "abs_error_ms": abs(predicted - row.target_ms),
                 "ape_pct": 100.0 * abs(predicted - row.target_ms) / row.target_ms,
+                "split": split_by_geometry[
+                    (row.batch_size, row.input_len, row.cache_len)
+                ],
                 "source": row.source,
             }
         )
@@ -756,9 +862,14 @@ def run_fit(args: argparse.Namespace) -> int:
         "schema_version": 1,
         "model": "DeepSeek-V4-Pro",
         "backend": backend,
-        "objective": (
-            "mean_absolute_error" if args.objective == "mae" else "mean_squared_error"
-        ),
+        "objective": {
+            "mae": "mean_absolute_error",
+            "mse": "mean_squared_error",
+            "hybrid": (
+                "0.5*MAE/median(train_target_ms) + "
+                "0.5*mean_absolute_percentage_error"
+            ),
+        }[args.objective],
         "target": (
             "median of successful client TTFT runs; falls back to "
             "server prefill_time_ms only for legacy input"
@@ -776,6 +887,12 @@ def run_fit(args: argparse.Namespace) -> int:
             for name, value in zip(FEATURE_NAMES, coefficients)
         ],
         "audit": audit,
+        "split": {
+            "mode": args.split_mode,
+            "seed": args.split_seed,
+            "train_fraction": 0.5 if args.split_mode == "random-50-50" else 0.70,
+            "test_fraction": 0.5 if args.split_mode == "random-50-50" else 0.15,
+        },
         "split_counts": {name: len(group) for name, group in splits.items()},
         "metrics": metrics,
         "production_acceptance": bool(
@@ -831,10 +948,17 @@ def build_parser() -> argparse.ArgumentParser:
     fit.add_argument("--max-max-ape-pct", type=float, default=40.0)
     fit.add_argument(
         "--objective",
-        choices=("mae", "mse"),
-        default="mae",
-        help="fit objective; default minimizes absolute error",
+        choices=("mae", "mse", "hybrid"),
+        default="hybrid",
+        help="fit objective; hybrid balances normalized absolute and relative error",
     )
+    fit.add_argument(
+        "--split-mode",
+        choices=("random-50-50", "seq-hash-70-15-15"),
+        default="random-50-50",
+        help="default randomly assigns exactly half of valid geometries to training",
+    )
+    fit.add_argument("--split-seed", type=int, default=20260904)
     fit.add_argument("--allow-insufficient-data", action="store_true")
     fit.set_defaults(func=run_fit)
     validate = sub.add_parser("validate-inputs", help="audit valid/invalid DSV4 rows")

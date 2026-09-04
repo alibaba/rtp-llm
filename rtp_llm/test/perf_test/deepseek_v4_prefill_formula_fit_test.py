@@ -8,6 +8,7 @@ from rtp_llm.test.perf_test.deepseek_v4_prefill_formula_fit import (
     Observation,
     feature_values,
     formula_text,
+    split_rows,
 )
 
 
@@ -34,6 +35,23 @@ class DeepseekV4PrefillFormulaFitTest(unittest.TestCase):
         for expression in FEATURE_NAMES[1:]:
             self.assertTrue(expression.startswith("sum("), expression)
             self.assertTrue(expression.endswith(")"), expression)
+
+    def test_random_half_split_is_exact_and_reproducible(self) -> None:
+        rows = [
+            Observation(1, 1024 + index, index, 10.0 + index, f"row-{index}")
+            for index in range(11)
+        ]
+        first = split_rows(rows, mode="random-50-50", seed=17)
+        second = split_rows(rows, mode="random-50-50", seed=17)
+        self.assertEqual(len(first["train"]), 5)
+        self.assertEqual(len(first["validation"]), 0)
+        self.assertEqual(len(first["test"]), 6)
+        self.assertEqual(first, second)
+        self.assertEqual(
+            set(first["train"]) | set(first["test"]),
+            set(rows),
+        )
+        self.assertFalse(set(first["train"]) & set(first["test"]))
 
 
 if __name__ == "__main__":
