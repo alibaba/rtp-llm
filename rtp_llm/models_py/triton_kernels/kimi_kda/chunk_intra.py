@@ -17,6 +17,7 @@ from rtp_llm.models_py.triton_kernels.autotune_cache import (
 )
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
 from rtp_llm.models_py.triton_kernels.fla.op import exp2
+from rtp_llm.models_py.triton_kernels.fla.solve_tril import solve_tril
 from rtp_llm.models_py.triton_kernels.fla.utils import (
     is_gather_supported as IS_GATHER_SUPPORTED,
 )
@@ -546,6 +547,85 @@ def chunk_kda_fwd_kernel_intra_sub_chunk(
     tl.store(p_Akk, b_Ai.to(Akk.dtype.element_ty), boundary_check=(0, 1))
 
 
+def _solve_large_tril_in_place(matrices: torch.Tensor) -> None:
+    """Invert batched 128/256 lower-triangular matrices in 64-token blocks."""
+    size = matrices.shape[-1]
+    block_size = 64
+    block_count = size // block_size
+
+    diagonal = torch.stack(
+        [
+            matrices[
+                ...,
+                index * block_size : (index + 1) * block_size,
+                index * block_size : (index + 1) * block_size,
+            ]
+            for index in range(block_count)
+        ],
+        dim=1,
+    )
+    batch, _, heads = diagonal.shape[:3]
+    diagonal = diagonal.reshape(batch * block_count, heads, block_size, block_size)
+    diagonal = diagonal.permute(0, 2, 1, 3).contiguous()
+    diagonal = solve_tril(diagonal, output_dtype=matrices.dtype)
+    diagonal = diagonal.permute(0, 2, 1, 3).reshape(
+        batch, block_count, heads, block_size, block_size
+    )
+    for index in range(block_count):
+        start = index * block_size
+        matrices[..., start : start + block_size, start : start + block_size].copy_(
+            diagonal[:, index]
+        )
+
+    merge_size = 2 * block_size
+    while merge_size <= size:
+        half = merge_size // 2
+        for start in range(0, size, merge_size):
+            middle, stop = start + half, start + merge_size
+            upper_inv = matrices[..., start:middle, start:middle]
+            lower_inv = matrices[..., middle:stop, middle:stop]
+            lower_left = matrices[..., middle:stop, start:middle]
+            product = torch.matmul(lower_left, upper_inv)
+            lower_left.copy_(-torch.matmul(lower_inv, product))
+        merge_size *= 2
+
+
+def _solve_large_tril(
+    matrix: torch.Tensor,
+    cu_seqlens: torch.LongTensor | None,
+) -> torch.Tensor:
+    batch, token_count, heads, chunk_size = matrix.shape
+
+    def solve_range(batch_index: int, start: int, length: int) -> None:
+        full_chunks, remainder = divmod(length, chunk_size)
+        full_tokens = full_chunks * chunk_size
+        if full_chunks:
+            chunks = matrix[batch_index, start : start + full_tokens].view(
+                full_chunks, chunk_size, heads, chunk_size
+            )
+            _solve_large_tril_in_place(chunks.permute(0, 2, 1, 3))
+        if remainder:
+            tail = matrix.new_zeros(1, heads, chunk_size, chunk_size)
+            tail[..., :remainder, :].copy_(
+                matrix[batch_index, start + full_tokens : start + length]
+                .permute(1, 0, 2)
+                .unsqueeze(0)
+            )
+            _solve_large_tril_in_place(tail)
+            matrix[batch_index, start + full_tokens : start + length].copy_(
+                tail[0, :, :remainder].permute(1, 0, 2)
+            )
+
+    if cu_seqlens is None:
+        for batch_index in range(batch):
+            solve_range(batch_index, 0, token_count)
+    else:
+        boundaries = [int(value) for value in cu_seqlens.detach().cpu().tolist()]
+        for start, stop in zip(boundaries, boundaries[1:]):
+            solve_range(0, start, stop - start)
+    return matrix
+
+
 def chunk_kda_fwd_intra(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -570,6 +650,33 @@ def chunk_kda_fwd_intra(
     Aqk = torch.empty(B, T, H, BT, device=k.device, dtype=k.dtype)
     # Akk must be zero-initialized - kernel only writes lower triangular
     Akk = torch.zeros(B, T, H, BT, device=k.device, dtype=k.dtype)
+
+    if BT != 64:
+        Aqk, Akk = chunk_kda_fwd_intra_token_parallel(
+            q=q,
+            k=k,
+            gk=gk,
+            beta=beta,
+            Aqk=Aqk,
+            Akk=Akk,
+            scale=scale,
+            cu_seqlens=cu_seqlens,
+            chunk_size=BT,
+            sub_chunk_size=BT,
+        )
+        Akk = _solve_large_tril(Akk, cu_seqlens)
+        w, u, qg, kg = recompute_w_u_fwd(
+            k=k,
+            v=v,
+            beta=beta,
+            A=Akk,
+            q=q if disable_recompute else None,
+            gk=gk,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+        )
+        return w, u, qg, kg, Aqk, Akk
+
     # Separate fp32 buffer for diagonal 16x16 blocks (for precision in solve_tril)
     Akkd = torch.empty(B, T, H, BC, device=k.device, dtype=torch.float32)
 

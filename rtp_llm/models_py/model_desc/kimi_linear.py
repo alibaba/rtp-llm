@@ -52,6 +52,7 @@ from rtp_llm.models_py.triton_kernels.kimi_kda import (
     chunk_kda,
     fused_kda_gate,
     fused_recurrent_kda,
+    get_kda_chunk_size,
 )
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
@@ -77,9 +78,11 @@ class KimiLinearMetadata(object):
         self,
         prefill_conv1d_meta: Optional[CausalConv1dMetadata] = None,
         is_target_verify: bool = False,
+        fuse_kda_state_recurrence: bool = False,
     ):
         self.prefill_conv1d_meta = prefill_conv1d_meta
         self.is_target_verify = is_target_verify
+        self.fuse_kda_state_recurrence = fuse_kda_state_recurrence
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
         return self.prefill_conv1d_meta
@@ -168,7 +171,7 @@ class KimiLinearKDABase(nn.Module):
         beta: torch.Tensor,
         attn_inputs: PyAttentionInputs,
         kv_cache: Optional[LayerKVCache],
-        attn_meta: KimiLinearMetadata,
+        fuse_kda_state_recurrence: bool,
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -228,6 +231,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
         kv_cache_tensor: Optional[torch.Tensor],
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
+        attn_meta: KimiLinearMetadata,
     ) -> torch.Tensor:
         # Compute gate: [T, local_H*D] -> [1, T, local_H, D]
         g = forget_gate.view(
@@ -281,8 +285,22 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
         ).contiguous()
 
         q_len = query.shape[1]
-        # Prefill: use chunk_kda with fused gate (use_gate_in_kernel=True)
-        attn_out, final_state, h = chunk_kda(
+        kda_chunk_size = get_kda_chunk_size()
+        cache_alignment = seq_size_per_block
+        if os.environ.get("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "0") == "1":
+            cache_alignment *= int(self.parallelism_config.get_attn_tp_size())
+        if cache_alignment % kda_chunk_size != 0:
+            raise ValueError(
+                f"KDA_CHUNK_SIZE={kda_chunk_size} must divide the Linear cache "
+                f"alignment {cache_alignment}"
+            )
+
+        # A compact-cache hit leaves at most one TP-wide alignment unit. Fuse
+        # its 64-token chunk-state recurrence into one launch.
+        fuse_kda_state_recurrence = fuse_kda_state_recurrence and q_len <= (
+            seq_size_per_block * int(self.parallelism_config.get_attn_tp_size())
+        )
+        attn_out, final_state, h_from_chunk = chunk_kda(
             query,
             key,
             value,
@@ -298,8 +316,9 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             dt_bias=self.dt_bias,
             safe_gate=self.gate_lower_bound is not None,
             lower_bound=self.gate_lower_bound,
+            fuse_state_recurrence=fuse_kda_state_recurrence,
+            chunk_size=kda_chunk_size,
         )
-        h_from_chunk = h
 
         if ssm_states is not None and final_state is not None:
             _target_dtype = ssm_states.dtype
@@ -322,7 +341,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
                 attn_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,
                 seq_size_per_block,
-                chunk_size=64,
+                chunk_size=kda_chunk_size,
             )
 
         return attn_out.squeeze_(0)
@@ -357,6 +376,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             kv_cache_tensor,
             seq_size_per_block,
             attn_inputs,
+            attn_meta.fuse_kda_state_recurrence,
         )
         if kv_cache is not None:
             kv_cache.cache_store_segment_sizes = list(self.cache_store_segment_sizes)
@@ -965,6 +985,12 @@ class KimiLinearModel(GptModelBase):
             ]
         )
         self.hc_enabled = model_config.hc_mult > 1
+        self.enable_kda_reuse_fusion = (
+            os.environ.get("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "0") == "1"
+            and os.environ.get("GLM5_KDA_REUSE_FUSION", "1") != "0"
+        )
+        self.kda_chunk_size = get_kda_chunk_size()
+        logging.info("KDA chunk size: %d", self.kda_chunk_size)
         if self.hc_enabled:
             self.norm = RMSNorm(
                 weights.get_global_weight(W.final_ln_gamma),
@@ -1017,7 +1043,17 @@ class KimiLinearModel(GptModelBase):
                 device=hidden_states.device,
             )
 
-        attn_meta = KimiLinearMetadata(prefill_conv1d_meta, is_target_verify)
+        fuse_kda_state_recurrence = False
+        if self.enable_kda_reuse_fusion and prefill_conv1d_meta is not None:
+            prefix_lengths = attention_inputs.prefix_lengths
+            fuse_kda_state_recurrence = prefix_lengths.numel() > 0 and bool(
+                (prefix_lengths > 0).all().item()
+            )
+        attn_meta = KimiLinearMetadata(
+            prefill_conv1d_meta,
+            is_target_verify,
+            fuse_kda_state_recurrence,
+        )
 
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)

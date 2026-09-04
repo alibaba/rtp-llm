@@ -9,6 +9,9 @@
 
 import torch
 
+from rtp_llm.models_py.triton_kernels.fla.chunk_delta_h import (
+    chunk_gated_delta_rule_fwd_h,
+)
 from rtp_llm.models_py.triton_kernels.fla.cumsum import chunk_local_cumsum
 from rtp_llm.models_py.triton_kernels.fla.utils import RCP_LN2
 from rtp_llm.models_py.triton_kernels.kimi_kda.chunk_delta_h import (
@@ -39,6 +42,7 @@ def chunk_kda_fwd(
     disable_recompute: bool = False,
     return_intermediate_states: bool = False,
     state_v_first: bool = False,
+    fuse_state_recurrence: bool = False,
 ):
     # Apply gate activation
     g_org = None
@@ -77,20 +81,32 @@ def chunk_kda_fwd(
         disable_recompute=disable_recompute,
     )
 
-    # The chunk-state recurrence always uses deterministic CUBLAS GEMMs. The
-    # former FLA Triton comparator accumulated BF16 tensor-core products and
-    # was never a production choice.
-    h, v_new, final_state = chunk_gated_delta_rule_fwd_h_cublas(
-        k=kg,
-        w=w,
-        u=u,
-        gk=g,
-        initial_state=initial_state,
-        output_final_state=output_final_state,
-        cu_seqlens=cu_seqlens,
-        use_exp2=True,
-        transpose_state_layout=state_v_first,
-    )
+    if fuse_state_recurrence and not state_v_first and chunk_size == 64:
+        h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
+            k=kg,
+            w=w,
+            u=u,
+            gk=g,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+            chunk_size=chunk_size,
+            intermediate_state_dtype=k.dtype,
+            use_exp2=True,
+        )
+    else:
+        h, v_new, final_state = chunk_gated_delta_rule_fwd_h_cublas(
+            k=kg,
+            w=w,
+            u=u,
+            gk=g,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+            chunk_size=chunk_size,
+            use_exp2=True,
+            transpose_state_layout=state_v_first,
+        )
 
     o = chunk_gla_fwd_o_gk(
         q=q,

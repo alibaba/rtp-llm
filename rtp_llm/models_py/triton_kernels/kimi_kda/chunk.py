@@ -8,6 +8,8 @@
 # Related files are modified and supported by the Moonshot AI Team
 # Adapted for rtp-llm: forward-only, no backward, no CP.
 
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -15,6 +17,22 @@ import triton.language as tl
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
 from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
 from rtp_llm.models_py.triton_kernels.kimi_kda.chunk_fwd import chunk_kda_fwd
+
+_SUPPORTED_KDA_CHUNK_SIZES = (64, 128, 256)
+
+
+def get_kda_chunk_size() -> int:
+    value = os.environ.get("KDA_CHUNK_SIZE", "64")
+    try:
+        chunk_size = int(value)
+    except ValueError as error:
+        raise ValueError(f"KDA_CHUNK_SIZE must be an integer, got {value!r}") from error
+    if chunk_size not in _SUPPORTED_KDA_CHUNK_SIZES:
+        raise ValueError(
+            "KDA_CHUNK_SIZE must be one of "
+            f"{_SUPPORTED_KDA_CHUNK_SIZES}, got {chunk_size}"
+        )
+    return chunk_size
 
 
 @triton.jit
@@ -67,9 +85,9 @@ class ChunkKDAFunction(torch.autograd.Function):
         lower_bound: float | None = None,
         return_intermediate_states: bool = False,
         state_v_first: bool = False,
+        fuse_state_recurrence: bool = False,
+        chunk_size: int = 64,
     ):
-        chunk_size = 64
-
         # Apply l2norm (ensure contiguous for view compatibility)
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q.contiguous())
@@ -106,6 +124,8 @@ class ChunkKDAFunction(torch.autograd.Function):
                 disable_recompute=False,
                 return_intermediate_states=return_intermediate_states,
                 state_v_first=state_v_first,
+                fuse_state_recurrence=fuse_state_recurrence,
+                chunk_size=chunk_size,
             )
         )
 
@@ -133,6 +153,8 @@ def chunk_kda(
     lower_bound: float | None = None,
     return_intermediate_states: bool = False,
     state_v_first: bool = False,
+    fuse_state_recurrence: bool = False,
+    chunk_size: int | None = None,
     **kwargs,
 ):
     r"""
@@ -159,6 +181,12 @@ def chunk_kda(
     Returns:
         (o, final_state) or (o, final_state, h) if return_intermediate_states=True.
     """
+    chunk_size = get_kda_chunk_size() if chunk_size is None else int(chunk_size)
+    if chunk_size not in _SUPPORTED_KDA_CHUNK_SIZES:
+        raise ValueError(
+            "chunk_size must be one of "
+            f"{_SUPPORTED_KDA_CHUNK_SIZES}, got {chunk_size}"
+        )
     if cu_seqlens is not None:
         if q.shape[0] != 1:
             raise ValueError(
@@ -215,4 +243,6 @@ def chunk_kda(
         lower_bound,
         return_intermediate_states,
         state_v_first,
+        fuse_state_recurrence,
+        chunk_size,
     )
