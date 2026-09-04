@@ -9,44 +9,52 @@ FlexLB 调度器的场景测试套件：每个用例启动一小片 mock 引擎�
 ```bash
 cd rtp_llm/flexlb/tools/online_eval
 
-python3 flexlb_functional_tests.py                 # 全量（默认 category=all profile=batch-window grade=normal）
-python3 flexlb_functional_tests.py --list          # 列出用例
-python3 flexlb_functional_tests.py --category kv --json results.json                  # 单分类 + JSON 结果
-python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbatch      # 子串过滤
+python3 parallel_runner.py                    # 全量：默认 4 路 case 级分片（profile=batch-window grade=normal）
+python3 parallel_runner.py --dry-run          # 只打印分片矩阵与端口矩阵，不执行
+python3 parallel_runner.py --parallel 1       # 串行等价（单进程全量）
+python3 parallel_runner.py --categories kv --parallel 2   # 只跑指定分类
 ```
 
-## CLI
+首轮没有逐例耗时基线时 case 均匀切分；跑完自动落盘耗时基线（见「并行编排」节），第二次起自动按实测耗时做 LPT 均衡。
+
+## CLI（parallel_runner.py）
 
 | 参数 | 取值 | 说明 |
 | --- | --- | --- |
-| `--category` | `all` / `cancel` / `status` / `kv` / `balance` / `elastic` / `engine-fault` / `master` / `admission` / `priority` / `direct` | 场景分类（默认 `all`） |
-| `--profile` | `batch-window` / `single-nonbatch` / `single-batch` / `window-nonbatch` | 调度形态（默认 `batch-window`）：decision（fixed_window / single）× dispatcher（batch / non_batch）两轴组合 |
-| `--grade` | `strict` / `normal` / `loose` | 断言档位（默认 `normal`）：数值断言按档位边界评估，超出运行档界值即 FAIL；逐例记录实际达到档并汇总为运行判定（优异 / 良好 / 边缘 / 不可用） |
-| `--filter` | 子串 | 按用例名子串过滤 |
-| `--json` | 路径 | 逐用例结果写成 JSON |
-| `--list` | — | 列出当前过滤条件下的用例并退出 |
-| `--keep` | — | 跑完保留环境不 teardown |
-| `--run-root` | 路径 | 覆盖 run 根目录（默认 `/tmp/flexlb_ft_<epoch>`；并行编排器用它隔离兄弟 lane 的 env 目录与日志） |
+| `--parallel` | `1..N` | lane 数（默认 4；1 = 单进程串行等价；上限由 mock stride 推导：默认 2000 → 6 路，`--mock-stride 500` → 21 路）|
+| `--shard` | `case` / `category` | 分片粒度（默认 `case`：逐例 LPT 摊平，同家族 case 可散到不同路；`category`：按家族装箱，最重家族决定 wall 下限）|
+| `--categories` | 逗号分隔 | 只跑指定分类（连字符/下划线均可）|
+| `--timing-json` | 路径 | 逐例耗时基线（默认自动读 `/tmp/flexlb_ft_timing_baseline.json`，可用 env `FLEXLB_FT_TIMING_BASELINE` 改址）|
+| `--mock-stride` | `≥153` | lane 间 mock 端口步长（默认 2000；实测每路 mock 窗口恒 153 口，500 有 ~3x 余量）|
+| `--profile` / `--grade` | — | 透传给 runner（默认 `batch-window` / `normal`）|
+| `--json` / `--out-dir` | 路径 | 聚合 JSON 与 lane 产物目录（默认 `/tmp/flexlb_ft_parallel_<ts>/aggregate.json`）|
+| `--keep` / `--dry-run` | — | 透传给 runner / 只打印计划不执行 |
 
-全集 **118 例**（10 分类）；`--list` 按当前 profile 过滤，默认 batch-window 下显示 103 例（priority 14 例仅 single-nonbatch、1 例仅 NON_BATCH 投递形态适用）。用例间环境按需复用 / 重建。
+### 定向复跑（flexlb_functional_tests.py）
 
-## 并行跑法（parallel_runner.py）
-
-串行全量 103 例约 35–55 分钟，瓶颈是各 case 的等待窗口（batch drain / TTL / 收敛）而非 CPU。同目录的 `parallel_runner.py` 支持两档分片粒度（`--shard`）：category 级把 10 个 category 按 LPT 装箱（权重 = 单例耗时 × `--list` 实时例数），case 级把每个 case 按实测耗时基线逐例 LPT 摊平（status 24 例不再独占一路）。每条 lane 是一个独立 runner 子进程树，端口与 run 目录显式分段，互不相碰：
+底层 runner 保留独立 CLI，主要供编排器内部 spawn（每路一次 `--cases <逗号列表>` 调用）与单例定向复跑：
 
 ```bash
-python3 parallel_runner.py                                          # 默认 4 路 category 级
-python3 parallel_runner.py --parallel 6 --shard case \
-  --timing-json full4b.json --json out.json                        # P1 摊平：逐例 LPT
-python3 parallel_runner.py --parallel 8 --shard case --mock-stride 500 \
-  --timing-json full4b.json                                         # 压缩 stride 后 8 路
-python3 parallel_runner.py --parallel 1                             # 退化 = 单进程 --category all（等价性冒烟）
-python3 parallel_runner.py --categories direct,balance --parallel 2  # 子集（连字符/下划线均可）
-python3 parallel_runner.py --dry-run                                # 只打印分组与端口矩阵
-python3 flexlb_functional_tests.py --cases a,b,c                    # 单 runner 精确 case 列表
+python3 flexlb_functional_tests.py --list                              # 列出用例
+python3 flexlb_functional_tests.py --cases a,b,c                       # 精确 case 名列表（优先于 --category/--filter）
+python3 flexlb_functional_tests.py --category kv --json results.json   # 单分类 + JSON 结果
+python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbatch   # 子串过滤
 ```
 
-`--shard case`（P1 摊平）要点：`--timing-json` 指向此前全量 run 的聚合 json（逐例 `duration_ms` 作成本基线；文件缺失退化为均匀切分并 stderr 警告，个别 case 无记录时退化为该家族单例权重）；同 category 的 case 可散到不同路（正是摊平的意义），expected-fail probes 正常参与；每路一次 runner 调用（`--cases <逗号列表>`），lane 内保持注册顺序便于逐例对照。单 runner 侧的 `--cases` 独立可用：精确 case 名列表优先于 `--category/--filter`（仍受 `--profile` 过滤），未知名报错退出（rc=2）。
+`--cases` 为精确 case 名逗号列表，仍受 `--profile` 过滤，未知名报错退出（rc=2）。其余 runner 参数（`--run-root` 等）见其 `--help`；全集 **118 例**（10 分类），`--list` 按当前 profile 过滤，默认 batch-window 下 103 例（priority 14 例仅 single-nonbatch、1 例仅 NON_BATCH 投递形态适用），用例间环境按需复用 / 重建。
+
+`--profile` / `--grade` 的取值语义（两个入口通用）：
+
+| 参数 | 取值 | 说明 |
+| --- | --- | --- |
+| `--profile` | `batch-window` / `single-nonbatch` / `single-batch` / `window-nonbatch` | 调度形态（默认 `batch-window`）：decision（fixed_window / single）× dispatcher（batch / non_batch）两轴组合 |
+| `--grade` | `strict` / `normal` / `loose` | 断言档位（默认 `normal`）：数值断言按档位边界评估，超出运行档界值即 FAIL；逐例记录实际达到档并汇总为运行判定（优异 / 良好 / 边缘 / 不可用） |
+
+## 并行编排与耗时基线
+
+串行全量 103 例约 35–55 分钟，瓶颈是各 case 的等待窗口（batch drain / TTL / 收敛）而非 CPU。默认的 `--shard case` 把每个 case 按实测耗时逐例 LPT 摊到 N 路（status 24 例不再独占一路，wall 跟随均衡总和而非最重家族）；每条 lane 是一个独立 runner 子进程树，端口与 run 目录显式分段，互不相碰。
+
+**耗时基线自维护**：每轮跑完（任何分片模式、任何子集），编排器把逐例 `duration_ms` **合并**写入共享基线 `/tmp/flexlb_ft_timing_baseline.json`（原子写；合并语义——定向子集 run 只刷新它跑过的 case，不破坏全量基线；env `FLEXLB_FT_TIMING_BASELINE` 改址，多操作员共享一台机时可各用各的）。case 分片未显式传 `--timing-json` 时自动读该文件：首轮不存在则均匀切分（正常态，无告警）；个别 case 无记录退化为该家族单例权重（stderr 警告）。显式 `--timing-json` 仍可覆盖（缺失/不可读 → 均匀切分 + 警告）。
 
 端口分段（lane i，0 起）：
 
@@ -59,11 +67,9 @@ python3 flexlb_functional_tests.py --cases a,b,c                    # 单 runner
 - 同机与他人共用且对方占用默认段时，用 `FLEXLB_FT_PARALLEL_MASTER_BASE` / `FLEXLB_FT_PARALLEL_MOCK_BASE` 整体平移（stride 不变，lane 间仍互斥）。
 - 其余 env（如 `FLEXLB_FT_HA_DUAL_MASTER=1`）原样透传给每条 lane；HA 分组与 mock 段已按 lane 同步分段，无需手工干预。
 
-聚合 `--json` 保持单 runner schema（summary + cases[]），另加：`cases[].lane`、`lanes[]`（各路 category 集合 / exit_codes / wall_s）、`summary.parallel / wall_time_s / serial_case_time_s`（最后一项为逐例耗时之和，是串行 wall 的下界，报告加速比时对标实测串行 35–55 分钟而非它）；case 级分片另记 `summary.shard`（category|case）与 `lanes[].case_names`（各路精确 case 名单，分片矩阵是 run 记录的一部分）。退出码 = 任一 lane runner 非零或存在 FAIL。`--parallel 1`（category 模式）全集走 `--category all` 单进程路径（跨 category 环境复用与直接跑 runner 完全一致），可作并行编排无回归的冒烟基线。
+聚合 `--json` 保持单 runner schema（summary + cases[]），另加：`cases[].lane`、`lanes[]`（各路 category 集合 / exit_codes / wall_s）、`summary.parallel / wall_time_s / serial_case_time_s`（最后一项为逐例耗时之和，是串行 wall 的下界，报告加速比时对标实测串行 35–55 分钟而非它）；case 级分片另记 `summary.shard`（category|case）与 `lanes[].case_names`（各路精确 case 名单，分片矩阵是 run 记录的一部分）。退出码 = 任一 lane runner 非零或存在 FAIL。`--parallel 1` 单 lane 跑全量（case 模式为一次 `--cases` 全列表调用，category 模式走 `--category all` 单进程路径），与直接串行等价，可作编排无回归的冒烟基线。
 
-实测参考（110 wuran.wzy_sm10x 容器，98 例快照，共享负载，4 路 = master+balance / engine_fault+cancel+direct / status+kv / admission+elastic）：串行 `--parallel 1` wall 4918s，4 路 wall 2444s，加速 2.01x；逐例结果 92/98 一致，6 例翻转均为时序敏感 flaky（双向）。wall 加速的硬上限来自最重家族——status 24 例实测 2104s（占串行 43%）、engine_fault 1324s，category 级不拆分时 4 路 wall 下限 ≈ 最重家族时长；若后续实测校准权重（status 15→~75、engine_fault 30→~100）可让 LPT 把 kv 从 status 路挪走，逼近 ~2100s；要突破需 case 级分片（`--shard case` 模式）。
-
-P1 摊平实测（同机同容器，103 例 = 98 例快照 + 5 新增 case，timing 基线取 P0 全量聚合 json）：6 路 `--shard case` wall 941s（15.7 分钟，最重路 16 例），vs 串行基线 4918s 加速 5.22x——status 家族 24 例被摊到全部 6 路，“最重家族即 wall 下限”的钳制消除；8 路 `--mock-stride 500`（mock base 平移避开他人占用段）wall 703s（11.7 分钟），加速 6.99x。等价性沿用 P0 口径：6 路对串行基线 98 共同例 89 一致、9 例翻转全部单向好转（8 例 FAIL→PASS，1 例 FC→FR；对翻转例同 jar 同 env 定向复跑两轮结果稳定，判定为快照漂移而非编排层回归）；8 路对 6 路 103 例 94 一致、FINDING 集完全相等（EQUIVALENT, modulo flaky flips）。新增 4 例 engine_prefill_token_budget_* FAIL 属旧 jar 与双预算组批新契约的组合性预存，与编排无关。
+实测参考（110 开发机容器，batch-window profile，共享负载）：串行单进程 wall 4918s（98 例快照）；category 级 4 路 wall 2444s（2.01x）——wall 被最重家族钳制（status 24 例实测 2104s，占串行 43%）；case 级 6 路 wall 941s（5.22x，15.7 分钟，最重路 16 例），8 路（`--mock-stride 500`，mock base 平移避开他人占用段）wall 703s（6.99x，11.7 分钟）——逐例摊平后钳制消除。等价性口径：并行 run 对串行基线逐例对照 + FINDING 集一致；实测 6 路 89/98 一致、9 例翻转全部单向好转（对翻转例同 jar 同 env 定向复跑两轮结果稳定，属快照漂移而非编排回归）；8 路对 6 路 FINDING 集完全相等。
 
 ## 测试分类（118 例）
 

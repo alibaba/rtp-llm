@@ -11,18 +11,27 @@ dirs.
 
 Two sharding granularities (--shard):
 
-  * category (P0, default) — the categories are LPT-packed into lanes.
-    Measured ceiling: the heaviest FAMILY caps the wall (status 24 cases
-    = 2104s of a 4918s serial run — 43%), so 4 lanes gave 2.01x, not 4x.
-  * case (P1 flattening) — every CASE is LPT-packed onto the lanes from
-    a measured per-case cost baseline (--timing-json = a prior full
-    run's aggregate JSON; cases[].duration_ms).  Same-family cases
-    deliberately spread across lanes; the wall tracks the balanced sum,
-    not the heaviest family.  Each lane runs ONE runner invocation with
-    the new --cases exact-name list.  Expected-fail probes participate
-    as ordinary cases.  Without a timing baseline the split degenerates
-    to uniform (round-robin) with a stderr warning; individual cases
-    missing from the baseline fall back to the family per-case weight.
+  * case (DEFAULT) — every CASE is LPT-packed onto the lanes from a
+    per-case cost baseline.  Same-family cases deliberately spread
+    across lanes; the wall tracks the balanced sum, not the heaviest
+    family.  Each lane runs ONE runner invocation with the --cases
+    exact-name list.  Expected-fail probes participate as ordinary
+    cases.  Without a timing baseline the split degenerates to uniform
+    (round-robin); individual cases missing from the baseline fall
+    back to the family per-case weight.
+  * category — the categories are LPT-packed into lanes (the runner's
+    original grouping; opt-in legacy mode).  Measured ceiling: the
+    heaviest FAMILY caps the wall (status 24 cases = 2104s of a 4918s
+    serial run — 43%), so 4 lanes gave 2.01x, not 4x.
+
+Timing-baseline self-maintenance: every completed run (any shard mode,
+    any subset) MERGES its per-case durations into a shared baseline
+    file (default /tmp/flexlb_ft_timing_baseline.json, overridable via
+    FLEXLB_FT_TIMING_BASELINE; atomic tmp+rename write).  case mode
+    reads that file automatically when --timing-json is absent, so the
+    SECOND full run onward is already cost-balanced; an explicit
+    --timing-json still overrides.  Merge, not overwrite: a partial
+    --categories run refreshes only the cases it ran.
 
 Isolation contract (why these knobs are enough):
 
@@ -65,9 +74,9 @@ not counted), so treat speedup vs the 35-55 min measured serial wall,
 not vs serial_case_time_s, when reporting.
 
 Usage:
-    python3 parallel_runner.py                          # 4 lanes, defaults
-    python3 parallel_runner.py --parallel 2 --json out.json
+    python3 parallel_runner.py                          # 4 lanes, case sharding
     python3 parallel_runner.py --parallel 1             # serial equivalence
+    python3 parallel_runner.py --shard category          # family-level lanes
     python3 parallel_runner.py --dry-run                # plan only
 """
 from __future__ import annotations
@@ -253,6 +262,59 @@ def load_timing_baseline(path: str) -> dict[str, float] | None:
         except (TypeError, ValueError):
             continue
     return out
+
+
+# Shared per-case timing baseline (case-mode cost source when no
+# --timing-json is given).  Lives OUTSIDE the repo (a cross-run,
+# machine-local artifact, like the /tmp run roots); the env override
+# exists so two operators sharing a host can keep separate baselines.
+TIMING_BASELINE_PATH = Path("/tmp/flexlb_ft_timing_baseline.json")
+
+
+def _default_timing_baseline() -> Path:
+    """Shared baseline location (FLEXLB_FT_TIMING_BASELINE overrides)."""
+    raw = os.environ.get("FLEXLB_FT_TIMING_BASELINE")
+    return Path(raw) if raw else TIMING_BASELINE_PATH
+
+
+def write_timing_baseline(payload: dict, path: Path | None = None) -> tuple[Path, int]:
+    """Merge a finished run's per-case durations into the shared baseline.
+
+    *payload* is the orchestrator aggregate (or a bare runner JSON —
+    both carry cases[].duration_ms).  MERGE, not overwrite: entries for
+    cases this run did not touch (a --categories subset, or a baseline
+    from a fuller run) keep their previous measurements, so a small
+    targeted run never destroys a full-run baseline.  Atomic tmp+rename
+    write — a concurrent reader never sees a half-written file.  Returns
+    (path, entry count) so callers can report what the baseline now holds.
+    """
+    target = path if path is not None else _default_timing_baseline()
+    entries: dict[str, int] = {}  # name -> duration_ms
+    if target.exists():
+        try:
+            old = json.loads(target.read_text(encoding="utf-8"))
+            if isinstance(old, dict):
+                for row in old.get("cases", []):
+                    if isinstance(row, dict) and row.get("name"):
+                        try:
+                            entries[row["name"]] = int(row["duration_ms"])
+                        except (KeyError, TypeError, ValueError):
+                            continue
+        except (OSError, ValueError):
+            entries = {}  # corrupt baseline: start fresh from this run
+    for row in payload.get("cases", []):
+        if not (isinstance(row, dict) and row.get("name")):
+            continue
+        try:
+            entries[row["name"]] = int(row["duration_ms"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    doc = {"cases": [{"name": n, "duration_ms": ms} for n, ms in entries.items()]}
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    tmp.replace(target)
+    return target, len(entries)
 
 
 def family_weights(profile: str) -> dict[str, float]:
@@ -528,11 +590,14 @@ def _plan_case_shard(
 ) -> tuple[list[list[str]], dict[str, float]]:
     """Per-case LPT plan (the P1 flattening).
 
-    Cost source: --timing-json (a prior full run's aggregate JSON,
-    cases[].duration_ms).  No baseline at all → uniform split (every case
-    weighs 1, LPT degenerates to round-robin) with a stderr warning;
-    individual cases missing from an otherwise usable baseline fall back
-    to the family per-case weight.  --categories still bounds the case
+    Cost source for case mode: an explicit --timing-json (a prior run's
+    aggregate JSON, cases[].duration_ms) always wins.  Without one, the
+    shared self-maintained baseline (see write_timing_baseline) is read
+    automatically: absent = first run, quiet uniform split; present but
+    corrupt = stderr warning + uniform.  Individual cases missing from
+    an otherwise usable baseline fall back to the family per-case
+    weight.  No baseline at all → uniform split (every case weighs 1,
+    LPT degenerates to round-robin).  --categories still bounds the case
     pool (family-level subset); same-family cases may land on different
     lanes — that is the point of the flattening.  Expected-fail probes
     participate as ordinary cases.
@@ -555,28 +620,40 @@ def _plan_case_shard(
     # changing the (lanes, weights) return contract.
     args.case_pairs = pairs
 
-    timing_path = getattr(args, "timing_json", None)
-    timing = load_timing_baseline(timing_path) if timing_path else None
-    if timing is None:
-        if timing_path:
+    explicit = getattr(args, "timing_json", None)
+    timing: dict[str, float] | None = None
+    auto = False
+    if explicit:
+        timing_path = explicit
+        timing = load_timing_baseline(timing_path)
+        if timing is None:
             print(
                 f"warning: --timing-json unreadable ({timing_path}); "
                 "falling back to uniform case split",
                 file=sys.stderr,
             )
             args.cost_source = f"uniform (baseline unreadable: {timing_path})"
-        else:
-            print(
-                "warning: --shard case without --timing-json — falling "
-                "back to uniform case split",
-                file=sys.stderr,
-            )
-            args.cost_source = "uniform (no baseline)"
     else:
-        args.cost_source = (
-            f"baseline {timing_path} "
-            f"({sum(1 for name, _ in pairs if name in timing)}/{len(pairs)} cases)"
-        )
+        timing_path = str(_default_timing_baseline())
+        auto = True
+        if Path(timing_path).exists():
+            timing = load_timing_baseline(timing_path)
+            if timing is None:
+                print(
+                    f"warning: default timing baseline corrupt "
+                    f"({timing_path}); falling back to uniform case split",
+                    file=sys.stderr,
+                )
+                args.cost_source = f"uniform (baseline corrupt: {timing_path})"
+        else:
+            # First run on this host (no baseline yet): uniform split is
+            # the expected state, not an error — stay quiet on stderr;
+            # the plan print shows the cost source.
+            args.cost_source = "uniform (no baseline yet — this run establishes it)"
+    if timing is not None:
+        covered = sum(1 for name, _ in pairs if name in timing)
+        label = "auto baseline" if auto else "baseline"
+        args.cost_source = f"{label} {timing_path} ({covered}/{len(pairs)} cases)"
 
     costs: list[tuple[str, float]] = []
     fallback: list[str] = []
@@ -762,9 +839,9 @@ def main() -> int:
         type=int,
         default=4,
         help=(
-            "lane count (default 4; 1 degenerates to the legacy serial "
-            "`--category all` path in category mode; cap derived from "
-            "--mock-stride — 6 at the default 2000, 21 at 500)"
+            "lane count (default 4; 1 = single-lane serial run; cap "
+            "derived from --mock-stride — 6 at the default 2000, 21 at "
+            "500)"
         ),
     )
     parser.add_argument(
@@ -794,22 +871,24 @@ def main() -> int:
     parser.add_argument(
         "--shard",
         choices=["category", "case"],
-        default="category",
+        default="case",
         help=(
-            "sharding granularity: category (P0 lane packing — the heaviest "
-            "family caps the wall) or case (P1 flattening — per-case LPT "
-            "from the --timing-json baseline; same-family cases spread "
-            "across lanes)"
+            "sharding granularity: case (DEFAULT — per-case LPT from the "
+            "timing baseline; same-family cases spread across lanes) or "
+            "category (family-level lane packing — the heaviest family "
+            "caps the wall; opt-in)"
         ),
     )
     parser.add_argument(
         "--timing-json",
         default=None,
         help=(
-            "case-mode cost baseline: a prior full run's aggregate JSON "
-            "(cases[].duration_ms). Missing file → uniform split; cases "
-            "absent from the baseline → family-weight fallback (both warn "
-            "on stderr)"
+            "case-mode cost baseline: a prior run's aggregate JSON "
+            "(cases[].duration_ms). Overrides the auto-maintained shared "
+            "baseline (default /tmp/flexlb_ft_timing_baseline.json, env "
+            "FLEXLB_FT_TIMING_BASELINE). Missing file → uniform split; "
+            "cases absent from the baseline → family-weight fallback "
+            "(both warn on stderr)"
         ),
     )
     parser.add_argument(
@@ -912,6 +991,13 @@ def main() -> int:
     payload = aggregate(lane_results, args, wall_s)
     json_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+
+    # Self-maintained timing baseline: every completed run (any shard
+    # mode / subset) refreshes the shared per-case durations — the next
+    # case-mode run reads them back automatically.  Dry-run never gets
+    # here (early return above), so a plan-only invocation never writes.
+    baseline_path, baseline_n = write_timing_baseline(payload)
+    print(f" timing baseline updated: {baseline_path} ({baseline_n} cases)")
 
     s = payload["summary"]
     print(f"\n{'=' * 60}")

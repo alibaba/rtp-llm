@@ -21,7 +21,14 @@ flattening honest:
     a non-zero lane rc forces exit_code 1 even with zero FAIL rows;
     shard=case runs record summary.shard + lanes[].case_names;
   * runner --cases — exact-name selection wins over --category/--filter,
-    profile filtering still applies, unknown names exit 2.
+    profile filtering still applies, unknown names exit 2;
+  * --shard defaults to CASE (single entry point); category stays
+    selectable;
+  * timing-baseline self-maintenance — every completed run merges its
+    per-case durations into the shared baseline (write_timing_baseline),
+    case mode auto-reads it when --timing-json is absent, and the
+    FLEXLB_FT_TIMING_BASELINE env pins the shared location (tests isolate
+    it so a developer's real /tmp baseline cannot leak in).
 
 Plus --dry-run CLI smokes (the only jar-free execution paths).
 """
@@ -242,6 +249,17 @@ def _write_runner_json(path: Path, cases: list[dict], summary: dict) -> None:
     path.write_text(json.dumps({"summary": summary, "cases": cases}), encoding="utf-8")
 
 
+# Point the shared-baseline lookup at a path that never exists: CLI
+# subprocess tests must not read (or write) the developer's real
+# /tmp/flexlb_ft_timing_baseline.json — otherwise a locally established
+# baseline would flip "uniform (no baseline)" assertions.
+def _env_without_baseline() -> dict[str, str]:
+    return {
+        **os.environ,
+        "FLEXLB_FT_TIMING_BASELINE": "/nonexistent/flexlb_ft_test_baseline.json",
+    }
+
+
 def _lane_result(lane_idx: int, runs, wall_s: float = 1.0):
     lr = parallel_runner.LaneResult(lane_idx, [cat for cat, _, _ in runs])
     lr.runs = runs
@@ -344,10 +362,14 @@ class AggregateTest(unittest.TestCase):
 
 class DryRunCLITest(unittest.TestCase):
     def test_dry_run_prints_plan_and_exits_zero(self):
+        # Explicit category shard: the family-level branch keeps its own
+        # dry-run smoke (the default branch is covered by ShardDefaultTest).
         proc = subprocess.run(
             [
                 sys.executable,
                 str(PARALLEL_RUNNER),
+                "--shard",
+                "category",
                 "--parallel",
                 "4",
                 "--dry-run",
@@ -516,13 +538,18 @@ class PlanCaseShardTest(unittest.TestCase):
         with mock.patch.object(
             parallel_runner, "list_case_pairs", return_value=list(self._PAIRS)
         ):
-            with contextlib.redirect_stderr(buf):
-                lanes, weights = parallel_runner._plan_case_shard(args)
+            with mock.patch.dict(
+                os.environ, {"FLEXLB_FT_TIMING_BASELINE": "/nonexistent/b.json"}
+            ):
+                with contextlib.redirect_stderr(buf):
+                    lanes, weights = parallel_runner._plan_case_shard(args)
         return lanes, weights, buf.getvalue()
 
-    def test_no_baseline_degrades_to_uniform_with_warning(self):
+    def test_no_baseline_degrades_to_uniform_quietly(self):
+        # timing_json=None + no shared baseline on disk = the FIRST run
+        # on a host: uniform split is the expected state, not a warning.
         lanes, weights, err = self._plan(self._args())
-        self.assertIn("falling back to uniform case split", err)
+        self.assertEqual("", err)
         self.assertTrue(all(w == 1.0 for w in weights.values()))
         self.assertEqual([3, 3], [len(lane) for lane in lanes])
 
@@ -664,7 +691,7 @@ class MockStrideTest(unittest.TestCase):
 
 
 class DryRunCaseShardTest(unittest.TestCase):
-    def test_dry_run_prints_case_matrix_and_warns_without_baseline(self):
+    def test_dry_run_case_shard_without_baseline_is_quiet_uniform(self):
         proc = subprocess.run(
             [
                 sys.executable,
@@ -677,12 +704,15 @@ class DryRunCaseShardTest(unittest.TestCase):
             ],
             capture_output=True,
             text=True,
+            env=_env_without_baseline(),
         )
         self.assertEqual(0, proc.returncode, proc.stderr)
         self.assertIn("shard=case", proc.stdout)
         self.assertIn("case plan", proc.stdout)
-        self.assertIn("uniform (no baseline)", proc.stdout)
-        self.assertIn("falling back to uniform case split", proc.stderr)
+        self.assertIn("uniform (no baseline", proc.stdout)
+        # First run (no shared baseline yet) must stay QUIET on stderr —
+        # a warning would suggest something needs fixing when it doesn't.
+        self.assertNotIn("falling back", proc.stderr)
         self.assertIn("port partition", proc.stdout)
 
     def test_dry_run_with_timing_json_prints_baseline_source(self):
@@ -727,6 +757,7 @@ class DryRunCaseShardTest(unittest.TestCase):
             ],
             capture_output=True,
             text=True,
+            env=_env_without_baseline(),
         )
         self.assertEqual(0, proc.returncode, proc.stderr)
         self.assertIn("stride 500", proc.stdout)
@@ -762,6 +793,207 @@ class DryRunCaseShardTest(unittest.TestCase):
         )
         self.assertEqual(2, proc.returncode)
         self.assertIn("--parallel must be 1..21", proc.stderr)
+
+
+class ShardDefaultTest(unittest.TestCase):
+    """--shard defaults to case (the single-entry-point decision)."""
+
+    def test_default_dry_run_is_case_shard(self):
+        proc = subprocess.run(
+            [sys.executable, str(PARALLEL_RUNNER), "--parallel", "2", "--dry-run"],
+            capture_output=True,
+            text=True,
+            env=_env_without_baseline(),
+        )
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        self.assertIn("shard=case", proc.stdout)
+        self.assertIn("case plan", proc.stdout)
+
+    def test_category_shard_still_selectable(self):
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(PARALLEL_RUNNER),
+                "--shard",
+                "category",
+                "--dry-run",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        self.assertIn("shard=category", proc.stdout)
+        self.assertIn("lane plan", proc.stdout)
+
+
+class TimingBaselineMaintenanceTest(unittest.TestCase):
+    """Shared-baseline self-maintenance: write-merge, auto-read, env pin."""
+
+    def test_write_merges_and_keeps_untouched_cases(self):
+        # A partial run (e.g. --categories cancel) must refresh only the
+        # cases it ran — a prior full-run baseline keeps the rest.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "b.json"
+            p.write_text(
+                json.dumps(
+                    {
+                        "cases": [
+                            {"name": "a", "duration_ms": 1000},
+                            {"name": "b", "duration_ms": 2000},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            payload = {
+                "cases": [
+                    {"name": "a", "duration_ms": 1500},  # refreshed
+                    {"name": "c", "duration_ms": 3000},  # added
+                ]
+            }
+            path, n = parallel_runner.write_timing_baseline(payload, path=p)
+            stored = parallel_runner.load_timing_baseline(str(path))
+        self.assertEqual(3, n)
+        self.assertAlmostEqual(1.5, stored["a"])
+        self.assertAlmostEqual(2.0, stored["b"])  # kept from the prior run
+        self.assertAlmostEqual(3.0, stored["c"])
+
+    def test_write_rebuilds_from_corrupt_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "b.json"
+            p.write_text("{corrupt", encoding="utf-8")
+            payload = {"cases": [{"name": "x", "duration_ms": 700}]}
+            path, n = parallel_runner.write_timing_baseline(payload, path=p)
+            stored = parallel_runner.load_timing_baseline(str(path))
+        self.assertEqual(1, n)
+        self.assertAlmostEqual(0.7, stored["x"])
+
+    def test_default_path_env_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "custom.json"
+            with mock.patch.dict(os.environ, {"FLEXLB_FT_TIMING_BASELINE": str(p)}):
+                self.assertEqual(p, parallel_runner._default_timing_baseline())
+                path, _ = parallel_runner.write_timing_baseline(
+                    {"cases": [{"name": "x", "duration_ms": 100}]}
+                )
+            self.assertEqual(p, path)
+            self.assertTrue(p.exists())
+
+    def test_plan_reads_default_baseline_automatically(self):
+        # No --timing-json given: the shared baseline is picked up on its
+        # own ("auto baseline"), cases absent from it still fall back to
+        # the family per-case weight.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "b.json"
+            p.write_text(
+                json.dumps({"cases": [{"name": "cancel_a", "duration_ms": 40000}]}),
+                encoding="utf-8",
+            )
+            args = argparse.Namespace(
+                shard="case",
+                profile="batch-window",
+                categories=None,
+                timing_json=None,
+                parallel=2,
+            )
+            with mock.patch.object(
+                parallel_runner,
+                "list_case_pairs",
+                return_value=list(PlanCaseShardTest._PAIRS),
+            ):
+                with mock.patch.dict(os.environ, {"FLEXLB_FT_TIMING_BASELINE": str(p)}):
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        lanes, weights = parallel_runner._plan_case_shard(args)
+        self.assertAlmostEqual(40.0, weights["cancel_a"])
+        self.assertIn("auto baseline", args.cost_source)
+        self.assertEqual(
+            parallel_runner.CATEGORY_WEIGHTS["status"], weights["status_a"]
+        )
+
+
+class BaselineWriteWiringTest(unittest.TestCase):
+    """main() updates the shared baseline after a completed run (any mode)."""
+
+    def _fake_lane(self, lane_idx, items, args, out_dir, run_stamp):
+        json_path = Path(out_dir) / f"lane{lane_idx}" / "cases.json"
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_runner_json(
+            json_path,
+            [
+                {
+                    "category": "cancel",
+                    "name": "cancel_a",
+                    "status": "PASS",
+                    "expected_fail": False,
+                    "duration_ms": 4321,
+                    "grade": {"achieved": "normal"},
+                }
+            ],
+            {
+                "total": 1,
+                "passed": 1,
+                "failed": 0,
+                "finding_confirmed": 0,
+                "finding_resolved": 0,
+            },
+        )
+        lr = parallel_runner.LaneResult(lane_idx, ["cancel"], case_names=["cancel_a"])
+        lr.runs = [("cases", 0, json_path)]
+        lr.wall_s = 5.0
+        return lr
+
+    def test_completed_run_updates_shared_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            out_json = d / "agg.json"
+            baseline = d / "baseline.json"
+            argv = [
+                "parallel_runner.py",
+                "--parallel",
+                "1",
+                "--json",
+                str(out_json),
+                "--out-dir",
+                str(d / "out"),
+            ]
+            with mock.patch.object(sys, "argv", argv):
+                plan = ([["cancel_a"]], {"cancel_a": 1.0})
+                with mock.patch.object(
+                    parallel_runner,
+                    "_plan",
+                    return_value=plan,
+                ):
+                    with mock.patch.object(
+                        parallel_runner, "run_lane", side_effect=self._fake_lane
+                    ):
+                        with mock.patch.dict(
+                            os.environ, {"FLEXLB_FT_TIMING_BASELINE": str(baseline)}
+                        ):
+                            buf = io.StringIO()
+                            with contextlib.redirect_stdout(buf):
+                                rc = parallel_runner.main()
+            stored = parallel_runner.load_timing_baseline(str(baseline))
+        self.assertEqual(0, rc)
+        self.assertAlmostEqual(4.321, stored["cancel_a"])
+        self.assertIn("timing baseline updated", buf.getvalue())
+
+    def test_dry_run_never_writes_the_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            baseline = Path(tmp) / "baseline.json"
+            argv = ["parallel_runner.py", "--parallel", "2", "--dry-run"]
+            with mock.patch.object(sys, "argv", argv):
+                with mock.patch.object(
+                    parallel_runner,
+                    "_plan",
+                    return_value=([["a"], ["b"]], {"a": 1.0, "b": 1.0}),
+                ):
+                    with mock.patch.dict(
+                        os.environ, {"FLEXLB_FT_TIMING_BASELINE": str(baseline)}
+                    ):
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            rc = parallel_runner.main()
+        self.assertEqual(0, rc)
+        self.assertFalse(baseline.exists())
 
 
 if __name__ == "__main__":
