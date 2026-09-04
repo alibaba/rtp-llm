@@ -235,6 +235,63 @@ TEST(SharedBlockCacheTest, FlatFallbackKeepsCanonicalDependencyWhenLogicalAliasU
     EXPECT_EQ(evicted.evicted_namespaces.at(8), SharedBlockCache::kGpuCpCanonicalNamespace);
 }
 
+TEST(SharedBlockCacheTest, FlatFallbackStopsAfterOldestCandidatesCoverRequestedBlocks) {
+    SharedBlockCache cache;
+    cache.setPrefixTreeEnabled(false);
+
+    cache.put(1, {101}, /*is_resident=*/true);
+    cache.put(2, {NULL_BLOCK_IDX, NULL_BLOCK_IDX}, /*is_resident=*/false);
+    cache.put(3, {301, 302, NULL_BLOCK_IDX, 304}, /*is_resident=*/false);
+    cache.put(4, {401}, /*is_resident=*/false);
+
+    auto evicted = cache.selectAndEvict(/*min_blocks=*/2);
+
+    EXPECT_EQ(evicted.evicted_keys, (CacheKeysType{2, 3}));
+    EXPECT_EQ(evicted.evicted_group_block_ids.at(2), (std::vector<BlockIdxType>{NULL_BLOCK_IDX, NULL_BLOCK_IDX}));
+    EXPECT_EQ(evicted.evicted_group_block_ids.at(3), (std::vector<BlockIdxType>{301, 302, NULL_BLOCK_IDX, 304}));
+    EXPECT_TRUE(cache.contains(1));
+    EXPECT_FALSE(cache.contains(2));
+    EXPECT_FALSE(cache.contains(3));
+    EXPECT_TRUE(cache.contains(4));
+}
+
+TEST(SharedBlockCacheTest, FlatFallbackEvictsAllCandidatesWhenBlocksAreInsufficient) {
+    SharedBlockCache cache;
+    cache.setPrefixTreeEnabled(false);
+
+    cache.put(1, {101}, /*is_resident=*/true);
+    cache.put(2, {NULL_BLOCK_IDX, NULL_BLOCK_IDX}, /*is_resident=*/false);
+    cache.put(3, {NULL_BLOCK_IDX, 302}, /*is_resident=*/false);
+    cache.put(4, {401, NULL_BLOCK_IDX, 403}, /*is_resident=*/false);
+
+    auto evicted = cache.selectAndEvict(/*min_blocks=*/4);
+
+    EXPECT_EQ(evicted.evicted_keys, (CacheKeysType{2, 3, 4}));
+    EXPECT_TRUE(cache.contains(1));
+    EXPECT_FALSE(cache.contains(2));
+    EXPECT_FALSE(cache.contains(3));
+    EXPECT_FALSE(cache.contains(4));
+    EXPECT_EQ(cache.size(), 1);
+}
+
+TEST(SharedBlockCacheTest, FlatFallbackForGroupSkipsResidentAndMissingGroupInLruOrder) {
+    SharedBlockCache cache;
+    cache.setPrefixTreeEnabled(false);
+
+    cache.put(1, {101, 201}, /*is_resident=*/false);
+    cache.put(2, {102, NULL_BLOCK_IDX}, /*is_resident=*/false);
+    cache.put(3, {103, 203}, /*is_resident=*/true);
+    cache.put(4, {104, 204}, /*is_resident=*/false);
+
+    auto evicted = cache.selectAndEvictForGroup(/*group_id=*/1, /*min_blocks=*/2);
+
+    EXPECT_EQ(evicted.evicted_keys, (CacheKeysType{1, 4}));
+    EXPECT_FALSE(cache.contains(1));
+    EXPECT_TRUE(cache.contains(2));
+    EXPECT_TRUE(cache.contains(3));
+    EXPECT_FALSE(cache.contains(4));
+}
+
 TEST(SharedBlockCacheTest, NonMatchableSlotStillEvictsButDoesNotMatchGroup) {
     SharedBlockCache cache;
     cache.put(1,
@@ -488,12 +545,40 @@ TEST(SharedBlockCachePerfTest, DISABLED_FlatFallbackLargeLru) {
 
     const auto start   = std::chrono::steady_clock::now();
     const auto evicted = cache.selectAndEvictForGroup(/*group_id=*/1, kEvictCount);
-    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now() - start);
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
 
     EXPECT_EQ(evicted.evicted_keys.size(), kEvictCount);
     std::cout << "[ PERF ] prefix_tree=off items=" << kItemCount << " evicted=" << evicted.evicted_keys.size()
               << " selection_us=" << elapsed.count() << std::endl;
+}
+
+TEST(SharedBlockCachePerfTest, DISABLED_FlatFallbackRepeatedSingleEviction) {
+    constexpr int kItemCount     = 50000;
+    constexpr int kEvictionCount = 1000;
+
+    SharedBlockCache cache;
+    cache.setPrefixTreeEnabled(false);
+    for (int i = 0; i < kItemCount; ++i) {
+        const auto key = static_cast<CacheKeyType>(i + 1);
+        cache.put(key, std::vector<BlockIdxType>{static_cast<BlockIdxType>(i + 1)}, /*is_resident=*/false);
+    }
+
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < kEvictionCount; ++i) {
+        auto evicted = cache.selectAndEvictForGroup(/*group_id=*/0, /*min_blocks=*/1);
+        ASSERT_EQ(evicted.evicted_keys.size(), 1);
+
+        const auto key = static_cast<CacheKeyType>(kItemCount + i + 1);
+        cache.put(key, std::vector<BlockIdxType>{static_cast<BlockIdxType>(key)}, /*is_resident=*/false);
+    }
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
+
+    EXPECT_EQ(cache.size(), kItemCount);
+    std::cout << "[ PERF ] prefix_tree=off items=" << kItemCount << " single_evictions=" << kEvictionCount
+              << " total_us=" << elapsed.count()
+              << " average_us=" << static_cast<double>(elapsed.count()) / kEvictionCount << std::endl;
 }
 
 TEST(SharedBlockCachePerfTest, DISABLED_PrefixTreeLongSessionChains) {
@@ -504,12 +589,11 @@ TEST(SharedBlockCachePerfTest, DISABLED_PrefixTreeLongSessionChains) {
     for (int family = 0; family < kFamilyCount; ++family) {
         CacheKeyType parent_key = 0;
         for (int depth = 0; depth < kChainDepth; ++depth) {
-            const auto key = static_cast<CacheKeyType>(family * kChainDepth + depth + 1);
+            const auto key         = static_cast<CacheKeyType>(family * kChainDepth + depth + 1);
             const bool target_leaf = family == kFamilyCount - 1 && depth == kChainDepth - 1;
             cache.put(key,
-                      std::vector<BlockIdxType>{
-                          static_cast<BlockIdxType>(key + 10000),
-                          target_leaf ? static_cast<BlockIdxType>(key + 20000) : NULL_BLOCK_IDX},
+                      std::vector<BlockIdxType>{static_cast<BlockIdxType>(key + 10000),
+                                                target_leaf ? static_cast<BlockIdxType>(key + 20000) : NULL_BLOCK_IDX},
                       /*is_resident=*/false,
                       SharedBlockCache::kGpuLogicalNamespace,
                       depth == 0 ? rootDep() : childDep(parent_key, static_cast<uint32_t>(depth)));
@@ -519,13 +603,13 @@ TEST(SharedBlockCachePerfTest, DISABLED_PrefixTreeLongSessionChains) {
 
     const auto start   = std::chrono::steady_clock::now();
     const auto evicted = cache.selectAndEvictForGroup(/*group_id=*/1, /*min_blocks=*/1);
-    const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now() - start);
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
 
     EXPECT_EQ(evicted.evicted_keys.size(), kChainDepth);
-    std::cout << "[ PERF ] prefix_tree=on items=" << kFamilyCount * kChainDepth
-              << " chains=" << kFamilyCount << " depth=" << kChainDepth
-              << " evicted=" << evicted.evicted_keys.size() << " selection_us=" << elapsed.count() << std::endl;
+    std::cout << "[ PERF ] prefix_tree=on items=" << kFamilyCount * kChainDepth << " chains=" << kFamilyCount
+              << " depth=" << kChainDepth << " evicted=" << evicted.evicted_keys.size()
+              << " selection_us=" << elapsed.count() << std::endl;
 }
 
 }  // namespace rtp_llm::test

@@ -192,20 +192,24 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvict(size_t min_blocks
         return result;
     }
 
-    std::unordered_set<CacheKeyType> resident_keys;
-    for (const auto& [key, item] : lru_cache_.items()) {
-        if (item.is_resident) {
-            resident_keys.insert(item.cache_key);
-        }
-    }
-
+    // Reclaim only enough LRU candidates for the current allocation deficit. Scanning the whole cache here makes
+    // repeated small allocations increasingly expensive after the cache becomes full.
     std::vector<CacheKeyType> lru_keys;
+    size_t                    candidate_blocks = 0;
     for (auto it = lru_cache_.items().rbegin(); it != lru_cache_.items().rend(); ++it) {
         const auto& item = it->second;
-        if (item.is_resident || resident_keys.count(item.cache_key)) {
+        if (item.is_resident) {
             continue;
         }
         lru_keys.push_back(item.cache_key);
+        for (const auto block_id : item.group_block_ids) {
+            if (!isNullBlockIdx(block_id)) {
+                ++candidate_blocks;
+            }
+        }
+        if (candidate_blocks >= min_blocks) {
+            break;
+        }
     }
 
     size_t selected_blocks = 0;
@@ -310,30 +314,23 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
         return result;
     }
 
-    std::unordered_set<CacheKeyType> resident_keys;
-    for (const auto& [key, item] : lru_cache_.items()) {
-        if (item.is_resident) {
-            resident_keys.insert(item.cache_key);
-        }
-    }
-
+    // Group allocation commonly asks for one block at a time, so stop at the first sufficient set of victims.
     std::vector<CacheKeyType> lru_keys;
+    lru_keys.reserve(std::min(min_blocks, lru_cache_.size()));
     for (auto it = lru_cache_.items().rbegin(); it != lru_cache_.items().rend(); ++it) {
         const auto& item = it->second;
-        if (item.is_resident || resident_keys.count(item.cache_key)) {
+        if (item.is_resident || !hasUsableGroup(item, group_id)) {
             continue;
         }
         lru_keys.push_back(item.cache_key);
+        if (lru_keys.size() >= min_blocks) {
+            break;
+        }
     }
 
     size_t selected_blocks = 0;
     for (const auto cache_key : lru_keys) {
         UnifiedCacheItem removed_item;
-        const auto*      item             = lru_cache_.find(cache_key);
-        bool             has_target_group = item && hasUsableGroup(*item, group_id);
-        if (!has_target_group) {
-            continue;
-        }
         if (!lru_cache_.remove(cache_key, &removed_item)) {
             continue;
         }
@@ -349,9 +346,7 @@ SharedBlockCache::EvictResult SharedBlockCache::selectAndEvictForGroup(int group
             result.evicted_dependencies[cache_key] = removed_item.dependency;
         }
 
-        if (hasUsableGroup(removed_item, group_id)) {
-            selected_blocks++;
-        }
+        selected_blocks++;
         if (selected_blocks >= min_blocks) {
             break;
         }
