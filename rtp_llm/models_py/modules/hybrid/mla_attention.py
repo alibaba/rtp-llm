@@ -25,6 +25,9 @@ if _DEVICE_TYPE == DeviceType.Cuda:
     from rtp_llm.models_py.modules.factory.linear.impl.cuda.mxfp8_linear import (
         CudaMxfp8Linear,
     )
+    from rtp_llm.models_py.modules.hy_v4.gated_mla_triton import (
+        maybe_fused_gated_mla_proj_mxfp8,
+    )
     from rtp_llm.models_py.triton_kernels.common.attn_output_gate import (
         sigmoid_mul_fp8_quant_fwd,
     )
@@ -36,6 +39,7 @@ if _DEVICE_TYPE == DeviceType.Cuda:
 else:
     CudaFp8GEMMLinear = None  # type: ignore
     CudaMxfp8Linear = None  # type: ignore
+    maybe_fused_gated_mla_proj_mxfp8 = None  # type: ignore
     mxfp8_quant_act_packed = None  # type: ignore
     sigmoid_mul_fp8_quant_fwd = None  # type: ignore
     fused_strided_rmsnorm = None  # type: ignore
@@ -290,6 +294,7 @@ class MlaAttention(nn.Module):
         self._gated_mla_quant_group_size = 128
         self._gated_mla_scale_ue8m0 = False
         self._gated_mla_round_scale_to_pow2 = False
+        self._fuse_gated_mla_proj_quant = False
         if (
             _fuse_on
             and self.gating_type == "elementwise"
@@ -309,6 +314,13 @@ class MlaAttention(nn.Module):
                 )
                 self._gated_mla_round_scale_to_pow2 = (
                     self.o_proj.input_quant_round_to_pow2
+                )
+                self._fuse_gated_mla_proj_quant = bool(
+                    maybe_fused_gated_mla_proj_mxfp8 is not None
+                    and getattr(self.gate_proj, "bias", None) is None
+                    and self._gated_mla_quant_group_size == 32
+                    and self._gated_mla_scale_ue8m0
+                    and self._gated_mla_round_scale_to_pow2
                 )
             elif CudaFp8GEMMLinear is not None and isinstance(
                 self.o_proj, CudaFp8GEMMLinear
@@ -523,8 +535,19 @@ class MlaAttention(nn.Module):
             )
         output = None
         if self.gate_proj is not None:
-            gate = self.gate_proj(hidden_states)
-            if (
+            fused_gate_quant = None
+            if self._fuse_gated_mla_proj_quant and attn_output.dim() == 2:
+                fused_gate_quant = maybe_fused_gated_mla_proj_mxfp8(
+                    hidden_states,
+                    self.gate_proj.weight,
+                    attn_output,
+                )
+            if fused_gate_quant is not None:
+                fp8_output, fp8_scale = fused_gate_quant
+                output = self.o_proj(fp8_output, input_scales=fp8_scale)
+            else:
+                gate = self.gate_proj(hidden_states)
+            if output is None and (
                 self._fuse_gated_mla_quant
                 and self.gating_type == "elementwise"
                 and attn_output.dim() == 2
@@ -538,7 +561,7 @@ class MlaAttention(nn.Module):
                     column_major_scales=True,
                 )
                 output = self.o_proj(fp8_output, input_scales=fp8_scale)
-            else:
+            elif output is None:
                 gate = torch.sigmoid(gate)
                 if self.gating_type == "headwise":
                     attn_output = attn_output.reshape(

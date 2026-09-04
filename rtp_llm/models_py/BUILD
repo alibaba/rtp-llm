@@ -98,6 +98,18 @@ py_test(
 )
 
 py_test(
+    name = "hy4_gated_mla_triton_test",
+    srcs = ["modules/hy_v4/test_gated_mla_triton.py"],
+    main = "modules/hy_v4/test_gated_mla_triton.py",
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM100"],
+    exec_properties = {"gpu": "SM100", "gpu_count": "1"},
+)
+
+py_test(
     name = "hy4_mega_moe_layout_test",
     srcs = ["modules/glm5_mega_moe/test_fused_moe_wrapper_layout.py"],
     main = "modules/glm5_mega_moe/test_fused_moe_wrapper_layout.py",
