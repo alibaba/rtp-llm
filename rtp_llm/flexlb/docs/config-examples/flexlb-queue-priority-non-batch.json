@@ -36,7 +36,6 @@
     "maxInflightRequestsPerPrefillWorker": 128
   },
   "router": {
-    "availabilityHysteresisPercent": 30,
     "roles": {
       "prefill": {
         "executionTimeEstimator": {
@@ -66,6 +65,7 @@
           "maxOutputTokensForEstimate": 1000
         },
         "decayPerToken": 0.001,
+        "loadDecayPerRequest": 1.0,
         "outlierRejection": {
           "maxEngineLoadVsAverageMultiplier": 3.0,
           "maxKvUsedVsAverageMultiplier": 3.0

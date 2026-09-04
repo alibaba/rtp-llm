@@ -303,7 +303,7 @@ class DecodeEndpointTest {
 
     private DecodeEndpoint.EngineDispatchPermit acquirePermit(long requestId) {
         DecodeEndpoint.EngineDispatchPermitAcquisition acquisition =
-                endpoint.acquireEngineDispatchPermit(requestId, 0);
+                endpoint.acquireEngineDispatchPermit(requestId, 0, 0L);
         assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
                 acquisition.status());
         assertNotNull(acquisition.permit());

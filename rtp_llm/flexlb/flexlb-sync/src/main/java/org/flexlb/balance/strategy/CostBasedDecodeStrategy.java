@@ -19,19 +19,21 @@ import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
-import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Component
 public class CostBasedDecodeStrategy {
 
     private static final int SNAPSHOT_CAPTURE_ATTEMPTS = 2;
+    private static final ThreadLocal<CandidateBuffer> CANDIDATES =
+            ThreadLocal.withInitial(CandidateBuffer::new);
 
     private final WorkerDirectory workerDirectory;
+    private final AtomicLong equalCostCursor = new AtomicLong();
 
     public CostBasedDecodeStrategy(WorkerDirectory workerDirectory) {
         this.workerDirectory = workerDirectory;
@@ -59,33 +61,39 @@ public class CostBasedDecodeStrategy {
                         balanceContext, 0, Map.of("NO_REGISTERED", 1));
                 return PlacementResult.blocked(roleType);
             }
-            PlacementResult<List<DecodeRoutingView>, RoleType> validated =
-                    validateFleet(snapshots, seqLen);
-            if (validated.status() == PlacementResult.Status.REJECTED) {
-                return PlacementResult.rejected(validated.rejection());
+            CandidateBuffer candidates = CANDIDATES.get();
+            captureCandidates(
+                    candidates, snapshots, seqLen,
+                    selector, softQueuePlacement, config);
+            Response staticRejection = validateFleet(candidates, seqLen);
+            if (staticRejection != null) {
+                return PlacementResult.rejected(staticRejection);
             }
-            List<DecodeRoutingView> candidates = validated.value();
 
-            Map<String, Integer> availabilityRejections = new HashMap<>();
-            List<DecodeRoutingView> eligible = softQueuePlacement
-                    ? candidates
-                    : filterAvailableEndpoints(
-                            candidates, config, availabilityRejections);
-            if (eligible.isEmpty()) {
+            if (candidates.availabilityEligible == 0) {
                 logNoAvailableEndpoint(
-                        balanceContext, registered, availabilityRejections);
+                        balanceContext, registered,
+                        rejectionMap("RESOURCE_UNAVAILABLE",
+                                candidates.availabilityRejected));
                 return PlacementResult.blocked(roleType);
             }
 
-            Map<String, Integer> hardRejections = new HashMap<>();
-            DecodeRoutingView selected = selectPreferredThenFallback(
-                    eligible, balanceContext, selector,
-                    softQueuePlacement, hardRejections);
-            if (selected == null) {
+            if (candidates.isEmpty()) {
                 logAllFilteredOut(
                         balanceContext,
-                        availabilityRejections,
-                        hardRejections);
+                        candidates);
+                return PlacementResult.blocked(roleType);
+            }
+            double kvDecay = selector.getDecayPerToken();
+            double loadDecay = selector.getLoadDecayPerRequest();
+            if (softQueuePlacement) {
+                preferImmediatelyDispatchable(
+                        candidates, balanceContext, kvDecay, loadDecay);
+            }
+            DecodeRoutingView selected = weightedRandomSelection(
+                    candidates, kvDecay, loadDecay);
+            if (selected == null) {
+                logAllFilteredOut(balanceContext, candidates);
                 return PlacementResult.blocked(roleType);
             }
 
@@ -104,54 +112,19 @@ public class CostBasedDecodeStrategy {
         return PlacementResult.blocked(roleType);
     }
 
-    private static List<DecodeRoutingView> filterAvailableEndpoints(
-            List<DecodeRoutingView> snapshots,
-            FlexlbConfig config,
-            Map<String, Integer> rejections) {
-        ArrayList<DecodeRoutingView> filtered = null;
-        int unavailable = 0;
-        for (int index = 0; index < snapshots.size(); index++) {
-            DecodeRoutingView snapshot = snapshots.get(index);
-            if (!hasDecodeCapacity(config, snapshot, false)) {
-                unavailable++;
-                if (filtered == null) {
-                    filtered = new ArrayList<>(snapshots.size());
-                    filtered.addAll(snapshots.subList(0, index));
-                }
-            } else if (filtered != null) {
-                filtered.add(snapshot);
-            }
-        }
-        if (filtered == null) {
-            return snapshots;
-        }
-        rejections.put("RESOURCE_UNAVAILABLE", unavailable);
-        return Collections.unmodifiableList(filtered);
-    }
-
-    private PlacementResult<List<DecodeRoutingView>, RoleType> validateFleet(
-            List<DecodeRoutingView> snapshots,
+    private Response validateFleet(
+            CandidateBuffer snapshots,
             long requiredKv) {
-        long maximumPhysicalKv = 0L;
-        boolean physicalKvUnknown = false;
-        for (DecodeRoutingView snapshot : snapshots) {
-            long physicalKv = snapshot.totalKv();
-            if (physicalKv <= 0L) {
-                physicalKvUnknown = true;
-            } else {
-                maximumPhysicalKv = Math.max(
-                        maximumPhysicalKv, physicalKv);
-            }
-        }
-        if (!physicalKvUnknown
-                && Math.max(0L, requiredKv) > maximumPhysicalKv) {
-            return PlacementResult.rejected(
-                    staticCapacityFailure(requiredKv, maximumPhysicalKv));
+        if (!snapshots.physicalKvUnknown
+                && Math.max(0L, requiredKv)
+                        > snapshots.maximumPhysicalKv) {
+            return staticCapacityFailure(
+                    requiredKv, snapshots.maximumPhysicalKv);
         }
         // Selection policies need the complete live fleet. A rotating subset
         // can hide the endpoint with the best load/KV state and makes the
         // result depend on request timing rather than the captured snapshot.
-        return PlacementResult.success(snapshots);
+        return null;
     }
 
     private static Response staticCapacityFailure(
@@ -192,61 +165,16 @@ public class CostBasedDecodeStrategy {
     }
 
     /**
-     * Prefer endpoints that can dispatch immediately. If every endpoint is
-     * temporarily full, retain the complete eligible set so QUEUE placement
-     * can wait for the next exact dispatch-capacity signal.
+     * Narrow to endpoints that can dispatch immediately when that set is
+     * non-empty. If all endpoints are busy, queued placement keeps the full
+     * hard-valid domain and waits on the chosen endpoint's exact capacity
+     * edge. This is one candidate-domain rule, not a second selection pass.
      */
-    private DecodeRoutingView selectPreferredThenFallback(
-            List<DecodeRoutingView> eligible,
+    private static void preferImmediatelyDispatchable(
+            CandidateBuffer eligible,
             BalanceContext context,
-            RoutingConfig.DecodeConfig selector,
-            boolean softQueuePlacement,
-            Map<String, Integer> rejections) {
-        long seqLen = context.getRequest().getSeqLen();
-        List<DecodeRoutingView> dispatchable = softQueuePlacement
-                ? dispatchableForRequest(eligible, context)
-                : eligible;
-        List<DecodeRoutingView> projected = softQueuePlacement
-                ? leastProjectedOwnership(dispatchable)
-                : dispatchable;
-        DecodeRoutingView selected = selectWithin(
-                projected, seqLen, selector, softQueuePlacement, rejections);
-        if (selected != null) {
-            return selected;
-        }
-        if (projected.size() != dispatchable.size()) {
-            selected = selectWithin(
-                    dispatchable, seqLen, selector, softQueuePlacement,
-                    rejections);
-            if (selected != null) {
-                return selected;
-            }
-        }
-        if (dispatchable.size() != eligible.size()) {
-            return selectWithin(
-                    eligible, seqLen, selector, softQueuePlacement,
-                    rejections);
-        }
-        return null;
-    }
-
-    private DecodeRoutingView selectWithin(
-            List<DecodeRoutingView> candidates,
-            long seqLen,
-            RoutingConfig.DecodeConfig selector,
-            boolean softQueuePlacement,
-            Map<String, Integer> rejections) {
-        List<DecodeRoutingView> filtered = applyHardFilters(
-                candidates, seqLen, selector, softQueuePlacement, rejections);
-        return weightedRandomSelection(
-                filtered, selector.getDecayPerToken());
-    }
-
-    /** Return the original list when all or no endpoints fit this request. */
-    private static List<DecodeRoutingView> dispatchableForRequest(
-            List<DecodeRoutingView> eligible,
-            BalanceContext context) {
-        ArrayList<DecodeRoutingView> available = new ArrayList<>(eligible.size());
+            double kvDecay,
+            double loadDecay) {
         var availability = context.getConfig().getRouter().getRoles()
                 .getDecode().getAvailability();
         Long configuredMaximumRequests = availability.getMaxEngineRequests();
@@ -257,69 +185,94 @@ public class CostBasedDecodeStrategy {
                         availability.getMaxKvUsagePercent());
         long hardKv = Math.max(0L, context.getRequest().getSeqLen());
         long maxNewTokens = context.getRequest().getMaxNewTokens();
-        for (DecodeRoutingView candidate : eligible) {
-            DecodeEndpoint.DecodeRoutingView view = candidate;
-            long expectedKv = Math.max(
-                    hardKv,
-                    context.getConfig().decodeKvReservationTokens(
-                            hardKv, maxNewTokens, view.totalKv()));
+        int availableCount = 0;
+        long allMinKv = Long.MAX_VALUE;
+        long allMaxKv = Long.MIN_VALUE;
+        int allMinLoad = Integer.MAX_VALUE;
+        int allMaxLoad = Integer.MIN_VALUE;
+        double allMaximumLogWeight = Double.NEGATIVE_INFINITY;
+        long availableMinKv = Long.MAX_VALUE;
+        long availableMaxKv = Long.MIN_VALUE;
+        int availableMinLoad = Integer.MAX_VALUE;
+        int availableMaxLoad = Integer.MIN_VALUE;
+        double availableMaximumLogWeight = Double.NEGATIVE_INFINITY;
+        long previousTotalKv = Long.MIN_VALUE;
+        long expectedKv = 0L;
+        for (int index = 0; index < eligible.size; index++) {
+            DecodeRoutingView view = eligible.values[index];
+            long used = view.realKvUsed();
+            int load = view.totalLoad();
+            double logWeight = rawLogWeight(view, kvDecay, loadDecay);
+            allMinKv = Math.min(allMinKv, used);
+            allMaxKv = Math.max(allMaxKv, used);
+            allMinLoad = Math.min(allMinLoad, load);
+            allMaxLoad = Math.max(allMaxLoad, load);
+            allMaximumLogWeight = Math.max(
+                    allMaximumLogWeight, logWeight);
+            if (view.totalKv() != previousTotalKv) {
+                previousTotalKv = view.totalKv();
+                expectedKv = Math.max(
+                        hardKv,
+                        context.getConfig().decodeKvReservationTokens(
+                                hardKv, maxNewTokens, previousTotalKv));
+            }
             if (DecodeEndpoint.canAcquireEngineDispatchPermit(
                     view, hardKv, expectedKv, capacity)) {
-                available.add(candidate);
+                eligible.values[availableCount++] = view;
+                availableMinKv = Math.min(availableMinKv, used);
+                availableMaxKv = Math.max(availableMaxKv, used);
+                availableMinLoad = Math.min(availableMinLoad, load);
+                availableMaxLoad = Math.max(availableMaxLoad, load);
+                availableMaximumLogWeight = Math.max(
+                        availableMaximumLogWeight, logWeight);
             }
         }
-        if (available.isEmpty() || available.size() == eligible.size()) {
-            return eligible;
+        if (availableCount > 0) {
+            eligible.size = availableCount;
+            eligible.setCostRange(
+                    availableMinKv, availableMaxKv,
+                    availableMinLoad, availableMaxLoad,
+                    availableMaximumLogWeight);
+        } else {
+            eligible.setCostRange(
+                    allMinKv, allMaxKv,
+                    allMinLoad, allMaxLoad,
+                    allMaximumLogWeight);
         }
-        return Collections.unmodifiableList(available);
     }
 
-    /**
-     * Queued ownership is excluded from the hard Engine gate, but it remains
-     * future Decode demand. Balance that demand before the immutable route is
-     * published; KV weighting then breaks ties inside the least-owned tier.
-     */
-    private static List<DecodeRoutingView> leastProjectedOwnership(
-            List<DecodeRoutingView> candidates) {
-        int minimum = Integer.MAX_VALUE;
-        ArrayList<DecodeRoutingView> leastOwned = new ArrayList<>(candidates.size());
-        for (DecodeRoutingView candidate : candidates) {
-            int projected = candidate.totalLoad();
-            if (projected < minimum) {
-                minimum = projected;
-                leastOwned.clear();
-                leastOwned.add(candidate);
-            } else if (projected == minimum) {
-                leastOwned.add(candidate);
-            }
-        }
-        if (leastOwned.size() == candidates.size()) {
-            return candidates;
-        }
-        return Collections.unmodifiableList(leastOwned);
-    }
-
-    private List<DecodeRoutingView> applyHardFilters(
-            List<DecodeRoutingView> eligible,
+    /** Capture and hard-filter the full fleet in one coherent traversal. */
+    private static void captureCandidates(
+            CandidateBuffer eligible,
+            List<DecodeRoutingView> snapshots,
             long seqLen,
             RoutingConfig.DecodeConfig selector,
             boolean softQueuePlacement,
-            Map<String, Integer> rejections) {
-        rejections.clear();
+            FlexlbConfig config) {
+        eligible.beginCapture(snapshots.size());
         RoutingConfig.DecodeOutlierRejectionConfig outlier = selector.getOutlierRejection();
         double hotspotMultiplier = outlier == null
                 ? 0.0 : outlier.getMaxEngineLoadVsAverageMultiplier();
         double imbalanceMultiplier = outlier == null
                 ? 0.0 : outlier.getMaxKvUsedVsAverageMultiplier();
 
-        int n = eligible.size();
         long sumLoad = 0;
         long sumCacheUsed = 0;
-        ArrayList<DecodeRoutingView> capacitySurvivors = null;
+        int maximumSurvivorLoad = 0;
+        long maximumSurvivorCacheUsed = 0L;
+        int capacitySurvivors = 0;
+        int availabilityEligible = 0;
+        int availabilityRejected = 0;
         int capacityRejected = 0;
-        for (int index = 0; index < n; index++) {
-            DecodeRoutingView candidate = eligible.get(index);
-            DecodeEndpoint.DecodeRoutingView view = candidate;
+        for (int index = 0; index < snapshots.size(); index++) {
+            DecodeRoutingView view = snapshots.get(index);
+            eligible.observePhysicalKv(view.totalKv());
+            if (!softQueuePlacement
+                    && !hasDecodeCapacity(config, view, false)) {
+                availabilityRejected++;
+                continue;
+            }
+            availabilityEligible++;
             sumLoad += view.engineLoad();
             sumCacheUsed += view.realKvUsed();
 
@@ -328,161 +281,174 @@ public class CostBasedDecodeStrategy {
                     ? totalKv : view.realKvAvailable();
             if (totalKv > 0 && availableKv < seqLen) {
                 capacityRejected++;
-                if (capacitySurvivors == null) {
-                    capacitySurvivors = new ArrayList<>(n);
-                    for (int survivorIndex = 0;
-                            survivorIndex < index;
-                            survivorIndex++) {
-                        capacitySurvivors.add(eligible.get(survivorIndex));
-                    }
-                }
                 continue;
             }
-            if (capacitySurvivors != null) {
-                capacitySurvivors.add(candidate);
-            }
+            eligible.values[capacitySurvivors++] = view;
+            maximumSurvivorLoad = Math.max(
+                    maximumSurvivorLoad, view.engineLoad());
+            maximumSurvivorCacheUsed = Math.max(
+                    maximumSurvivorCacheUsed, view.realKvUsed());
         }
-        long avgLoad = sumLoad / n;
-        long avgCacheUsed = sumCacheUsed / n;
+        eligible.size = capacitySurvivors;
+        eligible.availabilityEligible = availabilityEligible;
+        eligible.availabilityRejected = availabilityRejected;
+        eligible.capacityRejected = capacityRejected;
 
-        List<DecodeRoutingView> capacityCandidates = capacitySurvivors == null
-                ? eligible
-                : Collections.unmodifiableList(capacitySurvivors);
-        boolean filterHotspots = hotspotMultiplier > 0 && avgLoad > 0;
-        boolean filterImbalance = imbalanceMultiplier > 0 && avgCacheUsed > 0;
-        if (capacityCandidates.isEmpty()
+        if (availabilityEligible == 0) {
+            return;
+        }
+        long avgLoad = sumLoad / availabilityEligible;
+        long avgCacheUsed = sumCacheUsed / availabilityEligible;
+
+        boolean filterHotspots = hotspotMultiplier > 0 && avgLoad > 0
+                && maximumSurvivorLoad > avgLoad * hotspotMultiplier;
+        boolean filterImbalance = imbalanceMultiplier > 0 && avgCacheUsed > 0
+                && maximumSurvivorCacheUsed
+                        > avgCacheUsed * imbalanceMultiplier;
+        if (eligible.isEmpty()
                 || (!filterHotspots && !filterImbalance)) {
-            recordHardFilterRejections(
-                    rejections, capacityRejected, 0, 0);
-            return capacityCandidates;
+            return;
         }
 
-        ArrayList<DecodeRoutingView> outlierSurvivors = null;
+        int survivorCount = 0;
         int hotspotRejected = 0;
         int imbalanceRejected = 0;
-        for (int index = 0; index < capacityCandidates.size(); index++) {
-            DecodeRoutingView candidate = capacityCandidates.get(index);
-            DecodeEndpoint.DecodeRoutingView view = candidate;
+        for (int index = 0; index < eligible.size; index++) {
+            DecodeRoutingView view = eligible.values[index];
             if (filterHotspots
                     && view.engineLoad() > avgLoad * hotspotMultiplier) {
                 hotspotRejected++;
-                if (outlierSurvivors == null) {
-                    outlierSurvivors = new ArrayList<>(capacityCandidates.size());
-                    for (int survivorIndex = 0;
-                            survivorIndex < index;
-                            survivorIndex++) {
-                        outlierSurvivors.add(
-                                capacityCandidates.get(survivorIndex));
-                    }
-                }
                 continue;
             }
             long cacheUsed = view.realKvUsed();
             if (filterImbalance
                     && cacheUsed > avgCacheUsed * imbalanceMultiplier) {
                 imbalanceRejected++;
-                if (outlierSurvivors == null) {
-                    outlierSurvivors = new ArrayList<>(capacityCandidates.size());
-                    for (int survivorIndex = 0;
-                            survivorIndex < index;
-                            survivorIndex++) {
-                        outlierSurvivors.add(
-                                capacityCandidates.get(survivorIndex));
-                    }
-                }
                 continue;
             }
-            if (outlierSurvivors != null) {
-                outlierSurvivors.add(candidate);
-            }
+            eligible.values[survivorCount++] = view;
         }
-
-        List<DecodeRoutingView> candidates = outlierSurvivors == null
-                ? capacityCandidates
-                : Collections.unmodifiableList(outlierSurvivors);
-        recordHardFilterRejections(
-                rejections,
-                capacityRejected,
-                hotspotRejected,
-                imbalanceRejected);
-        return candidates;
-    }
-
-    private static void recordHardFilterRejections(
-            Map<String, Integer> rejections,
-            int capacityRejected,
-            int hotspotRejected,
-            int imbalanceRejected) {
-        if (capacityRejected > 0) {
-            rejections.put("KV_CAPACITY", capacityRejected);
-        }
-        if (hotspotRejected > 0) {
-            rejections.put("HOTSPOT_FILTERED", hotspotRejected);
-        }
-        if (imbalanceRejected > 0) {
-            rejections.put("IMBALANCE_FILTERED", imbalanceRejected);
-        }
+        eligible.size = survivorCount;
+        eligible.hotspotRejected = hotspotRejected;
+        eligible.imbalanceRejected = imbalanceRejected;
     }
 
     private DecodeRoutingView weightedRandomSelection(
-            List<DecodeRoutingView> candidates,
-            double decayFactor) {
+            CandidateBuffer candidates,
+            double kvDecay,
+            double loadDecay) {
         if (candidates.isEmpty()) {
             return null;
         }
 
-        int n = candidates.size();
-        long minCacheUsed = candidates.getFirst().realKvUsed();
-        long maxCacheUsed = minCacheUsed;
-        int minCacheUsedIndex = 0;
-        for (int index = 1; index < n; index++) {
-            long used = candidates.get(index).realKvUsed();
-            if (used < minCacheUsed) {
-                minCacheUsed = used;
-                minCacheUsedIndex = index;
+        int n = candidates.size;
+        if (!candidates.costRangeReady) {
+            candidates.computeCostRange(kvDecay, loadDecay);
+        }
+
+        if ((candidates.minimumCacheUsed == candidates.maximumCacheUsed
+                        || kvDecay == 0.0)
+                && (candidates.minimumLoad == candidates.maximumLoad
+                        || loadDecay == 0.0)) {
+            int index = (int) Math.floorMod(
+                    equalCostCursor.getAndIncrement(), (long) n);
+            return candidates.values[index];
+        }
+
+        // Normalize once into a reusable primitive buffer. This retains the
+        // exact categorical distribution while avoiding the two logarithms
+        // per endpoint required by Gumbel-max.
+        ThreadLocalRandom random = ThreadLocalRandom.current();
+        double[] weights = candidates.weights;
+        double totalWeight = 0.0;
+        long loadRange = (long) candidates.maximumLoad
+                - candidates.minimumLoad;
+        if (candidates.minimumCacheUsed == candidates.maximumCacheUsed
+                && loadRange >= 0L
+                && loadRange < n) {
+            // Queue traffic commonly leaves equal KV ownership and only a few
+            // discrete request-count tiers. Sampling a tier by its aggregate
+            // weight and then one member within that tier is the same
+            // categorical distribution as expanding every equal weight.
+            int tierCount = (int) loadRange + 1;
+            java.util.Arrays.fill(
+                    candidates.tierCounts, 0, tierCount, 0);
+            for (int i = 0; i < n; i++) {
+                int tier = candidates.values[i].totalLoad()
+                        - candidates.minimumLoad;
+                candidates.tierCounts[tier]++;
             }
-            maxCacheUsed = Math.max(maxCacheUsed, used);
+            for (int tier = 0; tier < tierCount; tier++) {
+                int members = candidates.tierCounts[tier];
+                if (members == 0) {
+                    continue;
+                }
+                double weight = Math.exp(rawLogWeight(
+                        candidates.values[0].realKvUsed(),
+                        candidates.minimumLoad + tier,
+                        kvDecay, loadDecay)
+                        - candidates.maximumLogWeight);
+                candidates.tierWeights[tier] = weight;
+                totalWeight += members * weight;
+            }
+            double target = random.nextDouble(totalWeight);
+            for (int tier = 0; tier < tierCount; tier++) {
+                int members = candidates.tierCounts[tier];
+                if (members == 0) {
+                    continue;
+                }
+                double weight = candidates.tierWeights[tier];
+                double tierWeight = members * weight;
+                if (target < tierWeight) {
+                    int memberOffset = Math.min(
+                            members - 1, (int) (target / weight));
+                    int selectedLoad = candidates.minimumLoad + tier;
+                    for (int index = 0; index < n; index++) {
+                        if (candidates.values[index].totalLoad()
+                                        == selectedLoad
+                                && memberOffset-- == 0) {
+                            return candidates.values[index];
+                        }
+                    }
+                    throw new IllegalStateException(
+                            "Decode tier count changed during selection");
+                }
+                target -= tierWeight;
+            }
+            return candidates.values[n - 1];
         }
 
-        if (minCacheUsed == maxCacheUsed || decayFactor == 0.0) {
-            return candidates.get(ThreadLocalRandom.current().nextInt(n));
-        }
-
-        double[] weights = new double[n];
-        double totalWeight = 0;
-        // Subtract the value that produces the maximum log-weight before exponentiation.
-        // This is mathematically equivalent to the previous average-centered weights, but
-        // keeps every exponent <= 0 and avoids exp(...) overflowing for large KV gaps.
-        long referenceCacheUsed = decayFactor >= 0
-                ? minCacheUsed
-                : maxCacheUsed;
         for (int i = 0; i < n; i++) {
-            long cacheUsed = candidates.get(i).realKvUsed();
-            double normalizedValue = (double) cacheUsed - referenceCacheUsed;
-            weights[i] = Math.exp(-decayFactor * normalizedValue);
-            totalWeight += weights[i];
+            double weight = Math.exp(rawLogWeight(
+                    candidates.values[i], kvDecay, loadDecay)
+                    - candidates.maximumLogWeight);
+            weights[i] = weight;
+            totalWeight += weight;
         }
-        if (!Double.isFinite(totalWeight) || totalWeight <= 0) {
-            Logger.warn(
-                    "Decode weighted selection produced invalid total weight: decayFactor={},"
-                        + " totalWeight={}",
-                    decayFactor,
-                    totalWeight);
-            return candidates.get(minCacheUsedIndex);
-        }
-
-        // 加权随机选择
-        double r = ThreadLocalRandom.current().nextDouble(totalWeight);
-        double cumulativeWeight = 0;
-        for (int i = 0; i < n; i++) {
-            cumulativeWeight += weights[i];
-            if (r <= cumulativeWeight) {
-                return candidates.get(i);
+        double target = random.nextDouble(totalWeight);
+        for (int i = 0; i < n - 1; i++) {
+            target -= weights[i];
+            if (target < 0.0) {
+                return candidates.values[i];
             }
         }
+        return candidates.values[n - 1];
+    }
 
-        // fallback: 返回使用率最低的
-        return candidates.get(minCacheUsedIndex);
+    private static double rawLogWeight(
+            DecodeRoutingView candidate,
+            double kvDecay,
+            double loadDecay) {
+        return rawLogWeight(candidate.realKvUsed(), candidate.totalLoad(),
+                kvDecay, loadDecay);
+    }
+
+    private static double rawLogWeight(
+            long realKvUsed,
+            int totalLoad,
+            double kvDecay,
+            double loadDecay) {
+        return -kvDecay * realKvUsed - loadDecay * totalLoad;
     }
 
     private SelectedRole buildSelectedRole(
@@ -514,7 +480,8 @@ public class CostBasedDecodeStrategy {
             WorkerEndpoint.GenerationPin factoryPin = selectedPin;
             selectedPin = null;
             return SelectedRole.decode(
-                    factoryPin, result, routing.totalKv());
+                    factoryPin, result, routing.totalKv(),
+                    routing.admissionVersion());
         } finally {
             if (selectedPin != null) {
                 selectedPin.close();
@@ -536,14 +503,129 @@ public class CostBasedDecodeStrategy {
 
     private static void logAllFilteredOut(
             BalanceContext balanceContext,
-            Map<String, Integer> availabilityRejections,
-            Map<String, Integer> hardRejections) {
-        Map<String, Integer> merged =
-                new HashMap<>(availabilityRejections);
-        hardRejections.forEach(
-                (key, count) -> merged.merge(key, count, Integer::sum));
+            CandidateBuffer candidates) {
+        Map<String, Integer> merged = new HashMap<>();
+        putRejection(merged, "RESOURCE_UNAVAILABLE",
+                candidates.availabilityRejected);
+        putRejection(merged, "KV_CAPACITY", candidates.capacityRejected);
+        putRejection(merged, "HOTSPOT_FILTERED",
+                candidates.hotspotRejected);
+        putRejection(merged, "IMBALANCE_FILTERED",
+                candidates.imbalanceRejected);
         Logger.debug(
                 "Decode select failed: all filtered out, request_id={}, rejections={}",
                 balanceContext.getRequestId(), merged);
+    }
+
+    private static Map<String, Integer> rejectionMap(
+            String reason, int count) {
+        return count > 0 ? Map.of(reason, count) : Map.of();
+    }
+
+    private static void putRejection(
+            Map<String, Integer> rejections,
+            String reason,
+            int count) {
+        if (count > 0) {
+            rejections.put(reason, count);
+        }
+    }
+
+    /** Per-planner reusable full-fleet columns and compaction workspace. */
+    private static final class CandidateBuffer {
+        private DecodeRoutingView[] values = new DecodeRoutingView[0];
+        private double[] weights = new double[0];
+        private double[] tierWeights = new double[0];
+        private int[] tierCounts = new int[0];
+        private int size;
+        private int availabilityEligible;
+        private int availabilityRejected;
+        private int capacityRejected;
+        private int hotspotRejected;
+        private int imbalanceRejected;
+        private long maximumPhysicalKv;
+        private boolean physicalKvUnknown;
+        private boolean costRangeReady;
+        private long minimumCacheUsed;
+        private long maximumCacheUsed;
+        private int minimumLoad;
+        private int maximumLoad;
+        private double maximumLogWeight;
+
+        private void beginCapture(int expected) {
+            ensureCapacity(expected);
+            size = 0;
+            availabilityEligible = 0;
+            availabilityRejected = 0;
+            capacityRejected = 0;
+            hotspotRejected = 0;
+            imbalanceRejected = 0;
+            maximumPhysicalKv = 0L;
+            physicalKvUnknown = false;
+            costRangeReady = false;
+        }
+
+        private void observePhysicalKv(long physicalKv) {
+            if (physicalKv <= 0L) {
+                physicalKvUnknown = true;
+            } else {
+                maximumPhysicalKv = Math.max(
+                        maximumPhysicalKv, physicalKv);
+            }
+        }
+
+        private void computeCostRange(double kvDecay, double loadDecay) {
+            long minKv = values[0].realKvUsed();
+            long maxKv = minKv;
+            int minLoad = values[0].totalLoad();
+            int maxLoad = minLoad;
+            double maxLogWeight = rawLogWeight(
+                    values[0], kvDecay, loadDecay);
+            for (int index = 1; index < size; index++) {
+                DecodeRoutingView candidate = values[index];
+                long used = candidate.realKvUsed();
+                int load = candidate.totalLoad();
+                minKv = Math.min(minKv, used);
+                maxKv = Math.max(maxKv, used);
+                minLoad = Math.min(minLoad, load);
+                maxLoad = Math.max(maxLoad, load);
+                maxLogWeight = Math.max(
+                        maxLogWeight,
+                        rawLogWeight(candidate, kvDecay, loadDecay));
+            }
+            setCostRange(minKv, maxKv, minLoad, maxLoad, maxLogWeight);
+        }
+
+        private void setCostRange(
+                long minKv,
+                long maxKv,
+                int minLoad,
+                int maxLoad,
+                double maxLogWeight) {
+            minimumCacheUsed = minKv;
+            maximumCacheUsed = maxKv;
+            minimumLoad = minLoad;
+            maximumLoad = maxLoad;
+            maximumLogWeight = maxLogWeight;
+            costRangeReady = true;
+        }
+
+        private boolean isEmpty() {
+            return size == 0;
+        }
+
+        private void ensureCapacity(int expected) {
+            if (values.length >= expected) {
+                return;
+            }
+            int capacity = Math.max(expected,
+                    Math.max(16, values.length << 1));
+            values = java.util.Arrays.copyOf(values, capacity);
+            weights = java.util.Arrays.copyOf(weights, capacity);
+            tierWeights = java.util.Arrays.copyOf(
+                    tierWeights, capacity);
+            tierCounts = java.util.Arrays.copyOf(
+                    tierCounts, capacity);
+        }
     }
 }

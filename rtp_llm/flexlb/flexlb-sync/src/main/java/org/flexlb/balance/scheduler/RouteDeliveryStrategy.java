@@ -10,7 +10,6 @@ import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
-import org.flexlb.dao.route.RoleType;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -22,9 +21,7 @@ import static org.flexlb.balance.scheduler.PrefillAdmissionResources.createCommi
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.failed;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.missingEndpoint;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.prepareMember;
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.preserveRejectedCause;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rejected;
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rejectedPrefill;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rollbackMember;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rollbackReservation;
 import static org.flexlb.balance.scheduler.PrefillAdmissionResources.sameIdentitySequence;
@@ -35,13 +32,6 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
 
     private static final RouteProjection.DeliveryProjection PROJECTION =
             new RouteProjectionPolicy();
-    private static final RouteProjection.AdmissionBlockSemantics
-            CAPACITY_BLOCK = new RouteProjection.AdmissionBlockSemantics(
-                    "DELIVERY_CAPACITY_PREFILL_REQUEST",
-                    RouteProjection.AfterProbeAdmission.BLOCKED,
-                    "DELIVERY_CAPACITY_PREFILL_REQUEST",
-                    RoleType.PREFILL);
-
     private final RequestRegistry requests;
     private final DeliveryMetrics telemetry;
 
@@ -186,15 +176,6 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 evaluator, item.seqLen(), item.hitCache());
     }
 
-    private static CapacityBoundary routeCapacityFull(
-            PrefillEndpoint prefill,
-            ScheduledRequest item) {
-        return CapacityBoundary.unavailable(
-                prefill.routeAdmissionAvailability(
-                        item.maxInflightDeliveriesPerPrefillWorker()),
-                CAPACITY_BLOCK);
-    }
-
     private static <T> CapacityBoundary.Attempt<T> ownershipLost() {
         return CapacityBoundary.Attempt.rejected(
                 CapacityBoundary.OWNERSHIP_LOST);
@@ -285,57 +266,31 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 return failed(failure);
             }
 
-            PrefillState.ReservationResult<PrefillState.RouteReservation> result;
             PrefillState.RouteReservation published =
                     exact.publishedRouteReservation();
             try {
-                if (published != null) {
-                    published.updatePrediction(exact, predictedMs);
-                    result = new PrefillState.ReservationResult<>(
-                            PrefillState.CapacityStatus.ACQUIRED, published);
-                } else if (exact.requiresRouteReservation()) {
+                if (published == null) {
                     return failed(new IllegalStateException(
                             "ACTIVE NON_BATCH request lost its publish-time route credit: request_id="
                                     + exact.requestId()));
-                } else {
-                    // Compatibility for non-QUEUE/internal route delivery.
-                    result = prefill.reserveRoute(
-                            exact,
-                            predictedMs,
-                            exact.maxInflightDeliveriesPerPrefillWorker());
                 }
+                published.updatePrediction(exact, predictedMs);
             } catch (Throwable failure) {
                 return failed(failure);
             }
-            if (result.status() != PrefillState.CapacityStatus.ACQUIRED) {
-                return rejectedPrefill(
-                        exact,
-                        result.status(),
-                        routeCapacityFull(prefill, exact));
-            }
-
-            PrefillState.RouteReservation reservation = result.reservation();
+            PrefillState.RouteReservation reservation = published;
             final CapacityBoundary.Attempt<PrefillAdmissionResources.Member>
                     memberAttempt;
             try {
                 memberAttempt = prepareMember(exact);
             } catch (Throwable failure) {
-                return failed(published == null
-                        ? rollbackReservation(reservation, failure)
-                        : failure);
+                return failed(failure);
             }
             if (!memberAttempt.accepted()) {
-                Throwable rollbackFailure = published == null
-                        ? rollbackReservation(reservation, null) : null;
-                if (rollbackFailure != null) {
-                    preserveRejectedCause(
-                            rollbackFailure, memberAttempt.boundary());
-                    return failed(rollbackFailure);
-                }
                 return rejected(memberAttempt.boundary());
             }
             reservations.add(reservation);
-            itemOwnedReservations.add(published != null);
+            itemOwnedReservations.add(true);
             members.add(memberAttempt.value());
             return acceptedItem;
         }
@@ -398,6 +353,11 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                         "Prefill", items.get(0));
             }
             try (routeCommit) {
+                // Allocate the committed owner before taking any credit away
+                // from its ACTIVE item. After the first successful CAS below,
+                // the remainder of this transaction must be allocation-free.
+                PrefillAdmissionResources.CommittedAdmissionOwner exactCommitted =
+                        createCommittedOwner(members, 1);
                 for (int index = 0; index < reservations.size(); index++) {
                     if (itemOwnedReservations.get(index)
                             && !items.get(index).takePublishedRouteReservation(
@@ -412,8 +372,6 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                         itemOwnedReservations.set(index, false);
                     }
                 }
-                PrefillAdmissionResources.CommittedAdmissionOwner exactCommitted =
-                        createCommittedOwner(members, 1);
                 PrefillState.CommittedHandoff handoff =
                         routeCommit.commit(items, reservations);
                 exactCommitted.bindPrefillHandoff(handoff);
@@ -513,88 +471,145 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
     private static final class RouteProjectionPolicy
             implements RouteProjection.DeliveryProjection {
 
+        private static final ThreadLocal<RoutePlanning> PLANNING =
+                ThreadLocal.withInitial(RoutePlanning::new);
+        private static final ThreadLocal<RouteService> SERVICE =
+                ThreadLocal.withInitial(RouteService::new);
+
+        @Override
+        public long singletonCompletionOffsetMs(
+                long seqLen,
+                long hitCache,
+                RouteProjection.Predictions predictions) {
+            return predictions.itemDurationMs(seqLen, hitCache);
+        }
+
         @Override
         public RouteProjection.GroupPlanning planning(
                 RouteProjection.Predictions predictions) {
-            return new RouteProjection.GroupPlanning() {
-                private List<GroupPlanner.Item> previous = List.of();
-                private long[] offsets = new long[0];
-                private int computedThrough = -1;
-
-                @Override
-                public double durationMs(
-                        List<GroupPlanner.Item> prefix,
-                        int requiredThroughIndex) {
-                    if (requiredThroughIndex < 0
-                            || requiredThroughIndex >= prefix.size()) {
-                        throw new IndexOutOfBoundsException(requiredThroughIndex);
-                    }
-                    if (!isIdentityPrefix(previous, prefix)) {
-                        previous = List.copyOf(prefix);
-                        offsets = new long[prefix.size()];
-                        computedThrough = -1;
-                    } else if (offsets.length < prefix.size()) {
-                        offsets = java.util.Arrays.copyOf(
-                                offsets, prefix.size());
-                        previous = List.copyOf(prefix);
-                    }
-                    while (computedThrough < requiredThroughIndex) {
-                        int next = computedThrough + 1;
-                        long prior = next == 0 ? 0L : offsets[next - 1];
-                        offsets[next] = saturatedAdd(
-                                prior,
-                                predictions.itemDurationMs(prefix.get(next)));
-                        computedThrough = next;
-                    }
-                    return offsets[requiredThroughIndex];
-                }
-            };
+            RoutePlanning planning = PLANNING.get();
+            planning.reset(predictions);
+            return planning;
         }
 
         @Override
         public RouteProjection.GroupService service(
                 GroupPlanner.Plan<GroupPlanner.Item> plan,
                 RouteProjection.Predictions predictions) {
-            return new RouteProjection.GroupService() {
-                private final long[] offsets = new long[plan.items().size()];
-                private int computedThrough = -1;
-
-                @Override
-                public long completionOffsetMs(int memberIndex) {
-                    if (memberIndex < 0 || memberIndex >= plan.items().size()) {
-                        throw new IndexOutOfBoundsException(memberIndex);
-                    }
-                    while (computedThrough < memberIndex) {
-                        int next = computedThrough + 1;
-                        long prior = next == 0 ? 0L : offsets[next - 1];
-                        offsets[next] = saturatedAdd(
-                                prior,
-                                predictions.itemDurationMs(
-                                        plan.items().get(next)));
-                        computedThrough = next;
-                    }
-                    return offsets[memberIndex];
-                }
-
-                @Override
-                public long totalDurationMs() {
-                    return completionOffsetMs(plan.items().size() - 1);
-                }
-            };
+            RouteService service = SERVICE.get();
+            service.reset(plan, predictions);
+            return service;
         }
 
-        private static boolean isIdentityPrefix(
-                List<GroupPlanner.Item> previous,
-                List<GroupPlanner.Item> next) {
-            if (previous.size() > next.size()) {
-                return false;
+        private static final class RoutePlanning
+                implements RouteProjection.GroupPlanning {
+            private GroupPlanner.Item[] previous = new GroupPlanner.Item[0];
+            private long[] offsets = new long[0];
+            private int previousSize;
+            private int computedThrough;
+            private RouteProjection.Predictions predictions;
+
+            private void reset(RouteProjection.Predictions exactPredictions) {
+                predictions = exactPredictions;
+                previousSize = 0;
+                computedThrough = -1;
             }
-            for (int index = 0; index < previous.size(); index++) {
-                if (previous.get(index) != next.get(index)) {
+
+            @Override
+            public double durationMs(
+                    List<GroupPlanner.Item> prefix,
+                    int requiredThroughIndex) {
+                if (requiredThroughIndex < 0
+                        || requiredThroughIndex >= prefix.size()) {
+                    throw new IndexOutOfBoundsException(requiredThroughIndex);
+                }
+                if (!isIdentityPrefix(prefix)) {
+                    ensureCapacity(prefix.size());
+                    for (int index = 0; index < prefix.size(); index++) {
+                        previous[index] = prefix.get(index);
+                    }
+                    previousSize = prefix.size();
+                    computedThrough = -1;
+                } else if (previousSize < prefix.size()) {
+                    ensureCapacity(prefix.size());
+                    for (int index = previousSize;
+                            index < prefix.size(); index++) {
+                        previous[index] = prefix.get(index);
+                    }
+                    previousSize = prefix.size();
+                }
+                while (computedThrough < requiredThroughIndex) {
+                    int next = computedThrough + 1;
+                    long prior = next == 0 ? 0L : offsets[next - 1];
+                    offsets[next] = saturatedAdd(
+                            prior,
+                            predictions.itemDurationMs(prefix.get(next)));
+                    computedThrough = next;
+                }
+                return offsets[requiredThroughIndex];
+            }
+
+            private boolean isIdentityPrefix(List<GroupPlanner.Item> next) {
+                if (previousSize > next.size()) {
                     return false;
                 }
+                for (int index = 0; index < previousSize; index++) {
+                    if (previous[index] != next.get(index)) {
+                        return false;
+                    }
+                }
+                return true;
             }
-            return true;
+
+            private void ensureCapacity(int size) {
+                if (previous.length >= size) {
+                    return;
+                }
+                previous = java.util.Arrays.copyOf(previous, size);
+                offsets = java.util.Arrays.copyOf(offsets, size);
+            }
+        }
+
+        private static final class RouteService
+                implements RouteProjection.GroupService {
+            private GroupPlanner.Plan<GroupPlanner.Item> plan;
+            private RouteProjection.Predictions predictions;
+            private long[] offsets = new long[0];
+            private int computedThrough;
+
+            private void reset(
+                    GroupPlanner.Plan<GroupPlanner.Item> exactPlan,
+                    RouteProjection.Predictions exactPredictions) {
+                plan = exactPlan;
+                predictions = exactPredictions;
+                if (offsets.length < exactPlan.items().size()) {
+                    offsets = java.util.Arrays.copyOf(
+                            offsets, exactPlan.items().size());
+                }
+                computedThrough = -1;
+            }
+
+            @Override
+            public long completionOffsetMs(int memberIndex) {
+                if (memberIndex < 0 || memberIndex >= plan.items().size()) {
+                    throw new IndexOutOfBoundsException(memberIndex);
+                }
+                while (computedThrough < memberIndex) {
+                    int next = computedThrough + 1;
+                    long prior = next == 0 ? 0L : offsets[next - 1];
+                    offsets[next] = saturatedAdd(
+                            prior,
+                            predictions.itemDurationMs(
+                                    plan.items().get(next)));
+                    computedThrough = next;
+                }
+                return offsets[memberIndex];
+            }
+
+            @Override
+            public long totalDurationMs() {
+                return completionOffsetMs(plan.items().size() - 1);
+            }
         }
 
         private static long saturatedAdd(long left, long right) {

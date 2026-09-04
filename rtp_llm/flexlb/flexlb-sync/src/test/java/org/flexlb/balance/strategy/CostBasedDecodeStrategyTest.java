@@ -394,27 +394,51 @@ class CostBasedDecodeStrategyTest {
                 registry, "127.0.0.2:8080");
         for (int index = 0; index < 20_000; index++) {
             long requestId = 10_000L + index;
-            int hotspotBefore = hotspot.routingView().totalLoad();
-            int peerBefore = peer.routingView().totalLoad();
             request.setRequestId(requestId);
             ServerStatus selected = selectStatus(
                     strategy, context, RoleType.DECODE, null);
             Assertions.assertNotNull(selected);
-            if (hotspotBefore != peerBefore) {
-                String leastOwned = hotspotBefore < peerBefore
-                        ? "127.0.0.1" : "127.0.0.2";
-                Assertions.assertEquals(
-                        leastOwned, selected.getServerIp(),
-                        "soft placement must not add another immutable route to the projected hotspot");
-            }
             DecodeEndpoint selectedEndpoint = decodeEndpoint(registry,
                     selected.getServerIp() + ":8080");
             reserveQueued(selectedEndpoint, requestId, 0L, 0L, 50);
         }
 
-        Assertions.assertEquals(
-                hotspot.routingView().totalLoad(), peer.routingView().totalLoad(),
-                "projected ownership should remain balanced under the incident backlog size");
+        int finalSkew = Math.abs(
+                hotspot.routingView().totalLoad()
+                        - peer.routingView().totalLoad());
+        Assertions.assertTrue(finalSkew <= 8,
+                "soft load weighting should converge without a hard minimum tier; skew="
+                        + finalSkew);
+    }
+
+    @Test
+    void oneLowerSnapshotDoesNotHerdEveryConcurrentPlan() {
+        registerWorker("127.0.0.1", 1_000, 1_000);
+        registerWorker("127.0.0.2", 1_000, 1_000);
+        EndpointRegistry registry = decodeRegistry();
+        reserveQueued(
+                decodeEndpoint(registry, "127.0.0.2:8080"),
+                91L, 0L, 0L, 50);
+        CostBasedDecodeStrategy strategy = availableStrategy(registry);
+        BalanceContext context = context(0L, 30_000L);
+        int lowerLoadSelections = 0;
+        int higherLoadSelections = 0;
+
+        for (int index = 0; index < 1_000; index++) {
+            context.getRequest().setRequestId(30_000L + index);
+            ServerStatus selected = selectStatus(
+                    strategy, context, RoleType.DECODE, null);
+            if ("127.0.0.1".equals(selected.getServerIp())) {
+                lowerLoadSelections++;
+            } else {
+                higherLoadSelections++;
+            }
+        }
+
+        Assertions.assertTrue(lowerLoadSelections > higherLoadSelections,
+                "lower load should retain a soft preference");
+        Assertions.assertTrue(higherLoadSelections > 0,
+                "a shared snapshot must not collapse every plan onto one endpoint");
     }
 
     private static void setKv(

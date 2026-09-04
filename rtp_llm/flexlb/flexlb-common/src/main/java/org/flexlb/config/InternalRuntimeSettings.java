@@ -12,10 +12,6 @@ public final class InternalRuntimeSettings {
     private static final String QUEUE_PLANNER_THREADS_PROPERTY =
             "flexlb.queue.planner.threads";
 
-    private final int prefillSaturatedAtPendingRequests = 20;
-    private final long decodeFullSpeedBelowKvUsagePercent = 40;
-    private final long decodeSaturatedAtKvUsagePercent = 80;
-
     private final int nettySelectThreadMultiplier = 1;
     private final int nettyWorkerThreadMultiplier = 2;
     private final int grpcClientExecutorThreads = 32;

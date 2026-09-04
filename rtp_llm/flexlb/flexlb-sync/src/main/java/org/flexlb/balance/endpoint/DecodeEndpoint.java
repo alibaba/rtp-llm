@@ -782,6 +782,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
+    /** Publish one real Decode capacity release to local and global waiters. */
+    private void publishCapacityRelease() {
+        notifyEngineDispatchCapacityListeners();
+        signalPlacementCapacityChanged();
+    }
+
     /**
      * Release one exact reservation that never crossed into Engine ownership.
      *
@@ -791,26 +797,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * that owner must consume an authoritative terminal instead.</p>
      */
     public void releaseReservationExact(ReservationHandle reservation) {
-        releaseReservationExact(reservation, true);
-    }
-
-    /**
-     * Roll back a reservation created by an admission attempt which never
-     * became visible to the delivery queue. The state returns to its previous
-     * capacity; publishing a placement edge here would make the same blocked
-     * head immediately retry itself without any external progress.
-     */
-    public void releaseReservationExactSilently(ReservationHandle reservation) {
-        releaseReservationExact(reservation, false);
-    }
-
-    private void releaseReservationExact(
-            ReservationHandle reservation,
-            boolean publishPlacementEdge) {
-        if (releaseLocalReservationExact(reservation)
-                && publishPlacementEdge) {
-            signalPlacementCapacityChanged();
-        }
+        releaseLocalReservationExact(reservation);
     }
 
     private boolean releaseLocalReservationExact(
@@ -878,7 +865,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             admissionLock.unlock();
         }
         if (capacityChanged) {
-            notifyEngineDispatchCapacityListeners();
+            publishCapacityRelease();
         }
         return capacityChanged;
     }
@@ -926,8 +913,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             admissionLock.unlock();
         }
         if (released) {
-            notifyEngineDispatchCapacityListeners();
-            signalPlacementCapacityChanged();
+            publishCapacityRelease();
         }
         return released;
     }
@@ -1093,7 +1079,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             admissionLock.unlock();
         }
         if (capacityChanged) {
-            notifyEngineDispatchCapacityListeners();
+            publishCapacityRelease();
         }
     }
 
@@ -1127,7 +1113,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             admissionLock.unlock();
         }
         if (capacityChanged) {
-            notifyEngineDispatchCapacityListeners();
+            publishCapacityRelease();
         }
     }
 
@@ -1216,7 +1202,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             admissionLock.unlock();
         }
         if (capacityChanged) {
-            notifyEngineDispatchCapacityListeners();
+            publishCapacityRelease();
         }
         return result;
     }
@@ -1472,7 +1458,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         } finally {
             admissionLock.unlock();
             if (committed) {
-                notifyEngineDispatchCapacityListeners();
+                publishCapacityRelease();
             }
         }
     }
@@ -1513,6 +1499,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
         } finally {
             admissionLock.unlock();
         }
+    }
+
+    /** Advisory endpoint admission revision captured by queue placement. */
+    public long placementVersion() {
+        return admissionVersion.get();
     }
 
     /** Atomic reserved/confirmed/queued ownership tuple. */
@@ -1625,29 +1616,30 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /**
      * Reuse an immutable observation for bulk selection when both routing
-     * generations are unchanged. This is deliberately separate from
+     * generations are unchanged. {@code admissionVersion} is the coherence
+     * token for both committed Engine observations and locally owned
+     * reservations, so the cached fast path need not reread and compare the
+     * larger status snapshots for every candidate. This is deliberately
+     * separate from
      * {@link #routingView()}: winner authorization must always take the fresh
      * locked path above.
      */
     DecodeRoutingView routingViewSnapshot(String address) {
-        WorkerStatus status = getStatus();
-        WorkerStatus.CommittedWorkerStatus committed =
-                status.committedWorkerStatus();
-        WorkerStatus.TopologySnapshot topology = status.topologySnapshot();
         long version = admissionVersion.get();
         DecodeRoutingView cached = routingViewCache;
-        if (routingViewMatches(
-                cached, address, committed, topology, version)) {
+        if (routingViewMatches(cached, address, version)) {
             return cached;
         }
+        WorkerStatus status = getStatus();
         admissionLock.lock();
         try {
-            committed = status.committedWorkerStatus();
-            topology = status.topologySnapshot();
+            WorkerStatus.CommittedWorkerStatus committed =
+                    status.committedWorkerStatus();
+            WorkerStatus.TopologySnapshot topology =
+                    status.topologySnapshot();
             version = admissionVersion.get();
             cached = routingViewCache;
-            if (routingViewMatches(
-                    cached, address, committed, topology, version)) {
+            if (routingViewMatches(cached, address, version)) {
                 return cached;
             }
             DecodeRoutingView routing = routingViewLocked(
@@ -1662,15 +1654,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private static boolean routingViewMatches(
             DecodeRoutingView cached,
             String address,
-            WorkerStatus.CommittedWorkerStatus committed,
-            WorkerStatus.TopologySnapshot topology,
             long version) {
         return cached != null
                 && cached.address().equals(address)
-                && cached.workerStatus() == committed
-                && cached.admissionVersion() == version
-                && (cached.topology() == topology
-                        || cached.topology().equals(topology));
+                && cached.admissionVersion() == version;
     }
 
     /** Caller holds {@link #admissionLock}. */
@@ -2059,7 +2046,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             admissionLock.unlock();
         }
         if (capacityChanged) {
-            notifyEngineDispatchCapacityListeners();
+            publishCapacityRelease();
         }
         return settled;
     }
@@ -2180,7 +2167,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             admissionLock.unlock();
         }
         if (capacityChanged) {
-            notifyEngineDispatchCapacityListeners();
+            publishCapacityRelease();
         }
     }
 
@@ -2212,7 +2199,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             admissionLock.unlock();
         }
         if (reconciled) {
-            notifyEngineDispatchCapacityListeners();
+            publishCapacityRelease();
         }
         return reconciled;
     }
@@ -2265,7 +2252,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             admissionLock.unlock();
         }
         if (capacityChanged) {
-            notifyEngineDispatchCapacityListeners();
+            publishCapacityRelease();
         }
         return reconciled;
     }
@@ -2912,8 +2899,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             admissionLock.unlock();
         }
         if (capacityChanged) {
-            notifyEngineDispatchCapacityListeners();
-            signalPlacementCapacityChanged();
+            publishCapacityRelease();
         }
         return evicted;
     }
@@ -3021,7 +3007,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             admissionLock.unlock();
         }
         if (capacityChanged) {
-            notifyEngineDispatchCapacityListeners();
+            publishCapacityRelease();
         }
         return true;
     }
@@ -3073,10 +3059,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         ENDPOINT_RETIRED
     }
 
-    /** Explicit result of {@link #acquireEngineDispatchPermit(long, long)}. */
+    /** Explicit result of {@link #acquireEngineDispatchPermit(long, long, long)}. */
     public record EngineDispatchPermitAcquisition(
             EngineDispatchPermitAcquireStatus status,
-            ReservationHandle reservation,
             EngineDispatchPermit permit) {
 
         public EngineDispatchPermitAcquisition {
@@ -3086,11 +3071,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
             if ((status == EngineDispatchPermitAcquireStatus.ACQUIRED) != (permit != null)) {
                 throw new IllegalArgumentException(
                         "only an ACQUIRED result may carry an engine dispatch permit");
-            }
-            if (status != EngineDispatchPermitAcquireStatus.ACQUIRED
-                    && reservation != null) {
-                throw new IllegalArgumentException(
-                        "a rejected result cannot carry a reservation");
             }
         }
     }
@@ -3189,14 +3169,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * admission lock, so concurrent acquisitions cannot oversell either gate.
      */
     public EngineDispatchPermitAcquisition acquireEngineDispatchPermit(
-            long requestId, long concurrencyLimit) {
-        return acquireEngineDispatchPermit(requestId, concurrencyLimit, -1L);
-    }
-
-    public EngineDispatchPermitAcquisition acquireEngineDispatchPermit(
             long requestId,
             long concurrencyLimit,
             long maxKvUsagePercent) {
+        if (maxKvUsagePercent < 0L) {
+            throw new IllegalArgumentException(
+                    "maxKvUsagePercent must be non-negative");
+        }
         GenerationPin generationPin = tryPinGeneration();
         if (generationPin == null) {
             return rejectedEngineDispatchPermit(
@@ -3205,71 +3184,6 @@ public class DecodeEndpoint extends WorkerEndpoint {
         try (generationPin) {
             return acquireEngineDispatchPermitPinned(
                     requestId, concurrencyLimit, maxKvUsagePercent);
-        }
-    }
-
-    /**
-     * Atomically reserve a newly selected queued request and acquire its exact
-     * pre-delivery permit. This is the Decode-side commit point used when a
-     * Prefill queue head moves away from a binding that became full after the
-     * request was enqueued.
-     */
-    public EngineDispatchPermitAcquisition
-            tryAcquireQueuedEngineDispatchPermitPinned(
-            GenerationPin pin,
-            long requestId,
-            long hardKvTokens,
-            long expectedKvTokens,
-            int priority,
-            long concurrencyLimit,
-            long maxKvUsagePercent) {
-        admissionLock.lock();
-        try {
-            requirePinnedGeneration(pin);
-            if (!requestIdAvailableForReservationLocked(requestId)) {
-                return rejectedEngineDispatchPermit(
-                        EngineDispatchPermitAcquireStatus.NOT_OWNED);
-            }
-            DecodeRequestState projected = new DecodeRequestState(
-                    hardKvTokens,
-                    expectedKvTokens,
-                    priority,
-                    0L);
-            if (isEngineDispatchCapacityFullLocked(
-                    projected, concurrencyLimit, maxKvUsagePercent)) {
-                return rejectedEngineDispatchPermit(
-                        EngineDispatchPermitAcquireStatus.CAPACITY_FULL);
-            }
-
-            ReservationHandle reservation = null;
-            try {
-                reservation = reserveLocked(
-                        requestId,
-                        hardKvTokens,
-                        expectedKvTokens,
-                        priority);
-                DecodeRequestState exact = shadowReservation(requestId);
-                addQueuedPhaseLocked(requestId, exact);
-                EngineDispatchPermit permit = installEngineDispatchPermitLocked(
-                        requestId, exact);
-                return new EngineDispatchPermitAcquisition(
-                        EngineDispatchPermitAcquireStatus.ACQUIRED,
-                        reservation,
-                        permit);
-            } catch (Throwable failure) {
-                if (reservation != null) {
-                    try {
-                        releaseLocked(requestId);
-                    } catch (Throwable rollbackFailure) {
-                        if (rollbackFailure != failure) {
-                            failure.addSuppressed(rollbackFailure);
-                        }
-                    }
-                }
-                throw failure;
-            }
-        } finally {
-            admissionLock.unlock();
         }
     }
 
@@ -3301,7 +3215,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             EngineDispatchPermit permit = installEngineDispatchPermitLocked(
                     requestId, reservation);
             return new EngineDispatchPermitAcquisition(
-                    EngineDispatchPermitAcquireStatus.ACQUIRED, null, permit);
+                    EngineDispatchPermitAcquireStatus.ACQUIRED, permit);
         } finally {
             admissionLock.unlock();
         }
@@ -3309,7 +3223,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     private static EngineDispatchPermitAcquisition rejectedEngineDispatchPermit(
             EngineDispatchPermitAcquireStatus status) {
-        return new EngineDispatchPermitAcquisition(status, null, null);
+        return new EngineDispatchPermitAcquisition(status, null);
     }
 
     /** Caller holds admissionLock and has validated exact queued ownership. */
@@ -3394,8 +3308,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             admissionLock.unlock();
         }
         if (released) {
-            notifyEngineDispatchCapacityListeners();
-            signalPlacementCapacityChanged();
+            publishCapacityRelease();
         }
         return true;
     }
@@ -3620,8 +3533,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (concurrencyLimit > 0L && occupiedSlots >= concurrencyLimit) {
             return false;
         }
-        // A negative percentage is the legacy concurrency-only overload.
-        if (maxKvUsagePercent < 0L || totalKv <= 0L) {
+        if (totalKv <= 0L) {
             return true;
         }
         if (hardKvTokens > Math.max(0L, hardKvAvailable)) {

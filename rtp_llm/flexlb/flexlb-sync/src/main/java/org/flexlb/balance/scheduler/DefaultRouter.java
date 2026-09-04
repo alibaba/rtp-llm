@@ -35,19 +35,7 @@ public class DefaultRouter {
     private final RandomStrategy vitSelector;
     private final ConfigService configService;
     private final List<RoleType> requiredRoles;
-    private final PlacementAvailability placementAvailability;
-
-    public DefaultRouter(
-            CostBasedPrefillStrategy prefillSelector,
-            CostBasedDecodeStrategy decodeSelector,
-            RandomStrategy vitSelector,
-            ConfigService configService,
-            ModelMetaConfig modelMetaConfig) {
-        this(prefillSelector, decodeSelector, vitSelector,
-                configService,
-                modelMetaConfig,
-                new PlacementAvailability());
-    }
+    private final RoleType queueAdmissionRole;
 
     @Autowired
     public DefaultRouter(
@@ -55,8 +43,7 @@ public class DefaultRouter {
             CostBasedDecodeStrategy decodeSelector,
             RandomStrategy vitSelector,
             ConfigService configService,
-            ModelMetaConfig modelMetaConfig,
-            PlacementAvailability placementAvailability) {
+            ModelMetaConfig modelMetaConfig) {
         this.prefillSelector = java.util.Objects.requireNonNull(
                 prefillSelector, "prefillSelector");
         this.decodeSelector = java.util.Objects.requireNonNull(
@@ -68,8 +55,11 @@ public class DefaultRouter {
         this.requiredRoles = List.copyOf(
                 java.util.Objects.requireNonNull(
                         modelMetaConfig, "modelMetaConfig").requiredRoles());
-        this.placementAvailability = java.util.Objects.requireNonNull(
-                placementAvailability, "placementAvailability");
+        this.queueAdmissionRole = requiredRoles.stream()
+                .filter(role -> role == RoleType.PREFILL
+                        || role == RoleType.PDFUSION)
+                .findFirst()
+                .orElse(RoleType.PREFILL);
     }
 
     public Response routeDirect(BalanceContext context) {
@@ -104,21 +94,14 @@ public class DefaultRouter {
                 return PlacementResult.blocked(routing.failure());
             }
             Response response = buildSuccessResponse(routing.serverStatuses());
-            return PlacementResult.success(
-                    QueueRouteAdmission.prepare(
-                            context,
-                            routing.selections(),
-                            response,
-                            (exactContext, group) -> decodeSelector
-                                    .select(
-                                            exactContext, RoleType.DECODE, group),
-                            placementAvailability));
+            return PlacementResult.success(QueueRouteAdmission.prepare(
+                    context, routing.selections(), response));
         }
     }
 
-    /** The immutable role topology used by both direct and queue routing. */
-    List<RoleType> requiredRoles() {
-        return requiredRoles;
+    /** Capacity domain that gates publication into the selected Prefill queue. */
+    RoleType queueAdmissionRole() {
+        return queueAdmissionRole;
     }
 
     private Response validateRequest(BalanceContext context) {

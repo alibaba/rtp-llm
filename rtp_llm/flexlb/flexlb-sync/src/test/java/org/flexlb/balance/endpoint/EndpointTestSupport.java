@@ -268,7 +268,7 @@ public final class EndpointTestSupport {
         try {
             for (ScheduledRequest item : items) {
                 PrefillState.ReservationResult<PrefillState.RouteReservation> result =
-                        endpoint.reserveRoute(
+                        endpoint.reservePublishedRouteCredit(
                                 item, predictedMs, Integer.MAX_VALUE);
                 if (result.status()
                         != PrefillState.CapacityStatus.ACQUIRED) {

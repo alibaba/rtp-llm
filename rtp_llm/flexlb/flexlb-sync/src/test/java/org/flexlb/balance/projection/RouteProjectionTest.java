@@ -78,9 +78,9 @@ class RouteProjectionTest {
         assertThrows(IllegalArgumentException.class,
                 () -> new RouteProjection.Candidate(
                         RouteProjection.Candidate.State.MODELED,
-                        OptionalLong.of(-1L), OptionalLong.empty(), 0L,
+                        -2L, RouteProjection.Candidate.UNKNOWN, 0L,
                         RouteProjection.Candidate.InitialHeadDisposition.NONE,
-                        "invalid", null, 0L, 0L, OptionalLong.of(1L)));
+                        "invalid", null, 0L, 0L, 1L));
 
         RouteProjection.Candidate modeledCandidate =
                 candidate(RouteProjection.Candidate.State.MODELED,
@@ -98,9 +98,13 @@ class RouteProjectionTest {
             OptionalLong projectedTtftMs,
             OptionalLong pendingCount) {
         return new RouteProjection.Candidate(
-                state, projectedTtftMs, OptionalLong.empty(), 0L,
+                state,
+                projectedTtftMs.orElse(RouteProjection.Candidate.UNKNOWN),
+                RouteProjection.Candidate.UNKNOWN,
+                0L,
                 RouteProjection.Candidate.InitialHeadDisposition.NONE,
-                state.name(), null, 0L, 0L, pendingCount);
+                state.name(), null, 0L, 0L,
+                pendingCount.orElse(RouteProjection.Candidate.UNKNOWN));
     }
 
     private static RouteProjection.Inputs inputs(

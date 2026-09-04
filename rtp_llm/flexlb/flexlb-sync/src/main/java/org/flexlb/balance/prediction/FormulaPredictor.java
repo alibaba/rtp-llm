@@ -1,4 +1,5 @@
 package org.flexlb.balance.prediction;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -15,8 +16,10 @@ import org.slf4j.LoggerFactory;
  *       {@code sum(expr)} over the batch items when per-request distribution is needed</li>
  * </ul>
  *
- * <p>Construction is cheap — the formula is parsed once and the AST is shared
- * across all evaluations.
+ * <p>Each predictor owns one parsed immutable formula. Endpoints built from
+ * the same immutable configuration share the expression object as their model
+ * identity, allowing a routing invocation to reuse an equal prediction without
+ * a process-wide formula cache.
  *
  * <p>{@link #learn(PrefillBatchFeatures, long, long)} observes each eligible
  * batch completion. This immutable implementation records the sample without
@@ -26,7 +29,7 @@ public class FormulaPredictor
         implements PrefillTimePredictor, PrefillTimePredictor.Evaluator {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
-
+    private final String formulaIdentity;
     private final PrefillTimeFormula formula;
 
     /**
@@ -35,13 +38,20 @@ public class FormulaPredictor
      * @param formulaString the cost formula expression
      */
     public FormulaPredictor(String formulaString) {
+        this.formulaIdentity = java.util.Objects.requireNonNull(
+                formulaString, "formulaString");
         this.formula = PrefillTimeFormula.parse(formulaString);
-        logger.debug("formula predictor created");
+        logger.trace("formula predictor created");
     }
 
     @Override
     public Evaluator evaluator() {
         return this;
+    }
+
+    @Override
+    public Object snapshotIdentity() {
+        return formulaIdentity;
     }
 
     @Override

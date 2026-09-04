@@ -23,7 +23,9 @@ import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
+import java.util.AbstractList;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.BitSet;
 import java.util.EnumMap;
 import java.util.List;
@@ -35,9 +37,14 @@ import java.util.concurrent.atomic.AtomicLong;
 @Component
 public class CostBasedPrefillStrategy {
 
+    private static final ThreadLocal<CandidateScratch> CANDIDATE_SCRATCH =
+            ThreadLocal.withInitial(CandidateScratch::new);
+
     private final WorkerDirectory workerDirectory;
     private final CacheAwareService cacheAwareService;
     private final EngineHealthReporter engineHealthReporter;
+    private final AtomicLong equalTtftCursor = new AtomicLong();
+    private final AtomicLong equalCacheLeaderCursor = new AtomicLong();
 
     public CostBasedPrefillStrategy(WorkerDirectory workerDirectory,
                                     CacheAwareService cacheAwareService,
@@ -84,7 +91,7 @@ public class CostBasedPrefillStrategy {
             return onlyEndpoint;
         }
         Map<String, Integer> cacheMatchResults =
-                getCacheMatchResults(balanceContext, roleType, group);
+                getCacheMatchResults(balanceContext, roleType, discovery);
         Map<String, Integer> rejections = new java.util.HashMap<>();
         Map<RoleType, Integer> poolWideBlockers =
                 new EnumMap<>(RoleType.class);
@@ -111,21 +118,12 @@ public class CostBasedPrefillStrategy {
             return PlacementResult.blocked(roleType);
         }
 
-        boolean modeledSelection =
-                selectedCandidates.candidate(0).selectable();
+        boolean modeledSelection = selectedCandidates.selectable(0);
         final int selectedIndex;
         if (modeledSelection) {
-            // Numeric TTFT policies see only candidates with a complete model.
-            long minProjectedTtftMs = Long.MAX_VALUE;
-            for (int i = 0; i < selectedCandidates.size(); i++) {
-                long projectedTtftMs = selectedCandidates.projectedTtftMs(i);
-                if (projectedTtftMs < minProjectedTtftMs) {
-                    minProjectedTtftMs = projectedTtftMs;
-                }
-            }
             selectedIndex = selectBestCandidate(
                     survivors,
-                    minProjectedTtftMs,
+                    selectedCandidates.minimumProjectedTtftMs,
                     roleType,
                     group,
                     seqLen,
@@ -145,8 +143,6 @@ public class CostBasedPrefillStrategy {
         }
 
         PrefillEndpoint best = selectedCandidates.endpoint(selectedIndex);
-        RouteProjection.Candidate selectedCandidate =
-                selectedCandidates.candidate(selectedIndex);
         long bestCacheHit = selectedCandidates.cacheHit(selectedIndex);
         long selectedPrefillMs = selectedCandidates.prefillMs(selectedIndex);
         WorkerEndpoint.GenerationPin selectedPin =
@@ -162,31 +158,28 @@ public class CostBasedPrefillStrategy {
             // transferring ownership for a stale generation.
             return PlacementResult.blocked(roleType);
         }
+        OptionalLong selectedTtft = OptionalLong.of(
+                selectedCandidates.projectedTtftMs(selectedIndex));
         SelectedRole selectedRole = buildSelectedRole(
                 best,
                 roleType,
                 requestId,
-                selectedCandidate.projectedTtftMs(),
+                selectedTtft,
                 selectedPrefillMs,
                 bestCacheHit,
+                selectedCandidates.ownershipVersion(selectedIndex),
                 selectedPin);
         reportSelectedEstimates(
                 roleType,
                 best,
                 config,
-                selectedCandidate.projectedTtftMs(),
+                selectedTtft,
                 selectedPrefillMs);
         reportCacheHitMetrics(roleType, bestCacheHit, seqLen);
-        long candidateMaxRoutingHit = 0L;
-        for (int i = 0; i < selectedCandidates.size(); i++) {
-            candidateMaxRoutingHit = Math.max(
-                    candidateMaxRoutingHit,
-                    selectedCandidates.candidate(i).routingCacheMatchTokens());
-        }
         reportRoutingCacheMatchMetrics(
                 roleType,
-                selectedCandidates.candidate(selectedIndex).routingCacheMatchTokens(),
-                candidateMaxRoutingHit,
+                selectedCandidates.routingCacheMatchTokens(selectedIndex),
+                selectedCandidates.maximumRoutingCacheMatchTokens,
                 seqLen);
         return PlacementResult.success(selectedRole);
     }
@@ -239,7 +232,7 @@ public class CostBasedPrefillStrategy {
             return null;
         }
         Map<String, Integer> cacheMatches =
-                getCacheMatchResults(context, roleType, group);
+                getCacheMatchResults(context, roleType, discovery);
         CacheTokenMatch cacheMatch = calculateCacheMatch(
                 endpoint,
                 only.address(),
@@ -276,6 +269,7 @@ public class CostBasedPrefillStrategy {
                 OptionalLong.empty(),
                 prefillMs,
                 cacheMatch.effectiveHitTokens(),
+                endpoint.placementVersion(),
                 selectedPin));
     }
 
@@ -293,12 +287,11 @@ public class CostBasedPrefillStrategy {
         long selectedPending = Long.MAX_VALUE;
         long selectedTime = Long.MAX_VALUE;
         for (int i = 0; i < candidates.size(); i++) {
-            RouteProjection.Candidate candidate = candidates.candidate(i);
-            if (!candidate.engineWorkUnmodeled()) {
+            if (!candidates.engineWorkUnmodeled(i)) {
                 throw new IllegalStateException(
                         "unmodeled fallback received a modeled candidate");
             }
-            long pending = candidate.requiredPendingCount();
+            long pending = candidates.pendingCount(i);
             long lastSelected = candidates.endpoint(i).getLastSelectedTime().get();
             if (selectedIndex < 0
                     || pending < selectedPending
@@ -338,22 +331,21 @@ public class CostBasedPrefillStrategy {
         String affinityReason = null;
         if (cacheAffinity != null) {
             long referenceHitTokens = 0L;
-            long minHitTokens = Long.MAX_VALUE;
-            long maxHitTokens = 0L;
-            for (int i = 0; i < survivors.size(); i++) {
-                long hitTokens = survivors.cacheHit(i);
-                minHitTokens = Math.min(minHitTokens, hitTokens);
-                maxHitTokens = Math.max(maxHitTokens, hitTokens);
-                if (survivors.projectedTtftMs(i) == minProjectedTtftMs) {
-                    referenceHitTokens = Math.max(
-                            referenceHitTokens, hitTokens);
-                }
-            }
+            long minHitTokens = survivors.minimumCacheHit;
+            long maxHitTokens = survivors.maximumCacheHit;
             affinityCutoffMs = saturatingAdd(
                     minProjectedTtftMs,
                     Math.max(0L, cacheAffinity.getMaxExtraTtftMs()));
             affinityReason = "NO_CACHE_LEAD";
             if (maxHitTokens > minHitTokens) {
+                for (int i = 0; i < survivors.size(); i++) {
+                    if (survivors.projectedTtftMs(i)
+                            == minProjectedTtftMs) {
+                        referenceHitTokens = Math.max(
+                                referenceHitTokens,
+                                survivors.cacheHit(i));
+                    }
+                }
                 boolean minimumHitRateMet = false;
                 double minimumHitRate = normalizedHitRate(
                         cacheAffinity.getMinPrefixHitPercent());
@@ -491,23 +483,38 @@ public class CostBasedPrefillStrategy {
                     Math.max(0L, candidateChoice.getMinimumToleranceMs()));
         }
         long ttftCutoffMs = saturatingAdd(minProjectedTtftMs, tieThreshold);
-        int selectedIndex = -1;
-        int tiedCount = 0;
+        int eligibleCount = 0;
+        boolean allExactlyEqual = true;
         for (int i = 0; i < survivors.size(); i++) {
-            if (survivors.projectedTtftMs(i) <= ttftCutoffMs
-                    && ThreadLocalRandom.current().nextInt(++tiedCount) == 0) {
-                selectedIndex = i;
+            long projectedTtftMs = survivors.projectedTtftMs(i);
+            if (projectedTtftMs <= ttftCutoffMs) {
+                eligibleCount++;
+                allExactlyEqual &= projectedTtftMs == minProjectedTtftMs;
             }
         }
-        return selectedIndex;
+        if (eligibleCount == 0) {
+            return -1;
+        }
+        int selectedOffset = allExactlyEqual
+                ? (int) Math.floorMod(
+                        equalTtftCursor.getAndIncrement(),
+                        (long) eligibleCount)
+                : ThreadLocalRandom.current().nextInt(eligibleCount);
+        for (int i = 0; i < survivors.size(); i++) {
+            if (survivors.projectedTtftMs(i) <= ttftCutoffMs
+                    && selectedOffset-- == 0) {
+                return i;
+            }
+        }
+        throw new IllegalStateException(
+                "TTFT candidate count changed during immutable selection");
     }
 
-    /** Randomize only endpoints with the same best cache hit and projected TTFT. */
+    /** Fairly rotate only endpoints with the same best cache hit and projected TTFT. */
     private int selectCacheLeader(
             CandidateSet survivors, BitSet preferredCandidates) {
         long bestHit = Long.MIN_VALUE;
         long bestProjectedTtftMs = Long.MAX_VALUE;
-        int selectedIndex = -1;
         int tiedCount = 0;
         for (int candidateIndex = 0;
                 candidateIndex < survivors.size(); candidateIndex++) {
@@ -520,15 +527,32 @@ public class CostBasedPrefillStrategy {
                     || hit == bestHit && projectedTtftMs < bestProjectedTtftMs) {
                 bestHit = hit;
                 bestProjectedTtftMs = projectedTtftMs;
-                selectedIndex = candidateIndex;
                 tiedCount = 1;
             } else if (hit == bestHit
-                    && projectedTtftMs == bestProjectedTtftMs
-                    && ThreadLocalRandom.current().nextInt(++tiedCount) == 0) {
-                selectedIndex = candidateIndex;
+                    && projectedTtftMs == bestProjectedTtftMs) {
+                tiedCount++;
             }
         }
-        return selectedIndex;
+        if (tiedCount == 0) {
+            return -1;
+        }
+        int selectedOffset = (int) Math.floorMod(
+                equalCacheLeaderCursor.getAndIncrement(),
+                (long) tiedCount);
+        for (int candidateIndex = 0;
+                candidateIndex < survivors.size(); candidateIndex++) {
+            if (!contains(preferredCandidates, candidateIndex)
+                    || survivors.cacheHit(candidateIndex) != bestHit
+                    || survivors.projectedTtftMs(candidateIndex)
+                            != bestProjectedTtftMs) {
+                continue;
+            }
+            if (selectedOffset-- == 0) {
+                return candidateIndex;
+            }
+        }
+        throw new IllegalStateException(
+                "cache-leader count changed during immutable selection");
     }
 
     private static BitSet baselinePoolMask(
@@ -625,7 +649,8 @@ public class CostBasedPrefillStrategy {
             List<EndpointRegistry.PrefillRoutingEntry> candidates) {
 
         private EndpointDiscovery {
-            candidates = List.copyOf(candidates);
+            candidates = java.util.Objects.requireNonNull(
+                    candidates, "candidates");
         }
 
         private EndpointRegistry.PrefillRoutingEntry onlyPreferredEndpoint() {
@@ -635,106 +660,253 @@ public class CostBasedPrefillStrategy {
         private int registeredCount() {
             return candidates.size();
         }
+
+        /** Zero-copy address view over the exact fleet used by this decision. */
+        private List<String> addresses() {
+            return new AbstractList<>() {
+                @Override
+                public String get(int index) {
+                    return candidates.get(index).address();
+                }
+
+                @Override
+                public int size() {
+                    return candidates.size();
+                }
+            };
+        }
     }
 
     private static final class CandidateSet {
-        private static final class Entry {
-            private final String endpointAddress;
-            private final PrefillEndpoint endpoint;
-            private final RouteProjection.Candidate candidate;
-
-            private Entry(
-                    String endpointAddress,
-                    PrefillEndpoint endpoint,
-                    RouteProjection.Candidate candidate) {
-                this.endpointAddress = endpointAddress;
-                this.endpoint = endpoint;
-                this.candidate = candidate;
-            }
-
-            private String endpointAddress() {
-                return endpointAddress;
-            }
-
-            private PrefillEndpoint endpoint() {
-                return endpoint;
-            }
-
-            private RouteProjection.Candidate candidate() {
-                return candidate;
-            }
-        }
-
-        private final ArrayList<Entry> entries;
+        private String[] endpointAddresses = new String[0];
+        private PrefillEndpoint[] endpoints = new PrefillEndpoint[0];
+        private RouteProjection.Candidate.State[] states =
+                new RouteProjection.Candidate.State[0];
+        private long[] projectedTtftMs = new long[0];
+        private long[] projectedDrainMs = new long[0];
+        private long[] incomingPrefillMs = new long[0];
+        private long[] cacheHitTokens = new long[0];
+        private long[] routingCacheMatchTokens = new long[0];
+        private long[] pendingCounts = new long[0];
+        private long[] ownershipVersions = new long[0];
+        private int size;
         private long projectedDrainTotalMs;
         private int knownDrainCount;
         private long pendingRequestTotal;
+        private long maximumPendingCount;
+        private long maximumProjectedDrainMs;
+        private long minimumProjectedTtftMs;
+        private long minimumCacheHit;
+        private long maximumCacheHit;
+        private long maximumRoutingCacheMatchTokens;
 
-        CandidateSet() {
-            this(0);
-        }
-
-        private CandidateSet(int expectedCapacity) {
-            entries = new ArrayList<>(Math.max(0, expectedCapacity));
+        private void reset(int expectedCapacity) {
+            ensureCapacity(expectedCapacity);
+            size = 0;
+            projectedDrainTotalMs = 0L;
+            knownDrainCount = 0;
+            pendingRequestTotal = 0L;
+            maximumPendingCount = 0L;
+            maximumProjectedDrainMs = 0L;
+            minimumProjectedTtftMs = Long.MAX_VALUE;
+            minimumCacheHit = Long.MAX_VALUE;
+            maximumCacheHit = 0L;
+            maximumRoutingCacheMatchTokens = 0L;
         }
 
         private void addCandidate(
                 String endpointAddress,
                 PrefillEndpoint endpoint,
-                RouteProjection.Candidate candidate) {
-            entries.add(new Entry(
-                    endpointAddress,
-                    endpoint,
-                    candidate));
-            OptionalLong projectedDrain = candidate.projectedDrainMs();
-            if (projectedDrain.isPresent()) {
+                RouteProjection.CandidateView candidate,
+                long ownershipVersion) {
+            ensureCapacity(size + 1);
+            endpointAddresses[size] = endpointAddress;
+            endpoints[size] = endpoint;
+            states[size] = candidate.state();
+            projectedTtftMs[size] = candidate.projectedTtftMsValue();
+            projectedDrainMs[size] = candidate.projectedDrainMsValue();
+            incomingPrefillMs[size] = candidate.incomingPrefillMs();
+            cacheHitTokens[size] = candidate.cacheHitTokens();
+            routingCacheMatchTokens[size] =
+                    candidate.routingCacheMatchTokens();
+            pendingCounts[size] = candidate.pendingCountValue();
+            ownershipVersions[size] = ownershipVersion;
+            size++;
+            if (candidate.hasProjectedDrain()) {
                 projectedDrainTotalMs = saturatingAdd(
-                        projectedDrainTotalMs, projectedDrain.getAsLong());
+                        projectedDrainTotalMs,
+                        candidate.requiredProjectedDrainMs());
+                maximumProjectedDrainMs = Math.max(
+                        maximumProjectedDrainMs,
+                        candidate.requiredProjectedDrainMs());
                 knownDrainCount++;
             }
             pendingRequestTotal = saturatingAdd(
                     pendingRequestTotal, candidate.requiredPendingCount());
+            maximumPendingCount = Math.max(
+                    maximumPendingCount, candidate.requiredPendingCount());
+            if (candidate.selectable()) {
+                minimumProjectedTtftMs = Math.min(
+                        minimumProjectedTtftMs,
+                        candidate.requiredProjectedTtftMs());
+            }
+            minimumCacheHit = Math.min(
+                    minimumCacheHit, candidate.cacheHitTokens());
+            maximumCacheHit = Math.max(
+                    maximumCacheHit, candidate.cacheHitTokens());
+            maximumRoutingCacheMatchTokens = Math.max(
+                    maximumRoutingCacheMatchTokens,
+                    candidate.routingCacheMatchTokens());
         }
 
-        private RouteProjection.Candidate candidate(int index) {
-            RouteProjection.Candidate candidate = entries.get(index).candidate();
-            if (candidate == null) {
-                throw new IllegalStateException("endpoint has not been projected");
-            }
-            return candidate;
+        private boolean selectable(int index) {
+            return states[index] == RouteProjection.Candidate.State.MODELED
+                    && projectedTtftMs[index] != RouteProjection.Candidate.UNKNOWN;
+        }
+
+        private boolean engineWorkUnmodeled(int index) {
+            return states[index]
+                    == RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK;
         }
 
         private PrefillEndpoint endpoint(int index) {
-            return entries.get(index).endpoint();
+            return endpoints[index];
         }
 
         private String endpointAddress(int index) {
-            return entries.get(index).endpointAddress();
+            return endpointAddresses[index];
         }
 
         private long cacheHit(int index) {
-            return candidate(index).cacheHitTokens();
+            return cacheHitTokens[index];
         }
 
         private long projectedTtftMs(int index) {
-            return candidate(index).projectedTtftMs().orElseThrow();
+            return projectedTtftMs[index];
         }
 
         private long prefillMs(int index) {
-            return candidate(index).incomingPrefillMs();
+            return incomingPrefillMs[index];
+        }
+
+        private boolean hasProjectedDrain(int index) {
+            return projectedDrainMs[index] != RouteProjection.Candidate.UNKNOWN;
+        }
+
+        private long projectedDrainMs(int index) {
+            return projectedDrainMs[index];
+        }
+
+        private long pendingCount(int index) {
+            return pendingCounts[index];
+        }
+
+        private long routingCacheMatchTokens(int index) {
+            return routingCacheMatchTokens[index];
+        }
+
+        private long ownershipVersion(int index) {
+            return ownershipVersions[index];
         }
 
         private int size() {
-            return entries.size();
+            return size;
         }
 
-        private void moveCandidateTo(
-                int index,
-                CandidateSet target) {
-            target.entries.add(entries.get(index));
+        private void retainAt(int source, int target) {
+            if (source == target) {
+                return;
+            }
+            endpointAddresses[target] = endpointAddresses[source];
+            endpoints[target] = endpoints[source];
+            states[target] = states[source];
+            projectedTtftMs[target] = projectedTtftMs[source];
+            projectedDrainMs[target] = projectedDrainMs[source];
+            incomingPrefillMs[target] = incomingPrefillMs[source];
+            cacheHitTokens[target] = cacheHitTokens[source];
+            routingCacheMatchTokens[target] =
+                    routingCacheMatchTokens[source];
+            pendingCounts[target] = pendingCounts[source];
+            ownershipVersions[target] = ownershipVersions[source];
+        }
+
+        private void beginRetainedSummary() {
+            projectedDrainTotalMs = 0L;
+            knownDrainCount = 0;
+            pendingRequestTotal = 0L;
+            maximumPendingCount = 0L;
+            maximumProjectedDrainMs = 0L;
+            minimumProjectedTtftMs = Long.MAX_VALUE;
+            minimumCacheHit = Long.MAX_VALUE;
+            maximumCacheHit = 0L;
+            maximumRoutingCacheMatchTokens = 0L;
+        }
+
+        private void retainAndSummarize(int source, int target) {
+            retainAt(source, target);
+            long drainMs = projectedDrainMs[target];
+            if (drainMs != RouteProjection.Candidate.UNKNOWN) {
+                projectedDrainTotalMs = saturatingAdd(
+                        projectedDrainTotalMs, drainMs);
+                maximumProjectedDrainMs = Math.max(
+                        maximumProjectedDrainMs, drainMs);
+                knownDrainCount++;
+            }
+            long pending = pendingCounts[target];
+            pendingRequestTotal = saturatingAdd(
+                    pendingRequestTotal, pending);
+            maximumPendingCount = Math.max(
+                    maximumPendingCount, pending);
+            if (selectable(target)) {
+                minimumProjectedTtftMs = Math.min(
+                        minimumProjectedTtftMs,
+                        projectedTtftMs[target]);
+            }
+            minimumCacheHit = Math.min(
+                    minimumCacheHit, cacheHitTokens[target]);
+            maximumCacheHit = Math.max(
+                    maximumCacheHit, cacheHitTokens[target]);
+            maximumRoutingCacheMatchTokens = Math.max(
+                    maximumRoutingCacheMatchTokens,
+                    routingCacheMatchTokens[target]);
+        }
+
+        private void finishRetainedSummary(int retainedSize) {
+            size = retainedSize;
+        }
+
+        private void ensureCapacity(int expectedCapacity) {
+            if (states.length >= expectedCapacity) {
+                return;
+            }
+            int capacity = Math.max(expectedCapacity,
+                    Math.max(16, states.length << 1));
+            endpointAddresses = Arrays.copyOf(endpointAddresses, capacity);
+            endpoints = Arrays.copyOf(endpoints, capacity);
+            states = Arrays.copyOf(states, capacity);
+            projectedTtftMs = Arrays.copyOf(projectedTtftMs, capacity);
+            projectedDrainMs = Arrays.copyOf(projectedDrainMs, capacity);
+            incomingPrefillMs = Arrays.copyOf(incomingPrefillMs, capacity);
+            cacheHitTokens = Arrays.copyOf(cacheHitTokens, capacity);
+            routingCacheMatchTokens = Arrays.copyOf(
+                    routingCacheMatchTokens, capacity);
+            pendingCounts = Arrays.copyOf(pendingCounts, capacity);
+            ownershipVersions = Arrays.copyOf(ownershipVersions, capacity);
         }
 
     }
+
+    /** Per-planner reusable candidate columns; a planner never re-enters selection. */
+    private static final class CandidateScratch {
+        private final CandidateSet modeled = new CandidateSet();
+        private final CandidateSet unmodeled = new CandidateSet();
+
+        private void reset(int expectedCapacity) {
+            modeled.reset(expectedCapacity);
+            unmodeled.reset(0);
+        }
+    }
+
     private CandidateSet evaluateCandidates(
             EndpointDiscovery discovery,
             BalanceContext balanceContext,
@@ -744,9 +916,12 @@ public class CostBasedPrefillStrategy {
             Map<RoleType, Integer> poolWideBlockers) {
         Request request = balanceContext.getRequest();
         int eligibleSize = discovery.candidates().size();
-        CandidateSet modeled = new CandidateSet(eligibleSize);
-        CandidateSet unmodeled = new CandidateSet();
+        CandidateScratch scratch = CANDIDATE_SCRATCH.get();
+        scratch.reset(eligibleSize);
+        CandidateSet modeled = scratch.modeled;
+        CandidateSet unmodeled = scratch.unmodeled;
         long planningAtMs = System.currentTimeMillis();
+        RouteProjection.Session projectionSession = RouteProjection.session();
 
         // Build one coherent projection per live endpoint. Cache
         // hit is part of both the incoming service prediction and batch-group
@@ -764,23 +939,21 @@ public class CostBasedPrefillStrategy {
                 long routingCacheMatchTokens = cacheMatch.routingHitTokens();
                 RouteProjection.Inputs projectionInputs =
                         ep.captureRouteProjectionInputs();
-                RouteProjection.Probe probe = new RouteProjection.Probe(
-                        request.getRequestId(),
-                        balanceContext.getPriority(),
-                        planningAtMs,
-                        // RequestRegistry owns terminal deadlines.
-                        // Selection scores endpoint work only; an expiry race
-                        // must not be reported as a capacity blocker.
-                        Long.MAX_VALUE,
-                        request.getSeqLen(),
-                        cacheHit,
-                        routingCacheMatchTokens,
-                        projectionDemand);
                 PrefillTimePredictor predictor = ep.getPredictor();
-                RouteProjection.Candidate projection =
-                        RouteProjection.project(
+                RouteProjection.CandidateView projection =
+                        projectionSession.projectView(
                                 projectionInputs,
-                                probe,
+                                request.getRequestId(),
+                                balanceContext.getPriority(),
+                                planningAtMs,
+                                // RequestRegistry owns terminal deadlines.
+                                // Selection scores endpoint work only; an expiry race
+                                // must not be reported as a capacity blocker.
+                                Long.MAX_VALUE,
+                                request.getSeqLen(),
+                                cacheHit,
+                                routingCacheMatchTokens,
+                                projectionDemand,
                                 predictor == null
                                         ? null : predictor.evaluator(),
                                 ep.deliveryProjection(),
@@ -804,25 +977,29 @@ public class CostBasedPrefillStrategy {
                 }
 
                 if (modeledProjection) {
-                    modeled.addCandidate(endpointAddress, ep, projection);
+                    modeled.addCandidate(
+                            endpointAddress, ep, projection,
+                            projectionInputs.ownershipVersion());
                 } else {
-                    unmodeled.addCandidate(endpointAddress, ep, projection);
+                    unmodeled.addCandidate(
+                            endpointAddress, ep, projection,
+                            projectionInputs.ownershipVersion());
                 }
                 // One routing request may inspect hundreds of endpoints. Keep the
                 // per-candidate diagnostic at TRACE so enabling ordinary DEBUG
                 // cannot turn the selection hot path into a log flood.
                 if (Logger.isTraceEnabled()) {
                     if (modeledProjection) {
-                        OptionalLong projectedDrainMs = projection.projectedDrainMs();
                         Logger.trace(
                                 "Prefill projection - ip: {}, order: {}, hitCache: {}, "
                                         + "ttftMs: {}, drainMs: {}",
                                 endpointAddress,
                                 config.isPriorityOrdering() ? "PRIORITY" : "FIFO",
                                 cacheHit,
-                                projection.projectedTtftMs(),
-                                projectedDrainMs.isPresent()
-                                        ? Long.toString(projectedDrainMs.getAsLong())
+                                projection.requiredProjectedTtftMs(),
+                                projection.hasProjectedDrain()
+                                        ? Long.toString(
+                                                projection.requiredProjectedDrainMs())
                                         : projectionDemand.drainRequired()
                                                 ? "unknown"
                                                 : "not-requested");
@@ -837,7 +1014,8 @@ public class CostBasedPrefillStrategy {
         }
 
         if (modeled.size() != 0) {
-            return rejectOutliers(modeled, config, rejections);
+            return rejectOutliers(
+                    modeled, config, rejections);
         }
         return unmodeled;
     }
@@ -862,64 +1040,84 @@ public class CostBasedPrefillStrategy {
                 : feasible.projectedDrainTotalMs / feasible.knownDrainCount;
         long avgPendingCount = feasible.pendingRequestTotal / feasibleSize;
 
+        // Balanced fleets are the dominant path. The maxima were reduced
+        // while candidates were projected, so prove that no outlier can be
+        // rejected without walking all endpoints a second time.
+        boolean mayRejectHotspot = hotspotMultiplier > 0.0
+                && avgPendingCount > 0L
+                && feasible.maximumPendingCount
+                        > avgPendingCount * hotspotMultiplier;
+        boolean mayRejectDrain = imbalanceMultiplier > 0.0
+                && avgDrainMs > 0L
+                && feasible.maximumProjectedDrainMs
+                        > avgDrainMs * imbalanceMultiplier;
+        if (!mayRejectHotspot && !mayRejectDrain) {
+            return feasible;
+        }
+
         // Round 2: hotspot / drain-imbalance filter using the same projections.
-        CandidateSet survivors = null;
+        int retainedCount = 0;
         int leastLoadedIndex = -1;
         long leastDrainMs = Long.MAX_VALUE;
         int leastPendingIndex = -1;
         long leastPendingCount = Long.MAX_VALUE;
+        int hotspotRejected = 0;
+        int imbalanceRejected = 0;
+        feasible.beginRetainedSummary();
         for (int i = 0; i < feasibleSize; i++) {
-                RouteProjection.Candidate projection = feasible.candidate(i);
-                OptionalLong projectedDrainMs = projection.projectedDrainMs();
-                long pendingCount = projection.requiredPendingCount();
+            long pendingCount = feasible.pendingCount(i);
 
-                if (projectedDrainMs.isPresent()
-                        && projectedDrainMs.getAsLong() < leastDrainMs) {
-                    leastDrainMs = projectedDrainMs.getAsLong();
-                    leastLoadedIndex = i;
-                }
-                if (pendingCount < leastPendingCount) {
-                    leastPendingCount = pendingCount;
-                    leastPendingIndex = i;
-                }
-
-                boolean rejected = false;
-                if (hotspotMultiplier > 0 && avgPendingCount > 0
-                        && pendingCount > avgPendingCount * hotspotMultiplier) {
-                    rejections.merge("HOTSPOT_FILTERED", 1, Integer::sum);
-                    rejected = true;
-                }
-                if (!rejected && imbalanceMultiplier > 0 && avgDrainMs > 0
-                        && projectedDrainMs.isPresent()
-                        && projectedDrainMs.getAsLong()
-                        > avgDrainMs * imbalanceMultiplier) {
-                    rejections.merge("IMBALANCE_FILTERED", 1, Integer::sum);
-                    rejected = true;
-                }
-                if (rejected && survivors == null) {
-                    survivors = new CandidateSet(feasibleSize);
-                    for (int acceptedIndex = 0;
-                            acceptedIndex < i; acceptedIndex++) {
-                        feasible.moveCandidateTo(acceptedIndex, survivors);
-                    }
-                } else if (!rejected && survivors != null) {
-                    feasible.moveCandidateTo(i, survivors);
-                }
+            if (feasible.hasProjectedDrain(i)
+                    && feasible.projectedDrainMs(i) < leastDrainMs) {
+                leastDrainMs = feasible.projectedDrainMs(i);
+                leastLoadedIndex = i;
+            }
+            if (pendingCount < leastPendingCount) {
+                leastPendingCount = pendingCount;
+                leastPendingIndex = i;
             }
 
-            if (survivors == null) {
-                return feasible;
+            boolean rejected = false;
+            if (mayRejectHotspot
+                    && pendingCount > avgPendingCount * hotspotMultiplier) {
+                hotspotRejected++;
+                rejected = true;
             }
-
-            if (survivors.size() == 0) {
-                int fallbackIndex = leastLoadedIndex >= 0
-                        ? leastLoadedIndex : leastPendingIndex;
-                if (fallbackIndex >= 0) {
-                    feasible.moveCandidateTo(fallbackIndex, survivors);
-                }
+            if (!rejected && mayRejectDrain
+                    && feasible.hasProjectedDrain(i)
+                    && feasible.projectedDrainMs(i)
+                    > avgDrainMs * imbalanceMultiplier) {
+                imbalanceRejected++;
+                rejected = true;
+            }
+            if (!rejected) {
+                feasible.retainAndSummarize(i, retainedCount++);
+            }
         }
 
-        return survivors;
+        if (hotspotRejected > 0) {
+            rejections.merge(
+                    "HOTSPOT_FILTERED", hotspotRejected, Integer::sum);
+        }
+        if (imbalanceRejected > 0) {
+            rejections.merge(
+                    "IMBALANCE_FILTERED", imbalanceRejected, Integer::sum);
+        }
+        if (retainedCount == feasibleSize) {
+            return feasible;
+        }
+
+        if (retainedCount == 0) {
+            int fallbackIndex = leastLoadedIndex >= 0
+                    ? leastLoadedIndex : leastPendingIndex;
+            if (fallbackIndex >= 0) {
+                feasible.retainAndSummarize(
+                        fallbackIndex, retainedCount++);
+            }
+        }
+
+        feasible.finishRetainedSummary(retainedCount);
+        return feasible;
     }
 
     static RoleType provenPoolWideBlocker(
@@ -975,16 +1173,16 @@ public class CostBasedPrefillStrategy {
                 matching.add(entry);
             }
         }
-        return new EndpointDiscovery(matching);
+        return new EndpointDiscovery(List.copyOf(matching));
     }
 
     private Map<String, Integer> getCacheMatchResults(
             BalanceContext balanceContext,
             RoleType roleType,
-            String group) {
+            EndpointDiscovery discovery) {
         List<Long> blockCacheKeys = balanceContext.getRequest().getBlockCacheKeys();
         return cacheAwareService.findMatchingEngines(
-                blockCacheKeys, roleType, group);
+                blockCacheKeys, roleType, discovery.addresses());
     }
 
     private record CacheTokenMatch(
@@ -1085,6 +1283,7 @@ public class CostBasedPrefillStrategy {
             OptionalLong projectedTtftMs,
             long selectedPrefillMs,
             long bestCacheHit,
+            long placementVersion,
             WorkerEndpoint.GenerationPin selectedPin) {
         try {
             // Populate DebugInfo so ScheduledRequest.hitCache() can read
@@ -1117,7 +1316,8 @@ public class CostBasedPrefillStrategy {
             result.setSuccess(true);
             WorkerEndpoint.GenerationPin ownedPin = selectedPin;
             selectedPin = null;
-            return SelectedRole.prefill(ownedPin, result, selectedPrefillMs);
+            return SelectedRole.prefill(
+                    ownedPin, result, selectedPrefillMs, placementVersion);
         } finally {
             if (selectedPin != null) {
                 selectedPin.close();

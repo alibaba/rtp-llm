@@ -222,8 +222,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                     org.mockito.Mockito.mock(CostBasedDecodeStrategy.class),
                     org.mockito.Mockito.mock(RandomStrategy.class),
                     org.mockito.Mockito.mock(ConfigService.class),
-                    emptyModelMeta(),
-                    new PlacementAvailability());
+                    emptyModelMeta());
         }
 
         private synchronized void bind(DefaultRouter exactRouter) {

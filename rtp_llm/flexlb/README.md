@@ -128,7 +128,6 @@ export FLEXLB_CONFIG='{
     "enqueueRpcTimeoutMs": 5000
   },
   "router": {
-    "availabilityHysteresisPercent": 15,
     "groupSelector": {
       "defaultTargets": [
         {"group": "default-group", "weight": 1}
@@ -172,6 +171,7 @@ export FLEXLB_CONFIG='{
           "maxOutputTokensForEstimate": 1000
         },
         "decayPerToken": 0.001,
+        "loadDecayPerRequest": 1.0,
         "outlierRejection": {
           "maxEngineLoadVsAverageMultiplier": 3.0,
           "maxKvUsedVsAverageMultiplier": 3.0
@@ -384,7 +384,10 @@ Authorization: Bearer <token>
   `router.roles.prefill.executionTimeEstimator.expression` when estimator type is
   `FORMULA`.
 - **Routing strategy parameters**: Prefill `candidateChoice` and Decode
-  `decayPerToken`/`outlierRejection` under their role objects.
+  `decayPerToken`/`loadDecayPerRequest`/`outlierRejection` under their role
+  objects. Decode combines KV usage and queued ownership as soft exponential
+  weights; it never hard-collapses a concurrent planning window onto the one
+  endpoint that happened to be least loaded in a shared snapshot.
 - **Traffic group selection**: `router.groupSelector` inside the same document.
 - **Backend topology**: `MODEL_SERVICE_CONFIG`.
 - **ZooKeeper consistency**: `FLEXLB_SYNC_CONSISTENCY_CONFIG`.

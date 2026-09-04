@@ -29,6 +29,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -75,6 +76,40 @@ class WorkerBatcherSchedulingTest {
         assertEquals(2, delivery.attempts.get(),
                 "one capacity signal must trigger exactly one retry");
         assertSame(head, runtime.captureQueueSnapshot().items().getFirst());
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void projectionCacheTracksCapacityBlockAndWake() {
+        FlexlbConfig config = singleConfig();
+        PrefillEndpoint endpoint = stableEndpoint(stableStatus());
+        ProjectionCacheBlock delivery = new ProjectionCacheBlock();
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        ScheduledRequest head = item(
+                config, endpoint, 11L, 50, System.currentTimeMillis());
+
+        try {
+            assertTrue(runtime.offer(head));
+            await(delivery.firstPrepareEntered);
+            assertNull(runtime.captureRouteProjectionInputs()
+                    .queue().admissionBlock(),
+                    "cache is warmed before the delivery miss is published");
+
+            delivery.allowFirstPrepare.countDown();
+            await(delivery.firstCapacity.subscribed);
+            assertNotNull(runtime.captureRouteProjectionInputs()
+                    .queue().admissionBlock(),
+                    "publishing the block must invalidate the warm cache");
+
+            delivery.firstCapacity.release();
+            await(delivery.secondPrepareEntered);
+            assertNull(runtime.captureRouteProjectionInputs()
+                    .queue().admissionBlock(),
+                    "capacity wake must invalidate the cached block");
+        } finally {
+            delivery.allowFirstPrepare.countDown();
+            delivery.allowSecondPrepare.countDown();
+        }
     }
 
     @Test
@@ -283,6 +318,34 @@ class WorkerBatcherSchedulingTest {
                         candidates.getFirst(), unavailable(firstCapacity));
             }
             secondAttempt.countDown();
+            return WorkerBatcherTestSupport.boundaryOnly(
+                    candidates.getFirst(), unavailable(parkedCapacity));
+        }
+    }
+
+    private static final class ProjectionCacheBlock extends BoundaryDelivery {
+
+        private final TestAvailability firstCapacity = new TestAvailability();
+        private final TestAvailability parkedCapacity = new TestAvailability();
+        private final CountDownLatch firstPrepareEntered = new CountDownLatch(1);
+        private final CountDownLatch allowFirstPrepare = new CountDownLatch(1);
+        private final CountDownLatch secondPrepareEntered = new CountDownLatch(1);
+        private final CountDownLatch allowSecondPrepare = new CountDownLatch(1);
+        private final AtomicInteger attempts = new AtomicInteger();
+
+        @Override
+        public Transaction prepare(
+                List<ScheduledRequest> candidates,
+                PrefillTimePredictor.Evaluator evaluator,
+                OptionalLong plannedPrediction) {
+            if (attempts.incrementAndGet() == 1) {
+                firstPrepareEntered.countDown();
+                await(allowFirstPrepare);
+                return WorkerBatcherTestSupport.boundaryOnly(
+                        candidates.getFirst(), unavailable(firstCapacity));
+            }
+            secondPrepareEntered.countDown();
+            await(allowSecondPrepare);
             return WorkerBatcherTestSupport.boundaryOnly(
                     candidates.getFirst(), unavailable(parkedCapacity));
         }

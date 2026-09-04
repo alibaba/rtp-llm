@@ -11,8 +11,6 @@ import java.util.Comparator;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.OptionalDouble;
-import java.util.OptionalLong;
 import java.util.PriorityQueue;
 
 /** Pure frozen-snapshot TTFT projection shared by endpoint selection policies. */
@@ -20,13 +18,48 @@ final class RouteTimelineProjector {
 
     private static final String INVALID_PREDICTION_DETAIL =
             "PREDICTOR_RETURNED_INVALID_VALUE";
-    private final RouteProjection.Probe incoming;
-    private final long pendingRequestCount;
+    private final PredictionBoundary predictions = new PredictionBoundary();
+    private long requestId;
+    private int priority;
+    private long enqueuedAtMs;
+    private long expiresAtMs;
+    private long seqLen;
+    private long hitCache;
+    private long routingCacheMatchTokens;
+    private RouteProjection.Demand demand;
+    private long pendingRequestCount;
+    private final ProjectedCandidate result = new ProjectedCandidate();
 
-    RouteTimelineProjector(
+    RouteTimelineProjector() {
+    }
+
+    void reset(
             RouteProjection.Probe incoming,
             long pendingRequestCount) {
-        this.incoming = incoming;
+        reset(incoming.requestId(), incoming.priority(), incoming.enqueuedAtMs(),
+                incoming.expiresAtMs(), incoming.seqLen(), incoming.hitCache(),
+                incoming.routingCacheMatchTokens(), incoming.demand(),
+                pendingRequestCount);
+    }
+
+    void reset(
+            long requestId,
+            int priority,
+            long enqueuedAtMs,
+            long expiresAtMs,
+            long seqLen,
+            long hitCache,
+            long routingCacheMatchTokens,
+            RouteProjection.Demand demand,
+            long pendingRequestCount) {
+        this.requestId = requestId;
+        this.priority = priority;
+        this.enqueuedAtMs = enqueuedAtMs;
+        this.expiresAtMs = expiresAtMs;
+        this.seqLen = seqLen;
+        this.hitCache = hitCache;
+        this.routingCacheMatchTokens = routingCacheMatchTokens;
+        this.demand = demand;
         this.pendingRequestCount = pendingRequestCount;
     }
 
@@ -37,7 +70,7 @@ final class RouteTimelineProjector {
      * and that cursor overlap via {@code max(cursor, readyAt)}. The snapshot's
      * frozen delivery projection defines each group's completion shape.
      */
-    RouteProjection.Candidate project(
+    RouteProjection.CandidateView project(
             QueueSnapshot queue,
             WorkSnapshot committed,
             PrefillTimePredictor.Evaluator evaluator,
@@ -47,49 +80,47 @@ final class RouteTimelineProjector {
         if (evaluator == null) {
             return unavailable("PREDICTOR_MISSING");
         }
-        if (incoming.expiresAtMs() <= 0L
-                || projectionAtMs >= incoming.expiresAtMs()) {
+        if (expiresAtMs <= 0L || projectionAtMs >= expiresAtMs) {
             return unavailable("INCOMING_EXPIRED");
         }
 
-        PredictionBoundary predictions = new PredictionBoundary(evaluator);
+        predictions.reset(evaluator);
         try {
             return projectWithPredictions(
                     queue, committed, deliveryProjection,
                     projectionAtMs, predictions);
         } catch (PredictionFailure predictionFailure) {
             return unavailable(predictionFailure.detail("PREDICTION_FAILED"));
+        } finally {
+            predictions.reset(null);
         }
     }
 
-    private RouteProjection.Candidate projectWithPredictions(
+    private RouteProjection.CandidateView projectWithPredictions(
             QueueSnapshot queue,
             WorkSnapshot committed,
             RouteProjection.DeliveryProjection deliveryProjection,
             long projectionAtMs,
             PredictionBoundary predictions) {
-        if (containsCommittedRequest(committed, incoming.requestId())) {
+        if (containsCommittedRequest(committed, requestId)) {
             return unavailable("INCOMING_ALREADY_COMMITTED");
         }
-        GroupPlanner.Item probe = incoming.asItem();
 
         final long incomingPrefillMs;
         try {
             incomingPrefillMs = predictions.singleMs(
-                    incoming.seqLen(), incoming.hitCache());
+                    seqLen, hitCache);
         } catch (PredictionFailure predictionFailure) {
             return unavailable(
                     predictionFailure.detail("SINGLE_PREDICTION_FAILED"));
         }
 
         if (committed.hasUnknownWork()) {
-            if (containsActiveRequest(queue, incoming.requestId())) {
+            if (containsActiveRequest(queue, requestId)) {
                 return unavailable("INCOMING_ALREADY_ACTIVE");
             }
             if (queue.queueScheduling()) {
-                GroupPlanner.Shape incomingShape =
-                        GroupPlanner.Shape.empty().add(incoming.seqLen());
-                if (!incomingShape.fitsKv(queue.constraints().batchKvCapacity())) {
+                if (seqLen > queue.constraints().batchKvCapacity()) {
                     return blocked(
                             incomingPrefillMs,
                             RouteProjection.Candidate.InitialHeadDisposition.NONE,
@@ -109,13 +140,13 @@ final class RouteTimelineProjector {
          */
         if (queue.queueScheduling() && queue.activeItems().isEmpty()) {
             long collectionDeadline = GroupPlanner.collectionDeadlineMs(
-                    probe.enqueuedAtMs(),
+                    enqueuedAtMs,
                     queue.constraints().collectionWindowMs());
-            if (probe.expiresAtMs() <= collectionDeadline) {
+            if (expiresAtMs <= collectionDeadline) {
                 return unavailable("INCOMING_EXPIRED_BEFORE_DISPATCH");
             }
             return projectIdleSingleton(
-                    queue, deliveryProjection, predictions, incoming,
+                    deliveryProjection, predictions,
                     incomingPrefillMs, committedMs);
         }
 
@@ -123,14 +154,17 @@ final class RouteTimelineProjector {
             long completionMs = saturatedAdd(committedMs, incomingPrefillMs);
             return candidate(
                     RouteProjection.Candidate.State.MODELED,
-                    OptionalLong.of(completionMs),
-                    incoming.demand().drainRequired()
-                            ? OptionalLong.of(completionMs)
-                            : OptionalLong.empty(),
+                    completionMs,
+                    demand.drainRequired()
+                            ? completionMs
+                            : RouteProjection.Candidate.UNKNOWN,
                     incomingPrefillMs,
                     RouteProjection.Candidate.InitialHeadDisposition.NONE,
                     "SERIAL_FROZEN_DIRECT");
         }
+        GroupPlanner.Item probe = new GroupPlanner.Item(
+                requestId, priority, Long.MAX_VALUE, enqueuedAtMs,
+                expiresAtMs, seqLen, hitCache);
         GroupPlanner.Item initialActiveHead =
                 queue.activeItems().isEmpty() ? null : queue.activeItems().getFirst();
         RouteProjection.Candidate.InitialHeadDisposition initialHeadDisposition =
@@ -149,7 +183,7 @@ final class RouteTimelineProjector {
                 }
                 continue;
             }
-            if (item.requestId() == incoming.requestId()) {
+            if (item.requestId() == requestId) {
                 return unavailable("INCOMING_ALREADY_ACTIVE");
             }
             eligibleActive.add(item);
@@ -256,7 +290,7 @@ final class RouteTimelineProjector {
                     // this exact completion offset has been established.
                     probeSeen = true;
                 }
-                if (!containsProbe || incoming.demand().drainRequired()) {
+                if (!containsProbe || demand.drainRequired()) {
                     cursorMs = saturatedAdd(
                             startMs, service.totalDurationMs());
                 } else {
@@ -277,7 +311,7 @@ final class RouteTimelineProjector {
             }
             ordered.removePlannedPrefix(plan.items().size());
 
-            if (probeSeen && !incoming.demand().drainRequired()) {
+            if (probeSeen && !demand.drainRequired()) {
                 return modeledTtftOnly(
                         probeCompletionMs, incomingPrefillMs,
                         initialHeadDisposition);
@@ -290,66 +324,47 @@ final class RouteTimelineProjector {
         }
         return candidate(
                 RouteProjection.Candidate.State.MODELED,
-                OptionalLong.of(probeCompletionMs),
-                drainKnown ? OptionalLong.of(cursorMs) : OptionalLong.empty(),
+                probeCompletionMs,
+                drainKnown ? cursorMs : RouteProjection.Candidate.UNKNOWN,
                 incomingPrefillMs,
                 initialHeadDisposition,
                 drainDetail);
     }
 
-    private RouteProjection.Candidate projectIdleSingleton(
-            QueueSnapshot queue,
+    private RouteProjection.CandidateView projectIdleSingleton(
             RouteProjection.DeliveryProjection deliveryProjection,
             PredictionBoundary predictions,
-            RouteProjection.Probe probe,
             long incomingPrefillMs,
             long committedMs) {
-        GroupPlanner.Item item = probe.asItem();
-        List<GroupPlanner.Item> singleton = List.of(item);
-        try {
-            deliveryProjection.planning(predictions)
-                    .durationMs(singleton, 0);
-        } catch (PredictionFailure predictionFailure) {
-            return unavailable(
-                    predictionFailure.detail("BATCH_PREDICTION_FAILED"));
-        }
-        GroupPlanner.Plan<GroupPlanner.Item> plan = new GroupPlanner.Plan<>(
-                singleton,
-                GroupPlanner.Shape.empty().add(item.seqLen()),
-                queue.capturedAtMs(),
-                queue.capturedAtMs(),
-                false,
-                OptionalDouble.empty(),
-                GroupPlanner.FIXED_WINDOW_TIMEOUT);
         final long completionMs;
         try {
             completionMs = saturatedAdd(
                     committedMs,
-                    deliveryProjection.service(plan, predictions)
-                            .completionOffsetMs(0));
+                    deliveryProjection.singletonCompletionOffsetMs(
+                            seqLen, hitCache, predictions));
         } catch (PredictionFailure predictionFailure) {
             return unavailable(
                     predictionFailure.detail("SERVICE_PREDICTION_FAILED"));
         }
         return candidate(
                 RouteProjection.Candidate.State.MODELED,
-                OptionalLong.of(completionMs),
-                probe.demand().drainRequired()
-                        ? OptionalLong.of(completionMs)
-                        : OptionalLong.empty(),
+                completionMs,
+                demand.drainRequired()
+                        ? completionMs
+                        : RouteProjection.Candidate.UNKNOWN,
                 incomingPrefillMs,
                 RouteProjection.Candidate.InitialHeadDisposition.NONE,
                 "EMPTY_ACTIVE_QUEUE_SINGLETON");
     }
 
-    private RouteProjection.Candidate modeledTtftOnly(
+    private RouteProjection.CandidateView modeledTtftOnly(
             long probeCompletionMs,
             long incomingPrefillMs,
             RouteProjection.Candidate.InitialHeadDisposition initialHeadDisposition) {
         return candidate(
                 RouteProjection.Candidate.State.MODELED,
-                OptionalLong.of(probeCompletionMs),
-                OptionalLong.empty(),
+                probeCompletionMs,
+                RouteProjection.Candidate.UNKNOWN,
                 incomingPrefillMs,
                 initialHeadDisposition,
                 "SERIAL_FROZEN_QUEUE_TTFT_ONLY");
@@ -357,17 +372,7 @@ final class RouteTimelineProjector {
 
     private static boolean containsCommittedRequest(
             WorkSnapshot committed, long requestId) {
-        for (WorkSnapshot.RequestWork request : committed.requests()) {
-            if (request.requestId() == requestId) {
-                return true;
-            }
-        }
-        for (WorkSnapshot.BatchWork batch : committed.batches()) {
-            if (batch.requestIds().contains(requestId)) {
-                return true;
-            }
-        }
-        return false;
+        return committed.containsRequest(requestId);
     }
 
     private static boolean containsActiveRequest(
@@ -383,26 +388,7 @@ final class RouteTimelineProjector {
     /** Remaining committed work normalized to the projection's common clock. */
     private static long knownRemainingWorkMsAt(
             WorkSnapshot committed, long projectionAtMs) {
-        long elapsedMs = elapsedFromNow(
-                committed.capturedAtMs(), projectionAtMs);
-        long totalMs = 0L;
-        for (WorkSnapshot.RequestWork request : committed.requests()) {
-            totalMs = saturatedAdd(totalMs, remainingAt(request.phase(),
-                    request.remainingWorkMs(), elapsedMs));
-        }
-        for (WorkSnapshot.BatchWork batch : committed.batches()) {
-            totalMs = saturatedAdd(totalMs, remainingAt(batch.phase(),
-                    batch.remainingWorkMs().orElseThrow(), elapsedMs));
-        }
-        return totalMs;
-    }
-
-    private static long remainingAt(
-            WorkSnapshot.Phase phase, long remainingMs, long elapsedMs) {
-        if (phase != WorkSnapshot.Phase.ENGINE_RUNNING) {
-            return remainingMs;
-        }
-        return elapsedMs >= remainingMs ? 0L : remainingMs - elapsedMs;
+        return committed.knownRemainingWorkMsAt(projectionAtMs);
     }
 
     private static boolean expiredAt(
@@ -587,48 +573,141 @@ final class RouteTimelineProjector {
         return deadlineMs <= nowMs ? 0L : deadlineMs - nowMs;
     }
 
-    private RouteProjection.Candidate unavailable(String detail) {
+    private RouteProjection.CandidateView unavailable(String detail) {
         return candidate(
                 RouteProjection.Candidate.State.UNAVAILABLE,
-                OptionalLong.empty(), OptionalLong.empty(), 0L,
+                RouteProjection.Candidate.UNKNOWN,
+                RouteProjection.Candidate.UNKNOWN, 0L,
                 RouteProjection.Candidate.InitialHeadDisposition.NONE, detail);
     }
 
-    private RouteProjection.Candidate unmodeledEngineWork(
+    private RouteProjection.CandidateView unmodeledEngineWork(
             long incomingPrefillMs) {
         return candidate(
                 RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK,
-                OptionalLong.empty(), OptionalLong.empty(), incomingPrefillMs,
+                RouteProjection.Candidate.UNKNOWN,
+                RouteProjection.Candidate.UNKNOWN, incomingPrefillMs,
                 RouteProjection.Candidate.InitialHeadDisposition.NONE,
                 "ENGINE_WORK_UNOBSERVABLE");
     }
 
-    private RouteProjection.Candidate blocked(
+    private RouteProjection.CandidateView blocked(
             long incomingPrefillMs,
             RouteProjection.Candidate.InitialHeadDisposition initialHeadDisposition,
             String detail) {
         return candidate(
                 RouteProjection.Candidate.State.BLOCKED,
-                OptionalLong.empty(), OptionalLong.empty(), incomingPrefillMs,
+                RouteProjection.Candidate.UNKNOWN,
+                RouteProjection.Candidate.UNKNOWN, incomingPrefillMs,
                 initialHeadDisposition, detail);
     }
 
-    private RouteProjection.Candidate candidate(
+    private RouteProjection.CandidateView candidate(
             RouteProjection.Candidate.State state,
-            OptionalLong projectedTtftMs,
-            OptionalLong projectedDrainMs,
+            long projectedTtftMs,
+            long projectedDrainMs,
             long incomingPrefillMs,
             RouteProjection.Candidate.InitialHeadDisposition headDisposition,
             String detail) {
         boolean carriesPending = state == RouteProjection.Candidate.State.MODELED
                 || state == RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK;
-        return new RouteProjection.Candidate(
+        result.reset(
                 state, projectedTtftMs, projectedDrainMs, incomingPrefillMs,
                 headDisposition, detail, null,
-                incoming.hitCache(), incoming.routingCacheMatchTokens(),
+                hitCache, routingCacheMatchTokens,
                 carriesPending
-                        ? OptionalLong.of(pendingRequestCount)
-                        : OptionalLong.empty());
+                        ? pendingRequestCount
+                        : RouteProjection.Candidate.UNKNOWN);
+        return result;
+    }
+
+    /** Reused only by the owning projection thread. */
+    private static final class ProjectedCandidate
+            implements RouteProjection.CandidateView {
+        private RouteProjection.Candidate.State state;
+        private long projectedTtftMsValue;
+        private long projectedDrainMsValue;
+        private long incomingPrefillMs;
+        private RouteProjection.Candidate.InitialHeadDisposition headDisposition;
+        private String detail;
+        private org.flexlb.dao.route.RoleType blockerRole;
+        private long cacheHitTokens;
+        private long routingCacheMatchTokens;
+        private long pendingCountValue;
+
+        private void reset(
+                RouteProjection.Candidate.State exactState,
+                long exactProjectedTtftMs,
+                long exactProjectedDrainMs,
+                long exactIncomingPrefillMs,
+                RouteProjection.Candidate.InitialHeadDisposition exactHeadDisposition,
+                String exactDetail,
+                org.flexlb.dao.route.RoleType exactBlockerRole,
+                long exactCacheHitTokens,
+                long exactRoutingCacheMatchTokens,
+                long exactPendingCount) {
+            state = exactState;
+            projectedTtftMsValue = exactProjectedTtftMs;
+            projectedDrainMsValue = exactProjectedDrainMs;
+            incomingPrefillMs = exactIncomingPrefillMs;
+            headDisposition = exactHeadDisposition;
+            detail = exactDetail;
+            blockerRole = exactBlockerRole;
+            cacheHitTokens = exactCacheHitTokens;
+            routingCacheMatchTokens = exactRoutingCacheMatchTokens;
+            pendingCountValue = exactPendingCount;
+        }
+
+        @Override
+        public RouteProjection.Candidate.State state() {
+            return state;
+        }
+
+        @Override
+        public long projectedTtftMsValue() {
+            return projectedTtftMsValue;
+        }
+
+        @Override
+        public long projectedDrainMsValue() {
+            return projectedDrainMsValue;
+        }
+
+        @Override
+        public long incomingPrefillMs() {
+            return incomingPrefillMs;
+        }
+
+        @Override
+        public RouteProjection.Candidate.InitialHeadDisposition
+                initialHeadDisposition() {
+            return headDisposition;
+        }
+
+        @Override
+        public String detail() {
+            return detail;
+        }
+
+        @Override
+        public org.flexlb.dao.route.RoleType blockerRole() {
+            return blockerRole;
+        }
+
+        @Override
+        public long cacheHitTokens() {
+            return cacheHitTokens;
+        }
+
+        @Override
+        public long routingCacheMatchTokens() {
+            return routingCacheMatchTokens;
+        }
+
+        @Override
+        public long pendingCountValue() {
+            return pendingCountValue;
+        }
     }
 
     private static long saturatedAdd(long left, long right) {
@@ -644,22 +723,38 @@ final class RouteTimelineProjector {
     private static final class PredictionBoundary
             implements RouteProjection.Predictions {
 
-        private final PrefillTimePredictor.Evaluator evaluator;
+        private PrefillTimePredictor.Evaluator evaluator;
+        private Object cachedSingleSnapshot;
         private long cachedSeqLen = -1L;
         private long cachedHitCache = -1L;
         private long cachedSingleMs;
+        private Object cachedBatchSnapshot;
+        private long cachedBatchSeqLen = -1L;
+        private long cachedBatchHitCache = -1L;
+        private double cachedBatchMs;
+        private PrefillBatchFeatures cachedSingletonBatch;
 
-        private PredictionBoundary(PrefillTimePredictor.Evaluator evaluator) {
+        private PredictionBoundary() {
+        }
+
+        private void reset(PrefillTimePredictor.Evaluator evaluator) {
             this.evaluator = evaluator;
+            // Prediction caches are keyed by immutable model snapshot and
+            // request shape, so they remain valid across equal-model endpoint
+            // probes in one full-fleet selection (and across later calls).
         }
 
         private long singleMs(long seqLen, long hitCache) {
-            if (cachedSeqLen == seqLen && cachedHitCache == hitCache) {
+            Object snapshot = evaluator.snapshotIdentity();
+            if (cachedSingleSnapshot == snapshot
+                    && cachedSeqLen == seqLen
+                    && cachedHitCache == hitCache) {
                 return cachedSingleMs;
             }
             try {
                 long predicted = PrefillPredictionBoundary.predictSingleRequestMs(
                         evaluator, seqLen, hitCache);
+                cachedSingleSnapshot = snapshot;
                 cachedSeqLen = seqLen;
                 cachedHitCache = hitCache;
                 cachedSingleMs = predicted;
@@ -677,11 +772,40 @@ final class RouteTimelineProjector {
         }
 
         @Override
+        public long itemDurationMs(long seqLen, long hitCache) {
+            return singleMs(seqLen, hitCache);
+        }
+
+        @Override
         public double batchPlanningDurationMs(
                 List<GroupPlanner.Item> items) {
             try {
                 return PrefillPredictionBoundary.predictDecisionGroupMs(
                         evaluator, batchFeatures(items));
+            } catch (InvalidPrefillPredictionException invalidPrediction) {
+                throw PredictionFailure.invalid(invalidPrediction);
+            } catch (RuntimeException predictionFailure) {
+                throw PredictionFailure.execution(predictionFailure);
+            }
+        }
+
+        @Override
+        public double singletonBatchPlanningDurationMs(
+                long seqLen, long hitCache) {
+            Object snapshot = evaluator.snapshotIdentity();
+            if (cachedBatchSnapshot == snapshot
+                    && cachedBatchSeqLen == seqLen
+                    && cachedBatchHitCache == hitCache) {
+                return cachedBatchMs;
+            }
+            try {
+                double predicted = PrefillPredictionBoundary.predictDecisionGroupMs(
+                        evaluator, singletonBatch(seqLen, hitCache));
+                cachedBatchSnapshot = snapshot;
+                cachedBatchSeqLen = seqLen;
+                cachedBatchHitCache = hitCache;
+                cachedBatchMs = predicted;
+                return predicted;
             } catch (InvalidPrefillPredictionException invalidPrediction) {
                 throw PredictionFailure.invalid(invalidPrediction);
             } catch (RuntimeException predictionFailure) {
@@ -700,6 +824,26 @@ final class RouteTimelineProjector {
             } catch (RuntimeException predictionFailure) {
                 throw PredictionFailure.execution(predictionFailure);
             }
+        }
+
+        @Override
+        public long singletonBatchDurationMs(
+                long seqLen, long hitCache) {
+            return committedGroupDurationMs(
+                    singletonBatchPlanningDurationMs(seqLen, hitCache));
+        }
+
+        private PrefillBatchFeatures singletonBatch(
+                long seqLen, long hitCache) {
+            PrefillBatchFeatures features = cachedSingletonBatch;
+            if (features == null
+                    || features.items().getFirst().seqLen() != seqLen
+                    || features.items().getFirst().hitCache() != hitCache) {
+                features = new PrefillBatchFeatures(List.of(
+                        new PrefillBatchFeatures.Item(seqLen, hitCache)));
+                cachedSingletonBatch = features;
+            }
+            return features;
         }
 
         @Override

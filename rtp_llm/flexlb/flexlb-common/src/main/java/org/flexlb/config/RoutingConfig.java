@@ -7,7 +7,6 @@ import lombok.Setter;
 @Setter
 public final class RoutingConfig {
 
-    private long availabilityHysteresisPercent = 15;
     private volatile TrafficPolicyConfig groupSelector;
     private RolesConfig roles = new RolesConfig();
 
@@ -97,6 +96,7 @@ public final class RoutingConfig {
                 new DecodeAvailabilityConfig();
         private KvReservationConfig kvReservation = new KvReservationConfig();
         private double decayPerToken = 0.001;
+        private double loadDecayPerRequest = 1.0;
         private DecodeOutlierRejectionConfig outlierRejection =
                 new DecodeOutlierRejectionConfig();
     }

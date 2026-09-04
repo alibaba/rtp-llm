@@ -20,16 +20,15 @@ import java.util.function.BooleanSupplier;
  *
  * <p>Ownership is transferred once from the planner to the commit sequencer;
  * the object is never accessed concurrently. It owns both
- * endpoint-generation pins. Exact Decode capacity is acquired only in the
- * short publication transaction. A successful commit moves ownership to the
- * canonical RequestSlot / ScheduledRequest; closing rolls back local ownership.</p>
+ * endpoint-generation pins. Exact Decode capacity is acquired only by the
+ * ordered publication transaction; planning never mutates endpoint capacity.
+ * A successful commit transfers ownership to the canonical RequestSlot /
+ * ScheduledRequest, while closing rolls back local pin ownership.</p>
  */
 public final class QueueRouteAdmission implements AutoCloseable {
 
     private final long requestId;
     private final Response response;
-    private final ScheduledRequest.DecodeReselection decodeReselection;
-    private final PlacementAvailability placementAvailability;
     private OwnedRoute ownedRoute;
     /** Exact endpoint which rejected the last publication attempt. */
     private WorkerEndpoint blockedEndpoint;
@@ -37,37 +36,26 @@ public final class QueueRouteAdmission implements AutoCloseable {
     private QueueRouteAdmission(
             long requestId,
             Response response,
-            OwnedRoute ownedRoute,
-            ScheduledRequest.DecodeReselection decodeReselection,
-            PlacementAvailability placementAvailability) {
+            OwnedRoute ownedRoute) {
         this.requestId = requestId;
         this.response = Objects.requireNonNull(response, "response");
         this.ownedRoute = Objects.requireNonNull(ownedRoute, "ownedRoute");
-        this.decodeReselection = decodeReselection;
-        this.placementAvailability = placementAvailability;
     }
 
     static QueueRouteAdmission prepare(
             BalanceContext context,
             List<SelectedRole> selectedRoles,
             Response response) {
-        return prepare(context, selectedRoles, response, null, null);
-    }
-
-    static QueueRouteAdmission prepare(
-            BalanceContext context,
-            List<SelectedRole> selectedRoles,
-            Response response,
-            ScheduledRequest.DecodeReselection decodeReselection,
-            PlacementAvailability placementAvailability) {
         long requestId = context.getRequestId();
 
         PrefillEndpoint prefillEndpoint = null;
         WorkerEndpoint.GenerationPin prefillPin = null;
         ServerStatus prefillStatus = null;
+        long prefillPlacementVersion = 0L;
         DecodeEndpoint decodeEndpoint = null;
         WorkerEndpoint.GenerationPin decodePin = null;
         ServerStatus decodeStatus = null;
+        long decodePlacementVersion = 0L;
 
         try {
             for (SelectedRole selected : selectedRoles) {
@@ -77,6 +65,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
                             "selected role belongs to another request");
                 }
                 RoleType role = status.getRole();
+                long placementVersion = selected.placementVersion();
                 WorkerEndpoint.GenerationPin pin =
                         selected.takeGenerationPin();
                 WorkerEndpoint endpoint = pin.endpoint();
@@ -90,6 +79,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
                     prefillEndpoint = prefill;
                     prefillPin = pin;
                     prefillStatus = status;
+                    prefillPlacementVersion = placementVersion;
                     continue;
                 }
                 if (role == RoleType.DECODE) {
@@ -102,6 +92,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
                     decodeEndpoint = decode;
                     decodePin = pin;
                     decodeStatus = status;
+                    decodePlacementVersion = placementVersion;
                     continue;
                 }
                 // Stateless roles need no owner after their response metadata
@@ -120,12 +111,12 @@ public final class QueueRouteAdmission implements AutoCloseable {
                             prefillEndpoint,
                             prefillPin,
                             prefillStatus,
+                            prefillPlacementVersion,
                             decodeEndpoint,
                             decodePin,
                             null,
-                            decodeStatus),
-                    decodeReselection,
-                    placementAvailability);
+                            decodeStatus,
+                            decodePlacementVersion));
         } catch (RuntimeException | Error failure) {
             WorkerEndpoint.GenerationPin ownedPrefillPin = prefillPin;
             WorkerEndpoint.GenerationPin ownedDecodePin = decodePin;
@@ -186,12 +177,12 @@ public final class QueueRouteAdmission implements AutoCloseable {
                                     prefillEndpoint,
                                     prefillPin,
                                     prefillStatus,
+                                    prefillSelection.placementVersion(),
                                     decodeEndpoint,
                                     decodePin,
                                     decodeReservation,
-                                    decodeStatus),
-                            null,
-                            null);
+                                    decodeStatus,
+                                    decodeEndpoint.placementVersion()));
                 }
             }
         } catch (RuntimeException | Error failure) {
@@ -214,20 +205,6 @@ public final class QueueRouteAdmission implements AutoCloseable {
         return response;
     }
 
-    /** Prefill capacity domain contended by this exact selected route. */
-    PlacementKey prefillPlacementKey() {
-        OwnedRoute route = requireOwned();
-        return placementKey(
-                route.prefillStatus(), route.prefillEndpoint());
-    }
-
-    /** Decode capacity domain, or null when this model has no Decode role. */
-    PlacementKey decodePlacementKey() {
-        ServerStatus status = requireOwned().decodeStatus();
-        return status == null ? null : placementKey(
-                status, requireOwned().decodeEndpoint());
-    }
-
     /**
      * Returns the exact endpoint whose local capacity rejected publication.
      * A queue coordinator may bypass this request only for a route which does
@@ -236,6 +213,29 @@ public final class QueueRouteAdmission implements AutoCloseable {
      */
     WorkerEndpoint blockedEndpoint() {
         return blockedEndpoint;
+    }
+
+    /** Whether the exact capacity miss invalidated the planning snapshot. */
+    boolean blockedSelectionBecameStale() {
+        OwnedRoute route = requireOwned();
+        if (blockedEndpoint == route.prefillEndpoint()) {
+            return route.prefillPlacementVersion()
+                    != route.prefillEndpoint().placementVersion();
+        }
+        if (blockedEndpoint == route.decodeEndpoint()) {
+            return route.decodePlacementVersion()
+                    != route.decodeEndpoint().placementVersion();
+        }
+        return false;
+    }
+
+    WorkerBatcher.QueueSnapshot capturePrefillQueueSnapshot() {
+        return requireOwned().prefillEndpoint().captureQueueSnapshot();
+    }
+
+    long selectedDecodeTotalKv() {
+        DecodeEndpoint endpoint = requireOwned().decodeEndpoint();
+        return endpoint == null ? 0L : endpoint.realKvTotal();
     }
 
     /** Whether this still-owned route contends with the supplied endpoint. */
@@ -265,15 +265,10 @@ public final class QueueRouteAdmission implements AutoCloseable {
                 route.prefillEndpoint(),
                 route.decodeEndpoint(),
                 route.decodeReservation(),
-                enqueuedAtMs,
-                decodeReselection,
-                placementAvailability);
+                enqueuedAtMs);
     }
 
-    /**
-     * Acquire exact capacity and publish once. A blocked result owns no
-     * endpoint resource and is safe to retry through a fresh route selection.
-     */
+    /** Acquire exact Decode and Prefill capacity, then publish once. */
     public PlacementResult<ScheduledRequest, PlacementKey> tryPublish(
             BalanceContext context,
             CompletableFuture<Response> future,
@@ -295,7 +290,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
                 lifecycle,
                 item,
                 false,
-                () -> exact.prefillEndpoint().offerPinnedForPlacement(
+                () -> exact.prefillEndpoint().offerPinned(
                         exact.prefillPin(), item));
         return switch (committed) {
             case SUCCESS -> PlacementResult.success(item);
@@ -419,8 +414,50 @@ public final class QueueRouteAdmission implements AutoCloseable {
         return committed;
     }
 
-    /** Commit one exact queue replacement; missing victims never degrade to a plain offer. */
-    public WorkerBatcher.QueueReplacementStatus commitReplacingQueuedVictims(
+    /** Result of one commit-time route reservation and exact queue replacement. */
+    public record QueueReplacementCommit(
+            WorkerBatcher.QueueReplacementStatus status,
+            ScheduledRequest item) {
+
+        public QueueReplacementCommit {
+            Objects.requireNonNull(status, "status");
+            if ((status == WorkerBatcher.QueueReplacementStatus.SUCCESS)
+                    != (item != null)) {
+                throw new IllegalArgumentException(
+                        "only a successful replacement owns the committed item");
+            }
+        }
+    }
+
+    /**
+     * Acquire Decode capacity and commit one exact queue replacement. Missing
+     * victims never degrade to a plain offer, and planning owns no capacity.
+     */
+    public QueueReplacementCommit commitReplacingQueuedVictims(
+            BalanceContext context,
+            CompletableFuture<Response> future,
+            RequestRegistry lifecycle,
+            boolean priorityAdmission,
+            List<ScheduledRequest> exactVictims) {
+        OwnedRoute route = requireOwned();
+        blockedEndpoint = null;
+        if (!tryReserveDecode(context, route)) {
+            return new QueueReplacementCommit(
+                    WorkerBatcher.QueueReplacementStatus.DECLINED, null);
+        }
+        ScheduledRequest item = buildItem(
+                context, future, System.currentTimeMillis());
+        context.setRouteSubmittedNanos(System.nanoTime());
+        WorkerBatcher.QueueReplacementStatus status =
+                commitPreparedReplacement(
+                        lifecycle, item, priorityAdmission, exactVictims);
+        return new QueueReplacementCommit(
+                status,
+                status == WorkerBatcher.QueueReplacementStatus.SUCCESS
+                        ? item : null);
+    }
+
+    private WorkerBatcher.QueueReplacementStatus commitPreparedReplacement(
             RequestRegistry lifecycle,
             ScheduledRequest item,
             boolean priorityAdmission,
@@ -502,7 +539,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
         try (prefillPin; decodePin) {
             if (route.decodeEndpoint() != null
                     && route.decodeReservation() != null) {
-                route.decodeEndpoint().releaseReservationExactSilently(
+                route.decodeEndpoint().releaseReservationExact(
                         route.decodeReservation());
             }
         }
@@ -512,10 +549,12 @@ public final class QueueRouteAdmission implements AutoCloseable {
             PrefillEndpoint prefillEndpoint,
             WorkerEndpoint.GenerationPin prefillPin,
             ServerStatus prefillStatus,
+            long prefillPlacementVersion,
             DecodeEndpoint decodeEndpoint,
             WorkerEndpoint.GenerationPin decodePin,
             DecodeEndpoint.ReservationHandle decodeReservation,
-            ServerStatus decodeStatus) {
+            ServerStatus decodeStatus,
+            long decodePlacementVersion) {
 
         private OwnedRoute withDecodeReservation(
                 DecodeEndpoint.ReservationHandle reservation) {
@@ -523,10 +562,12 @@ public final class QueueRouteAdmission implements AutoCloseable {
                     prefillEndpoint,
                     prefillPin,
                     prefillStatus,
+                    prefillPlacementVersion,
                     decodeEndpoint,
                     decodePin,
                     reservation,
-                    decodeStatus);
+                    decodeStatus,
+                    decodePlacementVersion);
         }
     }
 }

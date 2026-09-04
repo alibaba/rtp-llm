@@ -46,14 +46,10 @@ class RouteDeliveryStrategyTest {
                 fixture.slots.completions());
         assertEquals(List.of(List.of(first, second)),
                 fixture.telemetry.routes());
-        verify(fixture.capabilities.prefill()).reserveRoute(
-                org.mockito.ArgumentMatchers.same(first),
-                org.mockito.ArgumentMatchers.eq(90L),
-                org.mockito.ArgumentMatchers.anyInt());
-        verify(fixture.capabilities.prefill()).reserveRoute(
-                org.mockito.ArgumentMatchers.same(second),
-                org.mockito.ArgumentMatchers.eq(90L),
-                org.mockito.ArgumentMatchers.anyInt());
+        verify(fixture.capabilities.routeReservation(first))
+                .updatePrediction(first, 90L);
+        verify(fixture.capabilities.routeReservation(second))
+                .updatePrediction(second, 90L);
         verify(fixture.capabilities.routeCommit()).commit(
                 org.mockito.ArgumentMatchers.eq(List.of(first, second)),
                 org.mockito.ArgumentMatchers.eq(List.of(
@@ -69,7 +65,7 @@ class RouteDeliveryStrategyTest {
     void unavailableHeadReturnsExactBoundaryWithoutPublishing() {
         Fixture fixture = new Fixture();
         ScheduledRequest head = fixture.item(1L);
-        fixture.capabilities.rejectRouteAt(0);
+        fixture.capabilities.rejectPermitAt(0);
 
         String result = fixture.context.deliver(
                 fixture.strategy, List.of(head),
@@ -106,7 +102,7 @@ class RouteDeliveryStrategyTest {
         Fixture fixture = new Fixture();
         ScheduledRequest first = fixture.item(1L);
         ScheduledRequest second = fixture.item(2L);
-        fixture.capabilities.rejectRouteAt(1);
+        fixture.capabilities.rejectPermitAt(1);
 
         String result = fixture.context.deliver(
                 fixture.strategy, List.of(first, second),
@@ -176,7 +172,7 @@ class RouteDeliveryStrategyTest {
                 "lost-commit", 0, OptionalLong.empty());
 
         assertEquals("NOT_COMMITTED", result);
-        verify(fixture.capabilities.routeReservation(head)).close();
+        verify(fixture.capabilities.routeReservation(head), never()).close();
         verify(fixture.capabilities.permit(head)).release();
         verify(fixture.capabilities.permit(head), never())
                 .transferToEngineLifecycle();

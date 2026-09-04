@@ -7,6 +7,7 @@ import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.DispatcherConfig;
+import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
@@ -82,6 +83,39 @@ class PrefillEndpointTest {
     }
 
     // ---- batch commit / release ----
+
+    @Test
+    void batchPublicationCreditsComposeBatchAndDecisionCapacity() {
+        FlexlbConfig batchConfig = new FlexlbConfig();
+        configureBatch(batchConfig, 100, 3, 300, 2);
+        PrefillEndpoint fixedWindowEndpoint = new PrefillEndpoint(
+                EndpointTestSupport.workerStatus(
+                        RoleType.PREFILL, "127.0.0.2", 8080, 8090),
+                batchConfig,
+                EndpointTestSupport.routeStrategy(requestRuntime),
+                requestRuntime.events(),
+                endpointReporter);
+        try {
+            assertEquals(6, fixedWindowEndpoint.availableDeliveryCredits());
+        } finally {
+            fixedWindowEndpoint.close();
+        }
+
+        batchConfig.queueScheduler().setDecision(
+                DecisionPolicyConfig.single());
+        PrefillEndpoint singleEndpoint = new PrefillEndpoint(
+                EndpointTestSupport.workerStatus(
+                        RoleType.PREFILL, "127.0.0.3", 8080, 8090),
+                batchConfig,
+                EndpointTestSupport.routeStrategy(requestRuntime),
+                requestRuntime.events(),
+                endpointReporter);
+        try {
+            assertEquals(2, singleEndpoint.availableDeliveryCredits());
+        } finally {
+            singleEndpoint.close();
+        }
+    }
 
     @Test
     void nonBatchPublishAtomicallyOwnsAndReleasesRouteCredit() {
@@ -1250,7 +1284,7 @@ class PrefillEndpointTest {
 
             assertEquals(
                     PrefillState.CapacityStatus.ENDPOINT_RETIRED,
-                    retirementEndpoint.reserveRoute(
+                    retirementEndpoint.reservePublishedRouteCredit(
                             createScheduledRequest(
                                     retirementEndpoint,
                                     retirementConfig,
@@ -1270,6 +1304,7 @@ class PrefillEndpointTest {
             throws Exception {
         FlexlbConfig retirementConfig = new FlexlbConfig();
         configureBatch(retirementConfig, 100, 1, 0, null);
+        retirementConfig.setDispatcher(DispatcherConfig.nonBatch());
         setFormula(retirementConfig, "0");
 
         WorkerStatus status = EndpointTestSupport.workerStatus(
@@ -1313,7 +1348,6 @@ class PrefillEndpointTest {
                             org.mockito.Mockito.anyLong()))
                     .thenReturn(new DecodeEndpoint.EngineDispatchPermitAcquisition(
                             DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
-                            decodeReservation,
                             permit));
             org.mockito.Mockito.when(permit.transferToEngineLifecycle())
                     .thenReturn(

@@ -149,9 +149,10 @@ only when the caller did not supply a priority.
 Ordering is global to one model's `GlobalQueueCoordinator`. Its ordered snapshot
 is the placement boundary for one decision. A queue insertion that linearizes
 after that snapshot belongs to the next decision and does not revoke the
-captured route. A generation or exact-capacity conflict closes the stale plan
-before publication and retries from the current queue head. Delivery callbacks
-are serialized by the endpoint worker thread; asynchronous Engine
+captured route. An exact-capacity conflict is retried only when the selected
+endpoint's placement version proves that the plan is stale; an unchanged
+capacity miss parks on that endpoint immediately. Delivery callbacks are
+serialized by the endpoint worker thread; asynchronous Engine
 ACK/completion order is not a FIFO or priority guarantee.
 
 For example, suppose the global order is `[A, B, C]`. The coordinator commits
@@ -160,11 +161,11 @@ is only a decision boundary: `[A, B]` may become one endpoint-local batch or
 two batches if the requests choose different Prefill endpoints. The endpoint
 runtime can still split either group if an exact capacity or deadline check
 requires it. If `A` is rejected by the local capacity of endpoint `E1`, `B` may
-commit first when its independently selected route does not use `E1`; requests
-which use `E1` remain parked with `A` until an availability event. A selector
-miss without a concrete endpoint still blocks the frontier. Once a route is
-committed, delivery backpressure can delay the group but cannot trigger a
-second route selection.
+commit first when its independently selected route uses another endpoint. A
+later route which also uses `E1` parks behind `A`, preserving order within that
+endpoint capacity domain. A selector miss without a concrete endpoint still
+blocks the frontier. Once a route is committed, delivery backpressure can delay
+the group but cannot trigger a second route selection.
 
 PRIORITY does not create a separate request TTL. QUEUE resolves one absolute
 scheduling expiration from the public configuration:

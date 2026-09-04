@@ -3,8 +3,6 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
-import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
@@ -12,7 +10,6 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Prioritized;
 
 import java.util.Objects;
@@ -41,9 +38,7 @@ public final class ScheduledRequest implements Prioritized {
     private final Response routeResponse;
     private final ServerStatus prefill;
     private final PrefillEndpoint prefillEp;
-    private final AtomicReference<DecodeBinding> decodeBinding;
-    private final DecodeReselection decodeReselection;
-    private final PlacementAvailability placementAvailability;
+    private final DecodeBinding decodeBinding;
     private final long enqueuedAtMs;
     private final long enqueueSequence;
     private final long requestId;
@@ -72,39 +67,13 @@ public final class ScheduledRequest implements Prioritized {
                      DecodeEndpoint decodeEp,
                      DecodeEndpoint.ReservationHandle decodeReservation,
                      long enqueuedAtMs) {
-        this(ctx,
-                future,
-                routeResponse,
-                prefill,
-                decode,
-                prefillEp,
-                decodeEp,
-                decodeReservation,
-                enqueuedAtMs,
-                null,
-                null);
-    }
-
-    ScheduledRequest(BalanceContext ctx,
-                     CompletableFuture<Response> future,
-                     Response routeResponse,
-                     ServerStatus prefill,
-                     ServerStatus decode,
-                     PrefillEndpoint prefillEp,
-                     DecodeEndpoint decodeEp,
-                     DecodeEndpoint.ReservationHandle decodeReservation,
-                     long enqueuedAtMs,
-                     DecodeReselection decodeReselection,
-                     PlacementAvailability placementAvailability) {
         this.ctx = Objects.requireNonNull(ctx, "ctx");
         this.future = future;
         this.routeResponse = routeResponse;
         this.prefill = prefill;
         this.prefillEp = prefillEp;
-        this.decodeBinding = new AtomicReference<>(new DecodeBinding(
-                decode, decodeEp, decodeReservation));
-        this.decodeReselection = decodeReselection;
-        this.placementAvailability = placementAvailability;
+        this.decodeBinding = new DecodeBinding(
+                decode, decodeEp, decodeReservation);
         this.enqueuedAtMs = enqueuedAtMs;
         this.enqueueSequence = ENQUEUE_SEQUENCE.incrementAndGet();
         Request request = ctx.getRequest();
@@ -138,35 +107,15 @@ public final class ScheduledRequest implements Prioritized {
     public CompletableFuture<Response> future() { return future; }
     public Response routeResponse() { return routeResponse; }
     public ServerStatus prefill() { return prefill; }
-    public ServerStatus decode() { return decodeBinding.get().status(); }
+    public ServerStatus decode() { return decodeBinding.status(); }
     public PrefillEndpoint prefillEp() { return prefillEp; }
-    public DecodeEndpoint decodeEp() { return decodeBinding.get().endpoint(); }
+    public DecodeEndpoint decodeEp() { return decodeBinding.endpoint(); }
     public DecodeEndpoint.ReservationHandle decodeReservation() {
-        return decodeBinding.get().reservation();
+        return decodeBinding.reservation();
     }
 
     DecodeBinding decodeBinding() {
-        return decodeBinding.get();
-    }
-
-    boolean replaceDecodeBinding(
-            DecodeBinding expected,
-            DecodeBinding replacement) {
-        return decodeBinding.compareAndSet(
-                Objects.requireNonNull(expected, "expected"),
-                Objects.requireNonNull(replacement, "replacement"));
-    }
-
-    PlacementResult<SelectedRole, RoleType> selectDecodeForDispatch() {
-        DecodeBinding current = decodeBinding.get();
-        if (decodeReselection == null || current.status() == null) {
-            return null;
-        }
-        return decodeReselection.select(ctx, current.status().getGroup());
-    }
-
-    PlacementAvailability decodePlacementAvailability() {
-        return placementAvailability;
+        return decodeBinding;
     }
     public long enqueuedAtMs() { return enqueuedAtMs; }
     public long expiresAtMs() { return expiresAtMs; }
@@ -261,12 +210,6 @@ public final class ScheduledRequest implements Prioritized {
             ServerStatus status,
             DecodeEndpoint endpoint,
             DecodeEndpoint.ReservationHandle reservation) {
-    }
-
-    @FunctionalInterface
-    interface DecodeReselection {
-        PlacementResult<SelectedRole, RoleType> select(
-                        BalanceContext context, String group);
     }
 
 }

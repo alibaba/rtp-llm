@@ -5,7 +5,6 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.InternalRuntimeSettings;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
@@ -37,8 +36,8 @@ import java.util.concurrent.locks.ReentrantLock;
  * The single QUEUE admission owner for one FlexLB model.
  *
  * <p>This queue is the model's ordered placement boundary. A request is
- * selected exactly once from the complete live candidate fleet before the
- * endpoint runtime receives it. A bounded planning frontier controls how many
+ * selected from the complete live candidate fleet before the endpoint runtime
+ * receives it. A bounded planning frontier controls how many
  * independent routes can be prepared together; request collection and grouping
  * remain exclusively endpoint-runtime concerns. The queue lock protects only
  * index operations; route projection and RPCs are never performed while it is
@@ -84,6 +83,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     /** Requests blocked by an exact endpoint and eligible for endpoint bypass. */
     private final Set<Entry> endpointBlocked =
             Collections.newSetFromMap(new IdentityHashMap<>());
+    /** Lock-free empty fast path; all set mutations remain under {@link #lock}. */
+    private volatile boolean endpointBlocksPresent;
     private int size;
     /** A selector-level miss has no concrete route and cannot be bypassed. */
     private Entry frontierBlocked;
@@ -203,11 +204,16 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                         closePlan(plan);
                         continue;
                     }
-                    WorkerEndpoint conflictingEndpoint =
-                            conflictingEndpoint(plan);
-                    if (conflictingEndpoint != null) {
-                        park(plan.entry, keyFor(conflictingEndpoint),
-                                conflictingEndpoint);
+                    if (hasHigherPriorityEntry(plan.entry)) {
+                        // A priority arrival may race a captured planner
+                        // frontier. Ordering must not depend on CPU count or
+                        // how many low-priority plans happened to be in flight.
+                        closePlan(plan);
+                        closePendingPlans(plans, window, planIndex + 1);
+                        retry = true;
+                        break;
+                    }
+                    if (parkIfConflicting(plan)) {
                         closePlan(plan);
                         continue;
                     }
@@ -224,17 +230,15 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                                 plan.entry.context.getRequestId(), failure);
                         continue;
                     }
-                    if (outcome == Outcome.RETRY) {
+                    if (outcome == Outcome.REPLAN) {
+                        // The winner became stale at endpoint-local commit.
+                        // Replan this ordered frontier before consuming its
+                        // suffix. Otherwise a later request which selected the
+                        // same endpoint could overtake the older request before
+                        // its exact blocker has been published.
                         closePendingPlans(plans, window, planIndex + 1);
                         retry = true;
                         break;
-                    }
-                    if (outcome == Outcome.REPLAN) {
-                        // The winner became stale at endpoint-local commit.
-                        // Keep later independent plans moving; retry this exact
-                        // request from a fresh fleet snapshot next pass.
-                        retry = true;
-                        continue;
                     }
                     if (outcome == Outcome.BLOCKED) {
                         PlacementKey blocker = plan.blocker();
@@ -243,11 +247,11 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                                     "blocked placement has no capacity domain");
                         }
                         WorkerEndpoint blockedEndpoint = plan.blockedEndpoint();
-                        if (capacityChangedSince(plan, blocker)) {
+                        if (!parkIfCapacityUnchanged(
+                                plan, blocker, blockedEndpoint)) {
                             // The capacity edge may have been published after
                             // this planner captured its snapshot but before
-                            // the request was parked. Do not lose that wakeup;
-                            // retry against the newer endpoint state once.
+                            // the atomic park. Retry against the newer state.
                             closePlan(plan);
                             closePendingPlans(plans, window, planIndex + 1);
                             retry = true;
@@ -256,12 +260,10 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                         if (blockedEndpoint == null) {
                             // There is no exact engine identity to compare. Keep
                             // the old strict frontier semantics for this case.
-                            parkFrontier(plan.entry, blocker);
                             closePlan(plan);
                             closePendingPlans(plans, window, planIndex + 1);
                             break;
                         }
-                        park(plan.entry, blocker, blockedEndpoint);
                         closePlan(plan);
                         // The next plan can use another engine immediately. Plans
                         // on this same engine are parked as well by the conflict
@@ -295,22 +297,15 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             List<Entry> entries,
             int fromIndex) {
         for (int index = fromIndex; index < plans.size(); index++) {
-            final int pendingIndex = index;
             CompletableFuture<Plan> future = plans.submittedFuture(index);
             if (future == null) {
                 continue;
             }
-            future.whenComplete((plan, failure) -> {
-                if (failure != null) {
-                    Logger.error(
-                            "Global queue abandoned planner failed: request_id={}",
-                            entries.get(pendingIndex).context.getRequestId(),
-                            failure);
-                }
-                if (plan != null) {
-                    closePlan(plan);
-                }
-            });
+            // A submitted plan owns this Entry's sole AdmissionMutation.
+            // Re-entering the queue before it closes can misread that
+            // temporary ownership as a terminal lifecycle state. Abandonment
+            // is rare and bounded by plannerCount, so retire it synchronously.
+            closePlan(awaitPlan(future, entries.get(index)));
         }
     }
 
@@ -323,9 +318,10 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     }
 
     private List<Entry> nextWindow() {
-        lock.lock();
-        try {
-            while (!closed.get()) {
+        while (!closed.get()) {
+            long capacitySequence;
+            lock.lock();
+            try {
                 pruneHeadTombstones();
                 if (peekHead() == null) {
                     awaitChanged();
@@ -335,7 +331,32 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                         && !isQueued(frontierBlocked)) {
                     frontierBlocked = null;
                 }
-                int frontierSize = planningFrontierSize();
+                capacitySequence = availability.sequence();
+            } finally {
+                lock.unlock();
+            }
+
+            // Endpoint credit aggregation may inspect every Prefill endpoint.
+            // Keep it outside the global ordering lock so ingress/cancel never
+            // waits behind a 750-worker fleet scan.
+            int frontierSize = planningFrontierSize();
+
+            lock.lock();
+            try {
+                pruneHeadTombstones();
+                if (peekHead() == null) {
+                    continue;
+                }
+                if (frontierBlocked != null
+                        && !isQueued(frontierBlocked)) {
+                    frontierBlocked = null;
+                }
+                if (frontierSize <= 0
+                        && availability.sequence() != capacitySequence) {
+                    // A capacity edge raced with the advisory scan. Recompute
+                    // instead of sleeping after the wakeup has linearized.
+                    continue;
+                }
                 List<Entry> window = snapshotPrefix(frontierSize);
                 if (window.isEmpty()) {
                     // Every queued entry is parked, or the first otherwise
@@ -346,11 +367,11 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                     continue;
                 }
                 return window;
+            } finally {
+                lock.unlock();
             }
-            return List.of();
-        } finally {
-            lock.unlock();
         }
+        return List.of();
     }
 
     private List<Entry> snapshotPrefix(int limit) {
@@ -413,19 +434,16 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         if (entry.removed || entry.future.isDone()) {
             return Plan.done(entry, availabilitySequence);
         }
-        // Give every admitted request one authoritative route attempt.  The
-        // lifecycle registration already rejects a request which is expired
-        // at ingress; this second-attempt guard prevents a deadline update or
-        // timer race from repeatedly invoking the selector.
-        if (entry.attempted
-                && entry.context.requestExpired(System.currentTimeMillis())) {
+        // The decision point is the final hard-deadline gate. A delayed timer
+        // must not allow an already expired request to scan the fleet or be
+        // published to an endpoint queue.
+        if (entry.context.requestExpired(System.currentTimeMillis())) {
             lifecycle.cancelRequest(
                     entry.context.getRequestId(),
                     0L,
                     CancelReason.DEADLINE_EXCEEDED);
             return Plan.done(entry, availabilitySequence);
         }
-        entry.attempted = true;
         AdmissionMutation mutation = lifecycle.claimAdmissionMutation(
                 entry.context.getRequestId(), entry.future);
         if (mutation == null) {
@@ -503,6 +521,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                 return Outcome.DONE;
             }
             entry.blockedKey = publication.blocker();
+            boolean staleSelection = admission.blockedSelectionBecameStale();
             // The ordinary route still owns the admission mutation here.
             // Eviction is an independent takeover transaction and must start
             // only after that mutation and its provisional route are closed;
@@ -512,37 +531,12 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                 remove(entry);
                 return Outcome.DONE;
             }
-            if (!entry.commitConflictRetried) {
-                entry.commitConflictRetried = true;
+            if (staleSelection) {
                 return Outcome.REPLAN;
             }
             return Outcome.BLOCKED;
         } finally {
             plan.close();
-        }
-    }
-
-    /**
-     * Returns the endpoint which makes this plan unsafe to commit while an
-     * earlier request is parked. A route can contain both Prefill and Decode;
-     * sharing either exact endpoint is a local capacity conflict.
-     */
-    private WorkerEndpoint conflictingEndpoint(Plan plan) {
-        QueueRouteAdmission admission = plan.admission;
-        if (admission == null) {
-            return null;
-        }
-        lock.lock();
-        try {
-            for (Entry blocked : endpointBlocked) {
-                WorkerEndpoint endpoint = blocked.blockedEndpoint;
-                if (endpoint != null && admission.usesEndpoint(endpoint)) {
-                    return endpoint;
-                }
-            }
-            return null;
-        } finally {
-            lock.unlock();
         }
     }
 
@@ -555,54 +549,104 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         return !entry.removed && !entry.future.isDone();
     }
 
-    /**
-     * Detects a capacity publication which raced with route planning. Without
-     * this check, a release occurring immediately before {@link #park} would
-     * be consumed before the request entered the parked index and leave it
-     * waiting for a second release that might never arrive.
-     */
-    private boolean capacityChangedSince(Plan plan, PlacementKey blocker) {
-        return availability.lastChangedSequence(blocker)
-                > plan.availabilitySequence;
+    /** Revalidate PRIORITY at the commit linearization point. */
+    private boolean hasHigherPriorityEntry(Entry entry) {
+        if (!priorityOrdering) {
+            return false;
+        }
+        lock.lock();
+        try {
+            for (int priority = nonEmptyPriorities.previousSetBit(
+                            PRIORITY_LEVELS - 1);
+                    priority > entry.priority;
+                    priority = nonEmptyPriorities.previousSetBit(priority - 1)) {
+                ArrayDeque<Entry> bucket = priorityBuckets[priority];
+                if (bucket == null) {
+                    continue;
+                }
+                for (Entry candidate : bucket) {
+                    if (isEligible(candidate)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        } finally {
+            lock.unlock();
+        }
     }
 
-    private void park(
-            Entry entry,
+    /**
+     * Preserve queue order per endpoint while allowing independent endpoints
+     * to progress. Conflict discovery and park publication share the ordering
+     * lock, so an endpoint release cannot linearize between those operations.
+     */
+    private boolean parkIfConflicting(Plan plan) {
+        QueueRouteAdmission admission = plan.admission;
+        if (admission == null || !endpointBlocksPresent) {
+            return false;
+        }
+        lock.lock();
+        try {
+            for (Entry blocked : endpointBlocked) {
+                WorkerEndpoint endpoint = blocked.blockedEndpoint;
+                if (endpoint != null && admission.usesEndpoint(endpoint)) {
+                    parkEndpointUnderLock(
+                            plan.entry, blocked.blockedKey, endpoint);
+                    return true;
+                }
+            }
+            return false;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Atomically close the plan-snapshot/availability-edge race and publish
+     * either an exact endpoint blocker or a strict selector frontier.
+     *
+     * @return false when a newer capacity edge requires immediate replanning
+     */
+    private boolean parkIfCapacityUnchanged(
+            Plan plan,
             PlacementKey blocker,
             WorkerEndpoint endpoint) {
         lock.lock();
         try {
-            if (!isQueued(entry)) {
-                return;
+            if (!isQueued(plan.entry)) {
+                return true;
             }
-            entry.blockedKey = Objects.requireNonNull(blocker, "blocker");
-            entry.blockedEndpoint = Objects.requireNonNull(endpoint, "endpoint");
-            endpointBlocked.add(entry);
-            changed.signal();
+            if (availability.lastChangedSequence(blocker)
+                    > plan.availabilitySequence) {
+                return false;
+            }
+            if (endpoint == null) {
+                plan.entry.blockedKey = blocker;
+                frontierBlocked = plan.entry;
+                changed.signal();
+            } else {
+                parkEndpointUnderLock(plan.entry, blocker, endpoint);
+            }
+            return true;
         } finally {
             lock.unlock();
         }
     }
 
-    private void parkFrontier(Entry entry, PlacementKey blocker) {
-        lock.lock();
-        try {
-            if (!isQueued(entry)) {
-                return;
-            }
-            entry.blockedKey = Objects.requireNonNull(blocker, "blocker");
-            frontierBlocked = entry;
-            changed.signal();
-        } finally {
-            lock.unlock();
+    /** Caller holds {@link #lock}. */
+    private void parkEndpointUnderLock(
+            Entry entry,
+            PlacementKey blocker,
+            WorkerEndpoint endpoint) {
+        if (!isQueued(entry)) {
+            return;
         }
-    }
-
-    private static PlacementKey keyFor(WorkerEndpoint endpoint) {
-        return PlacementKey.exact(
-                endpoint.getStatus().getRole(),
-                endpoint.getStatus().topologySnapshot().group(),
-                endpoint.ipPort());
+        entry.blockedKey = Objects.requireNonNull(blocker, "blocker");
+        entry.blockedEndpoint = Objects.requireNonNull(endpoint, "endpoint");
+        endpointBlocked.add(entry);
+        endpointBlocksPresent = true;
+        changed.signal();
     }
 
     private void remove(Entry entry) {
@@ -613,6 +657,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             }
             entry.removed = true;
             endpointBlocked.remove(entry);
+            endpointBlocksPresent = !endpointBlocked.isEmpty();
             if (frontierBlocked == entry) {
                 frontierBlocked = null;
             }
@@ -638,6 +683,9 @@ final class GlobalQueueCoordinator implements AutoCloseable {
 
     /** Mark a completed request without scanning its bucket/deque. */
     private void markCompleted(Entry entry) {
+        if (entry.removed) {
+            return;
+        }
         lock.lock();
         try {
             if (entry.removed) {
@@ -646,6 +694,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             entry.removed = true;
             size = Math.max(0, size - 1);
             endpointBlocked.remove(entry);
+            endpointBlocksPresent = !endpointBlocked.isEmpty();
             if (frontierBlocked == entry) {
                 frontierBlocked = null;
             }
@@ -702,12 +751,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     }
 
     private static boolean resolvePriorityOrdering(ConfigService configService) {
-        try {
-            return configService.loadBalanceConfig().isPriorityOrdering();
-        } catch (Throwable failure) {
-            Logger.warn("Unable to read queue ordering; retaining FIFO", failure);
-            return false;
-        }
+        return configService.loadBalanceConfig().isPriorityOrdering();
     }
 
     /**
@@ -716,34 +760,28 @@ final class GlobalQueueCoordinator implements AutoCloseable {
      * global pump neither groups requests nor interprets decision policy.
      */
     private int planningFrontierSize() {
-        try {
-            var activeConfig = configService.loadBalanceConfig();
-            RoleType admissionRole = router.requiredRoles().stream()
-                    .filter(role -> role == RoleType.PREFILL
-                            || role == RoleType.PDFUSION)
-                    .findFirst()
-                    .orElse(RoleType.PREFILL);
-            long globalLimit = Math.max(
-                    MIN_PLANNING_FRONTIER_SIZE,
-                    activeConfig.queueScheduler().getCapacity()
-                            .getMaxOutstandingRequestsGlobal());
-            long available = endpointRegistry
-                    .availablePrefillDeliveryCredits(admissionRole);
-            if (available <= 0L) {
-                // With a live fleet, zero aggregate credit is authoritative:
-                // wait for an endpoint edge instead of selecting requests
-                // which cannot be committed. With no endpoint yet, route one
-                // request so the selector can establish its role/group wait.
-                return endpointRegistry.getEndpointCount(admissionRole) == 0
-                        ? MIN_PLANNING_FRONTIER_SIZE : 0;
-            }
-            available = Math.min(available, globalLimit);
-            return available >= Integer.MAX_VALUE
-                    ? Integer.MAX_VALUE : (int) available;
-        } catch (Throwable failure) {
-            Logger.warn("Unable to read queue decision policy; retaining single decision", failure);
-            return MIN_PLANNING_FRONTIER_SIZE;
+        var activeConfig = configService.loadBalanceConfig();
+        RoleType admissionRole = router.queueAdmissionRole();
+        long globalLimit = Math.max(
+                MIN_PLANNING_FRONTIER_SIZE,
+                activeConfig.queueScheduler().getCapacity()
+                        .getMaxOutstandingRequestsGlobal());
+        long available = endpointRegistry
+                .availablePrefillDeliveryCredits(admissionRole);
+        if (available <= 0L) {
+            // With a live fleet, zero aggregate credit is authoritative:
+            // wait for an endpoint edge instead of selecting requests
+            // which cannot be committed. With no endpoint yet, route one
+            // request so the selector can establish its role/group wait.
+            return endpointRegistry.getEndpointCount(admissionRole) == 0
+                    ? MIN_PLANNING_FRONTIER_SIZE : 0;
         }
+        // Capture the complete release budget, but PlanWindow keeps only
+        // plannerCount computations in flight and refills one as each ordered
+        // plan is consumed. This removes a barrier every plannerCount requests
+        // without allowing speculative work to exceed the planner pool.
+        long frontier = Math.min(available, globalLimit);
+        return (int) Math.max(MIN_PLANNING_FRONTIER_SIZE, frontier);
     }
 
     private void awaitChanged() {
@@ -771,7 +809,6 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             if (frontierBlocked != null
                     && isRelevant(frontierBlocked.blockedKey, key)) {
                 frontierBlocked.blockedKey = null;
-                frontierBlocked.commitConflictRetried = false;
                 frontierBlocked = null;
             }
             for (var iterator = endpointBlocked.iterator(); iterator.hasNext();) {
@@ -779,10 +816,10 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                 if (isRelevant(entry.blockedKey, key)) {
                     entry.blockedKey = null;
                     entry.blockedEndpoint = null;
-                    entry.commitConflictRetried = false;
                     iterator.remove();
                 }
             }
+            endpointBlocksPresent = !endpointBlocked.isEmpty();
             // Aggregate planning credits can become available even when no
             // parked entry matches this exact edge.
             changed.signal();
@@ -860,6 +897,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             }
             nonEmptyPriorities.clear();
             endpointBlocked.clear();
+            endpointBlocksPresent = false;
             frontierBlocked = null;
             size = 0;
         } finally {
@@ -891,13 +929,18 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
         availability.removeListener(availabilityListener);
         signal();
-        planners.shutdownNow();
+        // Do not discard queued CompletableFuture tasks: the decision thread
+        // may be joining one of them while it drains the current PlanWindow.
+        planners.shutdown();
         if (Thread.currentThread() != decisionThread) {
             try {
                 decisionThread.join(decisionThreadJoinTimeoutMs());
             } catch (InterruptedException interruption) {
                 Thread.currentThread().interrupt();
             }
+        }
+        if (!decisionThread.isAlive()) {
+            planners.shutdownNow();
         }
         awaitPlannerTermination();
     }
@@ -912,21 +955,14 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     }
 
     private long decisionThreadJoinTimeoutMs() {
-        try {
-            return Math.max(0L, configService.loadBalanceConfig()
-                    .getInternalRuntime()
-                    .getQueueDecisionThreadJoinTimeoutMs());
-        } catch (Throwable failure) {
-            Logger.warn("Unable to read queue shutdown timeout; using runtime default", failure);
-            return new InternalRuntimeSettings()
-                    .getQueueDecisionThreadJoinTimeoutMs();
-        }
+        return Math.max(0L, configService.loadBalanceConfig()
+                .getInternalRuntime()
+                .getQueueDecisionThreadJoinTimeoutMs());
     }
 
     private enum Outcome {
         DONE,
         BLOCKED,
-        RETRY,
         REPLAN
     }
 
@@ -935,8 +971,6 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         private final CompletableFuture<Response> future;
         private final int priority;
         private volatile boolean removed;
-        private volatile boolean attempted;
-        private volatile boolean commitConflictRetried;
         private volatile PlacementKey blockedKey;
         private volatile WorkerEndpoint blockedEndpoint;
 

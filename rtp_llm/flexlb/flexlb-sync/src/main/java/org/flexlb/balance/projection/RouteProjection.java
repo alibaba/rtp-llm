@@ -10,6 +10,9 @@ import java.util.OptionalLong;
 /** Projects one incoming route against immutable, coherently captured inputs. */
 public final class RouteProjection {
 
+    private static final ThreadLocal<Session> SESSIONS =
+            ThreadLocal.withInitial(Session::new);
+
     private RouteProjection() {
     }
 
@@ -18,6 +21,12 @@ public final class RouteProjection {
      * delivery strategy, while projection owns the input and result vocabulary.
      */
     public interface DeliveryProjection {
+
+        /** Exact service completion for an otherwise empty endpoint queue. */
+        long singletonCompletionOffsetMs(
+                long seqLen,
+                long hitCache,
+                Predictions predictions);
 
         /** Invocation-local, prefix-aware planning cursor. */
         GroupPlanning planning(Predictions predictions);
@@ -44,9 +53,29 @@ public final class RouteProjection {
 
         long itemDurationMs(GroupPlanner.Item item);
 
+        default long itemDurationMs(long seqLen, long hitCache) {
+            return itemDurationMs(new GroupPlanner.Item(
+                    0L, 0, 0L, 0L, Long.MAX_VALUE,
+                    seqLen, hitCache));
+        }
+
         double batchPlanningDurationMs(List<GroupPlanner.Item> items);
 
+        default double singletonBatchPlanningDurationMs(
+                long seqLen, long hitCache) {
+            return batchPlanningDurationMs(List.of(new GroupPlanner.Item(
+                    0L, 0, 0L, 0L, Long.MAX_VALUE,
+                    seqLen, hitCache)));
+        }
+
         long batchDurationMs(List<GroupPlanner.Item> items);
+
+        default long singletonBatchDurationMs(
+                long seqLen, long hitCache) {
+            return batchDurationMs(List.of(new GroupPlanner.Item(
+                    0L, 0, 0L, 0L, Long.MAX_VALUE,
+                    seqLen, hitCache)));
+        }
 
         long committedGroupDurationMs(double plannedDurationMs);
     }
@@ -127,29 +156,91 @@ public final class RouteProjection {
         }
     }
 
-    /** Complete immutable projection consumed by Prefill selection. */
+    /** Read-only projection result. Invocation-scoped views must not be retained. */
+    public interface CandidateView {
+        Candidate.State state();
+
+        long projectedTtftMsValue();
+
+        long projectedDrainMsValue();
+
+        long incomingPrefillMs();
+
+        Candidate.InitialHeadDisposition initialHeadDisposition();
+
+        String detail();
+
+        RoleType blockerRole();
+
+        long cacheHitTokens();
+
+        long routingCacheMatchTokens();
+
+        long pendingCountValue();
+
+        default boolean hasProjectedDrain() {
+            return projectedDrainMsValue() != Candidate.UNKNOWN;
+        }
+
+        default long requiredProjectedTtftMs() {
+            if (projectedTtftMsValue() == Candidate.UNKNOWN) {
+                throw new IllegalStateException(
+                        "candidate projected TTFT is unknown");
+            }
+            return projectedTtftMsValue();
+        }
+
+        default long requiredProjectedDrainMs() {
+            if (projectedDrainMsValue() == Candidate.UNKNOWN) {
+                throw new IllegalStateException(
+                        "candidate projected drain is unknown");
+            }
+            return projectedDrainMsValue();
+        }
+
+        default long requiredPendingCount() {
+            if (pendingCountValue() == Candidate.UNKNOWN) {
+                throw new IllegalStateException(
+                        "candidate pending count is unknown");
+            }
+            return pendingCountValue();
+        }
+
+        default boolean engineWorkUnmodeled() {
+            return state() == Candidate.State.UNMODELED_ENGINE_WORK;
+        }
+
+        default boolean selectable() {
+            return state() == Candidate.State.MODELED
+                    && projectedTtftMsValue() != Candidate.UNKNOWN;
+        }
+    }
+
+    /** Complete immutable projection used outside the full-fleet hot path. */
     public record Candidate(
             State state,
-            OptionalLong projectedTtftMs,
-            OptionalLong projectedDrainMs,
+            long projectedTtftMsValue,
+            long projectedDrainMsValue,
             long incomingPrefillMs,
             InitialHeadDisposition initialHeadDisposition,
             String detail,
             RoleType blockerRole,
             long cacheHitTokens,
             long routingCacheMatchTokens,
-            OptionalLong pendingCount) {
+            long pendingCountValue) implements CandidateView {
+
+        public static final long UNKNOWN = -1L;
 
         public Candidate {
-            projectedTtftMs = requireNonNegative(
-                    projectedTtftMs, "projectedTtftMs");
-            projectedDrainMs = requireNonNegative(
-                    projectedDrainMs, "projectedDrainMs");
-            if ((state == State.MODELED) != projectedTtftMs.isPresent()) {
+            requireKnownOrUnknown(projectedTtftMsValue, "projectedTtftMs");
+            requireKnownOrUnknown(projectedDrainMsValue, "projectedDrainMs");
+            if ((state == State.MODELED)
+                    != (projectedTtftMsValue != UNKNOWN)) {
                 throw new IllegalArgumentException(
                         "only MODELED projections may carry a projected TTFT");
             }
-            if (state != State.MODELED && projectedDrainMs.isPresent()) {
+            if (state != State.MODELED
+                    && projectedDrainMsValue != UNKNOWN) {
                 throw new IllegalArgumentException(
                         "only MODELED projections may carry a projected drain");
             }
@@ -168,24 +259,53 @@ public final class RouteProjection {
                 throw new IllegalArgumentException(
                         "cache token counts must be non-negative");
             }
-            pendingCount = java.util.Objects.requireNonNull(
-                    pendingCount, "pendingCount");
             boolean carriesPendingCount = state == State.MODELED
                     || state == State.UNMODELED_ENGINE_WORK;
-            if (carriesPendingCount != pendingCount.isPresent()) {
+            if (carriesPendingCount != (pendingCountValue != UNKNOWN)) {
                 throw new IllegalArgumentException(
                         "only modeled or Engine-unmodeled projections may carry pending count");
             }
-            if (pendingCount.isPresent() && pendingCount.getAsLong() < 0L) {
-                throw new IllegalArgumentException(
-                        "pendingCount must be non-negative");
+            requireKnownOrUnknown(pendingCountValue, "pendingCount");
+        }
+
+        public OptionalLong projectedTtftMs() {
+            return optional(projectedTtftMsValue);
+        }
+
+        public OptionalLong projectedDrainMs() {
+            return optional(projectedDrainMsValue);
+        }
+
+        public OptionalLong pendingCount() {
+            return optional(pendingCountValue);
+        }
+
+        public boolean hasProjectedDrain() {
+            return projectedDrainMsValue != UNKNOWN;
+        }
+
+        public long requiredProjectedTtftMs() {
+            if (projectedTtftMsValue == UNKNOWN) {
+                throw new IllegalStateException(
+                        "candidate projected TTFT is unknown");
             }
+            return projectedTtftMsValue;
+        }
+
+        public long requiredProjectedDrainMs() {
+            if (projectedDrainMsValue == UNKNOWN) {
+                throw new IllegalStateException(
+                        "candidate projected drain is unknown");
+            }
+            return projectedDrainMsValue;
         }
 
         public long requiredPendingCount() {
-            return pendingCount.orElseThrow(
-                    () -> new IllegalStateException(
-                            "candidate pending count is unknown"));
+            if (pendingCountValue == UNKNOWN) {
+                throw new IllegalStateException(
+                        "candidate pending count is unknown");
+            }
+            return pendingCountValue;
         }
 
         public boolean engineWorkUnmodeled() {
@@ -193,15 +313,19 @@ public final class RouteProjection {
         }
 
         public boolean selectable() {
-            return state == State.MODELED && projectedTtftMs.isPresent();
+            return state == State.MODELED
+                    && projectedTtftMsValue != UNKNOWN;
         }
 
-        private static OptionalLong requireNonNegative(
-                OptionalLong value, String name) {
-            if (value.isPresent() && value.getAsLong() < 0L) {
+        private static void requireKnownOrUnknown(long value, String name) {
+            if (value < 0L && value != UNKNOWN) {
                 throw new IllegalArgumentException(name + " must be non-negative");
             }
-            return value;
+        }
+
+        private static OptionalLong optional(long value) {
+            return value == UNKNOWN
+                    ? OptionalLong.empty() : OptionalLong.of(value);
         }
 
         public enum InitialHeadDisposition {
@@ -223,7 +347,15 @@ public final class RouteProjection {
     public record Inputs(
             QueueSnapshot queue,
             WorkSnapshot work,
-            long pendingRequestCount) {
+            long pendingRequestCount,
+            long ownershipVersion) {
+
+        public Inputs(
+                QueueSnapshot queue,
+                WorkSnapshot work,
+                long pendingRequestCount) {
+            this(queue, work, pendingRequestCount, 0L);
+        }
 
         public Inputs {
             if (queue.capturedAtMs() != work.capturedAtMs()) {
@@ -233,6 +365,10 @@ public final class RouteProjection {
             if (pendingRequestCount < 0L) {
                 throw new IllegalArgumentException(
                         "pendingRequestCount must be non-negative");
+            }
+            if (ownershipVersion < 0L) {
+                throw new IllegalArgumentException(
+                        "ownershipVersion must be non-negative");
             }
         }
     }
@@ -252,17 +388,97 @@ public final class RouteProjection {
             PrefillTimePredictor.Evaluator evaluator,
             DeliveryProjection deliveryProjection,
             long planningAtMs) {
-        Candidate candidate = new RouteTimelineProjector(
-                probe, inputs.pendingRequestCount()).project(
-                        inputs.queue(), inputs.work(), evaluator,
-                        deliveryProjection, planningAtMs);
-        return applyAdmissionPolicy(inputs.queue(), candidate);
+        CandidateView view = projectView(
+                inputs, probe.requestId(), probe.priority(),
+                probe.enqueuedAtMs(), probe.expiresAtMs(), probe.seqLen(),
+                probe.hitCache(), probe.routingCacheMatchTokens(),
+                probe.demand(), evaluator, deliveryProjection, planningAtMs);
+        return immutable(view);
+    }
+
+    /** Allocation-free probe handoff for full-fleet selector hot paths. */
+    public static Candidate project(
+            Inputs inputs,
+            long requestId,
+            int priority,
+            long enqueuedAtMs,
+            long expiresAtMs,
+            long seqLen,
+            long hitCache,
+            long routingCacheMatchTokens,
+            Demand demand,
+            PrefillTimePredictor.Evaluator evaluator,
+            DeliveryProjection deliveryProjection,
+            long planningAtMs) {
+        return immutable(projectView(
+                inputs, requestId, priority, enqueuedAtMs, expiresAtMs,
+                seqLen, hitCache, routingCacheMatchTokens, demand,
+                evaluator, deliveryProjection, planningAtMs));
+    }
+
+    /**
+     * Allocation-free full-fleet projection. The returned view is overwritten
+     * by the next projection on the same thread and must be copied immediately.
+     */
+    public static CandidateView projectView(
+            Inputs inputs,
+            long requestId,
+            int priority,
+            long enqueuedAtMs,
+            long expiresAtMs,
+            long seqLen,
+            long hitCache,
+            long routingCacheMatchTokens,
+            Demand demand,
+            PrefillTimePredictor.Evaluator evaluator,
+            DeliveryProjection deliveryProjection,
+            long planningAtMs) {
+        return session().projectView(
+                inputs, requestId, priority, enqueuedAtMs, expiresAtMs,
+                seqLen, hitCache, routingCacheMatchTokens, demand,
+                evaluator, deliveryProjection, planningAtMs);
+    }
+
+    /** Reusable projector owned by one planner thread for one fleet traversal. */
+    public static Session session() {
+        return SESSIONS.get();
+    }
+
+    public static final class Session {
+        private final RouteTimelineProjector projector =
+                new RouteTimelineProjector();
+
+        private Session() {
+        }
+
+        public CandidateView projectView(
+                Inputs inputs,
+                long requestId,
+                int priority,
+                long enqueuedAtMs,
+                long expiresAtMs,
+                long seqLen,
+                long hitCache,
+                long routingCacheMatchTokens,
+                Demand demand,
+                PrefillTimePredictor.Evaluator evaluator,
+                DeliveryProjection deliveryProjection,
+                long planningAtMs) {
+            projector.reset(
+                    requestId, priority, enqueuedAtMs, expiresAtMs,
+                    seqLen, hitCache, routingCacheMatchTokens, demand,
+                    inputs.pendingRequestCount());
+            CandidateView candidate = projector.project(
+                    inputs.queue(), inputs.work(), evaluator,
+                    deliveryProjection, planningAtMs);
+            return applyAdmissionPolicy(inputs.queue(), candidate);
+        }
     }
 
     /** Apply one observed worker admission wait without inventing a release duration. */
-    private static Candidate applyAdmissionPolicy(
+    private static CandidateView applyAdmissionPolicy(
             QueueSnapshot queue,
-            Candidate candidate) {
+            CandidateView candidate) {
         QueueSnapshot.AdmissionBlock observation = queue.admissionBlock();
         if (!queue.queueScheduling()
                 || observation == null
@@ -274,8 +490,8 @@ public final class RouteProjection {
             return copyAdmissionResult(
                     candidate,
                     Candidate.State.BLOCKED,
-                    OptionalLong.empty(),
-                    OptionalLong.empty(),
+                    Candidate.UNKNOWN,
+                    Candidate.UNKNOWN,
                     observation.semantics().blockedDetail(),
                     blockerRole(observation.semantics()));
         }
@@ -285,8 +501,8 @@ public final class RouteProjection {
             case BEFORE_PROBE -> copyAdmissionResult(
                     candidate,
                     Candidate.State.BLOCKED,
-                    OptionalLong.empty(),
-                    OptionalLong.empty(),
+                    Candidate.UNKNOWN,
+                    Candidate.UNKNOWN,
                     observation.semantics().blockedDetail(),
                     blockerRole(observation.semantics()));
             case NONE -> throw new IllegalStateException(
@@ -296,29 +512,29 @@ public final class RouteProjection {
         };
     }
 
-    private static Candidate applyAfterProbeAdmission(
+    private static CandidateView applyAfterProbeAdmission(
             AdmissionBlockSemantics semantics,
-            Candidate candidate) {
+            CandidateView candidate) {
         return switch (semantics.afterProbe()) {
             case BLOCKED -> copyAdmissionResult(
                     candidate,
                     Candidate.State.BLOCKED,
-                    OptionalLong.empty(),
-                    OptionalLong.empty(),
+                    Candidate.UNKNOWN,
+                    Candidate.UNKNOWN,
                     semantics.afterProbeDetail(),
                     null);
             case TTFT_KNOWN_DRAIN_UNKNOWN -> copyAdmissionResult(
                     candidate,
                     Candidate.State.MODELED,
-                    candidate.projectedTtftMs(),
-                    OptionalLong.empty(),
+                    candidate.requiredProjectedTtftMs(),
+                    Candidate.UNKNOWN,
                     semantics.afterProbeDetail(),
                     null);
             case UNAVAILABLE -> copyAdmissionResult(
                     candidate,
                     Candidate.State.UNAVAILABLE,
-                    OptionalLong.empty(),
-                    OptionalLong.empty(),
+                    Candidate.UNKNOWN,
+                    Candidate.UNKNOWN,
                     semantics.afterProbeDetail(),
                     blockerRole(semantics));
         };
@@ -332,10 +548,10 @@ public final class RouteProjection {
     }
 
     private static Candidate copyAdmissionResult(
-            Candidate source,
+            CandidateView source,
             Candidate.State state,
-            OptionalLong projectedTtftMs,
-            OptionalLong projectedDrainMs,
+            long projectedTtftMs,
+            long projectedDrainMs,
             String detail,
             RoleType blockerRole) {
         boolean carriesPending = state == Candidate.State.MODELED
@@ -350,6 +566,23 @@ public final class RouteProjection {
                 blockerRole,
                 source.cacheHitTokens(),
                 source.routingCacheMatchTokens(),
-                carriesPending ? source.pendingCount() : OptionalLong.empty());
+                carriesPending
+                        ? source.requiredPendingCount() : Candidate.UNKNOWN);
+    }
+
+    private static Candidate immutable(CandidateView source) {
+        return source instanceof Candidate candidate
+                ? candidate
+                : new Candidate(
+                        source.state(),
+                        source.projectedTtftMsValue(),
+                        source.projectedDrainMsValue(),
+                        source.incomingPrefillMs(),
+                        source.initialHeadDisposition(),
+                        source.detail(),
+                        source.blockerRole(),
+                        source.cacheHitTokens(),
+                        source.routingCacheMatchTokens(),
+                        source.pendingCountValue());
     }
 }

@@ -71,7 +71,6 @@ DEFAULT_FLEXLB_CONFIG = json.dumps(
             "enqueueRpcTimeoutMs": 5000,
         },
         "router": {
-            "availabilityHysteresisPercent": 30,
             "roles": {
                 "prefill": {
                     "executionTimeEstimator": {

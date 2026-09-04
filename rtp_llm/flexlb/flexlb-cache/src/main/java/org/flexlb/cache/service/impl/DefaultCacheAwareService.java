@@ -33,8 +33,10 @@ public class DefaultCacheAwareService implements CacheAwareService {
     private CacheMetricsReporter cacheMetricsReporter;
 
     @Override
-    public Map<String, Integer> findMatchingEngines(List<Long> blockCacheKeys,
-        RoleType roleType, String group) {
+    public Map<String, Integer> findMatchingEngines(
+            List<Long> blockCacheKeys,
+            RoleType roleType,
+            List<String> candidateEngineIpPorts) {
 
         long startTime = System.nanoTime() / 1000;
 
@@ -44,7 +46,8 @@ public class DefaultCacheAwareService implements CacheAwareService {
             }
 
             Map<String/*engineIpPort*/, Integer/*prefixMatchLength*/> resultMap
-                = kvCacheManager.findMatchingEngines(blockCacheKeys, roleType, group);
+                = kvCacheManager.findMatchingEngines(
+                        blockCacheKeys, candidateEngineIpPorts);
 
             cacheMetricsReporter.reportFindMatchingEnginesRT(roleType, startTime, "0");
 

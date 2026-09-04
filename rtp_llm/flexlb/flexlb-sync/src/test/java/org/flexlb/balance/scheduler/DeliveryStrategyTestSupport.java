@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.delivery.DeliveryResult;
@@ -136,20 +135,13 @@ final class DeliveryStrategyTestSupport {
         private final List<PrefillState.CommittedHandoff> handoffs =
                 new ArrayList<>();
         private PrefillState.BatchReservation batchReservation;
-        private int routeAttempt;
         private int permitAttempt;
-        private int rejectRouteAt = -1;
         private int rejectPermitAt = -1;
 
         TestEndpointCapabilities() {
             CapacityBoundary.Availability unavailable = unavailable().availability();
-            Mockito.when(prefill.routeAdmissionAvailability(Mockito.anyInt()))
-                    .thenReturn(unavailable);
             Mockito.when(prefill.batchAdmissionAvailability(Mockito.anyInt()))
                     .thenReturn(unavailable);
-            Mockito.when(prefill.reserveRoute(
-                            Mockito.any(), Mockito.anyLong(), Mockito.anyInt()))
-                    .thenAnswer(invocation -> reserveRoute(invocation.getArgument(0)));
             Mockito.when(prefill.tryBeginRouteCommitAdmission())
                     .thenReturn(routeCommit);
             Mockito.when(routeCommit.commit(
@@ -168,17 +160,19 @@ final class DeliveryStrategyTestSupport {
                 itemsByRequestId.put(item.requestId(), item);
                 DecodeEndpoint.ReservationHandle reservation = Mockito.mock(
                         DecodeEndpoint.ReservationHandle.class);
+                PrefillState.RouteReservation routeReservation = Mockito.mock(
+                        PrefillState.RouteReservation.class);
+                routeReservations.put(item, routeReservation);
                 Mockito.when(item.prefillEp()).thenReturn(prefill);
+                Mockito.when(item.requiresRouteReservation()).thenReturn(true);
+                Mockito.when(item.publishedRouteReservation())
+                        .thenReturn(routeReservation);
+                Mockito.when(item.takePublishedRouteReservation(routeReservation))
+                        .thenReturn(true);
                 Mockito.when(item.decodeBinding()).thenReturn(
                         new ScheduledRequest.DecodeBinding(
                                 null, decode, reservation));
-                Mockito.when(item.selectDecodeForDispatch()).thenReturn(
-                        PlacementResult.blocked(RoleType.DECODE));
             }
-        }
-
-        void rejectRouteAt(int preparedSize) {
-            rejectRouteAt = preparedSize;
         }
 
         void rejectPermitAt(int preparedSize) {
@@ -209,19 +203,6 @@ final class DeliveryStrategyTestSupport {
             return List.copyOf(handoffs);
         }
 
-        private PrefillState.ReservationResult<PrefillState.RouteReservation>
-                reserveRoute(ScheduledRequest item) {
-            if (routeAttempt++ == rejectRouteAt) {
-                return new PrefillState.ReservationResult<>(
-                        PrefillState.CapacityStatus.CAPACITY_FULL, null);
-            }
-            PrefillState.RouteReservation reservation = Mockito.mock(
-                    PrefillState.RouteReservation.class);
-            routeReservations.put(item, reservation);
-            return new PrefillState.ReservationResult<>(
-                    PrefillState.CapacityStatus.ACQUIRED, reservation);
-        }
-
         private PrefillState.ReservationResult<PrefillState.BatchReservation>
                 reserveBatch() {
             batchReservation = Mockito.mock(PrefillState.BatchReservation.class);
@@ -237,7 +218,6 @@ final class DeliveryStrategyTestSupport {
             if (permitAttempt++ == rejectPermitAt) {
                 return new DecodeEndpoint.EngineDispatchPermitAcquisition(
                         DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
-                        null,
                         null);
             }
             ScheduledRequest item = itemsByRequestId.get(requestId);
@@ -250,7 +230,6 @@ final class DeliveryStrategyTestSupport {
             }
             return new DecodeEndpoint.EngineDispatchPermitAcquisition(
                     DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
-                    null,
                     permit);
         }
 

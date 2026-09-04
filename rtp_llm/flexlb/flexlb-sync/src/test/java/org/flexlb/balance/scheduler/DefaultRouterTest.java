@@ -28,7 +28,9 @@ import org.junit.jupiter.params.provider.EnumSource;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -38,6 +40,10 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 
 /** Final selector/pin ownership contracts for {@link DefaultRouter}. */
 class DefaultRouterTest {
@@ -208,6 +214,66 @@ class DefaultRouterTest {
 
         admitted.value().close();
         verify(prefill.pin).close();
+    }
+
+    @Test
+    void prefillEvictionAcquiresDecodeOnlyAtCommit() {
+        when(modelMeta.requiredRoles()).thenReturn(
+                List.of(RoleType.PREFILL, RoleType.DECODE));
+        DefaultRouter router = router();
+        BalanceContext context = context(22L);
+        CompletableFuture<Response> future = new CompletableFuture<>();
+        SelectionFixture prefill = selection(
+                RoleType.PREFILL, 22L, "p", 8001, "g1");
+        SelectionFixture decode = selection(
+                RoleType.DECODE, 22L, "d", 8002, "g1");
+        DecodeEndpoint.ReservationHandle reservation =
+                new DecodeEndpoint.ReservationHandle(1L, 22L, 2L);
+        when(prefillSelector.selectForQueue(
+                context, RoleType.PREFILL, null))
+                .thenReturn(PlacementResult.success(prefill.selection));
+        when(decodeSelector.select(context, RoleType.DECODE, "g1"))
+                .thenReturn(PlacementResult.success(decode.selection));
+        when(((DecodeEndpoint) decode.endpoint).tryReserveQueuedPinned(
+                eq(decode.pin), eq(22L), eq(32L), anyLong(), eq(50)))
+                .thenReturn(reservation);
+        ScheduledRequest victim = mock(ScheduledRequest.class);
+        when(((PrefillEndpoint) prefill.endpoint).replaceQueued(
+                eq(prefill.pin), eq(List.of(victim)), any(ScheduledRequest.class)))
+                .thenReturn(WorkerBatcher.QueueReplacementStatus.SUCCESS);
+        RequestRegistry lifecycle = mock(RequestRegistry.class);
+        when(lifecycle.commitRoute(
+                any(ScheduledRequest.class), eq(true), anyInt(), anyLong(),
+                any(BooleanSupplier.class)))
+                .thenAnswer(invocation -> invocation
+                        .getArgument(4, BooleanSupplier.class).getAsBoolean()
+                        ? PlacementResult.Status.SUCCESS
+                        : PlacementResult.Status.CLOSED);
+
+        PlacementResult<QueueRouteAdmission, PlacementKey> routed =
+                router.routeForQueue(context);
+        assertEquals(PlacementResult.Status.SUCCESS, routed.status());
+        verify((DecodeEndpoint) decode.endpoint, never())
+                .tryReserveQueuedPinned(
+                        eq(decode.pin), eq(22L), eq(32L), anyLong(), eq(50));
+
+        QueueRouteAdmission.QueueReplacementCommit committed =
+                routed.value().commitReplacingQueuedVictims(
+                        context, future, lifecycle, true, List.of(victim));
+
+        assertEquals(WorkerBatcher.QueueReplacementStatus.SUCCESS,
+                committed.status());
+        assertEquals(reservation, committed.item().decodeReservation());
+        DecodeEndpoint.EngineDispatchPermit permit =
+                mock(DecodeEndpoint.EngineDispatchPermit.class);
+        when(((DecodeEndpoint) decode.endpoint).acquireEngineDispatchPermit(
+                anyLong(), anyLong(), anyLong()))
+                .thenReturn(new DecodeEndpoint.EngineDispatchPermitAcquisition(
+                        DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
+                        permit));
+        var member = PrefillAdmissionResources.prepareMember(committed.item());
+        assertTrue(member.accepted());
+        PrefillAdmissionResources.rollbackMember(member.value(), null);
     }
 
     @Test

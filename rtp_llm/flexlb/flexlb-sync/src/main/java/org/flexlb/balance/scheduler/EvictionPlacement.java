@@ -131,13 +131,8 @@ public class EvictionPlacement {
         }
         QueueRouteAdmission admission = routing.value();
         try {
-            ScheduledRequest item = admission.buildItem(
-                    context, future, System.currentTimeMillis());
-            DecodeEndpoint decodeEndpoint = item.decodeEp();
             long seqLen = context.getRequest().getSeqLen();
             long maxNewTokens = context.getRequest().getMaxNewTokens();
-            long kvTotal = decodeEndpoint == null
-                    ? 0L : decodeEndpoint.realKvTotal();
             PriorityRequestEnvelope envelope = new PriorityRequestEnvelope(
                     context.getRequestId(),
                     context.getPriority(),
@@ -146,11 +141,11 @@ public class EvictionPlacement {
                     context.getStartTime(),
                     seqLen,
                     context.getConfig().decodeKvReservationTokens(
-                            seqLen, maxNewTokens, kvTotal));
-            QueueSnapshot snapshot = item.prefillEp()
-                    .captureQueueSnapshot();
+                            seqLen, maxNewTokens,
+                            admission.selectedDecodeTotalKv()));
+            QueueSnapshot snapshot = admission.capturePrefillQueueSnapshot();
             return new PrefillEviction(
-                    context, admission, item, envelope, snapshot);
+                    context, future, admission, envelope, snapshot);
         } catch (RuntimeException | Error failure) {
             admission.close();
             throw failure;
@@ -159,7 +154,7 @@ public class EvictionPlacement {
 
     public final class PrefillEviction implements AutoCloseable {
         private final BalanceContext context;
-        private final ScheduledRequest item;
+        private final CompletableFuture<Response> future;
         private final PriorityRequestEnvelope envelope;
         private final QueueSnapshot queueSnapshot;
         private QueueRouteAdmission admission;
@@ -167,13 +162,13 @@ public class EvictionPlacement {
 
         private PrefillEviction(
                 BalanceContext context,
+                CompletableFuture<Response> future,
                 QueueRouteAdmission admission,
-                ScheduledRequest item,
                 PriorityRequestEnvelope envelope,
                 QueueSnapshot queueSnapshot) {
             this.context = context;
+            this.future = future;
             this.admission = admission;
-            this.item = item;
             this.envelope = envelope;
             this.queueSnapshot = queueSnapshot;
         }
@@ -193,12 +188,13 @@ public class EvictionPlacement {
                         "Prefill eviction admission was already consumed");
             }
             attempted = true;
-            WorkerBatcher.QueueReplacementStatus status =
+            QueueRouteAdmission.QueueReplacementCommit committed =
                     admission.commitReplacingQueuedVictims(
-                            lifecycle, item, true, exactVictims);
+                            context, future, lifecycle, true, exactVictims);
+            WorkerBatcher.QueueReplacementStatus status = committed.status();
             if (status == WorkerBatcher.QueueReplacementStatus.SUCCESS) {
                 admission = null;
-                publishCommittedPlacementMetadata(context, item);
+                publishCommittedPlacementMetadata(context, committed.item());
             }
             return status;
         }

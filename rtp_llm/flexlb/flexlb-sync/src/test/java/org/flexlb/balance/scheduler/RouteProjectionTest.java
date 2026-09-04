@@ -522,7 +522,7 @@ class RouteProjectionTest {
     }
 
     @Test
-    void oneFrozenEvaluatorSuppliesPlanningAndServicePredictions() {
+    void singletonProjectionEvaluatesOneFrozenPredictorOnce() {
         AtomicInteger singleCalls = new AtomicInteger();
         AtomicInteger batchCalls = new AtomicInteger();
         PrefillTimePredictor.Evaluator evaluator = evaluator(
@@ -550,8 +550,61 @@ class RouteProjectionTest {
 
         assertEquals(OptionalLong.of(20L), result.projectedTtftMs());
         assertEquals(1, singleCalls.get());
-        assertEquals(2, batchCalls.get(),
-                "planner and committed-service boundaries use the same snapshot evaluator");
+        assertEquals(1, batchCalls.get(),
+                "singleton projection evaluates one frozen predictor exactly once");
+    }
+
+    @Test
+    void singletonProjectionReusesAnIdenticalModelAcrossEndpoints() {
+        Object sharedSnapshot = new Object();
+        AtomicInteger singleCalls = new AtomicInteger();
+        AtomicInteger batchCalls = new AtomicInteger();
+        PrefillTimePredictor.Evaluator first = sharedEvaluator(
+                sharedSnapshot, singleCalls, batchCalls);
+        PrefillTimePredictor.Evaluator second = sharedEvaluator(
+                sharedSnapshot, singleCalls, batchCalls);
+
+        QueueSnapshot empty = queue(false,
+                new GroupPlanner.Constraints(
+                        1, 1_000_000L, 1_000_000L,
+                        500L, 0L),
+                List.of());
+        RouteProjection.Probe probe = probe(
+                100L, 50, 20L, 0L,
+                RouteProjection.Demand.TTFT_ONLY);
+
+        assertTrue(project(empty, noCommittedWork(), first, probe, BATCH)
+                .selectable());
+        assertTrue(project(empty, noCommittedWork(), second, probe, BATCH)
+                .selectable());
+        assertEquals(1, singleCalls.get());
+        assertEquals(1, batchCalls.get());
+    }
+
+    private static PrefillTimePredictor.Evaluator sharedEvaluator(
+            Object snapshot,
+            AtomicInteger singleCalls,
+            AtomicInteger batchCalls) {
+        return new PrefillTimePredictor.Evaluator() {
+            @Override
+            public Object snapshotIdentity() {
+                return snapshot;
+            }
+
+            @Override
+            public long estimateMs(long totalTokens, long hitTokens) {
+                singleCalls.incrementAndGet();
+                return totalTokens - hitTokens;
+            }
+
+            @Override
+            public double predictBatchMs(PrefillBatchFeatures features) {
+                batchCalls.incrementAndGet();
+                return features.items().stream()
+                        .mapToLong(PrefillBatchFeatures.Item::seqLen)
+                        .sum();
+            }
+        };
     }
 
     private static void assertModeled(

@@ -742,8 +742,45 @@ public final class PrefillState {
         requireState(removed,
                 "canonical ACTIVE request has no queue index request_id="
                         + item.requestId());
-        // The synchronous admission still owns any OPEN lease and releases it
-        // after this queue transaction. ACTIVE removal owns only request/index.
+        // BATCH preparation owns any OPEN batch lease together with a
+        // generation handoff. NON_BATCH item-owned route credits use the
+        // atomic counterpart below so retirement can never observe an orphan.
+        requests.remove(item.requestId(), entry);
+        mutationVersion++;
+        return true;
+    }
+
+    /**
+     * Remove one NON_BATCH ACTIVE owner and its item-owned OPEN route credit
+     * in the same ownership transaction.
+     */
+    public boolean terminalizeActiveRouteUnderLock(
+            ScheduledRequest item,
+            RouteReservation exactReservation) {
+        requireLock();
+        RequestEntry entry = requests.get(item.requestId());
+        if (entry == null || !entry.activeIdentity(item)) {
+            return false;
+        }
+        if (exactReservation == null
+                || exactReservation.owner != this
+                || entry.reservation != exactReservation
+                || exactReservation.state != LeaseState.OPEN) {
+            throw new IllegalStateException(
+                    "ACTIVE route request lost its exact Prefill credit request_id="
+                            + item.requestId());
+        }
+        requireState(activeIndex.contains(item),
+                "canonical ACTIVE route has no queue index request_id="
+                        + item.requestId());
+
+        // Every operation below is allocation-free and runs under the same
+        // lock used by generation retirement.
+        closeOpenLeaseUnderLock(exactReservation);
+        boolean removed = activeIndex.remove(item);
+        requireState(removed,
+                "validated ACTIVE route disappeared before terminal request_id="
+                        + item.requestId());
         requests.remove(item.requestId(), entry);
         mutationVersion++;
         return true;
@@ -865,16 +902,6 @@ public final class PrefillState {
         }
     }
 
-    private boolean routeCapacityAvailable(int maximum) {
-        lock.lock();
-        try {
-            return maximum <= 0
-                    || routeCapacityUsedUnderLock() < maximum;
-        } finally {
-            lock.unlock();
-        }
-    }
-
     /**
      * NON_BATCH delivery capacity covers both locally owned route leases and
      * worker-reported requests whose exact Master ownership is unavailable.
@@ -895,18 +922,33 @@ public final class PrefillState {
         }
     }
 
-    public CapacityBoundary.Availability routeAvailability(int maximum) {
-        return new CapacityAvailability(false, maximum);
-    }
-
-    /** Return the requests needed to refill the next local batch window. */
-    public int availableBatchDecisionSlots(int targetRequests) {
-        if (targetRequests <= 0) {
+    /**
+     * Convert endpoint-local batch delivery capacity into request publication
+     * credits. Decision owns the maximum members per group; dispatcher owns
+     * the number of groups that may be in flight. Already ACTIVE requests are
+     * staged against those same future groups and therefore deducted once.
+     */
+    public int availableBatchPublicationSlots(
+            int maximumInflightBatches,
+            int maximumRequestsPerGroup,
+            int maximumQueuedRequests) {
+        if (maximumRequestsPerGroup <= 0 || maximumQueuedRequests <= 0) {
             return 0;
         }
         lock.lock();
         try {
-            long available = (long) targetRequests - activeIndex.size();
+            long queueRoom = Math.max(
+                    0L, (long) maximumQueuedRequests - activeIndex.size());
+            if (maximumInflightBatches <= 0) {
+                return (int) Math.min((long) Integer.MAX_VALUE, queueRoom);
+            }
+            long freeBatches = Math.max(
+                    0L, (long) maximumInflightBatches - batchLeasesInUse);
+            long deliveryRoom = saturatedMultiply(
+                    freeBatches, maximumRequestsPerGroup);
+            long available = Math.min(
+                    queueRoom,
+                    Math.max(0L, deliveryRoom - activeIndex.size()));
             if (available <= 0L) {
                 return 0;
             }
@@ -914,6 +956,14 @@ public final class PrefillState {
         } finally {
             lock.unlock();
         }
+    }
+
+    private static long saturatedMultiply(long left, long right) {
+        if (left <= 0L || right <= 0L) {
+            return 0L;
+        }
+        return left > Long.MAX_VALUE / right
+                ? Long.MAX_VALUE : left * right;
     }
 
     /**
@@ -939,7 +989,7 @@ public final class PrefillState {
     }
 
     public CapacityBoundary.Availability batchAvailability(int maximum) {
-        return new CapacityAvailability(true, maximum);
+        return new CapacityAvailability(maximum);
     }
 
     /** Remove one already-detached ACTIVE route credit under the ownership lock. */
@@ -981,20 +1031,16 @@ public final class PrefillState {
     /** Exact wake capability permanently paired with this worker runtime. */
     private final class CapacityAvailability
             implements CapacityBoundary.Availability {
-        private final boolean batch;
         private final int maximum;
         private Runnable subscribed;
 
-        private CapacityAvailability(boolean batch, int maximum) {
-            this.batch = batch;
+        private CapacityAvailability(int maximum) {
             this.maximum = maximum;
         }
 
         @Override
         public boolean isAvailable() {
-            return batch
-                    ? batchCapacityAvailable(maximum)
-                    : routeCapacityAvailable(maximum);
+            return batchCapacityAvailable(maximum);
         }
 
         @Override

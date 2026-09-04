@@ -3,10 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.projection.RouteProjection;
-import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.util.Logger;
 
@@ -71,10 +68,7 @@ final class PrefillAdmissionResources {
         return switch (acquisition.status()) {
             case ACQUIRED -> captureMember(
                     item, acquisition.permit());
-            case CAPACITY_FULL -> prepareReplacementMember(
-                    item,
-                    binding,
-                    decodePoolSequence(item));
+            case CAPACITY_FULL -> decodeCapacityFull(item);
             case NOT_OWNED, NOT_QUEUED -> rejected(
                     CapacityBoundary.OWNERSHIP_LOST);
             case ENDPOINT_RETIRED -> failed(retired("Decode", item));
@@ -84,141 +78,11 @@ final class PrefillAdmissionResources {
         };
     }
 
-    /**
-     * Preserve the Prefill queue head while moving only its queued Decode
-     * capability. Selection is advisory; the replacement endpoint creates the
-     * reservation and hard-gate permit in one admission-lock transaction.
-     */
-    private static CapacityBoundary.Attempt<Member> prepareReplacementMember(
-            ScheduledRequest item,
-            ScheduledRequest.DecodeBinding original,
-            long observedPoolSequence) {
-        PlacementResult<SelectedRole, RoleType> selection;
-        try {
-            selection = item.selectDecodeForDispatch();
-        } catch (RuntimeException | Error failure) {
-            return failed(failure);
-        }
-        if (selection.status() != PlacementResult.Status.SUCCESS) {
-            return decodeCapacityFull(item, observedPoolSequence);
-        }
-
-        SelectedRole replacement = selection.value();
-        WorkerEndpoint.GenerationPin pin = null;
-        DecodeEndpoint candidate = null;
-        DecodeEndpoint.EngineDispatchPermitAcquisition acquisition = null;
-        try (replacement) {
-            pin = replacement.takeGenerationPin();
-            if (!(pin.endpoint() instanceof DecodeEndpoint exactCandidate)) {
-                return failed(new IllegalStateException(
-                        "Decode reselection returned another endpoint type"));
-            }
-            candidate = exactCandidate;
-            if (candidate == original.endpoint()) {
-                return decodeCapacityFull(item, observedPoolSequence);
-            }
-
-            long hardKv = Math.max(0L, item.seqLen());
-            long expectedKv = item.ctx().getConfig()
-                    .decodeKvReservationTokens(
-                            hardKv,
-                            item.ctx().getRequest().getMaxNewTokens(),
-                            replacement.decodeTotalKv());
-            acquisition = candidate
-                    .tryAcquireQueuedEngineDispatchPermitPinned(
-                            pin,
-                            item.requestId(),
-                            hardKv,
-                            Math.max(hardKv, expectedKv),
-                            item.priority(),
-                            item.maxDecodeEngineRequests(),
-                            item.maxDecodeKvUsagePercent());
-            if (acquisition.status()
-                    != DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED) {
-                return switch (acquisition.status()) {
-                    case CAPACITY_FULL, NOT_OWNED, NOT_QUEUED,
-                            ALREADY_ACQUIRED -> decodeCapacityFull(
-                                    item, observedPoolSequence);
-                    case ENDPOINT_RETIRED -> failed(retired("Decode", item));
-                    case ACQUIRED -> throw new IllegalStateException(
-                            "acquired replacement has no ownership");
-                };
-            }
-
-            ScheduledRequest.DecodeBinding rebound = new ScheduledRequest.DecodeBinding(
-                    RequestRegistry.copyOf(
-                            replacement.serverStatus()),
-                    candidate,
-                    acquisition.reservation());
-            if (!item.replaceDecodeBinding(original, rebound)) {
-                Throwable cleanup = rollbackReplacement(
-                        candidate, acquisition, null);
-                if (cleanup != null) {
-                    return failed(cleanup);
-                }
-                return rejected(CapacityBoundary.OWNERSHIP_LOST);
-            }
-
-            try {
-                original.endpoint().releaseReservationExact(
-                        original.reservation());
-            } catch (Throwable oldReleaseFailure) {
-                Throwable failure = oldReleaseFailure;
-                if (!item.replaceDecodeBinding(rebound, original)) {
-                    failure.addSuppressed(new IllegalStateException(
-                            "Decode binding changed while migration rolled back"));
-                }
-                failure = rollbackReplacement(
-                        candidate, acquisition, failure);
-                return failed(failure);
-            }
-            return captureMember(item, acquisition.permit());
-        } catch (RuntimeException | Error failure) {
-            if (acquisition != null
-                    && acquisition.status()
-                            == DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED
-                    && item.decodeBinding() == original) {
-                return failed(rollbackReplacement(
-                        candidate, acquisition, failure));
-            }
-            return failed(failure);
-        } finally {
-            if (pin != null) {
-                pin.close();
-            }
-        }
-    }
-
-    private static long decodePoolSequence(ScheduledRequest item) {
-        PlacementAvailability pool = item.decodePlacementAvailability();
-        return pool == null ? 0L : pool.sequence();
-    }
-
     private static CapacityBoundary.Attempt<Member> decodeCapacityFull(
-            ScheduledRequest item,
-            long observedPoolSequence) {
+            ScheduledRequest item) {
         return rejected(CapacityBoundary.unavailable(
-                new DecodeAvailability(item, observedPoolSequence),
+                new DecodeAvailability(item),
                 DECODE_BLOCK));
-    }
-
-    private static Throwable rollbackReplacement(
-            DecodeEndpoint endpoint,
-            DecodeEndpoint.EngineDispatchPermitAcquisition acquisition,
-            Throwable priorFailure) {
-        Throwable failure = rollbackPermit(
-                acquisition == null ? null : acquisition.permit(),
-                priorFailure);
-        if (endpoint == null || acquisition == null
-                || acquisition.reservation() == null) {
-            return failure;
-        }
-        try {
-            endpoint.releaseReservationExact(acquisition.reservation());
-        } catch (Throwable rollbackFailure) {
-            failure = combine(failure, rollbackFailure);
-        }
-        return failure;
     }
 
     /**
@@ -509,24 +373,12 @@ final class PrefillAdmissionResources {
             implements CapacityBoundary.Availability {
         private final ScheduledRequest item;
         private final DecodeEndpoint endpoint;
-        private final PlacementAvailability pool;
-        private final PlacementKey poolKey;
-        private final long observedPoolSequence;
         private Runnable subscribedListener;
-        private PlacementAvailability.Listener poolListener;
 
-        private DecodeAvailability(
-                ScheduledRequest item,
-                long observedPoolSequence) {
+        private DecodeAvailability(ScheduledRequest item) {
             this.item = item;
             ScheduledRequest.DecodeBinding binding = item.decodeBinding();
             this.endpoint = binding.endpoint();
-            this.pool = item.decodePlacementAvailability();
-            String group = binding.status() == null
-                    ? null : binding.status().getGroup();
-            this.poolKey = new PlacementKey(
-                    org.flexlb.dao.route.RoleType.DECODE, group);
-            this.observedPoolSequence = observedPoolSequence;
         }
 
         @Override
@@ -534,9 +386,7 @@ final class PrefillAdmissionResources {
             return endpoint.isEngineDispatchPermitAvailable(
                     item.requestId(),
                     item.maxDecodeEngineRequests(),
-                    item.maxDecodeKvUsagePercent())
-                    || pool != null && pool.lastChangedSequence(poolKey)
-                            > observedPoolSequence;
+                    item.maxDecodeKvUsagePercent());
         }
 
         @Override
@@ -550,14 +400,6 @@ final class PrefillAdmissionResources {
             }
             subscribedListener = listener;
             endpoint.addEngineDispatchCapacityListener(listener);
-            if (pool != null) {
-                poolListener = (key, ignoredSequence) -> {
-                    if (poolKey.equals(key)) {
-                        listener.run();
-                    }
-                };
-                pool.addListener(poolListener);
-            }
         }
 
         @Override
@@ -566,10 +408,6 @@ final class PrefillAdmissionResources {
                 return;
             }
             endpoint.removeEngineDispatchCapacityListener(listener);
-            if (pool != null && poolListener != null) {
-                pool.removeListener(poolListener);
-            }
-            poolListener = null;
             subscribedListener = null;
         }
     }

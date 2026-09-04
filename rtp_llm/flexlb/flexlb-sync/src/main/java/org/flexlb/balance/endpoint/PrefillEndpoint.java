@@ -125,14 +125,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return runtime.offer(exactItem);
     }
 
-    /** Exact queue-capacity commit for a fresh placement attempt. */
-    public boolean offerPinnedForPlacement(
-            GenerationPin exactPin,
-            ScheduledRequest exactItem) {
-        requirePinnedGeneration(exactPin);
-        return runtime.offerForPlacement(exactItem);
-    }
-
     /** Publish a role/group-scoped edge after real queue or status progress. */
     public void signalPlacementCapacityChanged() {
         WorkerStatus.TopologySnapshot topology =
@@ -269,18 +261,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return result;
     }
 
-    public PrefillState.ReservationResult<PrefillState.RouteReservation> reserveRoute(
-            ScheduledRequest exactItem,
-            long predictedMs,
-            int maximumRequests) {
-        if (isGenerationRetiringOrRetired()) {
-            return new PrefillState.ReservationResult<>(
-                    PrefillState.CapacityStatus.ENDPOINT_RETIRED, null);
-        }
-        return reservePublishedRouteCredit(
-                exactItem, predictedMs, maximumRequests);
-    }
-
     /**
      * Reserve request capacity inside the caller's already-pinned placement
      * transaction. The returned credit deliberately owns no generation pin.
@@ -290,6 +270,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
             ScheduledRequest exactItem,
             long predictedMs,
             int maximumRequests) {
+        if (isGenerationRetiringOrRetired()) {
+            return new PrefillState.ReservationResult<>(
+                    PrefillState.CapacityStatus.ENDPOINT_RETIRED, null);
+        }
         return prefillState.reserveRoute(
                 exactItem, predictedMs, maximumRequests);
     }
@@ -308,15 +292,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return prefillState.batchAvailability(maximumInflightBatches);
     }
 
-    /** Exact wake source for this generation's route admission capacity. */
-    public CapacityBoundary.Availability routeAdmissionAvailability(
-            int maximumRequests) {
-        return prefillState.routeAvailability(maximumRequests);
-    }
-
     /** Snapshot of requests this endpoint can accept for its bound dispatcher. */
     public int availableDeliveryCredits() {
         return runtime.availableDeliveryCredits();
+    }
+
+    /** Advisory endpoint ownership revision captured by queue placement. */
+    public long placementVersion() {
+        return prefillState.mutationVersion();
     }
 
     /** Diagnostic view of one explicit NON_BATCH request limit. */

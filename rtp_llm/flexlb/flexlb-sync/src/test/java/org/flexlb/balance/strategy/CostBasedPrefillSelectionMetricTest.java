@@ -23,8 +23,10 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -35,6 +37,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class CostBasedPrefillSelectionMetricTest {
+    private static final int FULL_FLEET_SIZE = 750;
+
     private FlexlbConfig config;
     private EndpointRegistry registry;
     private CacheAwareService cache;
@@ -127,6 +131,41 @@ class CostBasedPrefillSelectionMetricTest {
             verify(reporter).reportCacheAffinityDecision(
                     RoleType.PREFILL, "10.0.0.2", "CACHE_LEADER");
         }
+    }
+
+    @Test
+    void cacheLeaderAtEndOfFullFleetRemainsEligible() {
+        configureAffinity(600L, 5.0,
+                RoutingConfig.CandidateChoiceType.BEST_ONLY);
+        String cacheLeader = null;
+        for (int index = 2; index < FULL_FLEET_SIZE; index++) {
+            String ip = "10.2." + index / 250 + '.' + index % 250;
+            publish(ip, 8080);
+            cacheLeader = ip;
+        }
+        when(cache.findMatchingEngines(any(), any(), any()))
+                .thenReturn(Map.of(cacheLeader + ":8080", 5));
+
+        try (SelectedRole selected = select()) {
+            assertEquals(cacheLeader, selected.serverStatus().getServerIp(),
+                    "cache-first must inspect the complete 750-node fleet");
+        }
+    }
+
+    @Test
+    void exactCostTiesRotateWithoutShrinkingTheCandidateFleet() {
+        publish("10.0.0.2", 8080);
+        publish("10.0.0.3", 8080);
+
+        Set<String> selectedIps = new HashSet<>();
+        for (int index = 0; index < 3; index++) {
+            context.getRequest().setRequestId(30_000L + index);
+            try (SelectedRole selected = select()) {
+                selectedIps.add(selected.serverStatus().getServerIp());
+            }
+        }
+
+        assertEquals(Set.of("10.0.0.1", "10.0.0.2", "10.0.0.3"), selectedIps);
     }
 
     @ParameterizedTest

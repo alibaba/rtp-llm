@@ -5,13 +5,11 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
 import org.slf4j.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
@@ -30,7 +28,7 @@ import java.util.function.Supplier;
  * hiding it behind a derived capacity value.</p>
  */
 @Component
-public final class WorkerDirectory implements WorkerStatusProvider {
+public final class WorkerDirectory {
 
     private final Map<RoleType, ConcurrentHashMap<String, WorkerStatus>>
             statusesByRole = new EnumMap<>(RoleType.class);
@@ -244,25 +242,23 @@ public final class WorkerDirectory implements WorkerStatusProvider {
     /** Immutable Decode routing values for one group. */
     public List<DecodeEndpoint.DecodeRoutingView> decodeRoutingSnapshot(
             String group) {
+        // The selector copies this lazy view into its primitive candidate
+        // buffer in one pass. Avoid an intermediate immutable list when no
+        // group filter is needed.
         List<DecodeEndpoint.DecodeRoutingView> snapshots =
                 endpointRegistry.decodeRoutingSnapshot();
         if (group == null || snapshots.isEmpty()) {
             return snapshots;
         }
-        ArrayList<DecodeEndpoint.DecodeRoutingView> matching = null;
+        ArrayList<DecodeEndpoint.DecodeRoutingView> matching =
+                new ArrayList<>(snapshots.size());
         for (int index = 0; index < snapshots.size(); index++) {
             DecodeEndpoint.DecodeRoutingView snapshot = snapshots.get(index);
-            if (!group.equals(snapshot.topology().group())) {
-                if (matching == null) {
-                    matching = new ArrayList<>(snapshots.size());
-                    matching.addAll(snapshots.subList(0, index));
-                }
-            } else if (matching != null) {
+            if (group.equals(snapshot.topology().group())) {
                 matching.add(snapshot);
             }
         }
-        return matching == null
-                ? snapshots : Collections.unmodifiableList(matching);
+        return List.copyOf(matching);
     }
 
     /** Pin the exact generation represented by a Decode routing snapshot. */
@@ -310,11 +306,6 @@ public final class WorkerDirectory implements WorkerStatusProvider {
         } finally {
             closePins(captured);
         }
-    }
-
-    @Override
-    public List<String> getWorkerIpPorts(RoleType role, String group) {
-        return endpointAddresses(role, group);
     }
 
     private static void closePins(List<WorkerEndpoint.GenerationPin> pins) {

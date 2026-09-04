@@ -502,8 +502,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                 new CostBasedDecodeStrategy(workers),
                 new RandomStrategy(workers),
                 configService,
-                modelMeta,
-                schedulerRuntime.placementAvailability());
+                modelMeta);
     }
 
     private static ServerStatus server(

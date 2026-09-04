@@ -167,8 +167,6 @@ final class FlexlbConfigValidator {
     }
 
     private static void validateRouting(RoutingConfig routing) {
-        range(routing.getAvailabilityHysteresisPercent(), 0, 100,
-                "router.availabilityHysteresisPercent");
         require(routing.getRoles() != null, "router.roles", "is required");
         PrefillConfig prefill = routing.getRoles().getPrefill();
         require(prefill != null, "router.roles.prefill", "is required");
@@ -252,6 +250,8 @@ final class FlexlbConfigValidator {
         var decode = routing.getRoles().getDecode();
         nonNegative(decode.getDecayPerToken(),
                 "router.roles.decode.decayPerToken");
+        nonNegative(decode.getLoadDecayPerRequest(),
+                "router.roles.decode.loadDecayPerRequest");
         if (decode.getOutlierRejection() != null) {
             positive(decode.getOutlierRejection().getMaxEngineLoadVsAverageMultiplier(),
                     "router.roles.decode.outlierRejection.maxEngineLoadVsAverageMultiplier");

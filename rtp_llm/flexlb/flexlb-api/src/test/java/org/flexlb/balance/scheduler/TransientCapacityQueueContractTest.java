@@ -553,7 +553,7 @@ class TransientCapacityQueueContractTest {
 
     @Test
     @Timeout(20)
-    void queuedHeadRebindsWhenItsDecodeFillsBeforeDispatch()
+    void queuedRequestKeepsItsCommittedDecodeWhenStatusChangesBeforeDispatch()
             throws Exception {
         FlexlbConfig config = config();
         config.queueScheduler().setOrdering(new QueueOrderingConfig());
@@ -583,28 +583,24 @@ class TransientCapacityQueueContractTest {
 
             Response response = waiting.get(2, TimeUnit.SECONDS);
             assertTrue(response.isSuccess());
-            assertEquals("127.0.0.2:18082", decodeAddress(response));
-            assertEquals(List.of("127.0.0.2:18082"),
+            assertEquals("127.0.0.1:18081", decodeAddress(response));
+            assertEquals(List.of("127.0.0.1:18081"),
                     fixture.submission.decodeAddresses());
-            assertEquals(0,
-                    fixture.decodeEndpoint.layeredAdmissionView()
-                            .reserved().size(),
-                    "the stale Decode binding must release its queued hold");
-            assertEquals(1, spareEndpoint.routingView().engineLoad(),
-                    "the replacement Decode must own the dispatched request");
+            assertEquals(0, spareEndpoint.routingView().engineLoad(),
+                    "a committed route must not switch to a newly idle Decode");
         }
     }
 
     @Test
     @Timeout(20)
-    void queuedHeadWakesWhenAnotherDecodeReturnsCapacity()
+    void queuedSelectorMissWakesWhenDecodeCapacityReturns()
             throws Exception {
         verifyPoolCapacityWake(config(), 601L);
     }
 
     @Test
     @Timeout(20)
-    void nonBatchHeadAlsoWakesAndRebindsAcrossTheDecodePool()
+    void nonBatchSelectorMissAlsoWakesWhenDecodeCapacityReturns()
             throws Exception {
         FlexlbConfig config = config();
         config.setDispatcher(DispatcherConfig.nonBatch());
@@ -777,23 +773,19 @@ class TransientCapacityQueueContractTest {
                     fixture.runtime.scheduler().submit(
                             fixture.context(requestId, 50, 128_000L));
             assertFalse(waiting.isDone());
+            assertEquals(0, fixture.decodeEndpoint
+                    .layeredAdmissionView().reserved().size());
+            assertEquals(0, spareEndpoint
+                    .layeredAdmissionView().reserved().size());
 
-            boolean boundToPrimary = fixture.decodeEndpoint
-                    .layeredAdmissionView().reserved().size() == 1;
-            WorkerStatus releasedStatus = boundToPrimary
-                    ? spareStatus : fixture.decodeStatus;
-            String releasedAddress = boundToPrimary
-                    ? "127.0.0.2:18082" : "127.0.0.1:18081";
             fixture.runtime.applyStatus(
-                    releasedStatus,
+                    fixture.decodeStatus,
                     statusResponse(RoleType.DECODE, 3L, false));
 
             Response response = waiting.get(2, TimeUnit.SECONDS);
             assertTrue(response.isSuccess());
-            assertEquals(releasedAddress, decodeAddress(response));
-            DecodeEndpoint releasedEndpoint = boundToPrimary
-                    ? spareEndpoint : fixture.decodeEndpoint;
-            assertEquals(1, releasedEndpoint.routingView().engineLoad());
+            assertEquals("127.0.0.1:18081", decodeAddress(response));
+            assertEquals(1, fixture.decodeEndpoint.routingView().engineLoad());
         }
     }
 
@@ -904,8 +896,7 @@ class TransientCapacityQueueContractTest {
                             decodeSelector,
                             new RandomStrategy(workers),
                             configService,
-                            modelMeta(prefillFirst),
-                            runtime.placementAvailability()),
+                            modelMeta(prefillFirst)),
                     metrics));
         }
 
@@ -1062,8 +1053,7 @@ class TransientCapacityQueueContractTest {
                     mock(CostBasedDecodeStrategy.class),
                     mock(RandomStrategy.class),
                     mock(ConfigService.class),
-                    modelMeta(false),
-                    new PlacementAvailability());
+                    modelMeta(false));
             this.delegate = delegate;
             this.metrics = metrics;
         }

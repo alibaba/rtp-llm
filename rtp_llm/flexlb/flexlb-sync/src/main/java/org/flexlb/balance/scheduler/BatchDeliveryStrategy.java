@@ -856,91 +856,152 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     private static final class BatchProjection
             implements RouteProjection.DeliveryProjection {
 
+        private static final ThreadLocal<BatchPlanning> PLANNING =
+                ThreadLocal.withInitial(BatchPlanning::new);
+        private static final ThreadLocal<BatchService> SERVICE =
+                ThreadLocal.withInitial(BatchService::new);
+
+        @Override
+        public long singletonCompletionOffsetMs(
+                long seqLen,
+                long hitCache,
+                RouteProjection.Predictions predictions) {
+            // Committed prediction performs the same validated decision-group
+            // evaluation before converting to lifecycle milliseconds. Running
+            // the planning call first only evaluates the predictor twice for
+            // every endpoint in the full-fleet singleton fast path.
+            return predictions.singletonBatchDurationMs(seqLen, hitCache);
+        }
+
         @Override
         public RouteProjection.GroupPlanning planning(
                 RouteProjection.Predictions predictions) {
-            return new RouteProjection.GroupPlanning() {
-                private List<GroupPlanner.Item> previous = List.of();
-                private double[] durations = new double[0];
-                private boolean[] computed = new boolean[0];
-
-                @Override
-                public double durationMs(
-                        List<GroupPlanner.Item> candidatePrefix,
-                        int requiredThroughIndex) {
-                    if (requiredThroughIndex < 0
-                            || requiredThroughIndex >= candidatePrefix.size()) {
-                        throw new IndexOutOfBoundsException(
-                                requiredThroughIndex);
-                    }
-                    if (!isIdentityPrefix(previous, candidatePrefix)) {
-                        previous = List.copyOf(candidatePrefix);
-                        durations = new double[candidatePrefix.size()];
-                        computed = new boolean[candidatePrefix.size()];
-                    } else if (durations.length < candidatePrefix.size()) {
-                        durations = java.util.Arrays.copyOf(
-                                durations, candidatePrefix.size());
-                        computed = java.util.Arrays.copyOf(
-                                computed, candidatePrefix.size());
-                        previous = List.copyOf(candidatePrefix);
-                    }
-                    if (!computed[requiredThroughIndex]) {
-                        durations[requiredThroughIndex] =
-                                predictions.batchPlanningDurationMs(
-                                        candidatePrefix.subList(
-                                                0,
-                                                requiredThroughIndex + 1));
-                        computed[requiredThroughIndex] = true;
-                    }
-                    return durations[requiredThroughIndex];
-                }
-            };
+            BatchPlanning planning = PLANNING.get();
+            planning.reset(predictions);
+            return planning;
         }
 
         @Override
         public RouteProjection.GroupService service(
                 GroupPlanner.Plan<GroupPlanner.Item> plan,
                 RouteProjection.Predictions predictions) {
-            return new RouteProjection.GroupService() {
-                private final long[] completionOffsets =
-                        new long[plan.items().size()];
-                private final boolean[] computed =
-                        new boolean[plan.items().size()];
-
-                @Override
-                public long completionOffsetMs(int memberIndex) {
-                    if (memberIndex < 0 || memberIndex >= plan.items().size()) {
-                        throw new IndexOutOfBoundsException(memberIndex);
-                    }
-                    if (!computed[memberIndex]) {
-                        completionOffsets[memberIndex] =
-                                predictions.batchDurationMs(
-                                        plan.items().subList(
-                                                0, memberIndex + 1));
-                        computed[memberIndex] = true;
-                    }
-                    return completionOffsets[memberIndex];
-                }
-
-                @Override
-                public long totalDurationMs() {
-                    return completionOffsetMs(plan.items().size() - 1);
-                }
-            };
+            BatchService service = SERVICE.get();
+            service.reset(plan, predictions);
+            return service;
         }
 
-        private static boolean isIdentityPrefix(
-                List<GroupPlanner.Item> previous,
-                List<GroupPlanner.Item> next) {
-            if (previous.size() > next.size()) {
-                return false;
+        private static final class BatchPlanning
+                implements RouteProjection.GroupPlanning {
+            private GroupPlanner.Item[] previous = new GroupPlanner.Item[0];
+            private double[] durations = new double[0];
+            private boolean[] computed = new boolean[0];
+            private int previousSize;
+            private RouteProjection.Predictions predictions;
+
+            private void reset(RouteProjection.Predictions exactPredictions) {
+                predictions = exactPredictions;
+                if (previousSize != 0) {
+                    java.util.Arrays.fill(computed, 0, previousSize, false);
+                }
+                previousSize = 0;
             }
-            for (int index = 0; index < previous.size(); index++) {
-                if (previous.get(index) != next.get(index)) {
+
+            @Override
+            public double durationMs(
+                    List<GroupPlanner.Item> candidatePrefix,
+                    int requiredThroughIndex) {
+                if (requiredThroughIndex < 0
+                        || requiredThroughIndex >= candidatePrefix.size()) {
+                    throw new IndexOutOfBoundsException(requiredThroughIndex);
+                }
+                if (!isIdentityPrefix(candidatePrefix)) {
+                    ensureCapacity(candidatePrefix.size());
+                    for (int index = 0; index < candidatePrefix.size(); index++) {
+                        previous[index] = candidatePrefix.get(index);
+                    }
+                    java.util.Arrays.fill(
+                            computed, 0, candidatePrefix.size(), false);
+                    previousSize = candidatePrefix.size();
+                } else if (previousSize < candidatePrefix.size()) {
+                    ensureCapacity(candidatePrefix.size());
+                    for (int index = previousSize;
+                            index < candidatePrefix.size(); index++) {
+                        previous[index] = candidatePrefix.get(index);
+                        computed[index] = false;
+                    }
+                    previousSize = candidatePrefix.size();
+                }
+                if (!computed[requiredThroughIndex]) {
+                    durations[requiredThroughIndex] =
+                            predictions.batchPlanningDurationMs(
+                                    candidatePrefix.subList(
+                                            0, requiredThroughIndex + 1));
+                    computed[requiredThroughIndex] = true;
+                }
+                return durations[requiredThroughIndex];
+            }
+
+            private boolean isIdentityPrefix(List<GroupPlanner.Item> next) {
+                if (previousSize > next.size()) {
                     return false;
                 }
+                for (int index = 0; index < previousSize; index++) {
+                    if (previous[index] != next.get(index)) {
+                        return false;
+                    }
+                }
+                return true;
             }
-            return true;
+
+            private void ensureCapacity(int size) {
+                if (previous.length >= size) {
+                    return;
+                }
+                previous = java.util.Arrays.copyOf(previous, size);
+                durations = java.util.Arrays.copyOf(durations, size);
+                computed = java.util.Arrays.copyOf(computed, size);
+            }
+        }
+
+        private static final class BatchService
+                implements RouteProjection.GroupService {
+            private GroupPlanner.Plan<GroupPlanner.Item> plan;
+            private RouteProjection.Predictions predictions;
+            private long[] completionOffsets = new long[0];
+            private boolean[] computed = new boolean[0];
+
+            private void reset(
+                    GroupPlanner.Plan<GroupPlanner.Item> exactPlan,
+                    RouteProjection.Predictions exactPredictions) {
+                plan = exactPlan;
+                predictions = exactPredictions;
+                int size = exactPlan.items().size();
+                if (completionOffsets.length < size) {
+                    completionOffsets = java.util.Arrays.copyOf(
+                            completionOffsets, size);
+                    computed = java.util.Arrays.copyOf(computed, size);
+                }
+                java.util.Arrays.fill(computed, 0, size, false);
+            }
+
+            @Override
+            public long completionOffsetMs(int memberIndex) {
+                if (memberIndex < 0 || memberIndex >= plan.items().size()) {
+                    throw new IndexOutOfBoundsException(memberIndex);
+                }
+                if (!computed[memberIndex]) {
+                    completionOffsets[memberIndex] =
+                            predictions.batchDurationMs(
+                                    plan.items().subList(0, memberIndex + 1));
+                    computed[memberIndex] = true;
+                }
+                return completionOffsets[memberIndex];
+            }
+
+            @Override
+            public long totalDurationMs() {
+                return completionOffsetMs(plan.items().size() - 1);
+            }
         }
     }
 }

@@ -1361,7 +1361,7 @@ public class RequestRegistry {
             return applyDecodeSettledTerminalLocked(entry, terminal);
         }
         return switch (terminal.kind()) {
-            case FAILURE -> applyFailureTerminalLocked(entry, terminal, false);
+            case FAILURE -> applyFailureTerminalLocked(entry, terminal, true);
             case TIMEOUT -> applyTimeoutTerminalLocked(entry, terminal);
             case DELIVERY_FAILURE ->
                     applyFailureTerminalLocked(entry, terminal, true);
@@ -2075,7 +2075,6 @@ public class RequestRegistry {
             ScheduledRequest item,
             DeliveryClaimKind deliveryKind) {
         Response success = copyResponse(item.routeResponse());
-        replaceDecodeStatus(success, item.decode());
         success.setSuccess(true);
         success.setCode(200);
         success.setEnqueuedByMaster(
@@ -2086,22 +2085,6 @@ public class RequestRegistry {
         // permit counter is the lock-free, cluster-wide outstanding snapshot.
         success.setQueueLength(Math.max(0, outstandingRequestCount.get()));
         return success;
-    }
-
-    private static void replaceDecodeStatus(
-            Response response,
-            ServerStatus currentDecode) {
-        if (currentDecode == null || response.getServerStatus() == null) {
-            return;
-        }
-        List<ServerStatus> statuses = response.getServerStatus();
-        for (int index = 0; index < statuses.size(); index++) {
-            ServerStatus status = statuses.get(index);
-            if (status != null && status.getRole() == RoleType.DECODE) {
-                statuses.set(index, copyOf(currentDecode));
-                return;
-            }
-        }
     }
 
     public void failPrepared(ScheduledRequest exactItem, Throwable cause) {

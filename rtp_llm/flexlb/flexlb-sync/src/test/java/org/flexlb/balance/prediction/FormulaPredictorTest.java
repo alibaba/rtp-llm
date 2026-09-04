@@ -486,6 +486,22 @@ class FormulaPredictorTest {
         assertEquals(500, first.evaluator().estimateMs(400, 100));
     }
 
+    @Test
+    void equalFormulaPredictorsShareAnImmutableSnapshotIdentity() {
+        String sharedExpression = "sum(computeTokens) + batchSize";
+        FormulaPredictor first = new FormulaPredictor(sharedExpression);
+        FormulaPredictor second = new FormulaPredictor(sharedExpression);
+        FormulaPredictor different = new FormulaPredictor(
+                "sum(computeTokens) + 2*batchSize");
+
+        org.junit.jupiter.api.Assertions.assertSame(
+                first.evaluator().snapshotIdentity(),
+                second.evaluator().snapshotIdentity());
+        org.junit.jupiter.api.Assertions.assertNotSame(
+                first.evaluator().snapshotIdentity(),
+                different.evaluator().snapshotIdentity());
+    }
+
     // ---- helpers ----
 
     private static PrefillBatchFeatures batchFeatures(

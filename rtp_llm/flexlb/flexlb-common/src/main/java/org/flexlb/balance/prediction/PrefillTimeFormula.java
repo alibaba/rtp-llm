@@ -51,6 +51,9 @@ import java.util.function.DoubleUnaryOperator;
  */
 public final class PrefillTimeFormula {
 
+    private static final ThreadLocal<EvalContext> EVALUATION_CONTEXT =
+            ThreadLocal.withInitial(EvalContext::new);
+
     private static final Map<String, DoubleUnaryOperator> UNARY_FUNCTIONS = Map.of(
             "sqrt",  Math::sqrt,
             "log",   Math::log,
@@ -119,7 +122,13 @@ public final class PrefillTimeFormula {
      * {@code sum(expr)} evaluates {@code expr} for each array in {@code itemVars}.
      */
     public long evaluate(double[] vars, List<double[]> itemVars) {
-        return (long) root.evaluate(new EvalContext(vars, itemVars));
+        EvalContext context = EVALUATION_CONTEXT.get();
+        context.reset(vars, itemVars);
+        try {
+            return (long) root.evaluate(context);
+        } finally {
+            context.reset(null, null);
+        }
     }
 
     // ---- AST nodes ----
@@ -132,7 +141,10 @@ public final class PrefillTimeFormula {
         double[] vars;
         List<double[]> itemVars;
 
-        EvalContext(double[] vars, List<double[]> itemVars) {
+        private EvalContext() {
+        }
+
+        private void reset(double[] vars, List<double[]> itemVars) {
             this.vars = vars;
             this.itemVars = itemVars;
         }
@@ -358,7 +370,9 @@ public final class PrefillTimeFormula {
             }
             skipWs();
             Node initialValueNode = parseExpression();
-            double initialValue = initialValueNode.evaluate(new EvalContext(new double[VAR_COUNT], null));
+            EvalContext initialValueContext = new EvalContext();
+            initialValueContext.reset(new double[VAR_COUNT], null);
+            double initialValue = initialValueNode.evaluate(initialValueContext);
             skipWs();
             if (!match(')')) {
                 throw error("Expected ')' after param() arguments");

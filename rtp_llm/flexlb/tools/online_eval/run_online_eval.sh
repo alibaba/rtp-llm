@@ -130,7 +130,6 @@ DEFAULT_FLEXLB_CONFIG='{
     "enqueueRpcTimeoutMs": 5000
   },
   "router": {
-    "availabilityHysteresisPercent": 30,
     "roles": {
       "prefill": {
         "executionTimeEstimator": {"type": "FORMULA"},

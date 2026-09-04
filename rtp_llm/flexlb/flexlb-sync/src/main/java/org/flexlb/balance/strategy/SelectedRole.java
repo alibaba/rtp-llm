@@ -22,12 +22,14 @@ public final class SelectedRole implements AutoCloseable {
     private final ServerStatus serverStatus;
     private final long prefillWorkMs;
     private final long decodeTotalKv;
+    private final long placementVersion;
 
     private SelectedRole(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus,
             long prefillWorkMs,
-            long decodeTotalKv) {
+            long decodeTotalKv,
+            long placementVersion) {
         this.generationPin = generationPin;
         this.serverStatus = serverStatus;
         if (!serverStatus.isSuccess()) {
@@ -60,12 +62,27 @@ public final class SelectedRole implements AutoCloseable {
         }
         this.prefillWorkMs = prefillWorkMs;
         this.decodeTotalKv = decodeTotalKv;
+        if (placementVersion < 0L) {
+            throw new IllegalArgumentException(
+                    "placementVersion must be non-negative");
+        }
+        this.placementVersion = placementVersion;
     }
 
     public static SelectedRole prefill(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus,
             long prefillWorkMs) {
+        return prefill(
+                generationPin, serverStatus, prefillWorkMs,
+                endpointPlacementVersion(generationPin));
+    }
+
+    public static SelectedRole prefill(
+            WorkerEndpoint.GenerationPin generationPin,
+            ServerStatus serverStatus,
+            long prefillWorkMs,
+            long placementVersion) {
         if (prefillWorkMs < 0L) {
             if (generationPin != null) {
                 generationPin.close();
@@ -74,23 +91,34 @@ public final class SelectedRole implements AutoCloseable {
                     "Prefill work must be non-negative");
         }
         return createOwned(
-                generationPin, serverStatus, prefillWorkMs, -1L);
+                generationPin, serverStatus, prefillWorkMs, -1L,
+                placementVersion);
     }
 
     public static SelectedRole decode(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus,
             long decodeTotalKv) {
+        return decode(
+                generationPin, serverStatus, decodeTotalKv,
+                endpointPlacementVersion(generationPin));
+    }
+
+    public static SelectedRole decode(
+            WorkerEndpoint.GenerationPin generationPin,
+            ServerStatus serverStatus,
+            long decodeTotalKv,
+            long placementVersion) {
         return createOwned(
                 generationPin, serverStatus, -1L,
-                Math.max(0L, decodeTotalKv));
+                Math.max(0L, decodeTotalKv), placementVersion);
     }
 
     public static SelectedRole stateless(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus) {
         return createOwned(
-                generationPin, serverStatus, -1L, -1L);
+                generationPin, serverStatus, -1L, -1L, 0L);
     }
 
     /** Calling a factory consumes the pin, including every validation failure. */
@@ -98,10 +126,12 @@ public final class SelectedRole implements AutoCloseable {
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus,
             long prefillWorkMs,
-            long decodeTotalKv) {
+            long decodeTotalKv,
+            long placementVersion) {
         try {
             return new SelectedRole(
-                    generationPin, serverStatus, prefillWorkMs, decodeTotalKv);
+                    generationPin, serverStatus, prefillWorkMs, decodeTotalKv,
+                    placementVersion);
         } catch (RuntimeException | Error failure) {
             if (generationPin != null) {
                 generationPin.close();
@@ -128,6 +158,25 @@ public final class SelectedRole implements AutoCloseable {
                     "selection does not carry Decode capacity");
         }
         return decodeTotalKv;
+    }
+
+    public long placementVersion() {
+        return placementVersion;
+    }
+
+    private static long endpointPlacementVersion(
+            WorkerEndpoint.GenerationPin pin) {
+        if (pin == null) {
+            return 0L;
+        }
+        WorkerEndpoint endpoint = pin.endpoint();
+        if (endpoint instanceof PrefillEndpoint prefill) {
+            return prefill.placementVersion();
+        }
+        if (endpoint instanceof DecodeEndpoint decode) {
+            return decode.placementVersion();
+        }
+        return 0L;
     }
 
     /** Move the exact pin to the next domain owner. */

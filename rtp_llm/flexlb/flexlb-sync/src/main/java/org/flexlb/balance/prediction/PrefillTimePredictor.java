@@ -13,6 +13,18 @@ public interface PrefillTimePredictor {
     Evaluator evaluator();
 
     interface Evaluator {
+        /**
+         * Identity of the immutable model snapshot behind this evaluator.
+         *
+         * <p>Independent endpoint predictors may return the same object only
+         * when their predictions are guaranteed identical for equal inputs.
+         * Projection uses this identity to reuse an equal singleton prediction
+         * while it still evaluates every endpoint's queue and cache state.
+         */
+        default Object snapshotIdentity() {
+            return this;
+        }
+
         /** Estimate one request from its input and cache-hit token counts. */
         long estimateMs(long totalTokens, long hitTokens);
 

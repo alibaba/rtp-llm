@@ -86,7 +86,6 @@ print(json.dumps({
         "maxInflightBatchesPerPrefillWorker": max_batches,
     },
     "router": {
-        "availabilityHysteresisPercent": 0,
         "roles": {
             "prefill": {
                 "candidateChoice": {

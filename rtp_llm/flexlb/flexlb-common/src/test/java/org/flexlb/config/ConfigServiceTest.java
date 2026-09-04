@@ -80,7 +80,6 @@ class ConfigServiceTest {
                     "enqueueRpcTimeoutMs": 4000
                   },
                   "router": {
-                    "availabilityHysteresisPercent": 10,
                     "groupSelector": {
                       "defaultTargets": [{"group": "blue", "weight": 1}],
                       "rules": [{
@@ -185,6 +184,8 @@ class ConfigServiceTest {
         assertEquals(10.0, cacheAffinity.getMinPrefixHitPercent());
         assertEquals(128L, config.getRouter().getRoles().getDecode()
                 .getAvailability().getMaxEngineRequests());
+        assertEquals(1.0, config.getRouter().getRoles().getDecode()
+                .getLoadDecayPerRequest());
         assertEquals(1, config.getRouter().getGroupSelector().getRules().size());
     }
 
@@ -216,6 +217,12 @@ class ConfigServiceTest {
                 """));
         assertTrue(removedPrefillAvailability.getMessage()
                 .contains("availability"));
+        ConfigValidationException removedHysteresis = assertThrows(
+                ConfigValidationException.class, () -> ConfigService.parse("""
+                {"router":{"availabilityHysteresisPercent":15}}
+                """));
+        assertTrue(removedHysteresis.getMessage()
+                .contains("availabilityHysteresisPercent"));
     }
 
     @Test

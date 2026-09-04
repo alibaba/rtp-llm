@@ -663,6 +663,7 @@ public class EndpointRegistry {
             return null;
         }
         expectedStatus.requireActiveGeneration();
+        DetachedGeneration detached;
         synchronized (lifecycleGate) {
             if (registryPhase != RegistryPhase.OPEN) {
                 throw new IllegalStateException(
@@ -670,7 +671,7 @@ public class EndpointRegistry {
             }
             ConcurrentHashMap<String, WorkerEndpoint> endpoints =
                     endpoints(roleType);
-            DetachedGeneration detached = endpoints == null
+            detached = endpoints == null
                     ? null
                     : detach(roleType, endpoints, ipPort, expectedStatus);
             if (detached != null) {
@@ -683,8 +684,14 @@ public class EndpointRegistry {
                                     + expectedStatus.getGenerationId());
                 }
             }
-            return detached;
         }
+        if (detached != null) {
+            WorkerStatus.TopologySnapshot topology =
+                    detached.endpoint.getStatus().topologySnapshot();
+            placementAvailability.capacityChanged(
+                    roleType, topology.group(), ipPort);
+        }
+        return detached;
     }
 
     private DetachedGeneration detach(
@@ -784,7 +791,8 @@ public class EndpointRegistry {
         WorkerStatus.TopologySnapshot topology =
                 endpoint.getStatus().topologySnapshot();
         placementAvailability.capacityChanged(
-                endpoint.getStatus().getRole(), topology.group());
+                endpoint.getStatus().getRole(), topology.group(),
+                endpoint.ipPort());
     }
 
     public void close() {

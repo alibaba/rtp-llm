@@ -235,7 +235,7 @@ public final class WorkerBatcher {
     private Throwable stopFailure;
     private volatile boolean stopped;
     private final Runnable capacityAvailableSignal =
-            this::signalDeliveryCapacityAvailable;
+            this::signalCapacityAvailable;
     /** Exact resource event source for the currently blocked active head. */
     private CapacityBoundary.Availability
             subscribedCapacityAvailability;
@@ -277,10 +277,16 @@ public final class WorkerBatcher {
         this.stopAcknowledgementFailure = new IllegalStateException(
                 "FlexLB worker stop callback lost its exact retained owner: "
                         + key);
-        this.workerThread = new Thread(this::runLoop, "flexlb-batcher-" + key);
-        this.workerThread.setDaemon(true);
-        this.workerThread.setUncaughtExceptionHandler((t, e) ->
-                Logger.error("WorkerBatcher[{}] thread died unexpectedly", key, e));
+        // The endpoint still owns one serialized state machine, but waiting
+        // queues must not consume one OS thread per worker. Java 21 virtual
+        // threads preserve the blocking control flow and unmount on the queue
+        // condition, which keeps a 750-endpoint fleet schedulable.
+        this.workerThread = Thread.ofVirtual()
+                .name("flexlb-batcher-" + key)
+                .uncaughtExceptionHandler((thread, failure) -> Logger.error(
+                        "WorkerBatcher[{}] thread died unexpectedly",
+                        key, failure))
+                .unstarted(this::runLoop);
     }
 
     public synchronized void start() {
@@ -290,6 +296,12 @@ public final class WorkerBatcher {
                             + runtimeState);
         }
         runtimeState = RuntimeState.STARTING;
+        if (!queueScheduling) {
+            // DIRECT uses only the shared Prefill ownership/projection ledger.
+            // It has no admission queue and therefore owns no scheduler thread.
+            runtimeState = RuntimeState.RUNNING;
+            return;
+        }
         try {
             workerThread.start();
             runtimeState = RuntimeState.RUNNING;
@@ -305,15 +317,6 @@ public final class WorkerBatcher {
     }
 
     public boolean offer(ScheduledRequest exactItem) {
-        ScheduledRequest item = exactItem;
-        requireExactEndpoint(item, "incoming item");
-        if (runtimeState != RuntimeState.RUNNING || stopped) {
-            return false;
-        }
-        return enqueue(item, maxQueueCapacity());
-    }
-
-    public boolean offerForPlacement(ScheduledRequest exactItem) {
         ScheduledRequest item = exactItem;
         requireExactEndpoint(item, "incoming item");
         if (runtimeState != RuntimeState.RUNNING || stopped) {
@@ -372,20 +375,20 @@ public final class WorkerBatcher {
                     0L,
                     item.maxInflightDeliveriesPerPrefillWorker());
         } catch (Throwable failure) {
-            rollbackFreshActiveUnderLock(item);
+            rollbackFreshActiveUnderLock(item, null);
             return new EnqueueAttempt(false, null, failure);
         }
         if (result.status() != PrefillState.CapacityStatus.ACQUIRED) {
-            rollbackFreshActiveUnderLock(item);
+            rollbackFreshActiveUnderLock(item, null);
             return new EnqueueAttempt(false, null, null);
         }
 
         PrefillState.RouteReservation reservation = result.reservation();
         if (!item.bindPublishedRouteReservation(reservation)) {
-            rollbackFreshActiveUnderLock(item);
+            rollbackFreshActiveUnderLock(item, reservation);
             return new EnqueueAttempt(
                     false,
-                    reservation,
+                    null,
                     new IllegalStateException(
                             "ACTIVE request already owns a route reservation: request_id="
                                     + item.requestId()));
@@ -395,8 +398,14 @@ public final class WorkerBatcher {
     }
 
     /** Undo an ACTIVE publication which never escaped queueLock. */
-    private void rollbackFreshActiveUnderLock(ScheduledRequest item) {
-        if (!prefillState.terminalizeActiveUnderLock(item)) {
+    private void rollbackFreshActiveUnderLock(
+            ScheduledRequest item,
+            PrefillState.RouteReservation reservation) {
+        boolean removed = reservation == null
+                ? prefillState.terminalizeActiveUnderLock(item)
+                : prefillState.terminalizeActiveRouteUnderLock(
+                        item, reservation);
+        if (!removed) {
             throw new IllegalStateException(
                     "fresh ACTIVE publication could not roll back: request_id="
                             + item.requestId());
@@ -551,7 +560,7 @@ public final class WorkerBatcher {
                     cleanupFailure = appendCleanupFailure(
                             cleanupFailure, subscriptionFailure);
                 }
-                capacityBlockedHead = null;
+                setCapacityBlockedHeadUnderLock(null);
                 stateChanged.signalAll();
             } catch (Throwable wakeFailure) {
                 cleanupFailure = appendCleanupFailure(
@@ -709,8 +718,7 @@ public final class WorkerBatcher {
             queueLock.unlock();
         }
         if (removed) {
-            releaseUnconsumedRouteReservation(item);
-            prefillEndpoint.signalPlacementCapacityChanged();
+            signalCapacityAvailable();
             try {
                 Logger.debug(
                         "[request-scheduler] exact queue remove: worker={} reason={} request_id={}",
@@ -822,7 +830,9 @@ public final class WorkerBatcher {
                     rollbackIncoming = acquisition.reservation();
                     if (!incoming.bindPublishedRouteReservation(
                             rollbackIncoming)) {
-                        prefillState.terminalizeActiveUnderLock(incoming);
+                        prefillState.terminalizeActiveRouteUnderLock(
+                                incoming, rollbackIncoming);
+                        rollbackIncoming = null;
                         throw new IllegalStateException(
                                 "replacement could not bind its route credit: request_id="
                                         + incoming.requestId());
@@ -845,7 +855,7 @@ public final class WorkerBatcher {
             }
         }
         if (routeCapacityReleased) {
-            prefillEndpoint.signalPlacementCapacityChanged();
+            signalCapacityAvailable();
         }
         if (failure != null) {
             throw propagateCommitFailure(failure);
@@ -927,10 +937,7 @@ public final class WorkerBatcher {
                 ? 1 : fixedWindowDecision.resolveMaxRequests();
     }
 
-    /**
-     * Endpoint-local delivery credits exposed to the global planning pump.
-     * Decision grouping remains local and never limits planner concurrency.
-     */
+    /** Endpoint-local request credits exposed to the global planning pump. */
     public int availableDeliveryCredits() {
         DispatcherConfig dispatcher = config.getDispatcher();
         if (dispatcher.getType() == DispatcherConfig.Type.NON_BATCH) {
@@ -939,8 +946,12 @@ public final class WorkerBatcher {
             return prefillState.availableRouteDecisionSlots(
                     maximum == null ? 0 : maximum);
         }
-        return prefillState.availableBatchDecisionSlots(
-                maxDecisionRequests());
+        Integer maximumBatches =
+                dispatcher.getMaxInflightBatchesPerPrefillWorker();
+        return prefillState.availableBatchPublicationSlots(
+                maximumBatches == null ? 0 : maximumBatches,
+                maxDecisionRequests(),
+                maxQueueCapacity());
     }
 
     private long collectionWindowMs() {
@@ -972,7 +983,36 @@ public final class WorkerBatcher {
 
     /** Caller holds {@link #queueLock}. */
     private boolean removeTerminalActiveUnderLock(ScheduledRequest item) {
-        return prefillState.terminalizeActiveUnderLock(item);
+        if (!item.requiresRouteReservation()) {
+            return prefillState.terminalizeActiveUnderLock(item);
+        }
+        PrefillState.RouteReservation reservation =
+                item.takePublishedRouteReservation();
+        if (reservation == null) {
+            return false;
+        }
+        boolean removed;
+        try {
+            removed = prefillState.terminalizeActiveRouteUnderLock(
+                    item, reservation);
+        } catch (Throwable failure) {
+            restoreRouteReservation(item, reservation);
+            throw failure;
+        }
+        if (!removed) {
+            restoreRouteReservation(item, reservation);
+        }
+        return removed;
+    }
+
+    private static void restoreRouteReservation(
+            ScheduledRequest item,
+            PrefillState.RouteReservation reservation) {
+        if (!item.restorePublishedRouteReservation(reservation)) {
+            throw new IllegalStateException(
+                    "ACTIVE route credit could not be restored request_id="
+                            + item.requestId());
+        }
     }
 
     /** Caller holds {@link #queueLock}. */
@@ -1114,7 +1154,8 @@ public final class WorkerBatcher {
             RouteProjection.Inputs captured = new RouteProjection.Inputs(
                     queueSnapshot,
                     ownership.committedWork(),
-                    ownership.pendingRequestCount());
+                    ownership.pendingRequestCount(),
+                    currentOwnershipVersion);
             projectionCache = new ProjectionCache(
                     currentQueueVersion,
                     currentSchedulingInputVersion,
@@ -1306,12 +1347,7 @@ public final class WorkerBatcher {
         if (postCommitFailure != null) {
             Throwable failure = postCommitFailure;
             if (removedTerminalBoundary) {
-                try {
-                    releaseUnconsumedRouteReservation(
-                            transaction.blockedItem());
-                } catch (Throwable cleanupFailure) {
-                    failure = appendFailure(failure, cleanupFailure);
-                }
+                signalCapacityAvailable();
             }
             try {
                 notifyTerminalAdmissionFailure(
@@ -1329,7 +1365,7 @@ public final class WorkerBatcher {
             throw propagateCommitFailure(failure);
         }
         if (removedTerminalBoundary) {
-            releaseUnconsumedRouteReservation(transaction.blockedItem());
+            signalCapacityAvailable();
         }
         notifyTerminalAdmissionFailure(
                 removedTerminalBoundary,
@@ -1366,7 +1402,7 @@ public final class WorkerBatcher {
             queueLock.unlock();
         }
         if (removedTerminalBoundary) {
-            releaseUnconsumedRouteReservation(blockedItem);
+            signalCapacityAvailable();
         }
         notifyTerminalAdmissionFailure(
                 removedTerminalBoundary, blockedItem, blockedResult);
@@ -1445,7 +1481,7 @@ public final class WorkerBatcher {
         if (!removed) {
             return;
         }
-        releaseUnconsumedRouteReservation(head);
+        signalCapacityAvailable();
         try {
             endpointEvents.onQueuedItemExpired(head);
         } catch (Throwable callbackFailure) {
@@ -1804,7 +1840,7 @@ public final class WorkerBatcher {
         queueLock.lockInterruptibly();
         try {
             while (!stopped && queue.isEmpty()) {
-                capacityBlockedHead = null;
+                setCapacityBlockedHeadUnderLock(null);
                 unsubscribeFromBlockedCapacity();
                 awaitStateChange();
             }
@@ -1854,7 +1890,7 @@ public final class WorkerBatcher {
             if (stopped) {
                 return;
             }
-            capacityBlockedHead = blocked;
+            setCapacityBlockedHeadUnderLock(blocked);
             subscribeToBlockedCapacity(blocked);
             while (!stopped
                     && queue.peek() == blocked.request()
@@ -1872,7 +1908,7 @@ public final class WorkerBatcher {
                 }
             }
         } finally {
-            capacityBlockedHead = null;
+            setCapacityBlockedHeadUnderLock(null);
             unsubscribeFromBlockedCapacity();
             queueLock.unlock();
         }
@@ -1921,10 +1957,30 @@ public final class WorkerBatcher {
         queueLock.lock();
         try {
             if (capacityBlockedHead != null) {
+                projectionCache = null;
                 stateChanged.signal();
             }
         } finally {
             queueLock.unlock();
+        }
+    }
+
+    /** Publish one real Prefill credit release to local and global waiters. */
+    private void signalCapacityAvailable() {
+        signalDeliveryCapacityAvailable();
+        prefillEndpoint.signalPlacementCapacityChanged();
+    }
+
+    /** Caller holds queueLock. Capacity blocks are projection inputs. */
+    private void setCapacityBlockedHeadUnderLock(
+            BatcherCycleResult blocked) {
+        if (!queueLock.isHeldByCurrentThread()) {
+            throw new IllegalStateException(
+                    "capacity block update requires queueLock");
+        }
+        if (capacityBlockedHead != blocked) {
+            capacityBlockedHead = blocked;
+            projectionCache = null;
         }
     }
 
