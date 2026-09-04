@@ -11,9 +11,12 @@ import org.flexlb.config.RoutingConfig.DecodeAvailabilityConfig;
 import org.flexlb.config.RoutingConfig.EstimatorType;
 import org.flexlb.config.RoutingConfig.OutlierRejectionConfig;
 import org.flexlb.config.RoutingConfig.PrefillConfig;
+import org.flexlb.util.PriorityNormalizer;
 
 /** Cross-field validation for the public configuration contract. */
 final class FlexlbConfigValidator {
+
+    private static final int MIN_STALE_TIMEOUT_TO_RPC_TIMEOUT_RATIO = 2;
 
     static void validateDocumentShape(JsonNode document) {
         JsonNode scheduler = document.path("scheduler");
@@ -134,7 +137,9 @@ final class FlexlbConfigValidator {
                 "scheduler.lifecycle.maxDeliveredNotAcceptedRequestsGlobal");
         QueueOrderingConfig ordering = queue.getOrdering();
         if (ordering.getType() == QueueOrderingConfig.Type.PRIORITY) {
-            range(ordering.getDefaultPriority(), 1, 100,
+            range(ordering.getDefaultPriority(),
+                    PriorityNormalizer.MIN_PRIORITY,
+                    PriorityNormalizer.MAX_PRIORITY,
                     "scheduler.ordering.defaultPriority");
             PreemptionConfig preemption = ordering.getPreemption();
             if (preemption != null) {
@@ -224,7 +229,8 @@ final class FlexlbConfigValidator {
         if (affinity != null) {
             nonNegative(affinity.getMaxExtraTtftMs(),
                     "router.roles.prefill.cacheAffinity.maxExtraTtftMs");
-            range(affinity.getMinPrefixHitPercent(), 0, 100,
+            range(affinity.getMinPrefixHitPercent(), 0,
+                    RoutingConfig.PERCENTAGE_SCALE,
                     "router.roles.prefill.cacheAffinity.minPrefixHitPercent");
         }
 
@@ -234,7 +240,8 @@ final class FlexlbConfigValidator {
                 routing.getRoles().getDecode().getAvailability();
         require(decodeAvailability != null,
                 "router.roles.decode.availability", "is required");
-        range(decodeAvailability.getMaxKvUsagePercent(), 0, 100,
+        range(decodeAvailability.getMaxKvUsagePercent(), 0,
+                RoutingConfig.PERCENTAGE_SCALE,
                 "router.roles.decode.availability.maxKvUsagePercent");
         if (decodeAvailability.getMaxEngineRequests() != null) {
             positive(decodeAvailability.getMaxEngineRequests(),
@@ -283,7 +290,8 @@ final class FlexlbConfigValidator {
         positive(workers.getHealth().getStatusRpcTimeoutMs(),
                 "workerRegistry.health.statusRpcTimeoutMs");
         require(workers.getHealth().getStatusRpcTimeoutMs()
-                        <= workers.getHealth().getStatusStaleAfterMs() / 2,
+                        <= workers.getHealth().getStatusStaleAfterMs()
+                                / MIN_STALE_TIMEOUT_TO_RPC_TIMEOUT_RATIO,
                 "workerRegistry.health.statusStaleAfterMs",
                 "must be at least twice statusRpcTimeoutMs");
         require(workers.getCacheStatus() != null,

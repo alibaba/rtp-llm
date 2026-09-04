@@ -161,7 +161,7 @@ public class CostBasedDecodeStrategy {
         long used = engineFacing
                 ? view.engineFacingKvUsed() : view.realKvUsed();
         return view.totalKv() == 0
-                || used * 100.0 / view.totalKv()
+                || used * RoutingConfig.PERCENTAGE_SCALE / view.totalKv()
                         < availability.getMaxKvUsagePercent();
     }
 

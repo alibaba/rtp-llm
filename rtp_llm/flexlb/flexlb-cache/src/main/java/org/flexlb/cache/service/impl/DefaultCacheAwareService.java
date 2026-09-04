@@ -15,6 +15,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Default implementation of cache-aware service
@@ -25,6 +26,9 @@ import java.util.Set;
 @Slf4j
 @Service
 public class DefaultCacheAwareService implements CacheAwareService {
+
+    private static final String FIND_METRIC_SUCCESS = "0";
+    private static final String FIND_METRIC_FAILURE = "1";
 
     private final KvCacheManager kvCacheManager;
     private final CacheMetricsReporter cacheMetricsReporter;
@@ -45,7 +49,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
             RoleType roleType,
             List<String> candidateEngineIpPorts) {
 
-        long startTime = System.nanoTime() / 1000;
+        long startTime = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
 
         if (blockCacheKeys == null || blockCacheKeys.isEmpty()) {
             return Collections.emptyMap();
@@ -56,11 +60,11 @@ public class DefaultCacheAwareService implements CacheAwareService {
             resultMap = kvCacheManager.findMatchingEngines(
                     blockCacheKeys, candidateEngineIpPorts);
         } catch (RuntimeException e) {
-            reportFindLatency(roleType, startTime, "1");
+            reportFindLatency(roleType, startTime, FIND_METRIC_FAILURE);
             log.error("Error finding matching engines for role: {}", roleType, e);
             throw e;
         }
-        reportFindLatency(roleType, startTime, "0");
+        reportFindLatency(roleType, startTime, FIND_METRIC_SUCCESS);
         return resultMap;
     }
 
@@ -77,7 +81,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
 
     @Override
     public WorkerCacheUpdateResult updateEngineBlockCache(WorkerStatus workerStatus) {
-        long startTime = System.nanoTime() / 1000;
+        long startTime = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
         String engineIpPort = workerStatus.getIpPort();
         String role = workerStatus.getRole().getCode();
 

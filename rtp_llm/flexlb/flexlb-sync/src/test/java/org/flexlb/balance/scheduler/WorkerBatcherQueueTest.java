@@ -1,11 +1,8 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.scheduler.ScheduledRequest;
-import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.config.FlexlbConfig;

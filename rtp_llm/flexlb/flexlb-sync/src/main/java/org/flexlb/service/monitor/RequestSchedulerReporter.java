@@ -5,6 +5,7 @@ import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
+import org.flexlb.util.PriorityNormalizer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -40,9 +41,6 @@ import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_KV_TOKENS;
 @Component
 public class RequestSchedulerReporter {
 
-    /** Highest normalized priority level; see {@code PriorityNormalizer}. */
-    private static final int MAX_PRIORITY = 100;
-
     /**
      * Priority is a normalized level, so its single-tag set is shared per
      * level instead of being rebuilt on every report.
@@ -57,7 +55,8 @@ public class RequestSchedulerReporter {
     }
 
     private static FlexMetricTags[] buildPriorityTags() {
-        FlexMetricTags[] tags = new FlexMetricTags[MAX_PRIORITY + 1];
+        FlexMetricTags[] tags = new FlexMetricTags[
+                PriorityNormalizer.MAX_PRIORITY + 1];
         for (int priority = 0; priority < tags.length; priority++) {
             tags[priority] = FlexMetricTags.of("priority", String.valueOf(priority));
         }
@@ -65,7 +64,7 @@ public class RequestSchedulerReporter {
     }
 
     private static FlexMetricTags priorityTags(int priority) {
-        return priority >= 0 && priority <= MAX_PRIORITY
+        return priority >= 0 && priority <= PriorityNormalizer.MAX_PRIORITY
                 ? PRIORITY_TAGS[priority]
                 : FlexMetricTags.of("priority", String.valueOf(priority));
     }

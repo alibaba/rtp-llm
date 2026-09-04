@@ -1,8 +1,8 @@
 package org.flexlb.balance.eviction;
 
+import org.flexlb.balance.eviction.model.PriorityRequestEnvelope;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.scheduler.WorkerBatcher.QueueSnapshot;
-import org.flexlb.balance.eviction.model.PriorityRequestEnvelope;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;

@@ -1,21 +1,20 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.scheduler.ScheduledRequest;
-import org.flexlb.balance.delivery.DeliveryStrategy;
-import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryMetrics;
+import org.flexlb.balance.delivery.DeliveryResult;
+import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.projection.RouteProjection;
-import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Supplier;

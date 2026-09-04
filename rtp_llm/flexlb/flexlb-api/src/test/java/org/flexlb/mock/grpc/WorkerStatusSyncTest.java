@@ -5,7 +5,6 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.mock.FlexLBMockTestBase;
-import org.flexlb.mock.InflightAssertions;
 import org.flexlb.mock.MockWorkerBehavior;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.junit.jupiter.api.Test;

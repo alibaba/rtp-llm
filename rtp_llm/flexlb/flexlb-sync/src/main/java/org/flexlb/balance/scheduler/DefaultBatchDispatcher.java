@@ -11,8 +11,8 @@ import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.scheduler.BatchDeliveryStrategy.PreparedSubmission;
-import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.constant.MetricConstant;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -41,9 +41,9 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.BiConsumer;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.BiConsumer;
 
 /**
  * Default batch-submission execution adapter.

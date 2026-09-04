@@ -11,10 +11,10 @@ import io.grpc.netty.NettyChannelBuilder;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioSocketChannel;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 

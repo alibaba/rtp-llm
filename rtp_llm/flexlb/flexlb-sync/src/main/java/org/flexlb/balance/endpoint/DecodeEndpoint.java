@@ -3,6 +3,7 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.DecodeTaskPhase;
@@ -413,7 +414,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
         public AdmissionCapacity {
             if (maxEngineRequests < 0L || maxKvUsagePercent < 0L
-                    || maxKvUsagePercent > 100L) {
+                    || maxKvUsagePercent > RoutingConfig.PERCENTAGE_SCALE) {
                 throw new IllegalArgumentException(
                         "Decode admission limits are outside their domain");
             }
@@ -3426,7 +3427,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                         engineFenceHeldExpectedKv.get()));
         long projected = saturatedAddNonNegative(
                 expectedUsed, expectedKvTokens);
-        return (double) projected * 100.0
+        return (double) projected * RoutingConfig.PERCENTAGE_SCALE
                 > (double) capacity.maxKvUsagePercent() * (double) totalKv;
     }
 
@@ -3509,7 +3510,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 0L, currentExpectedUsage - freedExpectedUsage);
         long projectedExpectedUsage = saturatedAddNonNegative(
                 usageAfterVictims, incomingExpectedKv);
-        return (double) projectedExpectedUsage * 100.0
+        return (double) projectedExpectedUsage * RoutingConfig.PERCENTAGE_SCALE
                 <= (double) capacity.maxKvUsagePercent() * (double) totalKv;
     }
 
@@ -3563,7 +3564,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
         long projectedExpectedKv = saturatedAddNonNegative(
                 Math.max(0L, expectedKvUsed), expectedKvTokens);
-        return (double) projectedExpectedKv * 100.0
+        return (double) projectedExpectedKv * RoutingConfig.PERCENTAGE_SCALE
                 <= (double) maxKvUsagePercent * (double) totalKv;
     }
 

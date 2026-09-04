@@ -1,12 +1,12 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
-import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
@@ -35,15 +35,15 @@ import java.util.function.BooleanSupplier;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 /** Final selector/pin ownership contracts for {@link DefaultRouter}. */
 class DefaultRouterTest {

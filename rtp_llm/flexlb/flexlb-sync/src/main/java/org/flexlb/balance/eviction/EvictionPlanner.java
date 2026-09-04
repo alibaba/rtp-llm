@@ -1,10 +1,9 @@
 package org.flexlb.balance.eviction;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRequestView;
+import org.flexlb.balance.eviction.model.PriorityRequestEnvelope;
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.scheduler.WorkerBatcher.QueueSnapshot;
-import org.flexlb.balance.eviction.model.PriorityRequestEnvelope;
-
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.enums.DecodeTaskPhase;

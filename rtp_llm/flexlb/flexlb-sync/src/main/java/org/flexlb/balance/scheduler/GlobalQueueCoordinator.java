@@ -294,7 +294,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
 
             // Endpoint credit aggregation may inspect every Prefill endpoint.
             // Keep it outside the global ordering lock so ingress/cancel never
-            // waits behind a 750-worker fleet scan.
+            // waits behind a large-fleet scan.
             int frontierSize = planningFrontierSize();
 
             lock.lock();

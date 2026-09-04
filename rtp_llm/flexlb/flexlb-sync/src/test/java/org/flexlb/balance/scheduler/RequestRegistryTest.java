@@ -1,7 +1,6 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
-
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.scheduler.RequestLifecycleTestSupport.Registered;
@@ -28,8 +27,8 @@ import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.awaitCond
 import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.commitRoute;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;

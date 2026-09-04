@@ -1,9 +1,8 @@
 package org.flexlb.balance.delivery;
 
-import org.flexlb.balance.scheduler.ScheduledRequest;
-
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 
 import java.util.List;
 import java.util.OptionalLong;

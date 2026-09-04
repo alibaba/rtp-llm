@@ -1,12 +1,12 @@
 package org.flexlb.balance.projection;
 
 import org.flexlb.balance.delivery.DeliveryMetrics;
-import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
-import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.LearningPredictor;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
+import org.flexlb.balance.scheduler.RequestRegistry;
+import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 

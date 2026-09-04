@@ -1,7 +1,7 @@
 package org.flexlb.balance.composition;
 
-import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryMetrics;
+import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.RequestRegistry;

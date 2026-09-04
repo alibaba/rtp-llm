@@ -2,7 +2,6 @@ package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.TaskInfo;

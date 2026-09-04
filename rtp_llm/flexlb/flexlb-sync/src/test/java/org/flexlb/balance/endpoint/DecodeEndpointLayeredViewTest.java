@@ -1,7 +1,7 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.eviction.DecodeEndpointSnapshot;
 import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRequestView;
+import org.flexlb.balance.eviction.DecodeEndpointSnapshot;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;

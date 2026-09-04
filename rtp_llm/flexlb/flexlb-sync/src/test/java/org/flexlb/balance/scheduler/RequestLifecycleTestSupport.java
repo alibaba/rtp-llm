@@ -1,7 +1,6 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
-
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;

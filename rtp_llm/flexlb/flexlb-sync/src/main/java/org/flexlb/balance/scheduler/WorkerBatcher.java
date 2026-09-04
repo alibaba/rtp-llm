@@ -2,8 +2,8 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryStrategy;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillActiveIndex;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.InvalidPrefillPredictionException;

@@ -1,8 +1,8 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.config.SchedulerConfig;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.DispatcherConfig;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;

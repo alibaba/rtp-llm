@@ -1,21 +1,20 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
-
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryMetrics;
+import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.eviction.EvictionManager;
-import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
-import org.flexlb.config.DispatcherConfig;
+import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;

@@ -1,8 +1,6 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.scheduler.ScheduledRequest;
-import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.prediction.LearningPredictor;
@@ -10,7 +8,9 @@ import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;

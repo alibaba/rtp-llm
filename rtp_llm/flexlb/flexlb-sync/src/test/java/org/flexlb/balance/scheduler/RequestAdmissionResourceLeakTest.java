@@ -1,7 +1,6 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
-
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;

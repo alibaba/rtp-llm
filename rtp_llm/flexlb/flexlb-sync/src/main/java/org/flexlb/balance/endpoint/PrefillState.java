@@ -1,10 +1,11 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.projection.WorkSnapshot.Phase;
+import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.PriorityPreemptionProgress;
@@ -135,9 +136,6 @@ public final class PrefillState {
             }
         }
     }
-
-    /** Production RTP-LLM raw {@code ErrorCode::PRIORITY_PREEMPTED}. */
-    private static final long PRIORITY_PREEMPTED_ERROR_CODE = 8429L;
 
     enum LeaseState {
         OPEN,
@@ -2307,7 +2305,8 @@ public final class PrefillState {
                 ? WorkerStatusFact.Kind.COMPLETED
                 : terminal.preemptionProgress
                         == PriorityPreemptionProgress.CANCELED
-                    && terminal.errorCode == PRIORITY_PREEMPTED_ERROR_CODE
+                    && terminal.errorCode
+                            == StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode()
                 ? WorkerStatusFact.Kind.PRIORITY_CANCELED
                 : WorkerStatusFact.Kind.FAILED;
         return WorkerStatusFact.terminal(

@@ -1,8 +1,8 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.delivery.DeliveryStrategy;
-import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;

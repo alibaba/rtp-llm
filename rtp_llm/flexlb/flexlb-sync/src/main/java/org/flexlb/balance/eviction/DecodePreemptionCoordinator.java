@@ -7,6 +7,7 @@ import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimTerminal;
 import org.flexlb.balance.scheduler.PreemptionRegistration;
 import org.flexlb.balance.scheduler.RequestRegistry;
+import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -19,8 +20,6 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
-
-import org.springframework.stereotype.Component;
 
 /**
  * Executes one Engine-Cancel preemption transaction.

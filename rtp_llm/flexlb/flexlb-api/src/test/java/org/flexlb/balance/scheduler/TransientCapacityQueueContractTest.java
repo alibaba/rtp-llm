@@ -1,9 +1,8 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.PlacementResult;
-
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.Logger;
+import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
@@ -15,13 +14,12 @@ import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.QueueOrderingConfig;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.PreemptionConfig;
-import org.flexlb.config.RoutingConfig;
+import org.flexlb.config.QueueOrderingConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
@@ -1162,7 +1160,6 @@ class TransientCapacityQueueContractTest {
         private int totalPlacementAttempts() {
             return totalAttempts.get();
         }
-
 
         private long placementWakeups() {
             return placementWakeups.get();

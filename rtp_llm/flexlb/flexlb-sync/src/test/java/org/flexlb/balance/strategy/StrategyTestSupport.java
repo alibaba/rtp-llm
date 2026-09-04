@@ -1,19 +1,18 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.delivery.DeliveryMetrics;
-import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.flexlb.balance.scheduler.ScheduledRequest;
-import org.flexlb.balance.scheduler.EndpointEventProjector;
-import org.flexlb.balance.scheduler.PlacementAvailability;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;

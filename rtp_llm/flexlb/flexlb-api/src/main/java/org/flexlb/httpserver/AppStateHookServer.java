@@ -1,8 +1,8 @@
 package org.flexlb.httpserver;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.service.grace.GracefulLifecycleReporter;
 import org.flexlb.service.grace.ApplicationLifecycle;
+import org.flexlb.service.grace.GracefulLifecycleReporter;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.event.EventListener;

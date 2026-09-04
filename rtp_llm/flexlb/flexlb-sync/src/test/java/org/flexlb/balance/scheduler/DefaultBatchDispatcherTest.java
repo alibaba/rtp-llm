@@ -1,10 +1,9 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.scheduler.BatchDeliveryStrategy.PreparedSubmission;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
-import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.scheduler.BatchDeliveryStrategy.PreparedSubmission;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;

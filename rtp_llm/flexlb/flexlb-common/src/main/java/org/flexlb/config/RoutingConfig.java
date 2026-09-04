@@ -7,6 +7,9 @@ import lombok.Setter;
 @Setter
 public final class RoutingConfig {
 
+    /** Multiplicative scale for all percentage-valued routing settings. */
+    public static final double PERCENTAGE_SCALE = 100.0;
+
     private volatile TrafficPolicyConfig groupSelector;
     private RolesConfig roles = new RolesConfig();
 

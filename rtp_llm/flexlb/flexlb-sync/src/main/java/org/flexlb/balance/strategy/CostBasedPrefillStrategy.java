@@ -35,6 +35,7 @@ import java.util.concurrent.atomic.AtomicLong;
 @Component
 public class CostBasedPrefillStrategy {
 
+    private static final int LRU_CLAIM_ATTEMPTS = 2;
     private static final ThreadLocal<PrefillCandidateSet.Scratch> CANDIDATE_SCRATCH =
             ThreadLocal.withInitial(PrefillCandidateSet.Scratch::new);
 
@@ -238,7 +239,9 @@ public class CostBasedPrefillStrategy {
                             || hitTokens < referenceHitTokens
                             || minimumHitRate > 0.0
                                     && (seqLen <= 0L
-                                        || hitTokens * 100.0 / seqLen
+                                        || hitTokens
+                                                * RoutingConfig.PERCENTAGE_SCALE
+                                                / seqLen
                                                 < minimumHitRate)) {
                         continue;
                     }
@@ -295,12 +298,14 @@ public class CostBasedPrefillStrategy {
     private static double normalizedHitRate(double configuredRate) {
         if (Double.isNaN(configuredRate)
                 || configuredRate == Double.POSITIVE_INFINITY) {
-            return 100.0;
+            return RoutingConfig.PERCENTAGE_SCALE;
         }
         if (configuredRate == Double.NEGATIVE_INFINITY) {
             return 0.0;
         }
-        return Math.min(100.0, Math.max(0.0, configuredRate));
+        return Math.min(
+                RoutingConfig.PERCENTAGE_SCALE,
+                Math.max(0.0, configuredRate));
     }
 
     private int selectLeastRecentlyUsed(
@@ -443,7 +448,7 @@ public class CostBasedPrefillStrategy {
             BitSet baselineCandidates) {
         BitSet pool = preferredCandidates.isEmpty()
                 ? baselineCandidates : preferredCandidates;
-        for (int attempt = 0; attempt < 2; attempt++) {
+        for (int attempt = 0; attempt < LRU_CLAIM_ATTEMPTS; attempt++) {
             int selectedIndex = -1;
             AtomicLong selectedClock = null;
             long selectedValue = Long.MAX_VALUE;

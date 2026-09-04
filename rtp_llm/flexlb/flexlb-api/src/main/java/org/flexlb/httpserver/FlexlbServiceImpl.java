@@ -5,27 +5,28 @@ import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.RequestState;
+import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.consistency.MasterElectService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
-import org.flexlb.dao.pv.PvLogData;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.pv.PvLogData;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
-import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
+import org.flexlb.enums.StatusEnum;
 import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
+import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
+import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
-import org.flexlb.config.ConfigService;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
@@ -724,8 +725,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     }
                 }
             }
-            // Metrics above stay always-on; the per-request log line drops to
-            // Keep non-priority request summaries at DEBUG to avoid INFO noise.
+            // Keep request summaries at DEBUG while metrics remain always-on.
             String logFormat = "[priority-scheduler] request_id={} priority={} seq_len={} max_new_tokens={} "
                     + "request_expires_at_ms={} plan_type={} plan_cost={} "
                     + "victim_count={} selected_prefill={} selected_decode={} failure_reason={} commit_result={}";
@@ -750,9 +750,11 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             cause = cause.getCause();
         }
         if (cause instanceof TimeoutException) {
-            return buildErrorResponse(8402, "NO_AVAILABLE_WORKER: schedule timeout");
+            return buildErrorResponse(
+                    StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
+                    "NO_AVAILABLE_WORKER: schedule timeout");
         }
-        return buildErrorResponse(500,
+        return buildErrorResponse(StatusEnum.INTERNAL_ERROR.getCode(),
                 error.getMessage() != null ? error.getMessage() : "internal error");
     }
 
@@ -842,7 +844,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB.Builder builder =
                 FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder();
         if (response == null) {
-            return builder.setSuccess(false).setCode(500).setErrorMessage("null response").build();
+            return builder.setSuccess(false)
+                    .setCode(StatusEnum.INTERNAL_ERROR.getCode())
+                    .setErrorMessage("null response")
+                    .build();
         }
         builder.setSuccess(response.isSuccess());
         builder.setCode(response.getCode());
