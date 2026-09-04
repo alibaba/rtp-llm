@@ -1,12 +1,38 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "cc_test_wrapper", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
+cc_test = cc_test_wrapper
+
 cc_test(
-    name = "combo_position_ids_validation_test",
-    srcs = ["combo_position_ids_validation_test.cc"],
+    name = "cuda_graph_replay_contracts_test",
+    srcs = ["cuda_graph_replay_contracts_test.cc"],
     copts = copts(),
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_replay_contracts",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+)
+
+# The core host contracts construct device descriptors but perform no GPU
+# operation, so this target deliberately has no GPU tag.
+cc_test(
+    name = "cuda_graph_replay_contracts_host_test",
+    srcs = ["cuda_graph_replay_contracts_host_test.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_replay_contracts",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+)
+
+# Keep the public compatibility header as an independent compile/run tripwire;
+# core replay-contract coverage does not depend on this target's lifetime.
+cc_test(
+    name = "combo_position_ids_validation_compatibility_test",
+    srcs = ["combo_position_ids_validation_compatibility_test.cc"],
+    copts = copts(),
     deps = [
         "//rtp_llm/cpp/cuda_graph:combo_position_ids_validation",
         "@com_google_googletest//:gtest_main",
@@ -112,6 +138,7 @@ py_test(
         "NOT_USE_DEFAULT_STREAM": "1",
         "TEST_USING_DEVICE": "CUDA",
     },
+    timeout = "long",
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
 )

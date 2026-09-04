@@ -139,7 +139,7 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
 
     rtp_ops_m.def("embedding",
                   &embedding,
-                  "Embedding lookup kernel",
+                  "Embedding lookup kernel; position_ids and token_type_ids are retained for compatibility and ignored",
                   py::arg("output"),
                   py::arg("input"),
                   py::arg("weight"),
@@ -149,7 +149,7 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
 
     rtp_ops_m.def("embedding_bert",
                   &embeddingBert,
-                  "EmbeddingBert lookup kernel",
+                  "EmbeddingBert lookup kernel; text_tokens_mask=0 skips word-embedding lookup for that token",
                   py::arg("output"),
                   py::arg("input"),
                   py::arg("weight"),
@@ -157,7 +157,8 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("position_encoding"),
                   py::arg("combo_tokens_type_ids"),
                   py::arg("token_type_embedding"),
-                  py::arg("input_embedding_scalar") = 1.0f);
+                  py::arg("input_embedding_scalar") = 1.0f,
+                  py::arg("text_tokens_mask")       = py::none());
 
     rtp_ops_m.def("reuse_kv_cache_indexed_batched",
                   &rtp_llm::ReuseKVCacheIndexedBatched,
