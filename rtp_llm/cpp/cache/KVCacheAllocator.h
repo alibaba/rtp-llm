@@ -93,7 +93,7 @@ public:
 
     // REBASE CONFLICT CONTEXT(2413e8e03): keep new base CP slot mapping and
     // SharedBlockCache hooks while adding the source branch cudaMalloc pool flag.
-    void setCPSlotMapper(std::shared_ptr<CPSlotMapper> cp_slot_mapper) {
+    virtual void setCPSlotMapper(std::shared_ptr<CPSlotMapper> cp_slot_mapper) {
         cp_slot_mapper_ = std::move(cp_slot_mapper);
     }
 
@@ -135,7 +135,10 @@ protected:
         TOTAL_AND_AVAILABLE,
     };
 
-    virtual bool doInit() = 0;
+    virtual bool   doInit() = 0;
+    virtual size_t reserveBaseBlocksNum() const {
+        return availableBlocksNum();
+    }
     MallocResult initMalloc(const MallocInfo& malloc_info);
     virtual MallocStatus
     evaluateInitCapacity(const MallocInfo& malloc_info, size_t reserve_blocks, InitCapacityMode mode) const;

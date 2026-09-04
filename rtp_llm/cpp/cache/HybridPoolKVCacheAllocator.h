@@ -55,7 +55,8 @@ public:
     }
 
 private:
-    bool doInit() override;
+    bool   doInit() override;
+    size_t reserveBaseBlocksNum() const override;
 
     MallocStatus
     evaluateInitCapacity(const MallocInfo& malloc_info, size_t reserve_blocks, InitCapacityMode mode) const override;

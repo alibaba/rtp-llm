@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
@@ -29,10 +30,11 @@ public:
                        bool                           copy_last_block,
                        std::vector<BlockIdPair>&      block_update_mapping) override;
 
-    int seqSizePerBlock() const override;
-    int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                              int                            seq_len,
-                              int                            reserve_step) const override;
+    int  seqSizePerBlock() const override;
+    void setCPSlotMapper(std::shared_ptr<CPSlotMapper> cp_slot_mapper) override;
+    int  singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                               int                            seq_len,
+                               int                            reserve_step) const override;
 
 protected:
     MallocResult incrMalloc(const MallocInfo& malloc_info) override;
@@ -62,6 +64,7 @@ protected:
     std::vector<int>             full_group_ids_;
     std::vector<int>             linear_group_ids_;
     std::vector<int>             swa_group_ids_;
+    int                          linear_request_cache_alignment_blocks_ = 1;
 };
 
 using HybridKVCacheAllocatorPtr = std::shared_ptr<HybridKVCacheAllocator>;

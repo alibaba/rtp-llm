@@ -56,13 +56,6 @@ cpVirtualBlockSizeForGroup(const std::shared_ptr<CPSlotMapper>& mapper, CacheGro
     return cpShardThisGroup(mapper, group_type) ? mapper->virtualBlockSize() : block_size;
 }
 
-inline size_t groupSeqSize(const CacheConfig& config, int gid, size_t fallback) {
-    return (gid >= 0 && static_cast<size_t>(gid) < config.group_seq_size_per_block.size()
-            && config.group_seq_size_per_block[static_cast<size_t>(gid)] > 0) ?
-               config.group_seq_size_per_block[static_cast<size_t>(gid)] :
-               fallback;
-}
-
 BlockIndicesType validBlocksAfter(const BlockIndicesType& blocks, size_t begin) {
     BlockIndicesType valid;
     if (begin >= blocks.size()) {
@@ -86,10 +79,15 @@ bool HybridKVCacheAllocator::skipReuseCacheGroup(int gid) const {
 
 bool HybridKVCacheAllocator::cpCompactSwaGroup(int gid, const std::shared_ptr<CPSlotMapper>& mapper) const {
     if (!mapper || !mapper->isSharded() || gid < 0 || static_cast<size_t>(gid) >= config_.group_types.size()
+        || static_cast<size_t>(gid) >= kv_cache_groups_.size()
         || config_.group_types[static_cast<size_t>(gid)] != CacheGroupType::SWA) {
         return false;
     }
-    const auto row_tokens = groupSeqSize(config_, gid, seqSizePerBlock());
+    // Fixed state groups may use one CP-wide row (1024 tokens for 128-page
+    // CP8) even though CacheConfig's allocation summary keeps the canonical
+    // 128-token page size. The instantiated group/spec is authoritative for
+    // key-to-slot coordinates.
+    const auto row_tokens = kv_cache_groups_[static_cast<size_t>(gid)]->seqSizePerBlock();
     return row_tokens == static_cast<size_t>(mapper->virtualBlockSize());
 }
 
@@ -117,24 +115,67 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
         full_matched_blocks[static_cast<size_t>(gid)] = std::move(match_result.block_indices);
     }
 
-    int                           pos = min_full_reuse_blocks - 1;
     std::vector<BlockIdxType>     linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
     std::vector<BlockIndicesType> swa_tail_blocks(swa_group_ids_.size());
-    const bool                    has_tail_groups = !linear_group_ids_.empty() || !swa_group_ids_.empty();
-    for (; pos >= 0 && has_tail_groups; --pos) {
-        bool                          all_tail_groups_matched = true;
-        std::vector<BlockIdxType>     candidate_linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
-        std::vector<BlockIndicesType> candidate_swa_tail_blocks(swa_group_ids_.size());
+    const bool                    has_linear_groups = !linear_group_ids_.empty();
+    const bool exact_request_linear = has_linear_groups && config_.enable_linear_attention_request_cache;
+
+    // Linear state is reusable only at the longest prefix already matched by
+    // every paged FULL group. Do not walk backwards to an older state: a cached
+    // 1024-token state may be reused as a whole (also by a longer request), but
+    // it must never degrade to a 896/768/... partial hit.
+    if (exact_request_linear) {
+        if (min_full_reuse_blocks <= 0) {
+            return 0;
+        }
+        const CacheKeyType linear_state_key = cache_keys[static_cast<size_t>(min_full_reuse_blocks - 1)];
         for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
             const int gid      = linear_group_ids_[i];
             auto* linear_group = dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
             RTP_LLM_CHECK_WITH_INFO(linear_group != nullptr, "group %d is not LinearKVCacheGroup", gid);
-            auto result = linear_group->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
+            auto result = linear_group->matchSingleKey(linear_state_key);
             if (result.block_indices.empty()) {
-                all_tail_groups_matched = false;
-                break;
+                return 0;
             }
-            candidate_linear_tail_blocks[i] = result.block_indices[0];
+            linear_tail_blocks[i] = result.block_indices[0];
+        }
+        const int exact_pos = min_full_reuse_blocks - 1;
+        for (size_t i = 0; i < swa_group_ids_.size(); ++i) {
+            const int gid       = swa_group_ids_[i];
+            auto*     swa_group = dynamic_cast<SWAKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
+            RTP_LLM_CHECK_WITH_INFO(swa_group != nullptr, "group %d is not SWAKVCacheGroup", gid);
+            if (skipReuseCacheGroup(gid)) {
+                continue;
+            }
+            auto result = swa_group->matchSingleKey(cache_keys[static_cast<size_t>(exact_pos)]);
+            if (result.block_indices.empty()) {
+                return 0;
+            }
+            swa_tail_blocks[i].push_back(result.block_indices[0]);
+        }
+    }
+
+    int pos = min_full_reuse_blocks - 1;
+    // Models outside request-cache mode retain their legacy right-to-left
+    // Linear/SWA prefix matching.
+    const bool has_legacy_tail_groups = !exact_request_linear && (has_linear_groups || !swa_group_ids_.empty());
+    for (; pos >= 0 && has_legacy_tail_groups; --pos) {
+        bool                          all_tail_groups_matched = true;
+        std::vector<BlockIdxType>     candidate_linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
+        std::vector<BlockIndicesType> candidate_swa_tail_blocks(swa_group_ids_.size());
+        if (!exact_request_linear) {
+            for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
+                const int gid = linear_group_ids_[i];
+                auto*     linear_group =
+                    dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
+                RTP_LLM_CHECK_WITH_INFO(linear_group != nullptr, "group %d is not LinearKVCacheGroup", gid);
+                auto result = linear_group->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
+                if (result.block_indices.empty()) {
+                    all_tail_groups_matched = false;
+                    break;
+                }
+                candidate_linear_tail_blocks[i] = result.block_indices[0];
+            }
         }
         if (!all_tail_groups_matched) {
             continue;
@@ -154,13 +195,16 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
             candidate_swa_tail_blocks[i].push_back(result.block_indices[0]);
         }
         if (all_tail_groups_matched) {
-            linear_tail_blocks = std::move(candidate_linear_tail_blocks);
-            swa_tail_blocks    = std::move(candidate_swa_tail_blocks);
+            if (!exact_request_linear) {
+                linear_tail_blocks = std::move(candidate_linear_tail_blocks);
+            }
+            swa_tail_blocks = std::move(candidate_swa_tail_blocks);
             break;
         }
     }
 
-    const int reuse_blocks_len = has_tail_groups ? std::max(pos + 1, 0) : std::max(min_full_reuse_blocks, 0);
+    const int reuse_blocks_len =
+        exact_request_linear || !has_legacy_tail_groups ? std::max(min_full_reuse_blocks, 0) : std::max(pos + 1, 0);
     if (reuse_blocks_len <= 0) {
         return 0;
     }
@@ -230,11 +274,18 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         // tail-loop its only matchable key (full_keys[cp_size-1 + (n-1)*cp_size]
         // is exactly what the non-sharded SWA group caches).
         const bool    cp_active = cp_mapper && cp_mapper->isSharded();
-        CacheKeysType match_keys(cp_keys.begin(),
-                                 cp_active ? cp_keys.end() : (cp_keys.empty() ? cp_keys.end() : cp_keys.end() - 1));
-        auto          begin_us = currentTimeUs();
-        reuse_blocks           = reuseCache(match_keys, *kv_resource, cp_mapper);
-        match_cost_time_us     = currentTimeUs() - begin_us;
+        CacheKeysType match_keys;
+        if (cp_active && config_.enable_linear_attention_request_cache) {
+            const size_t safe_blocks =
+                seq_len > 0 ? static_cast<size_t>(seq_len - 1) / static_cast<size_t>(reuse_unit_tokens) : 0;
+            match_keys.assign(cp_keys.begin(), cp_keys.begin() + std::min(safe_blocks, cp_keys.size()));
+        } else {
+            match_keys.assign(cp_keys.begin(),
+                              cp_active ? cp_keys.end() : (cp_keys.empty() ? cp_keys.end() : cp_keys.end() - 1));
+        }
+        auto begin_us      = currentTimeUs();
+        reuse_blocks       = reuseCache(match_keys, *kv_resource, cp_mapper);
+        match_cost_time_us = currentTimeUs() - begin_us;
 
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
             const auto&      blocks = kv_resource->blocks(0, gid);
@@ -399,6 +450,44 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
         }
         const auto& full_dependencies = kv_cache_resource->cacheResource(batch_id).blockDependencies();
 
+        auto         token_ids = insert_info.complete_token_ids->completeTokenIdsVec(batch_id);
+        const size_t input_token_len =
+            insert_info.input_token_length > 0 ?
+                std::min(static_cast<size_t>(insert_info.input_token_length), token_ids.size()) :
+                (token_ids.empty() ? 0 : token_ids.size() - 1);
+        const int    linear_reuse_unit = cpVirtualBlockSizeForGroup(cp_mapper, CacheGroupType::FULL, seqSizePerBlock());
+        const size_t linear_reuse_blocks =
+            input_token_len > 0 ? (input_token_len - 1) / static_cast<size_t>(linear_reuse_unit) : 0;
+        const size_t linear_logical_pos =
+            linear_reuse_blocks > 0 ? linear_reuse_blocks * (cp_active ? cp_mapper->cpSize() : 1) - 1 : 0;
+        const std::optional<CacheKeyType> linear_state_key =
+            linear_reuse_blocks > 0 && linear_logical_pos < full_keys.size() ?
+                std::optional<CacheKeyType>(full_keys[linear_logical_pos]) :
+                std::nullopt;
+
+        auto insert_linear_request_state = [&]() {
+            if (!linear_state_key || linear_reuse_blocks == 0) {
+                return;
+            }
+            std::vector<BlockIdxType> group_slots(static_cast<size_t>(group_nums), NULL_BLOCK_IDX);
+            bool                      has_valid = false;
+            for (int gid : linear_group_ids_) {
+                const auto& blocks = kv_cache_resource->blocks(batch_id, gid);
+                if (linear_logical_pos < blocks.size() && !isNullBlockIdx(blocks[linear_logical_pos])) {
+                    group_slots[static_cast<size_t>(gid)] = blocks[linear_logical_pos];
+                    has_valid                             = true;
+                }
+            }
+            if (has_valid) {
+                const BlockDependency dependency{false, 0, static_cast<uint32_t>(linear_reuse_blocks - 1)};
+                shared_block_cache_->put(*linear_state_key,
+                                         group_slots,
+                                         insert_info.is_resident,
+                                         SharedBlockCache::kGpuLogicalNamespace,
+                                         dependency);
+            }
+        };
+
         if (!cp_active) {
             // Preserve the legacy non-CP GPU reuse surface: aggregate all groups
             // under one key. The prefix tree only receives extra dependency
@@ -409,6 +498,9 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
                 std::vector<BlockIdxType> group_slots(static_cast<size_t>(group_nums), NULL_BLOCK_IDX);
                 bool                      has_valid = false;
                 for (int gid = 0; gid < group_nums; ++gid) {
+                    if (config_.enable_linear_attention_request_cache && containsGroupId(linear_group_ids_, gid)) {
+                        continue;
+                    }
                     if (skipReuseCacheGroup(gid)) {
                         continue;
                     }
@@ -431,6 +523,9 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
                                              SharedBlockCache::kGpuLogicalNamespace,
                                              dependency);
                 }
+            }
+            if (config_.enable_linear_attention_request_cache) {
+                insert_linear_request_state();
             }
             continue;
         }
@@ -455,13 +550,15 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
             }
             cp_dependencies.push_back(dependency);
         }
-        auto token_ids = insert_info.complete_token_ids->completeTokenIdsVec(batch_id);
         if (token_ids.size() <= 1) {
             continue;
         }
         const size_t token_len = token_ids.size() - 1;
 
         for (int gid = 0; gid < group_nums; ++gid) {
+            if (config_.enable_linear_attention_request_cache && containsGroupId(linear_group_ids_, gid)) {
+                continue;
+            }
             if (skipReuseCacheGroup(gid)) {
                 continue;
             }
@@ -508,6 +605,9 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
                 shared_block_cache_->put(
                     src_keys[i], group_slots, insert_info.is_resident, namespace_id, dependency, matchable_slots);
             }
+        }
+        if (config_.enable_linear_attention_request_cache) {
+            insert_linear_request_state();
         }
     }
 }
@@ -622,6 +722,17 @@ bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& batch_
 
 int HybridKVCacheAllocator::seqSizePerBlock() const {
     return static_cast<int>(config_.seq_size_per_block);
+}
+
+void HybridKVCacheAllocator::setCPSlotMapper(std::shared_ptr<CPSlotMapper> cp_slot_mapper) {
+    const int alignment_blocks = cp_slot_mapper && cp_slot_mapper->isSharded() ? cp_slot_mapper->cpSize() : 1;
+    linear_request_cache_alignment_blocks_ = alignment_blocks;
+    KVCacheAllocator::setCPSlotMapper(std::move(cp_slot_mapper));
+    for (int gid : linear_group_ids_) {
+        auto* linear_group = dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
+        RTP_LLM_CHECK_WITH_INFO(linear_group != nullptr, "group %d is not LinearKVCacheGroup", gid);
+        linear_group->setRequestCacheAlignmentBlocks(alignment_blocks);
+    }
 }
 
 bool HybridKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const {

@@ -17,10 +17,7 @@ try:
     cuda_ver = torch.version.cuda or ""
     _major, _minor = (int(x) for x in (cuda_ver.split(".") + ["0", "0"])[:2])
     if (_major, _minor) >= (12, 9):
-        from flash_mla import (
-            flash_mla_with_kvcache,
-            get_mla_metadata,
-        )
+        from flash_mla import flash_mla_with_kvcache, get_mla_metadata
 except (ImportError, AttributeError, ValueError) as _e:
     logging.warning(f"flash_mla not available: {_e}. Requires CUDA >= 12.9")
 

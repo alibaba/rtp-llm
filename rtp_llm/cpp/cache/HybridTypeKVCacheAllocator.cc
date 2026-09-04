@@ -47,8 +47,11 @@ bool HybridTypeKVCacheAllocator::doInit() {
                 std::make_shared<SWAKVCacheGroup>(ids, spec, block_pool_, gid, config_.linear_step, shared_cache_raw);
             swa_group_ids_.push_back(gid);
         } else if (group_type == CacheGroupType::LINEAR || (spec && spec->type == KVCacheSpecType::LinearAttention)) {
-            group = std::make_shared<LinearKVCacheGroup>(
-                ids, spec, block_pool_, gid, config_.linear_step, shared_cache_raw);
+            auto linear_group = std::make_shared<LinearKVCacheGroup>(
+                ids, spec, block_pool_, gid, config_.linear_step, shared_cache_raw, nullptr, config_.linear_fixed_cap);
+            linear_group->setRequestCacheMode(config_.enable_linear_attention_request_cache);
+            linear_group->setRequestCacheAlignmentBlocks(linear_request_cache_alignment_blocks_);
+            group = std::move(linear_group);
             linear_group_ids_.push_back(gid);
         } else {
             group = std::make_shared<FullKVCacheGroup>(ids, spec, block_pool_, gid, shared_cache_raw);

@@ -33,9 +33,9 @@ bool isCpCompactFixedGroup(const CacheConfig& cache_config, int group_id, int cp
     return row_tokens > 0 && row_tokens == cache_config.seq_size_per_block * static_cast<size_t>(cp_size);
 }
 
-bool isCompactFullBlockList(const KVCacheResource& source,
+bool isCompactFullBlockList(const KVCacheResource&  source,
                             const BlockIndicesType& src_blocks,
-                            const CacheKeysType& selected_keys) {
+                            const CacheKeysType&    selected_keys) {
     return src_blocks.size() <= selected_keys.size() || src_blocks.size() < source.cacheKeys().size();
 }
 
@@ -190,12 +190,24 @@ bool KVCacheConnectorCoordinator::init() {
                      cache_config_.debugString().c_str(),
                      kv_cache_config_.to_string().c_str(),
                      runtime_config_.to_string().c_str());
-    if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_memory_cache) {
+    // Request-cache mode reuses only the longest complete aligned Linear state;
+    // it must never walk backwards to a shorter state. Memory/remote connectors
+    // currently perform general prefix matching and cannot enforce that rule.
+    // Keep them fail-closed in this mode; device cache implements the aligned
+    // state contract and P2P P->D transfer is initialized independently below.
+    const bool whole_state_linear_request_cache =
+        cache_config_.enable_linear_attention_request_cache && cache_config_.linear_group_num > 0;
+    if (whole_state_linear_request_cache
+        && (kv_cache_config_.enable_memory_cache || kv_cache_config_.enable_remote_cache)) {
+        RTP_LLM_LOG_WARNING("whole-state Linear request cache disables prefix-only memory/remote cache connectors; "
+                            "device exact reuse and P2P remain enabled");
+    }
+    if (!whole_state_linear_request_cache && kv_cache_config_.reuse_cache && kv_cache_config_.enable_memory_cache) {
         memory_connector_ = initMemoryConnector();
         connectors_.emplace_back(memory_connector_);
     }
 #ifdef USE_REMOTE_KV_CACHE
-    if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_remote_cache) {
+    if (!whole_state_linear_request_cache && kv_cache_config_.reuse_cache && kv_cache_config_.enable_remote_cache) {
         remote_connector_ = initRemoteConnector();
         connectors_.emplace_back(remote_connector_);
     }

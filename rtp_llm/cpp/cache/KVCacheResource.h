@@ -105,6 +105,8 @@ public:
     const LayerBlockIds&     layerBlocks() const;
     const LayerAttnBlockIds& layerAttnBlocks() const;
     int                      groupId(int layer_id, KVCacheRegionName region_name) const;
+    CacheGroupType           groupType(int group_id) const;
+    CacheGroupType           layerGroupType(int layer_id) const;
 
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
@@ -162,10 +164,11 @@ private:
     // layer_id -> region_name -> block_indices
     LayerAttnBlockIds layer_region_block_ids;
     // group_id -> block_indices
-    GroupBlockIds group_block_ids;
-    CacheKeysType cache_keys;
-    BlockDependenciesType block_dependencies;
-    bool cache_keys_are_cp_canonical_{false};
+    GroupBlockIds               group_block_ids;
+    std::vector<CacheGroupType> group_types;
+    CacheKeysType               cache_keys;
+    BlockDependenciesType       block_dependencies;
+    bool                        cache_keys_are_cp_canonical_{false};
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};

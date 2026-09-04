@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <string>
 
 #include "rtp_llm/cpp/cache/DSV4CacheConfigHelper.h"
 #include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
@@ -161,8 +163,7 @@ size_t kernelBlocksPerKvBlockForGroup(const CacheConfig& config, size_t group_id
     // Standard MLA/MHA specs price storage using their own token count. Only
     // extend them when the requested physical block is actually larger; do
     // not multiply a spec that already describes the full physical block.
-    RTP_LLM_CHECK_WITH_INFO(spec->seq_size_per_block > 0
-                                && config.seq_size_per_block % spec->seq_size_per_block == 0,
+    RTP_LLM_CHECK_WITH_INFO(spec->seq_size_per_block > 0 && config.seq_size_per_block % spec->seq_size_per_block == 0,
                             "physical block size %u must be divisible by group %zu spec block size %u",
                             config.seq_size_per_block,
                             group_id,
@@ -179,15 +180,17 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     config.group_kv_scale_stride_bytes.resize(group_num, 0);
     config.group_block_size_bytes.resize(group_num, 0);
 
-    size_t   max_kv_stride           = 0;
-    size_t   max_scale_stride        = 0;
-    size_t   total_kv_block_bytes    = 0;
-    size_t   total_scale_block_bytes = 0;
-    size_t   swa_kv_block_bytes      = 0;
-    size_t   swa_scale_block_bytes   = 0;
-    size_t   state_kv_block_bytes    = 0;
-    size_t   state_scale_block_bytes = 0;
-    uint32_t max_group_layers        = 0;
+    size_t   max_kv_stride            = 0;
+    size_t   max_scale_stride         = 0;
+    size_t   total_kv_block_bytes     = 0;
+    size_t   total_scale_block_bytes  = 0;
+    size_t   swa_kv_block_bytes       = 0;
+    size_t   swa_scale_block_bytes    = 0;
+    size_t   linear_kv_block_bytes    = 0;
+    size_t   linear_scale_block_bytes = 0;
+    size_t   state_kv_block_bytes     = 0;
+    size_t   state_scale_block_bytes  = 0;
+    uint32_t max_group_layers         = 0;
 
     config.layer_to_block_stride_bytes.assign(config.layer_all_num, 0);
     for (size_t gid = 0; gid < config.cache_specs.size(); ++gid) {
@@ -204,14 +207,18 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
         config.group_block_size_bytes[gid]      = static_cast<size_t>(layer_count) * (kv_stride + scale_stride);
         const auto region =
             gid < config.group_region_names.size() ? config.group_region_names[gid] : KVCacheRegionName::DEFAULT;
-        const bool is_state = isStateRegion(region);
-        const bool is_swa   = gid < config.group_types.size() && config.group_types[gid] == CacheGroupType::SWA;
+        const bool is_state  = isStateRegion(region);
+        const bool is_swa    = gid < config.group_types.size() && config.group_types[gid] == CacheGroupType::SWA;
+        const bool is_linear = gid < config.group_types.size() && config.group_types[gid] == CacheGroupType::LINEAR;
         if (is_state) {
             state_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
             state_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;
         } else if (is_swa) {
             swa_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
             swa_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;
+        } else if (is_linear && config.enable_linear_attention_request_cache) {
+            linear_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
+            linear_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;
         } else {
             total_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
             total_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;
@@ -232,6 +239,7 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     config.kv_block_size_bytes     = total_kv_block_bytes;
     config.kv_scale_size_bytes     = total_scale_block_bytes;
     config.swa_block_size_bytes    = swa_kv_block_bytes + swa_scale_block_bytes;
+    config.linear_block_size_bytes = linear_kv_block_bytes + linear_scale_block_bytes;
     config.state_block_size_bytes  = state_kv_block_bytes + state_scale_block_bytes;
     const size_t paged_block_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
     if (paged_block_bytes == 0) {
@@ -304,18 +312,23 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     const auto dtype = MemoryEvaluationHelper::getDataTypeForCache(model_config);
 
     CacheConfig config;
-    config.layer_num                 = static_cast<uint32_t>(model_config.num_layers);
-    config.layer_all_num             = config.layer_num;
-    config.block_num                 = 0;
-    config.seq_size_per_block        = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-    config.kernel_seq_size_per_block = kv_cache_config.kernel_seq_size_per_block > 0 ?
-                                           static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block) :
-                                           config.seq_size_per_block;
-    config.use_mla                   = model_config.attn_config.use_mla;
-    config.dtype                     = dtype;
-    config.linear_step               = std::max(1, kv_cache_config.linear_step);
-    config.linear_fixed_cap          = std::max(0, kv_cache_config.linear_fixed_cap);
-    config.is_sparse                 = model_config.attn_config.is_sparse;
+    config.layer_num                       = static_cast<uint32_t>(model_config.num_layers);
+    config.layer_all_num                   = config.layer_num;
+    config.block_num                       = 0;
+    config.seq_size_per_block              = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    config.kernel_seq_size_per_block       = kv_cache_config.kernel_seq_size_per_block > 0 ?
+                                                 static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block) :
+                                                 config.seq_size_per_block;
+    config.use_mla                         = model_config.attn_config.use_mla;
+    config.dtype                           = dtype;
+    config.linear_step                     = std::max(1, kv_cache_config.linear_step);
+    config.linear_fixed_cap                = std::max(0, kv_cache_config.linear_fixed_cap);
+    config.linear_speculative_reserve_step = gen_num_per_cycle > 0 ? gen_num_per_cycle + 1 : 0;
+    config.role_type                       = parallelism_config.role_type;
+    const char* linear_request_cache_env   = std::getenv("ENABLE_LINEAR_ATTN_REQUEST_CACHE");
+    config.enable_linear_attention_request_cache =
+        linear_request_cache_env != nullptr && std::string(linear_request_cache_env) == "1";
+    config.is_sparse = model_config.attn_config.is_sparse;
 
     if (!model_config.attn_config.layer_compress_ratios.empty()) {
         DSV4CacheConfigHelper::applyConfig(

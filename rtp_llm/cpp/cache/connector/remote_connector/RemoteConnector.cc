@@ -193,8 +193,10 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                 linear_group_ids.push_back(group_id);
             }
         }
+        const int linear_attention_write_interval =
+            cache_config.enable_linear_attention_request_cache ? 0 : std::max(1, cache_config.linear_step);
         group_policy_ = std::make_unique<remote_connector::FullLinearLayerGroupPolicy>(
-            allocator, full_group_ids, linear_group_ids, std::max(1, cache_config.linear_step));
+            allocator, full_group_ids, linear_group_ids, linear_attention_write_interval);
     }
 }
 

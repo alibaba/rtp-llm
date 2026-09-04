@@ -17,7 +17,7 @@ namespace rtp_llm {
 struct CacheConfig {
     // Cache specification and layer mapping
     std::vector<KVCacheSpecPtr>    cache_specs;
-    std::vector<std::vector<int>>  global_layer_ids;  // including mtp module layers
+    std::vector<std::vector<int>>  global_layer_ids;           // including mtp module layers
     std::vector<int>               local_to_global_layer_ids;  // MTP sub-config local layer -> global layer
     std::vector<std::vector<int>>  layer_ids;
     std::vector<std::vector<int>>  linear_groups;  // for hybrid attention
@@ -34,8 +34,8 @@ struct CacheConfig {
     std::vector<size_t>            group_kv_scale_stride_bytes;
     std::vector<size_t>            group_block_size_bytes;
     std::vector<uint32_t>          group_block_nums;
-    uint32_t                       dsv4_fixed_pool_blocks                  = 0;
-    uint32_t                       dsv4_hca_state_pool_blocks              = 0;
+    uint32_t                       dsv4_fixed_pool_blocks                   = 0;
+    uint32_t                       dsv4_hca_state_pool_blocks               = 0;
     bool                           use_independent_block_pools              = false;
     bool                           use_typed_cache_regions                  = false;
     bool                           use_opaque_kv_cache_store                = false;
@@ -63,10 +63,11 @@ struct CacheConfig {
 
     // Block sizing information
     // ---- Per-block sizes (all layers) ----
-    size_t kv_block_size_bytes  = 0;
-    size_t kv_scale_size_bytes  = 0;
-    size_t block_size_bytes     = 0;  // (kv + scales together)
-    size_t swa_block_size_bytes = 0;  // SWA groups (joint allocation with full groups)
+    size_t kv_block_size_bytes     = 0;
+    size_t kv_scale_size_bytes     = 0;
+    size_t block_size_bytes        = 0;  // (kv + scales together)
+    size_t swa_block_size_bytes    = 0;  // SWA groups (joint allocation with full groups)
+    size_t linear_block_size_bytes = 0;  // LINEAR groups (fixed per-request pools)
 
     // Per-block bytes of all DSV4 STATE pools (INDEXER_STATE, CSA_STATE,
     // HCA_STATE). Excluded from the HBM fixed-pool reservation only when
@@ -85,6 +86,13 @@ struct CacheConfig {
     // CacheConfigCreator deducts this from kv_cache_mem_size before computing the
     // paged block_num, so paged pools don't overcommit HBM. 0 means no reservation.
     size_t fixed_pool_reserve_bytes = 0;
+
+    // Linear attention has a token-independent pool. Two blocks are resident
+    // per live request; speculative decode may additionally reserve rollback
+    // states for the duration of a target-verify step.
+    int      linear_speculative_reserve_step       = 0;
+    RoleType role_type                             = RoleType::PDFUSION;
+    bool     enable_linear_attention_request_cache = false;
 
     // Attention-specific configuration
     int linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
@@ -105,7 +113,6 @@ struct CacheConfig {
     }
 
     void finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {
-        (void)runtime_config;
         if (!use_independent_block_pools || group_block_nums.empty()) {
             fixed_pool_reserve_bytes = 0;
             return;
@@ -114,15 +121,28 @@ struct CacheConfig {
         const int step    = std::max(1, linear_step);
         size_t    reserve = 0;
         for (size_t gid = 0; gid < group_block_nums.size(); ++gid) {
-            const bool is_swa = gid < group_types.size() && group_types[gid] == CacheGroupType::SWA;
+            const bool is_swa    = gid < group_types.size() && group_types[gid] == CacheGroupType::SWA;
+            const bool is_linear = gid < group_types.size() && group_types[gid] == CacheGroupType::LINEAR;
             const auto region = gid < group_region_names.size() ? group_region_names[gid] : KVCacheRegionName::DEFAULT;
-            const bool is_dsv4_fixed_region       = isDsv4FixedRegion(region);
-            const bool use_explicit_hca_blocks    = region == KVCacheRegionName::HCA_STATE
-                                                 && dsv4_hca_state_pool_blocks > 0;
-            const bool use_explicit_fixed_blocks  = is_dsv4_fixed_region && dsv4_fixed_pool_blocks > 0;
-            const bool use_explicit_dsv4_blocks   = use_explicit_hca_blocks || use_explicit_fixed_blocks;
+            const bool is_dsv4_fixed_region = isDsv4FixedRegion(region);
+            const bool use_explicit_hca_blocks =
+                region == KVCacheRegionName::HCA_STATE && dsv4_hca_state_pool_blocks > 0;
+            const bool use_explicit_fixed_blocks = is_dsv4_fixed_region && dsv4_fixed_pool_blocks > 0;
+            const bool use_explicit_dsv4_blocks  = use_explicit_hca_blocks || use_explicit_fixed_blocks;
             uint32_t   rule_blocks;
-            if (use_explicit_hca_blocks) {
+            if (is_linear && enable_linear_attention_request_cache) {
+                constexpr uint32_t kResidentBlocksPerRequest = 2;
+                const uint32_t     concurrency =
+                    static_cast<uint32_t>(std::max<int64_t>(1, runtime_config.max_generate_batch_size));
+                const uint32_t speculative_blocks =
+                    role_type == RoleType::PREFILL ?
+                        0u :
+                        static_cast<uint32_t>(std::max(linear_speculative_reserve_step - 1, 0));
+                // Prefill keeps room for one previous batch of whole-state
+                // cache entries while the next batch owns its two live states.
+                const uint32_t cached_request_blocks = role_type == RoleType::DECODE ? 0u : 1u;
+                rule_blocks = concurrency * (kResidentBlocksPerRequest + speculative_blocks + cached_request_blocks);
+            } else if (use_explicit_hca_blocks) {
                 rule_blocks = dsv4_hca_state_pool_blocks;
             } else if (use_explicit_fixed_blocks) {
                 rule_blocks = dsv4_fixed_pool_blocks;
@@ -137,7 +157,8 @@ struct CacheConfig {
             // pool budget. The linear-step fallback is accounted by the
             // effective block-size formula instead, so no reserve is needed.
             const bool exclude_from_reserve = is_dsv4_fixed_region && fixed_pool_uses_pinned_cpu;
-            if (use_explicit_dsv4_blocks && gid < group_block_size_bytes.size() && !exclude_from_reserve) {
+            if (((is_linear && enable_linear_attention_request_cache) || use_explicit_dsv4_blocks)
+                && gid < group_block_size_bytes.size() && !exclude_from_reserve) {
                 reserve += static_cast<size_t>(rule_blocks) * group_block_size_bytes[gid];
             }
         }
@@ -179,6 +200,7 @@ struct CacheConfig {
         OUTPUT_FIELD(kv_scale_size_bytes);
         OUTPUT_FIELD(block_size_bytes);
         OUTPUT_FIELD(swa_block_size_bytes);
+        OUTPUT_FIELD(linear_block_size_bytes);
         OUTPUT_FIELD(kv_block_stride_bytes);
         OUTPUT_FIELD(kv_scale_stride_bytes);
         os << "\n";
@@ -187,6 +209,9 @@ struct CacheConfig {
         os << indent1 << "# Attention Configuration:\n";
         OUTPUT_FIELD(linear_step);
         OUTPUT_FIELD(linear_fixed_cap);
+        OUTPUT_FIELD(linear_speculative_reserve_step);
+        OUTPUT_FIELD(enable_linear_attention_request_cache);
+        OUTPUT_FIELD_EXPR("role_type", roleTypeToString(role_type));
         OUTPUT_FIELD(group_layer_num);
         OUTPUT_FIELD(linear_group_num);
         OUTPUT_FIELD(swa_group_num);
@@ -221,8 +246,7 @@ struct CacheConfig {
         OUTPUT_FIELD_EXPR("global_layer_ids.size()", global_layer_ids.size());
         os << indent1 << "global_layer_ids=" << rtp_llm::vectorsToString(global_layer_ids) << "\n";
         OUTPUT_FIELD_EXPR("local_to_global_layer_ids.size()", local_to_global_layer_ids.size());
-        os << indent1 << "local_to_global_layer_ids="
-           << rtp_llm::vectorToString(local_to_global_layer_ids) << "\n";
+        os << indent1 << "local_to_global_layer_ids=" << rtp_llm::vectorToString(local_to_global_layer_ids) << "\n";
         OUTPUT_FIELD_EXPR("layer_ids.size()", layer_ids.size());
         os << indent1 << "layer_ids=" << rtp_llm::vectorsToString(layer_ids) << "\n";
         OUTPUT_FIELD_EXPR("group_types.size()", group_types.size());

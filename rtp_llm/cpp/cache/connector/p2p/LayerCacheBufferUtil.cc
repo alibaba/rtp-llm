@@ -45,7 +45,7 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheReso
     }
 
     const auto& block_ids = layer_block_ids[layer_id]->blocks();
-    // Under CP page-RR sharding the rank's block_ids hold only owned physical
+    // Under CP page-RR sharding a FULL layer's block_ids hold only owned physical
     // blocks (length = ceil(total_logical / cp_size)); cache_keys is still the
     // FULL logical-block sequence (length = total_logical). The i-th local
     // owned block belongs to logical position cp_rank + i*cp_size, so its
@@ -53,14 +53,19 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheReso
     // remap the prefill side registers each owned block under cache_keys[i],
     // which the decode-side per-peer block_pos lookup never finds → load
     // buffer timeouts.
-    const int local_to_logical_stride = cp_size;
-    const int local_to_logical_offset = cp_rank;
-    const int max_local_blocks_for_keys =
-        cp_size > 1 ?
-            static_cast<int>((cache_keys.size() > static_cast<size_t>(cp_rank) ? cache_keys.size() - cp_rank : 0)
+    // LINEAR/SWA layers deliberately remain in the logical coordinate system.
+    // In particular, Linear attention is TP-sharded by head, not CP-sharded by
+    // sequence page: every prefill TP rank must publish its one/two live state
+    // slots under the same logical keys so decode TP=1 can assemble all heads.
+    const bool cp_sharded_layer        = cp_size > 1 && resource.layerGroupType(layer_id) == CacheGroupType::FULL;
+    const int  local_to_logical_stride = cp_sharded_layer ? cp_size : 1;
+    const int  local_to_logical_offset = cp_sharded_layer ? cp_rank : 0;
+    const int  max_local_blocks_for_keys =
+        cp_sharded_layer ?
+             static_cast<int>((cache_keys.size() > static_cast<size_t>(cp_rank) ? cache_keys.size() - cp_rank : 0)
                              + cp_size - 1)
                 / cp_size :
-            static_cast<int>(cache_keys.size());
+             static_cast<int>(cache_keys.size());
     int actual_block_count =
         static_cast<int>(std::min(block_ids.size(), static_cast<size_t>(max_local_blocks_for_keys)));
     if (start_block_idx >= actual_block_count) {
@@ -88,6 +93,9 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheReso
         }
         int     block_id = block_ids[local_idx];
         int64_t key      = cache_keys[logical_idx];
+        if (isNullBlockIdx(block_id)) {
+            continue;
+        }
         layer_cache_buffer->addBlockId(key, block_id);
     }
 

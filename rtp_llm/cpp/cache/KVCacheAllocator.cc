@@ -18,13 +18,14 @@ bool KVCacheAllocator::init() {
     // NOTE: `availableBlocksNum()` depends on `block_pool_` and must be queried after `doInit()`.
     const int64_t reserve_ratio = reserve_block_ratio_;
     if (reserve_ratio > 0) {
-        const size_t available_blocks = availableBlocksNum();
-        const size_t reserve_blocks = static_cast<size_t>(reserve_ratio) * available_blocks / static_cast<size_t>(100);
-        reserve_block_num_          = reserve_blocks;
-        RTP_LLM_LOG_INFO("KVCacheAllocator set reserve blocks: ratio=%ld%% reserve_blocks=%zu available_blocks=%zu",
+        const size_t reserve_base_blocks = reserveBaseBlocksNum();
+        const size_t reserve_blocks =
+            static_cast<size_t>(reserve_ratio) * reserve_base_blocks / static_cast<size_t>(100);
+        reserve_block_num_ = reserve_blocks;
+        RTP_LLM_LOG_INFO("KVCacheAllocator set reserve blocks: ratio=%ld%% reserve_blocks=%zu reserve_base_blocks=%zu",
                          reserve_ratio,
                          reserve_blocks,
-                         available_blocks);
+                         reserve_base_blocks);
     } else {
         reserve_block_num_ = 0;
     }

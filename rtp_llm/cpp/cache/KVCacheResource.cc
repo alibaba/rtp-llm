@@ -130,6 +130,7 @@ void KVCacheResource::initGroups(int                                  group_num,
     group_block_ids.clear();
     layer_block_ids.clear();
     layer_region_block_ids.clear();
+    this->group_types.clear();
 
     if (!group_types.empty()) {
         RTP_LLM_CHECK_WITH_INFO(group_types.size() >= static_cast<size_t>(group_num),
@@ -139,11 +140,14 @@ void KVCacheResource::initGroups(int                                  group_num,
     }
 
     group_block_ids.reserve(static_cast<size_t>(group_num));
+    this->group_types.reserve(static_cast<size_t>(group_num));
     for (int i = 0; i < group_num; i++) {
-        const bool   is_full_group = group_types.empty() || group_types[static_cast<size_t>(i)] == CacheGroupType::FULL;
+        const auto   group_type    = group_types.empty() ? CacheGroupType::FULL : group_types[static_cast<size_t>(i)];
+        const bool   is_full_group = group_type == CacheGroupType::FULL;
         const size_t bpk           = is_full_group ? std::max<size_t>(1, kernel_blocks_per_kv_block) : 1;
         auto         bid           = std::make_shared<BlockIds>(bpk);
         group_block_ids.push_back(std::move(bid));
+        this->group_types.push_back(group_type);
     }
 
     if (!group_block_ids.empty()) {
@@ -277,6 +281,18 @@ int KVCacheResource::groupId(int layer_id, KVCacheRegionName region_name) const 
     return -1;
 }
 
+CacheGroupType KVCacheResource::groupType(int group_id) const {
+    RTP_LLM_CHECK_WITH_INFO(group_id >= 0 && static_cast<size_t>(group_id) < group_types.size(),
+                            "KVCacheResource: invalid group id %d for group_types size %zu",
+                            group_id,
+                            group_types.size());
+    return group_types[static_cast<size_t>(group_id)];
+}
+
+CacheGroupType KVCacheResource::layerGroupType(int layer_id) const {
+    return groupType(groupId(layer_id, KVCacheRegionName::DEFAULT));
+}
+
 CacheKeysType& KVCacheResource::cacheKeys() {
     return cache_keys;
 }
@@ -286,13 +302,13 @@ const CacheKeysType& KVCacheResource::cacheKeys() const {
 }
 
 void KVCacheResource::setCacheKeys(const CacheKeysType& keys) {
-    cache_keys = keys;
+    cache_keys                   = keys;
     cache_keys_are_cp_canonical_ = false;
     rebuildLinearBlockDependencies();
 }
 
 void KVCacheResource::setCacheKeys(CacheKeysType&& keys) {
-    cache_keys = std::move(keys);
+    cache_keys                   = std::move(keys);
     cache_keys_are_cp_canonical_ = false;
     rebuildLinearBlockDependencies();
 }

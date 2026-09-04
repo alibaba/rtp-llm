@@ -27,19 +27,32 @@ bool LinearKVCacheGroup::shouldMaterializeBlock(int pos, int seq_len, int reserv
         return false;
     }
 
-    const int  step        = std::max(1, linear_step_);
     const int  seq_slots   = needBlocksNum(seq_len, 0, 0);
     const int  total_slots = needBlocksNum(seq_len, 0, reserve_step);
-    const bool is_seq_tail = (seq_slots > 0) && (pos >= std::max(0, seq_slots - 2)) && (pos < seq_slots);
-    const bool is_reserve  = (reserve_step > 0) && (pos >= seq_slots) && (pos < total_slots);
-    const bool step_hit = (((pos + 1) % step) == 0);
+    const bool is_seq_tail =
+        (seq_slots > 0) && (pos >= std::max(0, seq_slots - kResidentBlocksPerRequest)) && (pos < seq_slots);
+    const bool is_reserve = (reserve_step > 0) && (pos >= seq_slots) && (pos < total_slots);
+    if (request_cache_mode_) {
+        // The state after the last completely reusable alignment unit may sit
+        // well before the two-block working tail (for example position 7 for
+        // a 1030-token request with 128-token pages and CP8). Keep exactly that
+        // one candidate; all earlier step states remain disposable.
+        const int  safe_slots         = std::max(seq_slots - 1, 0);
+        const int  aligned_slots      = safe_slots / request_cache_alignment_blocks_ * request_cache_alignment_blocks_;
+        const int  cache_candidate    = aligned_slots - 1;
+        const bool is_cache_candidate = enable_reuse_cache && pos == cache_candidate;
+        return is_seq_tail || is_reserve || is_cache_candidate;
+    }
+
+    const int  step          = std::max(1, linear_step_);
+    const bool step_hit      = ((pos + 1) % step) == 0;
     bool       keep_step_hit = step_hit;
-    if (step_hit && linear_fixed_cap_ > 0 && pos < seq_slots - 2) {
-        const int mandatory_tail = std::min(seq_slots, 2);
+    if (step_hit && linear_fixed_cap_ > 0 && pos < seq_slots - kResidentBlocksPerRequest) {
+        const int mandatory_tail = std::min(seq_slots, kResidentBlocksPerRequest);
         const int history_budget = std::max(linear_fixed_cap_ - mandatory_tail, 0);
-        const int history_hits   = std::max(seq_slots - 2, 0) / step;
+        const int history_hits   = std::max(seq_slots - kResidentBlocksPerRequest, 0) / step;
         const int hit_ordinal    = (pos + 1) / step;
-        keep_step_hit = hit_ordinal > history_hits - history_budget;
+        keep_step_hit            = hit_ordinal > history_hits - history_budget;
     }
     return is_reserve || (enable_reuse_cache ? (keep_step_hit || is_seq_tail) : is_seq_tail);
 }
@@ -56,14 +69,41 @@ NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
     auto common_required = [&](int pos) { return shouldMaterializeBlock(pos, common_seq_len, 0, reuse_enabled); };
     auto final_required  = [&](int pos) { return shouldMaterializeBlock(pos, seq_len, reserve_step, reuse_enabled); };
 
+    if (!request_cache_mode_) {
+        for (int pos = 0; pos < common_slots; ++pos) {
+            if (common_required(pos)) {
+                info.common_blocks++;
+            }
+        }
+        for (int pos = 0; pos < total_slots; ++pos) {
+            if (final_required(pos) && !(pos < common_slots && common_required(pos))) {
+                info.extra_blocks++;
+            }
+        }
+
+        const int reused_tail_pos = (reuse_enabled && reuse_blocks_len > 0) ? reuse_blocks_len - 1 : -1;
+        if (reused_tail_pos >= 0) {
+            if (reused_tail_pos < common_slots && common_required(reused_tail_pos)) {
+                info.common_blocks--;
+            } else if (reused_tail_pos < total_slots && final_required(reused_tail_pos)) {
+                info.extra_blocks--;
+            }
+        }
+        info.common_blocks = std::max(info.common_blocks, 0);
+        info.extra_blocks  = std::max(info.extra_blocks, 0);
+        return info;
+    }
+
+    int common_required_blocks = 0;
+    int final_required_blocks  = 0;
     for (int pos = 0; pos < common_slots; ++pos) {
         if (common_required(pos)) {
-            info.common_blocks++;
+            common_required_blocks++;
         }
     }
     for (int pos = 0; pos < total_slots; ++pos) {
-        if (final_required(pos) && !(pos < common_slots && common_required(pos))) {
-            info.extra_blocks++;
+        if (final_required(pos)) {
+            final_required_blocks++;
         }
     }
 
@@ -72,14 +112,17 @@ NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
     const int reused_tail_pos = (reuse_enabled && reuse_blocks_len > 0) ? reuse_blocks_len - 1 : -1;
     if (reused_tail_pos >= 0) {
         if (reused_tail_pos < common_slots && common_required(reused_tail_pos)) {
-            info.common_blocks--;
-        } else if (reused_tail_pos < total_slots && final_required(reused_tail_pos)) {
-            info.extra_blocks--;
+            common_required_blocks--;
+        }
+        if (reused_tail_pos < total_slots && final_required(reused_tail_pos)) {
+            final_required_blocks--;
         }
     }
 
-    info.common_blocks = std::max(info.common_blocks, 0);
-    info.extra_blocks  = std::max(info.extra_blocks, 0);
+    info.common_blocks = std::max(common_required_blocks, 0);
+    // malloc() reclaims stale common-tail states before filling the final tail,
+    // so capacity is the maximum of the two phases rather than their union.
+    info.extra_blocks = std::max(final_required_blocks - info.common_blocks, 0);
     return info;
 }
 
@@ -106,7 +149,29 @@ bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_re
     const int total_slots        = needBlocksNum(seq_len, 0, reserve_step);
     const int new_blocks_len     = std::max(total_slots - current_blocks_len, 0);
 
-    auto should_materialize = [&](int pos) { return shouldMaterializeBlock(pos, seq_len, reserve_step, enable_reuse_cache); };
+    auto should_materialize = [&](int pos) {
+        return shouldMaterializeBlock(pos, seq_len, reserve_step, enable_reuse_cache);
+    };
+
+    // Reclaim states that fell out of the two-block active tail before allocating
+    // their replacements. This prevents a long-running request from needing an
+    // extra resident block at every 128-token rollover.
+    if (request_cache_mode_) {
+        BlockIndicesType    stale_blocks;
+        std::vector<size_t> stale_positions;
+        const auto&         before_blocks = block_ids.blocks();
+        const int           stale_scan    = std::min(current_blocks_len, total_slots);
+        for (int i = 0; i < stale_scan; ++i) {
+            if (!should_materialize(i) && !isNullBlockIdx(before_blocks[static_cast<size_t>(i)])) {
+                stale_blocks.push_back(before_blocks[static_cast<size_t>(i)]);
+                stale_positions.push_back(static_cast<size_t>(i));
+            }
+        }
+        if (!stale_blocks.empty()) {
+            block_pool_->requestFree(stale_blocks);
+            block_ids.remove(stale_positions);
+        }
+    }
 
     std::vector<size_t> positions_to_backfill;
     const auto&         existing_blocks = block_ids.blocks();
@@ -183,8 +248,8 @@ void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_re
 
     BlockIndicesType    blocks_to_free;
     std::vector<size_t> pos_to_remove;
-    // keep last 2 and every reserve_step
-    for (int i = block_size - 3 - reserve_step; i >= 0; i--) {
+    const int           scan_end = request_cache_mode_ ? block_size : std::max(block_size - 2 - reserve_step, 0);
+    for (int i = 0; i < scan_end; ++i) {
         if (isNullBlockIdx(block_indices[i])) {
             continue;
         }

@@ -110,6 +110,10 @@ struct InsertInfo {
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
     bool                    is_resident;
+    // Original request/prompt length. Linear attention uses this to retain the
+    // single largest safe aligned state and never its earlier intermediate
+    // states. Zero keeps the legacy test fallback.
+    int input_token_length = 0;
 };
 
 }  // namespace rtp_llm

@@ -149,8 +149,17 @@ bool HybridPoolKVCacheAllocator::doInit() {
 
         KVCacheGroupPtr group;
         if (group_type == CacheGroupType::LINEAR) {
-            group = std::make_shared<LinearKVCacheGroup>(
-                ids, spec, group_pool, gid, config_.linear_step, shared_cache_raw, metrics_reporter_, config_.linear_fixed_cap);
+            auto linear_group = std::make_shared<LinearKVCacheGroup>(ids,
+                                                                     spec,
+                                                                     group_pool,
+                                                                     gid,
+                                                                     config_.linear_step,
+                                                                     shared_cache_raw,
+                                                                     metrics_reporter_,
+                                                                     config_.linear_fixed_cap);
+            linear_group->setRequestCacheMode(config_.enable_linear_attention_request_cache);
+            linear_group->setRequestCacheAlignmentBlocks(linear_request_cache_alignment_blocks_);
+            group = std::move(linear_group);
             linear_group_ids_.push_back(gid);
         } else if (group_type == CacheGroupType::SWA) {
             group = std::make_shared<SWAKVCacheGroup>(
@@ -420,6 +429,19 @@ size_t HybridPoolKVCacheAllocator::availableBlocksNum() const {
     return total;
 }
 
+size_t HybridPoolKVCacheAllocator::reserveBaseBlocksNum() const {
+    size_t total = 0;
+    for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
+        const auto region =
+            gid < config_.group_region_names.size() ? config_.group_region_names[gid] : KVCacheRegionName::DEFAULT;
+        const bool is_linear = gid < config_.group_types.size() && config_.group_types[gid] == CacheGroupType::LINEAR;
+        if (!isDsv4FixedRegion(region) && !(is_linear && config_.enable_linear_attention_request_cache)) {
+            total += group_block_pools_[gid]->availableBlocksNum();
+        }
+    }
+    return total;
+}
+
 BatchKVCacheResourcePtr HybridPoolKVCacheAllocator::popBlocksFromCache(size_t min_blocks_to_free) {
     if (min_blocks_to_free == 0 || !shared_block_cache_) {
         return nullptr;
@@ -606,6 +628,11 @@ KVCacheTokenCapacity HybridPoolKVCacheAllocator::tokenCapacity(size_t default_se
     size_t available_tokens = std::numeric_limits<size_t>::max();
     bool   has_pool         = false;
     for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
+        const bool is_linear = gid < config_.group_types.size() && config_.group_types[gid] == CacheGroupType::LINEAR;
+        if (gid < config_.group_types.size() && config_.group_types[gid] != CacheGroupType::FULL
+            && !(is_linear && !config_.enable_linear_attention_request_cache)) {
+            continue;
+        }
         const auto& pool = group_block_pools_[gid];
         if (!pool) {
             continue;
@@ -677,7 +704,8 @@ MallocStatus HybridPoolKVCacheAllocator::evaluateInitCapacity(const MallocInfo& 
     for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
         const auto region =
             gid < config_.group_region_names.size() ? config_.group_region_names[gid] : KVCacheRegionName::DEFAULT;
-        if (isDsv4FixedRegion(region)) {
+        const bool is_linear = gid < config_.group_types.size() && config_.group_types[gid] == CacheGroupType::LINEAR;
+        if (isDsv4FixedRegion(region) || (is_linear && config_.enable_linear_attention_request_cache)) {
             continue;
         }
         total_reservable_blocks += group_block_pools_[gid]->totalBlocksNum();
@@ -704,7 +732,11 @@ MallocStatus HybridPoolKVCacheAllocator::evaluateInitCapacity(const MallocInfo& 
         const size_t total_blocks = group_block_pools_[group_index]->totalBlocksNum();
         const auto region = group_index < config_.group_region_names.size() ? config_.group_region_names[group_index] :
                                                                               KVCacheRegionName::DEFAULT;
-        const size_t group_reserve_blocks = isDsv4FixedRegion(region) || total_reservable_blocks == 0 ?
+        const bool is_linear =
+            group_index < config_.group_types.size() && config_.group_types[group_index] == CacheGroupType::LINEAR;
+        const size_t group_reserve_blocks = isDsv4FixedRegion(region)
+                                                    || (is_linear && config_.enable_linear_attention_request_cache)
+                                                    || total_reservable_blocks == 0 ?
                                                 0 :
                                                 reserve_blocks * total_blocks / total_reservable_blocks;
         const size_t required_blocks      = static_cast<size_t>(need_blocks);

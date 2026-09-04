@@ -355,7 +355,8 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                 "tryReleaseKVBlock: stream=%ld, storing cache, curBlocksNum=%d", stream_->streamId(), total_blocks);
             // save cache to gpu
             if (enableDeviceCache()) {
-                InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false};
+                InsertInfo insert_info{
+                    batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, stream_->inputLength()};
                 resource_context_.cache_manager->insertIntoCache(insert_info);
             }
             storeCacheAsync(batch_kv_cache_resource_,

@@ -35,11 +35,10 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
             auto& kv_cache = stream->kvCacheMutable();
             auto& blocks   = kv_cache.blocks(0, 0);
             RTP_LLM_CHECK(blocks.size() > 0);
-            rtp_llm::InsertInfo insert_info{
-                stream->kvCachePtr(),
-                stream->completeTokenIdsPtr(),
-                true  // is_resident for system prompt
-            };
+            rtp_llm::InsertInfo insert_info{stream->kvCachePtr(),
+                                            stream->completeTokenIdsPtr(),
+                                            true,  // is_resident for system prompt
+                                            static_cast<int>(tokens_id.size())};
             cache_manager->insertIntoCache(insert_info);
             multi_task_prompt_args[task_id] = SystemPromptParams(tokens_id, blocks);
         }
