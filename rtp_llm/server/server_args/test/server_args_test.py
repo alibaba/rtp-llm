@@ -11,6 +11,10 @@ from rtp_llm.utils.backend_registry import (
     reset_backend_registrations,
 )
 
+from rtp_llm.config.test.kv_cache_event_test_values import (
+    KV_CACHE_EVENT_ENV_CASES,
+)
+
 
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
@@ -529,6 +533,58 @@ class ServerArgsSetTest(TestCase):
     def test_pdfusion_scheduler_mode_rejects_unknown_value(self):
         """Test that pdfusion_scheduler_mode only accepts fixed scheduler patterns."""
         sys.argv = ["prog", "--pdfusion_scheduler_mode", "ratioo"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        with self.assertRaises(SystemExit):
+            rtp_llm.server.server_args.server_args.setup_args()
+
+    def test_kv_cache_event_env_vars_bind_to_config(self):
+        for env_name, _, raw_value, _ in KV_CACHE_EVENT_ENV_CASES:
+            os.environ[env_name] = raw_value
+        # Exercise the mixed CLI + environment path rather than argparse's
+        # environment-to-argv fallback.
+        sys.argv = ["prog", "--model_type", "qwen"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        for _, field_name, _, expected_value in KV_CACHE_EVENT_ENV_CASES:
+            with self.subTest(field_name=field_name):
+                self.assertEqual(
+                    expected_value,
+                    getattr(py_env_configs.kv_cache_config, field_name),
+                )
+
+    def test_kv_cache_event_env_vars_bind_in_pure_env_mode(self):
+        os.environ["MODEL_TYPE"] = "qwen"
+        for case in KV_CACHE_EVENT_ENV_CASES:
+            os.environ[case.env_name] = case.raw_value
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        for case in KV_CACHE_EVENT_ENV_CASES:
+            with self.subTest(field_name=case.field_name):
+                self.assertEqual(
+                    case.expected_value,
+                    getattr(py_env_configs.kv_cache_config, case.field_name),
+                )
+
+    def test_kv_cache_event_cli_rejects_unknown_publisher_type(self):
+        sys.argv = [
+            "prog",
+            "--model_type",
+            "qwen",
+            "--kv_cache_event_publisher_type",
+            "KVCM",
+        ]
 
         import rtp_llm.server.server_args.server_args
 

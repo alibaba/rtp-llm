@@ -14,6 +14,14 @@ py_test(
     exec_properties = {'gpu':'H20'},
 )
 
+py_library(
+    name = "kv_cache_event_test_values",
+    srcs = [
+        "kv_cache_event_test_values.py",
+    ],
+    visibility = ["//rtp_llm/server/server_args/test:__pkg__"],
+)
+
 py_test(
     name = "grammar_tokenizer_info_test",
     srcs = [
@@ -24,6 +32,20 @@ py_test(
     ],
     deps = [
         "//rtp_llm:config",
+    ],
+)
+
+py_test(
+    name = "kv_cache_config_pickle_test",
+    srcs = [
+        "kv_cache_config_pickle_test.py",
+    ],
+    data = [
+        "//:th_transformer_config",
+    ],
+    deps = [
+        ":kv_cache_event_test_values",
+        "//rtp_llm:ops",
     ],
 )
 

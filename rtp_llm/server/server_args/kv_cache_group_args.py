@@ -39,6 +39,51 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="控制是否启用Remote Cache的机制。设置为 True 启用 , False 关闭",
     )
     kv_cache_group.add_argument(
+        "--kv_cache_event_publisher_type",
+        env_name="KV_CACHE_EVENT_PUBLISHER_TYPE",
+        bind_to=(kv_cache_config, "kv_cache_event_publisher_type"),
+        type=str,
+        choices=["none", "kvcm"],
+        default="none",
+        help="HBM KV cache 事件输出：none 关闭，kvcm 直连 KVCM。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_manager_endpoint",
+        env_name="KV_CACHE_EVENT_MANAGER_ENDPOINT",
+        bind_to=(kv_cache_config, "kv_cache_event_manager_endpoint"),
+        type=str,
+        default="",
+        help="KVCM Meta HTTP endpoint，例如 http://127.0.0.1:56020。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_instance_group",
+        env_name="KV_CACHE_EVENT_INSTANCE_GROUP",
+        bind_to=(kv_cache_config, "kv_cache_event_instance_group"),
+        type=str,
+        default="",
+        help="KVCM instance group；为空时复用 reco_instance_group。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_instance_id",
+        env_name="KV_CACHE_EVENT_INSTANCE_ID",
+        bind_to=(kv_cache_config, "kv_cache_event_instance_id"),
+        type=str,
+        default="",
+        help="稳定的 KVCM instance id，不能使用进程 PID。",
+    )
+    kv_cache_group.add_argument(
+        "--kv_cache_event_host_ip_port",
+        env_name="KV_CACHE_EVENT_HOST_IP_PORT",
+        bind_to=(kv_cache_config, "kv_cache_event_host_ip_port"),
+        type=str,
+        default="",
+        help=(
+            "当前 DP replica 的 tp_rank=0 Cache 协调端点；dp_size>1 时每个 DP replica 必须唯一。"
+            "为空时按 server_ip:(start_port + rank_id * worker_info_port_num) 自动派生；"
+            "pp_size>1 时该功能禁用。"
+        ),
+    )
+    kv_cache_group.add_argument(
         "--multi_task_prompt",
         env_name="MULTI_TASK_PROMPT",
         bind_to=(kv_cache_config, "multi_task_prompt"),
