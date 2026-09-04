@@ -34,3 +34,13 @@ py_test(
         "//rtp_llm:config",
     ],
 )
+
+py_test(
+    name = "engine_config_test",
+    srcs = [
+        "engine_config_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
