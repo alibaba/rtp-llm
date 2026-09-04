@@ -64,13 +64,17 @@ pressure).  One gate per case (admission wave-2 + wave-3, 2026-09):
                                   RPC — same code, different trigger
                                   source than the KV-gate deadline case.
   admission_placement_pool_wait
-                                  prefill placement under the new-B
-                                  Blocked semantics (the router
-                                  availability maxPendingRequests knob
-                                  is retired from the schema): the
-                                  second arrival is accepted fast
-                                  (code 200) and parks internally until
-                                  capacity frees; both requests complete.
+                                  prefill placement capacity wait under
+                                  a REAL backlog construction (verdict
+                                  §4.1): SINGLE+NON_BATCH with the
+                                  delivery-lease cap 1 + batcher queue cap
+                                  2 — the second arrival's Schedule RPC
+                                  parks OPEN on the master (Blocked park
+                                  via frontier credits + WorkerBatcher
+                                  queue), a concurrent background
+                                  sampler observes the parked ledger, and
+                                  B completes only after A's lease
+                                  releases (serialized, FIFO).
   admission_engine_waiting_batch_cap_reject
                                   engine waiting-batch cap gate
                                   (prefill.max_waiting_batches=1 via
@@ -123,6 +127,7 @@ pressure).  One gate per case (admission wave-2 + wave-3, 2026-09):
 from __future__ import annotations
 
 import json
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
@@ -738,7 +743,7 @@ def engine_prefill_concurrency_gate_park(ctx: CaseContext):
 # ===========================================================================
 
 
-DECODE_WAVE_REQUESTS = 150  # > 132 (master cap) > 128 (engine hard gate)
+DECODE_WAVE_REQUESTS = 280  # gate-reachability anchor — see case docstring
 DECODE_HARD_GATE = 128  # mock engine decodeMaxConcurrency (CLI default)
 
 
@@ -784,29 +789,27 @@ def engine_decode_hard_gate_unbounded_park(ctx: CaseContext):
     raised to 5000, so the ONLY admission edge is the engine's
     decodeMaxConcurrency=128 hard gate (the production waiting_streams_
     semantics).  decode_scale=10 stretches each decode step
-    ((19.5 + 0.175 x running) ms x 10 ≈ 0.42s at running=128) and
-    output_len=32 keeps every request ~13 decode steps (≈ 3.1s) in the
-    engine, so the arrival rate (≈ 25 requests per ~0.22s prefill batch)
-    sustains a decode concurrency far above 128 — the hard gate fills
-    and the overflow parks.  (task #107 fix (#15): with output_len=8 the
-    ~0.96s decode residency balanced the ~0.22s batch cadence at ≈ 109
-    concurrent — the gate never filled and decode_waiting stayed 0;
-    lengthening the residency makes the breakthrough deterministic.)
+    ((19.5 + 0.175 x running) ms x 10) and output_len=64 keeps every
+    request ~25 decode steps (≈ 10.4s residency at the gate, 2.6
+    tokens/step MTP fold) in the engine.
 
-    New-B rework (2026-09-04, intake3-rebuild semantics): the same
-    construction measured decode_running_max=78 (< gate 128) with
-    decode_waiting_max=0 — the residency/cadence model above is engine-
-    version sensitive and no longer stacks past the gate, and /set_perf
-    exposes no decode-concurrency override to lower the gate to the load
-    (the value is a mock CLI default).  The contract is therefore
-    GATE-AWARE: the invariant half (zero Schedule rejections, >= 95%
-    drain, clean ledgers, recovery) holds at ANY load level; the park
-    proof (decode waiting >= 1) activates exactly when the observed
-    running_max reaches the gate — a filled gate with waiting == 0
-    would mean the overflow vanished (rejected or dropped), which is
-    precisely the bug this case exists to catch.  A sub-gate wave parks
-    nothing by construction and passes on the invariant half alone,
-    with both maxima recorded as diagnostics.
+    Gate-reachability construction (2026-09-05 revision, verdict §4.5
+    option (a)): the 2026-09-04 construction (150 fires x output_len=32)
+    measured decode_running_max=78 (< gate 128) with decode_waiting_max=0
+    — that residency did not stack past the gate, so the park proof
+    never activated (the half-false-green finding).  The load is
+    re-anchored on the measured arrival model: steady-state running =
+    arrival_rate x residency, with arrival ≈ 19-25 req/s (prefill-bound,
+    back-solved from running_max=78 @ residency ≈ 4.1s) and residency
+    scaling linearly in output_len.  Doubling the residency
+    (output_len=64, ≈ 10.4s at the gate) and deepening the wave to 280
+    fires puts the modelled peak at running ≈ 155-180 > 128 with the
+    overflow (~30-50 requests) parked in decodePendingQueue.  If a
+    future run STILL measures sub-gate (engine-version drift, slower
+    machine), the gate-aware clause below degrades to the invariant
+    half ONLY and the measured running_max is reported as the next
+    calibration anchor — an honest no-proof pass, never a fabricated
+    one (the fallback semantics verdict §4.5 endorses).
 
     Behaviour: scheduleDecodeCompletion admits the first 128
     TransferToDecode arrivals as running and parks every overflow in
@@ -815,25 +818,22 @@ def engine_decode_hard_gate_unbounded_park(ctx: CaseContext):
     pressure).  As running slots free up, parked requests are admitted
     wave by wave.
 
-    Expected (contract): all 150 Schedule calls succeed (zero rejections
-    — the engine-side form of a waitable gate); IF the observed
-    decode_running_max reaches the 128 gate a snapshot poll must also
-    observe decode waiting >= 1 (the overflow parked — a filled gate
-    with no park is a vanished-overflow failure); after the drain >= 95%
-    of the fired requests completed their streams, the decode park is
-    empty (waiting == 0), the master inflight ledger is clean and a
-    fresh request succeeds (recovery).
+    Expected (contract): all 280 Schedule calls succeed (zero
+    rejections — the engine-side form of a waitable gate); IF the
+    observed decode_running_max reaches the 128 gate a snapshot poll
+    must also observe decode waiting >= 1 (the overflow parked — a
+    filled gate with no park is a vanished-overflow failure); after the
+    drain >= 95% of the fired requests completed their streams, the
+    decode park is empty (waiting == 0), the master inflight ledger is
+    clean and a fresh request succeeds (recovery).
 
     Prediction: the invariant half (zero rejections, >= 95% drain,
     clean ledgers) is load-level independent and holds; the park half
-    activates only if the wave stacks past the gate (the 2026-09-04
-    measured run stayed sub-gate at running_max=78 — see the new-B note
-    above; strengthening the construction to force a > 128 stack is
-    left open for a future tuning pass on a machine where the run can
-    be verified).  Drain budget: ~4800 decode tokens at the
-    ≈ 794 tok/s full-gate rate ≈ 6s plus ramp and the 22-request backlog
-    tail, well under the 45s per-stream cap; if a slow machine stretches
-    waves the completion bar is the 95% ratio, not perfection.
+    activates on the modelled running peak ≈ 155-180 (anchor above).
+    Drain budget: 280 x 64 = 17,920 decode tokens at the ≈ 790 tok/s
+    full-gate rate ≈ 23s plus the sub-gate tail, under the 45s
+    per-stream cap; if a slow machine stretches waves the completion
+    bar is the 95% ratio, not perfection.
     """
     env = ctx.env_manager.ensure(_decode_park_spec(ctx))
     ops = ctx.engine_ops(env)
@@ -849,7 +849,7 @@ def engine_decode_hard_gate_unbounded_park(ctx: CaseContext):
         fire_errors = []
         for i in range(DECODE_WAVE_REQUESTS):
             rid = ops.next_request_id(base)
-            err = _fire_request(ops, rid, fired, input_len=512, output_len=32)
+            err = _fire_request(ops, rid, fired, input_len=512, output_len=64)
             if err is not None:
                 fire_errors.append((rid, err))
             if (i + 1) % 25 == 0:
@@ -860,9 +860,11 @@ def engine_decode_hard_gate_unbounded_park(ctx: CaseContext):
         # proves the gate filled and overflowed, which a waiting-only
         # early break would truncate; under a sub-gate wave both stay
         # low and the gauges record the load shape as diagnostics).
+        # The 18s window spans the ~11-15s prefill supply phase plus the
+        # stack to the modelled peak (see the construction note above).
         waiting_max = 0
         running_max = 0
-        deadline = time.monotonic() + 10.0
+        deadline = time.monotonic() + 18.0
         while time.monotonic() < deadline:
             snap = ops.snapshot_by_name()
             for n in decode_engines:
@@ -1160,9 +1162,12 @@ BQ_DEADLINE_REQUESTS = 8  # 4 leases + 2 queue seats + 2 placementWaiters
 BQ_DEADLINE_MS = 1500
 # New-B terminal split for the deadline case: the 4 dispatcher lease
 # seats + 2 batcher-queue seats admit and COMPLETE (a queued entry's
-# request deadline detaches at queue acceptance, so the queue absorbs
-# fires 5-6 past the old expiry boundary); the 2 fires parked behind
-# the capacity gate expire on their still-open Schedule RPC (8511).
+# request deadline detaches at DELIVERY CONFIRMATION — RequestSlot.
+# confirmDeliveryForPublication clears requestDeadline when the
+# EnqueueBatch delivery is confirmed, verdict §1.5 — so the queue
+# absorbs fires 5-6 past the old expiry boundary); the 2 fires parked
+# behind the capacity gate expire on their still-open Schedule RPC
+# (8511).
 BQ_DEADLINE_ADMITTED = 6
 BQ_DEADLINE_OVERFLOW = 2
 
@@ -1190,23 +1195,103 @@ def _master_side_parked(ops, prefill_names, decode_names) -> tuple:
     return sched - engine_live, f"sched={sched}, engine_live={engine_live}"
 
 
-def _fire_tracked(ops, rid: int, fired: list, **kwargs) -> Optional[str]:
+def _fire_tracked(
+    ops, rid: int, fired: list, timeout_s: float = 30.0, **kwargs
+) -> Optional[str]:
     """Schedule AND immediately open the response stream, recording the
     fire instant so per-request terminal timing (completion order,
     deadline expiry) is measurable — the W3 victim-handle pattern,
-    batched.  Fire errors are reported like _fire_request's."""
+    batched.  Fire errors are reported like _fire_request's.
+
+    ``timeout_s`` is the client gRPC deadline for the Schedule RPC: a
+    capacity-blocked submitter parks as a Blocked request with the RPC
+    still OPEN (verdict §1.1), so callers that expect parking pass a
+    generous deadline.  NON_BATCH responses (enqueued_by_master=False)
+    open the direct GenerateStreamCall with an input_pb rebuilt from
+    the SAME kwargs — start_stream's default-shape fallback would
+    desynchronize the engine's view from the master's schedule (the
+    trap engine_ops.verify_recovery documents)."""
     try:
-        resp = ops.schedule(rid, **kwargs)
+        resp = ops.schedule(rid, timeout_s=timeout_s, **kwargs)
     except Exception as exc:
         return repr(exc)
     if resp.code != 200 or not resp.success:
         return f"schedule failed ({resp.code}): {resp.error_message}"
+    input_pb = None
+    if not resp.enqueued_by_master:
+        input_pb = ops.build_generate_input(rid, **kwargs)
     try:
-        handle = ops.start_stream(resp, rid)
+        handle = ops.start_stream(resp, rid, input_pb=input_pb)
     except Exception as exc:
         return repr(exc)
     fired.append((rid, handle, time.monotonic()))
     return None
+
+
+class _ParkedSampler:
+    """Background master-side-parked time-series sampler (verdict §3 fix).
+
+    The parked window lives DURING the concurrent fire: a Blocked park
+    holds the Schedule RPC open and the park drains the moment capacity
+    frees, so a sampler that only starts AFTER the fires settle
+    structurally misses the window — the 2026-09-04 run measured
+    parked_max=0 on exactly that defect while the wave demonstrably
+    queued.  This thread samples :func:`_master_side_parked` every
+    ``interval_s`` while the fires are in flight (the decode_hard_gate
+    L863-872 poll-loop cadence on the master.py coldstart-sampler
+    thread shape), recording ``(monotonic_t, parked, detail)`` samples;
+    the caller asserts on the series AFTER joining the fires.  HTTP
+    failures (parked == -1) are counted, never recorded as samples.
+    """
+
+    def __init__(self, ops, prefill_names, decode_names, interval_s: float = 0.2):
+        self._ops = ops
+        self._prefill = list(prefill_names)
+        self._decode = list(decode_names)
+        self._interval = interval_s
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self.samples: list[tuple[float, int, str]] = []
+        self.http_failures = 0
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            parked, detail = _master_side_parked(self._ops, self._prefill, self._decode)
+            if parked < 0:
+                self.http_failures += 1
+            else:
+                self.samples.append((time.monotonic(), parked, detail))
+            self._stop.wait(self._interval)
+
+    def start(self) -> "_ParkedSampler":
+        self._thread = threading.Thread(
+            target=self._loop, name="parked-sampler", daemon=True
+        )
+        self._thread.start()
+        return self
+
+    def stop(self, timeout_s: float = 5.0) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout_s)
+
+    @property
+    def max_parked(self) -> int:
+        return max((p for _, p, _ in self.samples), default=-1)
+
+    @property
+    def max_detail(self) -> str:
+        best = max(self.samples, key=lambda s: s[1], default=None)
+        return best[2] if best is not None else "no samples"
+
+    def parked_in_window(self, t_lo: float, t_hi: float) -> bool:
+        """True when any sample inside [t_lo, t_hi] observed parked >= 1.
+
+        Both bounds and the sample stamps are time.monotonic() instants
+        from the same clock, so callers can align the park evidence with
+        independently recorded event windows (e.g. the 8511 expiry
+        window of the deadline case)."""
+        return any(t_lo <= t <= t_hi and p >= 1 for t, p, _ in self.samples)
 
 
 def _await_tracked(fired: list, wait_s: float = 45.0) -> list:
@@ -1301,21 +1386,25 @@ def admission_batcher_queue_capacity_park(ctx: CaseContext):
     (FIFO); after the drain the engine park is empty, the master
     inflight ledger is clean and a fresh request succeeds (recovery).
     The master-side parked count (scheduler ledger minus engine-live)
-    is an OBSERVATION, not an assertion: under the new coordinator the
-    parked/waiting wave measured 0 on this discriminator (2026-09-04
-    run: 7/7 completed, parked_max=0), and the conditional park clause
-    — any request that parks must drain to zero — is proven by the
-    inflight_clean + settled assertions below.  The drain-span number
-    is likewise an observation only: the await starts after the parked-
-    observation window, so a wave that fully drains inside that window
-    collapses the measured span to ~0 regardless of the engine's
-    internal serialization (the old >= 12s span proof only measured
-    anything while the await raced a still-live drain).
+    is a HARD assertion sampled by a background thread DURING the
+    fire (verdict §3): fires 5-6 occupy the batcher queue and fire 7
+    parks with its Schedule RPC open, so a 0.2s-cadence sampler that
+    starts BEFORE the first fire must observe parked >= 1 while the
+    wave is in flight — the 2026-09-04 run measured parked_max=0 only
+    because its observation loop started AFTER the fires settled,
+    structurally past the park window.  The drain-span number is an
+    observation only: `ends` are the wait_end() return instants, so a
+    wave that drains before the await starts collapses the measured
+    span to ~0 regardless of the engine's internal serialization (the
+    old >= 12s span proof only measured anything while the await raced
+    a still-live drain).
 
-    Prediction: measured contract (2026-09-04 run: 7/7 completed, zero
-    rejects, clean ledgers, recovery ok).  Risk: none identified — the
-    assertion now pins exactly the invariant half that holds at any
-    load level under Blocked admission.
+    Prediction: 7/7 completed, zero rejects, parked_max >= 1 (queued
+    fires 5-6 + parked fire 7 ride the master ledger while only the 4
+    lease holders show on the engine), clean ledgers, recovery ok.
+    Risk: none identified — the assertion now pins the invariant half
+    that holds at any load level under Blocked admission PLUS the
+    in-flight park observation the sampler window makes honest.
     """
     env = ctx.env_manager.ensure(_batcher_queue_spec(ctx, queue_timeout_ms=60_000))
     ops = ctx.engine_ops(env)
@@ -1329,30 +1418,23 @@ def admission_batcher_queue_capacity_park(ctx: CaseContext):
         for n in names:
             ops.set_perf(n, prefill_fixed_ms=3000.0)
 
+        # The park window lives DURING the fire (verdict §3): fires 5-6
+        # queue on the master batcher and fire 7 parks with its Schedule
+        # RPC open, all of which drains once capacity frees — so the
+        # sampler starts BEFORE the first fire and runs across the wave
+        # and the drain; a post-fire observation loop structurally
+        # misses the window (the 2026-09-04 parked_max=0 defect).
+        sampler = _ParkedSampler(ops, names, decode_names).start()
         fire_errors = []
-        for _ in range(BQ_PARK_REQUESTS):
-            rid = ops.next_request_id(base)
-            err = _fire_tracked(ops, rid, fired, input_len=512, output_len=2)
-            if err is not None:
-                fire_errors.append((rid, err))
-            time.sleep(0.4)  # >> maxCollectionWaitMs: one batch per fire
-
-        # Observe the master-side park while the pressure holds —
-        # OBSERVATION ONLY under the new-B coordinator (the measured run
-        # shows 0 on this discriminator: internal waits are not visible
-        # in scheduler_inflight).  The conditional park clause (any
-        # parked request must drain to zero) is proven by inflight_clean
-        # + settled after the drain.
-        parked_max = -1
-        parked_detail = "not observed"
-        deadline = time.monotonic() + 8.0
-        while time.monotonic() < deadline:
-            parked, detail = _master_side_parked(ops, names, decode_names)
-            if parked > parked_max:
-                parked_max, parked_detail = parked, detail
-            if parked_max >= 1:
-                break
-            time.sleep(0.2)
+        try:
+            for _ in range(BQ_PARK_REQUESTS):
+                rid = ops.next_request_id(base)
+                err = _fire_tracked(ops, rid, fired, input_len=512, output_len=2)
+                if err is not None:
+                    fire_errors.append((rid, err))
+                time.sleep(0.4)  # >> maxCollectionWaitMs: one batch per fire
+        finally:
+            sampler.stop()
 
         outcomes = _await_tracked(fired, wait_s=45.0)
         completed = [rid for rid, _, _, ok, _ in outcomes if ok]
@@ -1380,8 +1462,14 @@ def admission_batcher_queue_capacity_park(ctx: CaseContext):
         )
         recovery_ok, recovery_msg = ops.verify_recovery()
 
+        # Park evidence (hard, verdict §3): the in-flight sampler must
+        # have seen the queued/parked wave on the master ledger while
+        # the engines carried only the lease holders.
+        parked_max = sampler.max_parked
+        parked_proven = parked_max >= 1
         passed = (
             not fire_errors
+            and parked_proven
             and len(completed) == BQ_PARK_REQUESTS
             and not failures
             and fifo_ordered
@@ -1392,8 +1480,9 @@ def admission_batcher_queue_capacity_park(ctx: CaseContext):
         return passed, (
             f"fired={BQ_PARK_REQUESTS} (fire_errors={fire_errors[:1]}), "
             f"master_side_parked_max={parked_max} "
-            f"({parked_detail}, observation — any park drains: "
-            f"inflight_clean+settled), "
+            f"({sampler.max_detail}, samples={len(sampler.samples)}, "
+            f"http_failures={sampler.http_failures}, in-flight sampled — "
+            f"hard), "
             f"completed={len(completed)}/{BQ_PARK_REQUESTS} "
             f"(failures={failures[:1]}), "
             f"fifo_ordered={fifo_ordered} "
@@ -1438,9 +1527,13 @@ def admission_batcher_queue_deadline(ctx: CaseContext):
     open.
 
     Behaviour (new-B semantics): a QUEUED entry's request deadline
-    detaches at queue acceptance, so fires 5-6 survive past the old
-    expiry boundary and complete once the leases release — the queue
-    absorbs them (the old contract expected them to expire in place).
+    detaches at DELIVERY CONFIRMATION — RequestSlot.
+    confirmDeliveryForPublication clears requestDeadline when the
+    EnqueueBatch delivery is confirmed (verdict §1.5: the code's
+    detach point, not "queue acceptance" as this docstring previously
+    claimed), so fires 5-6 survive past the old expiry boundary and
+    complete once the leases release — the queue absorbs them (the old
+    contract expected them to expire in place).
     The two PARKED fires (7-8) expire while they wait: the absolute
     expiration (admissionTimeMs + queueTimeoutMs) completes the
     still-open Schedule RPC synchronously with the typed
@@ -1461,15 +1554,23 @@ def admission_batcher_queue_deadline(ctx: CaseContext):
     zero fire errors (a typed deadline reject is an expected terminal,
     not a fire failure); after the wave the master inflight ledger is
     clean and a fresh request on the relieved gate succeeds
-    (recovery).  The pre-expiry master-side parked count is an
-    OBSERVATION (the new coordinator's parked RPCs measured -1/0 on
-    the scheduler-ledger discriminator), never an assertion.
+    (recovery).  The master-side parked count is a HARD assertion
+    aligned with the expiry window (verdict §3): a background sampler
+    running DURING the fire must observe parked >= 1 inside the
+    overflow fires' live window [first fire 7-8 call, last 8511
+    reject] — fires 5-8 ride the master ledger while only the 4 lease
+    holders show on the engine, so a sample inside that window proves
+    the park+expiry sequence shares one ledger view.  The 2026-09-04
+    run's parked_max=-1/0 readings were the post-fire observation-loop
+    defect, not a dead discriminator.
 
     Prediction: measured contract — the 6+2 split is structural (the
     queue accepts fires 5-6 during the 1.2s fire window while the
     first engine terminal is >= 3s away, so the boundary is
     ordinal-stable); the parked fires 7-8 expire at ~2.4s, ~0.6s
-    before the first lease release — no wake-up race.
+    before the first lease release — no wake-up race; the in-flight
+    sampler observes parked 2-4 across [~0.9s, ~3.0s], straddling the
+    expiry window.
     """
     env = ctx.env_manager.ensure(
         _batcher_queue_spec(ctx, queue_timeout_ms=BQ_DEADLINE_MS)
@@ -1492,58 +1593,51 @@ def admission_batcher_queue_deadline(ctx: CaseContext):
         # expires it with the typed reject (recorded in rpc_rejects, an
         # expected terminal).  fire_errors records only real failures
         # (RPC exception / stream-open failure), never a typed deadline
-        # reject.
+        # reject.  The parked window lives DURING this loop (fires 5-8
+        # ride the master ledger while fires 7-8 hold their RPCs open
+        # up to 1.5s each), so the background sampler starts BEFORE the
+        # first fire (verdict §3 — a post-fire observation loop
+        # structurally misses the park window).
+        sampler = _ParkedSampler(ops, names, decode_names).start()
         fire_errors = []
-        for _ in range(BQ_DEADLINE_REQUESTS):
-            rid = ops.next_request_id(base)
-            t_call = time.monotonic()
-            try:
-                resp = ops.schedule(rid, input_len=512, output_len=2)
-            except Exception as exc:
-                fire_errors.append((rid, repr(exc)))
-                time.sleep(0.15)
-                continue
-            if resp.code != 200 or not resp.success:
-                rpc_rejects.append(
-                    (
-                        rid,
-                        t_call,
-                        time.monotonic(),
-                        resp.code,
-                        str(resp.error_message),
-                    )
-                )
-            else:
+        try:
+            for _ in range(BQ_DEADLINE_REQUESTS):
+                rid = ops.next_request_id(base)
+                t_call = time.monotonic()
                 try:
-                    handle = ops.start_stream(resp, rid)
+                    resp = ops.schedule(rid, input_len=512, output_len=2)
                 except Exception as exc:
                     fire_errors.append((rid, repr(exc)))
                     time.sleep(0.15)
                     continue
-                fired.append((rid, handle, t_call))
-            time.sleep(0.15)  # parks the whole wave before any expiry
-
-        # Pre-expiry observation — OBSERVATION ONLY under the new-B
-        # coordinator: the parked placement-waiters are not visible on
-        # the scheduler-ledger-minus-engine-live discriminator (the
-        # measured run shows -1, "not observed"), so the count is
-        # recorded, never asserted.
-        parked_max = -1
-        parked_detail = "not observed"
-        deadline = time.monotonic() + 0.8
-        while time.monotonic() < deadline:
-            parked, detail = _master_side_parked(ops, names, decode_names)
-            if parked > parked_max:
-                parked_max, parked_detail = parked, detail
-            if parked_max >= 1:
-                break
-            time.sleep(0.2)
+                if resp.code != 200 or not resp.success:
+                    rpc_rejects.append(
+                        (
+                            rid,
+                            t_call,
+                            time.monotonic(),
+                            resp.code,
+                            str(resp.error_message),
+                        )
+                    )
+                else:
+                    try:
+                        handle = ops.start_stream(resp, rid)
+                    except Exception as exc:
+                        fire_errors.append((rid, repr(exc)))
+                        time.sleep(0.15)
+                        continue
+                    fired.append((rid, handle, t_call))
+                time.sleep(0.15)  # parks the whole wave before any expiry
+        finally:
+            sampler.stop()
 
         outcomes = _await_tracked(fired, wait_s=30.0)
         # New-B terminal split: the 6 admitted fires (4 lease seats +
         # 2 queue seats) ALL complete — the queued entries' deadline
-        # detached at queue acceptance, so they drain through the
-        # released leases instead of expiring.
+        # detached at delivery confirmation
+        # (confirmDeliveryForPublication, verdict §1.5), so they drain
+        # through the released leases instead of expiring.
         delivered_ok = len(outcomes) == BQ_DEADLINE_ADMITTED and all(
             ok and err is None for _, _, _, ok, err in outcomes
         )
@@ -1589,10 +1683,27 @@ def admission_batcher_queue_deadline(ctx: CaseContext):
         )
         recovery_ok, recovery_msg = ops.verify_recovery()
 
+        # Park evidence (hard, verdict §3): at least one in-flight
+        # sample observed parked >= 1 INSIDE the overflow fires' live
+        # window — from the first fire 7-8 Schedule call to the last
+        # 8511 reject — proving the park and its typed expiry share one
+        # ledger view (fires 5-8 on the master ledger while only the 4
+        # lease holders show on the engine).
+        parked_max = sampler.max_parked
+        if rpc_rejects:
+            ov_lo = min(t_call for _, t_call, _, _, _ in rpc_rejects)
+            ov_hi = max(t_end for _, _, t_end, _, _ in rpc_rejects)
+            park_aligned = sampler.parked_in_window(ov_lo, ov_hi)
+        else:
+            ov_lo = ov_hi = 0.0
+            park_aligned = False
+        overflow_window_s = ov_hi - ov_lo if rpc_rejects else 0.0
+
         passed = (
             not fire_errors
             and delivered_ok
             and all_deadline
+            and park_aligned
             and inflight_ok
             and recovery_ok
         )
@@ -1602,7 +1713,10 @@ def admission_batcher_queue_deadline(ctx: CaseContext):
             f"/deadline_rpc_reject:{len(rpc_rejects)} "
             f"(expect {BQ_DEADLINE_ADMITTED}+{BQ_DEADLINE_OVERFLOW}), "
             f"master_side_parked_max={parked_max} "
-            f"({parked_detail}, observation), "
+            f"({sampler.max_detail}, samples={len(sampler.samples)}, "
+            f"http_failures={sampler.http_failures}, in-flight sampled "
+            f"inside the {overflow_window_s:.2f}s overflow live window — "
+            f"hard), "
             f"delivered_completed={delivered_ok}, "
             f"deadline_typed={all_deadline} (details={wave_details}), "
             f"inflight_clean={inflight_ok}({inflight_detail}), "
@@ -1624,73 +1738,96 @@ def admission_batcher_queue_deadline(ctx: CaseContext):
 
 
 def _pool_wait_spec(ctx: CaseContext) -> EnvSpec:
-    """A4 env: 1 prefill (the prefill_max_pending_requests=1 argument is
-    a RETIRED no-op kept for history — the codex schema removed
-    router.roles.prefill.availability and admission_config emits no
-    config key for it; prefill admission parks via Blocked placement).
+    """A4 env (verdict §4.1 rebuild): 1P+2D on the SINGLE+NON_BATCH base
+    with the two LIVE capacity knobs — dispatcher
+    maxInflightRequestsPerPrefillWorker=1 (RoutePrefillAdmission leases
+    one in-flight delivery per dispatch; priority.py's verified backlog
+    window — without the cap every request dispatches immediately, no
+    queueing is observable) plus scheduler.capacity
+    maxWaitingRequestsPerPrefillWorker=2 (the WorkerBatcher ACTIVE-queue
+    ceiling and the planning-frontier credits source).
 
-    The batcher queue capacity stays at the Java default (1024) and the
-    dispatcher lease window at the template default (4): with the
-    availability filter gone there is NO fast-reject admission edge in
-    play — a second arrival while the first runs is accepted (code 200)
-    and parks internally until capacity frees."""
+    The retired prefill_max_pending_requests no-op is GONE (the codex
+    schema removed router.roles.prefill.availability, commit
+    3a6bb84000; admission_config emits no key for it): the old
+    construction — 1P + lease 4 + queue 1024 — had NO admission edge in
+    play and could never observe capacity behaviour (the 2026-09-04
+    false-green root cause).  With the delivery lease at 1, a second
+    arrival while the first runs finds the lease held and parks as a
+    Blocked request with its Schedule RPC open."""
     return EnvSpec(
         label=f"admit_pool_{ctx.profile}",
         n_prefill=1,
         n_decode=2,
         perf=default_perf(),
         master_profile=ctx.profile,
-        master_env={"FLEXLB_CONFIG": admission_config(prefill_max_pending_requests=1)},
+        master_env={
+            "FLEXLB_CONFIG": build_flexlb_config(
+                ordering="fifo",
+                decision="single",
+                dispatcher="non_batch",
+                queue_timeout_ms=60_000,
+                max_inflight_requests_per_worker=1,
+                max_waiting_requests_per_prefill_worker=2,
+            )
+        },
     )
 
 
 @case(
     "admission_placement_pool_wait",
-    profiles=["batch-window"],
-    requires=["enqueue_batch"],
+    profiles=["single-nonbatch"],
+    requires=["generate_stream"],
     source=(
-        "admission wave-2 A4: prefill placement under new-B Blocked "
-        "semantics — immediate accept (200), internal park, both "
-        "requests complete (name kept for history)"
+        "admission wave-2 A4 (verdict §4.1 rebuild): prefill placement "
+        "capacity wait — real backlog via delivery-lease cap 1 + queue "
+        "cap 2, concurrent park sampling, serialized completion "
+        "(name kept for history)"
     ),
 )
 def admission_placement_pool_wait(ctx: CaseContext):
-    """Prefill placement under the new-B Blocked semantics: accepted
-    fast, parked internally, both requests complete.  (The case name
-    keeps its historical "pool_wait" form from the pre-intake3
-    availability-filter contract.)
+    """Prefill placement capacity wait: a REAL backlog construction
+    (verdict §4.1; the case name keeps its historical "pool_wait" form
+    from the pre-intake3 availability-filter contract).
 
-    Scenario: dedicated 1P+2D env with prefill_fixed_ms=5000 (the
-    retired maxPendingRequests knob emits no config key any more).
-    Request A is fired first; once A is OBSERVABLY RUNNING on the
-    engine AND still live on the master ledger (both asserted — see
-    the precondition below), request B arrives.
+    Scenario: dedicated 1P+2D env on the SINGLE+NON_BATCH base with
+    dispatcher.maxInflightRequestsPerPrefillWorker=1 and
+    scheduler.capacity.maxWaitingRequestsPerPrefillWorker=2, all under
+    prefill_fixed_ms=5000.  Request A is fired first; once A is
+    OBSERVABLY RUNNING on the engine AND still live on the master
+    ledger (both asserted — the precondition below), request B
+    arrives.
 
-    Gate semantics (new-B): the router availability filter is GONE
-    from the codex schema — prefill admission parks via Blocked
-    placement instead of refusing the route.  B's Schedule RPC
-    therefore returns 200 IMMEDIATELY (measured fire_rpc=0.02s — the
-    direct evidence that the old availability reject path is dead) and
-    B parks inside the coordinator until capacity frees; the measured
-    run delivered B's prefill alongside A's (both ~10s e2e).
+    Mechanism under test (verdict §1.1/§2, the two-level master
+    prefill park): the dispatcher delivery lease (1) is held by A, so
+    B's route cannot dispatch — the planning frontier
+    (availableBatchPublicationCredits = maxWaiting - activeIndex)
+    blocks B from being selected while the WorkerBatcher ACTIVE queue
+    holds its seats, and the capacity-blocked submitter parks as a
+    Blocked request (BlockedRequestIndex.parkFrontier) with its
+    Schedule RPC still OPEN.  The parked request stays on the master
+    ledger (RequestRegistry liveRequestCount) and is absent from every
+    engine snapshot until capacity frees (settleUnderLock ->
+    signalPlacementCapacityChanged wakes the retry).
 
-    Expected (contract): both schedules succeed (zero fast rejects —
-    the waitable-gate contract); the pre-B precondition holds (A
-    running on the engine AND live on the ledger — a construction
-    that fires B after A already settled is vacuous and fails loudly
-    with the snapshot evidence); BOTH requests complete normally; no
-    leakage (master + engine ledgers clean) and a fresh request
-    succeeds (recovery).  B's fire-RPC duration, the B-after-A end
-    gap and the master-side parked count are OBSERVATIONS (the
-    internal park is not externally observable in the new
-    coordinator), recorded in the detail line.
+    Expected (contract): A completes; B's Schedule RPC parks OPEN —
+    fire RPC duration > 0.5s (the parked-with-open-RPC evidence; the
+    2026-09-04 false-green run measured 0.02s precisely because the
+    no-op knob created no edge) — and the CONCURRENT background
+    sampler observes master_side_parked >= 1 during B's park window
+    (scheduler ledger carries B while no engine does: a HARD assertion
+    now — sampling only after the fires settle structurally misses the
+    park window, verdict §3); B completes AFTER A (end gap > 0 — B's
+    prefill starts only at A's lease release; FIFO); no leakage
+    (master + engine ledgers clean) and a fresh request succeeds
+    (recovery).
 
-    Prediction: measured contract (2026-09-04 run: A 10.13s / B 10.10s
-    e2e, B fire_rpc 0.02s, clean ledgers, recovery ok).  Risk: the
-    pre-B precondition is the fragile link — under a compressed
-    schedule (slow snapshot polling) A could settle before B's fire;
-    the 5s prefill plus the explicit ledger+running check close that
-    window, and a breach now fails loudly instead of silently.
+    Prediction: A e2e ~5.5s (5s prefill + decode), B's fire RPC ~5s
+    (parks until A's lease releases), parked_max=1 during the park
+    window, B e2e ~10.5s (gap ~5s).  Risk: the pre-B precondition
+    (A still holding the lease) remains the fragile link — the 5s
+    prefill plus the explicit ledger+running check close the window,
+    and a breach fails loudly instead of silently.
     """
     env = ctx.env_manager.ensure(_pool_wait_spec(ctx))
     ops = ctx.engine_ops(env)
@@ -1704,7 +1841,7 @@ def admission_placement_pool_wait(ctx: CaseContext):
         for n in names:
             ops.set_perf(n, prefill_fixed_ms=5000.0)
 
-        # A takes the single placement-pool seat and runs.
+        # A takes the single delivery lease and runs.
         rid_a = ops.next_request_id(base)
         fire_err_a = _fire_tracked(ops, rid_a, fired, input_len=512, output_len=2)
         if fire_err_a is not None:
@@ -1718,10 +1855,11 @@ def admission_placement_pool_wait(ctx: CaseContext):
             return False, "request A never reached RUNNING on prefill"
 
         # PRECONDITION (fail loudly, task #107 #18): B must arrive while
-        # A REALLY still owns the pool — A running on the engine AND live
-        # on the master ledger.  A fast snapshot that observed a stale
-        # running fact (A already settled, pending 1 -> 0) would let B
-        # route straight through — the old silent not-parking failure.
+        # A REALLY still holds the lease — A running on the engine AND
+        # live on the master ledger.  A fast snapshot that observed a
+        # stale running fact (A already settled, pending 1 -> 0) would
+        # let B route straight through — the old silent not-parking
+        # failure.
         ledger_before_b = ops.master_scheduler_inflight()
         snap_before_b = ops.snapshot_by_name()
         a_running_now = any(
@@ -1737,38 +1875,36 @@ def admission_placement_pool_wait(ctx: CaseContext):
             }
             return False, (
                 f"precondition failed before B fire: A must still hold the "
-                f"pool (ledger={ledger_before_b}, engine_running="
+                f"lease (ledger={ledger_before_b}, engine_running="
                 f"{a_running_now}, engines={engine_state}) — firing B now "
-                f"would be vacuous (the pool seat is free)"
+                f"would be vacuous (the lease is free)"
             )
 
-        # B arrives while A runs: under the new-B semantics the retired
-        # availability filter no longer refuses the route — B's Schedule
-        # RPC returns 200 immediately and B parks internally (Blocked
-        # placement) until capacity frees.  The RPC duration is recorded
-        # as the no-reject evidence.
+        # B arrives while A runs: its Schedule RPC parks OPEN (Blocked
+        # placement holds the RPC until the lease releases), so B's fire
+        # runs on a worker thread while the main thread concurrently
+        # samples the parked ledger — the park window lives DURING the
+        # fire, and a post-fire sampler structurally misses it (verdict
+        # §3, the 2026-09-04 parked_max=0 defect).
         rid_b = ops.next_request_id(base)
-        t_b_call = time.monotonic()
-        fire_err_b = _fire_tracked(ops, rid_b, fired, input_len=512, output_len=2)
+        sampler = _ParkedSampler(ops, names, decode_names).start()
+        pool = ThreadPoolExecutor(max_workers=1)
+        try:
+            t_b_call = time.monotonic()
+            b_future = pool.submit(
+                _fire_tracked,
+                ops,
+                rid_b,
+                fired,
+                timeout_s=60.0,
+                input_len=512,
+                output_len=2,
+            )
+            fire_err_b = b_future.result()  # settles at the lease release
+        finally:
+            pool.shutdown(wait=True)
+            sampler.stop()
         b_fire_rpc_s = time.monotonic() - t_b_call
-
-        # Parked-count observation — OBSERVATION ONLY under the new-B
-        # coordinator (the internal park measured 0 on the scheduler-
-        # ledger discriminator).  The window is bound to A's own
-        # residency with a hard 10s ceiling.
-        parked_max = -1
-        parked_detail = "not observed"
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline:
-            parked, detail = _master_side_parked(ops, names, decode_names)
-            if parked > parked_max:
-                parked_max, parked_detail = parked, detail
-            if parked_max >= 1:
-                break
-            snap = ops.snapshot_by_name()
-            if not any(int(snap.get(n, {}).get("running", 0)) >= 1 for n in names):
-                break  # A's residency ended; the park window is over
-            time.sleep(0.2)
 
         outcomes = _await_tracked(fired, wait_s=30.0)
         if len(outcomes) != 2:
@@ -1776,6 +1912,17 @@ def admission_placement_pool_wait(ctx: CaseContext):
         (_, t0a, end_a, ok_a, err_a) = outcomes[0]
         (_, t0b, end_b, ok_b, err_b) = outcomes[1]
         both_completed = ok_a and err_a is None and ok_b and err_b is None
+
+        # Park evidence (hard): the sampler observed B on the master
+        # ledger while no engine carried it, and B's Schedule RPC stayed
+        # open past the decision path (> 0.5s — the parked-RPC proof;
+        # an immediately-dispatched B settles in tens of ms).
+        parked_max = sampler.max_parked
+        b_parked_rpc = b_fire_rpc_s > 0.5
+        # Serialization (FIFO): B's terminal strictly follows A's — B's
+        # prefill cannot start before A's lease release, so a parallel
+        # completion (gap <= 0) would falsify the capacity contract.
+        b_after_a = end_b > end_a
 
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
             _master_http(ops), 30.0
@@ -1788,6 +1935,9 @@ def admission_placement_pool_wait(ctx: CaseContext):
         passed = (
             fire_err_b is None
             and both_completed
+            and parked_max >= 1
+            and b_parked_rpc
+            and b_after_a
             and inflight_ok
             and engine_clean
             and recovery_ok
@@ -1797,11 +1947,11 @@ def admission_placement_pool_wait(ctx: CaseContext):
             f"(e2e={end_a - t0a:.2f}s), "
             f"b_completed={ok_b and err_b is None} "
             f"(e2e={end_b - t0b:.2f}s, fire_err={fire_err_b}, "
-            f"fire_rpc={b_fire_rpc_s:.2f}s — immediate accept, "
-            f"observation), "
-            f"b_after_a_gap={end_b - end_a:.2f}s (observation), "
+            f"fire_rpc={b_fire_rpc_s:.2f}s — parked-open-RPC), "
+            f"b_after_a_gap={end_b - end_a:.2f}s (serialized), "
             f"master_side_parked_max={parked_max} "
-            f"({parked_detail}, observation), "
+            f"({sampler.max_detail}, samples={len(sampler.samples)}, "
+            f"http_failures={sampler.http_failures}), "
             f"inflight_clean={inflight_ok}({inflight_detail}), "
             f"engine_clean={engine_clean}({engine_detail}), "
             f"recovery={recovery_msg}"
