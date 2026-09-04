@@ -44,6 +44,9 @@ from rtp_llm.models.deepseek_v2 import (
     DeepSeekV3MtpWeight,
 )
 from rtp_llm.models.dsv4_kv_cache import (
+    DSV4_FIXED_POOL_TAGS,
+    HCA_STATE_TAG,
+    apply_dsv4_explicit_pool_blocks,
     build_dsv4_kv_cache_spec_descs,
     resolve_dsv4_tokens_per_block,
 )
@@ -80,6 +83,25 @@ def _dsv4_fixed_pool_use_host_memory() -> bool:
     if raw is None:
         return False
     return raw.strip().lower() in _TRUTHY_ENV_VALUES
+
+
+def _dsv4_env_pool_blocks(env_name: str) -> int:
+    """Read a non-negative DSV4 fixed-pool block override from the environment.
+
+    Same env-channel rationale as ``_dsv4_fixed_pool_use_host_memory``:
+    ``KVCacheConfig`` is not reachable from ``_post_build_model_config``, so the
+    ``env_name`` that backs ``--dsv4_fixed_pool_blocks`` /
+    ``--dsv4_hca_state_pool_blocks`` is read directly. Returns 0 (meaning
+    "derive from linear_step") when unset or not a valid non-negative int.
+    """
+    raw = os.environ.get(env_name)
+    if raw is None:
+        return 0
+    try:
+        value = int(raw.strip())
+    except (TypeError, ValueError):
+        return 0
+    return value if value > 0 else 0
 
 
 class DeepSeekV4Weight(DeepSeekV2Weight):
@@ -573,6 +595,31 @@ class DeepSeekV4(DeepSeekV2):
             indexer_head_dim=int(attn_config.indexer_head_dim),
             fixed_pool_use_host_memory=_dsv4_fixed_pool_use_host_memory(),
         )
+
+        # Apply operator-supplied fixed-pool block counts. Must run before the
+        # descs list is consumed downstream (the pybind getter returns a copy, so
+        # mutating a read-back list would be a no-op).
+        fixed_pool_blocks = _dsv4_env_pool_blocks("DSV4_FIXED_POOL_BLOCKS")
+        if fixed_pool_blocks > 0:
+            for tag in DSV4_FIXED_POOL_TAGS:
+                apply_dsv4_explicit_pool_blocks(
+                    model_config.kv_cache_spec_descs, tag, fixed_pool_blocks
+                )
+            logging.info(
+                "DeepSeek-V4 pinned fixed pools %s to %d blocks",
+                DSV4_FIXED_POOL_TAGS,
+                fixed_pool_blocks,
+            )
+        # HCA_STATE takes a dedicated override that wins over the shared value.
+        hca_state_pool_blocks = _dsv4_env_pool_blocks("DSV4_HCA_STATE_POOL_BLOCKS")
+        if hca_state_pool_blocks > 0:
+            apply_dsv4_explicit_pool_blocks(
+                model_config.kv_cache_spec_descs, HCA_STATE_TAG, hca_state_pool_blocks
+            )
+            logging.info(
+                "DeepSeek-V4 pinned HCA_STATE pool to %d blocks",
+                hca_state_pool_blocks,
+            )
 
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model

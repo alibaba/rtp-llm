@@ -6,6 +6,7 @@ import torch
 from rtp_llm.models_py.modules.dsv4.cp import (
     _CP_ROLE_MAIN,
     CPContext,
+    CPCudaAsyncGatherHandle,
     CPSyncGatherHandle,
     CudaAsyncCPGatherImpl,
     SyncCPGatherImpl,
@@ -113,6 +114,22 @@ def test_cuda_async_cp_gather_impl_fails_fast_on_cpu():
         RuntimeError,
         "requires CUDA",
     )
+
+
+def test_cuda_async_handle_strongly_owns_producer_and_output():
+    local = torch.zeros((2, 3))
+    gathered = torch.zeros((4, 3))
+    handle = CPCudaAsyncGatherHandle(
+        cp_ctx=_make_cp_ctx(),
+        gathered=gathered,
+        work=object(),
+        stream=object(),
+        completion_event=object(),
+        local_2d=local,
+    )
+
+    assert handle.local_2d is local
+    assert handle.gathered is gathered
 
 
 def test_cp_wait_gather_full_rejects_unknown_handle():

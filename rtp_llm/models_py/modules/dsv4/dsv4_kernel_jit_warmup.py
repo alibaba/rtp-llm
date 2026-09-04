@@ -88,6 +88,39 @@ def _cp_padded_tokens_per_rank_bound(max_seq_len: int, cp_size: int) -> int:
     return padded_seq_len // cp_size
 
 
+def _batch_bucket_warmup_sizes(
+    max_batch_size: int, *, max_supported_batch: int
+) -> tuple[int, ...]:
+    max_supported = min(
+        max(int(max_batch_size), 1), int(max_supported_batch)
+    )
+    max_bucket = 1 << (max_supported - 1).bit_length()
+    sizes = []
+    bucket = 1
+    while bucket <= max_bucket:
+        sizes.append(bucket)
+        bucket *= 2
+    return tuple(sizes)
+
+
+def _cp_direct_gather_batch_warmup_sizes(max_batch_size: int) -> tuple[int, ...]:
+    """Represent each direct-gather ``next_power_of_2(B)`` bucket up to 64."""
+    return _batch_bucket_warmup_sizes(max_batch_size, max_supported_batch=64)
+
+
+def _cp_restore_batch_warmup_sizes(max_batch_size: int) -> tuple[int, ...]:
+    """Represent every supported fused-restore batch bucket through 64."""
+    del max_batch_size
+    return _batch_bucket_warmup_sizes(64, max_supported_batch=64)
+
+
+def _swa_slot_metadata_batch_warmup_sizes(
+    max_batch_size: int,
+) -> tuple[int, ...]:
+    """Represent each SWA slot-metadata batch bucket through 1024."""
+    return _batch_bucket_warmup_sizes(max_batch_size, max_supported_batch=1024)
+
+
 def _compute_state_ring_entries(
     compress_ratio: int,
     overlap: bool,
@@ -1912,6 +1945,7 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
     kv_cache: Any,
     cp_size: int,
     device: torch.device,
+    max_batch_size: int = 1,
 ) -> None:
     """Compile the CP byte-sliced SWA slot dequant kernel with real block width."""
 
@@ -1932,7 +1966,18 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
 
     from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
         ENTRY_BYTES,
+        HEAD_DIM,
+        _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked,
+        cp_direct_flat_pack_enabled,
+        cp_swa_direct_dequant_scatter_enabled,
         dequantize_slots_to_bf16,
+        direct_triton_fast_path_supported,
+        try_dequantize_and_gather_k_cache_slots_to_workspace,
+        try_gather_k_cache_packed_to_flat,
+        try_restore_dequantize_scatter_packed_k_cache_flat,
+    )
+    from rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton import (
+        compute_swa_slot_in_flat_from_cu,
     )
 
     full_stride_bytes = int(local_slice_bytes) * cp_size
@@ -1944,7 +1989,31 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
             ENTRY_BYTES,
         )
         return
-    warmup_key = (int(full_stride_bytes), int(entries_per_block), str(device))
+    direct_arch_supported = direct_triton_fast_path_supported(device)
+    direct_scatter_enabled = (
+        cp_swa_direct_dequant_scatter_enabled() and direct_arch_supported
+    )
+    direct_gather_enabled = cp_direct_flat_pack_enabled() and direct_arch_supported
+    direct_gather_batches = (
+        _cp_direct_gather_batch_warmup_sizes(max_batch_size)
+        if direct_gather_enabled
+        else ()
+    )
+    restore_batches = (
+        _cp_restore_batch_warmup_sizes(max_batch_size)
+        if direct_arch_supported
+        else ()
+    )
+    swa_slot_metadata_batches = _swa_slot_metadata_batch_warmup_sizes(max_batch_size)
+    warmup_key = (
+        int(full_stride_bytes),
+        int(entries_per_block),
+        bool(direct_scatter_enabled),
+        direct_gather_batches,
+        restore_batches,
+        swa_slot_metadata_batches,
+        str(device),
+    )
     if warmup_key in _SWA_SLOT_DEQUANT_JIT_WARMED_KEYS:
         return
 
@@ -1966,6 +2035,126 @@ def warmup_dsv4_fp8_swa_slot_dequant_jit(
     )
     slot_indices = torch.tensor([0, -1], dtype=torch.long, device=device)
     out = dequantize_slots_to_bf16(full_view, slot_indices)
+    for batch_size in swa_slot_metadata_batches:
+        total_tokens = 2 * batch_size
+        swa_slot_cu = torch.arange(
+            0,
+            total_tokens + 1,
+            2,
+            dtype=torch.int32,
+            device=device,
+        )
+        swa_slot_prefixes = torch.zeros(
+            batch_size, dtype=torch.int32, device=device
+        )
+
+        def _launch_swa_slot_metadata() -> None:
+            compute_swa_slot_in_flat_from_cu(
+                swa_slot_cu,
+                swa_slot_prefixes,
+                num_tokens=total_tokens,
+                M=4,
+                window_size=128,
+                base_offset=1,
+            )
+
+        _run_triton_warmup_launch_with_retry(
+            "DSV4 SWA SlotMetadata",
+            f"batch_size={batch_size}",
+            _launch_swa_slot_metadata,
+            device=device,
+        )
+        del swa_slot_cu, swa_slot_prefixes
+    if direct_scatter_enabled:
+        slot_mapping = torch.tensor(
+            [[0, 1], [1, -1]], dtype=torch.long, device=device
+        )
+        gather_lens = torch.tensor([2, 1], dtype=torch.int32, device=device)
+        workspace = torch.empty(
+            (2, 4, HEAD_DIM), dtype=torch.bfloat16, device=device
+        )
+        direct_scatter = try_dequantize_and_gather_k_cache_slots_to_workspace(
+            out=workspace,
+            k_cache=full_view,
+            slot_mapping=slot_mapping,
+            gather_lens=gather_lens,
+            offset=1,
+        )
+        if not direct_scatter:
+            raise RuntimeError(
+                "DSV4 SWA direct dequant-scatter is enabled but unsupported during "
+                "JIT warmup"
+            )
+        _launch_dequantize_and_gather_k_slots_cp_rank_major_unchecked(
+            workspace,
+            full_raw.view(cp_size, local_slice_bytes),
+            slot_mapping,
+            gather_lens,
+            1,
+            full_entries_per_block=entries_per_block,
+            num_unique_blocks=1,
+        )
+        del slot_mapping, gather_lens, workspace
+    if direct_gather_enabled:
+        pool_cache = torch.zeros(
+            (2, 4, ENTRY_BYTES), dtype=torch.uint8, device=device
+        )
+        for batch_size in direct_gather_batches:
+            pool_block_table = torch.zeros(
+                (batch_size, 1), dtype=torch.int32, device=device
+            )
+            pool_padded_lens = torch.full(
+                (batch_size,), 2, dtype=torch.int32, device=device
+            )
+            pool_actual_lens = torch.ones(
+                batch_size, dtype=torch.int32, device=device
+            )
+            pool_local_flat = torch.empty(
+                (2 * batch_size, ENTRY_BYTES), dtype=torch.uint8, device=device
+            )
+            direct_gather = try_gather_k_cache_packed_to_flat(
+                pool_local_flat,
+                pool_cache,
+                pool_block_table,
+                pool_padded_lens,
+                pool_actual_lens,
+                block_size=4,
+                has_actual_tokens=True,
+            )
+            if not direct_gather:
+                raise RuntimeError(
+                    "DSV4 direct packed CP gather is enabled but unsupported during "
+                    f"JIT warmup for batch_size={batch_size}"
+                )
+            del pool_block_table, pool_padded_lens, pool_actual_lens, pool_local_flat
+        del pool_cache
+    for batch_size in restore_batches:
+        restore_gathered = torch.zeros(
+            (batch_size, ENTRY_BYTES), dtype=torch.uint8, device=device
+        )
+        restore_indices = torch.arange(
+            batch_size, dtype=torch.int64, device=device
+        )
+        restore_seq_lens = torch.ones(
+            batch_size, dtype=torch.int32, device=device
+        )
+        restore_workspace = torch.empty(
+            (batch_size, 2, HEAD_DIM), dtype=torch.bfloat16, device=device
+        )
+        restored = try_restore_dequantize_scatter_packed_k_cache_flat(
+            restore_workspace,
+            restore_gathered,
+            restore_indices,
+            restore_seq_lens,
+            1,
+            seq_lens_total=batch_size,
+        )
+        if not restored:
+            raise RuntimeError(
+                "DSV4 fused restore-dequant-scatter is supported but rejected "
+                f"JIT warmup for batch_size={batch_size}"
+            )
+        del restore_gathered, restore_indices, restore_seq_lens, restore_workspace
     del full_raw, full_view, slot_indices, out
     _sync_cuda(device)
     if rank == 0:
