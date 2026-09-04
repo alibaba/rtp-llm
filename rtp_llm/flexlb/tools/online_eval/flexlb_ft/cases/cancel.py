@@ -485,6 +485,23 @@ def cancel_sibling_isolation(ctx: CaseContext):
 
         ops.cancel(cancel_rid, responses[1])
         b_ended = handles[1].wait_end(5.0)
+
+        # Master mid-flight leg (P1): once B's client stream terminated,
+        # its scheduler ledger entry must release — poll for
+        # scheduler_inflight <= 2 (only the surviving siblings A/C may
+        # remain; a stale 3 pins B's cancellation never settling the
+        # master ledger).  A/C completing meanwhile only LOWERS the
+        # count, so the assertion direction is monotone-safe on both
+        # dispatch timings; the 2s window tolerates the 20ms event-driven
+        # reconcile chain.
+        sched_isolated = True
+        sched_final = -1
+        if responses[1].enqueued_by_master:
+            sched_isolated = wait_for(
+                lambda: ops.master_scheduler_inflight() <= 2, 2.0, 0.1
+            )
+            sched_final = ops.master_scheduler_inflight()
+
         a_complete = handles[0].wait_end(30.0)
         c_complete = handles[2].wait_end(30.0)
 
@@ -512,12 +529,18 @@ def cancel_sibling_isolation(ctx: CaseContext):
             and engine_cancelled
             and recovery_ok
         )
+        if responses[1].enqueued_by_master:
+            # P1 master legs: mid-flight isolation (B's ledger entry
+            # released without waiting for the siblings) + the closing
+            # drain of the whole inflight ledger.
+            passed = passed and sched_isolated and inflight_ok
         return passed, (
             f"A_completed={a_snap.completed}(outputs={len(a_snap.outputs)}), "
             f"B_cancelled={b_ended}(completed={b_snap.completed}), "
             f"C_completed={c_snap.completed}(outputs={len(c_snap.outputs)}), "
             f"engine_recv={engine_recv}({recv_detail}), "
             f"engine_cancelled={engine_cancelled}({cancel_detail}), "
+            f"master_isolation(sched<=2)={sched_isolated}(final={sched_final}), "
             f"inflight_clean={inflight_ok}({inflight_detail}), recovery={recovery_msg}"
         )
     except Exception as exc:
@@ -773,7 +796,11 @@ def cancel_anomaly_path(ctx: CaseContext):
             # contract here — see kv_decode_capacity_park's watermark
             # rationale.
             inflight_ok, inflight_detail = True, "N/A (NON_BATCH residue contract)"
-        passed = ended and recovery_ok
+        # P0.5 升格（refactor wave）：BATCH 投递下 master 账本排空进
+        # verdict（对齐 _anomaly_error_case 的口径——client 终态、账本
+        # 清零、恢复三合一）；NON_BATCH 分支 inflight_ok 恒 True，语义
+        # 不变。
+        passed = ended and recovery_ok and inflight_ok
         return passed, (
             f"cancel_latency={cancel_latency:.3f}s, stream_terminated={ended}, "
             f"outputs={len(handle.snap.outputs)}, "

@@ -1663,15 +1663,24 @@ def status_gap_long_retire(ctx: CaseContext):
 )
 def recovery_kv_usage_reset(ctx: CaseContext):
     """E6 — expected behaviour: when an engine restarts and its KV memory
-    is lost, its self-reported KV usage must restart from ZERO — the
-    master's capacity view of the new generation must be rebuilt from the
-    fresh self-report, never resumed from the old generation's reading:
+    is lost, its self-reported KV usage must restart from ZERO — and the
+    point of the case is what the MASTER then does with the fresh
+    self-report (master linkage as verdict, engine reset as construction
+    gate):
 
-      * a pre-outage injected KV occupancy must be gone from the engine's
-        self-report after the restart (kv_tokens_used == 0 with an empty
-        LRU — a resumed old reading is a restart-fidelity defect);
-      * the recovered engine must keep receiving traffic (the master does
-        not blacklist it behind the stale occupancy);
+      * construction (gate, detail-only): the engine's self-report
+        restarts from zero (kv_tokens_used == 0 with an empty LRU — a
+        resumed old reading is a mock restart-fidelity defect, recorded
+        in the detail without failing the master leg);
+      * verdict, first-wave typed-clean: the first post-recovery
+        requests must succeed WITHOUT a LACK_MEM rejection — the
+        master's capacity view of the new generation is rebuilt from
+        the zeroed self-report, so a lack_mem reject (or any error) on
+        the first wave pins the master resuming the STALE pre-outage
+        occupancy (master-side defect);
+      * verdict, no blacklist: the recovered engine keeps receiving
+        traffic (the master does not blacklist it behind the stale
+        occupancy — the accepted counter grows);
       * the generation actually turned over (fresh full-resync signal).
 
     FINDING if it fails: KV capacity not reset across a restart — the old
@@ -1728,12 +1737,44 @@ def recovery_kv_usage_reset(ctx: CaseContext):
         created_after = _created_generation_count(env, ip, log_offset)
         generation_bumped = created_after > created_before
 
-        # The engine's self-report must restart from zero (memory lost).
+        # The engine's self-report must restart from zero (memory lost)
+        # — CONSTRUCTION GATE only (detail), read BEFORE the first wave
+        # occupies fresh KV blocks.
         used_after = int(ops.snapshot_by_name().get(name, {}).get("kv_tokens_used", -1))
         reset_ok = used_after == 0
 
-        # The master must not keep the engine blacklisted behind the stale
-        # occupancy: fresh traffic still lands on it.
+        # Master verdict leg — first-wave typed-clean: the first
+        # post-recovery requests must succeed with ZERO LACK_MEM
+        # rejections.  The fresh generation's capacity view is rebuilt
+        # from the zeroed self-report; a lack_mem on the first wave (or
+        # any request error) pins the master resuming the STALE
+        # pre-outage occupancy instead.
+        def _lack_mem_sum() -> int:
+            snap = ops.snapshot_by_name()
+            return sum(
+                int(info.get("lack_mem_rejects", 0))
+                for n, info in snap.items()
+                if "prefill" in n
+            )
+
+        lack_base = _lack_mem_sum()
+        wave_errs = []
+        for _ in range(3):
+            rid = ops.next_request_id(base)
+            _, err = ops.run_one_request(
+                rid,
+                output_len=2,
+                block_keys=[rid * 100 + 1],
+                stream_timeout_s=10.0,
+            )
+            if err is not None:
+                wave_errs.append(str(err)[:60])
+        lack_delta = _lack_mem_sum() - lack_base
+        first_wave_clean = not wave_errs and lack_delta == 0
+
+        # Traffic-restoration verdict: the master must not keep the
+        # engine blacklisted behind the stale occupancy — fresh traffic
+        # still lands on it.
         pumps_ok = _pump_until_accepted(ops, name, base, 15.0)
 
         recovery_ok, recovery_msg = ops.verify_recovery()
@@ -1742,7 +1783,7 @@ def recovery_kv_usage_reset(ctx: CaseContext):
             retired
             and alive_back
             and generation_bumped
-            and reset_ok
+            and first_wave_clean
             and pumps_ok
             and recovery_ok
         )
@@ -1750,7 +1791,9 @@ def recovery_kv_usage_reset(ctx: CaseContext):
             f"ip={ip}, created_generations={created_before}->{created_after}, "
             f"retired={retired}, alive_restored={alive_back}, "
             f"kv_tokens_used={pressure}(injected)->{used_after} "
-            f"(reset_ok={reset_ok}, need 0), "
+            f"(reset gate: {reset_ok}, need 0), "
+            f"first_wave_typed_clean={first_wave_clean} "
+            f"(errs={wave_errs[:1]}, lack_mem_delta={lack_delta}), "
             f"post_recovery_traffic={pumps_ok}, recovery={recovery_msg}"
         )
     except Exception as exc:

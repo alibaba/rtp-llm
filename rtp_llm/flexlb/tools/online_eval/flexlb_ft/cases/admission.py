@@ -125,6 +125,7 @@ from ..engine_ops import (
 from ..harness import (
     AssertUtils,
     EnvSpec,
+    _ttft_p50,
     admission_config,
     build_flexlb_config,
     default_perf,
@@ -2337,6 +2338,100 @@ def _lifecycle_rows(ops, name: str, rids: list) -> dict:
     return {rid: lifecycle.get(str(rid)) for rid in rids}
 
 
+def _ledger_series_ok(
+    samples: list, peak_batches: int, n_requests: int, expect_intermediate: bool
+) -> tuple[bool, str]:
+    """Master-side ledger linkage assertion for the regroup cases (the
+    VERDICT leg — engine-side batch shape is only a construction gate).
+
+    Caliber (source-verified, HttpLoadBalanceServer.inflightStatus ->
+    PrefillState.stats()): one EnqueueBatch's bookkeeping stays counted as
+    ONE inflight batch until every member settles — the ENGINE-side split
+    never multiplies the master's batch count, and the master digests the
+    engine's per-execution-batch completion events event-driven (20ms
+    WorkerStatus reconcile):
+
+      * peak inflight_batches == 1 — the master books the one batch IT
+        dispatched, regardless of how the engine regrouped it;
+      * peak prefill inflight_requests == n_requests — every fired member
+        entered the ledger;
+      * when *expect_intermediate* (engine split the batch), the member
+        accounting must show at least one intermediate plateau (0 < v <
+        n_requests) — an event-driven step-down, not a single settle-or-
+        never-release jump; when not (verbatim batch), NO intermediate
+        value may appear — the batch settles atomically;
+      * scheduler_inflight must never climb mid-series (a re-admission of
+        parked work back into the scheduler would be a master-side
+        anomaly: the tail executes inside the engine, the master must not
+        re-dispatch anything).
+
+    The end-of-run zero is owned by AssertUtils.inflight_clean (its TTL
+    drain window tolerates slow CI); the sampler only pins the linkage.
+    """
+    if not samples:
+        return False, "no inflight samples (endpoint unreachable in window)"
+    requests_series = [s[3] for s in samples]
+    sched_series = [s[1] for s in samples]
+    peak_requests = max(requests_series)
+    intermediates = sorted({v for v in requests_series if 0 < v < peak_requests})
+    sched_monotonic = all(
+        later <= earlier for earlier, later in zip(sched_series, sched_series[1:])
+    )
+    ok = (
+        peak_batches == 1
+        and peak_requests == n_requests
+        and (bool(intermediates) if expect_intermediate else not intermediates)
+        and sched_monotonic
+    )
+    return ok, (
+        f"peak_batches={peak_batches}/1, peak_requests={peak_requests}/"
+        f"{n_requests}, intermediate_steps={intermediates or 'none'}, "
+        f"sched_series={sched_series[:8]}"
+        f"{'...' if len(sched_series) > 8 else ''} "
+        f"(monotonic_non_increasing={sched_monotonic})"
+    )
+
+
+def _timed_request(ops, rid: int, **kwargs) -> tuple:
+    """schedule + consume to terminal, returning (err, duration_s).
+
+    Client-side completion-duration caliber (schedule -> stream end):
+    under BATCH dispatch the mock surfaces the first streamed output only
+    at fetch completion, so this is the TTFT observable the client sees.
+    """
+    t0 = time.monotonic()
+    try:
+        resp = ops.schedule(rid, **kwargs)
+        if resp.code != 200 or not resp.success:
+            return f"schedule failed ({resp.code}): {resp.error_message}", None
+        input_pb = None if resp.enqueued_by_master else ops.build_generate_input(rid)
+        handle = ops.start_stream(resp, rid, input_pb=input_pb)
+        ended = handle.wait_end(STREAM_TIMEOUT_S)
+        if not ended or not handle.snap.completed or handle.snap.error:
+            return handle.snap.error or "stream did not complete", None
+        return None, time.monotonic() - t0
+    except Exception as exc:
+        return repr(exc), None
+
+
+def _shape_gate(
+    delta_batches: int, delta_requests: int, max_size: int, expected: tuple
+) -> tuple:
+    """Engine-side executed-batch shape gate (construction verification,
+    NOT a verdict): returns (ok, detail) so the case can record the
+    achieved vs expected split shape while the verdict stays on the
+    master linkage — a gate miss means the constructed scenario differs
+    from the intended one, the master assertions still run against the
+    ACTUAL shape (that is the tested value)."""
+    exp_b, exp_r, exp_max = expected
+    ok = delta_batches == exp_b and delta_requests == exp_r and max_size == exp_max
+    return ok, (
+        f"shape_gate={'ok' if ok else 'MISMATCH'} "
+        f"(construct executed={delta_batches}b/{delta_requests}r/max{max_size}, "
+        f"intended {exp_b}b/{exp_r}r/max{exp_max})"
+    )
+
+
 @case(
     "engine_prefill_token_budget_split",
     profiles=["batch-window"],
@@ -2347,8 +2442,8 @@ def _lifecycle_rows(ops, name: str, rids: list) -> dict:
     ),
 )
 def engine_prefill_token_budget_split(ctx: CaseContext):
-    """Engine-internal token-budget regroup: an over-budget master batch
-    splits prefix/tail and every member still closes its ledger.
+    """Engine-internal token-budget regroup: the VERDICT is the master's
+    linkage to whatever shape the engine actually executed.
 
     Scenario: dedicated 1P+2D env, prefill.max_batch_tokens=1024 (the
     request dimension off), flat prefill.fixed_ms=3000.  Four
@@ -2357,29 +2452,40 @@ def engine_prefill_token_budget_split(ctx: CaseContext):
     batch whose total logical tokens (4 x 512 = 2048, sum of
     computeTokens + hitTokens) is 2x the budget.
 
-    Behaviour: the engine-side regroup composer (production
-    FIFOScheduler.cc:371-481 semantics — the budget is a STOP, members
-    join while admitted < budget) fills the execution batch with the
-    first two arrivals, parks the tail members as one PrefillPendingBatch
-    in prefillPendingQueue and admits them FIFO when the running batch
-    drains.
+    Construction (gate, not verdict): the engine-side regroup composer
+    (production FIFOScheduler.cc:371-481 semantics — the budget is a
+    STOP, members join while admitted < budget) fills the execution
+    batch with the first two arrivals, parks the tail members as one
+    PrefillPendingBatch in prefillPendingQueue and admits them FIFO
+    when the running batch drains — the executed-batch counters (delta
+    over the pre-fire baseline) should grow by 2 batches / 4 requests
+    with max size 2.  A shape MISS does not fail the case: the master
+    assertions still run against the ACTUAL executed shape (that is the
+    tested value); the deviation is recorded in the detail.
 
-    Expected (contract): all four schedules succeed; a snapshot poll
-    observes prefill_waiting_batches >= 1 while the prefix executes;
-    every fired request drains to terminal COMPLETED; the executed-
-    batch counters (delta over the pre-fire baseline, captured before
-    the recovery probe adds its own batch) grow by exactly 2 batches /
-    4 requests with max size 2 — the regrouped shape, not the master's
-    verbatim 1x4; every member's request_lifecycle row still carries
-    the SAME master batch_id (ledger identity survives the split);
-    the park settles empty, the master inflight ledger is clean and a
-    fresh request succeeds (recovery).
+    Verdict (master linkage, the point of the case):
+      * ledger identity — every member's request_lifecycle row still
+        carries the SAME master batch_id (the split never rewrites it);
+      * booking caliber — through the split window the master's
+        inflight_batches peaks at exactly 1 (it books the ONE batch it
+        dispatched; the engine-side split never multiplies master
+        bookkeeping) with inflight_requests peaking at 4;
+      * event-driven digestion — the member accounting steps DOWN
+        through an intermediate plateau (prefix settles, tail still
+        executing) instead of jumping to zero in one reconcile: the
+        master tracks the engine's per-execution-batch completions
+        live, not at TTL/expiry time;
+      * scheduler_inflight never climbs mid-window (parked tail work
+        executes inside the engine — the master must not re-admit or
+        re-dispatch anything);
+      * the park settles empty, the master inflight ledger drains clean
+        and a fresh request succeeds (recovery).
 
-    Prediction: expected to pass — the split path is the primary #8
-    deliverable; PrefillBudgetRegroupTest pins the same shape in-JVM
-    (2 batches / 4 requests / max 2).  Risk: FIXED_WINDOW coalescing
-    flake would reshape the master batch — mitigated by the 10x margin
-    between the 10ms inter-fire gap and the 100ms collection window.
+    Prediction: expected to pass — the master's EnqueueBatch ledger is
+    keyed to the batch it dispatched and reconciles engine completion
+    facts per member (PrefillState.reconcileWorkerStatus), so the split
+    is invisible in batch count and visible as a step-down in member
+    count.
     """
     env = ctx.env_manager.ensure(_regroup_spec(ctx, 1024, 0))
     ops = ctx.engine_ops(env)
@@ -2407,16 +2513,28 @@ def engine_prefill_token_budget_split(ctx: CaseContext):
                 break
             time.sleep(0.2)
 
+        # Master ledger linkage — sample through the split window: the
+        # prefix executes 3s, the tail another 3s, so ~8s of sampling
+        # covers both completion steps (fire returned AFTER the
+        # EnqueueBatch ACK, so the first sample already sees the full 4).
+        samples, peak_batches = AssertUtils.inflight_batches_peak(
+            _master_http(ops), "prefill", window_s=8.0, interval_s=0.2
+        )
+        ledger_ok, ledger_detail = _ledger_series_ok(
+            samples, peak_batches, n_requests=len(rids), expect_intermediate=True
+        )
+
         outcomes = _drain_fired(ops, fired, wait_s=45.0)
         completed = [rid for rid, ok, _ in outcomes if ok]
         drain_errors = [(rid, err) for rid, ok, err in outcomes if not ok]
 
-        # Counters AFTER the drain, BEFORE verify_recovery's probe.
+        # Counters AFTER the drain, BEFORE verify_recovery's probe —
+        # construction gate only (see docstring).
         after_counters = _prefill_batch_counters(ops, names[0])
         delta_batches = after_counters[0] - base_counters[0]
         delta_requests = after_counters[1] - base_counters[1]
-        counters_ok = (
-            delta_batches == 2 and delta_requests == 4 and after_counters[2] == 2
+        shape_ok, shape_detail = _shape_gate(
+            delta_batches, delta_requests, after_counters[2], (2, 4, 2)
         )
 
         # Ledger identity: all four members still attribute to the ONE
@@ -2441,8 +2559,8 @@ def engine_prefill_token_budget_split(ctx: CaseContext):
             and park_max >= 1
             and len(completed) == len(rids)
             and not drain_errors
-            and counters_ok
             and batch_id_ok
+            and ledger_ok
             and settled
             and inflight_ok
             and recovery_ok
@@ -2452,8 +2570,8 @@ def engine_prefill_token_budget_split(ctx: CaseContext):
             f"park_observed_max={park_max}, "
             f"completed={len(completed)}/{len(rids)} "
             f"(drain_errors={drain_errors[:1]}), "
-            f"executed_delta={delta_batches}b/{delta_requests}r "
-            f"max_size={after_counters[2]} (expect 2b/4r/2), "
+            f"{shape_detail}, "
+            f"master_linkage={ledger_ok}({ledger_detail}), "
             f"member_batch_ids={member_batch_ids}, "
             f"park_settled_empty={settled}, "
             f"inflight_clean={inflight_ok}({inflight_detail}), "
@@ -2461,6 +2579,71 @@ def engine_prefill_token_budget_split(ctx: CaseContext):
         )
     except Exception as exc:
         return False, f"exception: {exc!r}"
+
+
+def _drain_one(ops, rid, resp, wait_s: float):
+    """Consume ONE fired request to terminal, recording its completion
+    timestamp the moment the stream ends.  Returns (rid, completed, err,
+    done_monotonic); done_monotonic is None when it never completed."""
+    done = None
+    err = None
+    try:
+        handle = ops.start_stream(resp, rid)
+        ended = handle.wait_end(wait_s)
+        if ended and handle.snap.completed and not handle.snap.error:
+            done = time.monotonic()
+        else:
+            err = handle.snap.error or "stream did not complete"
+    except Exception as exc:
+        err = repr(exc)
+    if done is None:
+        try:
+            ops.cancel(rid, resp)
+        except Exception:
+            pass
+    return rid, done is not None, err, done
+
+
+def _drain_fired_start(ops, fired: list, wait_s: float = 60.0):
+    """Start CONCURRENT consumption of every fired request WITHOUT
+    waiting — each worker's completion timestamp must reflect the ACTUAL
+    completion event, so the streams have to be opened while the requests
+    are still executing (opening them after an observation window would
+    stamp already-finished streams with the caller's consume order —
+    measuring nothing).  Returns (pool, futures); collect with
+    _drain_fired_collect, then pool.shutdown(wait=True)."""
+    pool = ThreadPoolExecutor(max_workers=max(1, len(fired)))
+    futures = [pool.submit(_drain_one, ops, rid, resp, wait_s) for rid, resp in fired]
+    return pool, futures
+
+
+def _drain_fired_collect(futures: list) -> list:
+    """Collect _drain_fired_start results as [(rid, completed, err,
+    done_monotonic)] in fire order (a crashed worker surfaces as a
+    failed outcome, never an exception past this boundary)."""
+    outcomes = []
+    for future in futures:
+        try:
+            outcomes.append(future.result())
+        except Exception as exc:
+            outcomes.append((None, False, repr(exc), None))
+    return outcomes
+
+
+def _timed_wave_start(ops, base: int, n: int = 4, **kwargs):
+    """Fire *n* requests 10ms apart (the _fire_regroup_wave coalescing
+    shape) with each worker measuring its own schedule->end duration
+    CONCURRENTLY — the TTFT-shape observable for the boundary case.
+    Workers block on their streams the whole execution window; the
+    caller runs its observation windows in the meantime and collects
+    afterwards.  Returns (rids, pool, futures)."""
+    rids = [ops.next_request_id(base) for _ in range(n)]
+    pool = ThreadPoolExecutor(max_workers=n)
+    futures = []
+    for rid in rids:
+        futures.append(pool.submit(_timed_request, ops, rid, **kwargs))
+        time.sleep(0.01)
+    return rids, pool, futures
 
 
 @case(
@@ -2473,7 +2656,8 @@ def engine_prefill_token_budget_split(ctx: CaseContext):
     ),
 )
 def engine_prefill_token_budget_split_fifo(ctx: CaseContext):
-    """The split preserves arrival order across execution batches.
+    """The split preserves arrival order — VERDICT on the client-visible
+    completion chain + the master's linkage, engine order as gate.
 
     Scenario: identical config to engine_prefill_token_budget_split
     (1024-token budget, flat 3000ms prefill, four 512-token requests
@@ -2481,24 +2665,30 @@ def engine_prefill_token_budget_split_fifo(ctx: CaseContext):
     reuses the very same env; this case pins the ORDER contract on a
     fresh wave of rids.
 
-    Behaviour: the composer admits members while admitted < budget —
-    prefix [r1, r2] forms execution batch #1, tail [r3, r4] parks
-    until the prefix drains, so execution batches run in arrival
-    order.
+    Construction (gate, not verdict): the composer admits members while
+    admitted < budget — prefix [r1, r2] forms execution batch #1, tail
+    [r3, r4] parks until the prefix drains; the engine lifecycle end_ms
+    must show the tail finishing STRICTLY after the prefix with >1s
+    separation (each execution batch runs 3000ms; a reshuffled or
+    interleaved composition collapses the gap).  The executed-batch
+    counters should grow 2b/4r/max2.  Gate misses are recorded in the
+    detail, not the verdict.
 
-    Expected (contract): all four requests complete; the executed-
-    batch counters grow by exactly 2 batches / 4 requests with max
-    size 2 (delta over the shared env's pre-fire baseline); each
-    fired request's engine lifecycle end_ms — written at prefill
-    completion — shows the tail finishing STRICTLY after the prefix
-    with >1s separation (each execution batch runs 3000ms; a
-    reshuffled or interleaved composition collapses the gap); the
-    master inflight ledger is clean and a fresh request succeeds.
+    Verdict (master/client linkage, the point of the case):
+      * CLIENT FIFO chain — the four fired requests are consumed
+        CONCURRENTLY; the prefix members' client-visible completion
+        timestamps must precede the tail members' (the master dispatched
+        ONE batch and the engine executed its members in arrival order —
+        a master re-dispatch or an engine reshuffle would reorder the
+        client completions);
+      * the same master ledger linkage as the split case: peak
+        inflight_batches == 1, member accounting stepping down through an
+        intermediate plateau, scheduler_inflight never climbing;
+      * the master inflight ledger is clean and a fresh request succeeds.
 
     Prediction: expected to pass — the FIFO contract is structural
-    (the composer consumes the master batch head-first, the tail
-    parks behind it).  The >1s threshold sits at 1/3 of the execution
-    window.
+    (the composer consumes the master batch head-first, the tail parks
+    behind it) and the ~3s execution gap dwarfs any scheduling jitter.
     """
     env = ctx.env_manager.ensure(_regroup_spec(ctx, 1024, 0))
     ops = ctx.engine_ops(env)
@@ -2510,31 +2700,59 @@ def engine_prefill_token_budget_split_fifo(ctx: CaseContext):
         base_counters = _prefill_batch_counters(ops, names[0])
         rids, fired, fire_errors = _fire_regroup_wave(ops, base)
 
-        outcomes = _drain_fired(ops, fired, wait_s=45.0)
-        completed = [rid for rid, ok, _ in outcomes if ok]
-        drain_errors = [(rid, err) for rid, ok, err in outcomes if not ok]
+        # CLIENT FIFO needs completion timestamps stamped at the ACTUAL
+        # completion instants, so consumption starts NOW — while the
+        # streams are still executing (the prefix batch is ~3s from
+        # done).  The workers block on their streams; the master-ledger
+        # sampling below runs in the main thread in parallel.
+        pool, futures = _drain_fired_start(ops, fired, wait_s=45.0)
+
+        # Master ledger linkage through the split window (same window as
+        # the split case: prefix 3s + tail 3s).
+        samples, peak_batches = AssertUtils.inflight_batches_peak(
+            _master_http(ops), "prefill", window_s=8.0, interval_s=0.2
+        )
+        ledger_ok, ledger_detail = _ledger_series_ok(
+            samples, peak_batches, n_requests=len(rids), expect_intermediate=True
+        )
+
+        # Collect the concurrent consumers — done stamps are the true
+        # completion instants, not the caller's consume order.
+        outcomes = _drain_fired_collect(futures)
+        pool.shutdown(wait=True)
+        completed = [rid for rid, ok, _, _ in outcomes if ok]
+        drain_errors = [(rid, err) for rid, ok, err, _ in outcomes if not ok]
+        done_ts = {rid: done for rid, _, _, done in outcomes}
+        prefix_vals = [done_ts.get(r) for r in rids[:2]]
+        tail_vals = [done_ts.get(r) for r in rids[2:]]
+        all_done = all(v is not None for v in prefix_vals + tail_vals)
+        prefix_done = max(prefix_vals) if all_done else None
+        tail_done = min(tail_vals) if all_done else None
+        client_fifo_ok = all_done and prefix_done < tail_done
+        client_fifo_gap_s = tail_done - prefix_done if client_fifo_ok else float("nan")
 
         after_counters = _prefill_batch_counters(ops, names[0])
         delta_batches = after_counters[0] - base_counters[0]
         delta_requests = after_counters[1] - base_counters[1]
-        counters_ok = (
-            delta_batches == 2 and delta_requests == 4 and after_counters[2] == 2
+        shape_ok, shape_detail = _shape_gate(
+            delta_batches, delta_requests, after_counters[2], (2, 4, 2)
         )
 
-        # ORDER: prefix members' prefill-completion timestamps must
-        # sit strictly before the tail's, with a >1s gap (the parked
-        # tail only starts after the prefix's 3s batch drains).
+        # ENGINE order (construction gate): prefix members' prefill-
+        # completion timestamps must sit strictly before the tail's,
+        # with a >1s gap (the parked tail only starts after the prefix's
+        # 3s batch drains).
         rows = _lifecycle_rows(ops, names[0], rids)
         end_ms = {
             rid: int(row.get("end_ms", 0)) if row else 0 for rid, row in rows.items()
         }
-        prefix_done = max(end_ms[rids[0]], end_ms[rids[1]])
-        tail_done = min(end_ms[rids[2]], end_ms[rids[3]])
-        fifo_gap_ms = tail_done - prefix_done
-        fifo_ok = (
+        prefix_end = max(end_ms[rids[0]], end_ms[rids[1]])
+        tail_end = min(end_ms[rids[2]], end_ms[rids[3]])
+        engine_fifo_gap_ms = tail_end - prefix_end
+        engine_fifo_ok = (
             all(v > 0 for v in end_ms.values())
-            and prefix_done < tail_done
-            and fifo_gap_ms > 1000
+            and prefix_end < tail_end
+            and engine_fifo_gap_ms > 1000
         )
 
         settled = wait_for(lambda: _park_settled(ops, names), 10.0, 0.2)
@@ -2547,8 +2765,8 @@ def engine_prefill_token_budget_split_fifo(ctx: CaseContext):
             not fire_errors
             and len(completed) == len(rids)
             and not drain_errors
-            and counters_ok
-            and fifo_ok
+            and client_fifo_ok
+            and ledger_ok
             and settled
             and inflight_ok
             and recovery_ok
@@ -2557,10 +2775,12 @@ def engine_prefill_token_budget_split_fifo(ctx: CaseContext):
             f"fired={len(rids)} (fire_errors={fire_errors[:1]}), "
             f"completed={len(completed)}/{len(rids)} "
             f"(drain_errors={drain_errors[:1]}), "
-            f"executed_delta={delta_batches}b/{delta_requests}r "
-            f"max_size={after_counters[2]} (expect 2b/4r/2), "
-            f"fifo_prefix_done={prefix_done} tail_done={tail_done} "
-            f"gap_ms={fifo_gap_ms} (expect >1000), "
+            f"client_fifo(prefix_max<tail_min)={client_fifo_ok}, "
+            f"gap_s={client_fifo_gap_s:.2f}, "
+            f"{shape_detail}, "
+            f"engine_fifo(gate): gap_ms={engine_fifo_gap_ms} "
+            f"(ok={engine_fifo_ok}, expect >1000), "
+            f"master_linkage={ledger_ok}({ledger_detail}), "
             f"park_settled_empty={settled}, "
             f"inflight_clean={inflight_ok}({inflight_detail}), "
             f"recovery={recovery_msg}"
@@ -2579,22 +2799,34 @@ def engine_prefill_token_budget_split_fifo(ctx: CaseContext):
     ),
 )
 def engine_prefill_token_budget_boundary(ctx: CaseContext):
-    """Boundary: a batch exactly AT the token budget executes verbatim.
+    """Boundary: a batch exactly AT the token budget executes verbatim —
+    the VERDICT is the master's single-batch bookkeeping + TTFT shape
+    neutrality, the engine shape as gate.
 
     Scenario: prefill.max_batch_tokens=2048 — exactly the total of
     four 512-token requests coalesced into one master batch.
 
-    Behaviour: production admission semantics (FIFOScheduler.cc:
-    371-481) — members join while admitted < budget (strict), so the
-    fourth member (admitted 1536 < 2048) still fits and the whole
-    batch executes as ONE.
+    Construction (gate, not verdict): production admission semantics
+    (FIFOScheduler.cc:371-481) — members join while admitted < budget
+    (strict), so the fourth member (admitted 1536 < 2048) still fits and
+    the whole batch should execute as ONE (counters 1b/4r/max4, no park
+    through the execution window).  Gate misses are recorded in the
+    detail, not the verdict.
 
-    Expected (contract): all four requests complete; a snapshot poll
-    through the 3s execution window observes prefill_waiting_batches
-    == 0 throughout (no park — nothing is left over); the executed-
-    batch counters grow by exactly 1 batch / 4 requests with max
-    size 4 (verbatim, the boundary is inclusive); the master inflight
-    ledger is clean and a fresh request succeeds.
+    Verdict (master linkage, the point of the case):
+      * booking caliber — through the execution window the master's
+        inflight_batches peaks at exactly 1 and inflight_requests at
+        exactly 4, and the member accounting shows NO intermediate
+        plateau: the verbatim batch settles ATOMICALLY (one reconcile
+        step 4->0 — any intermediate value means the master split its
+        own bookkeeping or lost members one by one);
+      * TTFT shape neutrality — the batched wave's client-visible
+        completion durations must not degrade beyond 50% against a
+        single-request baseline on the same env (AssertUtils.
+        ttft_degradation): batch shape must not cost latency;
+      * scheduler_inflight never climbs mid-window;
+      * the master inflight ledger drains clean and a fresh request
+        succeeds (recovery).
 
     Prediction: expected to pass — the boundary condition is pinned
     in-JVM by PrefillBudgetRegroupTest.
@@ -2607,8 +2839,27 @@ def engine_prefill_token_budget_boundary(ctx: CaseContext):
     if not names:
         return False, "no prefill engines found"
     try:
+        # Shape-neutral TTFT baseline: ONE 512-token request consumed to
+        # terminal (its duration is the single-request reference the
+        # batched wave is graded against).
+        baseline_rid = ops.next_request_id(base)
+        baseline_err, baseline_dur = _timed_request(
+            ops, baseline_rid, input_len=512, output_len=2
+        )
+        if baseline_err:
+            return False, f"baseline request failed: {baseline_err}"
+
         base_counters = _prefill_batch_counters(ops, names[0])
-        rids, fired, fire_errors = _fire_regroup_wave(ops, base)
+
+        # The timed wave: four 512-token requests fired 10ms apart (the
+        # _fire_regroup_wave coalescing shape), each worker measuring its
+        # OWN schedule->end duration concurrently — the streams open while
+        # the batch still executes, so the durations are live TTFT
+        # readings (a post-hoc drain would stamp the caller's consume
+        # order instead of the completion instants).
+        rids, pool, futures = _timed_wave_start(
+            ops, base, 4, input_len=512, output_len=2
+        )
 
         # No park: the single verbatim batch admits immediately —
         # poll through its 3s execution window.
@@ -2624,15 +2875,46 @@ def engine_prefill_token_budget_boundary(ctx: CaseContext):
                 break
             time.sleep(0.2)
 
-        outcomes = _drain_fired(ops, fired, wait_s=45.0)
-        completed = [rid for rid, ok, _ in outcomes if ok]
-        drain_errors = [(rid, err) for rid, ok, err in outcomes if not ok]
+        # Master ledger linkage — single verbatim batch: the 3s execution
+        # plus settle margin fits in ~5s of sampling; expect_intermediate
+        # is FALSE (atomic settle of the whole batch).
+        samples, peak_batches = AssertUtils.inflight_batches_peak(
+            _master_http(ops), "prefill", window_s=5.0, interval_s=0.2
+        )
+        ledger_ok, ledger_detail = _ledger_series_ok(
+            samples, peak_batches, n_requests=len(rids), expect_intermediate=False
+        )
+
+        # Collect the timed wave — (err, duration_s) per member, each
+        # worker's own schedule->end reading.
+        wave_results = []
+        for future in futures:
+            try:
+                wave_results.append(future.result())
+            except Exception as exc:
+                wave_results.append((repr(exc), None))
+        pool.shutdown(wait=True)
+        wave_errors = [err for err, _ in wave_results if err]
+        wave_durs_ms = [
+            dur * 1000.0 for err, dur in wave_results if not err and dur is not None
+        ]
 
         after_counters = _prefill_batch_counters(ops, names[0])
         delta_batches = after_counters[0] - base_counters[0]
         delta_requests = after_counters[1] - base_counters[1]
-        counters_ok = (
-            delta_batches == 1 and delta_requests == 4 and after_counters[2] == 4
+        shape_ok, shape_detail = _shape_gate(
+            delta_batches, delta_requests, after_counters[2], (1, 4, 4)
+        )
+
+        # TTFT shape neutrality (client-visible caliber — schedule ->
+        # stream end; under BATCH dispatch the mock surfaces the first
+        # output at fetch completion, so the duration IS the TTFT the
+        # client sees): the verbatim 4-member wave graded against the
+        # single-request baseline through the shared degradation gate.
+        baseline_p50_ms = baseline_dur * 1000.0
+        wave_p50_ms = _ttft_p50(wave_durs_ms)
+        ttft_ok, ttft_detail = AssertUtils.ttft_degradation(
+            baseline_p50_ms, wave_p50_ms
         )
 
         settled = wait_for(lambda: _park_settled(ops, names), 10.0, 0.2)
@@ -2642,22 +2924,22 @@ def engine_prefill_token_budget_boundary(ctx: CaseContext):
         recovery_ok, recovery_msg = ops.verify_recovery()
 
         passed = (
-            not fire_errors
+            not wave_errors
             and no_park
-            and len(completed) == len(rids)
-            and not drain_errors
-            and counters_ok
+            and len(wave_durs_ms) == len(rids)
+            and ledger_ok
+            and ttft_ok
             and settled
             and inflight_ok
             and recovery_ok
         )
         return passed, (
-            f"fired={len(rids)} (fire_errors={fire_errors[:1]}), "
+            f"wave={len(rids)} (errors={wave_errors[:1]}), "
             f"no_park_through_window={no_park}, "
-            f"completed={len(completed)}/{len(rids)} "
-            f"(drain_errors={drain_errors[:1]}), "
-            f"executed_delta={delta_batches}b/{delta_requests}r "
-            f"max_size={after_counters[2]} (expect 1b/4r/4), "
+            f"completed={len(wave_durs_ms)}/{len(rids)}, "
+            f"{shape_detail}, "
+            f"master_linkage(atomic_1b4r)={ledger_ok}({ledger_detail}), "
+            f"ttft_neutral={ttft_ok}({ttft_detail}), "
             f"park_settled_empty={settled}, "
             f"inflight_clean={inflight_ok}({inflight_detail}), "
             f"recovery={recovery_msg}"
@@ -2676,20 +2958,34 @@ def engine_prefill_token_budget_boundary(ctx: CaseContext):
     ),
 )
 def engine_prefill_regroup_disabled_verbatim(ctx: CaseContext):
-    """The 0/0 switch: regroup off, the master batch executes as-is.
+    """The 0/0 switch: regroup off, the master batch executes as-is —
+    the VERDICT is the master's single-batch bookkeeping, the engine
+    shape as gate.
 
     Scenario: prefill.max_batch_tokens=0 AND
     prefill.max_batch_requests=0 — the documented off switch: both
     dimensions zero disables the in-engine regroup entirely and the
     master batch executes verbatim (the pre-#8 behaviour).
 
-    Expected (contract): all four requests complete; no park is
-    observed (the single master batch admits immediately); the
-    executed-batch counters grow by exactly 1 batch / 4 requests with
-    max size 4 — the verbatim master shape (4x the tokens a 1024
-    budget would have split); every member's lifecycle row attributes
-    to the SAME master batch_id; the master inflight ledger is clean
-    and a fresh request succeeds.
+    Construction (gate, not verdict): the executed-batch counters
+    (delta over the pre-fire baseline) grow by exactly 1 batch /
+    4 requests with max size 4 — the verbatim master shape (4x the
+    tokens a 1024 budget would have split).  Gate misses are recorded
+    in the detail, not the verdict; the master assertions still run
+    against the ACTUAL executed shape.
+
+    Verdict (master linkage, the point of the case):
+      * booking caliber — through the execution window the master's
+        inflight_batches peaks at exactly 1 and inflight_requests at
+        exactly 4, with NO intermediate plateau: the verbatim batch
+        settles ATOMICALLY (one reconcile step 4->0), and
+        scheduler_inflight never climbs — the off-switch must not make
+        the master re-dispatch or re-admit anything;
+      * ledger identity — every member's lifecycle row attributes to
+        the SAME master batch_id;
+      * no park, and no master misbehaviour from it: a fresh request
+        admits normally after the wave (recovery), the ledger drains
+        clean (inflight_clean).
 
     Prediction: expected to pass — the disabled path is the preserved
     legacy code (prefillRegroupEnabled() == false), pinned in-JVM by
@@ -2717,6 +3013,17 @@ def engine_prefill_regroup_disabled_verbatim(ctx: CaseContext):
                 break
             time.sleep(0.2)
 
+        # Master ledger linkage — single verbatim batch: 3s execution
+        # plus settle margin in ~5s of sampling; the atomic settle (no
+        # intermediate member count) pins that the master books the ONE
+        # batch it dispatched and releases it in one reconcile step.
+        samples, peak_batches = AssertUtils.inflight_batches_peak(
+            _master_http(ops), "prefill", window_s=5.0, interval_s=0.2
+        )
+        ledger_ok, ledger_detail = _ledger_series_ok(
+            samples, peak_batches, n_requests=len(rids), expect_intermediate=False
+        )
+
         outcomes = _drain_fired(ops, fired, wait_s=45.0)
         completed = [rid for rid, ok, _ in outcomes if ok]
         drain_errors = [(rid, err) for rid, ok, err in outcomes if not ok]
@@ -2724,8 +3031,8 @@ def engine_prefill_regroup_disabled_verbatim(ctx: CaseContext):
         after_counters = _prefill_batch_counters(ops, names[0])
         delta_batches = after_counters[0] - base_counters[0]
         delta_requests = after_counters[1] - base_counters[1]
-        counters_ok = (
-            delta_batches == 1 and delta_requests == 4 and after_counters[2] == 4
+        shape_ok, shape_detail = _shape_gate(
+            delta_batches, delta_requests, after_counters[2], (1, 4, 4)
         )
 
         rows = _lifecycle_rows(ops, names[0], rids)
@@ -2747,7 +3054,7 @@ def engine_prefill_regroup_disabled_verbatim(ctx: CaseContext):
             and no_park
             and len(completed) == len(rids)
             and not drain_errors
-            and counters_ok
+            and ledger_ok
             and batch_id_ok
             and settled
             and inflight_ok
@@ -2758,8 +3065,8 @@ def engine_prefill_regroup_disabled_verbatim(ctx: CaseContext):
             f"no_park_through_window={no_park}, "
             f"completed={len(completed)}/{len(rids)} "
             f"(drain_errors={drain_errors[:1]}), "
-            f"executed_delta={delta_batches}b/{delta_requests}r "
-            f"max_size={after_counters[2]} (expect 1b/4r/4), "
+            f"{shape_detail}, "
+            f"master_linkage(atomic_1b4r)={ledger_ok}({ledger_detail}), "
             f"member_batch_ids={member_batch_ids}, "
             f"park_settled_empty={settled}, "
             f"inflight_clean={inflight_ok}({inflight_detail}), "

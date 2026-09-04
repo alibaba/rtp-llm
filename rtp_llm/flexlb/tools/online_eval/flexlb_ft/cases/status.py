@@ -115,9 +115,11 @@ from ..harness import (
     build_flexlb_config,
     default_perf,
     http_get_status,
-    ttl_spec,
-    wait_for,
 )
+from ..harness import master_decode_requests_sum as _harness_decode_requests_sum
+from ..harness import master_prefill_batches_sum as _harness_prefill_batches_sum
+from ..harness import master_prefill_requests_sum as _harness_prefill_requests_sum
+from ..harness import ttl_spec, wait_for
 
 STATUS_CASES: list[CaseDef] = []
 
@@ -308,40 +310,24 @@ def _recovery_rate(ops, base: int, n: int = 20) -> tuple:
 
 def _prefill_batches_sum(ops) -> int:
     """Sum of master-side prefill inflight_batches across every endpoint
-    (-1 when the inflight endpoint is unreachable)."""
-    data = ops.master_inflight()
-    if data is None:
-        return -1
-    total = 0
-    for ep in data.get("prefill_endpoints", []) or []:
-        batches = ep.get("inflight_batches", 0)
-        total += len(batches) if isinstance(batches, list) else int(batches)
-    return total
+    (shared caliber — see harness.master_prefill_batches_sum; kept as a
+    local alias so existing status.py call sites read unchanged)."""
+    return _harness_prefill_batches_sum(ops)
 
 
 def _decode_requests_sum(ops) -> int:
-    """Sum of master-side decode inflight_requests across every endpoint."""
-    data = ops.master_inflight()
-    if data is None:
-        return -1
-    return sum(
-        int(ep.get("inflight_requests", 0) or 0)
-        for ep in data.get("decode_endpoints", []) or []
-    )
+    """Sum of master-side decode inflight_requests across every endpoint
+    (shared caliber — see harness.master_decode_requests_sum)."""
+    return _harness_decode_requests_sum(ops)
 
 
 def _prefill_requests_sum(ops) -> int:
     """Sum of master-side prefill inflight_requests (locally-owned member
     accounting) across every endpoint — the member-count caliber behind
-    the batch bookkeeping (inflight_batches alone cannot expose whether a
-    failed ack member still occupies the batch ledger)."""
-    data = ops.master_inflight()
-    if data is None:
-        return -1
-    return sum(
-        int(ep.get("inflight_requests", 0) or 0)
-        for ep in data.get("prefill_endpoints", []) or []
-    )
+    the batch bookkeeping (shared caliber, harness.master_prefill_requests_sum;
+    inflight_batches alone cannot expose whether a failed ack member still
+    occupies the batch ledger)."""
+    return _harness_prefill_requests_sum(ops)
 
 
 def _enqueue_rpc_count(ops, names: list) -> int:

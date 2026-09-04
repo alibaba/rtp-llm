@@ -83,11 +83,11 @@ python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbat
 | --- | --- | --- |
 | `cancel_basic` | 请求流式输出中客户端发显式 Cancel | 流终止；引擎侧取消可见；master inflight 排空；后续请求正常 |
 | `cancel_idempotent` | 同一请求连续 Cancel 两次 | 第二次幂等不报错；流终止；恢复 |
-| `cancel_sibling_isolation` | 3 并发请求，长 decode 的 B 中途被取消，A/C 为短请求 | B 终止且未完成；A/C 照常完成；引擎记录取消；恢复 |
+| `cancel_sibling_isolation` | 3 并发请求，长 decode 的 B 中途被取消，A/C 为短请求 | B 终止且未完成；A/C 照常完成；引擎记录取消；（BATCH 投递）master 腿：B 账目中途释放（scheduler_inflight 只剩 A/C 计数）+ 收尾 inflight 清零；恢复 |
 | `cancel_after_terminal` | 请求已完成后再发 Cancel | 幂等成功、无二次结算；恢复 |
 | `cancel_unknown_rid` | 对从未存在的 rid 发 Cancel | 调用不抛异常（幂等处理） |
 | `cancel_phase_timing` | A 处于 prefill 相位、B 处于 decode 相位时分别取消 | 两相位取消都终止流；恢复 |
-| `cancel_anomaly_path` | 注入失败后的请求走客户端侧取消路径 | 流终止、取消记录可见；（BATCH 投递）inflight 清零；恢复 |
+| `cancel_anomaly_path` | 注入失败后的请求走客户端侧取消路径 | 流终止、取消记录可见；（BATCH 投递）inflight 清零升格进 verdict；恢复 |
 | `cancel_deadline_exempt_inflight` | queueTimeout 到期落在请求已被引擎认领之后 | 不取消：完整输出、无引擎侧取消记录、走普通完成路径 |
 | `cancel_schedule_drop_delivered` | 批已认领后客户端取消 Schedule RPC 本身（仅 BATCH 投递） | master 仍向原 prefill 发真引擎 Cancel；账目经 CANCELLED reconcile 结算 |
 | `cancel_engine_notfound_settle` | 迟到的 Cancel 到达时引擎已无该请求 | master 幂等处理；引擎 NOT_FOUND 不报错；已有终态不被复写 |
@@ -195,7 +195,7 @@ KV 前缀缓存生命周期契约：per-engine 账本隔离、全局共享块的
 | `engine_fault_recovery_no_resurrect` | 崩溃时有 inflight 请求 | 恢复引擎内存为空；崩溃前请求不复活、不假完成 |
 | `engine_fault_status_gap_no_bump` | 2 个 tick 的短状态空窗 | 不误退役代际（抖动容忍） |
 | `engine_fault_status_gap_long_retire` | 长状态空窗 | 代际退役；其账目 / inflight 被栅栏 |
-| `engine_fault_recovery_kv_usage_reset` | 引擎全量重启后 | KV 用量从零起步（不沿用旧读数）；不被误拉黑 |
+| `engine_fault_recovery_kv_usage_reset` | 引擎全量重启后 | KV 用量从零起步（构造 gate）；master 腿：恢复后首批请求 typed 成功无 lack_mem 拒绝（容量视图从零重建）；不被误拉黑 |
 
 ### master（9 例 · 8 例固定 batch-window、1 例全 profile）
 
@@ -230,10 +230,10 @@ master 自身进程级故障与冷启动行为，以及双实例 HA 链路（冻
 | `admission_placement_pool_wait` | prefill placement 池仅 1 席，A 运行中 B 到达被拒入池 | 池满为 WAIT：B 驻留 master 侧，池释放后被唤醒重试并晚于 A≥1s 完成；账目干净并恢复 |
 | `admission_engine_waiting_batch_cap_reject` | 引擎等待批上限=1（运行时注入）打满后探测批到达 | 非等待门：快速整批 backpressure 拒绝；占用者不受扰；同压力下放开 cap 可 park；账目干净并恢复 |
 | `admission_engine_kv_lack_mem_fast_reject` | 17 块引擎 KV 池被两个 8 块租 约占满后第 3 个 8 块请求入队 | 非等待门：快速 602 LACK_MEM 拒绝（引擎侧码非 8431）；租约完成后归还；恢复后新请求成功、账目干净 |
-| `engine_prefill_token_budget_split` | 引擎内双预算重组（#8）：token 预算 1024，4×512 请求合一 master 批（Σ2048 超预算 2x） | 拆散前缀+尾段 park：全部完成；执行批计数 2 批/4 请求/最大 2；成员 batch_id 归属同一 master 批；账目干净并恢复 |
-| `engine_prefill_token_budget_split_fifo` | 同拆散场景钉执行序（lifecycle end_ms） | 尾段成员完成严格晚于前缀 >1s（到达序贯穿重组）；执行批计数增量 2 批/4 请求/最大 2；账目干净并恢复 |
-| `engine_prefill_token_budget_boundary` | 预算 2048 == 4×512（恰好等于） | 不拆：1 批/4 请求/最大 4 verbatim；执行窗口内无 park；账目干净并恢复 |
-| `engine_prefill_regroup_disabled_verbatim` | 双 0 关闭重组（复现旧行为） | master 批原样执行：1 批/4 请求/最大 4；无 park；成员同批归属；账目干净并恢复 |
+| `engine_prefill_token_budget_split` | 引擎内双预算重组（#8）：token 预算 1024，4×512 请求合一 master 批（Σ2048 超预算 2x） | 拆散前缀+尾段 park：全部完成；执行批计数 2 批/4 请求/最大 2（构造 gate）；master 账目联动：inflight_batches 峰值恒 1、requests 事件驱动台阶下降、scheduler_inflight 不回升；成员 batch_id 归属同一 master 批；账目干净并恢复 |
+| `engine_prefill_token_budget_split_fifo` | 同拆散场景钉执行序（并发消费取真实完成时刻） | client FIFO：前缀成员完成时间戳严格早于尾段（到达序贯穿重组到客户端）；引擎 end_ms 序降构造 gate；master 账目联动（峰值 1 批/4 请求、台阶下降）；账目干净并恢复 |
+| `engine_prefill_token_budget_boundary` | 预算 2048 == 4×512（恰好等于） | 不拆：1 批/4 请求/最大 4 verbatim（构造 gate）；master 原子结算（inflight_batches=1、requests 4→0 无中间台阶）；TTFT 批形状中性（对单请求基线劣化 ≤50%）；执行窗口内无 park；账目干净并恢复 |
+| `engine_prefill_regroup_disabled_verbatim` | 双 0 关闭重组（复现旧行为） | master 批原样执行：1 批/4 请求/最大 4（构造 gate）；master 原子结算（1 批/4 请求、无中间台阶、scheduler 不回升）；无 park；成员同批归属；账目干净并恢复 |
 
 ### priority（15 例 · 14 例固定 single-nonbatch + PRIORITY 轴 case 层注入、1 例全 profile）
 
