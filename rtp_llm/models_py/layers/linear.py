@@ -1057,9 +1057,19 @@ class QKVParallelLinear(ColumnParallelLinear):
             # FP8 per-block grid for this q/k/v shard: TP-slice along the
             # output(head)-block dim, then place at the shard's block offset
             # in the merged [total_blocks, in_blocks] grid.
-            block_n, _ = self.fp8_scale_block_size()
+            block_n, block_k = self.fp8_scale_block_size()
             rank = self.tp_rank if qkv_key == "q" else self.kv_head_rank
             self._ensure_parameter_shard_not_loaded(param_name, qkv_key)
+            expected_rows = num_heads * self.head_dim
+            expected_shape = (
+                self._ceil_div(expected_rows, block_n),
+                self._ceil_div(self.hidden_size, block_k),
+            )
+            if tuple(tensor.shape) != expected_shape:
+                raise ValueError(
+                    f"{self.prefix}.{qkv_key}.weight_scale_inv checkpoint shape "
+                    f"must be {expected_shape}, got {tuple(tensor.shape)}"
+                )
             if self.tp_size > 1:
                 heads_pp = (
                     self.num_heads_per_partition
@@ -1075,21 +1085,24 @@ class QKVParallelLinear(ColumnParallelLinear):
                         f"start={start_row}, rows={rows}"
                     )
                 start_blk = start_row // block_n
-                tensor = tensor.narrow(0, start_blk, rows // block_n).contiguous()
+                local_blocks = rows // block_n
+                tensor = tensor.narrow(0, start_blk, local_blocks).contiguous()
+            else:
+                local_blocks = expected_shape[0]
             if offset % block_n != 0:
                 raise ValueError(
                     f"{self.prefix}.{qkv_key}.weight_scale_inv offset {offset} "
                     f"must align to FP8 output block {block_n}"
                 )
             off_blk = offset // block_n
-            target = param.data[off_blk : off_blk + tensor.shape[0]]
+            target = param.data[off_blk : off_blk + local_blocks]
             if tuple(target.shape) != tuple(tensor.shape):
                 raise ValueError(
                     f"Shape mismatch for {self.prefix}.{qkv_key}.weight_scale_inv: "
                     f"got {tuple(tensor.shape)}, expected {tuple(target.shape)}"
                 )
             _copy_checked(
-                param.data[off_blk : off_blk + tensor.shape[0]],
+                target,
                 tensor,
                 f"{self.prefix}.{qkv_key}.{param_name}",
             )
