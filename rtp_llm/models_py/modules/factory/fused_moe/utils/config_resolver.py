@@ -61,15 +61,7 @@ class MoeConfigResolver:
         """
         if config.quant_config is None:
             return None
-        runtime_method = config.quant_config.get_runtime_method_key()
-        if runtime_method in ("fp8", "fp8_online"):
-            # Both prequantized and load-time-quantized per-tensor FP8 weights
-            # execute with dynamically quantized activations. The fused-MoE
-            # strategy registry names that execution contract
-            # FP8_DYNAMIC_PER_TENSOR; the config-side name FP8 describes the
-            # checkpoint representation and is not a registered strategy key.
-            return "FP8_DYNAMIC_PER_TENSOR"
-        return config.quant_config.get_method()
+        return config.quant_config.get_moe_runtime_method_key()
 
     @staticmethod
     def is_ep_enabled(config: MoEConfigAdapter) -> bool:
