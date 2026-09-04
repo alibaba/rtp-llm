@@ -149,7 +149,25 @@ def main():
         help="scheduling profile (scheduler.ordering.decision.dispatcher axes)",
     )
     parser.add_argument("--filter", default=None, help="substring filter on case name")
+    parser.add_argument(
+        "--cases",
+        default=None,
+        help=(
+            "comma-separated exact case names to run — takes priority over "
+            "the --category/--filter selection (profile filtering still "
+            "applies); unknown names exit 2"
+        ),
+    )
     parser.add_argument("--json", default=None, help="write JSON results to path")
+    parser.add_argument(
+        "--run-root",
+        default=None,
+        help=(
+            "override the run root directory (the parallel orchestrator "
+            "isolates sibling lanes this way; default keeps the "
+            "/tmp/flexlb_ft_<epoch> layout)"
+        ),
+    )
     parser.add_argument("--list", action="store_true", help="list cases and exit")
     parser.add_argument(
         "--grade",
@@ -169,12 +187,28 @@ def main():
 
     category = CATEGORY_ALIASES.get(args.category, args.category)
 
-    # Filter cases
+    # Filter cases.  --cases (exact-name list — the parallel orchestrator
+    # passes each case-shard lane's slice this way) wins over the
+    # --category/--filter selection; profile filtering below still applies.
     cases = ALL_CASES
-    if category != "all":
-        cases = [c for c in cases if c.category == category]
-    if args.filter:
-        cases = [c for c in cases if args.filter.lower() in c.name.lower()]
+    if args.cases:
+        wanted = [n.strip() for n in args.cases.split(",") if n.strip()]
+        by_name = {c.name: c for c in ALL_CASES}
+        unknown = [n for n in wanted if n not in by_name]
+        if unknown:
+            print(
+                f"error: unknown --cases entries: {unknown} "
+                "(run --list for valid names)",
+                file=sys.stderr,
+            )
+            return 2
+        # dict.fromkeys: order-preserving dedup of the requested names.
+        cases = [by_name[n] for n in dict.fromkeys(wanted)]
+    else:
+        if category != "all":
+            cases = [c for c in cases if c.category == category]
+        if args.filter:
+            cases = [c for c in cases if args.filter.lower() in c.name.lower()]
     # Profile filter: explicit profile list, then semantic requirements
     # (CaseDef.requires must be covered by the profile's capability set).
     caps = PROFILE_CAPS[args.profile]
@@ -207,8 +241,15 @@ def main():
         print("No cases match filters.", file=sys.stderr)
         return 1
 
-    # Setup
-    run_root = Path(f"/tmp/flexlb_ft_{int(time.time())}")
+    # Setup.  --run-root (parallel_runner.py passes a per-lane dir) keeps
+    # sibling lanes from sharing the same second-derived directory — two
+    # lanes started in the same wall-clock second would otherwise merge
+    # their env<N>_<label> dirs and interleave mock/master logs.
+    run_root = (
+        Path(args.run_root)
+        if args.run_root
+        else Path(f"/tmp/flexlb_ft_{int(time.time())}")
+    )
     run_root.mkdir(parents=True, exist_ok=True)
     env_mgr = EnvManager(run_root)
     ctx = CaseContext(

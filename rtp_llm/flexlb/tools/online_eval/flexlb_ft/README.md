@@ -26,10 +26,46 @@ python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbat
 | `--json` | 路径 | 逐用例结果写成 JSON |
 | `--list` | — | 列出当前过滤条件下的用例并退出 |
 | `--keep` | — | 跑完保留环境不 teardown |
+| `--run-root` | 路径 | 覆盖 run 根目录（默认 `/tmp/flexlb_ft_<epoch>`；并行编排器用它隔离兄弟 lane 的 env 目录与日志） |
 
-全集 **99 例**；`--list` 按当前 profile 过滤，默认 profile 下显示 98 例（1 例仅 NON_BATCH 投递形态适用）。用例间环境按需复用 / 重建。
+全集 **118 例**（10 分类）；`--list` 按当前 profile 过滤，默认 batch-window 下显示 103 例（priority 14 例仅 single-nonbatch、1 例仅 NON_BATCH 投递形态适用）。用例间环境按需复用 / 重建。
 
-## 测试分类（114 例）
+## 并行跑法（parallel_runner.py）
+
+串行全量 103 例约 35–55 分钟，瓶颈是各 case 的等待窗口（batch drain / TTL / 收敛）而非 CPU。同目录的 `parallel_runner.py` 支持两档分片粒度（`--shard`）：category 级把 10 个 category 按 LPT 装箱（权重 = 单例耗时 × `--list` 实时例数），case 级把每个 case 按实测耗时基线逐例 LPT 摊平（status 24 例不再独占一路）。每条 lane 是一个独立 runner 子进程树，端口与 run 目录显式分段，互不相碰：
+
+```bash
+python3 parallel_runner.py                                          # 默认 4 路 category 级
+python3 parallel_runner.py --parallel 6 --shard case \
+  --timing-json full4b.json --json out.json                        # P1 摊平：逐例 LPT
+python3 parallel_runner.py --parallel 8 --shard case --mock-stride 500 \
+  --timing-json full4b.json                                         # 压缩 stride 后 8 路
+python3 parallel_runner.py --parallel 1                             # 退化 = 单进程 --category all（等价性冒烟）
+python3 parallel_runner.py --categories direct,balance --parallel 2  # 子集（连字符/下划线均可）
+python3 parallel_runner.py --dry-run                                # 只打印分组与端口矩阵
+python3 flexlb_functional_tests.py --cases a,b,c                    # 单 runner 精确 case 列表
+```
+
+`--shard case`（P1 摊平）要点：`--timing-json` 指向此前全量 run 的聚合 json（逐例 `duration_ms` 作成本基线；文件缺失退化为均匀切分并 stderr 警告，个别 case 无记录时退化为该家族单例权重）；同 category 的 case 可散到不同路（正是摊平的意义），expected-fail probes 正常参与；每路一次 runner 调用（`--cases <逗号列表>`），lane 内保持注册顺序便于逐例对照。单 runner 侧的 `--cases` 独立可用：精确 case 名列表优先于 `--category/--filter`（仍受 `--profile` 过滤），未知名报错退出（rc=2）。
+
+端口分段（lane i，0 起）：
+
+| 段 | 区间 | 说明 |
+| --- | --- | --- |
+| master 组 | `18080+10i .. 18080+10i+5` | http/mgmt/grpc = +0/+1/+2（单 master、HA Tier-1 A、Tier-3 三选一路径共用组首）；HA Tier-1 B = +3..+5 |
+| mock 窗口 | `55151+S*i .. +151` | 显式 `FLEXLB_FT_MOCK_BASE_GRPC_PORT`，消除并发自动扫描的 bind TOCTOU；实测占用宽度恒为 153 口（http=base-1、engines=base..base+n-1、victim zone=base+149..151） |
+
+- `--parallel` 上限由 mock stride 推导：`base+stride*(N-1)+151 ≤ 65535`（默认 stride 2000 → 6 路；`--mock-stride 500` → 21 路上限，容器实测承载 4–8；stride 下限 153 = 窗口宽度，代码内校验）。
+- 同机与他人共用且对方占用默认段时，用 `FLEXLB_FT_PARALLEL_MASTER_BASE` / `FLEXLB_FT_PARALLEL_MOCK_BASE` 整体平移（stride 不变，lane 间仍互斥）。
+- 其余 env（如 `FLEXLB_FT_HA_DUAL_MASTER=1`）原样透传给每条 lane；HA 分组与 mock 段已按 lane 同步分段，无需手工干预。
+
+聚合 `--json` 保持单 runner schema（summary + cases[]），另加：`cases[].lane`、`lanes[]`（各路 category 集合 / exit_codes / wall_s）、`summary.parallel / wall_time_s / serial_case_time_s`（最后一项为逐例耗时之和，是串行 wall 的下界，报告加速比时对标实测串行 35–55 分钟而非它）；case 级分片另记 `summary.shard`（category|case）与 `lanes[].case_names`（各路精确 case 名单，分片矩阵是 run 记录的一部分）。退出码 = 任一 lane runner 非零或存在 FAIL。`--parallel 1`（category 模式）全集走 `--category all` 单进程路径（跨 category 环境复用与直接跑 runner 完全一致），可作并行编排无回归的冒烟基线。
+
+实测参考（110 wuran.wzy_sm10x 容器，98 例快照，共享负载，4 路 = master+balance / engine_fault+cancel+direct / status+kv / admission+elastic）：串行 `--parallel 1` wall 4918s，4 路 wall 2444s，加速 2.01x；逐例结果 92/98 一致，6 例翻转均为时序敏感 flaky（双向）。wall 加速的硬上限来自最重家族——status 24 例实测 2104s（占串行 43%）、engine_fault 1324s，category 级不拆分时 4 路 wall 下限 ≈ 最重家族时长；若后续实测校准权重（status 15→~75、engine_fault 30→~100）可让 LPT 把 kv 从 status 路挪走，逼近 ~2100s；要突破需 case 级分片（`--shard case` 模式）。
+
+P1 摊平实测（同机同容器，103 例 = 98 例快照 + 5 新增 case，timing 基线取 P0 全量聚合 json）：6 路 `--shard case` wall 941s（15.7 分钟，最重路 16 例），vs 串行基线 4918s 加速 5.22x——status 家族 24 例被摊到全部 6 路，“最重家族即 wall 下限”的钳制消除；8 路 `--mock-stride 500`（mock base 平移避开他人占用段）wall 703s（11.7 分钟），加速 6.99x。等价性沿用 P0 口径：6 路对串行基线 98 共同例 89 一致、9 例翻转全部单向好转（8 例 FAIL→PASS，1 例 FC→FR；对翻转例同 jar 同 env 定向复跑两轮结果稳定，判定为快照漂移而非编排层回归）；8 路对 6 路 103 例 94 一致、FINDING 集完全相等（EQUIVALENT, modulo flaky flips）。新增 4 例 engine_prefill_token_budget_* FAIL 属旧 jar 与双预算组批新契约的组合性预存，与编排无关。
+
+## 测试分类（118 例）
 
 断言一律写**正确契约**而非当前实现——跑挂即 finding。表内「期望」为一句话摘要，完整断言与构造细节以各用例 docstring 为准。
 
@@ -169,7 +205,7 @@ master 自身进程级故障与冷启动行为，以及双实例 HA 链路（冻
 | `fallback_negative_errorcode` | 业务错误码（8431）与短 deadline（800ms 冻结）下 fallback 已武装 | 均不触发兑底：业务错误经 master 应答带码、deadline 失败不重试不切换；清除后账目收敛 |
 | `failback_wraparound` | 重建 sticky B 端态后重启 A、再杀 B | A 60s 内重新收敛并接恢复流量；对称切换绕回 A；inflight 干净、无 8511 风暴 |
 
-### admission（11 例 · 10 例固定 batch-window、1 例仅 BATCH 投递）
+### admission（15 例 · 14 例固定 batch-window、1 例仅 BATCH 投递）
 
 准入门全谱——可等待 park 与快速拒两种语义：引擎侧（prefill 并发、decode 硬门、等待批上限、KV 块池、队列深度）与 master 侧（batcher 队列容量、placement 池、准入许可、全局 outstanding），外加 SLO 排队超时终态。
 
@@ -185,7 +221,11 @@ master 自身进程级故障与冷启动行为，以及双实例 HA 链路（冻
 | `admission_batcher_queue_deadline` | batcher 队列容量门下 queueTimeout=1.5s，溢出波 park 后到期 | 排队者 1-5s 内带类型 deadline 终态（8511，与 KV 门同码分类统一）；已投递者不受扰；账目干净并恢复 |
 | `admission_placement_pool_wait` | prefill placement 池仅 1 席，A 运行中 B 到达被拒入池 | 池满为 WAIT：B 驻留 master 侧，池释放后被唤醒重试并晚于 A≥1s 完成；账目干净并恢复 |
 | `admission_engine_waiting_batch_cap_reject` | 引擎等待批上限=1（运行时注入）打满后探测批到达 | 非等待门：快速整批 backpressure 拒绝；占用者不受扰；同压力下放开 cap 可 park；账目干净并恢复 |
-| `admission_engine_kv_lack_mem_fast_reject` | 17 块引擎 KV 池被两个 8 块租约占满后第 3 个 8 块请求入队 | 非等待门：快速 602 LACK_MEM 拒绝（引擎侧码非 8431）；租约完成后归还；恢复后新请求成功、账目干净 |
+| `admission_engine_kv_lack_mem_fast_reject` | 17 块引擎 KV 池被两个 8 块租 约占满后第 3 个 8 块请求入队 | 非等待门：快速 602 LACK_MEM 拒绝（引擎侧码非 8431）；租约完成后归还；恢复后新请求成功、账目干净 |
+| `engine_prefill_token_budget_split` | 引擎内双预算重组（#8）：token 预算 1024，4×512 请求合一 master 批（Σ2048 超预算 2x） | 拆散前缀+尾段 park：全部完成；执行批计数 2 批/4 请求/最大 2；成员 batch_id 归属同一 master 批；账目干净并恢复 |
+| `engine_prefill_token_budget_split_fifo` | 同拆散场景钉执行序（lifecycle end_ms） | 尾段成员完成严格晚于前缀 >1s（到达序贯穿重组）；执行批计数增量 2 批/4 请求/最大 2；账目干净并恢复 |
+| `engine_prefill_token_budget_boundary` | 预算 2048 == 4×512（恰好等于） | 不拆：1 批/4 请求/最大 4 verbatim；执行窗口内无 park；账目干净并恢复 |
+| `engine_prefill_regroup_disabled_verbatim` | 双 0 关闭重组（复现旧行为） | master 批原样执行：1 批/4 请求/最大 4；无 park；成员同批归属；账目干净并恢复 |
 
 ### priority（15 例 · 14 例固定 single-nonbatch + PRIORITY 轴 case 层注入、1 例全 profile）
 
