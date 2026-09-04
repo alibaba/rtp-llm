@@ -128,6 +128,15 @@ def parse_args():
         default=int(os.environ.get("PERF_REQUEST_TIMEOUT", "7200")),
         help="Per-request timeout in seconds for cache-grid mode (default: 7200)",
     )
+    perf.add_argument(
+        "--cache_commit_tail_tokens",
+        type=int,
+        default=int(os.environ.get("CACHE_COMMIT_TAIL_TOKENS", "4096")),
+        help=(
+            "Extra seed tokens used to commit the requested cache prefix "
+            "before measurement (default: 4096)"
+        ),
+    )
 
     engine = parser.add_argument_group(
         "engine args consumed by perf test (also forwarded to server)"
@@ -196,19 +205,22 @@ def _load_cache_grid_cases(path: str) -> List[Dict[str, int]]:
                 )
             count = int(generation.get("count", 489))
             max_seq_len = int(generation.get("max_seq_len", 1048575))
-            block = int(config.get("cache_block_size", 256))
-            if count < 2 or max_seq_len <= block:
+            seq_block = int(config.get("seq_block_size", 256))
+            if count < 2 or max_seq_len <= seq_block:
                 raise ValueError("invalid seq_generation bounds")
-            values = set(range(block, min(16384, max_seq_len), block))
+            values = set(range(seq_block, min(16384, max_seq_len), seq_block))
             target_nonmax = count - 1
             i = 0
             while len(values) < target_nonmax:
-                raw = block + round(
-                    i * (max_seq_len - 2 * block) / max(1, target_nonmax - 1)
+                raw = seq_block + round(
+                    i * (max_seq_len - 2 * seq_block) / max(1, target_nonmax - 1)
                 )
                 aligned = max(
-                    block,
-                    min(max_seq_len - block, round(raw / block) * block),
+                    seq_block,
+                    min(
+                        max_seq_len - seq_block,
+                        round(raw / seq_block) * seq_block,
+                    ),
                 )
                 values.add(aligned)
                 i += 1
@@ -224,13 +236,14 @@ def _load_cache_grid_cases(path: str) -> List[Dict[str, int]]:
                 [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 0.95],
             )
         ]
-        block = int(config.get("cache_block_size", 256))
+        block = int(config.get("cache_block_size", 4096))
         if block <= 0 or any(ratio < 0.0 or ratio >= 1.0 for ratio in ratios):
             raise ValueError("cache_ratios must be in [0, 1) and block must be positive")
         raw_cases = []
         case_id = 0
         for seq_len in seq_lens:
             seq_len = int(seq_len)
+            max_cache_len = max(0, ((seq_len - block) // block) * block)
             for ratio in ratios:
                 cache_len = int((max(0, seq_len - 1) * ratio) // block) * block
                 raw_cases.append(
@@ -238,17 +251,17 @@ def _load_cache_grid_cases(path: str) -> List[Dict[str, int]]:
                         "case_id": case_id,
                         "batch_size": 1,
                         "input_len": seq_len,
-                        "cache_len": min(cache_len, seq_len - 1),
+                        "cache_len": min(cache_len, max_cache_len),
                     }
                 )
                 case_id += 1
-            if seq_len > block:
+            if max_cache_len > 0:
                 raw_cases.append(
                     {
                         "case_id": case_id,
                         "batch_size": 1,
                         "input_len": seq_len,
-                        "cache_len": ((seq_len - 1) // block - 1) * block,
+                        "cache_len": max_cache_len,
                     }
                 )
                 case_id += 1
@@ -323,6 +336,9 @@ def _write_test_info(args: argparse.Namespace, remaining_args: List[str]) -> Non
         "cache_request_timeout": (
             args.cache_request_timeout if args.cache_grid_json else None
         ),
+        "cache_commit_tail_tokens": (
+            args.cache_commit_tail_tokens if args.cache_grid_json else None
+        ),
         "dataset_name": args.dataset_name or None,
         "dataset_path": args.dataset_path or args.dataset or None,
     }
@@ -360,8 +376,24 @@ def main() -> str:
             raise ValueError("--cache_measure_runs must be positive")
         if args.cache_request_timeout <= 0:
             raise ValueError("--cache_request_timeout must be positive")
+        if args.cache_commit_tail_tokens <= 0:
+            raise ValueError("--cache_commit_tail_tokens must be positive")
 
         cases = _load_cache_grid_cases(args.cache_grid_json)
+        for case in cases:
+            cache_len = int(case["cache_len"])
+            input_len = int(case["input_len"])
+            if cache_len and cache_len % args.cache_commit_tail_tokens:
+                raise ValueError(
+                    "cache-grid cache_len must align to "
+                    f"--cache_commit_tail_tokens={args.cache_commit_tail_tokens}: "
+                    f"{case}"
+                )
+            if cache_len and cache_len + args.cache_commit_tail_tokens > input_len:
+                raise ValueError(
+                    "cache-grid cache_len must leave one commit tail before "
+                    f"server startup: {case}"
+                )
         max_input_len = max(int(case["input_len"]) for case in cases)
         max_batch_size = max(int(case["batch_size"]) for case in cases)
         tokenizer_path = (
@@ -392,6 +424,7 @@ def main() -> str:
                 args.result_dir,
                 request_timeout=args.cache_request_timeout,
                 measure_runs=args.cache_measure_runs,
+                cache_commit_tail_tokens=args.cache_commit_tail_tokens,
             ).run()
             _collect_timeline_files(args.result_dir)
         finally:

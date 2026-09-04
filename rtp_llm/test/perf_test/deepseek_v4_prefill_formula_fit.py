@@ -8,7 +8,7 @@ reused.  This tool accepts a row only when the runner marks it successful and
 all measured reuse lengths exactly match the requested cache length.
 
 * every requested measurement run succeeded;
-* every run has output length one and finite prefill latency;
+* every run has output length one and finite end-to-end TTFT;
 * observed reuse is constant and exactly matches the request; and
 * the selected batch size is fixed (the DSV4 Pro configuration uses 1).
 
@@ -16,6 +16,10 @@ The exported expression intentionally uses only the variables and operators
 accepted by the FlexLB prefill evaluator: ``tokens``, ``hitCacheTokens``,
 numbers, ``+``, ``-``, ``*``, ``/`` and parentheses.  It does not emit
 ``sum()``, ``max()``, ``batchSize``, ``computeTokens`` or Python syntax.
+
+New runner output uses client HTTP wall time with ``max_new_tokens=1`` as
+TTFT.  The server's ``first_token_cost_time`` is retained for diagnostics and
+is used only as a backward-compatible fallback for legacy inputs.
 
 The report keeps the fit and the production gate separate: a formula can be
 useful for analysis while still failing a tail-error gate.
@@ -122,7 +126,12 @@ def _median_run_time(
         run_input = _integer(run.get("input_len"))
         output_len = _integer(run.get("output_len"))
         reuse_len = _integer(run.get("reuse_len"))
-        latency = _finite(run.get("prefill_time_ms"))
+        latency = _finite(
+            run.get(
+                "ttft_ms",
+                run.get("client_wall_time_ms", run.get("prefill_time_ms")),
+            )
+        )
         if run_input != input_len or output_len != 1:
             return None, None, "request_shape_mismatch"
         if reuse_len != cache_len:
@@ -168,8 +177,19 @@ def load_observations(
                 )
                 target = _finite(
                     item.get(
-                        "avg_prefill_time_ms",
-                        item.get("prefill_time_ms", item.get("target_ms")),
+                        "avg_ttft_ms",
+                        item.get(
+                            "ttft_ms",
+                            item.get(
+                                "client_wall_time_ms",
+                                item.get(
+                                    "avg_prefill_time_ms",
+                                    item.get(
+                                        "prefill_time_ms", item.get("target_ms")
+                                    ),
+                                ),
+                            ),
+                        ),
                     )
                 )
                 if (
@@ -536,7 +556,10 @@ def run_fit(args: argparse.Namespace) -> int:
         "objective": (
             "mean_absolute_error" if args.objective == "mae" else "mean_squared_error"
         ),
-        "target": "median of successful prefill_time_ms runs",
+        "target": (
+            "median of successful client TTFT runs; falls back to "
+            "server prefill_time_ms only for legacy input"
+        ),
         "formula": formula,
         "formula_compatibility": {
             "variables": ["tokens", "hitCacheTokens"],

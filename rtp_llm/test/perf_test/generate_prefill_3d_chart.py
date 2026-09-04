@@ -34,9 +34,10 @@ def _number(value: Any) -> float | None:
 
 def _run_rt(run: dict[str, Any]) -> float | None:
     for key in (
+        "ttft_ms",
+        "client_wall_time_ms",
         "prefill_time_ms",
         "prefill_ms",
-        "ttft_ms",
         "avg_prefill_time",
         "first_token_time_ms",
     ):

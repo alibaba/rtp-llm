@@ -5,7 +5,8 @@ runner adds a cache dimension without adding an engine/server argument: each
 case first inserts a unique prefix into the normal prefix cache, then sends
 three unique continuations sharing exactly that prefix.  The measured
 ``aux_info.reuse_len`` is recorded, so a requested cache length is never
-silently treated as a hit.
+silently treated as a hit.  End-to-end TTFT is measured around the HTTP call;
+the server's auxiliary timing remains available as a separate diagnostic.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import statistics
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
@@ -114,10 +116,9 @@ class PrefixPromptFactory:
                 f"cache_len must satisfy 0 <= cache_len < total_len, "
                 f"got {cache_len}/{total_len}"
             )
-        # Share one deterministic prefix namespace across cache-grid cases.
-        # This lets the prefix tree reuse common tokens and prevents cumulative
-        # per-case cache duplication on long-sequence sweeps.
-        marker = "cache_grid_shared_prefix_"
+        # Keep cases independent. A shared prefix makes the observed reuse
+        # depend on which earlier case happened to populate the prefix tree.
+        marker = f"cache_grid_case_{case_id}_prefix_"
         if cache_len == 0:
             target, target_ids = self._exact_text_and_ids(total_len, marker)
             return target, "", len(target_ids)
@@ -133,10 +134,24 @@ class PrefixPromptFactory:
             )
         return target, prefix, len(target_ids)
 
-    def make_seed(self, case_id: int, cache_len: int) -> str:
+    def make_seed(
+        self, case_id: int, prefix: str, cache_len: int, commit_tail_tokens: int
+    ) -> str:
         if cache_len <= 0:
             return ""
-        return self._exact_text(cache_len, f"case_{case_id}_prefix_")
+        seed_len = cache_len + commit_tail_tokens
+        seed, seed_ids = self._exact_text_and_ids(
+            seed_len, prefix + f" __seed_commit_{case_id}_"
+        )
+        prefix_ids = _encode(self.tokenizer, prefix)
+        if len(prefix_ids) != cache_len or seed_ids[:cache_len] != prefix_ids:
+            seed, seed_ids = self._exact_text_and_ids(seed_len, prefix)
+        if len(seed_ids) != seed_len or seed_ids[:cache_len] != prefix_ids:
+            raise ValueError(
+                f"unable to build cache seed for case={case_id}: "
+                f"prefix={cache_len}, seed={len(seed_ids)}"
+            )
+        return seed
 
 
 def _post_prefill(
@@ -150,22 +165,35 @@ def _post_prefill(
             "force_sp_accept": True,
         },
     }
+    started = time.perf_counter()
     try:
         response = requests.post(
             f"http://127.0.0.1:{port}", json=body, timeout=timeout
         )
     except Exception as exc:
-        return {"success": False, "error": repr(exc), "request_id": request_id}
+        return {
+            "success": False,
+            "error": repr(exc),
+            "request_id": request_id,
+            "client_wall_time_ms": (time.perf_counter() - started) * 1000.0,
+        }
+    client_wall_time_ms = (time.perf_counter() - started) * 1000.0
     if response.status_code != 200:
         return {
             "success": False,
             "error": f"HTTP {response.status_code}: {response.text[:500]}",
             "request_id": request_id,
+            "client_wall_time_ms": client_wall_time_ms,
         }
     try:
         data = response.json()
     except Exception as exc:
-        return {"success": False, "error": f"invalid JSON: {exc}", "request_id": request_id}
+        return {
+            "success": False,
+            "error": f"invalid JSON: {exc}",
+            "request_id": request_id,
+            "client_wall_time_ms": client_wall_time_ms,
+        }
     aux = data.get("aux_info") or {}
     return {
         "success": True,
@@ -176,6 +204,9 @@ def _post_prefill(
         "prefill_time_ms": float(aux.get("first_token_cost_time", 0.0)),
         "total_time_ms": float(aux.get("cost_time", 0.0)),
         "wait_time_ms": float(aux.get("wait_time", 0.0)),
+        "client_wall_time_ms": client_wall_time_ms,
+        "ttft_ms": client_wall_time_ms,
+        "ttft_source": "client_http_wall_max_new_tokens_1",
     }
 
 
@@ -192,6 +223,7 @@ class CacheGridRunner:
         request_timeout: int = 7200,
         measure_runs: int = 3,
         checkpoint_every: int = 1,
+        cache_commit_tail_tokens: int = 4096,
     ):
         self.port = port
         self.factory = PrefixPromptFactory(tokenizer)
@@ -202,9 +234,12 @@ class CacheGridRunner:
             raise ValueError("request_timeout must be positive")
         if measure_runs <= 0:
             raise ValueError("measure_runs must be positive")
+        if cache_commit_tail_tokens <= 0:
+            raise ValueError("cache_commit_tail_tokens must be positive")
         self.request_timeout = request_timeout
         self.measure_runs = measure_runs
         self.checkpoint_every = max(1, checkpoint_every)
+        self.cache_commit_tail_tokens = cache_commit_tail_tokens
         self.result_path = self.result_dir / "cache_grid_results.json"
         self._results: Dict[str, Dict[str, Any]] = {}
         if self.result_path.exists():
@@ -247,6 +282,16 @@ class CacheGridRunner:
             batch_size = int(case.get("batch_size", 1))
             if batch_size != 1:
                 raise ValueError("prefix cache grid currently requires batch_size=1")
+            if cache_len and cache_len % self.cache_commit_tail_tokens:
+                raise ValueError(
+                    f"cache_len must align to commit tail "
+                    f"{self.cache_commit_tail_tokens}, got {cache_len}"
+                )
+            if cache_len and cache_len + self.cache_commit_tail_tokens > total_len:
+                raise ValueError(
+                    f"cache_len must leave at least {self.cache_commit_tail_tokens} "
+                    f"tokens for seed commit, got {cache_len}/{total_len}"
+                )
             started = time.time()
             try:
                 target, prefix, built_len = self.factory.make_case(
@@ -254,9 +299,15 @@ class CacheGridRunner:
                 )
                 seed_result: Dict[str, Any] = {}
                 if cache_len:
+                    seed = self.factory.make_seed(
+                        int(case["case_id"]),
+                        prefix,
+                        cache_len,
+                        self.cache_commit_tail_tokens,
+                    )
                     seed_result = _post_prefill(
                         self.port,
-                        prefix,
+                        seed,
                         self.request_timeout,
                         f"{key}:seed",
                     )
@@ -290,6 +341,19 @@ class CacheGridRunner:
                     len(successful) == self.measure_runs
                     and all(x == expected_reuse for x in reuse_values)
                 )
+                shape_exact = bool(
+                    len(successful) == self.measure_runs
+                    and all(
+                        int(r.get("input_len", -1)) == total_len for r in successful
+                    )
+                    and all(int(r.get("output_len", -1)) == 1 for r in successful)
+                )
+                ttft_values = [
+                    float(r["ttft_ms"])
+                    for r in successful
+                    if float(r.get("ttft_ms", 0.0)) > 0.0
+                ]
+                timing_valid = len(ttft_values) == self.measure_runs
                 metric = {
                     "case_key": key,
                     "case_id": int(case["case_id"]),
@@ -301,13 +365,27 @@ class CacheGridRunner:
                     "expected_reuse_len": expected_reuse,
                     "success_runs": len(successful),
                     "measure_runs": self.measure_runs,
+                    "cache_commit_tail_tokens": self.cache_commit_tail_tokens,
                     "seed": seed_result,
                     "runs": runs,
                     "reuse_exact": reuse_exact,
+                    "shape_exact": shape_exact,
+                    "timing_valid": timing_valid,
+                    "ttft_ms": ttft_values,
+                    "median_ttft_ms": (
+                        statistics.median(ttft_values) if timing_valid else None
+                    ),
+                    "avg_ttft_ms": (
+                        statistics.fmean(ttft_values) if timing_valid else None
+                    ),
                     "elapsed_s": time.time() - started,
                     "status": (
                         "ok"
-                        if len(successful) == self.measure_runs and reuse_exact
+                        if reuse_exact and shape_exact and timing_valid
+                        else "invalid_shape"
+                        if len(successful) == self.measure_runs and not shape_exact
+                        else "invalid_timing"
+                        if len(successful) == self.measure_runs and not timing_valid
                         else "invalid_reuse"
                         if len(successful) == self.measure_runs
                         else "failed"
