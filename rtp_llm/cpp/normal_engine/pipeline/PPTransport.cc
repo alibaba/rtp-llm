@@ -38,7 +38,6 @@ NcclPPTransport::NcclPPTransport(int64_t previous_rank, int64_t next_rank):
 
 std::unique_ptr<PPCommTicket> NcclPPTransport::asyncSend(const torch::Tensor& tensor) {
 #if USING_CUDA
-    RTP_LLM_CHECK_WITH_INFO(tensor.is_cuda(), "PP send is unavailable");
     return std::make_unique<NcclPPCommTicket>(tensor, execISend(tensor, next_rank_));
 #else
     (void)tensor;
@@ -48,7 +47,6 @@ std::unique_ptr<PPCommTicket> NcclPPTransport::asyncSend(const torch::Tensor& te
 
 std::unique_ptr<PPCommTicket> NcclPPTransport::asyncReceive(torch::Tensor& tensor) {
 #if USING_CUDA
-    RTP_LLM_CHECK_WITH_INFO(tensor.is_cuda(), "PP receive is unavailable");
     return std::make_unique<NcclPPCommTicket>(tensor, execIRecv(tensor, previous_rank_));
 #else
     (void)tensor;

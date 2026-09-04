@@ -344,11 +344,18 @@ def _create_process_groups(
                         backend=backend,
                         timeout=timedelta(days=36500),
                     )
+                    # Gloo twin of the lane group for CPU-object transport.
+                    pp_gloo_group = torch.distributed.new_group(
+                        ranks=pp_ranks,
+                        backend="gloo",
+                        timeout=timedelta(days=36500),
+                    )
                     if world_rank in pp_ranks:
                         group_key = Group.PP.name + str(
                             dp_rank_val * tp_size + tp_rank_val
                         )
                         _group_map[group_key] = pp_group
+                        _group_map[group_key + "_gloo"] = pp_gloo_group
                         logging.info(
                             f"[rank: {world_rank}] Stored PP group with key: {group_key} {pp_group} with ranks: {pp_ranks}"
                         )
@@ -563,7 +570,9 @@ def _register_process_groups_to_cpp():
         and _parallelism_config is not None
         and _parallelism_config.pp_size > 1
     ):
-        register_pp_process_group(_get_group(Group.PP))
+        register_pp_process_group(
+            _get_group(Group.PP), _get_group(Group.PP, cpu_backend=True)
+        )
         logging.info("Registered PP communication callbacks (p2p + snapshot exchange)")
 
     # Bootstrap the UDS-backed intra-node TP broadcaster right after new_group.
@@ -592,11 +601,13 @@ def _register_process_groups_to_cpp():
 
 def register_pp_process_group(
     process_group: torch.distributed.ProcessGroup,
+    cpu_process_group: torch.distributed.ProcessGroup,
 ) -> None:
     """Register all PP communication callbacks in one call.
 
-    isend/irecv bind the passed group and take global world ranks as peer;
-    the snapshot exchange is fixed to the PP lane group.
+    isend/irecv take global world ranks as peer and route by tensor device:
+    CUDA tensors go to the NCCL group, CPU tensors to the gloo group.
+    The snapshot exchange uses the gloo group.
     """
     import librtp_compute_ops
 
@@ -617,7 +628,7 @@ def register_pp_process_group(
         work = torch.distributed.isend(
             tensor,
             dst=_check_peer(global_peer),
-            group=process_group,
+            group=process_group if tensor.is_cuda else cpu_process_group,
         )
         if work is None:
             raise RuntimeError("isend returned no work")
@@ -627,7 +638,7 @@ def register_pp_process_group(
         work = torch.distributed.irecv(
             tensor,
             src=_check_peer(global_peer),
-            group=process_group,
+            group=process_group if tensor.is_cuda else cpu_process_group,
         )
         if work is None:
             raise RuntimeError("irecv returned no work")
@@ -635,9 +646,10 @@ def register_pp_process_group(
 
     # all_gather_object preserves group-rank order, so the list is indexed by pp_rank.
     def cpp_pp_snapshot_exchange(snapshot_bytes: bytes) -> List[bytes]:
-        pg = _get_group(Group.PP)
-        payloads: List[bytes] = [b""] * pg.size()
-        torch.distributed.all_gather_object(payloads, snapshot_bytes, group=pg)
+        payloads: List[bytes] = [b""] * cpu_process_group.size()
+        torch.distributed.all_gather_object(
+            payloads, snapshot_bytes, group=cpu_process_group
+        )
         return payloads
 
     librtp_compute_ops.register_pp_ops(cpp_isend, cpp_irecv, cpp_pp_snapshot_exchange)
@@ -735,7 +747,9 @@ def destroy_distributed_environment():
     gc.collect()
 
 
-def _get_group(group: Group) -> torch.distributed.ProcessGroup:
+def _get_group(
+    group: Group, cpu_backend: bool = False
+) -> torch.distributed.ProcessGroup:
     """Get process group for the specified group type.
 
     This function checks if the distributed environment is initialized.
@@ -743,6 +757,8 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
 
     Args:
         group: Group type (DP, TP, or DP_AND_TP)
+        cpu_backend: Only valid for Group.PP; selects the gloo twin group
+            used for CPU-object transport.
 
     Returns:
         Process group for the specified group type
@@ -751,6 +767,8 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
         RuntimeError: If distributed environment is not initialized and cannot be auto-initialized
         ValueError: If group type is invalid
     """
+    if cpu_backend and group != Group.PP:
+        raise ValueError("cpu_backend is only supported for the PP group")
     global _parallelism_config, _initialized
 
     # Check if we need to initialize
@@ -787,6 +805,8 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
         tp_rank = rank % tp_size
         dp_rank = (rank // tp_size) % dp_size
         group_key = Group.PP.name + str(dp_rank * tp_size + tp_rank)
+        if cpu_backend:
+            group_key = group_key + "_gloo"
     else:
         # DP_AND_TP always uses Group.DP_AND_TP as key
         group_key = Group.DP_AND_TP

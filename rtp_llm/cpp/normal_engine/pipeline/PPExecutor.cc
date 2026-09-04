@@ -53,22 +53,20 @@ void PPExecutor::InflightBatch::reset() {
 }
 
 void PPExecutor::sendObject(const torch::Tensor& object, PPTickets& tickets) {
-    auto object_size      = torch::tensor({object.numel()}, torch::kInt64).to(torch::kCUDA);
-    auto object_on_device = object.to(torch::kCUDA);
+    auto object_size = torch::tensor({object.numel()}, torch::kInt64);
     tickets.push_back(transport_->asyncSend(object_size));
-    tickets.push_back(transport_->asyncSend(object_on_device));
+    tickets.push_back(transport_->asyncSend(object));
 }
 
 torch::Tensor PPExecutor::receiveObject() {
-    auto object_size  = torch::empty({1}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
+    auto object_size  = torch::empty({1}, torch::TensorOptions().dtype(torch::kInt64));
     auto size_receive = transport_->asyncReceive(object_size);
     size_receive->wait();
 
-    auto object =
-        torch::empty({object_size.item<int64_t>()}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    auto object         = torch::empty({object_size.item<int64_t>()}, torch::TensorOptions().dtype(torch::kUInt8));
     auto object_receive = transport_->asyncReceive(object);
     object_receive->wait();
-    return object.cpu();
+    return object;
 }
 
 void PPExecutor::asyncSendPlan(const PPExecutionPlan& plan, bool empty_plan, PPTickets& tickets) {
