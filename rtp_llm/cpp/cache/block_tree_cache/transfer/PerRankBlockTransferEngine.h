@@ -15,6 +15,7 @@
 namespace rtp_llm {
 
 class BlockTreeCacheMetricsReporter;
+class BlockTreeCache;
 
 namespace block_tree_cache_test {
 class BlockTreeCacheTestPeer;
@@ -45,6 +46,7 @@ public:
     }
 
 private:
+    friend class BlockTreeCache;
     friend class block_tree_cache_test::BlockTreeCacheTestPeer;
 
     TransferStatus        execute(const std::vector<HostBufferView>&     hosts,

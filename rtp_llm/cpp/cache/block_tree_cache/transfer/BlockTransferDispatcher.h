@@ -13,6 +13,7 @@ namespace rtp_llm {
 class MultiRankBlockTransferEngine;
 class PerRankBlockTransferEngine;
 class BlockTreeCacheMetricsReporter;
+class BlockTreeCache;
 
 namespace block_tree_cache_test {
 class BlockTreeCacheTestPeer;
@@ -44,6 +45,7 @@ public:
     void setMetricsReporter(BlockTreeCacheMetricsReporter* metrics_reporter) const;
 
 private:
+    friend class BlockTreeCache;
     friend class block_tree_cache_test::BlockTreeCacheTestPeer;
 
     std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine_;
