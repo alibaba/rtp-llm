@@ -145,6 +145,7 @@ requirement(names = [
     "watchdog",
     "zstandard",
     "xgrammar",
+    "epsilon",
 ] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
 
 
@@ -175,6 +176,7 @@ py_library(
         ":prettytable",
         ":psutil",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
+        ":epsilon",
     ] + arch_dep + internal_deps()
 )
 
