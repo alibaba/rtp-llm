@@ -75,6 +75,36 @@ def parse_args() -> Tuple[argparse.Namespace, List[str]]:
     )
     perf.add_argument("--decode_test_length", type=int, default=10)
     perf.add_argument(
+        "--cache_grid_json",
+        type=str,
+        default="",
+        help=(
+            "JSON describing an explicit total-seq x prefix-cache grid. "
+            "Each case inserts a prefix, then verifies aux_info.reuse_len."
+        ),
+    )
+    perf.add_argument(
+        "--cache_measure_runs",
+        type=int,
+        default=3,
+        help="Measured requests per cache-grid case (default: 3)",
+    )
+    perf.add_argument(
+        "--cache_request_timeout",
+        type=int,
+        default=int(os.environ.get("PERF_REQUEST_TIMEOUT", "7200")),
+        help="Per-request timeout in seconds for cache-grid mode (default: 7200)",
+    )
+    perf.add_argument(
+        "--cache_commit_tail_tokens",
+        type=int,
+        default=int(os.environ.get("CACHE_COMMIT_TAIL_TOKENS", "4096")),
+        help=(
+            "Extra seed tokens used to commit the requested cache prefix "
+            "before measurement (default: 4096)"
+        ),
+    )
+    perf.add_argument(
         "--num_measures",
         type=int,
         default=5,
