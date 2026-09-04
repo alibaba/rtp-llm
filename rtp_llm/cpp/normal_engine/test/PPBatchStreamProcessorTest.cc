@@ -131,4 +131,75 @@ TEST_F(PPBatchStreamProcessorTest, MixedReturnSequencesPlanRoundTripAndDispatch)
     EXPECT_EQ(single_stream->completeTokenIdsVec(0), (std::vector<int>{3, 4, 5, 12}));
 }
 
+TEST_F(PPBatchStreamProcessorTest, PromptLogitsPlanResultRoundTripAndDispatch) {
+    ResourceContext resource_context;
+    const auto      model_config = makeModelConfig();
+
+    auto prompt_logits_stream                        = makeStream(resource_context, model_config, 301, {1, 2, 3}, 1);
+    auto regular_stream                              = makeStream(resource_context, model_config, 302, {4, 5}, 1);
+    auto prompt_logits_config                        = prompt_logits_stream->generateConfig();
+    prompt_logits_config->max_new_tokens             = 1;
+    prompt_logits_config->return_prompt_logits       = true;
+    prompt_logits_config->prompt_logits_top_k        = 2;
+    prompt_logits_config->prompt_logits_start        = 1;
+    prompt_logits_config->prompt_logits_end          = 3;
+    prompt_logits_config->return_target_logprob      = true;
+    regular_stream->generateConfig()->max_new_tokens = 1;
+
+    std::list<GenerateStreamPtr> streams{prompt_logits_stream, regular_stream};
+    StreamGroups                 stream_groups(streams);
+    PDSepConfig                  pd_sep_config;
+    ProfilingDebugLoggingConfig  profiling_debug_logging_config;
+    CacheConfig                  cache_config;
+    PPBatchStreamProcessor processor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, true);
+
+    PPExecutionPlan plan;
+    TensorHolder    holder;
+    auto            model_input = processor.gatherModelInput(stream_groups, holder);
+    ASSERT_TRUE(model_input.ok());
+    plan.model_input   = std::move(model_input.value());
+    plan.sampling_plan = processor.gatherSamplingPlan(stream_groups);
+    plan.output_config = processor.gatherOutputConfig(stream_groups);
+
+    auto round_trip_plan = pp_serialization::deserializePlan(pp_serialization::serializePlan(plan, false));
+    EXPECT_TRUE(round_trip_plan.model_input.need_all_logits);
+    ASSERT_EQ(round_trip_plan.output_config.prompt_logits_requests.size(), 2);
+    const auto& prompt_logits_request = round_trip_plan.output_config.prompt_logits_requests[0];
+    EXPECT_TRUE(prompt_logits_request.enabled);
+    EXPECT_EQ(prompt_logits_request.top_k, 2);
+    EXPECT_EQ(prompt_logits_request.start, 1);
+    EXPECT_EQ(prompt_logits_request.end, 3);
+    EXPECT_TRUE(prompt_logits_request.return_target_logprob);
+    EXPECT_FALSE(round_trip_plan.output_config.prompt_logits_requests[1].enabled);
+
+    GptModelOutputs model_output;
+    const auto      token_count = round_trip_plan.model_input.combo_tokens.numel();
+    model_output.all_logits     = torch::arange(token_count * model_config.vocab_size, torch::kFloat32)
+                                  .reshape({token_count, static_cast<int64_t>(model_config.vocab_size)});
+
+    SamplerOutput sampler_output;
+    sampler_output.token_ids = torch::tensor({10, 11}, torch::kInt32).reshape({2, 1});
+    sampler_output.success   = torch::tensor({true, true}, torch::kBool);
+    auto result              = processor.makeExecutionResult(round_trip_plan, model_output, sampler_output);
+    ASSERT_TRUE(result.ok());
+
+    auto round_trip_result =
+        pp_serialization::deserializeExecutionResult(pp_serialization::serializeExecutionResult(result.value()));
+    ASSERT_EQ(round_trip_result.prompt_logits.size(), 2);
+    ASSERT_TRUE(round_trip_result.prompt_logits[0].has_value());
+    EXPECT_FALSE(round_trip_result.prompt_logits[1].has_value());
+    EXPECT_EQ(round_trip_result.prompt_logits[0]->topk_logprobs.sizes().vec(), (std::vector<int64_t>{2, 2}));
+    EXPECT_EQ(round_trip_result.prompt_logits[0]->target_logprobs.numel(), 1);
+
+    ASSERT_TRUE(processor.dispatchExecutionResult(stream_groups, round_trip_result).ok());
+    auto prompt_logits_output = prompt_logits_stream->nextOutput(1000);
+    auto regular_output       = regular_stream->nextOutput(1000);
+    ASSERT_TRUE(prompt_logits_output.ok());
+    ASSERT_TRUE(regular_output.ok());
+    ASSERT_EQ(prompt_logits_output.value().generate_outputs.size(), 1);
+    ASSERT_EQ(regular_output.value().generate_outputs.size(), 1);
+    EXPECT_TRUE(prompt_logits_output.value().generate_outputs[0].prompt_logits.has_value());
+    EXPECT_FALSE(regular_output.value().generate_outputs[0].prompt_logits.has_value());
+}
+
 }  // namespace rtp_llm

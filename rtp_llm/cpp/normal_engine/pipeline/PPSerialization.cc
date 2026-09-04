@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/normal_engine/pipeline/PPSerialization.h"
 
 #include <cstring>
+#include <utility>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
@@ -14,7 +15,7 @@ namespace {
 /* Versioned byte stream; readers bounds-check every field. The tensor
    presence flag encodes definedness so defined-but-empty tensors survive;
    host tensors are rebuilt pinned to match gatherModelInput plan tensors. */
-constexpr uint32_t kVersion = 3;
+constexpr uint32_t kVersion = 4;
 
 struct ByteWriter {
     std::vector<uint8_t> buf;
@@ -351,6 +352,14 @@ void writeOutputConfig(ByteWriter& w, const PPOutputConfig& output_config) {
     w.flag(output_config.return_hidden_states);
     w.flag(output_config.return_all_hidden_states);
     w.val<int32_t>(static_cast<int32_t>(output_config.return_all_probs));
+    w.val<uint64_t>(output_config.prompt_logits_requests.size());
+    for (const auto& request : output_config.prompt_logits_requests) {
+        w.flag(request.enabled);
+        w.val<int32_t>(request.top_k);
+        w.val<int32_t>(request.start);
+        w.val<int32_t>(request.end);
+        w.flag(request.return_target_logprob);
+    }
 }
 
 void readOutputConfig(ByteReader& r, PPOutputConfig& output_config) {
@@ -362,6 +371,15 @@ void readOutputConfig(ByteReader& r, PPOutputConfig& output_config) {
     output_config.return_all_hidden_states = r.flag();
     const auto return_all_probs            = r.val<int32_t>();
     output_config.return_all_probs         = static_cast<ReturnAllProbsMode>(return_all_probs);
+    const auto prompt_logits_request_num   = r.val<uint64_t>();
+    output_config.prompt_logits_requests.resize(prompt_logits_request_num);
+    for (auto& request : output_config.prompt_logits_requests) {
+        request.enabled               = r.flag();
+        request.top_k                 = r.val<int32_t>();
+        request.start                 = r.val<int32_t>();
+        request.end                   = r.val<int32_t>();
+        request.return_target_logprob = r.flag();
+    }
 }
 
 }  // namespace
@@ -414,6 +432,18 @@ torch::Tensor serializeExecutionResult(const PPExecutionResult& result) {
     w.tensor(result.all_probs);
     w.tensor(result.loss);
     w.tensor(result.all_hidden_states);
+    w.val<uint64_t>(result.prompt_logits.size());
+    for (const auto& prompt_logits : result.prompt_logits) {
+        w.flag(prompt_logits.has_value());
+        if (!prompt_logits.has_value()) {
+            continue;
+        }
+        w.tensor(prompt_logits->topk_logprobs);
+        w.tensor(prompt_logits->topk_token_ids);
+        w.tensor(prompt_logits->target_logprobs);
+        w.val<int32_t>(prompt_logits->start_pos);
+        w.val<int32_t>(prompt_logits->end_pos);
+    }
     w.val<uint64_t>(result.processor_errors.size());
     for (const auto& error : result.processor_errors) {
         w.flag(error.has_value());
@@ -441,6 +471,21 @@ PPExecutionResult deserializeExecutionResult(const torch::Tensor& buffer) {
     result.all_probs         = r.tensor();
     result.loss              = r.tensor();
     result.all_hidden_states = r.tensor();
+
+    const auto prompt_logits_num = r.val<uint64_t>();
+    result.prompt_logits.resize(prompt_logits_num);
+    for (auto& prompt_logits : result.prompt_logits) {
+        if (!r.flag()) {
+            continue;
+        }
+        PromptLogitsOutput output;
+        output.topk_logprobs   = r.tensor();
+        output.topk_token_ids  = r.tensor();
+        output.target_logprobs = r.tensor();
+        output.start_pos       = r.val<int32_t>();
+        output.end_pos         = r.val<int32_t>();
+        prompt_logits          = std::move(output);
+    }
 
     const auto processor_error_num = r.val<uint64_t>();
     result.processor_errors.resize(processor_error_num);

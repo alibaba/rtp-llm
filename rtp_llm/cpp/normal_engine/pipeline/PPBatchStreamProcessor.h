@@ -32,6 +32,7 @@ private:
 
     void dispatchSingleStream(const GenerateStreamPtr& stream,
                               const PPExecutionResult& result,
+                              int64_t                  stream_idx,
                               int64_t                  batch_idx,
                               int64_t                  stream_batch_size,
                               int64_t                  token_offset,
