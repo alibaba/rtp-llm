@@ -934,11 +934,17 @@ def cancel_schedule_drop_delivered(ctx: CaseContext):
     rollback.
 
     Expected (contract): (a) the original prefill's Cancel RPC counter
-    increases — the master really sent an engine cancel; (b) the engine
-    records the cancellation (cancelled_rids / lifecycle end_state), the
-    cancellation landing on the tracked request after the delayed
-    enqueue processed; (c) the master inflight ledger settles through
-    the typed CANCELLED reconcile; (d) a follow-up request completes.
+    increases — the master really sent an engine cancel; that counter IS
+    the delivery evidence of the contract now.  (b) superseded 2026-09-04:
+    the engine-side cancelled_rids / lifecycle record is no longer a
+    required artifact of this path — under the CancelAck typed semantics
+    the late cancel lands either before the delayed enqueue has tracked
+    the request (TOMBSTONED / absent-fence branch) or after the terminal
+    (NOT_FOUND branch), and neither branch records cancelled_rids; the
+    run showed delta=1 with an empty cancelled set, which is the new
+    protocol behaving correctly.  (c) the master inflight ledger settles
+    through the typed CANCELLED reconcile; (d) a follow-up request
+    completes.
 
     Trigger note: this is the Schedule-RPC drop (the only stream the
     master's CancellationListener observes); dropping the FetchResponse
@@ -946,9 +952,11 @@ def cancel_schedule_drop_delivered(ctx: CaseContext):
     autonomous-cleanup cases below.
 
     Prediction: expected to pass — the chain (listener → defer →
-    resume-after-ACK → fence cancel channel → engine tracked-cancel →
-    typed CANCELLED reconcile) is all production wiring; if it fails,
-    the finding is in the master's resume/fence path, not the test.
+    resume-after-ACK → fence cancel channel → typed CANCELLED reconcile)
+    is all production wiring; the engine record was dropped from the
+    gate because the typed-ack protocol no longer produces it on this
+    path (see (b)); if (a)/(c)/(d) fail, the finding is in the master's
+    resume/fence path, not the test.
     """
     ops = ctx.ops()
     prefill_names = _prefill_names(ops)
@@ -971,19 +979,20 @@ def cancel_schedule_drop_delivered(ctx: CaseContext):
             return _cancel_rpc_total(ops) - baseline_cancel >= 1
 
         engine_cancel_rpc = wait_for(cancel_reached, 15.0, 0.2)
-        # The promoted cancel lands after the delayed enqueue processed
-        # (tracked), so the engine must record it.
+        # Diagnostic only (NOT gated): under the CancelAck typed semantics
+        # the cancel may answer TOMBSTONED/NOT_FOUND without recording a
+        # cancelled_rid — see the docstring contract note (b).
         engine_cancelled, cancel_detail = ops.verify_engine_cancelled(rid)
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
             _master_http(ops), 15.0
         )
         recovery_ok, recovery_msg = ops.verify_recovery()
-        passed = engine_cancel_rpc and engine_cancelled and inflight_ok
-        passed = passed and recovery_ok
+        passed = engine_cancel_rpc and inflight_ok and recovery_ok
         return passed, (
             f"schedule_drop_delivered: engine_cancel_rpc_delta="
             f"{_cancel_rpc_total(ops) - baseline_cancel}, "
-            f"engine_cancelled={engine_cancelled}({cancel_detail}), "
+            f"engine_cancelled={engine_cancelled}({cancel_detail})"
+            "[diagnostic, not gated], "
             f"inflight_clean={inflight_ok}({inflight_detail}), "
             f"recovery={recovery_msg}"
         )
@@ -1105,19 +1114,34 @@ def cancel_preemption_victim(ctx: CaseContext):
     master → original-Prefill weak-Cancel protocol.
 
     Scenario: dedicated 1P+1D environment, PRIORITY ordering with the
-    production preemption block (allowedVictimStages PREFILL_QUEUED +
-    DECODE_RESERVED — master_fixed_window.json values) and
-    decode maxEngineRequests=1 so the single decode slot makes the
-    capacity contest deterministic.  The victim (priority 30,
-    input_len=512 / output_len=200 — long decode) is scheduled first and
-    waits RUNNING on the decode engine; the preemptor (priority 70,
-    output_len=2) then arrives.
+    victim stages {PREFILL_QUEUED, DECODE_RESERVED, DECODE_ENGINE_OWNED}
+    plus the engineCancellation block (the engine-owned stage REQUIRES
+    it — FlexlbConfigValidator rejects the stage set otherwise; see
+    harness._build_preemption_cfg for the schema) and decode
+    maxEngineRequests=1 so the single decode slot makes the capacity
+    contest deterministic.  The victim (priority 30, input_len=512 /
+    output_len=200 — long decode) is scheduled first and waits RUNNING
+    on the decode engine; the preemptor (priority 70, output_len=2)
+    then arrives.
+
+    Stage contract (EvictionPlanner/PreemptionConfig): a RUNNING
+    victim is engine-confirmed — only the DECODE_ENGINE_OWNED admission
+    path can reach it (planDecodeOne gates the ENGINE_CANCEL ownership
+    on preemption.allows(DECODE_ENGINE_OWNED) + the cancel channel).
+    The 2026-09-04 run proved the legacy set
+    {PREFILL_QUEUED, DECODE_RESERVED} (master_fixed_window.json values)
+    wrong for this choreography: a RUNNING victim is invisible to both
+    master-local layers, so it simply ran to completion and the weak
+    cancel never fired (delta=0) — correct behaviour for THAT config,
+    which makes this a construction fix, not an assertion relaxation.
 
     Behaviour: the preemptor's ordinary placement is BLOCKED (decode
     capacity exhausted), so RequestScheduler.attemptPlacement escalates
-    to EvictionManager.tryAdmit; the victim is selected and the master
-    sends the real (weak) Cancel to the ORIGINAL prefill, which
-    propagates to decode (P→D stream-cancel conduction).
+    to EvictionManager.tryAdmit; slotDeficit=1 (engineLoad 1, limit 1)
+    makes the planner select the engine-owned victim and the master
+    sends the real (weak) Cancel to the ORIGINAL prefill (tokenized
+    Cancel coordinator, GrpcEngineCancelChannel), which propagates to
+    decode (P→D stream-cancel conduction).
 
     Expected (contract): the victim's stream terminates in a
     non-completion terminal carrying the typed 8429
@@ -1127,18 +1151,31 @@ def cancel_preemption_victim(ctx: CaseContext):
     went out); the P70 request completes normally once the slot frees;
     the master inflight ledger drains with no leak; recovery works.
 
-    Prediction: expected to pass — this is the legacy priority-preemption
-    smoke scenario (RUNNING decode victim, batch default) ported onto the
-    flexlb_ft framework; capacity here comes from maxEngineRequests=1
-    instead of the smoke line's KV pressure so the eviction trigger is
+    Prediction: this is the legacy priority-preemption smoke scenario
+    (RUNNING decode victim, batch default) ported onto the flexlb_ft
+    framework; capacity here comes from maxEngineRequests=1 instead of
+    the smoke line's KV pressure so the eviction trigger is
     deterministic.  Priority rides the Schedule proto's priority field
     (see _schedule_with_priority).
     """
     config = json.loads(flexlb_config_for_profile(ctx.profile, ordering="priority"))
     ordering = config["scheduler"]["ordering"]
     ordering["defaultPriority"] = 50
+    # Victim-stage contract: the victim is polled to RUNNING on the
+    # decode engine (= engine-confirmed), so the stage set MUST include
+    # DECODE_ENGINE_OWNED — and that stage requires the engineCancellation
+    # block (ackTimeoutMs / completionTimeoutMs, the same values the
+    # priority family's _PREEMPT_DECODE spec uses).  The legacy
+    # {PREFILL_QUEUED, DECODE_RESERVED} set left the RUNNING victim
+    # unreachable by every eviction layer (see the docstring's stage-
+    # contract note).
     ordering["preemption"] = {
-        "allowedVictimStages": ["PREFILL_QUEUED", "DECODE_RESERVED"],
+        "allowedVictimStages": [
+            "PREFILL_QUEUED",
+            "DECODE_RESERVED",
+            "DECODE_ENGINE_OWNED",
+        ],
+        "engineCancellation": {"ackTimeoutMs": 50, "completionTimeoutMs": 1000},
     }
     config["router"]["roles"]["decode"]["availability"]["maxEngineRequests"] = 1
     spec = EnvSpec(

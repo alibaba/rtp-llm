@@ -890,18 +890,32 @@ def _o1_spec(ctx: CaseContext) -> EnvSpec:
 
 def _q3_spec(ctx: CaseContext) -> EnvSpec:
     """ENV-Q3 (A5, Mark P1-3/PR3): metric-plane normalization env — Q1
-    config plus FLEXLB_MONITOR_MODE=all.  auto_tpm.request.count{priority=..}
+    config plus the metric-whitelist entry exposing
+    auto_tpm.request.count.  auto_tpm.request.count{priority=..}
     is counted at the schedule RPC entry for EVERY request regardless of
     outcome (FlexlbServiceImpl:723), which keeps the proto-vs-header
     channel discrimination observable even while capacity-blocked
     submitters park in the intake3 coordinator; the shared ENV-P0/Q1/F1
     specs cannot serve it because the default critical-only metrics
-    filter hides auto_tpm.*."""
+    filter hides auto_tpm.*.
+
+    [2026-09-04] FLEXLB_MONITOR_MODE=all is DEAD on the v2 line — the
+    single configurable exposure filter is flexlb.monitor.metric-
+    whitelist (env FLEXLB_MONITOR_METRIC_WHITELIST via relaxed binding;
+    WhitelistMetricsFilterConfig), whose default preset keeps only the
+    six core link-latency metrics, so the old env var silently left
+    auto_tpm.* hidden and prio_normalize's segment 4 scraped None
+    buckets (2026-09-04 run).  The spec now pins the exact
+    prometheus-form prefix flexlb_auto_tpm_request_count — the same
+    entry the run_online_eval.sh collector whitelist uses — exposing
+    exactly the series segment 4 sums (a bare "flexlb_" would expose
+    the whole flexlb_* family; the minimal entry keeps the Q3 env's
+    exposition surface tight)."""
     return _spec(
         ctx,
         "prio_q3",
         config=_prio_config(),
-        extra_env={"FLEXLB_MONITOR_MODE": "all"},
+        extra_env={"FLEXLB_MONITOR_METRIC_WHITELIST": "flexlb_auto_tpm_request_count"},
     )
 
 
@@ -1317,10 +1331,16 @@ def prio_normalize(ctx: CaseContext):
     input) + C(no input → 50) + A(proto 70, header 30 — proto must win)
     + B(proto unset, header 70 — header must take effect) + G(explicit
     70).  [EV-1-FIXED] Under the intake3 pull-based coordinator the wave
-    parks whole and dispatches [ph, C, A, B, G]: C (the wave's first
-    submitter) legitimately wins the first release slot, then the
-    70-group A/B/G follows in submit order (a failed channel reorders
-    the tail and flips the assertion).  The source's FIFO-profile half
+    parks whole behind the placeholder.  [2026-09 recalibration] the
+    post-codex admission release is pure priority-desc: observed
+    dispatch [ph, A, B, G, C] — intake3's first-parker special case
+    (C, the wave's first submitter, winning the first release slot) is
+    gone; the assertion is now STRUCTURAL, not exact-sequence (the
+    exact form lagged twice already — intake3, then codex admission):
+    the 70-group A/B/G must precede C (either channel failing demotes
+    that member to <=50 and behind C), the group must keep submit
+    order A→B→G (FIFO survives park→release), and all settle code=200.
+    The source's FIFO-profile half
     (F1 control env) is not profile-reachable on this line; the FIFO
     control lives separately in atpm_comparator_frozen_weak's fifo_half.
     Implementation-period note: design §2.2 sketched this segment without
@@ -1410,18 +1430,37 @@ def prio_normalize(ctx: CaseContext):
         s2_fires.extend(_fire_batch(ops2, s2_specs))
         s2_outcomes = _drain(ops2, s2_fires)
         s2_order = _dispatch_order(ops2, s2_fires)
-        # [EV-1-FIXED] baseline flipped at intake3 PendingPlacementCoordinator
-        # (6ad0315f10): the four-request wave parks whole and dispatches
-        # [ph, C, A, B, G] — C (no input -> default 50) is the wave's first
-        # submitter and wins the first release slot, then the 70-group A/B/G
-        # follows in submit order (proto won for A, header took effect for
-        # B — a failed channel reorders the tail and flips the assertion).
-        # All four settle code=200.
+        # [2026-09 recalibration, post-codex admission] the wave parks
+        # whole behind the placeholder and releases pure priority-desc:
+        # observed [ph, A, B, G, C] (intake3's first-parker slot-win is
+        # gone).  Structural form (sep-anchored like _two_cluster_split,
+        # robust to release-order drift that does not cross a priority
+        # group): (i) the placeholder and every wave member dispatched;
+        # (ii) the placeholder is first (it held the slot before the
+        # wave parked); (iii) the 70-group A/B/G strictly precedes C —
+        # proto must win for A (a header-loser A lands 30, behind C's
+        # 50) and the header must take effect for B (a default-loser B
+        # ties C at 50 and FIFO puts submitted-later B behind
+        # first-submitter C); (iv) the 70-group keeps submit order
+        # A→B→G (FIFO survives park→release); (v) all settle code=200.
         s2_m = _outcome_map(s2_outcomes)
         s2_wave = [c_rid, a_rid, b_rid, g_rid]
-        s2_expected = [ph2, c_rid, a_rid, b_rid, g_rid]
+        _s2_miss = len(s2_order) + 99  # sentinel: never dispatched
+        s2_pos = {
+            rid: (s2_order.index(rid) if rid in s2_order else _s2_miss)
+            for rid in (ph2, c_rid, a_rid, b_rid, g_rid)
+        }
+        s2_all = all(p < _s2_miss for p in s2_pos.values())
+        s2_ph_first = s2_pos[ph2] == 0
+        s2_group_before_c = all(
+            s2_pos[r] < s2_pos[c_rid] for r in (a_rid, b_rid, g_rid)
+        )
+        s2_fifo_in_group = s2_pos[a_rid] < s2_pos[b_rid] < s2_pos[g_rid]
         s2_ok = (
-            s2_order == s2_expected
+            s2_all
+            and s2_ph_first
+            and s2_group_before_c
+            and s2_fifo_in_group
             and s2_m[ph2][0]
             and all(s2_m[r][0] for r in s2_wave)
         )
@@ -1429,10 +1468,11 @@ def prio_normalize(ctx: CaseContext):
             (
                 "proto_header_default_ev1_fixed",
                 s2_ok,
-                f"[EV-1-FIXED] dispatch==[ph,C,A,B,G]:"
-                f"{s2_order == s2_expected}, "
-                f"codes={[(r % 1_000_000, s2_m[r][1]) for r in s2_wave]}, "
-                f"order={[r % 1_000_000 for r in s2_order]}",
+                f"[2026-09 recal] dispatch="
+                f"{[r % 1_000_000 for r in s2_order]} "
+                f"(structural: ph first, 70-group A/B/G before C, "
+                f"FIFO in group, all code=200), "
+                f"codes={[(r % 1_000_000, s2_m[r][1]) for r in s2_wave]}",
             )
         )
         hygiene.append((ops2, s2_fires, p2_names))
@@ -1508,12 +1548,14 @@ def prio_normalize(ctx: CaseContext):
         p6_flags.append(s3_m[ph3][0] and all(s3_m[r][0] for r in s3_wave) and clean_ok)
 
         # -- segment 4 (A5): channel discrimination, metric plane -------
-        # Needs its own env (FLEXLB_MONITOR_MODE=all): the shared env /
-        # Q1 specs run the default critical-only metrics filter that
-        # hides auto_tpm.*.  Fresh env means the counters start at zero,
-        # so the expected buckets are absolute.  Buckets count at the
-        # schedule RPC entry regardless of outcome — EV-1 cannot block
-        # this observation plane.
+        # Needs its own env (ENV-Q3): the default critical-only metrics
+        # whitelist (six link-latency presets) hides auto_tpm.*, and the
+        # v2 filter has NO mode switch — the whitelist entry
+        # flexlb_auto_tpm_request_count is what exposes the series (see
+        # the _q3_spec docstring).  Fresh env means the counters start
+        # at zero, so the expected buckets are absolute.  Buckets count
+        # at the schedule RPC entry regardless of outcome — EV-1 cannot
+        # block this observation plane.
         env4 = ctx.env_manager.ensure(_q3_spec(ctx))
         ops4 = ctx.engine_ops(env4)
         s4_specs = [
@@ -1537,9 +1579,10 @@ def prio_normalize(ctx: CaseContext):
             ops4, [(rid, kw) for rid, (_l, kw) in zip(s4_rids, s4_specs)]
         )
         _drain(ops4, s4_fires)  # terminals only — buckets count regardless
+        s4_samples = _scrape_master_metrics(ops4)
         s4_buckets = {
             p: _metric_sum(
-                _scrape_master_metrics(ops4),
+                s4_samples,
                 "auto_tpm_request",
                 {"priority": str(p)},
             )
@@ -1557,7 +1600,9 @@ def prio_normalize(ctx: CaseContext):
                 "channel_discrimination_metric_plane",
                 s4_ok,
                 f"buckets={ {p: s4_buckets[p] for p in s4_buckets} } "
-                f"(expected 70:1, 30:1, 50:1)",
+                f"(expected 70:1, 30:1, 50:1), "
+                f"auto_tpm_lines="
+                f"{_metric_lines(s4_samples, 'auto_tpm_request')}",
             )
         )
         hygiene.append((ops4, s4_fires, _prefill_names(ops4)))
