@@ -30,9 +30,7 @@ class LocalStandbyCacheIndex {
     private static final int PRESSURE_CHECKS_BEFORE_CLEANUP = 2;
     private static final double FULL_SCAN_TRIGGER_RATIO = 0.9;
 
-    private final long ttlNanos;
-    private final long minimumTtlNanos;
-    private final double ttlReductionStartRatio;
+    private volatile ExpirationSettings expirationSettings;
     private final boolean automaticCleanupEnabled;
     private final ConcurrentHashMap<Long, ConcurrentHashMap<String, Long>> blockToEnginesMap = new ConcurrentHashMap<>();
     // Prevent duplicate request-triggered full scans from being queued or run concurrently.
@@ -48,9 +46,7 @@ class LocalStandbyCacheIndex {
                            double ttlReductionStartRatio,
                            long maximumEntries,
                            boolean enabled) {
-        this.ttlNanos = TimeUnit.MILLISECONDS.toNanos(ttlMs);
-        this.minimumTtlNanos = TimeUnit.MILLISECONDS.toNanos(minimumTtlMs);
-        this.ttlReductionStartRatio = ttlReductionStartRatio;
+        this.expirationSettings = expirationSettings(ttlMs, minimumTtlMs, ttlReductionStartRatio);
         this.maximumEntries = maximumEntries;
         this.automaticCleanupEnabled = enabled;
         this.cleanupExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
@@ -131,6 +127,10 @@ class LocalStandbyCacheIndex {
         requestHighWatermarkCleanupIfNeeded();
     }
 
+    void updateExpirationSettings(long ttlMs, long minimumTtlMs, double ttlReductionStartRatio) {
+        expirationSettings = expirationSettings(ttlMs, minimumTtlMs, ttlReductionStartRatio);
+    }
+
     long maximumEntryCount() {
         return maximumEntries;
     }
@@ -179,29 +179,30 @@ class LocalStandbyCacheIndex {
     }
 
     int checksBeforeCleanup() {
-        if (capacityUsageRatio() >= ttlReductionStartRatio) {
+        if (capacityUsageRatio() >= expirationSettings.ttlReductionStartRatio()) {
             return PRESSURE_CHECKS_BEFORE_CLEANUP;
         }
         return NORMAL_CHECKS_BEFORE_CLEANUP;
     }
 
     long effectiveTtlNanos() {
+        ExpirationSettings settings = expirationSettings;
         if (maximumEntries <= 0 || mappingCount.get() <= 0) {
-            return ttlNanos;
+            return settings.ttlNanos();
         }
 
         double usageRatio = capacityUsageRatio();
-        if (usageRatio <= ttlReductionStartRatio) {
-            return ttlNanos;
+        if (usageRatio <= settings.ttlReductionStartRatio()) {
+            return settings.ttlNanos();
         }
         if (usageRatio >= 1.0) {
-            return minimumTtlNanos;
+            return settings.minimumTtlNanos();
         }
 
         double reductionProgress =
-                (usageRatio - ttlReductionStartRatio) / (1.0 - ttlReductionStartRatio);
-        long ttlRange = ttlNanos - minimumTtlNanos;
-        return ttlNanos - (long) (ttlRange * reductionProgress);
+                (usageRatio - settings.ttlReductionStartRatio()) / (1.0 - settings.ttlReductionStartRatio());
+        long ttlRange = settings.ttlNanos() - settings.minimumTtlNanos();
+        return settings.ttlNanos() - (long) (ttlRange * reductionProgress);
     }
 
     void removeExpiredMappingsBatch() {
@@ -210,7 +211,7 @@ class LocalStandbyCacheIndex {
              * Normal cleanup scans about 10% of block hashes. After the configured pressure
              * threshold, each pass scans about 20%.
              */
-            int batchDivisor = capacityUsageRatio() >= ttlReductionStartRatio
+            int batchDivisor = capacityUsageRatio() >= expirationSettings.ttlReductionStartRatio()
                     ? PRESSURE_CLEANUP_BATCH_DIVISOR
                     : NORMAL_CLEANUP_BATCH_DIVISOR;
             int blockBatchSize = Math.max(1, (blockToEnginesMap.size() + batchDivisor - 1)
@@ -291,7 +292,17 @@ class LocalStandbyCacheIndex {
         return currentTimeNanos - lastUpdatedNanos >= effectiveTtlNanos;
     }
 
+    private ExpirationSettings expirationSettings(long ttlMs, long minimumTtlMs, double ttlReductionStartRatio) {
+        return new ExpirationSettings(
+                TimeUnit.MILLISECONDS.toNanos(ttlMs),
+                TimeUnit.MILLISECONDS.toNanos(minimumTtlMs),
+                ttlReductionStartRatio);
+    }
+
     private double capacityUsageRatio() {
         return maximumEntries <= 0 ? 0 : (double) mappingCount.get() / maximumEntries;
+    }
+
+    private record ExpirationSettings(long ttlNanos, long minimumTtlNanos, double ttlReductionStartRatio) {
     }
 }

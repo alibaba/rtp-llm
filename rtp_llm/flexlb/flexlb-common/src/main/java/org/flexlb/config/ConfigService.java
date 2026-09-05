@@ -14,8 +14,10 @@ import javax.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 /**
  * Loads the strict FLEXLB_CONFIG document and the independent MODEL_SERVICE_CONFIG document.
@@ -30,8 +32,9 @@ public class ConfigService {
 
     private final AtomicReference<FlexlbConfig> currentFlexlbConfig;
     private final AtomicReference<ServiceRoute> currentModelServiceConfig;
-    private final List<Consumer<FlexlbConfig>> updateListeners = new ArrayList<>();
+    private final List<ConfigUpdateListener> updateListeners = new ArrayList<>();
     private final Object updateLock = new Object();
+    private final Object notificationLock = new Object();
     private int configSchemaVersion = ConfigSchemaVersion.V0_COMPATIBILITY;
 
     public ConfigService(List<ConfigDocumentParser> parsers) {
@@ -60,9 +63,25 @@ public class ConfigService {
     }
 
     public void addUpdateListener(Consumer<FlexlbConfig> listener) {
-        synchronized (updateLock) {
-            updateListeners.add(listener);
-            listener.accept(currentFlexlbConfig.get());
+        addUpdateListener(Function.identity(), listener);
+    }
+
+    /**
+     * Replays the current projected setting and applies subsequent changes in update order.
+     * Projections must be side-effect free; appliers run outside the snapshot lock.
+     */
+    public <T> void addUpdateListener(Function<FlexlbConfig, T> projection, Consumer<T> listener) {
+        Objects.requireNonNull(projection);
+        Objects.requireNonNull(listener);
+        synchronized (notificationLock) {
+            T initialValue;
+            synchronized (updateLock) {
+                initialValue = projection.apply(currentFlexlbConfig.get());
+            }
+            listener.accept(initialValue);
+            synchronized (updateLock) {
+                updateListeners.add(new ProjectedConfigUpdateListener<>(projection, listener, initialValue));
+            }
         }
     }
 
@@ -106,19 +125,30 @@ public class ConfigService {
     }
 
     private void receiveConfigUpdate(ConfigSource source, String content) {
-        synchronized (updateLock) {
+        synchronized (notificationLock) {
             try {
-                FlexlbConfig previous = currentFlexlbConfig.get();
-                NormalizedConfig normalized = source.normalize(content);
-                FlexlbConfig updated = FlexlbConfigMerger.merge(previous, normalized.flexlbConfig(), source.name());
-                if (updated == previous) {
-                    log.info("Ignored empty FlexLB configuration update from {} source",
-                            source.name());
-                    return;
+                List<Runnable> notifications;
+                FlexlbConfig updated;
+                synchronized (updateLock) {
+                    FlexlbConfig previous = currentFlexlbConfig.get();
+                    NormalizedConfig normalized = source.normalize(content);
+                    updated = FlexlbConfigMerger.merge(previous, normalized.flexlbConfig(), source.name());
+                    if (updated == previous) {
+                        log.info("Ignored empty FlexLB configuration update from {} source", source.name());
+                        return;
+                    }
+                    notifications = updateListeners.stream()
+                            .map(listener -> listener.prepareUpdate(updated)).toList();
+                    currentFlexlbConfig.set(updated);
+                    configSchemaVersion = normalized.sourceSchemaVersion();
                 }
-                currentFlexlbConfig.set(updated);
-                configSchemaVersion = normalized.sourceSchemaVersion();
-                notifyUpdateListeners(updated);
+                for (Runnable notification : notifications) {
+                    try {
+                        notification.run();
+                    } catch (RuntimeException error) {
+                        log.error("FlexLB configuration update listener failed", error);
+                    }
+                }
                 logEffectiveConfig(updated, configSchemaVersion);
                 log.info("Applied FlexLB configuration update from {} source", source.name());
             } catch (Exception error) {
@@ -129,13 +159,33 @@ public class ConfigService {
         }
     }
 
-    private void notifyUpdateListeners(FlexlbConfig config) {
-        for (Consumer<FlexlbConfig> listener : updateListeners) {
-            try {
-                listener.accept(config);
-            } catch (RuntimeException error) {
-                log.error("FlexLB configuration update listener failed", error);
+    private interface ConfigUpdateListener {
+        Runnable prepareUpdate(FlexlbConfig config);
+    }
+
+    /** Tracks the last successfully applied value so later updates retry failed appliers. */
+    private static final class ProjectedConfigUpdateListener<T> implements ConfigUpdateListener {
+        private final Function<FlexlbConfig, T> projection;
+        private final Consumer<T> listener;
+        private T currentValue;
+
+        private ProjectedConfigUpdateListener(Function<FlexlbConfig, T> projection,
+                                                Consumer<T> listener, T initialValue) {
+            this.projection = projection;
+            this.listener = listener;
+            this.currentValue = initialValue;
+        }
+
+        @Override
+        public Runnable prepareUpdate(FlexlbConfig config) {
+            T updatedValue = projection.apply(config);
+            if (Objects.equals(currentValue, updatedValue)) {
+                return () -> {};
             }
+            return () -> {
+                listener.accept(updatedValue);
+                currentValue = updatedValue;
+            };
         }
     }
 

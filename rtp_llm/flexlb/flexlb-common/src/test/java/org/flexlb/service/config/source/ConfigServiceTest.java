@@ -12,13 +12,22 @@ import org.flexlb.service.config.ConfigSource;
 import org.flexlb.service.config.parser.StandardConfigDocumentParser;
 import org.flexlb.service.config.parser.V0ConfigDocumentParser;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -377,6 +386,160 @@ class ConfigServiceTest {
         assertThat(source.closed).isTrue();
     }
 
+    @Test
+    void publishesOnlyChangedValidatedRuntimeSettings() {
+        FakeConfigSource source = new FakeConfigSource("Nacos", 200, "{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":9}}");
+        ConfigService service = createService(List.of(
+                environmentSource(Map.of()),
+                source));
+        List<Long> updates = new ArrayList<>();
+
+        service.addUpdateListener(config -> {
+            long hysteresisPercent = config.getRouter().getAvailabilityHysteresisPercent();
+            if (hysteresisPercent == 12) {
+                throw new IllegalArgumentException("projection rejects 12");
+            }
+            return hysteresisPercent;
+        }, updates::add);
+        source.emit("{\"schemaVersion\":1,\"enableFallback\":true}");
+        assertThat(updates).containsExactly(9L);
+        FlexlbConfig lastKnownGood = service.loadBalanceConfig();
+
+        source.emit("{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":12}}");
+        assertThat(service.loadBalanceConfig()).isSameAs(lastKnownGood);
+        assertThat(updates).containsExactly(9L);
+
+        source.emit("{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":10}}");
+        assertThat(service.loadBalanceConfig()).isNotSameAs(lastKnownGood);
+        assertThat(updates).containsExactly(9L, 10L);
+    }
+
+    @Test
+    void continuesNotifyingOtherRuntimeSettingsWhenOneApplierFails() {
+        FakeConfigSource source = new FakeConfigSource("Nacos", 200, "{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":9}}");
+        ConfigService service = createService(List.of(
+                environmentSource(Map.of()),
+                source));
+        List<Long> delivered = new ArrayList<>();
+        List<Long> attempted = new ArrayList<>();
+        AtomicBoolean failApplier = new AtomicBoolean(true);
+
+        service.addUpdateListener(config -> config.getRouter().getAvailabilityHysteresisPercent(), value -> {
+            attempted.add(value);
+            if (value == 10 && failApplier.get()) {
+                throw new IllegalStateException("test applier failure");
+            }
+        });
+        service.addUpdateListener(config -> config.getRouter().getAvailabilityHysteresisPercent(), delivered::add);
+
+        source.emit("{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":10}}");
+        failApplier.set(false);
+        source.emit("{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":10}}");
+        source.emit("{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":11}}");
+
+        assertThat(service.loadBalanceConfig().getRouter().getAvailabilityHysteresisPercent()).isEqualTo(11);
+        assertThat(delivered).containsExactly(9L, 10L, 11L);
+        assertThat(attempted).containsExactly(9L, 10L, 10L, 11L);
+    }
+
+    @Test
+    @DisplayName("注册监听器时发生配置更新，不丢失初始回放之后的更新")
+    void doesNotLoseUpdateThatRacesWithListenerRegistration() throws Exception {
+        FakeConfigSource source = new FakeConfigSource("Nacos", 200, "{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":9}}");
+        ConfigService service = createService(List.of(
+                environmentSource(Map.of()),
+                source));
+        List<Long> updates = Collections.synchronizedList(new ArrayList<>());
+        CountDownLatch initialCallbackEntered = new CountDownLatch(1);
+        CountDownLatch allowInitialCallback = new CountDownLatch(1);
+        CountDownLatch updateAttempted = new CountDownLatch(1);
+        CountDownLatch updateCompleted = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        try {
+            Future<?> subscription = executor.submit(() -> service.addUpdateListener(config -> config.getRouter().getAvailabilityHysteresisPercent(), value -> {
+                updates.add(value);
+                if (value == 9) {
+                    initialCallbackEntered.countDown();
+                    awaitCallbackRelease(allowInitialCallback);
+                }
+            }));
+            assertThat(initialCallbackEntered.await(1, TimeUnit.SECONDS)).isTrue();
+
+            Future<?> update = executor.submit(() -> {
+                try {
+                    source.emit("{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":10}}", updateAttempted::countDown);
+                } finally {
+                    updateCompleted.countDown();
+                }
+            });
+            assertThat(updateAttempted.await(1, TimeUnit.SECONDS)).isTrue();
+            assertThat(updateCompleted.await(100, TimeUnit.MILLISECONDS)).isFalse();
+
+            allowInitialCallback.countDown();
+            subscription.get(1, TimeUnit.SECONDS);
+            update.get(1, TimeUnit.SECONDS);
+
+            assertThat(updates).containsExactly(9L, 10L);
+        } finally {
+            allowInitialCallback.countDown();
+            shutdown(executor);
+        }
+    }
+
+    @Test
+    @DisplayName("配置快照先提交，运行时监听器按更新顺序串行执行")
+    void serializesRuntimeCallbacksAfterCommittingTheSnapshot() throws Exception {
+        FakeConfigSource source = new FakeConfigSource("Nacos", 200, "{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":9}}");
+        ConfigService service = createService(List.of(
+                environmentSource(Map.of()),
+                source));
+        List<Long> updates = Collections.synchronizedList(new ArrayList<>());
+        CountDownLatch firstRuntimeCallbackEntered = new CountDownLatch(1);
+        CountDownLatch allowFirstRuntimeCallback = new CountDownLatch(1);
+        CountDownLatch secondUpdateAttempted = new CountDownLatch(1);
+        CountDownLatch secondRuntimeCallbackEntered = new CountDownLatch(1);
+        AtomicInteger activeCallbacks = new AtomicInteger();
+        AtomicInteger maximumConcurrentCallbacks = new AtomicInteger();
+        service.addUpdateListener(config -> config.getRouter().getAvailabilityHysteresisPercent(), value -> {
+            int concurrentCallbacks = activeCallbacks.incrementAndGet();
+            maximumConcurrentCallbacks.updateAndGet(current -> Math.max(current, concurrentCallbacks));
+            try {
+                updates.add(value);
+                if (value == 10) {
+                    firstRuntimeCallbackEntered.countDown();
+                    awaitCallbackRelease(allowFirstRuntimeCallback);
+                } else if (value == 11) {
+                    secondRuntimeCallbackEntered.countDown();
+                }
+            } finally {
+                activeCallbacks.decrementAndGet();
+            }
+        });
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        try {
+            Future<?> firstUpdate = executor.submit(() -> source.emit("{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":10}}"));
+            assertThat(firstRuntimeCallbackEntered.await(1, TimeUnit.SECONDS)).isTrue();
+            assertThat(service.loadBalanceConfig().getRouter().getAvailabilityHysteresisPercent()).isEqualTo(10);
+
+            Future<?> secondUpdate = executor.submit(() ->
+                    source.emit("{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":11}}", secondUpdateAttempted::countDown));
+            assertThat(secondUpdateAttempted.await(1, TimeUnit.SECONDS)).isTrue();
+            assertThat(secondRuntimeCallbackEntered.await(100, TimeUnit.MILLISECONDS)).isFalse();
+
+            allowFirstRuntimeCallback.countDown();
+            firstUpdate.get(1, TimeUnit.SECONDS);
+            secondUpdate.get(1, TimeUnit.SECONDS);
+
+            assertThat(updates).containsExactly(9L, 10L, 11L);
+            assertThat(maximumConcurrentCallbacks).hasValue(1);
+        } finally {
+            allowFirstRuntimeCallback.countDown();
+            shutdown(executor);
+        }
+    }
+
     private ConfigService createService(List<ConfigSource> sources) {
         for (ConfigSource source : sources) {
             if (!(source instanceof EnvironmentConfigSource)) {
@@ -408,6 +571,22 @@ class ConfigServiceTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasStackTraceContaining(expectedMessage);
         assertThat(source.closed).isTrue();
+    }
+
+    private void awaitCallbackRelease(CountDownLatch latch) {
+        try {
+            if (!latch.await(1, TimeUnit.SECONDS)) {
+                throw new AssertionError("Timed out waiting for test callback release");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("Interrupted while waiting for test callback release", e);
+        }
+    }
+
+    private void shutdown(ExecutorService executor) throws InterruptedException {
+        executor.shutdownNow();
+        assertThat(executor.awaitTermination(1, TimeUnit.SECONDS)).isTrue();
     }
 
     private static final class FakeConfigSource implements ConfigSource {
@@ -465,6 +644,11 @@ class ConfigServiceTest {
         @Override
         public void close() {
             closed = true;
+        }
+
+        private void emit(String content, Runnable beforeEmit) {
+            beforeEmit.run();
+            emit(content);
         }
 
         private void emit(String content) {

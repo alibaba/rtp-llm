@@ -3,16 +3,22 @@ package org.flexlb.service.config.source;
 import com.alibaba.nacos.api.config.listener.Listener;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DeploymentIdentity;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.LocalStandbyRuntimeSettings;
 import org.flexlb.dao.nacos.NacosConfig;
 import org.flexlb.service.config.parser.ConfigDocumentParserResolver;
 import org.flexlb.service.config.parser.StandardConfigDocumentParser;
 import org.flexlb.service.config.parser.V0ConfigDocumentParser;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.test.util.ReflectionTestUtils;
 import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -272,6 +278,101 @@ class NacosConfigSourceTest {
 
         verify(client).shutDown();
         configService.close();
+    }
+
+    @Test
+    void appliesAllFiveLocalStandbyRuntimeFieldsFromNacos() throws Exception {
+        try (LocalStandbyNacosContext context = localStandbyNacosContext()) {
+            List<Optional<LocalStandbyRuntimeSettings>> applied = new ArrayList<>();
+            context.service().addUpdateListener(LocalStandbyRuntimeSettings::fromFlexlbConfig, applied::add);
+
+            context.listener().receiveConfigInfo(localStandbyDocument(
+                    "\"maximumEntries\":500,\"capacityMultiplier\":2.0,\"ttlMs\":150,"
+                            + "\"minimumTtlMs\":20,\"ttlReductionStartRatio\":0.7"));
+
+            assertThat(applied).containsExactly(
+                    Optional.of(new LocalStandbyRuntimeSettings(2000, 10.0, 300000, 100000, 0.8)),
+                    Optional.of(new LocalStandbyRuntimeSettings(500, 2.0, 150, 20, 0.7)));
+        }
+    }
+
+    @Test
+    void validStaticLocalStandbyUpdateDoesNotReapplyRuntimeProjection() throws Exception {
+        try (LocalStandbyNacosContext context = localStandbyNacosContext()) {
+            List<Optional<LocalStandbyRuntimeSettings>> applied = new ArrayList<>();
+            context.service().addUpdateListener(LocalStandbyRuntimeSettings::fromFlexlbConfig, applied::add);
+
+            context.listener().receiveConfigInfo(localStandbyDocument("\"autoSwitch\":false"));
+
+            assertThat(context.service().loadBalanceConfig().kvcmCacheMatching()
+                    .getLocalStandby().isAutoSwitch()).isFalse();
+            assertThat(applied).hasSize(1);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "\"maximumEntries\":0", "\"capacityMultiplier\":0.5",
+            "\"ttlMs\":0", "\"minimumTtlMs\":300001",
+            "\"ttlReductionStartRatio\":1.0", "\"hashThreadCount\":0"
+    })
+    void invalidLocalStandbyUpdateKeepsSnapshotAndRuntimeSettings(String invalidField) throws Exception {
+        try (LocalStandbyNacosContext context = localStandbyNacosContext()) {
+            List<Optional<LocalStandbyRuntimeSettings>> applied = new ArrayList<>();
+            context.service().addUpdateListener(LocalStandbyRuntimeSettings::fromFlexlbConfig, applied::add);
+            FlexlbConfig lastKnownGood = context.service().loadBalanceConfig();
+
+            context.listener().receiveConfigInfo(localStandbyDocument(invalidField));
+
+            assertThat(context.service().loadBalanceConfig()).isSameAs(lastKnownGood);
+            assertThat(applied).hasSize(1);
+            context.listener().receiveConfigInfo(localStandbyDocument("\"maximumEntries\":500"));
+            assertThat(context.service().loadBalanceConfig()).isNotSameAs(lastKnownGood);
+            assertThat(applied).containsExactly(
+                    Optional.of(new LocalStandbyRuntimeSettings(2000, 10.0, 300000, 100000, 0.8)),
+                    Optional.of(new LocalStandbyRuntimeSettings(500, 10.0, 300000, 100000, 0.8)));
+        }
+    }
+
+    @Test
+    void localSyncDoesNotBlockUnrelatedUpdatesWithLocalStandbySubscriber() throws Exception {
+        try (LocalStandbyNacosContext context = localStandbyNacosContext()) {
+            context.listener().receiveConfigInfo(
+                    "{\"schemaVersion\":1,\"cacheMatching\":{\"type\":\"LOCAL_SYNC\"}}");
+            List<Optional<LocalStandbyRuntimeSettings>> applied = new ArrayList<>();
+            context.service().addUpdateListener(LocalStandbyRuntimeSettings::fromFlexlbConfig, applied::add);
+
+            context.listener().receiveConfigInfo("{\"schemaVersion\":1,\"enableFallback\":true}");
+
+            assertThat(context.service().loadBalanceConfig().isEnableFallback()).isTrue();
+            assertThat(applied).containsExactly(Optional.empty());
+        }
+    }
+
+    private LocalStandbyNacosContext localStandbyNacosContext() throws Exception {
+        com.alibaba.nacos.api.config.ConfigService client =
+                mock(com.alibaba.nacos.api.config.ConfigService.class);
+        when(client.getConfig("flexlb-test", "FLEXLB_GROUP", 3000L))
+                .thenReturn(localStandbyDocument("\"maximumEntries\":2000"));
+        NacosConfigSource source = createSource(client, "test-namespace");
+        source.initialize();
+        ArgumentCaptor<Listener> listener = ArgumentCaptor.forClass(Listener.class);
+        verify(client).addListener(org.mockito.ArgumentMatchers.eq("flexlb-test"),
+                org.mockito.ArgumentMatchers.eq("FLEXLB_GROUP"), listener.capture());
+        return new LocalStandbyNacosContext(new ConfigService(List.of(
+                new StandardConfigDocumentParser(), new V0ConfigDocumentParser())), listener.getValue());
+    }
+
+    private String localStandbyDocument(String fields) {
+        return "{\"schemaVersion\":1,\"cacheMatching\":{\"type\":\"KVCM\",\"localStandby\":{"
+                + fields + "}}}";
+    }
+
+    private record LocalStandbyNacosContext(ConfigService service, Listener listener) implements AutoCloseable {
+        @Override
+        public void close() {
+            service.close();
+        }
     }
 
     private NacosConfigSource createSource(com.alibaba.nacos.api.config.ConfigService client, String namespace) throws Exception {
