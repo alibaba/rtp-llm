@@ -230,7 +230,7 @@ def _relay_worker(rank: int, world_size: int, init_file: str) -> None:
         dist.barrier()
 
         user_buffers.init_user_buffers_communicator(
-            dist.group.WORLD, rank, world_size, buffer_size=1 << 20
+            dist.group.WORLD, rank, buffer_size=1 << 20
         )
         _run_real_prefix_reuse(rank, use_user_buffers=True)
         torch.cuda.synchronize(device)

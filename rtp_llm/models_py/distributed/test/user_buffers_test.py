@@ -67,34 +67,39 @@ def get_parallelism_config(world_rank, world_size, tp_size, dp_size, port):
 
 # Test functions that operate on a communicator instance
 def _test_basic_properties(
-    comm: UserBufferCommunicator, rank: int, world_size: int, buffer_size: int
+    comm: UserBufferCommunicator,
+    group_rank: int,
+    group_size: int,
+    device_index: int,
+    buffer_size: int,
 ):
-    """Test basic properties of the communicator"""
-    assert comm.local_rank == rank
-    assert comm.world_size == world_size
+    """Test basic properties of the communicator."""
+    assert comm.group_rank == group_rank
+    assert comm.group_size == group_size
+    assert comm.device_index == device_index
     assert comm.buffer_size == buffer_size
-    expected_device = torch.device(f"cuda:{rank}")
-    assert comm.device == expected_device
-    logging.info(f"Rank {rank}: basic properties test passed")
+    assert comm.device == torch.device(f"cuda:{device_index}")
+    logging.info(f"Group rank {group_rank}: basic properties test passed")
 
 
-def _test_buffer_internals(comm: UserBufferCommunicator, rank: int):
-    """Test that communicator maintains buffer references and streams"""
-    # Check buffer pointers and handles are initialized
+def _test_buffer_internals(comm: UserBufferCommunicator, group_rank: int):
+    """Test that communicator maintains buffer references and streams."""
     assert comm._buffer_ptrs is not None
     assert comm._communicator_ptr is not None
     assert comm._ub_handle is not None
 
-    assert len(comm._send_stream_ids) == comm.world_size
+    assert len(comm._send_stream_ids) == comm.group_size
     assert comm._current_stream is not None
     assert comm._recv_stream is not None
-    logging.info(f"Rank {rank}: buffer internals test passed")
+    logging.info(f"Group rank {group_rank}: buffer internals test passed")
 
 
-def _test_send_recv_tensor(comm: UserBufferCommunicator, rank: int, world_size: int):
-    prev_rank = (rank - 1) % world_size
-    next_rank = (rank + 1) % world_size
-    src_tensor = rank * torch.ones(
+def _test_send_recv_tensor(
+    comm: UserBufferCommunicator, group_rank: int, group_size: int
+):
+    prev_rank = (group_rank - 1) % group_size
+    next_rank = (group_rank + 1) % group_size
+    src_tensor = group_rank * torch.ones(
         [1024, 4096], dtype=torch.float32, device=torch.cuda.current_device()
     )
     dst_tensor = torch.empty(
@@ -105,15 +110,17 @@ def _test_send_recv_tensor(comm: UserBufferCommunicator, rank: int, world_size: 
         [1024, 4096], dtype=torch.float32, device=src_tensor.device
     )
     assert torch.equal(expect_tensor, dst_tensor)
-    logging.info(f"Rank {rank}: send_recv valid tensor test passed")
+    logging.info(f"Group rank {group_rank}: send_recv valid tensor test passed")
 
 
-def _test_all_gather_tensor(comm: UserBufferCommunicator, rank: int, world_size: int):
-    src_tensor = rank * torch.ones(
+def _test_all_gather_tensor(
+    comm: UserBufferCommunicator, group_rank: int, group_size: int
+):
+    src_tensor = group_rank * torch.ones(
         [1, 4096], dtype=torch.float32, device=torch.cuda.current_device()
     )
     expect_tensor = (
-        torch.arange(world_size, dtype=torch.float32, device=src_tensor.device)
+        torch.arange(group_size, dtype=torch.float32, device=src_tensor.device)
         .unsqueeze(1)
         .repeat(1, 4096)
     )
@@ -121,18 +128,23 @@ def _test_all_gather_tensor(comm: UserBufferCommunicator, rank: int, world_size:
     all_gather_tensor = comm.all_gather(src_tensor)
 
     assert torch.equal(expect_tensor, all_gather_tensor)
-    logging.info(f"Rank {rank}: all_gather returns tensor test passed")
+    logging.info(f"Group rank {group_rank}: all_gather returns tensor test passed")
 
 
 # Worker functions that create communicator and run all tests
-def run_user_buffer_test_main(rank: int, world_size: int, port: int):
-    """Worker function that creates one communicator and tests all interfaces"""
+def _run_user_buffer_test_main(
+    rank: int,
+    world_size: int,
+    tp_size: int,
+    dp_size: int,
+    port: int,
+    test_reinitialization: bool,
+):
     logging.info(f"Rank {rank}: starting all interfaces test")
 
     try:
-
         parallelism_config, nccl_comm_config, nccl_init_port = get_parallelism_config(
-            rank, world_size, world_size, 1, port
+            rank, world_size, tp_size, dp_size, port
         )
         torch.cuda.set_device(parallelism_config.local_rank)
         torch.set_default_device(f"cuda:{parallelism_config.local_rank}")
@@ -143,13 +155,41 @@ def run_user_buffer_test_main(rank: int, world_size: int, port: int):
             backend="nccl",
             timeout=60,
         )
-        # use cp group for test
         ub_communicator = get_user_buffers_communicator()
+        assert ub_communicator is not None
+        group_rank = dist.get_rank(ub_communicator.group)
+        group_size = dist.get_world_size(ub_communicator.group)
+        group_start = (rank // tp_size) * tp_size
+        expected_devices = [
+            peer_rank % torch.cuda.device_count()
+            for peer_rank in range(group_start, group_start + tp_size)
+        ]
+        assert ub_communicator._group_device_indices == expected_devices
 
-        _test_basic_properties(ub_communicator, rank, world_size, BUFFER_SIZE)
-        _test_buffer_internals(ub_communicator, rank)
-        _test_send_recv_tensor(ub_communicator, rank, world_size)
-        _test_all_gather_tensor(ub_communicator, rank, world_size)
+        _test_basic_properties(
+            ub_communicator,
+            group_rank,
+            group_size,
+            parallelism_config.local_rank,
+            BUFFER_SIZE,
+        )
+        _test_buffer_internals(ub_communicator, group_rank)
+        _test_send_recv_tensor(ub_communicator, group_rank, group_size)
+        _test_all_gather_tensor(ub_communicator, group_rank, group_size)
+
+        if test_reinitialization:
+            dist.barrier(group=ub_communicator.group)
+            user_buffers.destroy_user_buffers_communicator()
+            assert ub_communicator._communicator_ptr is None
+            assert get_user_buffers_communicator() is None
+            user_buffers.destroy_user_buffers_communicator()
+
+            init_user_buffers_environment(parallelism_config)
+            reinitialized = get_user_buffers_communicator()
+            assert reinitialized is not None
+            assert reinitialized is not ub_communicator
+            _test_send_recv_tensor(reinitialized, group_rank, group_size)
+            dist.barrier(group=reinitialized.group)
 
         logging.info(f"Rank {rank}: all tests passed")
 
@@ -159,6 +199,14 @@ def run_user_buffer_test_main(rank: int, world_size: int, port: int):
     except Exception as e:
         print(f"Rank {rank} error in collective operations test: {e}")
         raise
+
+
+def run_user_buffer_test_main(rank: int, world_size: int, port: int):
+    _run_user_buffer_test_main(rank, world_size, world_size, 1, port, True)
+
+
+def run_user_buffer_tp2_dp2_test_main(rank: int, world_size: int, port: int):
+    _run_user_buffer_test_main(rank, world_size, 2, 2, port, False)
 
 
 class TestUserBufferCommunicator(unittest.TestCase):
@@ -178,7 +226,7 @@ class TestUserBufferCommunicator(unittest.TestCase):
 
     def test_send_recv_preserves_producer_and_consumer_stream_order(self):
         comm = object.__new__(UserBufferCommunicator)
-        comm.local_rank = 0
+        comm.group_rank = 0
         comm.per_rank_buffer_size = 1024
         comm._ub_handle = 1
         comm._communicator_ptr = 2
@@ -270,11 +318,19 @@ class TestUserBufferCommunicator(unittest.TestCase):
         )
 
     def test_user_buffers_worldsize_4(self):
-        """Test all interfaces with multiple processes"""
+        """Test all interfaces with multiple processes."""
         self._run_multi_process_test(
             run_user_buffer_test_main,
             world_size=4,
             test_name="test_user_buffers_worldsize_4",
+        )
+
+    def test_user_buffers_tp2_dp2(self):
+        """Test two independent TP communicators across four devices."""
+        self._run_multi_process_test(
+            run_user_buffer_tp2_dp2_test_main,
+            world_size=4,
+            test_name="test_user_buffers_tp2_dp2",
         )
 
 

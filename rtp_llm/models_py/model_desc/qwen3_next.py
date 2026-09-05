@@ -1181,8 +1181,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             ub_communicator = get_user_buffers_communicator()
         use_ub_relay = (
             ub_communicator is not None
-            and getattr(ub_communicator, "world_size", cp_plan.cp_size)
-            == cp_plan.cp_size
+            and ub_communicator.group_size == cp_plan.cp_size
             and ub_communicator.can_handle_tensor(state)
         )
         for step_index, step in enumerate(relay_steps):

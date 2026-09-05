@@ -9,7 +9,12 @@ from flashinfer import (
 from flashinfer.cascade import merge_state
 from flashinfer.page import append_paged_kv_cache
 
-from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, recv, send
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    all_gather,
+    recv_from_group_rank,
+    send_to_group_rank,
+)
 from rtp_llm.models_py.distributed.user_buffers import get_user_buffers_communicator
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_utils import (
     generate_half_kv_indices,
@@ -292,11 +297,19 @@ class PCPAll2AllAttnOp:
                         )
                     else:
                         if self.prefill_cp_rank < next_rank_id:
-                            send(kv_buffer, dst=next_rank_id, group=Group.TP)
-                            recv(recv_buf, src=prev_rank_id, group=Group.TP)
+                            send_to_group_rank(
+                                kv_buffer, dst=next_rank_id, group=Group.TP
+                            )
+                            recv_from_group_rank(
+                                recv_buf, src=prev_rank_id, group=Group.TP
+                            )
                         else:
-                            recv(recv_buf, src=prev_rank_id, group=Group.TP)
-                            send(kv_buffer, dst=next_rank_id, group=Group.TP)
+                            recv_from_group_rank(
+                                recv_buf, src=prev_rank_id, group=Group.TP
+                            )
+                            send_to_group_rank(
+                                kv_buffer, dst=next_rank_id, group=Group.TP
+                            )
                     self.comm_events[round_id].record()
 
             if round_id == 0:  # local attention

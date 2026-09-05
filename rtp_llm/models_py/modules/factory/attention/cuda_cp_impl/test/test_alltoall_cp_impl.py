@@ -109,8 +109,12 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
         )
         with contextlib.ExitStack() as stack:
             stack.enter_context(patch(f"{_A2A_MODULE}.all_gather", side_effect=mock_ag))
-            stack.enter_context(patch(f"{_A2A_MODULE}.send", side_effect=mock_send))
-            stack.enter_context(patch(f"{_A2A_MODULE}.recv", side_effect=mock_recv))
+            stack.enter_context(
+                patch(f"{_A2A_MODULE}.send_to_group_rank", side_effect=mock_send)
+            )
+            stack.enter_context(
+                patch(f"{_A2A_MODULE}.recv_from_group_rank", side_effect=mock_recv)
+            )
             stack.enter_context(
                 patch(
                     f"{_A2A_MODULE}.get_user_buffers_communicator",

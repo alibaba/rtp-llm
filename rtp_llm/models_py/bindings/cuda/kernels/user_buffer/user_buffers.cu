@@ -58,8 +58,10 @@ void* init_communicator(int64_t local_rank, int64_t world_size) {
     comm->local_rank     = static_cast<int32_t>(local_rank);
     comm->world_size     = static_cast<int32_t>(world_size);
 
+    int device       = 0;
     int device_clock = 0;
-    AT_CUDA_CHECK(cudaDeviceGetAttribute(&device_clock, cudaDevAttrClockRate, local_rank));
+    AT_CUDA_CHECK(cudaGetDevice(&device));
+    AT_CUDA_CHECK(cudaDeviceGetAttribute(&device_clock, cudaDevAttrClockRate, device));
     comm->ub_timeout  = 1000ull * device_clock * 110;
     comm->free_region = 0;
     comm->gpu_ptrs    = 0;
