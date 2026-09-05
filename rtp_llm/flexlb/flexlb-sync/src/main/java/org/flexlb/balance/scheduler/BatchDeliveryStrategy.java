@@ -476,7 +476,7 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
                     reservation = result.reservation();
                 }
                 CapacityBoundary.Attempt<PrefillAdmissionResources.Member>
-                        memberAttempt = prepareMember(exact);
+                        memberAttempt = prepareMember(exact, owner.requests);
                 CapacityBoundary.Attempt<ScheduledRequest> result;
                 if (memberAttempt.accepted()) {
                     members.add(memberAttempt.value());

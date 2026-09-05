@@ -208,7 +208,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         config.queueScheduler().getCapacity().setMaxWaitingRequestsPerPrefillWorker(1024);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
-        when(router.routeForQueue(any(BalanceContext.class)))
+        when(router.routeForQueue(any(BalanceContext.class), any()))
                 .thenAnswer(inv -> routeResult(inv.getArgument(0)));
         // ---- E2E bridge: mocked gRPC transport → real in-process mock engine ----
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(),

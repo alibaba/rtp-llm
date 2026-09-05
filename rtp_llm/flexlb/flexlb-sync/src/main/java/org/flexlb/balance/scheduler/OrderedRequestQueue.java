@@ -24,12 +24,14 @@ final class OrderedRequestQueue {
     private final Bucket[] priorityBuckets = new Bucket[PRIORITY_LEVELS];
     private final BitSet nonEmptyPriorities = new BitSet(PRIORITY_LEVELS);
     private int size;
+    private long nextSequence;
 
     OrderedRequestQueue(boolean priorityOrdering) {
         this.priorityOrdering = priorityOrdering;
     }
 
     void add(GlobalQueueEntry entry) {
+        entry.sequence = ++nextSequence;
         if (priorityOrdering) {
             Bucket bucket =
                     priorityBuckets[entry.priority];
@@ -62,8 +64,7 @@ final class OrderedRequestQueue {
 
     List<GlobalQueueEntry> snapshotPrefix(
             int limit,
-            Predicate<GlobalQueueEntry> eligible,
-            GlobalQueueEntry frontier) {
+            Predicate<GlobalQueueEntry> eligible) {
         if (limit <= 0) {
             return List.of();
         }
@@ -78,12 +79,10 @@ final class OrderedRequestQueue {
                 if (bucket == null) {
                     continue;
                 }
-                if (!appendEligible(bucket, result, limit, eligible, frontier)) {
-                    return result;
-                }
+                appendEligible(bucket, result, limit, eligible);
             }
         } else {
-            appendEligible(fifo, result, limit, eligible, frontier);
+            appendEligible(fifo, result, limit, eligible);
         }
         return result;
     }
@@ -203,18 +202,14 @@ final class OrderedRequestQueue {
         }
     }
 
-    private static boolean appendEligible(
+    private static void appendEligible(
             Bucket source,
             List<GlobalQueueEntry> result,
             int limit,
-            Predicate<GlobalQueueEntry> eligible,
-            GlobalQueueEntry frontier) {
+            Predicate<GlobalQueueEntry> eligible) {
         for (GlobalQueueEntry entry = source.head;
                 entry != null;
                 entry = entry.next) {
-            if (entry == frontier) {
-                return false;
-            }
             if (eligible.test(entry)) {
                 result.add(entry);
                 if (result.size() == limit) {
@@ -222,7 +217,6 @@ final class OrderedRequestQueue {
                 }
             }
         }
-        return true;
     }
 
     private static final class Bucket {

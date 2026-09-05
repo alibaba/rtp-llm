@@ -55,6 +55,23 @@ class WorkerBatcherQueueTest {
     }
 
     @Test
+    void deliveryCapacityAllowsExactPriorityReplacementBeforeHardQueueIsFull() {
+        SchedulingTestConfig.useBatchDispatcher(config).setMaxInflightBatchesPerPrefillWorker(1);
+        WorkerBatcher runtime = runningRuntime();
+        ScheduledRequest low = item(901L, 10, Long.MAX_VALUE, 1, 128);
+        ScheduledRequest high = item(902L, 90, Long.MAX_VALUE, 2, 128);
+        assertTrue(runtime.offer(low));
+        assertFalse(runtime.offer(high));
+        WorkerBatcher.QueueSnapshot snapshot = runtime.captureQueueSnapshot();
+        assertEquals(1, snapshot.queueCapacity());
+        assertTrue(snapshot.queueCapacity() < config.queueScheduler().getCapacity()
+                .getMaxWaitingRequestsPerPrefillWorker());
+        assertEquals(WorkerBatcher.QueueReplacementStatus.SUCCESS,
+                runtime.replaceQueued(List.of(low), high));
+        assertEquals(List.of(high), runtime.captureQueueSnapshot().items());
+    }
+
+    @Test
     void priorityOrderIsPriorityDescendingThenActualOfferFifo() {
         WorkerBatcher runtime = runningRuntime();
         long now = System.currentTimeMillis();
@@ -139,6 +156,19 @@ class WorkerBatcherQueueTest {
         assertEquals(List.of(canonical),
                 runtime.captureQueueSnapshot().items());
         assertTrue(runtime.removeQueued(canonical, "canonical identity"));
+    }
+
+    @Test
+    void activeQueueMutationsReuseImmutableCommittedWork() {
+        WorkerBatcher runtime = runningRuntime();
+        var before = runtime.captureRouteProjectionInputs();
+        ScheduledRequest queued = item(905L, 50, Long.MAX_VALUE, 1L, 128L);
+        assertTrue(runtime.offer(queued));
+        var after = runtime.captureRouteProjectionInputs();
+        assertTrue(after.ownershipVersion() > before.ownershipVersion());
+        assertSame(before.work(), after.work());
+        assertTrue(runtime.removeQueued(queued, "test cleanup"));
+        assertSame(before.work(), runtime.captureRouteProjectionInputs().work());
     }
 
     private WorkerBatcher runningRuntime() {

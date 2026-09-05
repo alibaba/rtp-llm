@@ -37,7 +37,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     private final EndpointEventProjector endpointEvents;
     private final PlacementAvailability placementAvailability =
             new PlacementAvailability();
-    private final BindingRouter router = new BindingRouter();
+    private final BindingRouter router;
     private final EndpointRegistry registry;
     private final EvictionManager evictionManager;
     private final RequestScheduler scheduler;
@@ -73,6 +73,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 new DecodePreemptionCoordinator(cancelChannel, lifecycle),
                 lifecycle,
                 batchReporter);
+        this.router = new BindingRouter(new org.flexlb.sync.status.WorkerDirectory(registry), configService);
         this.scheduler = new RequestScheduler(
                 configService,
                 router,
@@ -208,12 +209,15 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     private static final class BindingRouter extends DefaultRouter {
         private DefaultRouter delegate;
 
-        private BindingRouter() {
-            super(
-                    org.mockito.Mockito.mock(CostBasedPrefillStrategy.class),
-                    org.mockito.Mockito.mock(CostBasedDecodeStrategy.class),
-                    org.mockito.Mockito.mock(RandomStrategy.class),
-                    org.mockito.Mockito.mock(ConfigService.class),
+        private BindingRouter(org.flexlb.sync.status.WorkerDirectory workers, ConfigService configs) {
+            // Real constructor dependencies keep Mockito instrumentation out of
+            // the selector classes exercised by the bound production router.
+            super(new CostBasedPrefillStrategy(workers,
+                            org.mockito.Mockito.mock(org.flexlb.cache.service.CacheAwareService.class),
+                            org.mockito.Mockito.mock(org.flexlb.service.monitor.EngineHealthReporter.class)),
+                    new CostBasedDecodeStrategy(workers),
+                    new RandomStrategy(workers),
+                    configs,
                     emptyModelMeta());
         }
 
@@ -232,8 +236,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
         @Override
         public PlacementResult<QueueRouteAdmission, PlacementKey> routeForQueue(
-                BalanceContext context) {
-            return requireBound().routeForQueue(context);
+                BalanceContext context, String policyGroup) {
+            return requireBound().routeForQueue(context, policyGroup);
         }
 
         private synchronized DefaultRouter requireBound() {

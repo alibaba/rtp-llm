@@ -67,7 +67,9 @@ classDiagram
 
 `DIRECT` skips QUEUE admission, the ordered active index, and the endpoint worker thread, but it uses the same
 `router.groupSelector` and `router.roles` worker-selection configuration as
-QUEUE. PDFUSION follows the prefill role configuration.
+QUEUE. PDFUSION follows the prefill role configuration and requires only a
+PDFUSION endpoint; a separate Decode endpoint is optional only when explicitly
+requested by the model topology.
 
 ## Request flow
 
@@ -104,7 +106,7 @@ sequenceDiagram
 
 The decision policy and dispatcher answer different questions. The global queue
 owns ordering and one authoritative placement/commit per request. Its planning
-frontier is only a capacity-bounded execution pipeline: it does not collect a
+frontier is bounded by admitted work and planner concurrency: it does not collect a
 logical group and never waits to fill one. After placement, the selected
 Prefill endpoint is the sole decision-group owner. `SINGLE` forms a one-request
 group. `FIXED_WINDOW` collects up to
@@ -171,8 +173,9 @@ runtime can still split either group if an exact capacity or deadline check
 requires it. If `A` is rejected by the local capacity of endpoint `E1`, `B` may
 commit first when its independently selected route uses another endpoint. A
 later route which also uses `E1` parks behind `A`, preserving order within that
-endpoint capacity domain. A selector miss without a concrete endpoint still
-blocks the frontier. Once a route is committed, delivery backpressure can delay
+endpoint capacity domain. A selector miss blocks its routing domain: explicit,
+different policy groups progress independently; an unbound group overlaps all
+groups. The policy group is frozen at ingress and reused for route selection. Once a route is committed, delivery backpressure can delay
 the group but cannot trigger a second route selection.
 
 PRIORITY does not create a separate request TTL. QUEUE resolves one absolute
@@ -213,7 +216,7 @@ accepted.
 | `scheduler.capacity.maxWaitingRequestsPerPrefillWorker` | `QUEUE` | `1024` | Positive hard bound for each Prefill waiting queue |
 | `scheduler.lifecycle.staleInflightTimeoutMs` | `QUEUE` | `300000` ms | Stale inflight reconciliation bound |
 | `scheduler.lifecycle.deliveredNotAcceptedTimeoutMs` | `QUEUE` | `30000` ms | Bound before reconciling work delivered but not accepted by Decode |
-| `scheduler.lifecycle.maxDeliveredNotAcceptedRequestsGlobal` | `QUEUE` | `200` | Global post-delivery ownership guard |
+| `scheduler.lifecycle.maxDeliveredNotAcceptedRequestsGlobal` | `QUEUE` | `200` | Global Decode acceptance guard, acquired during delivery preparation |
 
 FIFO has no additional fields. PRIORITY can optionally contain
 `scheduler.ordering.preemption`:
@@ -234,7 +237,31 @@ and its backpressure limits. Select `SINGLE` explicitly instead of relying on a
 dispatcher type to choose a decision policy.
 
 Omitted `schemaVersion` is interpreted as v2; unsupported explicit versions are
-rejected. There is no schema-v1 migration or alternate runtime model.
+rejected. The online loader has one schema-v2 runtime model.
+
+`org.flexlb.config.FlexlbConfigMigration` provides an explicit offline v1-to-v2
+conversion. Its `main` reads v1 JSON from stdin, writes validated v2 JSON to
+stdout, and reports behavior changes on stderr. Run it with the built
+`flexlb-common` module and its dependencies on the Java classpath. Review the
+reported changes before deploying the resulting JSON:
+
+- NON_BATCH receives an explicit `SINGLE` decision. BATCH grouping fields move
+  to `scheduler.decision`; its waiting bound moves to `scheduler.capacity`.
+- The old Prefill pending bound maps to the canonical NON_BATCH request cap,
+  including DIRECT. BATCH queue and batch limits need explicit sizing because
+  they use different units.
+- Prefill/Decode `RANDOM` policies have no equivalent and fail conversion.
+  Availability hysteresis is reported as removed; recovery follows exact
+  capacity release. Unknown fields, malformed numbers and conflicting field
+  owners fail conversion.
+
+At the global outstanding bound, PRIORITY admission can transfer a lower-priority
+queued request's permit directly to the new request. Unplaced requests are eligible;
+placed requests also require the existing `PREFILL_QUEUED` victim-stage policy.
+Equal/lower priorities and FIFO never displace work. Delivery claims and in-progress
+admission mutations cannot yield their permits. Candidate lookup excludes delivered
+and terminal generations; endpoint cleanup and completion callbacks run outside the
+short admission critical section. Rejected submissions publish no lifecycle object.
 
 ### Dispatcher
 
@@ -243,7 +270,7 @@ rejected. There is no schema-v1 migration or alternate runtime model.
 | `dispatcher.type` | all | `BATCH` | `BATCH` or `NON_BATCH`; DIRECT requires `NON_BATCH` |
 | `dispatcher.maxInflightBatchesPerPrefillWorker` | `BATCH` | omitted | Optional positive per-Prefill EnqueueBatch backpressure cap |
 | `dispatcher.enqueueRpcTimeoutMs` | `BATCH` | `5000` ms | EnqueueBatch RPC timeout |
-| `dispatcher.maxInflightRequestsPerPrefillWorker` | `QUEUE + NON_BATCH` | omitted | Optional positive per-Prefill route-decision cap |
+| `dispatcher.maxInflightRequestsPerPrefillWorker` | `DIRECT/QUEUE + NON_BATCH` | omitted | Optional positive per-Prefill outstanding request cap |
 
 The two optional inflight limits use omission, not zero, to mean unlimited.
 Decision-group and waiting-queue parameters are rejected under `dispatcher`.
@@ -373,12 +400,13 @@ any of these valid modes. Role algorithms themselves are fixed.
 
 1. `scheduler.capacity.maxOutstandingRequestsGlobal` is acquired atomically and
    released exactly once across failure, cancellation, timeout, rollback, and
-   shutdown.
+   shutdown. Overload rejection does not register a retained request slot.
 2. Under QUEUE, `PrefillEndpoint.inflightBatches` contains only real
    `EnqueueBatch` operations. NON_BATCH route decisions use a request-keyed
    ledger instead of synthetic singleton batches.
 3. Decode reservation and accounting remain request-keyed in both dispatcher
-   modes.
+   modes when Decode is required. PDFUSION-only uses its own endpoint ledger
+   and terminal status without a synthetic Decode reservation.
 4. A request captures its delivery mode at admission. An inflight request cannot
    switch ownership protocol.
 5. Lifecycle, preemption, and post-delivery claims are mutually exclusive under
@@ -395,7 +423,8 @@ any of these valid modes. Role algorithms themselves are fixed.
    bypass only when its route does not use the parked endpoint.
 9. NON_BATCH deliberately acquires the exact Decode engine-facing permit at
    delivery, after Prefill queueing, so a long Prefill backlog cannot consume
-   idle Decode execution capacity. Permit failure waits on that same Decode
+   idle Decode execution capacity. The shared acceptance cap is acquired at the
+   same delivery boundary and wakes waiters on release. Permit failure waits on that same Decode
    endpoint and never reselects a route. Once transferred to delivery, a Decode
    permit never returns to queued ownership. Preemptive Decode admission instead
    reserves its exact capacity in the placement transaction because a typed

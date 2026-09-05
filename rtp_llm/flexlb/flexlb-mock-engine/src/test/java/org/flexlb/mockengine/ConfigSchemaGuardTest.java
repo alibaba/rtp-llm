@@ -21,7 +21,7 @@ class ConfigSchemaGuardTest {
 
     private static final String[] PERFORMANCES = {
             "../tools/online_eval/data/performance/dsv4_flash_performance.fast_ab.json",
-            "../tools/online_eval/data/performance/dsv4_flash_performance.realistic.json",
+            "../tools/online_eval/data/performance/dsv4_flash_performance.sm100_dev.json",
     };
 
     @Test

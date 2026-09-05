@@ -24,6 +24,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class RouteProjectionTest {
 
     @Test
+    void unchangedRunningWorkCanReuseItsEarlierClockBase() {
+        WorkSnapshot cached = new WorkSnapshot(13L, List.of(new WorkSnapshot.RequestWork(
+                1L, WorkSnapshot.Phase.ENGINE_RUNNING, 1_000L)), List.of(), 0L);
+        WorkSnapshot current = new WorkSnapshot(20L, List.of(new WorkSnapshot.RequestWork(
+                1L, WorkSnapshot.Phase.ENGINE_RUNNING, 993L)), List.of(), 0L);
+        assertEquals(
+                RouteProjection.project(new RouteProjection.Inputs(emptyQueue(20L), current, 1L),
+                        probe(RouteProjection.Demand.TTFT_AND_DRAIN), new CountingEvaluator(), routeProjection()),
+                RouteProjection.project(new RouteProjection.Inputs(emptyQueue(20L), cached, 1L),
+                        probe(RouteProjection.Demand.TTFT_AND_DRAIN), new CountingEvaluator(), routeProjection()));
+    }
+
+    @Test
     void queueWorkAndPendingCountComeFromOneCanonicalInput() {
         RouteProjection.Inputs inputs = inputs(13L, 7L);
         CountingEvaluator evaluator = new CountingEvaluator();

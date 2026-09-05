@@ -79,11 +79,16 @@ public class DefaultRouter {
 
     public PlacementResult<QueueRouteAdmission, PlacementKey> routeForQueue(
             BalanceContext context) {
+        return routeForQueue(context, resolvePolicyGroup(context));
+    }
+
+    public PlacementResult<QueueRouteAdmission, PlacementKey> routeForQueue(
+            BalanceContext context, String policyGroup) {
         Response validationFailure = validateRequest(context);
         if (validationFailure != null) {
             return PlacementResult.rejected(validationFailure);
         }
-        try (PinnedRouting routing = selectAll(context, requiredRoles)) {
+        try (PinnedRouting routing = selectAll(context, requiredRoles, policyGroup)) {
             if (routing.rejection() != null) {
                 return PlacementResult.rejected(routing.rejection());
             }
@@ -112,8 +117,11 @@ public class DefaultRouter {
     private PinnedRouting selectAll(
             BalanceContext context,
             List<RoleType> roles) {
+        return selectAll(context, roles, resolvePolicyGroup(context));
+    }
+
+    private PinnedRouting selectAll(BalanceContext context, List<RoleType> roles, String policyGroup) {
         List<SelectedRole> selected = new ArrayList<>(roles.size());
-        String policyGroup = resolvePolicyGroup(context);
         String group = policyGroup;
         if (StringUtils.isNotBlank(policyGroup)) {
             Logger.info(
@@ -162,7 +170,10 @@ public class DefaultRouter {
         }
     }
 
-    private String resolvePolicyGroup(BalanceContext context) {
+    String resolvePolicyGroup(BalanceContext context) {
+        if (context == null || context.getRequest() == null) {
+            return null;
+        }
         FlexlbConfig config = context.getConfig() != null
                 ? context.getConfig()
                 : configService.loadBalanceConfig();
@@ -212,9 +223,19 @@ public class DefaultRouter {
                             throw new IllegalStateException(
                                     "Prefill selection has another endpoint type");
                         }
-                        PrefillState.DirectRegistration registration =
-                                prefill.registerDirectRequest(
-                                        pin, context.getRequestId(), selected.prefillWorkMs());
+                        var acquisition = prefill.registerDirectRequest(
+                                pin, context.getRequestId(), selected.prefillWorkMs());
+                        if (acquisition.status() != PrefillState.CapacityStatus.ACQUIRED) {
+                            Throwable cleanup = closeGenerationPin(pin, null);
+                            pin = null;
+                            cleanup = closeOwnerPins(owners, rollbackDirect(owners, cleanup));
+                            if (cleanup != null) {
+                                throw propagate(cleanup);
+                            }
+                            return Response.error(acquisition.status() == PrefillState.CapacityStatus.CAPACITY_FULL
+                                    ? StrategyErrorType.RESOURCE_EXHAUSTED : StrategyErrorType.INVALID_REQUEST);
+                        }
+                        PrefillState.DirectRegistration registration = acquisition.reservation();
                         try {
                             owners.add(new DirectOwnership(pin, registration));
                         } catch (RuntimeException | Error appendFailure) {

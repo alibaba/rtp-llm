@@ -21,6 +21,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.awaitCondition;
@@ -84,6 +85,19 @@ class RequestRegistryTest {
     }
 
     @Test
+    void overloadRejectionsDoNotCreateRetainedGenerations() {
+        assertFalse(lifecycle.register(context(1L), 1).isDone());
+        for (long id = 2; id <= 1001; id++) {
+            assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(),
+                    lifecycle.register(context(id), 1).join().getCode());
+        }
+        assertEquals(1, lifecycle.snapshotSlots().size());
+        assertEquals(1, lifecycle.liveRequestCount());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
+                lifecycle.register(context(1L), 1).join().getCode());
+    }
+
+    @Test
     void slotLockContractIsEnforcedWithoutJvmAssertions() {
         lifecycle.register(context(102L), 8);
         RequestSlot slot = lifecycle.requestSlot(102L);
@@ -123,19 +137,56 @@ class RequestRegistryTest {
         assertEquals(PlacementResult.Status.SUCCESS,
                 commitRoute(lifecycle, first, 1, 30_000L));
         assertEquals(
-                PlacementResult.Status.LIMIT_REACHED,
+                PlacementResult.Status.SUCCESS,
                 commitRoute(lifecycle, second, 1, 30_000L));
+        assertEquals(0, lifecycle.decodeAcceptanceCount(), "queued requests own no delivery guard");
+        RequestLifecycleTestSupport.prepareAcceptance(lifecycle, first);
+        var blocked = lifecycle.prepareDecodeAcceptance(second.item());
+        assertFalse(blocked.accepted());
+        assertTrue(blocked.boundary().unavailable());
         assertEquals(1, lifecycle.decodeAcceptanceCount());
+        AtomicInteger wakes = new AtomicInteger();
+        Runnable listener = wakes::incrementAndGet;
+        blocked.boundary().availability().addListener(listener);
 
         lifecycle.cancelRequest(211L, 0L, CancelReason.CLIENT_CANCELLED);
 
         assertEquals(0, lifecycle.decodeAcceptanceCount());
-        assertEquals(PlacementResult.Status.SUCCESS,
-                commitRoute(lifecycle, second, 1, 30_000L));
+        assertEquals(1, wakes.get());
+        assertTrue(blocked.boundary().availability().isAvailable());
+        blocked.boundary().availability().removeListener(listener);
+        RequestLifecycleTestSupport.prepareAcceptance(lifecycle, second);
         assertEquals(1, lifecycle.decodeAcceptanceCount());
 
         lifecycle.cancelRequest(212L, 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(0, lifecycle.decodeAcceptanceCount());
+        assertEquals(1, wakes.get(), "detached waiters receive no later capacity callbacks");
+    }
+
+    @Test
+    void failedAcceptanceTransferRetainsCleanupUntilOutsideTheDeliverySlotLock() {
+        Registered registered = registerItem(215L);
+        assertEquals(PlacementResult.Status.SUCCESS,
+                commitRoute(lifecycle, registered, 2, 30_000L));
+        RequestLifecycleTestSupport.prepareAcceptance(lifecycle, registered);
+        var duplicate = lifecycle.prepareDecodeAcceptance(registered.item()).value();
+        assertNotNull(duplicate);
+        var blocked = lifecycle.prepareDecodeAcceptance(registered.item());
+        assertFalse(blocked.accepted());
+        var slot = lifecycle.requestSlot(215L);
+        AtomicReference<Boolean> notifiedUnderSlotLock = new AtomicReference<>();
+        Runnable listener = () -> notifiedUnderSlotLock.set(Thread.holdsLock(slot));
+        blocked.boundary().availability().addListener(listener);
+        try (duplicate) {
+            assertThrows(IllegalStateException.class, () -> lifecycle.tryClaimRouteDelivery(
+                    registered.item(), () -> duplicate.transferTo(registered.item())));
+            assertEquals(2, lifecycle.decodeAcceptanceCount(),
+                    "failed transfer leaves the prepared permit with its transaction owner");
+            assertNull(notifiedUnderSlotLock.get());
+        }
+        assertEquals(Boolean.FALSE, notifiedUnderSlotLock.get());
+        assertEquals(1, lifecycle.decodeAcceptanceCount());
+        blocked.boundary().availability().removeListener(listener);
     }
 
     @Test
@@ -147,6 +198,9 @@ class RequestRegistryTest {
                 commitRoute(lifecycle, first, 0, 30_000L));
         assertEquals(PlacementResult.Status.SUCCESS,
                 commitRoute(lifecycle, second, 0, 30_000L));
+        assertEquals(0, lifecycle.decodeAcceptanceCount());
+        RequestLifecycleTestSupport.prepareAcceptance(lifecycle, first);
+        RequestLifecycleTestSupport.prepareAcceptance(lifecycle, second);
         assertEquals(2, lifecycle.decodeAcceptanceCount());
 
         lifecycle.cancelRequest(221L, 0L, CancelReason.CLIENT_CANCELLED);

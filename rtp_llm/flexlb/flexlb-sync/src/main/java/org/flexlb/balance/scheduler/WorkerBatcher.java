@@ -268,9 +268,7 @@ public final class WorkerBatcher {
         this.deliveryCredits = queueScheduling
                 ? DeliveryCreditPolicy.from(
                         Objects.requireNonNull(
-                                config.getDispatcher(), "dispatcher"),
-                        maxQueueCapacity(),
-                        maxDecisionRequests())
+                                config.getDispatcher(), "dispatcher"))
                 : null;
         this.queueOrder = priorityOrdering
                 ? PRIORITY_QUEUE_ORDER : FIFO_QUEUE_ORDER;
@@ -338,14 +336,14 @@ public final class WorkerBatcher {
         if (runtimeState != RuntimeState.RUNNING || stopped) {
             return false;
         }
-        return enqueue(item, maxQueueCapacity());
+        return enqueue(item);
     }
 
-    private boolean enqueue(ScheduledRequest item, int maximumQueueSize) {
+    private boolean enqueue(ScheduledRequest item) {
         EnqueueAttempt attempt;
         queueLock.lock();
         try {
-            attempt = enqueueUnderLock(item, maximumQueueSize);
+            attempt = enqueueUnderLock(item, publicationCapacity().maximumActiveRequests());
         } finally {
             queueLock.unlock();
         }
@@ -370,7 +368,7 @@ public final class WorkerBatcher {
         if (stopped) {
             return new EnqueueAttempt(false, null, null);
         }
-        if (maximumQueueSize > 0 && activeIndex.size() >= maximumQueueSize) {
+        if (activeIndex.size() >= maximumQueueSize) {
             return new EnqueueAttempt(false, null, null);
         }
         if (!publishActiveIndexUnderLock(item)) {
@@ -779,18 +777,15 @@ public final class WorkerBatcher {
             if (runtimeState != RuntimeState.RUNNING || stopped) {
                 return QueueReplacementStatus.DECLINED;
             }
-            int maximumQueueSize = maxQueueCapacity();
-            int victimsRequiredNow = maximumQueueSize <= 0
-                    ? 0
-                    : Math.max(0, activeIndex.size() + 1 - maximumQueueSize);
+            int maximumQueueSize = publicationCapacity().maximumActiveRequests();
+            int victimsRequiredNow = Math.max(0, activeIndex.size() + 1 - maximumQueueSize);
             if (victimsRequiredNow == 0
                     || exactVictims.size() != victimsRequiredNow) {
                 return QueueReplacementStatus.DECLINED;
             }
             int postSwapSize = activeIndex.size() - exactVictims.size() + 1;
             if (postSwapSize < 0
-                    || (maximumQueueSize > 0
-                    && postSwapSize > maximumQueueSize)) {
+                    || postSwapSize > maximumQueueSize) {
                 return QueueReplacementStatus.DECLINED;
             }
             if (!prefillState.replaceActiveExact(exactVictims, incoming)) {
@@ -874,16 +869,14 @@ public final class WorkerBatcher {
         if (runtimeState != RuntimeState.RUNNING || stopped) {
             return QueueReplacementStatus.DECLINED;
         }
-        int maximumQueueSize = maxQueueCapacity();
-        int victimsRequiredNow = maximumQueueSize <= 0
-                ? 0 : Math.max(0, activeIndex.size() + 1 - maximumQueueSize);
+        int maximumQueueSize = publicationCapacity().maximumActiveRequests();
+        int victimsRequiredNow = Math.max(0, activeIndex.size() + 1 - maximumQueueSize);
         if (victimsRequiredNow == 0
                 || exactVictims.size() != victimsRequiredNow) {
             return QueueReplacementStatus.DECLINED;
         }
         int postSwapSize = activeIndex.size() - exactVictims.size() + 1;
-        if (postSwapSize < 0 || maximumQueueSize > 0
-                && postSwapSize > maximumQueueSize) {
+        if (postSwapSize < 0 || postSwapSize > maximumQueueSize) {
             return QueueReplacementStatus.DECLINED;
         }
         return null;
@@ -923,7 +916,7 @@ public final class WorkerBatcher {
             return new QueueSnapshot(
                     key,
                     queueVersion.get(),
-                    maxQueueCapacity(),
+                    publicationCapacity().maximumActiveRequests(),
                     activeItemsInSchedulingOrder());
         } finally {
             queueLock.unlock();
@@ -931,6 +924,11 @@ public final class WorkerBatcher {
     }
 
     // ==================== Queue ownership and projection ====================
+
+    /** Shared by publication and exact priority replacement under queueLock. */
+    private PrefillState.PublicationCapacity publicationCapacity() {
+        return deliveryCredits.capacity(prefillState, maxQueueCapacity(), maxDecisionRequests());
+    }
 
     private int maxQueueCapacity() {
         return config.queueScheduler().getCapacity()
@@ -945,7 +943,7 @@ public final class WorkerBatcher {
     /** Endpoint-local request credits exposed to the global planning pump. */
     public int availableDeliveryCredits() {
         return deliveryCredits == null
-                ? 0 : deliveryCredits.availableCredits(prefillState);
+                ? 0 : publicationCapacity().availableCredits();
     }
 
     private long collectionWindowMs() {
@@ -1111,12 +1109,18 @@ public final class WorkerBatcher {
                 && observed.ownershipVersion() == observedOwnershipVersion) {
             return observed.inputs();
         }
+        long currentQueueVersion;
+        long currentSchedulingInputVersion;
+        long currentOwnershipVersion;
+        BatchCapacitySnapshot capacity;
+        PrefillState.Snapshot ownership;
+        AdmissionBlock admissionBlock;
         queueLock.lock();
         try {
-            long currentQueueVersion = queueVersion.get();
-            long currentSchedulingInputVersion =
+            currentQueueVersion = queueVersion.get();
+            currentSchedulingInputVersion =
                     schedulingInputVersion.get();
-            long currentOwnershipVersion =
+            currentOwnershipVersion =
                     prefillState.mutationVersionUnderLock();
             ProjectionCache cached = projectionCache;
             if (cached != null
@@ -1127,40 +1131,44 @@ public final class WorkerBatcher {
                             == currentOwnershipVersion) {
                 return cached.inputs();
             }
-            BatchCapacitySnapshot capacity = batchCapacitySnapshot();
-            PrefillState.Snapshot ownership =
-                    prefillState.snapshotUnderLock(queueOrder);
-            List<GroupPlanner.Item> items = ownership.activeItems().stream()
-                    .map(WorkerBatcher::projectionItem)
-                    .toList();
-            org.flexlb.balance.projection.QueueSnapshot queueSnapshot =
-                    new org.flexlb.balance.projection.QueueSnapshot(
-                            ownership.capturedAtMs(),
-                            queueScheduling,
-                            projectionOrder,
-                            new GroupPlanner.Constraints(
-                                    maxDecisionRequests(),
-                                    capacity.batchTokenCapacity(),
-                                    capacity.batchKvCapacity(),
-                                    predictedExecutionBudgetMs(),
-                                    collectionWindowMs()),
-                            items,
-                            items.isEmpty()
-                                    ? null : admissionBlockSnapshot.get());
-            RouteProjection.Inputs captured = new RouteProjection.Inputs(
-                    queueSnapshot,
-                    ownership.committedWork(),
-                    ownership.pendingRequestCount(),
-                    currentOwnershipVersion);
+            capacity = batchCapacitySnapshot();
+            ownership = prefillState.snapshotUnderLock();
+            admissionBlock = ownership.activeItems().isEmpty() ? null : admissionBlockSnapshot.get();
+        } finally {
+            queueLock.unlock();
+        }
+        List<GroupPlanner.Item> items = ownership.activeItems().stream()
+                .sorted(queueOrder)
+                .map(WorkerBatcher::projectionItem)
+                .toList();
+        org.flexlb.balance.projection.QueueSnapshot queueSnapshot =
+                new org.flexlb.balance.projection.QueueSnapshot(
+                        ownership.capturedAtMs(),
+                        queueScheduling,
+                        projectionOrder,
+                        new GroupPlanner.Constraints(
+                                maxDecisionRequests(),
+                                capacity.batchTokenCapacity(),
+                                capacity.batchKvCapacity(),
+                                predictedExecutionBudgetMs(),
+                                collectionWindowMs()),
+                        items,
+                        admissionBlock);
+        RouteProjection.Inputs captured = new RouteProjection.Inputs(
+                queueSnapshot,
+                ownership.work().materialize(),
+                ownership.pendingRequestCount(),
+                currentOwnershipVersion);
+        if (queueVersion.get() == currentQueueVersion
+                && schedulingInputVersion.get() == currentSchedulingInputVersion
+                && prefillState.mutationVersion() == currentOwnershipVersion) {
             projectionCache = new ProjectionCache(
                     currentQueueVersion,
                     currentSchedulingInputVersion,
                     currentOwnershipVersion,
                     captured);
-            return captured;
-        } finally {
-            queueLock.unlock();
         }
+        return captured;
     }
 
     private static GroupPlanner.Item projectionItem(ScheduledRequest item) {

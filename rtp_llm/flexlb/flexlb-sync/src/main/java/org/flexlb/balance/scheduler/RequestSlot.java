@@ -65,22 +65,34 @@ final class RequestSlot {
     private AcceptanceDeadline acceptanceDeadline;
 
     private AtomicInteger outstandingCounter;
-    private boolean outstandingPermitReleaseRequested;
-    private boolean outstandingPermitReleased;
+    private final int admissionPriority;
+    /** Index removal is nonblocking and never takes the registry admission lock. */
+    private final Consumer<RequestSlot> removeAdmissionCandidate;
 
     private PreemptionRegistration preemption;
     private EngineFenceRegistration engineFence;
 
     RequestSlot(
             RequestCompletionPublisher completionPublisher,
-            long requestId) {
+            long requestId,
+            AtomicInteger outstandingCounter,
+            int admissionPriority,
+            Consumer<RequestSlot> removeAdmissionCandidate) {
         this.completionPublisher = Objects.requireNonNull(
                 completionPublisher, "completionPublisher");
         this.requestId = requestId;
+        this.admissionPriority = admissionPriority;
+        this.removeAdmissionCandidate = Objects.requireNonNull(removeAdmissionCandidate);
         this.createdAtMs = System.currentTimeMillis();
         this.updatedAtMs = createdAtMs;
         this.future = new RequestFuture(completionPublisher, this);
         this.lastWorkerStatusAtMs = createdAtMs;
+        this.outstandingCounter = Objects.requireNonNull(
+                outstandingCounter, "outstandingCounter");
+    }
+
+    int admissionPriority() {
+        return admissionPriority;
     }
 
     long requestId() {
@@ -111,6 +123,7 @@ final class RequestSlot {
             deliveryClaimKind = DeliveryClaimKind.BATCH_ENQUEUE;
             batchId = assignedBatchId;
         }
+        removeAdmissionCandidate.accept(this);
         transition(RequestState.Phase.DISPATCHING,
                 "batch enqueue started");
     }
@@ -122,6 +135,7 @@ final class RequestSlot {
         if (deliveryClaimKind == DeliveryClaimKind.NONE) {
             deliveryClaimKind = DeliveryClaimKind.ROUTE_DECISION;
         }
+        removeAdmissionCandidate.accept(this);
         transition(RequestState.Phase.DISPATCHING,
                 "route decision delivery started");
     }
@@ -308,14 +322,6 @@ final class RequestSlot {
         }
         item = null;
         assertInvariant();
-    }
-
-    /** Roll back an unpublished item and its exact acceptance capability. */
-    AdmissionCleanup rollbackAdmissionPublication(ScheduledRequest exact) {
-        rollbackItemPublication(exact);
-        AdmissionCleanup cleanup = detachAdmissionCleanup(true);
-        assertInvariant();
-        return cleanup;
     }
 
     /** Exact ACTIVE item, or null when this generation no longer owns one. */
@@ -778,47 +784,39 @@ final class RequestSlot {
 
     // ==================== Outstanding request permit ====================
 
-    boolean bindOutstandingPermit(AtomicInteger counter) {
-        requireSlotLock("outstanding permit binding");
-        if (outstandingCounter != null) {
-            throw new IllegalStateException(
-                    "outstanding permit already bound");
+    /** The admission owner transfers this exact ticket without exposing a free slot. */
+    void transferOutstandingPermit() {
+        requireSlotLock("outstanding permit transfer");
+        if (slotPhase != SlotPhase.TERMINALIZING || outstandingCounter == null) {
+            throw new IllegalStateException("permit transfer requires an owned local terminal");
         }
-        outstandingCounter = counter;
-        if (outstandingPermitReleaseRequested || future.isDone()) {
-            releaseOutstandingPermitLocked();
-            assertInvariant();
-            return false;
-        }
-        assertInvariant();
-        return true;
+        outstandingCounter = null;
     }
 
     void releaseOutstandingPermit() {
         synchronized (this) {
-            outstandingPermitReleaseRequested = true;
-            releaseOutstandingPermitLocked();
+            removeAdmissionCandidate.accept(this);
+            AtomicInteger counter = outstandingCounter;
+            outstandingCounter = null;
+            if (counter != null) {
+                releaseOutstandingPermit(counter);
+            }
             assertInvariant();
         }
     }
 
-    private void releaseOutstandingPermitLocked() {
-        if (outstandingCounter == null || outstandingPermitReleased) {
-            return;
-        }
-        outstandingPermitReleased = true;
+    /** Roll back a registration which has not published its slot yet. */
+    static void releaseOutstandingPermit(AtomicInteger counter) {
         while (true) {
-            int current = outstandingCounter.get();
+            int current = counter.get();
             if (current == OUTSTANDING_ADMISSION_CLOSED) {
-                assertInvariant();
                 return;
             }
             if (current <= 0) {
                 throw new IllegalStateException(
                         "outstanding request permit counter underflow");
             }
-            if (outstandingCounter.compareAndSet(current, current - 1)) {
-                assertInvariant();
+            if (counter.compareAndSet(current, current - 1)) {
                 return;
             }
         }
@@ -1704,6 +1702,7 @@ final class RequestSlot {
         boolean transferred = false;
         try {
             slotPhase = SlotPhase.TERMINALIZING;
+            removeAdmissionCandidate.accept(this);
             admissionOpen = false;
 
             EngineFenceRegistration claimedFence = engineFence;

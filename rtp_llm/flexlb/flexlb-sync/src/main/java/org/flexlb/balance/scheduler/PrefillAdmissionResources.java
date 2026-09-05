@@ -10,13 +10,14 @@ import org.flexlb.util.Logger;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Shared endpoint-capability mechanics for the two delivery transactions.
  *
  * <p>This class deliberately has no dispatcher selection logic. The active
  * transaction decides which Prefill reservation is prepared; this class owns the
- * exact per-request Decode permit, identity validation, and the canonical
+ * optional per-request Decode permit, identity validation, and the canonical
  * post-commit cleanup state machine.</p>
  */
 final class PrefillAdmissionResources {
@@ -38,20 +39,35 @@ final class PrefillAdmissionResources {
 
     static final class Member {
         final ScheduledRequest item;
-        final DecodeEndpoint.EngineDispatchPermit permit;
+        final Optional<DecodeResources> decode;
         MemberOwnership ownership = MemberOwnership.ADMISSION_OWNED;
 
         Member(
                 ScheduledRequest item,
-                DecodeEndpoint.EngineDispatchPermit permit) {
+                DecodeEndpoint.EngineDispatchPermit permit,
+                RequestRegistry.DeliveryAdmission acceptance) {
             this.item = Objects.requireNonNull(item, "item");
-            this.permit = Objects.requireNonNull(permit, "permit");
+            this.decode = permit == null ? Optional.empty()
+                    : Optional.of(new DecodeResources(permit, acceptance));
+        }
+    }
+
+    private record DecodeResources(DecodeEndpoint.EngineDispatchPermit permit,
+                                   RequestRegistry.DeliveryAdmission acceptance) {
+        private DecodeResources {
+            Objects.requireNonNull(permit, "permit");
+            Objects.requireNonNull(acceptance, "acceptance");
         }
     }
 
     static CapacityBoundary.Attempt<Member> prepareMember(
-            ScheduledRequest item) {
+            ScheduledRequest item, RequestRegistry requests) {
         ScheduledRequest.DecodeBinding binding = item.decodeBinding();
+        if (binding.isAbsent()) {
+            // The committed topology has no independent Decode resource.
+            // Its Prefill/PDFUSION reservation still follows the same handoff.
+            return captureMember(item, null, null);
+        }
         DecodeEndpoint decode = binding.endpoint();
         if (decode == null || binding.reservation() == null) {
             return failed(missingEndpoint("Decode reservation", item));
@@ -66,8 +82,7 @@ final class PrefillAdmissionResources {
             return failed(failure);
         }
         return switch (acquisition.status()) {
-            case ACQUIRED -> captureMember(
-                    item, acquisition.permit());
+            case ACQUIRED -> prepareAcceptance(item, acquisition.permit(), requests);
             case CAPACITY_FULL -> decodeCapacityFull(item);
             case NOT_OWNED, NOT_QUEUED -> rejected(
                     CapacityBoundary.OWNERSHIP_LOST);
@@ -76,6 +91,21 @@ final class PrefillAdmissionResources {
                     "Decode dispatch permit already acquired: request_id="
                             + item.requestId()));
         };
+    }
+
+    private static CapacityBoundary.Attempt<Member> prepareAcceptance(
+            ScheduledRequest item, DecodeEndpoint.EngineDispatchPermit permit, RequestRegistry requests) {
+        try {
+            CapacityBoundary.Attempt<RequestRegistry.DeliveryAdmission> attempt =
+                    requests.prepareDecodeAcceptance(item);
+            if (attempt.accepted()) {
+                return captureMember(item, permit, attempt.value());
+            }
+            Throwable rollback = rollbackPermit(permit, null);
+            return rollback == null ? rejected(attempt.boundary()) : failed(rollback);
+        } catch (Throwable failure) {
+            return failed(rollbackPermit(permit, failure));
+        }
     }
 
     private static CapacityBoundary.Attempt<Member> decodeCapacityFull(
@@ -92,14 +122,15 @@ final class PrefillAdmissionResources {
      */
     private static CapacityBoundary.Attempt<Member> captureMember(
             ScheduledRequest item,
-            DecodeEndpoint.EngineDispatchPermit permit) {
+            DecodeEndpoint.EngineDispatchPermit permit,
+            RequestRegistry.DeliveryAdmission acceptance) {
         Member member = null;
         try {
-            member = new Member(item, permit);
+            member = new Member(item, permit, acceptance);
             return accepted(member);
         } catch (Throwable captureFailure) {
             Throwable failure = member == null
-                    ? rollbackPermit(permit, captureFailure)
+                    ? rollbackAcceptance(acceptance, rollbackPermit(permit, captureFailure))
                     : rollbackMember(member, captureFailure);
             return failed(failure);
         }
@@ -187,9 +218,27 @@ final class PrefillAdmissionResources {
                 || member.ownership != MemberOwnership.ADMISSION_OWNED) {
             return priorFailure;
         }
-        Throwable failure = rollbackPermit(member.permit, priorFailure);
+        Throwable failure = priorFailure;
+        if (member.decode.isPresent()) {
+            DecodeResources resources = member.decode.get();
+            failure = rollbackAcceptance(resources.acceptance(),
+                    rollbackPermit(resources.permit(), failure));
+        }
         member.ownership = MemberOwnership.OWNERSHIP_LOST;
         return failure;
+    }
+
+    private static Throwable rollbackAcceptance(
+            RequestRegistry.DeliveryAdmission admission, Throwable prior) {
+        if (admission == null) {
+            return prior;
+        }
+        try {
+            admission.close();
+            return prior;
+        } catch (Throwable failure) {
+            return combine(prior, failure);
+        }
     }
 
     static void preserveRejectedCause(
@@ -233,16 +282,6 @@ final class PrefillAdmissionResources {
                 exactMembers, committedHandoffCount);
     }
 
-    private static void releaseCommittedPermit(
-            DecodeEndpoint.EngineDispatchPermit permit) {
-        try {
-            permit.release();
-        } catch (Throwable failure) {
-            Logger.error(
-                    "Committed Decode permit cleanup isolated", failure);
-        }
-    }
-
     private static void releaseCommittedHandoff(
             PrefillState.CommittedHandoff handoff) {
         if (handoff == null) {
@@ -275,7 +314,6 @@ final class PrefillAdmissionResources {
     static final class CommittedAdmissionOwner implements AutoCloseable {
         private final IdentityHashMap<ScheduledRequest, Member> membersByIdentity;
         private final Member[] members;
-        private final DecodeEndpoint.EngineDispatchPermit[] permits;
         private final PrefillState.CommittedHandoff[] handoffs;
         private boolean bound;
         private boolean closed;
@@ -289,7 +327,6 @@ final class PrefillAdmissionResources {
             }
             membersByIdentity = new IdentityHashMap<>(exactMembers.size());
             members = exactMembers.toArray(Member[]::new);
-            permits = new DecodeEndpoint.EngineDispatchPermit[members.length];
             handoffs = new PrefillState.CommittedHandoff[
                     committedHandoffCount];
             for (int index = 0; index < members.length; index++) {
@@ -299,7 +336,6 @@ final class PrefillAdmissionResources {
                             "committed admission member is not admission-owned");
                 }
                 membersByIdentity.put(member.item, member);
-                permits[index] = member.permit;
             }
         }
 
@@ -329,8 +365,15 @@ final class PrefillAdmissionResources {
                 throw new IllegalStateException(
                         "committed item was already transferred");
             }
+            if (member.decode.isEmpty()) {
+                member.ownership = MemberOwnership.ENDPOINT_OWNED;
+                return true;
+            }
+            if (!member.decode.get().acceptance().transferTo(exactItem)) {
+                return false;
+            }
             DecodeEndpoint.EngineDispatchPermitTransferStatus transfer =
-                    member.permit.transferToEngineLifecycle();
+                    member.decode.get().permit().transferToEngineLifecycle();
             return switch (transfer) {
                 case TRANSFERRED -> {
                     member.ownership = MemberOwnership.ENDPOINT_OWNED;
@@ -357,8 +400,10 @@ final class PrefillAdmissionResources {
             for (int index = 0; index < members.length; index++) {
                 Member member = members[index];
                 if (member.ownership == MemberOwnership.ADMISSION_OWNED) {
-                    releaseCommittedPermit(permits[index]);
-                    member.ownership = MemberOwnership.OWNERSHIP_LOST;
+                    Throwable failure = rollbackMember(member, null);
+                    if (failure != null) {
+                        Logger.error("Committed admission cleanup isolated", failure);
+                    }
                 }
             }
             for (PrefillState.CommittedHandoff handoff

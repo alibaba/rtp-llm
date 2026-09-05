@@ -78,7 +78,7 @@ class RequestAdmissionResourceLeakTest {
                 PlacementResult.rejected(
                         RequestRegistry.buildErrorResponse(
                                 StrategyErrorType.NO_PREFILL_WORKER, null));
-        when(router.routeForQueue(context)).thenAnswer(invocation -> {
+        when(router.routeForQueue(context, null)).thenAnswer(invocation -> {
             assertEquals(0, lifecycle.decodeAcceptanceCount(),
                     "unpublished placement must not own an acceptance guard");
             return rejected;
@@ -102,7 +102,7 @@ class RequestAdmissionResourceLeakTest {
     }
 
     @Test
-    void publishedRouteBindsAcceptanceGuardExactlyOnce() {
+    void deliveryPreparationBindsAcceptanceGuardExactlyOnce() {
         Registered registered = registerItem(61L);
 
         try (AdmissionMutation admission =
@@ -110,10 +110,12 @@ class RequestAdmissionResourceLeakTest {
             assertNotNull(admission);
             assertEquals(PlacementResult.Status.SUCCESS,
                     lifecycle.commitRoute(
-                            registered.item(), 1, 30_000L,
+                            registered.item(),
                             () -> true));
         }
 
+        assertEquals(0, lifecycle.decodeAcceptanceCount());
+        RequestLifecycleTestSupport.prepareAcceptance(lifecycle, registered);
         assertEquals(1, lifecycle.decodeAcceptanceCount());
         lifecycle.cancelRequest(61L, 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(0, lifecycle.decodeAcceptanceCount());
@@ -129,7 +131,7 @@ class RequestAdmissionResourceLeakTest {
             assertEquals(
                     PlacementResult.Status.BLOCKED,
                     lifecycle.commitRoute(
-                            registered.item(), 1, 30_000L,
+                            registered.item(),
                             () -> false));
             assertEquals(0, lifecycle.decodeAcceptanceCount());
             assertTrue(lifecycle.isAdmissionOpen(
@@ -147,7 +149,7 @@ class RequestAdmissionResourceLeakTest {
             assertNotNull(admission);
             assertThrows(IllegalStateException.class,
                     () -> lifecycle.commitRoute(
-                            registered.item(), 1, 30_000L,
+                            registered.item(),
                             () -> {
                                 throw new IllegalStateException("publish failed");
                             }));
@@ -165,7 +167,7 @@ class RequestAdmissionResourceLeakTest {
 
         assertEquals(PlacementResult.Status.CLOSED,
                 lifecycle.commitRoute(
-                        registered.item(), 0, 30_000L,
+                        registered.item(),
                         () -> true));
         assertEquals(1, lifecycle.decodeAcceptanceCount(),
                 "a duplicate commit may release only its own permit");
@@ -183,9 +185,11 @@ class RequestAdmissionResourceLeakTest {
         assertNotNull(admission);
         assertEquals(PlacementResult.Status.SUCCESS,
                 lifecycle.commitRoute(
-                        registered.item(), 1, 30_000L,
+                        registered.item(),
                         () -> true));
 
+        assertEquals(0, lifecycle.decodeAcceptanceCount());
+        RequestLifecycleTestSupport.prepareAcceptance(lifecycle, registered);
         RequestState requested = lifecycle.cancelRequest(
                 201L, 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(RequestState.Phase.CANCEL_REQUESTED,
@@ -209,7 +213,7 @@ class RequestAdmissionResourceLeakTest {
 
         assertEquals(PlacementResult.Status.CLOSED,
                 lifecycle.commitRoute(
-                        registered.item(), 1, 30_000L,
+                        registered.item(),
                         () -> true));
         assertEquals(0, lifecycle.decodeAcceptanceCount(),
                 "Decode already owns the request, so no second guard remains");

@@ -2,13 +2,18 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.NavigableSet;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeSet;
 
-/** Exact endpoint waiters plus the single non-bypassable selector frontier. */
+/** Ordered waiters for exact endpoints and overlapping selector domains. */
 final class BlockedRequestIndex {
 
     record Conflict(WorkerEndpoint endpoint, PlacementKey blocker) {
@@ -20,21 +25,34 @@ final class BlockedRequestIndex {
             new IdentityHashMap<>();
     private final Map<String, Set<WorkerEndpoint>> endpointsByAddress =
             new java.util.HashMap<>();
-    private GlobalQueueEntry frontier;
+    private final Comparator<GlobalQueueEntry> order;
+    private final NavigableSet<GlobalQueueEntry> selectorWaiters;
+    private final Map<String, NavigableSet<GlobalQueueEntry>> selectorsByGroup = new HashMap<>();
 
-    boolean isExactBlocked(GlobalQueueEntry entry) {
-        return entry.blockedEndpoint != null;
+    BlockedRequestIndex(boolean priorityOrdering) {
+        Comparator<GlobalQueueEntry> fifo = Comparator.comparingLong(entry -> entry.sequence);
+        order = priorityOrdering
+                ? Comparator.<GlobalQueueEntry>comparingInt(entry -> entry.priority).reversed()
+                        .thenComparing(fifo)
+                : fifo;
+        selectorWaiters = new TreeSet<>(order);
     }
 
-    GlobalQueueEntry frontier() {
-        return frontier;
+    boolean isBlocked(GlobalQueueEntry entry) {
+        return entry.blockedEndpoint != null || isSelectorBlocked(entry);
     }
 
-    void clearStaleFrontier() {
-        if (frontier != null
-                && (frontier.removed || frontier.future.isDone())) {
-            clearEntry(frontier);
-        }
+    boolean isSelectorBlocked(GlobalQueueEntry entry) {
+        // Unbound requests can select any group. Explicit groups may bypass
+        // only other explicit groups; wildcard blockers remain fleet-wide.
+        return entry.routingGroup == null ? precedes(selectorWaiters, entry)
+                : precedes(selectorsByGroup.get(null), entry)
+                        || precedes(selectorsByGroup.get(entry.routingGroup), entry);
+    }
+
+    private boolean precedes(NavigableSet<GlobalQueueEntry> waiters, GlobalQueueEntry entry) {
+        return waiters != null && !waiters.isEmpty()
+                && order.compare(waiters.first(), entry) <= 0;
     }
 
     Conflict conflict(
@@ -81,23 +99,30 @@ final class BlockedRequestIndex {
         entry.blockedEndpoint = exactEndpoint;
     }
 
-    void parkFrontier(GlobalQueueEntry entry, PlacementKey blocker) {
+    void parkSelector(GlobalQueueEntry entry, PlacementKey blocker) {
         clearEntry(entry);
-        if (frontier != null && frontier != entry) {
-            throw new IllegalStateException(
-                    "selector frontier already belongs to another request");
-        }
         entry.blockedKey = Objects.requireNonNull(blocker, "blocker");
-        frontier = entry;
+        selectorWaiters.add(entry);
+        selectorsByGroup.computeIfAbsent(entry.routingGroup,
+                ignored -> new TreeSet<>(order)).add(entry);
     }
 
     void clearEntry(GlobalQueueEntry entry) {
         detachEntry(entry, true);
-        if (frontier == entry) {
-            frontier = null;
-        }
+        clearSelector(entry);
         entry.blockedKey = null;
         entry.blockedEndpoint = null;
+    }
+
+    private void clearSelector(GlobalQueueEntry entry) {
+        if (!selectorWaiters.remove(entry)) {
+            return;
+        }
+        NavigableSet<GlobalQueueEntry> group = selectorsByGroup.get(entry.routingGroup);
+        group.remove(entry);
+        if (group.isEmpty()) {
+            selectorsByGroup.remove(entry.routingGroup);
+        }
     }
 
     /**
@@ -117,9 +142,7 @@ final class BlockedRequestIndex {
         boolean consumedClaim = waiters.claimant == entry
                 && selects(admission, waiters.endpoint);
         detachEntry(entry, !consumedClaim);
-        if (frontier == entry) {
-            frontier = null;
-        }
+        clearSelector(entry);
         entry.blockedKey = null;
         entry.blockedEndpoint = null;
     }
@@ -131,25 +154,43 @@ final class BlockedRequestIndex {
      * miss instead of replanning every request parked on the endpoint.
      */
     void capacityChanged(PlacementKey event) {
-        if (frontier != null && isRelevant(frontier.blockedKey, event)) {
-            clearEntry(frontier);
-        }
+        releaseSelectors(event);
         forEachExactEndpoint(event, this::activateNext);
     }
 
     /** A generation change invalidates every route pinned to that address. */
     void topologyChanged(PlacementKey event) {
-        if (frontier != null && isRelevant(frontier.blockedKey, event)) {
-            clearEntry(frontier);
-        }
+        releaseSelectors(event);
         forEachExactEndpoint(event, this::releaseAll);
     }
 
-    void clear() {
-        if (frontier != null) {
-            frontier.blockedKey = null;
-            frontier = null;
+    private void releaseSelectors(PlacementKey event) {
+        if (event == null) {
+            return;
         }
+        releaseSelectors(selectorsByGroup.get(null), event);
+        if (event.group() != null) {
+            releaseSelectors(selectorsByGroup.get(event.group()), event);
+        }
+    }
+
+    private void releaseSelectors(NavigableSet<GlobalQueueEntry> entries, PlacementKey event) {
+        if (entries == null) {
+            return;
+        }
+        for (GlobalQueueEntry entry : List.copyOf(entries)) {
+            if (isRelevant(entry.blockedKey, event)) {
+                clearEntry(entry);
+            }
+        }
+    }
+
+    void clear() {
+        for (GlobalQueueEntry entry : selectorWaiters) {
+            entry.blockedKey = null;
+        }
+        selectorWaiters.clear();
+        selectorsByGroup.clear();
         for (EndpointWaiters waiters : byEndpoint.values()) {
             for (GlobalQueueEntry entry : waiters.entries) {
                 entry.blockedKey = null;
@@ -166,7 +207,8 @@ final class BlockedRequestIndex {
             WorkerEndpoint endpoint) {
         EndpointWaiters waiters = byEndpoint.get(endpoint);
         if (waiters == null || waiters.entries.isEmpty()
-                || waiters.claimant == entry) {
+                || waiters.claimant == entry
+                || order.compare(entry, waiters.entries.first()) < 0) {
             return null;
         }
         return new Conflict(endpoint, waiters.blocker);
@@ -281,10 +323,9 @@ final class BlockedRequestIndex {
                 || blocker.group() == null;
     }
 
-    private static final class EndpointWaiters {
+    private final class EndpointWaiters {
         private final WorkerEndpoint endpoint;
-        private final LinkedHashSet<GlobalQueueEntry> entries =
-                new LinkedHashSet<>();
+        private final NavigableSet<GlobalQueueEntry> entries = new TreeSet<>(order);
         private PlacementKey blocker;
         private GlobalQueueEntry claimant;
 

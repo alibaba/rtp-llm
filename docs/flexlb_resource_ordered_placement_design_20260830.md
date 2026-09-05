@@ -41,21 +41,25 @@ GlobalQueueCoordinator
 
 Ingress 不执行 RPC、不等待容量、不扫描队列。Global queue 只有一个短的
 ordered commit 点；候选计算在 planner pool 中并行，提交仍按队列顺序线性化。
-Planning frontier 的请求预算来自全 fleet 当前 delivery credits 与
-`scheduler.capacity.maxOutstandingRequestsGlobal` 的较小值；它不代表 decision
-group。实际同时计算的 route plan 不超过 planner pool 大小。线程数来自
+Planning frontier 受 `scheduler.capacity.maxOutstandingRequestsGlobal` 约束，
+实际同时计算的 route plan 不超过 planner pool 大小；它不代表 decision group。
+规划只占用 CPU，不以 fleet 剩余额度作为启动条件，因此零额度时仍可执行精确路由抢占。
+endpoint publication 和 priority replacement 使用同一个有效容量：排队上限与扣除
+已交付、引擎存量工作后的 delivery 容量的较小值。线程数来自
 `InternalRuntimeSettings.queuePlannerThreads`（默认值为 JVM 可见 CPU 核数，可用
 `flexlb.queue.planner.threads` 显式覆盖）。PRIORITY 在每次 commit 前重新确认没有
 更高优先级请求；需要重新读取容量或排序 frontier 时，尚未提交的 plan 会先关闭。
 若某请求在 commit 时只与一个具体
 engine 的本地容量冲突，就把它按 endpoint park；后续不使用该 endpoint 的
 请求可以先提交，同一 endpoint 的请求仍然等待容量事件。selector 层没有具体
-endpoint 的 pool-wide miss 不能安全绕过队头。每次 route decision
+endpoint 的 miss 按入队时固定的 policy group 建立冲突域：显式且不同的 group
+可独立前进；无 group 的请求与所有 group 冲突，相同 group 仍保持 FIFO/priority。
+每次 route decision
 都会读取该 role 的完整 live endpoint snapshot；look-ahead 只限制同时准备的
 请求数，不限制机器候选数，因此不会因 cursor 窗口漏掉全局最优机器。
 
-FIFO/PRIORITY 的顺序仍是默认提交顺序；endpoint-local capacity conflict 是唯一
-明确允许的绕行条件，不通过隐藏 fallback 破坏顺序。优先级抢占只在
+FIFO/PRIORITY 的顺序仍是共享资源域内的提交顺序；绕行只允许用于互不冲突的
+endpoint 或显式 policy group，不通过隐藏 fallback 改变候选选择。优先级抢占只在
 `EvictionManager` 的现有协议中作为一次明确的 priority rescue，不形成多层
 重试链。
 
@@ -73,7 +77,16 @@ tombstone，也不扫描大队列。
 - cancel、terminal response 和 cleanup；
 - 已发布请求的精确 queue item / Decode reservation 释放。
 
-Global queue 的 entry 只保存 context、future、priority 和 queue-local 状态，
+全局 outstanding 配额在 RequestSlot 注册前获取；过载拒绝不创建保留五分钟的
+请求 generation。配额交给唯一 RequestSlot，并在终止时精确释放一次。
+PRIORITY 模式额度已满时，按低优先级优先查找尚未交付、可本地终止的候选，
+在同一次入场临界区内将其配额直接转交高优请求，不先释放再竞争。全局等待请求
+可直接参与置换；已落到端点队列的请求遵循 `PREFILL_QUEUED` 抢占配置。
+同优、低优及 FIFO 不触发置换，已交付或 admission mutation 尚未结束的请求
+不能被本地回收。候选索引随交付/终止移除，不扫描保留的 generation；端点清理、
+定时器操作和 future 通知均在入场锁外执行。
+
+Global queue 的 entry 保存 context、future、priority、固定 policy group、入队顺序和 queue-local 状态，
 不增加 `WAITING_P`、`WAITING_D`、`RETRYING`、`PREPARED` 等生命周期状态。
 
 ## 4. 一次统一 placement decision
@@ -83,12 +96,20 @@ Global queue 的 entry 只保存 context、future、priority 和 queue-local 状
 1. 读取当前 worker、cache 和 delivery projection；
 2. 用现有 `DefaultRouter.routeForQueue` 完整选择 required roles；
 3. 在 `QueueRouteAdmission.tryPublish` 中校验 generation、P queue seat、
-   Decode reservation 和全局 acceptance cap；
+   required roles 中的 Decode reservation；
 4. 成功后一次性发布 `ScheduledRequest` 到选中的 Prefill endpoint；
 5. 关闭 admission mutation 和 generation pin 的临时所有权。
 
 任何失败都关闭本次 pins/reservation，不把部分 P/D 选择带到下一次尝试。
 成功的 placement 不会因普通 WorkerStatus 心跳再次选机。
+
+PDFUSION-only 拓扑只选择 PDFUSION，不要求独立 Decode，不占用 Decode 配额。
+分离式拓扑的全局 delivered-not-accepted 配额在 delivery preparation 时获取；
+排队不占用该配额，容量不足时等待真实释放事件，交付和回滚使用同一个一次性资源句柄。
+WorkerBatcher 在锁内冻结版本与所有权数据，排序及投影在锁外执行。已提交工作
+的派生快照只在提交、状态更新、终止或退休时失效，ACTIVE 排队变更复用该快照；
+运行中的剩余时长由其原始时钟基准重算，不会冻结执行进度。最终 admission
+仍在精确 endpoint 上校验容量，不能把 advisory snapshot 当成授权。
 
 ## 5. TTL、拒绝和容量事件
 

@@ -51,7 +51,6 @@ public final class RequestScheduler {
                 ? new GlobalQueueCoordinator(
                         this.configService,
                         Objects.requireNonNull(router, "router"),
-                        this.endpointRegistry,
                         Objects.requireNonNull(reporter, "reporter"),
                         Objects.requireNonNull(evictionManager, "evictionManager"),
                         this.lifecycle,
@@ -97,10 +96,14 @@ public final class RequestScheduler {
         if (future.isDone()) {
             return future;
         }
-        if (!globalQueue.offer(context, future, context.getPriority())) {
-            future.complete(error(
-                    StrategyErrorType.BATCH_DISPATCH_FAILED,
-                    "request scheduler is shutting down"));
+        try {
+            if (!globalQueue.offer(context, future, context.getPriority())) {
+                future.complete(error(StrategyErrorType.BATCH_DISPATCH_FAILED,
+                        "request scheduler is shutting down"));
+            }
+        } catch (Throwable failure) {
+            future.complete(error(StrategyErrorType.BATCH_DISPATCH_FAILED,
+                    "Queue submission failed: " + failure.getMessage()));
         }
         return future;
     }

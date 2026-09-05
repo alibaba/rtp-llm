@@ -52,6 +52,16 @@ final class RequestLifecycleTestSupport {
             long acceptanceTimeoutMs) {
         assertEquals(PlacementResult.Status.SUCCESS,
                 commitRoute(lifecycle, registered, limit, acceptanceTimeoutMs));
+        prepareAcceptance(lifecycle, registered);
+    }
+
+    /** Simulate the existing delivery preparation/handoff boundary. */
+    static void prepareAcceptance(RequestRegistry lifecycle, Registered registered) {
+        try (RequestRegistry.DeliveryAdmission admission =
+                     lifecycle.prepareDecodeAcceptance(registered.item()).value()) {
+            assertNotNull(admission);
+            assertTrue(admission.transferTo(registered.item()));
+        }
     }
 
     static PlacementResult.Status commitRoute(
@@ -59,13 +69,14 @@ final class RequestLifecycleTestSupport {
             Registered registered,
             int limit,
             long acceptanceTimeoutMs) {
+        var policy = registered.item().ctx().getConfig().queueScheduler().getLifecycle();
+        policy.setMaxDeliveredNotAcceptedRequestsGlobal(limit);
+        policy.setDeliveredNotAcceptedTimeoutMs(acceptanceTimeoutMs);
         try (AdmissionMutation admission =
                      lifecycle.claimAdmissionMutation(
                              registered.item().requestId(), registered.future())) {
             assertNotNull(admission);
-            return lifecycle.commitRoute(
-                    registered.item(), limit,
-                    acceptanceTimeoutMs, () -> true);
+            return lifecycle.commitRoute(registered.item(), () -> true);
         }
     }
 
