@@ -421,6 +421,15 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
 
     stackBuffersToTensorPB(flatten_output->mutable_logits(), source_outputs, [](const auto& r) { return r.logits; });
 
+    // OpenAI logprobs live in AuxInfo in-process; FlattenOutputPB owns the
+    // tensor on the model-RPC wire. Deliberately outside the dump_aux_info
+    // gate: presence is already gated by generate_config->aux_info on the
+    // producer side (NormalGenerateStream), and the Python client parses
+    // this field outside its aux_info branch.
+    stackBuffersToTensorPB(flatten_output->mutable_all_probs(), source_outputs, [](const auto& r) {
+        return r.aux_info.all_probs;
+    });
+
     stackBuffersToTensorPB(
         flatten_output->mutable_all_hidden_states(), source_outputs, [](const auto& r) { return r.all_hidden_states; });
 
