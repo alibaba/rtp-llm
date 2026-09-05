@@ -58,6 +58,7 @@ public:
                                  int  reuse_blocks_len,
                                  bool reuse_enabled = false) const override;
     bool           shouldMaterializeBlock(int pos, int seq_len, int reserve_step, bool enable_reuse_cache) const;
+    bool           materializeBlockAt(BlockIds& block_ids, size_t pos);
 
 private:
     void filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const;

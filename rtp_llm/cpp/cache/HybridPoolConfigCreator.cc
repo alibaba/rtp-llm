@@ -323,6 +323,7 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     config.dtype                           = dtype;
     config.linear_step                     = std::max(1, kv_cache_config.linear_step);
     config.linear_fixed_cap                = std::max(0, kv_cache_config.linear_fixed_cap);
+    config.linear_request_cache_pool_blocks = kv_cache_config.linear_request_cache_pool_blocks;
     config.linear_speculative_reserve_step = gen_num_per_cycle > 0 ? gen_num_per_cycle + 1 : 0;
     config.role_type                       = parallelism_config.role_type;
     const char* linear_request_cache_env   = std::getenv("ENABLE_LINEAR_ATTN_REQUEST_CACHE");

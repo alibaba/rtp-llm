@@ -117,6 +117,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         default=0,
         help="线性注意力每个请求最多保留的序列 block 数；0 表示不限制。正确性必需的尾块不受小于 2 的配置影响。",
     )
+    kv_cache_group.add_argument(
+        "--linear_attn_request_cache_pool_blocks",
+        env_name="LINEAR_ATTN_REQUEST_CACHE_POOL_BLOCKS",
+        bind_to=(kv_cache_config, "linear_request_cache_pool_blocks"),
+        type=int,
+        default=0,
+        help="整请求 Linear Attention device cache 每个 group 的总 block 数；0 表示按并发自动计算。",
+    )
 
     kv_cache_group.add_argument(
         "--ssm_state_dtype",

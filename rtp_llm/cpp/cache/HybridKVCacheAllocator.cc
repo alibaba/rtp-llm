@@ -117,65 +117,28 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
 
     std::vector<BlockIdxType>     linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
     std::vector<BlockIndicesType> swa_tail_blocks(swa_group_ids_.size());
-    const bool                    has_linear_groups = !linear_group_ids_.empty();
-    const bool exact_request_linear = has_linear_groups && config_.enable_linear_attention_request_cache;
-
-    // Linear state is reusable only at the longest prefix already matched by
-    // every paged FULL group. Do not walk backwards to an older state: a cached
-    // 1024-token state may be reused as a whole (also by a longer request), but
-    // it must never degrade to a 896/768/... partial hit.
-    if (exact_request_linear) {
-        if (min_full_reuse_blocks <= 0) {
-            return 0;
-        }
-        const CacheKeyType linear_state_key = cache_keys[static_cast<size_t>(min_full_reuse_blocks - 1)];
-        for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
-            const int gid      = linear_group_ids_[i];
-            auto* linear_group = dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
-            RTP_LLM_CHECK_WITH_INFO(linear_group != nullptr, "group %d is not LinearKVCacheGroup", gid);
-            auto result = linear_group->matchSingleKey(linear_state_key);
-            if (result.block_indices.empty()) {
-                return 0;
-            }
-            linear_tail_blocks[i] = result.block_indices[0];
-        }
-        const int exact_pos = min_full_reuse_blocks - 1;
-        for (size_t i = 0; i < swa_group_ids_.size(); ++i) {
-            const int gid       = swa_group_ids_[i];
-            auto*     swa_group = dynamic_cast<SWAKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
-            RTP_LLM_CHECK_WITH_INFO(swa_group != nullptr, "group %d is not SWAKVCacheGroup", gid);
-            if (skipReuseCacheGroup(gid)) {
-                continue;
-            }
-            auto result = swa_group->matchSingleKey(cache_keys[static_cast<size_t>(exact_pos)]);
-            if (result.block_indices.empty()) {
-                return 0;
-            }
-            swa_tail_blocks[i].push_back(result.block_indices[0]);
-        }
-    }
+    const bool                    has_tail_groups = !linear_group_ids_.empty() || !swa_group_ids_.empty();
 
     int pos = min_full_reuse_blocks - 1;
-    // Models outside request-cache mode retain their legacy right-to-left
-    // Linear/SWA prefix matching.
-    const bool has_legacy_tail_groups = !exact_request_linear && (has_linear_groups || !swa_group_ids_.empty());
-    for (; pos >= 0 && has_legacy_tail_groups; --pos) {
+    // Walk back to the newest cached Linear state covered by every FULL group.
+    // In request-cache mode these are sparse, whole-request checkpoints only;
+    // intermediate step states were never inserted, so this cannot re-enable
+    // legacy partial-prefix fallback.
+    for (; pos >= 0 && has_tail_groups; --pos) {
         bool                          all_tail_groups_matched = true;
         std::vector<BlockIdxType>     candidate_linear_tail_blocks(linear_group_ids_.size(), NULL_BLOCK_IDX);
         std::vector<BlockIndicesType> candidate_swa_tail_blocks(swa_group_ids_.size());
-        if (!exact_request_linear) {
-            for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
-                const int gid = linear_group_ids_[i];
-                auto*     linear_group =
-                    dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
-                RTP_LLM_CHECK_WITH_INFO(linear_group != nullptr, "group %d is not LinearKVCacheGroup", gid);
-                auto result = linear_group->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
-                if (result.block_indices.empty()) {
-                    all_tail_groups_matched = false;
-                    break;
-                }
-                candidate_linear_tail_blocks[i] = result.block_indices[0];
+        for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
+            const int gid = linear_group_ids_[i];
+            auto*     linear_group =
+                dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
+            RTP_LLM_CHECK_WITH_INFO(linear_group != nullptr, "group %d is not LinearKVCacheGroup", gid);
+            auto result = linear_group->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
+            if (result.block_indices.empty()) {
+                all_tail_groups_matched = false;
+                break;
             }
+            candidate_linear_tail_blocks[i] = result.block_indices[0];
         }
         if (!all_tail_groups_matched) {
             continue;
@@ -195,16 +158,13 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
             candidate_swa_tail_blocks[i].push_back(result.block_indices[0]);
         }
         if (all_tail_groups_matched) {
-            if (!exact_request_linear) {
-                linear_tail_blocks = std::move(candidate_linear_tail_blocks);
-            }
+            linear_tail_blocks = std::move(candidate_linear_tail_blocks);
             swa_tail_blocks = std::move(candidate_swa_tail_blocks);
             break;
         }
     }
 
-    const int reuse_blocks_len =
-        exact_request_linear || !has_legacy_tail_groups ? std::max(min_full_reuse_blocks, 0) : std::max(pos + 1, 0);
+    const int reuse_blocks_len = has_tail_groups ? std::max(pos + 1, 0) : std::max(min_full_reuse_blocks, 0);
     if (reuse_blocks_len <= 0) {
         return 0;
     }
@@ -693,6 +653,32 @@ std::shared_ptr<KVCacheResource> HybridKVCacheAllocator::incrKVCacheRef(const KV
         selected_resource->mutableBlockIds(gid).assign(std::move(selected_blocks[static_cast<size_t>(gid)]));
     }
     return selected_resource;
+}
+
+bool HybridKVCacheAllocator::materializeRequestCacheState(KVCacheResource& resource, size_t key_index) {
+    if (!config_.enable_linear_attention_request_cache || key_index >= resource.cacheKeys().size()) {
+        return false;
+    }
+
+    std::vector<std::pair<int, BlockIdxType>> allocated;
+    for (int gid : linear_group_ids_) {
+        auto* group = dynamic_cast<LinearKVCacheGroup*>(kv_cache_groups_[static_cast<size_t>(gid)].get());
+        RTP_LLM_CHECK_WITH_INFO(group != nullptr, "group %d is not LinearKVCacheGroup", gid);
+        auto& block_ids = resource.mutableBlockIds(gid);
+        if (block_ids.blocksNum() > key_index && !isNullBlockIdx(block_ids.blocks()[key_index])) {
+            continue;
+        }
+        if (!group->materializeBlockAt(block_ids, key_index)) {
+            for (const auto& [allocated_gid, block] : allocated) {
+                auto& allocated_ids = resource.mutableBlockIds(allocated_gid);
+                allocated_ids.setAt(key_index, NULL_BLOCK_IDX);
+                kv_cache_groups_[static_cast<size_t>(allocated_gid)]->free({block});
+            }
+            return false;
+        }
+        allocated.emplace_back(gid, block_ids.blocks()[key_index]);
+    }
+    return !linear_group_ids_.empty();
 }
 
 void HybridKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector) {

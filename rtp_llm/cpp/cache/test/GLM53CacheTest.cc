@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <cstdlib>
+#include <string>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
@@ -14,6 +16,31 @@
 namespace rtp_llm {
 namespace test {
 namespace {
+
+class ScopedEnvVar {
+public:
+    ScopedEnvVar(const char* name, const char* value): name_(name) {
+        const char* old_value = std::getenv(name_);
+        if (old_value != nullptr) {
+            old_value_ = old_value;
+            had_value_ = true;
+        }
+        setenv(name_, value, 1);
+    }
+
+    ~ScopedEnvVar() {
+        if (had_value_) {
+            setenv(name_, old_value_.c_str(), 1);
+        } else {
+            unsetenv(name_);
+        }
+    }
+
+private:
+    const char* name_;
+    std::string old_value_;
+    bool        had_value_ = false;
+};
 
 ModelConfig makeGlm53Config() {
     ModelConfig mc;
@@ -344,7 +371,8 @@ TEST(GLM53CacheConfigTest, DecodeShardedPrefillCpRequiresExplicitCpSize) {
     EXPECT_DEATH(HybridPoolConfigCreator::createConfig(makeGlm53Config(), decode_pc, makeKvConfig(), false, 0), "");
 }
 
-TEST(GLM53CacheConfigTest, PropagatesLinearReusePolicy) {
+TEST(GLM53CacheConfigTest, SwitchOffPreservesLinearReusePolicy) {
+    ScopedEnvVar      request_cache_mode("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "0");
     ParallelismConfig pc;
     auto              kv_config = makeKvConfig();
     kv_config.linear_step       = 4;
@@ -352,8 +380,124 @@ TEST(GLM53CacheConfigTest, PropagatesLinearReusePolicy) {
 
     auto config = HybridPoolConfigCreator::createConfig(makeGlm53Config(), pc, kv_config, false, 0);
 
+    EXPECT_FALSE(config.enable_linear_attention_request_cache);
     EXPECT_EQ(config.linear_step, 4);
     EXPECT_EQ(config.linear_fixed_cap, 6);
 }
+
+TEST(GLM53CacheConfigTest, LinearPoolIsTokenIndependentAndRoleSized) {
+    constexpr uint32_t tp_size = 8;
+    ScopedEnvVar       request_cache_mode("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "1");
+
+    ParallelismConfig prefill_pc;
+    prefill_pc.role_type                          = RoleType::PREFILL;
+    prefill_pc.tp_size                            = tp_size;
+    prefill_pc.ep_size                            = tp_size;
+    prefill_pc.world_size                         = tp_size;
+    prefill_pc.prefill_cp_config.method           = CPRotateMethod::DISABLED;
+    prefill_pc.prefill_cp_config.kv_cache_sharded = true;
+
+    ParallelismConfig decode_pc;
+    decode_pc.role_type                          = RoleType::DECODE;
+    decode_pc.tp_size                            = 1;
+    decode_pc.dp_size                            = tp_size;
+    decode_pc.ep_size                            = tp_size;
+    decode_pc.world_size                         = tp_size;
+    decode_pc.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+    decode_pc.prefill_cp_config.kv_cache_sharded = true;
+    decode_pc.prefill_cp_config.prefill_cp_size  = tp_size;
+
+    RuntimeConfig prefill_runtime;
+    prefill_runtime.max_generate_batch_size = 64;
+    RuntimeConfig decode_runtime;
+    decode_runtime.max_generate_batch_size = 8;
+
+    auto prefill_config =
+        HybridPoolConfigCreator::createConfig(makeGlm53Config(), prefill_pc, makeKvConfig(), false, 3);
+    auto decode_config = HybridPoolConfigCreator::createConfig(makeGlm53Config(), decode_pc, makeKvConfig(), false, 3);
+
+    ASSERT_EQ(prefill_config.group_types[1], CacheGroupType::LINEAR);
+    ASSERT_EQ(decode_config.group_types[1], CacheGroupType::LINEAR);
+    EXPECT_EQ(prefill_config.linear_block_size_bytes, prefill_config.group_block_size_bytes[1]);
+    EXPECT_EQ(decode_config.linear_block_size_bytes, decode_config.group_block_size_bytes[1]);
+    EXPECT_EQ(prefill_config.linear_speculative_reserve_step, 4);
+    EXPECT_EQ(decode_config.linear_speculative_reserve_step, 4);
+
+    prefill_config.finalizeBlockNums(10000, prefill_runtime);
+    decode_config.finalizeBlockNums(10000, decode_runtime);
+    EXPECT_EQ(prefill_config.group_block_nums[1], 64u * 3u);
+    EXPECT_EQ(decode_config.group_block_nums[1], 8u * 5u);
+    EXPECT_GE(prefill_config.fixed_pool_reserve_bytes, 64u * 3u * prefill_config.linear_block_size_bytes);
+    EXPECT_GE(decode_config.fixed_pool_reserve_bytes, 8u * 5u * decode_config.linear_block_size_bytes);
+
+    // Paged MLA/indexer capacity may change with the global token budget, but
+    // the LINEAR pool remains bounded only by live-request concurrency.
+    prefill_config.finalizeBlockNums(20000, prefill_runtime);
+    decode_config.finalizeBlockNums(20000, decode_runtime);
+    EXPECT_EQ(prefill_config.group_block_nums[1], 64u * 3u);
+    EXPECT_EQ(decode_config.group_block_nums[1], 8u * 5u);
+}
+
+TEST(GLM53CacheConfigTest, LinearRequestPoolBlockOverrideIsAppliedWithLiveRequestFloor) {
+    ScopedEnvVar request_cache_mode("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "1");
+
+    ParallelismConfig pc;
+    pc.role_type = RoleType::PREFILL;
+    RuntimeConfig runtime;
+    runtime.max_generate_batch_size = 64;
+
+    auto kv_config = makeKvConfig();
+    kv_config.linear_request_cache_pool_blocks = 384;
+    auto config = HybridPoolConfigCreator::createConfig(makeGlm53Config(), pc, kv_config, false, 3);
+    config.finalizeBlockNums(10000, runtime);
+    EXPECT_EQ(config.group_block_nums[1], 384u);
+
+    kv_config.linear_request_cache_pool_blocks = 32;
+    config = HybridPoolConfigCreator::createConfig(makeGlm53Config(), pc, kv_config, false, 3);
+    config.finalizeBlockNums(10000, runtime);
+    EXPECT_EQ(config.group_block_nums[1], 128u);
+}
+
+TEST(GLM53CacheConfigTest, OfficialShapeCacheBytesMatchOneMillionTokenAccounting) {
+    auto model       = makeGlm53Config();
+    model.num_layers = 45;
+    model.hybrid_attention_config.hybrid_attention_types.assign(34, HybridAttentionType::LINEAR);
+    model.hybrid_attention_config.hybrid_attention_types.insert(
+        model.hybrid_attention_config.hybrid_attention_types.end(), 11, HybridAttentionType::NONE);
+    model.linear_attention_config.linear_key_head_dim   = 128;
+    model.linear_attention_config.linear_value_head_dim = 128;
+    model.attn_config.kv_cache_dtype                    = KvCacheDataType::FP8;
+
+    ParallelismConfig prefill_pc;
+    prefill_pc.role_type                          = RoleType::PREFILL;
+    prefill_pc.tp_size                            = 8;
+    prefill_pc.prefill_cp_config.method           = CPRotateMethod::DISABLED;
+    prefill_pc.prefill_cp_config.kv_cache_sharded = true;
+    auto prefill_config = HybridPoolConfigCreator::createConfig(model, prefill_pc, makeKvConfig(), false, 3);
+
+    ASSERT_EQ(prefill_config.cache_specs.size(), 4u);
+    EXPECT_EQ(prefill_config.global_layer_ids[0].size(), 11u);
+    EXPECT_EQ(prefill_config.global_layer_ids[1].size(), 34u);
+    EXPECT_EQ(prefill_config.global_layer_ids[2].size(), 11u);
+    EXPECT_EQ(prefill_config.global_layer_ids[3].size(), 11u);
+    auto* mla_spec = dynamic_cast<MLAKVCacheSpec*>(prefill_config.cache_specs[0].get());
+    ASSERT_NE(mla_spec, nullptr);
+    EXPECT_EQ(11u * mla_spec->block_size_bytes(), 743424u);
+    EXPECT_EQ(11u * mla_spec->scale_block_size_bytes(), 185856u);
+    EXPECT_EQ(prefill_config.group_block_size_bytes[0], 929280u);
+    EXPECT_EQ(prefill_config.group_block_size_bytes[1], 18452480u);
+    EXPECT_EQ(prefill_config.group_block_size_bytes[2], 46464u);
+
+    ParallelismConfig decode_pc;
+    decode_pc.role_type                          = RoleType::DECODE;
+    decode_pc.tp_size                            = 1;
+    decode_pc.dp_size                            = 8;
+    decode_pc.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+    decode_pc.prefill_cp_config.kv_cache_sharded = true;
+    decode_pc.prefill_cp_config.prefill_cp_size  = 8;
+    auto decode_config = HybridPoolConfigCreator::createConfig(model, decode_pc, makeKvConfig(), false, 3);
+    EXPECT_EQ(decode_config.group_block_size_bytes[1], 147619840u);
+}
+
 }  // namespace test
 }  // namespace rtp_llm

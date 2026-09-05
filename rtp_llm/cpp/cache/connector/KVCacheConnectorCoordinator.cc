@@ -190,19 +190,15 @@ bool KVCacheConnectorCoordinator::init() {
                      cache_config_.debugString().c_str(),
                      kv_cache_config_.to_string().c_str(),
                      runtime_config_.to_string().c_str());
-    // Request-cache mode reuses only the longest complete aligned Linear state;
-    // it must never walk backwards to a shorter state. Memory/remote connectors
-    // currently perform general prefix matching and cannot enforce that rule.
-    // Keep them fail-closed in this mode; device cache implements the aligned
-    // state contract and P2P P->D transfer is initialized independently below.
+    // Remote cache still uses the legacy prefix-only contract. Memory cache has
+    // a dedicated whole-request path and remains available in this mode.
     const bool whole_state_linear_request_cache =
         cache_config_.enable_linear_attention_request_cache && cache_config_.linear_group_num > 0;
-    if (whole_state_linear_request_cache
-        && (kv_cache_config_.enable_memory_cache || kv_cache_config_.enable_remote_cache)) {
-        RTP_LLM_LOG_WARNING("whole-state Linear request cache disables prefix-only memory/remote cache connectors; "
-                            "device exact reuse and P2P remain enabled");
+    if (whole_state_linear_request_cache && kv_cache_config_.enable_remote_cache) {
+        RTP_LLM_LOG_WARNING(
+            "whole-state Linear request cache disables prefix-only remote cache; device/memory/P2P remain enabled");
     }
-    if (!whole_state_linear_request_cache && kv_cache_config_.reuse_cache && kv_cache_config_.enable_memory_cache) {
+    if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_memory_cache) {
         memory_connector_ = initMemoryConnector();
         connectors_.emplace_back(memory_connector_);
     }
@@ -255,6 +251,22 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
             }
             ref_resource = makeCpShardedConnectorResource(kvcache_resource, cache_config_, ref_keys, cp_size);
             ref_keys     = ref_resource.cacheKeys();
+        }
+    }
+    if (memory_connector_ && connector_context->meta()->enableMemoryCache()
+        && cache_config_.enable_linear_attention_request_cache && cache_config_.linear_group_num > 0) {
+        if (cp_size > 1) {
+            RTP_LLM_LOG_WARNING("whole-request memory cache currently requires unsharded cache keys; skip CP read");
+            return nullptr;
+        } else {
+            const size_t matched_blocks = memory_connector_->matchWholeRequest(ref_resource);
+            if (matched_blocks > ref_resource.reuseBlockNum()
+                && !allocator_->materializeRequestCacheState(ref_resource, matched_blocks - 1)) {
+                RTP_LLM_LOG_WARNING(
+                    "whole-request memory cache matched %zu blocks but failed to allocate Linear state target",
+                    matched_blocks);
+                return nullptr;
+            }
         }
     }
     auto resource = allocator_->incrKVCacheRef(ref_resource, ref_keys, true);

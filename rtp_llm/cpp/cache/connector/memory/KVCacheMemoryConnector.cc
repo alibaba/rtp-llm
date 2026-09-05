@@ -281,8 +281,12 @@ void KVCacheMemoryConnector::initBlockPool() {
 
     const auto slots                 = layerRegionSlots();
     const bool prefix_tree_requested = kv_cache_config_.enable_prefix_tree_memory_cache;
-    const bool prefix_tree_supported = isDsv4TypedCacheLayout(slots);
-    use_prefix_tree_memory_cache_    = prefix_tree_requested && prefix_tree_supported;
+    const bool whole_request_cache   = wholeStateRequestCache();
+    const bool prefix_tree_supported = isDsv4TypedCacheLayout(slots) || whole_request_cache;
+    // Whole-request Linear states must be split from paged MLA/Indexer blocks:
+    // one state checkpoint is stored only at a completed request boundary,
+    // while compressed KV remains a normal block chain.
+    use_prefix_tree_memory_cache_ = whole_request_cache || (prefix_tree_requested && prefix_tree_supported);
     RTP_LLM_CHECK_WITH_INFO(use_prefix_tree_memory_cache_ || !prefix_tree_requested
                                 || kv_cache_config_.enable_legacy_memory_connector_fallback,
                             "prefix-tree memory cache requested but unsupported by this layout/config and legacy "
@@ -318,6 +322,7 @@ void KVCacheMemoryConnector::initBlockPool() {
         const size_t total_bytes         = static_cast<size_t>(memory_cache_size_mb) * 1024ULL * 1024ULL;
         size_t       compressed_capacity = 0;
         size_t       state_swa_capacity  = 0;
+        bool         device_scaled       = false;
         if (kv_cache_config_.prefix_tree_memory_state_swa_pool_ratio > 0) {
             RTP_LLM_CHECK_WITH_INFO(kv_cache_config_.prefix_tree_memory_state_swa_pool_ratio < 100,
                                     "prefix_tree_memory_state_swa_pool_ratio must be in [1, 99], got %ld",
@@ -327,7 +332,33 @@ void KVCacheMemoryConnector::initBlockPool() {
             const size_t compressed_bytes = total_bytes - state_bytes;
             compressed_capacity           = compressed_bytes / compressed_block_size_;
             state_swa_capacity            = state_bytes / state_swa_block_size_;
-        } else {
+        } else if (whole_request_cache) {
+            size_t device_total_bytes = 0;
+            size_t device_state_bytes = 0;
+            const size_t group_count = std::min(cache_config_.group_block_nums.size(),
+                                                cache_config_.group_block_size_bytes.size());
+            for (size_t gid = 0; gid < group_count; ++gid) {
+                const size_t bytes = static_cast<size_t>(cache_config_.group_block_nums[gid])
+                                     * cache_config_.group_block_size_bytes[gid];
+                device_total_bytes += bytes;
+                if (gid < cache_config_.group_types.size()
+                    && cache_config_.group_types[gid] == CacheGroupType::LINEAR) {
+                    device_state_bytes += bytes;
+                }
+            }
+            if (device_state_bytes > 0 && device_state_bytes < device_total_bytes) {
+                const long double state_fraction = static_cast<long double>(device_state_bytes)
+                                                   / static_cast<long double>(device_total_bytes);
+                const size_t state_bytes = static_cast<size_t>(static_cast<long double>(total_bytes) * state_fraction);
+                const size_t compressed_bytes = total_bytes - state_bytes;
+                compressed_capacity = compressed_bytes / compressed_block_size_;
+                state_swa_capacity  = state_bytes / state_swa_block_size_;
+                device_scaled       = true;
+            }
+        }
+        if (compressed_capacity == 0 || state_swa_capacity == 0) {
+            // Legacy prefix-tree layouts keep one compressed and one state
+            // slot per logical key when no explicit or device-derived split exists.
             const size_t bytes_per_key = compressed_block_size_ + state_swa_block_size_;
             const size_t key_capacity  = total_bytes / bytes_per_key;
             compressed_capacity        = key_capacity;
@@ -352,12 +383,13 @@ void KVCacheMemoryConnector::initBlockPool() {
         compressed_pool_ = make_pool(compressed_block_size_, compressed_capacity);
         state_swa_pool_  = make_pool(state_swa_block_size_, state_swa_capacity);
         RTP_LLM_LOG_INFO("prefix-tree memory pool init: compressed_size=%zu state_swa_size=%zu "
-                         "compressed_capacity=%zu state_swa_capacity=%zu ratio=%ld",
+                         "compressed_capacity=%zu state_swa_capacity=%zu ratio=%ld device_scaled=%d",
                          compressed_block_size_,
                          state_swa_block_size_,
                          compressed_capacity,
                          state_swa_capacity,
-                         kv_cache_config_.prefix_tree_memory_state_swa_pool_ratio);
+                         kv_cache_config_.prefix_tree_memory_state_swa_pool_ratio,
+                         device_scaled);
         return;
     }
 
@@ -767,6 +799,30 @@ std::shared_ptr<AsyncMatchContext> KVCacheMemoryConnector::asyncMatch(const std:
 
     autil::ScopedTime2 timer;
 
+    if (wholeStateRequestCache()) {
+        const size_t matched_num = matchWholeRequest(*resource);
+        if (matched_num <= already_reuse_num) {
+            reportMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_num);
+            return nullptr;
+        }
+        const int start_read_block_index = static_cast<int>(already_reuse_num);
+        const int read_block_num         = static_cast<int>(matched_num - already_reuse_num);
+        resource->ensureLinearBlockDependencies();
+        auto copy_plan = buildPrefixCopyPlanForRead(cache_keys,
+                                                    resource->blockDependencies(),
+                                                    layer_attn_block_ids,
+                                                    slots,
+                                                    start_read_block_index,
+                                                    read_block_num);
+        if (!copy_plan || copy_plan->copy_infos.empty()) {
+            reportMatchMetrics(/*success=*/false, timer.done_us(), cache_keys_size, already_reuse_num);
+            return nullptr;
+        }
+        reportMatchMetrics(/*success=*/true, timer.done_us(), cache_keys_size, matched_num);
+        return std::make_shared<MemoryAsyncMatchContext>(
+            matched_num, start_read_block_index, read_block_num, copy_plan);
+    }
+
     if (usePrefixTreeMemoryCache()) {
         resource->ensureLinearBlockDependencies();
         size_t matched_num  = already_reuse_num;
@@ -905,7 +961,14 @@ bool KVCacheMemoryConnector::usePrefixTreeMemoryCache() const {
     return use_prefix_tree_memory_cache_;
 }
 
+bool KVCacheMemoryConnector::wholeStateRequestCache() const {
+    return cache_config_.enable_linear_attention_request_cache && cache_config_.linear_group_num > 0;
+}
+
 CacheBlockKind KVCacheMemoryConnector::kindForSlot(const LayerRegionSlot& slot) const {
+    if (wholeStateRequestCache()) {
+        return isFullOnlySlot(slot) ? CacheBlockKind::COMPRESSED_KV : CacheBlockKind::STATE_SWA_KV;
+    }
     if (slot.group_id >= 0 && slot.group_id <= 2) {
         return CacheBlockKind::COMPRESSED_KV;
     }
@@ -913,6 +976,52 @@ CacheBlockKind KVCacheMemoryConnector::kindForSlot(const LayerRegionSlot& slot) 
         return CacheBlockKind::STATE_SWA_KV;
     }
     return isFullOnlySlot(slot) ? CacheBlockKind::COMPRESSED_KV : CacheBlockKind::STATE_SWA_KV;
+}
+
+std::vector<uint8_t>
+KVCacheMemoryConnector::wholeStateSlotMask(const std::vector<LayerRegionSlot>& slots) const {
+    std::vector<uint8_t> mask(slots.size(), 0);
+    for (size_t i = 0; i < slots.size(); ++i) {
+        const int group_id = slots[i].group_id;
+        if (group_id >= 0 && static_cast<size_t>(group_id) < cache_config_.group_types.size()
+            && cache_config_.group_types[static_cast<size_t>(group_id)] == CacheGroupType::LINEAR) {
+            mask[i] = 1;
+        }
+    }
+    return mask;
+}
+
+size_t KVCacheMemoryConnector::matchWholeRequest(const KVCacheResource& resource) {
+    if (!wholeStateRequestCache() || !usePrefixTreeMemoryCache() || !prefix_block_cache_) {
+        return resource.reuseBlockNum();
+    }
+    const auto& keys      = resource.cacheKeys();
+    const size_t key_size = keys.empty() ? 0 : keys.size() - 1;
+    if (key_size == 0) {
+        return resource.reuseBlockNum();
+    }
+
+    const auto slots       = layerRegionSlots();
+    const auto layer_blocks = resourceLayerRegionBlocks(resource, slots);
+    const auto state_mask  = wholeStateSlotMask(slots);
+    if (!std::any_of(state_mask.begin(), state_mask.end(), [](uint8_t valid) { return valid != 0; })) {
+        return resource.reuseBlockNum();
+    }
+    size_t     matched     = resource.reuseBlockNum();
+    for (size_t i = 0; i < key_size; ++i) {
+        const auto compressed_mask =
+            prefixSlotValidMask(layer_blocks, slots, i, CacheBlockKind::COMPRESSED_KV);
+        const bool compressed_required = std::any_of(
+            compressed_mask.begin(), compressed_mask.end(), [](uint8_t valid) { return valid != 0; });
+        if (!compressed_required
+            || !prefix_block_cache_->match(keys[i], CacheBlockKind::COMPRESSED_KV, compressed_mask).found) {
+            break;
+        }
+        if (prefix_block_cache_->match(keys[i], CacheBlockKind::STATE_SWA_KV, state_mask).found) {
+            matched = i + 1;
+        }
+    }
+    return matched;
 }
 
 bool KVCacheMemoryConnector::kindRequiredAt(const LayerAttnBlockIds&            layer_attn_block_ids,

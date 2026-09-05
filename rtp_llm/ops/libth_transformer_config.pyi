@@ -682,6 +682,8 @@ class KVCacheConfig:
     fp8_kv_cache: int
     int8_kv_cache: int
     kv_cache_mem_mb: int
+    linear_fixed_cap: int
+    linear_request_cache_pool_blocks: int
     linear_step: int
     max_block_size_per_item: int
     memory_cache_size_mb: int

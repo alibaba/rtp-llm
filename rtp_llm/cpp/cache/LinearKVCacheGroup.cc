@@ -255,6 +255,24 @@ bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_re
     return true;
 }
 
+bool LinearKVCacheGroup::materializeBlockAt(BlockIds& block_ids, size_t pos) {
+    if (block_ids.blocksNum() <= pos) {
+        block_ids.resize(pos + 1, NULL_BLOCK_IDX);
+    }
+    if (!isNullBlockIdx(block_ids.blocks()[pos])) {
+        return true;
+    }
+    if (freeBlocksNum() == 0 && !ensureFreeBlocks(1)) {
+        return false;
+    }
+    auto blocks = block_pool_->malloc(1);
+    if (blocks.size() != 1) {
+        return false;
+    }
+    block_ids.setAt(pos, blocks[0]);
+    return true;
+}
+
 void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
     // malloc() already removes obsolete request-cache states while retaining
     // the one prefix state needed by the imminent Prefill forward. Do not free

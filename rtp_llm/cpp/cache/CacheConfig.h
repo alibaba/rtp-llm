@@ -93,6 +93,7 @@ struct CacheConfig {
     int      linear_speculative_reserve_step       = 0;
     RoleType role_type                             = RoleType::PDFUSION;
     bool     enable_linear_attention_request_cache = false;
+    uint32_t linear_request_cache_pool_blocks      = 0;
 
     // Attention-specific configuration
     int linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
@@ -141,7 +142,11 @@ struct CacheConfig {
                 // Prefill keeps room for one previous batch of whole-state
                 // cache entries while the next batch owns its two live states.
                 const uint32_t cached_request_blocks = role_type == RoleType::DECODE ? 0u : 1u;
-                rule_blocks = concurrency * (kResidentBlocksPerRequest + speculative_blocks + cached_request_blocks);
+                const uint32_t live_blocks = concurrency * (kResidentBlocksPerRequest + speculative_blocks);
+                const uint32_t auto_blocks = live_blocks + concurrency * cached_request_blocks;
+                rule_blocks = linear_request_cache_pool_blocks == 0 ?
+                                  auto_blocks :
+                                  std::max(linear_request_cache_pool_blocks, live_blocks);
             } else if (use_explicit_hca_blocks) {
                 rule_blocks = dsv4_hca_state_pool_blocks;
             } else if (use_explicit_fixed_blocks) {
@@ -211,6 +216,7 @@ struct CacheConfig {
         OUTPUT_FIELD(linear_fixed_cap);
         OUTPUT_FIELD(linear_speculative_reserve_step);
         OUTPUT_FIELD(enable_linear_attention_request_cache);
+        OUTPUT_FIELD(linear_request_cache_pool_blocks);
         OUTPUT_FIELD_EXPR("role_type", roleTypeToString(role_type));
         OUTPUT_FIELD(group_layer_num);
         OUTPUT_FIELD(linear_group_num);

@@ -58,6 +58,11 @@ public:
     virtual std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
                                                             const CacheKeysType&   cache_keys,
                                                             bool                   is_connector = false) = 0;
+    virtual bool materializeRequestCacheState(KVCacheResource& resource, size_t key_index) {
+        (void)resource;
+        (void)key_index;
+        return false;
+    }
 
     virtual CacheLayerLayout allLayerCacheBase() const                                     = 0;
     virtual bool             updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,

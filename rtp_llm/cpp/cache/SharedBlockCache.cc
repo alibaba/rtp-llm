@@ -129,18 +129,19 @@ BlockIdxType SharedBlockCache::matchGroup(CacheKeyType cache_key, int group_id) 
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(mu_);
 
-    auto [success, item] = lru_cache_.get(cache_key);
-    if (!success) {
+    const auto* item = lru_cache_.peek(cache_key);
+    if (item == nullptr || group_id < 0 || static_cast<size_t>(group_id) >= item->slots.size()
+        || !slotMatchable(*item, static_cast<size_t>(group_id))) {
         return NULL_BLOCK_IDX;
     }
+    const auto block = item->slots[static_cast<size_t>(group_id)];
+    if (isNullBlockIdx(block)) {
+        return NULL_BLOCK_IDX;
+    }
+    // Only a successful group match is an access. Sparse Linear checkpoint
+    // probes must not heat unrelated FULL-only entries while walking back.
+    lru_cache_.get(cache_key);
     touchTreeAliasesLocked(cache_key);
-    if (group_id < 0 || static_cast<size_t>(group_id) >= item.slots.size()) {
-        return NULL_BLOCK_IDX;
-    }
-    if (!slotMatchable(item, static_cast<size_t>(group_id))) {
-        return NULL_BLOCK_IDX;
-    }
-    const auto block = item.slots[group_id];
     return block;
 }
 

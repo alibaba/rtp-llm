@@ -1159,6 +1159,15 @@ TEST_F(HybridPoolKVCacheAllocatorTest, CP8LinearReuseStoresOnlyThe1024StateForA1
     EXPECT_FALSE(isNullBlockIdx(allocator->sharedBlockCache()->matchGroup(keys[7], /*gid=*/0)));
     EXPECT_TRUE(isNullBlockIdx(allocator->sharedBlockCache()->matchGroup(keys[8], /*gid=*/0)));
 
+    // FULL attention may have a newer partial/output block than the last
+    // whole-request Linear checkpoint. It must not force reuse to zero.
+    auto full_only = allocator->groupBlockPools()[1]->malloc(1);
+    ASSERT_EQ(full_only.size(), 1u);
+    allocator->sharedBlockCache()->put(
+        keys[8], {NULL_BLOCK_IDX, full_only[0]}, /*is_resident=*/false);
+    allocator->groupBlockPools()[1]->requestFree(full_only);
+    EXPECT_FALSE(isNullBlockIdx(allocator->sharedBlockCache()->matchGroup(keys[8], /*gid=*/1)));
+
     // A longer request consumes the complete 1024-token state, even though it
     // has additional aligned pages of its own.
     auto extension_res    = makeBatchResource(/*batch_size=*/1, config);

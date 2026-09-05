@@ -170,6 +170,26 @@ CacheConfig createDsv4TypedConnectorConfig() {
     return config;
 }
 
+CacheConfig createCompactRequestConnectorConfig() {
+    CacheConfig config;
+    config.layer_num                            = 2;
+    config.layer_all_num                        = 2;
+    config.block_num                            = 100;
+    config.seq_size_per_block                   = 128;
+    config.kernel_seq_size_per_block            = 128;
+    config.use_independent_block_pools          = true;
+    config.enable_linear_attention_request_cache = true;
+    config.linear_group_num                     = 1;
+    config.group_types                          = {CacheGroupType::FULL, CacheGroupType::LINEAR};
+    config.group_block_nums                     = {100, 10};
+    config.group_kv_block_stride_bytes          = {64, 192};
+    config.group_kv_scale_stride_bytes          = {0, 0};
+    config.group_block_size_bytes               = {64, 192};
+    config.layer_to_group_id                    = {0, 1};
+    config.layer_to_block_stride_bytes          = {64, 192};
+    return config;
+}
+
 }  // namespace
 
 // Test-local helper struct. Business code no longer exposes a LayerBlock type.
@@ -1027,6 +1047,26 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_PrefixPoolsDefaultKeepEqualKeyC
     ASSERT_NE(conn->compressed_pool_, nullptr);
     ASSERT_NE(conn->state_swa_pool_, nullptr);
     EXPECT_EQ(conn->compressed_pool_->totalBlocksNum(), conn->state_swa_pool_->totalBlocksNum());
+}
+
+TEST_F(KVCacheMemoryConnectorTest, initBlockPool_CompactRequestPoolsScaleFromDeviceMemorySplit) {
+    auto cfg    = createCompactRequestConnectorConfig();
+    auto kv_cfg = kv_cache_config_;
+    kv_cfg.memory_cache_size_mb            = 1;
+    kv_cfg.memory_cache_sync_timeout_ms    = 1000;
+    kv_cfg.enable_prefix_tree_memory_cache = false;
+
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv_cfg, allocator_, server_addrs_);
+    ASSERT_NO_THROW(conn->initBlockPool());
+    ASSERT_TRUE(conn->usePrefixTreeMemoryCache());
+    ASSERT_NE(conn->compressed_pool_, nullptr);
+    ASSERT_NE(conn->state_swa_pool_, nullptr);
+
+    // Device pools use 6,400 bytes for FULL and 1,920 bytes for Linear.
+    // The 1 MiB host cache keeps the same byte ratio instead of assigning an
+    // equal block count to the differently-sized pools.
+    EXPECT_EQ(conn->compressed_pool_->totalBlocksNum(), 12603u);
+    EXPECT_EQ(conn->state_swa_pool_->totalBlocksNum(), 1260u);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_PrefixPoolRatioChangesStateCapacity) {

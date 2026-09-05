@@ -438,6 +438,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("memory_cache_disk_sync_timeout_ms", &KVCacheConfig::memory_cache_disk_sync_timeout_ms)
         .def_readwrite("linear_step", &KVCacheConfig::linear_step)
         .def_readwrite("linear_fixed_cap", &KVCacheConfig::linear_fixed_cap)
+        .def_readwrite("linear_request_cache_pool_blocks", &KVCacheConfig::linear_request_cache_pool_blocks)
         .def_readwrite("int8_kv_cache", &KVCacheConfig::int8_kv_cache)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
@@ -545,7 +546,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_legacy_memory_connector_fallback,
                                       self.prefix_tree_memory_state_swa_pool_ratio,
                                       self.enable_dsv4_state_block_independent_eviction,
-                                      self.linear_fixed_cap);
+                                      self.linear_fixed_cap,
+                                      self.linear_request_cache_pool_blocks);
             },
             [](py::tuple t) {
                 const bool   has_disk_fields = t.size() >= 50 && py::isinstance<py::str>(t[9]);
@@ -629,9 +631,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                             if (extra_count >= 6) {
                                 c.prefix_tree_memory_state_swa_pool_ratio      = t[extra_start + 4].cast<int64_t>();
                                 c.enable_dsv4_state_block_independent_eviction = t[extra_start + 5].cast<bool>();
-                            if (extra_count >= 7) {
-                                c.linear_fixed_cap = t[extra_start + 6].cast<int>();
-                            }
+                                if (extra_count >= 7) {
+                                    c.linear_fixed_cap = t[extra_start + 6].cast<int>();
+                                }
+                                if (extra_count >= 8) {
+                                    c.linear_request_cache_pool_blocks = t[extra_start + 7].cast<uint32_t>();
+                                }
                             }
                         }
                     }

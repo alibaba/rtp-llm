@@ -362,6 +362,19 @@ TEST(SharedBlockCacheTest, SelectAndEvictForGroupPrunesBranchUntilTargetAncestor
     EXPECT_TRUE(cache.empty());
 }
 
+TEST(SharedBlockCacheTest, FlatGroupEvictionRemovesTheWholeEntry) {
+    SharedBlockCache cache;
+    cache.setPrefixTreeEnabled(false);
+    cache.put(1, std::vector<BlockIdxType>{101, 201}, false);
+
+    auto evicted = cache.selectAndEvictForGroup(/*group_id=*/1, /*min_blocks=*/1);
+
+    ASSERT_EQ(evicted.evicted_keys, (CacheKeysType{1}));
+    ASSERT_EQ(evicted.evicted_slots.at(1), (std::vector<BlockIdxType>{101, 201}));
+    EXPECT_TRUE(evicted.evicted_state_only_group.empty());
+    EXPECT_TRUE(cache.empty());
+}
+
 TEST(SharedBlockCacheTest, SelectAndEvictForGroupDoesNotPruneWhenTargetAncestorBlockedByResidentSibling) {
     SharedBlockCache cache;
     cache.put(1,

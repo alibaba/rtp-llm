@@ -127,6 +127,7 @@ std::string KVCacheConfig::to_string() const {
         << "memory_cache_disk_sync_timeout_ms: " << memory_cache_disk_sync_timeout_ms << "\n"
         << "linear_step: " << linear_step << "\n"
         << "linear_fixed_cap: " << linear_fixed_cap << "\n"
+        << "linear_request_cache_pool_blocks: " << linear_request_cache_pool_blocks << "\n"
         << "int8_kv_cache: " << int8_kv_cache << "\n"
         << "fp8_kv_cache: " << fp8_kv_cache << "\n"
         << "ssm_state_dtype: " << ssm_state_dtype << "\n"

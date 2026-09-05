@@ -1072,5 +1072,38 @@ TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNull_StartIdxNegative) {
     EXPECT_EQ(buf, nullptr);
 }
 
+TEST_F(LayerCacheBufferUtilTest, ConvertLayer_CPShardsOnlyFullLayers) {
+    KVCacheResource resource;
+    resource.initGroups(/*group_num=*/2,
+                        /*layer_num=*/2,
+                        /*layer_to_group_id=*/{0, 1},
+                        /*kernel_blocks_per_kv_block=*/1,
+                        /*group_types=*/{CacheGroupType::FULL, CacheGroupType::LINEAR});
+    for (int i = 0; i < 16; ++i) {
+        resource.cacheKeys().push_back(1000 + i);
+    }
+
+    // FULL cache is compact page-RR storage on rank 3: local blocks map to
+    // global logical pages 3 and 11.
+    resource.mutableBlockIds(0).assign({30, 31});
+    auto full = LayerCacheBufferUtil::convertLayer(resource, 0, 0, 0, -1, /*cp_rank=*/3, /*cp_size=*/8);
+    ASSERT_NE(full, nullptr);
+    ASSERT_EQ(full->blockIdMap().size(), 2);
+    EXPECT_EQ(full->blockIdMap().at(1003), 30);
+    EXPECT_EQ(full->blockIdMap().at(1011), 31);
+
+    // LINEAR cache remains sequence-logical and TP-sharded by head. Only its
+    // live state slots are published, under their original logical keys.
+    BlockIndicesType linear_blocks(16, NULL_BLOCK_IDX);
+    linear_blocks[6]  = 60;
+    linear_blocks[15] = 61;
+    resource.mutableBlockIds(1).assign(std::move(linear_blocks));
+    auto linear = LayerCacheBufferUtil::convertLayer(resource, 0, 1, 0, -1, /*cp_rank=*/3, /*cp_size=*/8);
+    ASSERT_NE(linear, nullptr);
+    ASSERT_EQ(linear->blockIdMap().size(), 2);
+    EXPECT_EQ(linear->blockIdMap().at(1006), 60);
+    EXPECT_EQ(linear->blockIdMap().at(1015), 61);
+}
+
 }  // namespace test
 }  // namespace rtp_llm

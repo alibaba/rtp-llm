@@ -66,6 +66,7 @@ public:
     virtual bool              copyCache(const MemoryOperationRequestPB& request, MemoryOperationResponsePB& response);
     std::vector<CacheKeyType> cacheKeys() const;
     std::vector<CacheKeyType> cacheKeysForStatus() const;
+    size_t                    matchWholeRequest(const KVCacheResource& resource);
 
 private:
     struct LayerRegionSlot {
@@ -166,7 +167,9 @@ private:
                                                    const std::vector<LayerRegionSlot>& slots,
                                                    size_t                              key_index) const;
     bool                         usePrefixTreeMemoryCache() const;
+    bool                         wholeStateRequestCache() const;
     CacheBlockKind               kindForSlot(const LayerRegionSlot& slot) const;
+    std::vector<uint8_t>         wholeStateSlotMask(const std::vector<LayerRegionSlot>& slots) const;
     bool                         kindRequiredAt(const LayerAttnBlockIds&            layer_attn_block_ids,
                                                 const std::vector<LayerRegionSlot>& slots,
                                                 size_t                              key_index,

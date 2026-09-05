@@ -245,6 +245,31 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemorySkipped_AndSto
     coordinator->update_thread_.reset();  // break shared_ptr cycle from shared_from_this()
 }
 
+TEST_F(KVCacheConnectorCoordinatorTest, Init_WholeStateLinearModeInitializesMemoryConnector) {
+    CacheConfig   cache_config;
+    KVCacheConfig kv_cache_config;
+    RuntimeConfig runtime_config;
+    cache_config.layer_num                            = 1;
+    cache_config.layer_all_num                        = 1;
+    cache_config.block_num                            = 1;
+    cache_config.block_size_bytes                     = 1;
+    cache_config.linear_group_num                     = 1;
+    cache_config.enable_linear_attention_request_cache = true;
+    cache_config.layer_to_group_id.assign(static_cast<size_t>(cache_config.layer_all_num), 0);
+
+    kv_cache_config.reuse_cache          = true;
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.memory_cache_size_mb         = 0;
+    kv_cache_config.memory_cache_sync_timeout_ms = 1000;
+
+    auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
+        cache_config, kv_cache_config, runtime_config, ParallelismConfig{}, SpeculativeExecutionConfig{}, allocator_);
+
+    // Whole-state mode must no longer silently discard ENABLE_MEMORY_CACHE.
+    EXPECT_THROW(coordinator->init(), std::runtime_error);
+    EXPECT_TRUE(coordinator->connectors_.empty());
+}
+
 TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnFalse_WhenMemoryEnabledButSizeInvalid) {
     CacheConfig   cache_config;
     KVCacheConfig kv_cache_config;
