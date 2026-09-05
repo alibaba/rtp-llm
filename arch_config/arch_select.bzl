@@ -207,6 +207,7 @@ def flashinfer_deps():
     native.alias(
         name = "flashinfer",
         actual = select({
+            "@rtp_llm//:using_cuda13_arm": "@flashinfer_cpp_cu13//:flashinfer",
             "@rtp_llm//:using_cuda13_x86": "@flashinfer_cpp_cu13//:flashinfer",
             "//conditions:default": "@flashinfer_cpp//:flashinfer",
         })
