@@ -1,13 +1,134 @@
 import os
+import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from types import ModuleType, SimpleNamespace
+from unittest.mock import Mock, patch
 
 import torch
 from safetensors.torch import save_file
 
 from rtp_llm.utils import ckpt_file_info
 from rtp_llm.utils.database import _LAYER_RE, CkptDatabase
+
+
+class FastsafetensorsIteratorLifecycleTest(unittest.TestCase):
+    def setUp(self):
+        self.database = object.__new__(CkptDatabase)
+        self.database.pretrain_file_list = [
+            SimpleNamespace(file_name="b.safetensors"),
+            SimpleNamespace(file_name="a.safetensors"),
+        ]
+        self.loader = Mock(spec=["iterate_weights", "close"])
+        self.package = ModuleType("fastsafetensors")
+        self.package.AutoLoader = Mock(return_value=self.loader)
+        self.group = Mock()
+        self.group.rank.return_value = 0
+        self.package.SingleGroup = Mock(return_value=self.group)
+        package_patch = patch.dict(sys.modules, fastsafetensors=self.package)
+        package_patch.start()
+        self.addCleanup(package_patch.stop)
+        distributed_patch = patch.object(
+            torch.distributed, "is_initialized", return_value=False
+        )
+        distributed_patch.start()
+        self.addCleanup(distributed_patch.stop)
+
+    def _iterator(self, **kwargs):
+        return self.database.fastsafetensors_weights_iterator(
+            "cuda", use_tqdm_on_load=False, **kwargs
+        )
+
+    def test_normal_exhaustion_closes_once_and_forwards_options(self):
+        tensor = object()
+        self.loader.iterate_weights.return_value = iter([("weight", tensor)])
+        stacked = {"stacked": "experts.{expert_id}.weight"}
+        local_filter = {"weight"}.__contains__
+        iterator = self._iterator(
+            stacked_key_config=stacked, local_copyout_filter=local_filter
+        )
+        self.assertEqual(list(iterator), [("weight", tensor)])
+        iterator.close()
+        self.loader.close.assert_called_once_with()
+        self.package.AutoLoader.assert_called_once_with(
+            self.group,
+            ["a.safetensors", "b.safetensors"],
+            device="cuda:0",
+            stacked_moe_tensors=stacked,
+            local_copyout_filter=local_filter,
+        )
+
+    def test_empty_iteration_closes_once(self):
+        self.loader.iterate_weights.return_value = iter(())
+        self.assertEqual(list(self._iterator()), [])
+        self.loader.close.assert_called_once_with()
+
+    def test_iteration_failure_closes_and_preserves_primary(self):
+        for after_yield in (False, True):
+            with self.subTest(after_yield=after_yield):
+                primary = RuntimeError("iteration failed")
+
+                def weights():
+                    if after_yield:
+                        yield "weight", object()
+                    raise primary
+
+                self.loader.reset_mock()
+                self.loader.iterate_weights.return_value = weights()
+                with self.assertRaises(RuntimeError) as raised:
+                    list(self._iterator())
+                self.assertIs(raised.exception, primary)
+                self.loader.close.assert_called_once_with()
+
+    def test_close_failure_after_exhaustion_propagates(self):
+        cleanup = RuntimeError("close failed")
+        self.loader.iterate_weights.return_value = iter(())
+        self.loader.close.side_effect = cleanup
+        with self.assertRaises(RuntimeError) as raised:
+            list(self._iterator())
+        self.assertIs(raised.exception, cleanup)
+        self.loader.close.assert_called_once_with()
+
+    def test_dual_failure_preserves_primary_and_logs_cleanup(self):
+        primary = ValueError("iteration failed")
+        self.loader.iterate_weights.side_effect = primary
+        self.loader.close.side_effect = RuntimeError("close failed")
+        with self.assertLogs(level="WARNING") as logs:
+            with self.assertRaises(ValueError) as raised:
+                list(self._iterator())
+        self.assertIs(raised.exception, primary)
+        self.assertIn("preserving active error", "\n".join(logs.output))
+        self.assertIn("close failed", "\n".join(logs.output))
+        self.loader.close.assert_called_once_with()
+
+    def test_early_close_closes_delegate_and_loader_once(self):
+        delegate_closed = Mock()
+
+        def weights():
+            try:
+                yield "weight", object()
+                self.fail("closed generator resumed")
+            finally:
+                delegate_closed()
+
+        self.loader.iterate_weights.return_value = weights()
+        iterator = self._iterator()
+        next(iterator)
+        self.loader.close.assert_not_called()
+        iterator.close()
+        iterator.close()
+        delegate_closed.assert_called_once_with()
+        self.loader.close.assert_called_once_with()
+
+    def test_unstarted_iterator_creates_no_resources(self):
+        iterator = self._iterator()
+        self.package.AutoLoader.assert_not_called()
+        self.package.SingleGroup.assert_not_called()
+        iterator.close()
+        self.package.AutoLoader.assert_not_called()
+        self.package.SingleGroup.assert_not_called()
+        self.loader.iterate_weights.assert_not_called()
+        self.loader.close.assert_not_called()
 
 
 class CkptDataBaseTest(unittest.TestCase):

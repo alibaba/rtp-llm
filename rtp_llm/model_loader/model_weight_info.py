@@ -739,6 +739,7 @@ class ModelDeployWeightInfo:
         exported_device: Optional[Any] = None,
         force_cpu_load_weights: bool = False,
         moe_pure_tp_preshard: bool = False,
+        fastsafetensors_reserve_mb: int = 2048,
     ):
         merge_lora = False
 
@@ -801,6 +802,7 @@ class ModelDeployWeightInfo:
             use_swizzleA=self._use_swizzleA,
             force_cpu_load_weights=force_cpu_load_weights,
             moe_pure_tp_preshard=moe_pure_tp_preshard,
+            fastsafetensors_reserve_mb=fastsafetensors_reserve_mb,
         )
         return load_config
 

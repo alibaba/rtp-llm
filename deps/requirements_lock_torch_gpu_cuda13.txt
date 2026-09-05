@@ -619,15 +619,15 @@ exceptiongroup==1.3.0 \
     --hash=sha256:4d111e6e0c13d0644cad6ddaa7ed0261a0b36971f6d23e7ec9b4b9097da78a10 \
     --hash=sha256:b241f5885f560bc56a59ee63ca4c6a8bfa46ae4ad651af316d4e81817bb9fd88
     # via anyio
-fast-safetensors @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:dd6aa7fe17acf6bfb3ea00dbfb934146b78d852ef3e0b1979dd0edb8bfaaf19a
+fast-safetensors @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu130/fast_safetensors-0.7.4.dev0%2Btorch2.11.0.cu130.aone67401633-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:432c84b917088964e78864384d33580f6ad1e2beb706ef744b6bf6a80a9ef4fd
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
 fastapi==0.115.6 \
     --hash=sha256:9ec46f7addc14ea472958a96aae5b5de65f39721a46aaf5705c480d9a8b76654 \
     --hash=sha256:e9240b29e36fa8f4bb7290316988e90c381e5092e0cbe84e7818cc3713bcf305
     # via -r internal_source/deps/../../open_source/deps/requirements_base.txt
-fastsafetensors @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:04f3a2e8b082af33e7c78536d79db2e6ebb72debebc934fc90087b9b873db552
+fastsafetensors @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fastsafetensors-0.3.4.dev20260904%2Bali.fuseshm.gf2e21da-cp310-cp310-linux_x86_64.whl \
+    --hash=sha256:4ffc63b1edc3a8ee860f733deece34c4be64fad348271f552c0c9d42a0183520
     # via -r internal_source/deps/requirements_torch_gpu_cuda13.txt
 filelock==3.20.0 \
     --hash=sha256:339b4732ffda5cd79b13f4e2711a31b0365ce445d95d243bb996273d072546a2 \
