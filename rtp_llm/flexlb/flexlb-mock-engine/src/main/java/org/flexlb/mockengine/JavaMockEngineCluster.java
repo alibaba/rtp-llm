@@ -10,10 +10,10 @@ import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
-import org.flexlb.dao.route.RoleType;
 
 import java.io.IOException;
 import java.io.PrintWriter;

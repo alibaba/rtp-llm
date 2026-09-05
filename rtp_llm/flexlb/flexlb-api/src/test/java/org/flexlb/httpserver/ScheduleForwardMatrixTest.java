@@ -6,9 +6,9 @@ import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.cache.match.CacheAwareService;
-import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
@@ -18,8 +18,6 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
 import org.flexlb.service.optimizer.OptimizerClient;
-// dsv4 v1 stack: PrioritySchedulerReporter is the pre-rename name of
-// intake3's RequestSchedulerReporter (same constructor slot).
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -131,6 +129,8 @@ class ScheduleForwardMatrixTest {
                 configService,
                 mock(BatchSchedulerReporter.class),
                 mock(ServerScheduleLatencyRecorder.class),
+                // dsv4 v1 stack: PrioritySchedulerReporter is the pre-rename name of
+                // intake3's RequestSchedulerReporter (same constructor slot).
                 mock(PrioritySchedulerReporter.class),
                 cacheAwareService,
                 mock(OptimizerClient.class));
