@@ -265,8 +265,10 @@ absl::Status PPExecutor::warmUp(const ScheduleOutput& schedule_output) {
 
     buffer_holder_.release();
     model_->releaseBuffers();
-    if (cache_manager_ && model_input.kv_cache_update_mapping.defined()) {
-        cache_manager_->blockBatchCopy(model_input.kv_cache_update_mapping);
+    if (cache_manager_ && model_input.kv_cache_update_mapping.defined()
+        && model_input.kv_cache_update_mapping.size(0) > 0) {
+        cache_manager_->blockBatchCopy(
+            decodeCacheUpdateMapping(model_input.kv_cache_update_mapping, cache_manager_->cacheConfig()));
     }
 
     PPIntermediateTensors input_tensors;
