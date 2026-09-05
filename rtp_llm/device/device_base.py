@@ -1,4 +1,5 @@
 import logging
+from typing import Optional
 
 import torch
 
@@ -88,7 +89,10 @@ class DeviceBase:
         raise NotImplementedError("moe_apply_int8 is not implemented")
 
     def maybe_rewrite_weight_by_key(
-        self, key: str, weight: torch.Tensor
+        self,
+        key: str,
+        weight: torch.Tensor,
+        use_swizzle_a: Optional[bool] = None,
     ) -> torch.Tensor:
         return weight
 

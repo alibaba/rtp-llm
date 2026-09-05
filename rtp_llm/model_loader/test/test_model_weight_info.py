@@ -200,7 +200,7 @@ class AttentionOutputStaticQuantReciprocalTest(unittest.TestCase):
                 ep_size=1,
                 merge_lora=False,
                 exported_device=SimpleNamespace(
-                    maybe_rewrite_weight_by_key=lambda _, tensor: tensor
+                    maybe_rewrite_weight_by_key=lambda _, tensor, **kwargs: tensor
                 ),
             ),
         )
