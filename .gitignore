@@ -82,3 +82,8 @@ docs/index/dist/
 
 # Local analysis reports
 *_analysis_report.md
+
+# Local DSV4 benchmark artifacts
+/TEST_OUTPUT_DEEPSEEK_V4_*/
+/main_logs/
+/natural_eos_logs/
