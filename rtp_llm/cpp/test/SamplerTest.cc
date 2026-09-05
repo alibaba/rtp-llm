@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/test/ModelTestUtil.h"
+#include <ATen/cuda/CUDAGeneratorImpl.h>
 
 using namespace std;
 using namespace rtp_llm;
@@ -269,4 +270,73 @@ TEST_F(SamplerTest, testGeneralSampling) {
             }
         }
     }
+}
+
+TEST_F(SamplerTest, NoRepeatNgramUsesConsumedHistoryLength) {
+    SamplerInputs input;
+    input.logits = torch::tensor({0.0f, 10.0f, 0.0f, 5.0f}, torch::kFloat32).reshape({1, 4}).to(torch::kCUDA);
+    // Four consumed tokens plus an unwritten output slot. The suffix 2 bans 1.
+    input.token_ids = torch::tensor({1, 2, 1, 2, 0}, torch::kInt32).reshape({1, 5});
+    input.input_lengths = torch::ones({1}, torch::kInt32);
+    input.sequence_lengths = torch::full({1}, 4, torch::kInt32);
+    input.logits_processor_states_ptr = std::make_shared<LogitsProcessorStates>();
+    input.vocab_size = 4;
+    input.step = 4;
+    input.batch_size = input.batch_size_out = 1;
+    input.num_beams_in = input.num_beams_out = torch::ones({1}, torch::kLong);
+    input.top_k = torch::ones({1}, torch::kInt32).pin_memory();
+    input.top_p = torch::ones({1}, torch::kFloat32).pin_memory();
+    input.temperature = torch::ones({1}, torch::kFloat32).pin_memory();
+    input.no_repeat_ngram_size = torch::full({1}, 2, torch::kInt32).pin_memory();
+    input.do_sample = torch::ones({1}, torch::kBool).pin_memory();
+    input.all_probs = torch::zeros_like(input.logits);
+    input.generator.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+    input.generator.back().set_current_seed(17);
+    auto result = sampler_->forward(input);
+    EXPECT_EQ(result.token_ids.cpu()[0][4].item<int32_t>(), 3);
+    EXPECT_EQ(result.all_probs.cpu()[0][1].item<float>(), 0.0f);
+}
+
+TEST_F(SamplerTest, JointTopKTopPReturnedProbabilitySupport) {
+    auto makeInputs = [](bool return_probs) {
+        SamplerInputs input;
+        input.logits = torch::tensor({0.30f, 0.28f, 0.22f, 0.20f}, torch::kFloat32)
+                           .log().repeat({32, 1}).to(torch::kCUDA);
+        input.token_ids = torch::zeros({32, 2}, torch::kInt32);
+        input.input_lengths = torch::ones({32}, torch::kInt32);
+        input.sequence_lengths = torch::ones({32}, torch::kInt32);
+        input.logits_processor_states_ptr = std::make_shared<LogitsProcessorStates>();
+        input.vocab_size = 4;
+        input.step = 1;
+        input.batch_size = input.batch_size_out = 32;
+        input.num_beams_in = input.num_beams_out = torch::ones({32}, torch::kLong);
+        input.top_k = torch::full({32}, 3, torch::kInt32).pin_memory();
+        input.top_p = torch::full({32}, 0.7f, torch::kFloat32).pin_memory();
+        input.temperature = torch::ones({32}, torch::kFloat32).pin_memory();
+        input.do_sample = torch::ones({32}, torch::kBool).pin_memory();
+        if (return_probs) {
+            input.all_probs = torch::zeros_like(input.logits);
+            input.cum_log_probs = torch::zeros({32}, input.logits.options());
+        }
+        for (uint64_t seed = 0; seed < 32; ++seed) {
+            input.generator.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+            input.generator.back().set_current_seed(seed);
+        }
+        return input;
+    };
+    auto sampling_only = makeInputs(false);
+    auto original_tokens = sampler_->forward(sampling_only).token_ids.cpu().clone();
+    auto input = makeInputs(true);
+    auto result = sampler_->forward(input);
+    auto tokens = result.token_ids.cpu();
+    EXPECT_TRUE(torch::equal(original_tokens, tokens));
+    for (size_t row = 0; row < input.generator.size(); ++row) {
+        EXPECT_TRUE(torch::equal(sampling_only.generator[row].get_state(), input.generator[row].get_state()));
+    }
+    // Original-probability nucleus is {0, 1, 2}; intersecting top-k keeps all three.
+    auto expected = torch::tensor({0.375f, 0.35f, 0.275f, 0.0f}, torch::kFloat32).repeat({32, 1});
+    EXPECT_TRUE(torch::allclose(result.all_probs.cpu(), expected, 1e-5, 1e-7));
+    auto selected = tokens.select(1, 1).to(torch::kLong).reshape({32, 1});
+    EXPECT_TRUE((selected == 2).any().item<bool>());
+    EXPECT_TRUE(torch::allclose(result.cum_log_probs.cpu(), expected.gather(1, selected).log().reshape({32}), 1e-5, 1e-6));
 }

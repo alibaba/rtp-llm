@@ -1079,7 +1079,9 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         torch::Tensor softmax_result_t;
         if (need_all_logits) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(need_all_logits_index)");
-            auto last_logits = torch::index_select(logits, 0, lm_output_indexes_device.to(torch::kLong));
+            auto indexes     = lm_output_indexes_device.to(torch::kLong);
+            auto last_logits = torch::index_select(logits, 0, indexes);
+            last_hidden      = torch::index_select(hidden, 0, indexes);
             return {last_logits, last_hidden, hidden, logits, softmax_result_t};
         }
 

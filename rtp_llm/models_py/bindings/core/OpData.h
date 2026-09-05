@@ -115,6 +115,7 @@ public:
 
 struct GptModelOutputs {
     torch::Tensor logits;
+    // Same selected LM output rows as logits, independent of need_all_logits.
     torch::Tensor hidden_states;
     torch::Tensor all_hidden_states;
     torch::Tensor all_logits;

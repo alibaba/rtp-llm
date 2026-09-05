@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <sstream>
@@ -284,10 +285,19 @@ struct CompressedKVCacheSpec: public OpaqueKVCacheSpec {
         spec->tag                = desc.tag;
         spec->seq_size_per_block = seqSizePerBlock(desc, ctx);
         spec->entry_dtype_       = desc.entry_dtype;
-        const uint32_t entries   = entryCount(desc, ctx);
-        const size_t   payload   = payloadBytes(desc.entry_elems, entries, desc.entry_dtype);
-        const size_t   stride    = blockStrideBytes(desc, payload, entries);
-        spec->setLayout(desc.entry_elems, entries, payload, stride);
+
+        const uint32_t kernel_seq_size = resolveKernelSeqSizePerBlock(
+            SpecBuilder::groupType(desc), spec->seq_size_per_block, ctx.kernel_tokens_per_block);
+        const uint32_t kernel_blocks_per_kv_block = spec->seq_size_per_block / kernel_seq_size;
+        const uint32_t kernel_entry_count         = entryCount(desc, ctx);
+        RTP_LLM_CHECK(kernel_entry_count <= std::numeric_limits<uint32_t>::max() / kernel_blocks_per_kv_block);
+        const size_t kernel_payload_bytes = payloadBytes(desc.entry_elems, kernel_entry_count, desc.entry_dtype);
+        // Preserve per-kernel padding/overrides when assembling the physical block.
+        const size_t kernel_stride_bytes = blockStrideBytes(desc, kernel_payload_bytes, kernel_entry_count);
+        spec->setLayout(desc.entry_elems,
+                        kernel_entry_count * kernel_blocks_per_kv_block,
+                        kernel_payload_bytes * kernel_blocks_per_kv_block,
+                        kernel_stride_bytes * kernel_blocks_per_kv_block);
         return spec;
     }
 

@@ -170,10 +170,8 @@ void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<Lay
                                                                             std::max<size_t>(1, seq_size_per_block);
         }
         if (group.kernel_seq_size_per_block == 0) {
-            group.kernel_seq_size_per_block =
-                group.policy.group_type == CacheGroupType::FULL && kernel_seq_size_per_block > 0 ?
-                    std::min(kernel_seq_size_per_block, group.seq_size_per_block) :
-                    group.seq_size_per_block;
+            group.kernel_seq_size_per_block = resolveKernelSeqSizePerBlock(
+                group.policy.group_type, group.seq_size_per_block, kernel_seq_size_per_block);
         }
         if (group.kv_block_stride_bytes == 0) {
             group.kv_block_stride_bytes = group.spec->block_size_bytes();

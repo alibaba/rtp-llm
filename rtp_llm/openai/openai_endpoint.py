@@ -333,6 +333,11 @@ class OpenaiEndpoint(object):
         )
         if request.debug_info:
             config.return_output_ids = True
+        if config.num_return_sequences > 1 and (
+            config.return_output_ids or config.return_hidden_states or config.return_logits
+        ):
+            # Keep each sequence's last valid fields before the batch finishes.
+            config.is_streaming = True
         return config
 
     @staticmethod
@@ -494,7 +499,13 @@ class OpenaiEndpoint(object):
                         all_choices[i].logprobs = response.choices[i].logprobs
             usage = response.usage or usage
             aux_info = response.aux_info or aux_info
-            extra_outputs = response.extra_outputs or extra_outputs
+            if response.extra_outputs is not None:
+                if extra_outputs is None:
+                    extra_outputs = response.extra_outputs.model_copy(deep=True)
+                else:
+                    extra_outputs = extra_outputs.model_copy(
+                        update=response.extra_outputs.model_dump(exclude_none=True)
+                    )
 
         if usage == None:
             logging.warning(f"No usage returned from stream response. use empty value.")

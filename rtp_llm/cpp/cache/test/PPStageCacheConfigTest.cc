@@ -7,6 +7,7 @@
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/PPTopologyValidator.h"
@@ -171,6 +172,22 @@ TEST(PPStageCacheConfig, independentPoolPp2SlicesGeometry) {
         EXPECT_EQ(tags, (std::vector<std::string>{"full", "linear"})) << "rank=" << rank;
         EXPECT_TRUE(stage.use_independent_block_pools) << "rank=" << rank;
     }
+}
+
+TEST(PPStageCacheConfig, independentPoolMhaStrideCountsPhysicalBlockOnce) {
+    const auto mc = makeIndependentPoolModelConfig(8);
+
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.seq_size_per_block        = 8;
+    kv_cache_config.kernel_seq_size_per_block = 2;
+    const auto config = HybridPoolConfigCreator::createConfig(mc, makePpConfig(8, 2, 0), kv_cache_config, false, 0);
+
+    const auto  full_gid = static_cast<size_t>(config.groupIdForTag("full"));
+    const auto& spec     = config.specForGroup(full_gid);
+    ASSERT_EQ(spec->type, KVCacheSpecType::MultiHeadAttention);
+    ASSERT_EQ(config.kernelBlocksPerKvBlockForGroup(full_gid), 4u);
+    EXPECT_EQ(config.kvBlockStrideBytesForGroup(full_gid), spec->block_size_bytes());
+    EXPECT_EQ(config.kvScaleStrideBytesForGroup(full_gid), spec->scale_block_size_bytes());
 }
 
 TEST(PPStageCacheConfig, independentPoolPp2UnevenSplit) {

@@ -385,7 +385,9 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     std::shared_ptr<GenerateInput> query1         = make_shared<GenerateInput>();
     query1->input_ids                             = hostIntBuffer({1});
     query1->generate_config                       = make_shared<GenerateConfig>();
+    query1->generate_config->return_logits        = true;
     query1->generate_config->return_softmax_probs = true;
+    query1->generate_config->is_streaming         = true;
     GenerateStreamPtr stream1 =
         make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr1;
@@ -418,6 +420,12 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     merge_outputs.sampler_output.cum_log_probs = torch::tensor({1.0f}).to(torch::kCUDA);
     auto status                                = processor.dispatch(stream_groups, merge_outputs);
     EXPECT_TRUE(status.ok());
+    auto output_status = stream1->nextOutput(1000);
+    ASSERT_TRUE(output_status.ok());
+    const auto& outputs = output_status.value().generate_outputs;
+    ASSERT_EQ(outputs.size(), 1u);
+    ASSERT_TRUE(outputs[0].logits.has_value());
+    EXPECT_EQ(toVec<float>(*outputs[0].logits), (std::vector<float>{1.0f, 2.0f}));
 
     auto softmax_probs = stream1->getSoftmaxProbs();
     EXPECT_TRUE(softmax_probs.defined());
@@ -910,10 +918,12 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     addr1.setBatchBlocks(0, 0, {1});
     stream1->setKVCache(addr1);
 
-    std::shared_ptr<GenerateInput> query3   = make_shared<GenerateInput>();
-    query3->input_ids                       = hostIntBuffer({0, 1});
-    query3->generate_config                 = make_shared<GenerateConfig>();
-    query3->generate_config->calculate_loss = 2;
+    std::shared_ptr<GenerateInput> query3         = make_shared<GenerateInput>();
+    query3->input_ids                             = hostIntBuffer({0, 1});
+    query3->generate_config                       = make_shared<GenerateConfig>();
+    query3->generate_config->calculate_loss       = 2;
+    query3->generate_config->max_new_tokens       = 1;
+    query3->generate_config->return_hidden_states = true;
     GenerateStreamPtr stream3 =
         make_shared<NormalGenerateStream>(query3, model_config, runtime_config, resource_context, nullptr);
     BatchKVCacheResource addr3;
@@ -953,7 +963,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
 
     SamplerInputs sampler_inputs;
     MergedOutput  merge_outputs;
-    auto loss_hidden_tensor = torch::tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}).reshape({3, 2}).to(torch::kCUDA);
+    auto loss_hidden_tensor = torch::tensor({1.0f, 2.0f, 5.0f, 6.0f, 11.0f, 12.0f}).reshape({3, 2}).to(torch::kCUDA);
     auto loss_logits_tensor = torch::tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}).reshape({3, 2}).to(torch::kCUDA);
     auto loss_all_logits_tensor =
         torch::tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f})
@@ -972,6 +982,11 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     auto loss3 = stream3->getLoss();
     EXPECT_EQ(1, loss3.numel());
     EXPECT_NEAR(0.31326, loss3.data_ptr<float>()[0], 0.0001);
+    auto output3 = stream3->nextOutput(1000);
+    ASSERT_TRUE(output3.ok());
+    ASSERT_EQ(output3.value().generate_outputs.size(), 1);
+    ASSERT_TRUE(output3.value().generate_outputs[0].hidden_states.has_value());
+    EXPECT_EQ(toVec<float>(*output3.value().generate_outputs[0].hidden_states), (std::vector<float>{5.0f, 6.0f}));
     EXPECT_TRUE(stream4->getLoss().defined());
     auto loss4 = stream4->getLoss();
     EXPECT_EQ(2, loss4.numel());

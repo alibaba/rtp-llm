@@ -9,6 +9,7 @@
 #include <torch/extension.h>
 
 #include "rtp_llm/cpp/cache/BufferTypes.h"
+#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace rtp_llm {
@@ -158,6 +159,38 @@ TEST(KVCacheLayoutViewTest, FullOpaqueExpandsButLinearSwaAndStateStayPhysical) {
         EXPECT_EQ(layer.kv_cache_base.sizes().vec(), physical.sizes().vec()) << tag;
         EXPECT_EQ(layer.kv_cache_base.data_ptr(), physical.data_ptr()) << tag;
     }
+}
+
+TEST(KVCacheLayoutViewTest, CompressedSpecKeepsKernelPaddingAcrossPhysicalBlockBoundary) {
+    KVCacheSpecDesc desc;
+    desc.tag                          = "hca_kv";
+    desc.cache_type                   = KVCacheSpecType::OpaqueKV;
+    desc.entry_elems                  = 584;
+    desc.entry_dtype                  = DataType::TYPE_UINT8;
+    desc.compression_ratio            = 128;
+    desc.entry_count_mode             = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
+    desc.block_stride_bytes_alignment = 576;
+    SpecBuildContext ctx;
+    ctx.seq_size_per_block      = 512;
+    ctx.kernel_tokens_per_block = 128;
+    auto group      = makeGroup("hca_kv", KVCacheSpecType::OpaqueKV, CacheGroupType::FULL, 512, 128, 2336, 0);
+    group.spec      = SpecBuilder::build(desc, ctx);
+    group.block_num = 2;
+    const auto base = torch::full(
+        {2, static_cast<int64_t>(group.spec->block_size_bytes())}, 0xA5, torch::TensorOptions().dtype(torch::kUInt8));
+    torch_ext::KVCache cache(makeLayout({std::move(group)}, {"hca_kv"}, {{base, {}}}));
+    auto               kernel_view = cache.getLayerCache(0, "hca_kv").kv_cache_base;
+    ASSERT_EQ(kernel_view.sizes().vec(), (std::vector<int64_t>{8, 1152}));
+    EXPECT_EQ(kernel_view.data_ptr(), base.data_ptr());
+
+    // Kernel blocks 3 and 4 straddle the physical block boundary.
+    kernel_view[3].narrow(0, 0, 584).fill_(11);
+    kernel_view[4].narrow(0, 0, 584).fill_(22);
+    auto expected = torch::full({2, 4608}, 0xA5, base.options());
+    expected[0].narrow(0, 3456, 584).fill_(11);
+    expected[1].narrow(0, 0, 584).fill_(22);
+    EXPECT_TRUE(torch::equal(base, expected));
+    EXPECT_EQ(kernel_view[4].data_ptr(), base[1].data_ptr());
 }
 
 TEST(KVCacheLayoutViewTest, MultiGroupRequiresTagAndEnumerationSkipsPlaceholder) {

@@ -6,6 +6,10 @@
 
 #include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#if USING_CUDA
+#include "rtp_llm/models_py/bindings/cuda/ops/StandaloneOps.h"
+#include "ATen/cuda/CUDAContext.h"
+#endif
 
 namespace rtp_llm {
 
@@ -173,14 +177,20 @@ absl::StatusOr<PPExecutionResult> PPBatchStreamProcessor::makeExecutionResult(
 
     PPExecutionResult result;
     result.request_ids = plan.sampling_plan.request_ids.to(torch::kCPU).contiguous();
+    if (plan.output_config.return_logits) {
+        result.logits = model_output.logits.to(torch::kCPU).contiguous();
+    }
 
     const auto compact_token_ids =
         sampler_output.token_ids.narrow(1, sampler_output.token_ids.size(1) - 1, 1).contiguous();
     if (plan.output_config.return_softmax_probs) {
-        result.softmax_probs = torch::softmax(model_output.logits.to(torch::kFloat32), -1)
-                                   .gather(1, compact_token_ids.to(torch::kLong))
-                                   .to(torch::kCPU)
-                                   .contiguous();
+        auto probs = model_output.logits.to(torch::kFloat32).contiguous();
+#if USING_CUDA
+        cudaSoftmaxInplace(probs, at::cuda::getCurrentCUDAStream().stream());
+#else
+        probs = torch::softmax(probs, -1);
+#endif
+        result.softmax_probs = probs.gather(1, compact_token_ids.to(torch::kLong)).to(torch::kCPU).contiguous();
     }
 
     result.new_token_ids = compact_token_ids.to(torch::kCPU).contiguous();
@@ -197,23 +207,14 @@ absl::StatusOr<PPExecutionResult> PPBatchStreamProcessor::makeExecutionResult(
     }
 
     result.sample_success = sampler_output.success.to(torch::kCPU).contiguous();
-    if (plan.output_config.return_logits) {
-        result.logits = model_output.logits.to(torch::kCPU).contiguous();
-    }
     if (plan.output_config.return_cum_log_probs) {
         result.cum_log_probs = sampler_output.cum_log_probs.to(torch::kCPU).contiguous();
     }
     if (plan.output_config.return_all_probs != ReturnAllProbsMode::NONE) {
         result.all_probs = sampler_output.all_probs.to(torch::kCPU).contiguous();
     }
-    /** need_all_logits makes hidden_states token-major; select one output row per batch row. */
     if (plan.output_config.return_hidden_states) {
-        auto hidden_states = model_output.hidden_states;
-        if (plan.model_input.need_all_logits) {
-            auto indexes  = plan.model_input.lm_output_indexes.to(hidden_states.device(), torch::kLong);
-            hidden_states = torch::index_select(hidden_states, 0, indexes);
-        }
-        result.hidden_states = hidden_states.to(torch::kCPU).contiguous();
+        result.hidden_states = model_output.hidden_states.to(torch::kCPU).contiguous();
     }
     if (plan.output_config.return_all_hidden_states) {
         result.all_hidden_states = model_output.all_hidden_states.to(torch::kCPU).contiguous();

@@ -140,11 +140,13 @@ TEST_F(PPBatchStreamProcessorTest, PromptLogitsPlanResultRoundTripAndDispatch) {
     auto prompt_logits_config                        = prompt_logits_stream->generateConfig();
     prompt_logits_config->max_new_tokens             = 1;
     prompt_logits_config->return_prompt_logits       = true;
+    prompt_logits_config->return_hidden_states       = true;
     prompt_logits_config->prompt_logits_top_k        = 2;
     prompt_logits_config->prompt_logits_start        = 1;
     prompt_logits_config->prompt_logits_end          = 3;
     prompt_logits_config->return_target_logprob      = true;
     regular_stream->generateConfig()->max_new_tokens = 1;
+    regular_stream->generateConfig()->return_hidden_states = true;
 
     std::list<GenerateStreamPtr> streams{prompt_logits_stream, regular_stream};
     StreamGroups                 stream_groups(streams);
@@ -174,6 +176,7 @@ TEST_F(PPBatchStreamProcessorTest, PromptLogitsPlanResultRoundTripAndDispatch) {
 
     GptModelOutputs model_output;
     const auto      token_count = round_trip_plan.model_input.combo_tokens.numel();
+    model_output.hidden_states  = torch::tensor({5.0f, 6.0f, 9.0f, 10.0f}).reshape({2, 2});
     model_output.all_logits     = torch::arange(token_count * model_config.vocab_size, torch::kFloat32)
                                   .reshape({token_count, static_cast<int64_t>(model_config.vocab_size)});
 
@@ -200,6 +203,12 @@ TEST_F(PPBatchStreamProcessorTest, PromptLogitsPlanResultRoundTripAndDispatch) {
     ASSERT_EQ(regular_output.value().generate_outputs.size(), 1);
     EXPECT_TRUE(prompt_logits_output.value().generate_outputs[0].prompt_logits.has_value());
     EXPECT_FALSE(regular_output.value().generate_outputs[0].prompt_logits.has_value());
+    ASSERT_TRUE(prompt_logits_output.value().generate_outputs[0].hidden_states.has_value());
+    ASSERT_TRUE(regular_output.value().generate_outputs[0].hidden_states.has_value());
+    EXPECT_EQ(tensorToVector<float>(*prompt_logits_output.value().generate_outputs[0].hidden_states),
+              (std::vector<float>{5.0f, 6.0f}));
+    EXPECT_EQ(tensorToVector<float>(*regular_output.value().generate_outputs[0].hidden_states),
+              (std::vector<float>{9.0f, 10.0f}));
 }
 
 }  // namespace rtp_llm

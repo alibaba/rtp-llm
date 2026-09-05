@@ -297,7 +297,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                 auto src_indices_device = src_batch_indices.to(raw_logits.device(), torch::kLong);
                 batch_logits            = raw_logits.index_select(0, src_indices_device);
             } else {
-                batch_logits = raw_logits;
+                batch_logits = raw_logits.clone();
             }
         }
     }
