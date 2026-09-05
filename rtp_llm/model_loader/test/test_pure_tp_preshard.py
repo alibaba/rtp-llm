@@ -21,7 +21,7 @@ from rtp_llm.utils.model_weight import W
 # Identity device stubs: parity vs legacy relies on no real post-processing here.
 _DEVICE = SimpleNamespace(
     shuffle_moe_weight=lambda tensor, *_: tensor,
-    maybe_rewrite_weight_by_key=lambda _, tensor: tensor,
+    maybe_rewrite_weight_by_key=lambda _, tensor, **kwargs: tensor,
 )
 
 
