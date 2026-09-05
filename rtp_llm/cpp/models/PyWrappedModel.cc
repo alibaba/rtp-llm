@@ -668,7 +668,8 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs&      i
                                               multimodal_inputs,
                                               py_attn_inputs,
                                               attention_inputs_by_group,
-                                              bert_embedding_inputs});
+                                              bert_embedding_inputs,
+                                              inputs.pp_intermediates});
     }
 
     const bool                has_cache_store_work = !inputs.warmup && inputs.pd_separation;
@@ -724,7 +725,15 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs&      i
 
     RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
 
-    return callForwardPostLayers(hidden_states, inputs, false);
+    auto outputs = callForwardPostLayers(hidden_states, inputs, false);
+    if (!micro_batch_plan.enable) {
+        // A single logical batch keeps the PP boundary tensors intact.
+        outputs.pp_intermediates = std::move(py_model_outputs[0].pp_intermediates);
+    } else {
+        RTP_LLM_CHECK_WITH_INFO(py_model_outputs[0].pp_intermediates.empty(),
+                                "micro-batched PP boundary tensors are not supported yet");
+    }
+    return outputs;
 }
 
 torch_ext::PyEmbeddingInputs PyWrappedModel::buildPyEmbeddingInputs(const GptModelInputs& inputs) {
@@ -949,16 +958,18 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         const bool                has_cache_store_work = !inputs.warmup && inputs.pd_separation;
         CacheStoreWriteCycleGuard cache_store_write_cycle(cache_store_async_writer_, has_cache_store_work);
 
-        auto           py_model_inputs = PyModelInputs({token_ids,
-                                                        input_hiddens,
-                                                        combo_position_ids,
-                                                        embedding_inputs,
-                                                        multimodal_inputs,
-                                                        attention_inputs_,
-                                                        attention_inputs_by_group_,
-                                                        bert_embedding_inputs});
-        PyModelOutputs py_model_outputs;
-        torch::Tensor  hidden_states;
+        auto            py_model_inputs = PyModelInputs({token_ids,
+                                                         input_hiddens,
+                                                         combo_position_ids,
+                                                         embedding_inputs,
+                                                         multimodal_inputs,
+                                                         attention_inputs_,
+                                                         attention_inputs_by_group_,
+                                                         bert_embedding_inputs,
+                                                         inputs.pp_intermediates});
+        PyModelOutputs  py_model_outputs;
+        torch::Tensor   hidden_states;
+        PPIntermediates py_pp_intermediates;
 
         // Cast the Python object to PyModelOutputs and extract hidden states
         if (enable_cuda_graph_ && graph_runner_->canRun(py_model_inputs, graph_state_)) {
@@ -986,6 +997,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_outputs = outputs.cast<PyModelOutputs>();
             hidden_states    = py_model_outputs.hidden_states.clone();
         }
+        // PP boundary tensors travel to the next stage via GptModelOutputs;
+        // empty under pp_size=1 or when the model emits none.
+        py_pp_intermediates                = std::move(py_model_outputs.pp_intermediates);
+        const auto attach_pp_intermediates = [&py_pp_intermediates](GptModelOutputs out) {
+            out.pp_intermediates = std::move(py_pp_intermediates);
+            return out;
+        };
 
         cache_store_write_cycle.finish();
 
@@ -995,25 +1013,27 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 // Python returns normalized [B*gamma, hidden_dim]. Reuse the
                 // regular C++ lm_head and TP logits gather for every proposal
                 // row; the speculative executor owns only Markov sampling.
-                return callForwardPostLayers(hidden_states, inputs, true);
+                return attach_pp_intermediates(callForwardPostLayers(hidden_states, inputs, true));
             }
             // Commit only updates the draft KV cache and has no logits
             // consumer. Preserve its row-aligned hidden output for the common
             // CUDA graph contract without running lm_head.
-            GptModelOutputs outputs;
-            outputs.hidden_states     = hidden_states;
-            outputs.all_hidden_states = hidden_states;
-            return outputs;
+            return attach_pp_intermediates([hidden_states]() {
+                GptModelOutputs outputs;
+                outputs.hidden_states     = hidden_states;
+                outputs.all_hidden_states = hidden_states;
+                return outputs;
+            }());
         }
         if (device_props_.enable_prefill_cp && has_context_request) {
             if (!inputs.need_all_logits && !inputs.need_all_hidden_states) {
                 context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
-                return forwardPostLayersLastHidden(hidden_states, inputs);
+                return attach_pp_intermediates(forwardPostLayersLastHidden(hidden_states, inputs));
             }
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
-            return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
+            return attach_pp_intermediates(callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens));
         }
-        return callForwardPostLayers(hidden_states, inputs, true);
+        return attach_pp_intermediates(callForwardPostLayers(hidden_states, inputs, true));
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
