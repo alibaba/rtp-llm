@@ -831,10 +831,14 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                     else scale_weight
                 )
             kernel_weight = load_config.exported_device.maybe_rewrite_weight_by_key(
-                "weight", kernel_weight
+                "weight",
+                kernel_weight,
+                use_swizzle_a=load_config.use_swizzleA,
             )
             scale_weight = load_config.exported_device.maybe_rewrite_weight_by_key(
-                "scale", scale_weight
+                "scale",
+                scale_weight,
+                use_swizzle_a=load_config.use_swizzleA,
             )
             # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
 
