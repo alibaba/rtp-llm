@@ -306,10 +306,14 @@ class EnvArgumentParser(argparse.ArgumentParser):
                     if arg.startswith("--"):
                         # Find the action for this option
                         for action_item in self._actions:
-                            if arg in action_item.option_strings:
+                            if arg.split("=", 1)[0] in action_item.option_strings:
                                 provided_args.add(action_item.dest)
                                 # Check if this action requires a value
-                                if action_item.nargs in (None, "?", 1):
+                                if "=" not in arg and action_item.nargs in (
+                                    None,
+                                    "?",
+                                    1,
+                                ):
                                     # Skip the value if present
                                     if i + 1 < len(args) and not args[i + 1].startswith(
                                         "-"
@@ -325,10 +329,14 @@ class EnvArgumentParser(argparse.ArgumentParser):
                     if arg.startswith("--"):
                         # Find the action for this option
                         for action_item in self._actions:
-                            if arg in action_item.option_strings:
+                            if arg.split("=", 1)[0] in action_item.option_strings:
                                 provided_args.add(action_item.dest)
                                 # Check if this action requires a value
-                                if action_item.nargs in (None, "?", 1):
+                                if "=" not in arg and action_item.nargs in (
+                                    None,
+                                    "?",
+                                    1,
+                                ):
                                     # Skip the value if present
                                     if i + 1 < len(sys.argv) and not sys.argv[
                                         i + 1
@@ -357,18 +365,30 @@ class EnvArgumentParser(argparse.ArgumentParser):
 
                         if action is not None:
                             # Convert the value using the action's type
-                            if action.type is not None:
-                                try:
-                                    converted_value = action.type(env_value)
-                                    setattr(parsed_args, dest, converted_value)
-                                except argparse.ArgumentTypeError as error:
-                                    self.error(f"{env_name} ({dest}): {error}")
-                                except (ValueError, TypeError):
-                                    # If conversion fails, skip this value
-                                    pass
-                            else:
-                                # No type converter, use as string
-                                setattr(parsed_args, dest, env_value)
+                            try:
+                                converted_value = (
+                                    action.type(env_value)
+                                    if action.type is not None
+                                    else env_value
+                                )
+                                if (
+                                    action.choices is not None
+                                    and converted_value not in action.choices
+                                ):
+                                    choices = ", ".join(
+                                        repr(choice) for choice in action.choices
+                                    )
+                                    self.error(
+                                        f"{env_name} ({dest}): invalid choice: "
+                                        f"{converted_value!r} "
+                                        f"(choose from {choices})"
+                                    )
+                                setattr(parsed_args, dest, converted_value)
+                            except argparse.ArgumentTypeError as error:
+                                self.error(f"{env_name} ({dest}): {error}")
+                            except (ValueError, TypeError):
+                                # If conversion fails, skip this value
+                                pass
 
         # 应用所有配置绑定
         if self._root_config is not None:
@@ -553,6 +573,5 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
         py_env_configs.runtime_config.warm_up,
         py_env_configs.runtime_config.model_warm_up,
     )
-
 
     return py_env_configs

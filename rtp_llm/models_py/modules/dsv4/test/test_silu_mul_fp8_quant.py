@@ -26,19 +26,11 @@ class SiluMulFp8QuantPackedTest(unittest.TestCase):
         # Direct file-path imports — bypass ``rtp_llm.models_py.modules``
         # package init (which pulls in fastapi/aiohttp/rtp_kernel/etc.).
         # The kernel under test depends only on torch + triton.
-        import importlib.util
-        import os
+        from rtp_llm.models_py.triton_kernels.moe.silu_mul_fp8_quant import (
+            silu_mul_fp8_quant_packed,
+        )
 
-        here = os.path.dirname(os.path.abspath(__file__))
-        kernel_path = os.path.join(
-            here, "..", "moe", "_silu_mul_fp8_quant_triton.py"
-        )
-        spec = importlib.util.spec_from_file_location(
-            "_silu_mul_fp8_quant_triton", kernel_path
-        )
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        cls._fused = staticmethod(module.silu_mul_fp8_quant_packed)
+        cls._fused = staticmethod(silu_mul_fp8_quant_packed)
 
     @staticmethod
     def _ref(
@@ -100,7 +92,10 @@ class SiluMulFp8QuantPackedTest(unittest.TestCase):
         if num_groups % 4 != 0:
             pad = 4 - (num_groups % 4)
             exp_biased = torch.cat(
-                [exp_biased, torch.zeros((M, pad), dtype=torch.int32, device=exp_biased.device)],
+                [
+                    exp_biased,
+                    torch.zeros((M, pad), dtype=torch.int32, device=exp_biased.device),
+                ],
                 dim=1,
             )
         # Reshape into [M, num_packed_groups, 4] and pack via shifts
@@ -115,7 +110,8 @@ class SiluMulFp8QuantPackedTest(unittest.TestCase):
         tma_aligned_M = ((M + 3) // 4) * 4
         out_scale_colmajor = torch.zeros(
             (num_packed_groups, tma_aligned_M),
-            dtype=torch.int32, device=out_scale_rowmajor.device,
+            dtype=torch.int32,
+            device=out_scale_rowmajor.device,
         ).T[:M, :]
         out_scale_colmajor.copy_(out_scale_rowmajor)
 
@@ -144,7 +140,8 @@ class SiluMulFp8QuantPackedTest(unittest.TestCase):
         # to a kernel bug).
         max_abs = (ref_q_f32 - fused_q_f32).abs().max().item()
         self.assertLess(
-            max_abs, 1e-2,
+            max_abs,
+            1e-2,
             f"FP8 output diff too large (M={M}, inter={inter}, clamp={clamp_limit}): "
             f"max_abs={max_abs}",
         )
@@ -155,7 +152,8 @@ class SiluMulFp8QuantPackedTest(unittest.TestCase):
         self.assertEqual(fused_s.shape, ref_s.shape, "scale shape mismatch")
         scale_diff = (fused_s.cpu() != ref_s.cpu()).sum().item()
         self.assertEqual(
-            scale_diff, 0,
+            scale_diff,
+            0,
             f"UE8M0 scale mismatch (M={M}, inter={inter}, clamp={clamp_limit}): "
             f"{scale_diff} elements differ out of {fused_s.numel()}",
         )

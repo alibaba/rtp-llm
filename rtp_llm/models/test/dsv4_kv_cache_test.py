@@ -1,7 +1,11 @@
+import json
+import os
+import tempfile
 from unittest import TestCase, main
+from unittest.mock import patch
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.models.deepseek_v4 import DeepSeekV4
+from rtp_llm.models.deepseek_v4 import DeepSeekV4, _require_n_shared_experts
 from rtp_llm.models.dsv4_kv_cache import (
     CSA_KV_TAG,
     CSA_STATE_TAG,
@@ -19,6 +23,7 @@ from rtp_llm.models.dsv4_kv_cache import (
     apply_dsv4_explicit_pool_blocks,
     build_dsv4_kv_cache_spec_descs,
 )
+from rtp_llm.models_py.model_desc.deepseek_v4_model import _args_from_model_config
 from rtp_llm.ops import (
     CacheEvictPolicy,
     CacheMemoryPlacement,
@@ -37,6 +42,250 @@ LAYER_COMPRESS_RATIOS = [4, 128, 0, 0, 4]
 HEAD_DIM = 512
 INDEXER_HEAD_DIM = 128
 FRAMEWORK_DEFAULT_TOKENS_PER_BLOCK = 64
+
+
+class Dsv4MoeConfigTest(TestCase):
+    @staticmethod
+    def _minimal_config_json(n_shared_experts: int) -> dict:
+        return {
+            "num_hidden_layers": 1,
+            "hidden_size": 512,
+            "vocab_size": 64,
+            "num_attention_heads": 1,
+            "num_key_value_heads": 1,
+            "head_dim": 512,
+            "qk_rope_head_dim": 64,
+            "compress_ratios": [0],
+            "o_groups": 1,
+            "o_lora_rank": 0,
+            "index_head_dim": 128,
+            "index_n_heads": 1,
+            "index_topk": 4,
+            "scoring_func": "sqrtsoftplus",
+            "routed_scaling_factor": 1.0,
+            "num_experts_per_tok": 4,
+            "n_routed_experts": 16,
+            "moe_intermediate_size": 256,
+            "n_shared_experts": n_shared_experts,
+        }
+
+    @classmethod
+    def _load_minimal_model_config(cls, n_shared_experts: int) -> ModelConfig:
+        with tempfile.TemporaryDirectory() as ckpt_path:
+            with open(os.path.join(ckpt_path, "config.json"), "w") as writer:
+                json.dump(cls._minimal_config_json(n_shared_experts), writer)
+            return DeepSeekV4._create_config(ckpt_path)
+
+    def test_missing_shared_expert_count_fails_fast(self):
+        with self.assertRaisesRegex(ValueError, "missing required field"):
+            _require_n_shared_experts({})
+
+    def test_explicit_zero_keeps_routed_only_checkpoint_supported(self):
+        self.assertEqual(_require_n_shared_experts({"n_shared_experts": 0}), 0)
+
+    def test_one_shared_expert_is_supported(self):
+        self.assertEqual(_require_n_shared_experts({"n_shared_experts": 1}), 1)
+
+    def test_multiple_shared_experts_are_supported(self):
+        self.assertEqual(_require_n_shared_experts({"n_shared_experts": 2}), 2)
+
+    def test_shared_expert_count_rejects_invalid_values(self):
+        for value in (True, False, 0.5, 1.0, "1", None, -1):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError, "non-negative integer"
+            ):
+                _require_n_shared_experts({"n_shared_experts": value})
+
+    def test_routed_only_config_propagates_through_model_build_inputs(self):
+        model_config = self._load_minimal_model_config(0)
+
+        self.assertEqual(model_config.n_shared_experts, 0)
+        self.assertEqual(model_config.inter_size, 0)
+        args = _args_from_model_config(model_config)
+        self.assertEqual(args.n_shared_experts, 0)
+        self.assertEqual(args.moe_inter_dim, 256)
+
+    def test_multiple_shared_experts_keep_routed_expert_width(self):
+        model_config = self._load_minimal_model_config(2)
+
+        self.assertEqual(model_config.n_shared_experts, 2)
+        self.assertEqual(model_config.inter_size, 512)
+        args = _args_from_model_config(model_config)
+        self.assertEqual(args.n_shared_experts, 2)
+        self.assertEqual(args.moe_inter_dim, 256)
+
+    def test_zero_routed_expert_width_fails_fast(self):
+        model_config = self._load_minimal_model_config(0)
+        model_config.moe_inter_size = 0
+
+        with self.assertRaisesRegex(ValueError, "positive routed expert width"):
+            _args_from_model_config(model_config)
+
+    def test_inconsistent_shared_expert_width_fails_fast(self):
+        model_config = self._load_minimal_model_config(2)
+        model_config.inter_size = 256
+
+        with self.assertRaisesRegex(ValueError, "shared-expert width is inconsistent"):
+            _args_from_model_config(model_config)
+
+    def test_shared_width_can_recover_missing_routed_width(self):
+        model_config = self._load_minimal_model_config(2)
+        model_config.moe_inter_size = 0
+
+        self.assertEqual(_args_from_model_config(model_config).moe_inter_dim, 256)
+
+    def test_production_weight_graph_tracks_shared_expert_config(self):
+        import torch
+
+        from rtp_llm.config.kv_cache_config import KVCacheConfig
+        from rtp_llm.ops import HWKernelConfig, ParallelismConfig
+        from rtp_llm.utils.database import CkptDatabase
+        from rtp_llm.utils.model_weight import W
+
+        for n_shared_experts in (0, 1, 2):
+            with self.subTest(n_shared_experts=n_shared_experts):
+                model_config = self._load_minimal_model_config(n_shared_experts)
+                parallelism_config = ParallelismConfig()
+                parallelism_config.tp_size = 1
+                parallelism_config.tp_rank = 0
+                parallelism_config.dp_size = 1
+                parallelism_config.dp_rank = 0
+                parallelism_config.ep_size = 1
+                parallelism_config.ep_rank = 0
+                parallelism_config.world_size = 1
+                parallelism_config.world_rank = 0
+                parallelism_config.local_world_size = 1
+
+                with tempfile.TemporaryDirectory() as checkpoint_path:
+                    # A real checkpoint database drives the same constructor,
+                    # metadata processing, descriptor construction, and file
+                    # filtering path used by BaseModel.create_model_loader().
+                    torch.save(
+                        {"embed.weight": torch.ones(1)},
+                        os.path.join(checkpoint_path, "model.bin"),
+                    )
+                    database = CkptDatabase(checkpoint_path)
+                    weight_builder = DeepSeekV4.get_weight_cls()(
+                        model_config=model_config,
+                        parallelism_config=parallelism_config,
+                        hw_kernel_config=HWKernelConfig(),
+                        kv_cache_config=KVCacheConfig(),
+                    )
+                    weight_info = weight_builder.create_model_weight_info(database)
+
+                self.assertEqual(weight_builder._n_shared_experts, n_shared_experts)
+                layer_by_name = {
+                    weight.name: weight for weight in weight_info.layer_weights[0]
+                }
+                shared_names = {W.v4_shared_w13_w, W.v4_shared_w2_w}
+                if n_shared_experts == 0:
+                    self.assertTrue(shared_names.isdisjoint(layer_by_name))
+                else:
+                    self.assertTrue(shared_names.issubset(layer_by_name))
+                    self.assertEqual(
+                        {
+                            ckpt.tensor_name(0)
+                            for ckpt in layer_by_name[W.v4_shared_w13_w].weights
+                        },
+                        {
+                            "layers.0.ffn.shared_experts.w1.weight",
+                            "layers.0.ffn.shared_experts.w3.weight",
+                        },
+                    )
+                    self.assertEqual(
+                        {
+                            ckpt.tensor_name(0)
+                            for ckpt in layer_by_name[W.v4_shared_w2_w].weights
+                        },
+                        {"layers.0.ffn.shared_experts.w2.weight"},
+                    )
+
+    def test_public_strategy_unsupported_by_dsv4_falls_back_to_auto(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            public_config = server_args.setup_args(
+                ["--moe_strategy", "fp8_per_block_no_dp"]
+            ).moe_config
+        with self.assertLogs(level="WARNING") as logs:
+            args = _args_from_model_config(
+                self._load_minimal_model_config(1),
+                moe_config=public_config,
+            )
+
+        self.assertEqual(public_config.moe_strategy, "fp8_per_block_no_dp")
+        self.assertEqual(args.moe_strategy, "auto")
+        self.assertIn("does not support MOE_STRATEGY", "\n".join(logs.output))
+
+    def test_public_strategy_reaches_v4_block_and_moe_selection(self):
+        import torch
+        import torch.nn as nn
+
+        from rtp_llm.models_py.modules.dsv4.block import Block
+        from rtp_llm.models_py.modules.dsv4.transformer import _block_kwargs
+        from rtp_llm.server.server_args import server_args
+        from rtp_llm.utils.model_weight import W
+
+        class DummyModule(nn.Module):
+            def __init__(self, *args, **kwargs):
+                super().__init__()
+
+        class DummyMoe(DummyModule):
+            def __init__(self, *args, **kwargs):
+                super().__init__()
+                self.strategy_name = kwargs["strategy"]
+
+        weight_keys = (
+            W.v4_attn_norm,
+            W.v4_ffn_norm,
+            W.v4_hc_attn_fn,
+            W.v4_hc_attn_base,
+            W.v4_hc_attn_scale,
+            W.v4_hc_ffn_fn,
+            W.v4_hc_ffn_base,
+            W.v4_hc_ffn_scale,
+        )
+        cases = (("mega_moe", 0), ("mega_moe_se", 1))
+        for strategy, n_shared_experts in cases:
+            with self.subTest(strategy=strategy), patch.dict(
+                os.environ, {}, clear=True
+            ):
+                public_config = server_args.setup_args(
+                    ["--moe_strategy", strategy]
+                ).moe_config
+                model_config = self._load_minimal_model_config(n_shared_experts)
+                args = _args_from_model_config(
+                    model_config,
+                    moe_config=public_config,
+                )
+                args.ep_size = 2
+                args.ep_rank = 0
+                layer_weights = {key: torch.ones(1) for key in weight_keys}
+                kwargs = _block_kwargs(0, args, layer_weights)
+
+                with patch(
+                    "rtp_llm.models_py.modules.dsv4.block.AttentionFP8",
+                    DummyModule,
+                ), patch(
+                    "rtp_llm.models_py.modules.dsv4.block.RMSNorm",
+                    DummyModule,
+                ), patch(
+                    "rtp_llm.models_py.modules.dsv4.block.build_hc_unit",
+                    side_effect=lambda *args, **kwargs: DummyModule(),
+                ), patch.object(
+                    Block,
+                    "_resolve_prefill_fast_hc_impls",
+                    return_value=(lambda: None,) * 4,
+                ), patch(
+                    "rtp_llm.models_py.modules.dsv4.block.Dsv4MoeLayer",
+                    DummyMoe,
+                ):
+                    block = Block(**kwargs)
+
+                self.assertEqual(public_config.moe_strategy, strategy)
+                self.assertEqual(args.moe_strategy, strategy)
+                self.assertEqual(kwargs["moe_strategy"], strategy)
+                self.assertEqual(block.ffn.strategy_name, strategy)
 
 
 class Dsv4KvCacheSpecTest(TestCase):

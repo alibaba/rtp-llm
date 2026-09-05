@@ -37,6 +37,10 @@ class MoeStrategy(ABC):
     to define which Router and Executor implementations they use.
     """
 
+    # Public MOE_STRATEGY value for explicitly selectable strategies. Strategies
+    # without a public name remain eligible only when selection is automatic.
+    strategy_name: Optional[str] = None
+
     def can_handle(self, config: MoEConfigAdapter) -> bool:
         """Determine whether this strategy can handle the given configuration
 

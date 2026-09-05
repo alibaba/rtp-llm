@@ -15,6 +15,18 @@ from .defs.strategy_base import MoeStrategy
 logger = logging.getLogger(__name__)
 
 
+def _requested_strategy_context(config: MoEConfigAdapter) -> str:
+    requested = config.moe_strategy
+    model_config = config.model_config
+    model_scope = model_config.model_type
+    if not model_scope:
+        model_scope = type(model_config).__name__
+    return (
+        f"Requested MOE_STRATEGY={requested!r} for model scope "
+        f"{model_scope!r} in the generic fused-MoE factory."
+    )
+
+
 class StrategyRegistry:
     """Strategy registry
 
@@ -65,17 +77,35 @@ class StrategyRegistry:
         logger.debug(
             f"[StrategyRegistry] Evaluating {len(self._strategies)} strategies..."
         )
+        quant_method = getattr(config, "moe_quant_method", None)
+        strategies = [
+            strategy
+            for strategy in self._strategies
+            if (
+                getattr(strategy, "supported_moe_quant_method", None) is None
+                and quant_method != "FP8_FP4"
+            )
+            or getattr(strategy, "supported_moe_quant_method", None) == quant_method
+        ]
+        requested = config.moe_strategy
+        if requested != "auto":
+            strategies = [
+                strategy
+                for strategy in strategies
+                if strategy.strategy_name == requested
+            ]
         candidates = [
-            strategy for strategy in self._strategies if strategy.can_handle(config)
+            strategy for strategy in strategies if strategy.can_handle(config)
         ]
         logger.debug(f"[StrategyRegistry] Found {len(candidates)} candidate(s)")
 
         if not candidates:
-            quant_method = (
-                config.model_config.quant_config.get_method()
-                if config.model_config.quant_config is not None
-                else None
-            )
+            quant_method = getattr(config, "moe_quant_method", None)
+            if quant_method is None:
+                quant_config = getattr(config.model_config, "quant_config", None)
+                quant_method = (
+                    quant_config.get_method() if quant_config is not None else None
+                )
             logger.error(
                 f"No suitable MOE strategy found. Config details: "
                 f"quant_config={config.model_config.quant_config}, "
@@ -89,11 +119,12 @@ class StrategyRegistry:
                     "W8A8_INT8_PER_CHANNEL_COMPRESSED weights were loaded, but "
                     "no registered MOE compute backend can consume them; install "
                     "or register a backend with W8A8 INT8 per-channel execution "
-                    "support"
+                    f"support. {_requested_strategy_context(config)}"
                 )
             raise ValueError(
-                f"No suitable MOE strategy found for configuration. "
-                f"Please check quant_config, ep_size, and parallelism settings."
+                "No suitable MOE strategy found for configuration. "
+                "Please check quant_config, ep_size, and parallelism settings. "
+                f"{_requested_strategy_context(config)}"
             )
 
         # get_attributes() is not a plain accessor -- it does lazy imports and

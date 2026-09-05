@@ -243,6 +243,15 @@ class TestCudaNoQuantSingleGpuStrategy(unittest.TestCase):
         strategy = BatchedTritonStrategy()
         self.assertTrue(strategy.can_handle(config))
 
+    def test_explicit_strategy_is_not_silently_consumed_by_fallback(self) -> None:
+        config = create_moe_config_adapter(
+            model_config=create_model_config_without_quant(),
+            parallelism_config=create_parallelism_config(),
+            moe_config=create_moe_config(moe_strategy="mega_moe"),
+        )
+
+        self.assertFalse(BatchedTritonStrategy().can_handle(config))
+
     def test_can_handle_false_has_quant(self) -> None:
         """Test case with quantization"""
         config = create_moe_config_adapter(
@@ -654,7 +663,9 @@ class TestCudaFp8PerBlockPureCPStrategy(unittest.TestCase):
         self.assertTrue(strategy.can_handle(config))
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
-    def test_can_handle_false_auto_falls_back_to_deepep(self, mock_has_deep_gemm: Any) -> None:
+    def test_can_handle_false_auto_falls_back_to_deepep(
+        self, mock_has_deep_gemm: Any
+    ) -> None:
         """moe_strategy=auto + pure CP+EP topology should NOT auto-select PureCP (falls back to DeepEP)."""
         mock_has_deep_gemm.return_value = True
 
@@ -773,7 +784,9 @@ class TestCudaFp8PerBlockPureDPStrategy(unittest.TestCase):
         self.assertTrue(strategy.can_handle(config))
 
     @patch("rtp_llm.models_py.kernels.cuda.deepgemm_wrapper.has_deep_gemm")
-    def test_can_handle_false_auto_falls_back_to_deepep(self, mock_has_deep_gemm: Any) -> None:
+    def test_can_handle_false_auto_falls_back_to_deepep(
+        self, mock_has_deep_gemm: Any
+    ) -> None:
         """moe_strategy=auto + pure DP+EP topology should NOT auto-select PureDP (falls back to DeepEP)."""
         mock_has_deep_gemm.return_value = True
 

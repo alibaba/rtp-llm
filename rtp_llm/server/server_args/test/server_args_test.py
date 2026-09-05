@@ -1,4 +1,5 @@
 import importlib
+import io
 import json
 import os
 import pickle
@@ -6,14 +7,60 @@ import sys
 from unittest import TestCase, main
 from unittest.mock import patch
 
-from rtp_llm.utils.backend_registry import (
-    register_backend_hook,
-    reset_backend_registrations,
-)
+from rtp_llm.utils import backend_registry
+from rtp_llm.utils.backend_registry import register_backend_hook
 
 
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
+
+    def test_dsv4_mega_moe_public_choices(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            nonse = server_args.setup_args(["--moe_strategy", "mega_moe"])
+            fused_se = server_args.setup_args(["--moe_strategy", "mega_moe_se"])
+            grouped = server_args.setup_args(["--moe_strategy", "grouped_fp4"])
+            local = server_args.setup_args(["--moe_strategy", "local_loop"])
+        self.assertEqual(nonse.moe_config.moe_strategy, "mega_moe")
+        self.assertEqual(fused_se.moe_config.moe_strategy, "mega_moe_se")
+        self.assertEqual(grouped.moe_config.moe_strategy, "grouped_fp4")
+        self.assertEqual(local.moe_config.moe_strategy, "local_loop")
+
+    def test_dsv4_single_card_strategy_from_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        for strategy in ("grouped_fp4", "local_loop"):
+            with self.subTest(strategy=strategy), patch.dict(
+                os.environ, {"MOE_STRATEGY": strategy}, clear=True
+            ), patch.object(sys, "argv", ["rtp_llm_server"]):
+                configs = server_args.setup_args()
+                self.assertEqual(configs.moe_config.moe_strategy, strategy)
+
+    def test_dsv4_strategy_choices_reject_invalid_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        for argv in (
+            ["rtp_llm_server"],
+            ["rtp_llm_server", "--tp_size", "1"],
+        ):
+            with self.subTest(argv=argv), patch.dict(
+                os.environ, {"MOE_STRATEGY": "not_a_strategy"}, clear=True
+            ), patch.object(sys, "argv", argv), patch(
+                "sys.stderr", new_callable=io.StringIO
+            ):
+                with self.assertRaises(SystemExit):
+                    server_args.setup_args()
+
+    def test_equal_form_cli_strategy_overrides_environment(self):
+        from rtp_llm.server.server_args import server_args
+
+        for env_value in ("mega_moe", "not_a_strategy"):
+            with self.subTest(env_value=env_value), patch.dict(
+                os.environ, {"MOE_STRATEGY": env_value}, clear=True
+            ):
+                configs = server_args.setup_args(["--moe_strategy=local_loop"])
+                self.assertEqual(configs.moe_config.moe_strategy, "local_loop")
 
     def test_internal_backend_registers_moe_choice_before_parser_initialization(self):
         from rtp_llm.server.server_args import server_args
@@ -34,34 +81,36 @@ class ServerArgsPyEnvConfigsTest(TestCase):
                 loaded = True
             return True
 
-        reset_backend_registrations()
-        try:
-            with (
-                patch.dict(os.environ, {}, clear=True),
-                patch.object(
-                    server_args,
-                    "ensure_backend_entrypoint_loaded",
-                    side_effect=load_backend,
-                ),
-                patch(
-                    "rtp_llm.utils.backend_registry.ensure_backend_entrypoint_loaded",
-                    return_value=True,
-                ),
-            ):
-                first_configs = server_args.setup_args(
-                    ["--moe_strategy", "external_test_strategy"]
-                )
-                second_configs = server_args.setup_args(
-                    ["--moe_strategy", "external_test_strategy"]
-                )
-            self.assertEqual(
-                first_configs.moe_config.moe_strategy, "external_test_strategy"
+        with (
+            patch.object(backend_registry, "_hooks", {}),
+            patch.object(backend_registry, "_started", set()),
+            patch.object(backend_registry, "_repeatable", set()),
+            patch.object(backend_registry, "_inflight", {}),
+            patch.object(backend_registry, "_failures", {}),
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(
+                server_args,
+                "ensure_backend_entrypoint_loaded",
+                side_effect=load_backend,
+            ),
+            patch.object(
+                backend_registry,
+                "ensure_backend_entrypoint_loaded",
+                return_value=True,
+            ),
+        ):
+            first_configs = server_args.setup_args(
+                ["--moe_strategy", "external_test_strategy"]
             )
-            self.assertEqual(
-                second_configs.moe_config.moe_strategy, "external_test_strategy"
+            second_configs = server_args.setup_args(
+                ["--moe_strategy", "external_test_strategy"]
             )
-        finally:
-            reset_backend_registrations()
+        self.assertEqual(
+            first_configs.moe_config.moe_strategy, "external_test_strategy"
+        )
+        self.assertEqual(
+            second_configs.moe_config.moe_strategy, "external_test_strategy"
+        )
 
 
 class ServerArgsSetTest(TestCase):

@@ -57,6 +57,7 @@ py_library(
     ],
     deps = [
         ":utils",
+        ":kernels",
         ":tile_kernels_mhc",
         "//rtp_llm:warmup",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
@@ -105,12 +106,10 @@ py_library(
         "modules/dsv4/_fused_inv_rope_fp8_quant_triton.py",
         "modules/dsv4/_fused_rmsnorm_rope_triton.py",
         "modules/dsv4/_rope_only_triton.py",
-        "modules/dsv4/moe/_mega_input_pack_triton.py",
-        "modules/dsv4/moe/_mega_se_gate_pack_triton.py",
-        "modules/dsv4/moe/_mega_se_input_pack_triton.py",
     ],
     visibility = ["//visibility:public"],
 )
+
 
 # Export sitecustomize.py for test targets to fix nvidia-cutlass-dsl import
 exports_files(["modules/factory/sitecustomize.py"])
@@ -138,7 +137,7 @@ py_library(
     srcs = glob([
         "kernels/*.py",
         "kernels/**/*.py",
-    ])
+    ]),
 )
 
 py_library(

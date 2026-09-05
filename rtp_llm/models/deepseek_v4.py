@@ -82,6 +82,33 @@ def _dsv4_fixed_pool_use_host_memory() -> bool:
     return raw.strip().lower() in _TRUTHY_ENV_VALUES
 
 
+def _require_n_shared_experts(config_json: dict) -> int:
+    """Return the explicitly declared shared-expert count.
+
+    Treating a missing value as zero is unsafe: a checkpoint can still contain
+    shared-expert weights, and silently selecting the routed-only path would
+    drop their contribution from every MoE layer.  Routed-only checkpoints are
+    supported, but must declare ``n_shared_experts: 0`` explicitly.
+    """
+    if "n_shared_experts" not in config_json:
+        raise ValueError(
+            "DeepSeek-V4 config.json is missing required field "
+            "'n_shared_experts'; set it to 0 explicitly for a routed-only "
+            "checkpoint"
+        )
+
+    raw_value = config_json["n_shared_experts"]
+    # JSON booleans are Python ints, so check bool explicitly. Avoid int()
+    # coercion: values such as 0.5 or true must never silently switch the model
+    # between routed-only and shared-expert execution.
+    if isinstance(raw_value, bool) or not isinstance(raw_value, int) or raw_value < 0:
+        raise ValueError(
+            "DeepSeek-V4 config.json field 'n_shared_experts' must be a "
+            f"non-negative integer, got {raw_value!r}"
+        )
+    return raw_value
+
+
 class DeepSeekV4Weight(DeepSeekV2Weight):
     """DeepSeek-V4 weight info.
 
@@ -120,6 +147,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         else:
             self._compress_ratios = self._compress_ratios[: self._num_layers]
         self._num_hash_layers = int(self.model_config.num_hash_layers)
+        self._n_shared_experts = int(self.model_config.n_shared_experts)
 
     def _compress_ratio(self, layer_id: int) -> int:
         if layer_id < 0 or layer_id >= len(self._compress_ratios):
@@ -311,6 +339,8 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
         return out
 
     def _build_shared_expert(self, layer_id: int) -> List[WeightModule]:
+        if self._n_shared_experts == 0:
+            return []
         cfg = self._v4_attn_cfg()
         return [
             AttnAtomicWeight(
@@ -694,9 +724,11 @@ class DeepSeekV4(DeepSeekV2):
         config.moe_n_group = 0
         config.moe_topk_group = 0
         config.has_moe_norm = config_json.get("norm_topk_prob", False)
-        config.moe_style = 2  # shared + expert
-        n_shared_experts = config_json["n_shared_experts"]
+        n_shared_experts = _require_n_shared_experts(config_json)
+        config.moe_style = 2 if n_shared_experts > 0 else 1
+        config.n_shared_experts = int(n_shared_experts)
         config.inter_size = n_shared_experts * moe_intermediate_size
+        config.moe_inter_size = int(moe_intermediate_size)
         # Every layer is MoE in V4 (compress_ratios doesn't include dense replacement)
         config.moe_layer_index = list(range(config.num_layers))
 

@@ -100,3 +100,12 @@ py_test (
     tags = ["open_skip", "SM100_ARM"],
     exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'},
 )
+
+py_test(
+    name = "local_loop_test",
+    srcs = ["local_loop_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)

@@ -62,7 +62,7 @@ class TestStaticBufferSliceProperty(unittest.TestCase):
         self.assertTrue(torch.all(buf[T:] == 0.0))
 
 
-class TestMegaMoeBufCodeChange(unittest.TestCase):
+class TestMegaMoEBufCodeChange(unittest.TestCase):
     """Verify the Stream B code change semantics in isolation."""
 
     def test_pre_alloc_avoids_realloc(self):

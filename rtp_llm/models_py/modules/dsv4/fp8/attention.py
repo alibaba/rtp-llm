@@ -317,6 +317,8 @@ def bind_attn_cache(attn, kv_cache=None, block_tables_by_type=None, cp_ctx=BIND_
         attn._kv_cache = prev_kv
         attn._block_tables_by_type = prev_bt
         attn._cp_ctx = prev_cp
+
+
 _DSV4_FP8_INDEXER_ENTRY_BYTES = 132
 
 # Process-wide fixed Q chunk for streaming FlashMLA prefill. Resolve and
@@ -964,7 +966,7 @@ class AttentionFP8(nn.Module):
         # the ``fp8_einsum`` production path uses the pre-stacked
         # ``_wo_a_stk_w`` / ``_wo_a_stk_s`` buffers below, the BF16
         # fallback path inline-dequants from these via
-        # ``_fp8_dequant_to_fp32``.
+        # ``dequantize_fp8_weight``.
         assert (n_heads * head_dim) % o_groups == 0
         wo_a_w = layer_weights[W.v4_attn_wo_a_w]
         wo_a_s = layer_weights[W.v4_attn_wo_a_s]
@@ -1492,9 +1494,7 @@ class AttentionFP8(nn.Module):
         eb = self._pool_entries_per_block(SWA_KV)
         if pool_view is None or eb <= 0:
             return None
-        swa_tokens_per_block = _dsv4_pool_tokens_per_block(
-            self._kv_cache, tag=SWA_KV
-        )
+        swa_tokens_per_block = _dsv4_pool_tokens_per_block(self._kv_cache, tag=SWA_KV)
 
         win = self.window_size
         if win <= 0:
@@ -1576,9 +1576,7 @@ class AttentionFP8(nn.Module):
         eb = self._pool_entries_per_block(SWA_KV)
         if pool_view is None or eb <= 0 or dense_len <= 0:
             return None
-        swa_tokens_per_block = _dsv4_pool_tokens_per_block(
-            self._kv_cache, tag=SWA_KV
-        )
+        swa_tokens_per_block = _dsv4_pool_tokens_per_block(self._kv_cache, tag=SWA_KV)
 
         device = pool_view.device
         dtype = torch.bfloat16
@@ -1710,12 +1708,8 @@ class AttentionFP8(nn.Module):
             state_bt = bt_by_type.get(INDEXER_STATE) if bt_by_type is not None else None
             state_eb = self._pool_entries_per_block(INDEXER_STATE)
             kv_tpb = _dsv4_pool_tokens_per_block(self._kv_cache, tag=INDEXER_KV)
-            kv_owner_tpb = _dsv4_pool_owner_tokens_per_block(
-                self._kv_cache, INDEXER_KV
-            )
-            state_tpb = _dsv4_pool_tokens_per_block(
-                self._kv_cache, tag=INDEXER_STATE
-            )
+            kv_owner_tpb = _dsv4_pool_owner_tokens_per_block(self._kv_cache, INDEXER_KV)
+            state_tpb = _dsv4_pool_tokens_per_block(self._kv_cache, tag=INDEXER_STATE)
             self.indexer.set_pool_context(
                 kv_view,
                 kv_bt,
@@ -2518,6 +2512,8 @@ class AttentionFP8(nn.Module):
         assert (
             x.dim() == 2
         ), f"DSv4 Attention prefill expects flat [T, dim]; got shape {tuple(x.shape)}"
+        if x.size(0) == 0:
+            return x
         # Prefill is FP8-only on this branch — every downstream helper
         # (``_prefill_write_swa_fp8_paged``, ``_attn_fp8_swa_via_kv_full``,
         # ``_attn_via_workspace``) hard-assumes FP8 KV-cache pools. Hoist
@@ -2551,6 +2547,8 @@ class AttentionFP8(nn.Module):
         kv_cache: Optional[Any] = None,
         block_tables_by_type: Optional[Dict[str, torch.Tensor]] = None,
     ) -> torch.Tensor:
+        if x.size(0) == 0:
+            return x
         prev_kv = self._kv_cache
         prev_bt = self._block_tables_by_type
         if kv_cache is not None:
@@ -4325,9 +4323,7 @@ class AttentionFP8(nn.Module):
         cmp_eb = self._pool_entries_per_block(cmp_at)
         if swa_eb <= 0 or cmp_eb <= 0:
             return None
-        swa_tokens_per_block = _dsv4_pool_tokens_per_block(
-            self._kv_cache, tag=SWA_KV
-        )
+        swa_tokens_per_block = _dsv4_pool_tokens_per_block(self._kv_cache, tag=SWA_KV)
 
         win = self.window_size
         # ``use_varlen`` is required — set by ``_build_shared_prefill_meta``
@@ -4795,9 +4791,7 @@ class AttentionFP8(nn.Module):
                 slot_in_flat=None,
                 cache_slot_mapping=None,
             )
-        swa_tokens_per_block = _dsv4_pool_tokens_per_block(
-            self._kv_cache, tag=SWA_KV
-        )
+        swa_tokens_per_block = _dsv4_pool_tokens_per_block(self._kv_cache, tag=SWA_KV)
 
         # Group-1 (every pool-bound FP8 layer): SWA pool write meta.
         #
@@ -5471,7 +5465,9 @@ class AttentionFP8(nn.Module):
         from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 
         with record_function_range("dsv4.fp8.attn.out.tp_all_reduce"):
-            all_reduce(out, Group.TP)
+            reduced = all_reduce(out, Group.TP, inplace=True)
+            if reduced is not out:
+                out.copy_(reduced)
 
     def _prefill_output_proj(
         self,

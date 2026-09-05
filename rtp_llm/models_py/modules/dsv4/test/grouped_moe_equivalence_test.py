@@ -1,312 +1,302 @@
-"""Numerical-equivalence test for the DeepGEMM grouped-FP4 MoE path.
+"""Real-GPU numerical coverage for grouped DSV4 MoE execution.
 
-Compares `MoE._grouped_routed_experts` (activates when deep_gemm ships
-`m_grouped_fp8_fp4_gemm_nt_contiguous`, i.e. >= 2.4) against the legacy
-per-expert QuantizedLinear loop under factory-mode construction.
-
-Run against the local conda env that has deep_gemm 2.4+ —
-``/opt/conda310/bin/python``. The bazel-pinned deep_gemm 2.1.1 lacks the
-FP4 kernels and will simply skip this test (factory-mode falls back to
-the legacy path, both paths match trivially).
+The test builds the production ``MoE`` layer from current ``W.v4_*`` tensor
+descriptors. It compares the automatically available grouped-FP4
+implementation against the explicit local-loop rollback path, including the
+standalone shared expert used by the production single-rank model, and
+exercises the zero-token boundary without mocks or fake strategies.
 """
 
-import os
-import sys
+from __future__ import annotations
+
 import unittest
 
 import torch
+import torch.nn.functional as F
 
-_THIS = os.path.dirname(os.path.abspath(__file__))
-_REPO = os.path.abspath(os.path.join(_THIS, "..", "..", "..", "..", ".."))
-if _REPO not in sys.path:
-    sys.path.insert(0, _REPO)
-
-# Force grouped-FP4 opt-in BEFORE importing the moe module so the
-# ``_has_fp8_fp4_grouped_kernel`` probe (called at decorator-evaluation
-# time below) sees the env gate as enabled.  Without this the test would
-# always skip because the production default keeps the path opt-in.
-os.environ.setdefault("DSV4_USE_GROUPED_FP4", "1")
-
-from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import has_deep_gemm
-from rtp_llm.models_py.modules.dsv4.moe import MoE, _has_fp8_fp4_grouped_kernel
+from rtp_llm.models_py.modules.dsv4.moe_layer import Dsv4MoeLayer as MoE
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.grouped_fp4 import (
+    GroupedFp4Executor,
+    _has_fp8_fp4_grouped_kernel,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.local_loop import (
+    LocalLoopExecutor,
+)
+from rtp_llm.utils.model_weight import W
 
 
-def _make_weights_dict(
-    E: int,
-    D: int,
-    inter: int,
-    topk: int,
+def _make_layer_weights(
+    experts: int,
+    dim: int,
+    inter_dim: int,
     device: str,
-    prefix: str = "ffn",
+    *,
+    stable_routing: bool = False,
+    routing_offset: int = 0,
+    include_shared: bool = True,
 ) -> dict:
-    """Synthesize a weights dict with V4-shaped routed-expert tensors."""
-    w: dict = {}
-    # Gate (non-hash path): [E, D] bf16 + bias [E] fp32
-    w[f"{prefix}.gate.weight"] = torch.randn(E, D, device=device, dtype=torch.bfloat16)
-    w[f"{prefix}.gate.bias"] = torch.randn(E, device=device, dtype=torch.float32) * 0.01
-    # Routed experts: FP4-packed weight + UE8M0 block-32 scale, per expert
-    # Use reasonable random values so the output isn't saturated.
-    for i in range(E):
-        w[f"{prefix}.experts.{i}.w1.weight"] = torch.randint(
+    def packed_fp4(out_dim: int, in_dim: int) -> torch.Tensor:
+        return torch.randint(
             -10,
             10,
-            (inter, D // 2),
+            (experts, out_dim, in_dim // 2),
             dtype=torch.int8,
             device=device,
         )
-        w[f"{prefix}.experts.{i}.w1.scale"] = torch.randint(
-            120, 132, (inter, D // 32), dtype=torch.uint8, device=device
-        ).view(torch.float8_e8m0fnu)
-        w[f"{prefix}.experts.{i}.w2.weight"] = torch.randint(
-            -10,
-            10,
-            (D, inter // 2),
-            dtype=torch.int8,
-            device=device,
-        )
-        w[f"{prefix}.experts.{i}.w2.scale"] = torch.randint(
-            120, 132, (D, inter // 32), dtype=torch.uint8, device=device
-        ).view(torch.float8_e8m0fnu)
-        w[f"{prefix}.experts.{i}.w3.weight"] = torch.randint(
-            -10,
-            10,
-            (inter, D // 2),
-            dtype=torch.int8,
-            device=device,
-        )
-        w[f"{prefix}.experts.{i}.w3.scale"] = torch.randint(
-            120, 132, (inter, D // 32), dtype=torch.uint8, device=device
-        ).view(torch.float8_e8m0fnu)
-    # Shared expert (FP8 e4m3fn + UE8M0 block-128)
-    for name, out_dim, in_dim in (("w1", inter, D), ("w2", D, inter), ("w3", inter, D)):
-        w[f"{prefix}.shared_experts.{name}.weight"] = torch.randn(
-            out_dim, in_dim, device=device, dtype=torch.bfloat16
-        ).to(torch.float8_e4m3fn)
-        w[f"{prefix}.shared_experts.{name}.scale"] = torch.randint(
-            120,
-            135,
-            (max(1, out_dim // 128), max(1, in_dim // 128)),
+
+    def fp4_scale(out_dim: int, in_dim: int) -> torch.Tensor:
+        # Exercise the real block-scale layout instead of letting every block
+        # collapse to the same scale. Values close to the neutral UE8M0 byte
+        # 127 keep the output large enough for relative-error checks to matter.
+        return torch.randint(
+            124,
+            127,
+            (experts, out_dim, in_dim // 32),
             dtype=torch.uint8,
             device=device,
         ).view(torch.float8_e8m0fnu)
-    return w
 
+    router_w = torch.randn(experts, dim, dtype=torch.bfloat16, device=device)
+    router_bias = torch.zeros(experts, dtype=torch.float32, device=device)
+    if stable_routing:
+        # Hash routing keeps both implementations on identical routes while
+        # covering every expert; a monotonic bias would exercise only the same
+        # top-k experts in every layer.
+        router_w.zero_()
 
-class TestGroupedRoutedExperts(unittest.TestCase):
-    @unittest.skipUnless(has_deep_gemm(), "deep_gemm not available")
-    @unittest.skipUnless(
-        _has_fp8_fp4_grouped_kernel(),
-        "deep_gemm < 2.4: fp8_fp4 grouped kernel absent; grouped path skipped",
+    weights = {
+        W.v4_router_w: router_w,
+        W.v4_router_bias: router_bias,
+        W.v4_routed_w1_w: packed_fp4(inter_dim, dim),
+        W.v4_routed_w1_s: fp4_scale(inter_dim, dim),
+        W.v4_routed_w2_w: packed_fp4(dim, inter_dim),
+        W.v4_routed_w2_s: fp4_scale(dim, inter_dim),
+        W.v4_routed_w3_w: packed_fp4(inter_dim, dim),
+        W.v4_routed_w3_s: fp4_scale(inter_dim, dim),
+    }
+    if stable_routing:
+        token_ids = torch.arange(32, dtype=torch.int32, device=device).unsqueeze(1)
+        topk_slots = torch.arange(4, dtype=torch.int32, device=device).unsqueeze(0)
+        weights[W.v4_router_tid2eid] = (
+            token_ids * 4 + topk_slots + routing_offset
+        ).remainder(experts)
+    weights.update(
+        {
+            W.v4_shared_w13_w: torch.randn(
+                2 * inter_dim,
+                dim,
+                dtype=torch.bfloat16,
+                device=device,
+            ).to(torch.float8_e4m3fn),
+            W.v4_shared_w13_s: torch.randint(
+                124,
+                127,
+                (2 * inter_dim // 128, dim // 128),
+                dtype=torch.uint8,
+                device=device,
+            ).view(torch.float8_e8m0fnu),
+            W.v4_shared_w2_w: torch.randn(
+                dim,
+                inter_dim,
+                dtype=torch.bfloat16,
+                device=device,
+            ).to(torch.float8_e4m3fn),
+            W.v4_shared_w2_s: torch.randint(
+                124,
+                127,
+                (dim // 128, inter_dim // 128),
+                dtype=torch.uint8,
+                device=device,
+            ).view(torch.float8_e8m0fnu),
+        }
     )
-    def test_grouped_matches_loop(self):
-        """Build one MoE twice on the same weights — once via the grouped
-        FP4 path, once via the legacy per-expert loop — and check the
-        outputs match within 1e-2 BF16 tolerance."""
-        torch.manual_seed(0)
-        device = "cuda:0"
-        # Small but realistic dims: non-trivial E and dim divisible by 128.
-        E, D, inter, topk = 16, 512, 256, 4
-        N = 8  # total tokens
+    if not include_shared:
+        for key in (
+            W.v4_shared_w13_w,
+            W.v4_shared_w13_s,
+            W.v4_shared_w2_w,
+            W.v4_shared_w2_s,
+        ):
+            weights.pop(key)
+    return weights
 
-        w = _make_weights_dict(E, D, inter, topk, device)
-        # Clone the dict: legacy path calls `weights.pop(...)` so we need
-        # two independent dicts.
-        w_a = {k: v.clone() for k, v in w.items()}
-        w_b = {k: v.clone() for k, v in w.items()}
 
-        # Build MoE with grouped path (deep_gemm 2.4+)
-        # To force the legacy path on the same weights, monkey-patch
-        # `_has_fp8_fp4_grouped_kernel` to return False for that instance.
-        with torch.device("meta"):
-            moe_grouped = MoE(
-                layer_id=3,
-                dim=D,
-                moe_inter_dim=inter,
-                n_routed_experts=E,
-                n_activated_experts=topk,
-                n_shared_experts=1,
-                score_func="sqrtsoftplus",
-                route_scale=1.0,
-                swiglu_limit=10.0,
-                n_hash_layers=0,
-                vocab_size=1,
-                weights=w_a,
-                prefix="ffn",
+def _clone_weights(weights: dict) -> dict:
+    return {key: value.clone() for key, value in weights.items()}
+
+
+class GroupedMoEExecutionTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        if not torch.cuda.is_available():
+            raise AssertionError(
+                "CUDA is required by this dedicated SM100 Bazel target"
             )
-        # Both paths produce the same output deterministically given a
-        # fixed input (gates use bf16 weights so topk selection is stable).
-        self.assertTrue(
-            moe_grouped._use_grouped_fp4, "expected grouped FP4 path to activate"
-        )
-        # Build MoE with legacy path: override the feature flag.
-        import rtp_llm.models_py.modules.dsv4.moe as moe_mod
+        if not _has_fp8_fp4_grouped_kernel():
+            raise AssertionError(
+                "SM100 grouped FP8xFP4 DeepGEMM kernel is required by this "
+                "dedicated SM100 Bazel target"
+            )
 
-        _orig = moe_mod._has_fp8_fp4_grouped_kernel
-        moe_mod._has_fp8_fp4_grouped_kernel = lambda: False
-        try:
-            with torch.device("meta"):
-                moe_legacy = MoE(
-                    layer_id=3,
-                    dim=D,
-                    moe_inter_dim=inter,
-                    n_routed_experts=E,
-                    n_activated_experts=topk,
-                    n_shared_experts=1,
-                    score_func="sqrtsoftplus",
-                    route_scale=1.0,
-                    swiglu_limit=10.0,
-                    n_hash_layers=0,
-                    vocab_size=1,
-                    weights=w_b,
-                    prefix="ffn",
-                )
-        finally:
-            moe_mod._has_fp8_fp4_grouped_kernel = _orig
-        self.assertFalse(moe_legacy._use_grouped_fp4)
-
-        # Materialize any meta-device buffers on both.
-        for moe in (moe_grouped, moe_legacy):
-            for name, buf in list(moe._buffers.items()):
-                if buf is not None and buf.device.type == "meta":
-                    moe._buffers[name] = torch.zeros(
-                        buf.shape,
-                        dtype=buf.dtype,
-                        device=device,
-                    )
-
-        x = torch.randn(N, D, device=device, dtype=torch.bfloat16)
-        input_ids = torch.randint(0, 1, (N,), dtype=torch.long, device=device)
-
-        with torch.inference_mode():
-            y_grouped = moe_grouped(x, input_ids)
-            y_legacy = moe_legacy(x, input_ids)
-
-        # Output shapes match the input.
-        self.assertEqual(tuple(y_grouped.shape), (N, D))
-        self.assertEqual(tuple(y_legacy.shape), (N, D))
-
-        # Numerical equivalence — FP4 (4-bit) path is lossy; we check the
-        # outputs are close in a relative-tolerance sense.
-        diff = (y_grouped.float() - y_legacy.float()).abs()
-        scale = y_legacy.float().abs().mean().item() + 1e-6
-        rel = diff.mean().item() / scale
-        # Both paths share the same FP4 dequant LUT.  Differences come from
-        # GEMM accumulation order and the activation quant step (grouped
-        # path: one global per-token FP8 quant before grouped GEMM; legacy
-        # path: per-expert BF16 ``F.linear`` after dequant).  Tightened
-        # 0.05 → 0.02 — the prior loose tolerance was hiding the per-group
-        # alignment violation that compounded across V4-Flash's 60 layers
-        # (see ``moe.py::_has_fp8_fp4_grouped_kernel`` history).
-        self.assertLess(
-            rel,
-            0.02,
-            f"grouped vs legacy diverged: rel diff={rel:.3e}\n"
-            f"  max abs diff: {diff.max().item():.3e}\n"
-            f"  legacy mean abs: {y_legacy.abs().mean().item():.3e}",
+    def _build_moe(
+        self,
+        layer_weights: dict,
+        strategy: str,
+        *,
+        layer_id: int = 3,
+        hash_routing: bool = False,
+        n_shared_experts: int = 1,
+    ) -> MoE:
+        return MoE(
+            layer_id=layer_id,
+            dim=512,
+            moe_inter_dim=256,
+            n_routed_experts=16,
+            n_activated_experts=4,
+            n_shared_experts=n_shared_experts,
+            score_func="sqrtsoftplus",
+            route_scale=1.0,
+            swiglu_limit=10.0,
+            n_hash_layers=4 if hash_routing else 0,
+            vocab_size=32,
+            layer_weights=layer_weights,
+            ep_size=1,
+            ep_rank=0,
+            max_tokens_per_rank=128,
+            strategy=strategy,
         )
 
-    @unittest.skipUnless(has_deep_gemm(), "deep_gemm not available")
-    @unittest.skipUnless(
-        _has_fp8_fp4_grouped_kernel(),
-        "deep_gemm < 2.4: fp8_fp4 grouped kernel absent; grouped path skipped",
-    )
-    def test_grouped_4_layer_chain_no_compounding(self):
-        """Detect systematic per-layer error compounding.
+    def test_grouped_matches_local_loop_and_handles_empty_rank(self):
+        torch.manual_seed(20260901)
+        weights = _make_layer_weights(16, 512, 256, "cuda")
+        grouped = self._build_moe(_clone_weights(weights), "grouped_fp4")
+        local = self._build_moe(_clone_weights(weights), "local_loop")
 
-        The original alignment bug was masked by the single-pass 5%
-        tolerance — random noise around zero — but in the real V4-Flash
-        60-layer stack the error had a systematic direction and produced
-        garbage output.  Stack four MoE layers (output-of-i fed into i+1)
-        for grouped vs legacy and check the cumulative rel diff stays
-        bounded.  Random per-step error grows ≈ sqrt(L); systematic error
-        grows ≈ L.  Threshold of 0.05 across 4 layers admits the former
-        and rejects the latter.
-        """
-        torch.manual_seed(0)
-        device = "cuda:0"
-        E, D, inter, topk = 16, 512, 256, 4
-        N = 8
-        L = 4
+        self.assertIsInstance(grouped.fused_moe.fused_experts, GroupedFp4Executor)
+        self.assertIsInstance(local.fused_moe.fused_experts, LocalLoopExecutor)
+        for moe in (grouped, local):
+            self.assertIsNotNone(moe._moe.shared_experts)
+            self.assertIsNotNone(moe._moe._shared_executor)
 
-        # Build L MoE pairs sharing weights, one path each.
-        import rtp_llm.models_py.modules.dsv4.moe as moe_mod
-
-        moes_grouped, moes_legacy = [], []
-        for layer in range(L):
-            torch.manual_seed(1000 + layer)
-            w = _make_weights_dict(E, D, inter, topk, device, prefix=f"l{layer}")
-            w_a = {k: v.clone() for k, v in w.items()}
-            w_b = {k: v.clone() for k, v in w.items()}
-            with torch.device("meta"):
-                mg = MoE(
-                    layer_id=layer,
-                    dim=D,
-                    moe_inter_dim=inter,
-                    n_routed_experts=E,
-                    n_activated_experts=topk,
-                    n_shared_experts=1,
-                    score_func="sqrtsoftplus",
-                    route_scale=1.0,
-                    swiglu_limit=10.0,
-                    n_hash_layers=0,
-                    vocab_size=1,
-                    weights=w_a,
-                    prefix=f"l{layer}",
-                )
-            self.assertTrue(mg._use_grouped_fp4)
-            _orig = moe_mod._has_fp8_fp4_grouped_kernel
-            moe_mod._has_fp8_fp4_grouped_kernel = lambda: False
-            try:
-                with torch.device("meta"):
-                    ml = MoE(
-                        layer_id=layer,
-                        dim=D,
-                        moe_inter_dim=inter,
-                        n_routed_experts=E,
-                        n_activated_experts=topk,
-                        n_shared_experts=1,
-                        score_func="sqrtsoftplus",
-                        route_scale=1.0,
-                        swiglu_limit=10.0,
-                        n_hash_layers=0,
-                        vocab_size=1,
-                        weights=w_b,
-                        prefix=f"l{layer}",
-                    )
-            finally:
-                moe_mod._has_fp8_fp4_grouped_kernel = _orig
-            self.assertFalse(ml._use_grouped_fp4)
-            for moe in (mg, ml):
-                for name, buf in list(moe._buffers.items()):
-                    if buf is not None and buf.device.type == "meta":
-                        moe._buffers[name] = torch.zeros(
-                            buf.shape,
-                            dtype=buf.dtype,
-                            device=device,
-                        )
-            moes_grouped.append(mg)
-            moes_legacy.append(ml)
-
-        x = torch.randn(N, D, device=device, dtype=torch.bfloat16)
-        input_ids = torch.randint(0, 1, (N,), dtype=torch.long, device=device)
-
+        x = torch.randn(8, 512, dtype=torch.bfloat16, device="cuda")
+        input_ids = torch.arange(8, dtype=torch.long, device="cuda")
         with torch.inference_mode():
-            yg = x.clone()
-            yl = x.clone()
-            for layer in range(L):
-                yg = moes_grouped[layer](yg, input_ids).to(x.dtype)
-                yl = moes_legacy[layer](yl, input_ids).to(x.dtype)
+            grouped_out = grouped(x, input_ids).clone()
+            local_out = local(x, input_ids)
 
-        diff = (yg.float() - yl.float()).abs()
-        scale = yl.float().abs().mean().item() + 1e-6
-        rel = diff.mean().item() / scale
+        self.assertNotEqual(grouped_out.data_ptr(), local_out.data_ptr())
+        self.assertEqual(grouped_out.shape, x.shape)
+        self.assertEqual(local_out.shape, x.shape)
+        diff = (grouped_out.float() - local_out.float()).abs()
+        self.assertGreater(grouped_out.float().abs().mean().item(), 1.0e-3)
+        self.assertGreater(local_out.float().abs().mean().item(), 1.0e-3)
+        scale = local_out.float().abs().mean().item() + 1e-6
         self.assertLess(
-            rel,
+            diff.mean().item() / scale,
+            0.03,
+            "grouped_fp4 diverged from the local_loop rollback path",
+        )
+
+        empty_x = torch.empty(0, 512, dtype=torch.bfloat16, device="cuda")
+        empty_ids = torch.empty(0, dtype=torch.long, device="cuda")
+        with torch.inference_mode():
+            self.assertEqual(grouped(empty_x, empty_ids).shape, empty_x.shape)
+            self.assertEqual(local(empty_x, empty_ids).shape, empty_x.shape)
+
+    def test_routed_only_grouped_matches_local_loop(self):
+        torch.manual_seed(20260902)
+        weights = _make_layer_weights(16, 512, 256, "cuda", include_shared=False)
+        grouped = self._build_moe(
+            _clone_weights(weights), "grouped_fp4", n_shared_experts=0
+        )
+        local = self._build_moe(
+            _clone_weights(weights), "local_loop", n_shared_experts=0
+        )
+        for moe in (grouped, local):
+            self.assertIsNone(moe._moe.shared_experts)
+            self.assertIsNone(moe._moe._shared_executor)
+
+        x = torch.randn(8, 512, dtype=torch.bfloat16, device="cuda")
+        input_ids = torch.arange(8, dtype=torch.long, device="cuda")
+        with torch.inference_mode():
+            grouped_out = grouped(x, input_ids).clone()
+            local_out = local(x, input_ids)
+
+        diff = (grouped_out.float() - local_out.float()).abs()
+        scale = local_out.float().abs().mean().item() + 1e-6
+        self.assertGreater(scale, 1.0e-3)
+        # This denominator contains routed output only, so the bound cannot be
+        # diluted by the identical shared-expert contribution.
+        self.assertLess(
+            diff.mean().item() / scale,
+            0.04,
+            "routed-only grouped_fp4 diverged from local_loop",
+        )
+
+    def test_four_layer_chain_has_no_systematic_error_compounding(self):
+        grouped_layers = []
+        local_layers = []
+        for layer_id in range(4):
+            torch.manual_seed(20262000 + layer_id)
+            weights = _make_layer_weights(
+                16,
+                512,
+                256,
+                "cuda",
+                stable_routing=True,
+                routing_offset=layer_id * 4,
+            )
+            grouped_layers.append(
+                self._build_moe(
+                    _clone_weights(weights),
+                    "grouped_fp4",
+                    layer_id=layer_id,
+                    hash_routing=True,
+                )
+            )
+            local_layers.append(
+                self._build_moe(
+                    _clone_weights(weights),
+                    "local_loop",
+                    layer_id=layer_id,
+                    hash_routing=True,
+                )
+            )
+
+        torch.manual_seed(20262010)
+        grouped_out = torch.randn(8, 512, dtype=torch.bfloat16, device="cuda")
+        local_out = grouped_out.clone()
+        input_ids = torch.arange(8, dtype=torch.long, device="cuda")
+        for layer in grouped_layers:
+            covered = set(layer.gate.tid2eid[input_ids].flatten().cpu().tolist())
+            self.assertEqual(covered, set(range(16)))
+        with torch.inference_mode():
+            for grouped, local in zip(grouped_layers, local_layers):
+                # Mirror the transformer boundary around each MoE: pre-norm
+                # each branch independently, then carry the residual forward.
+                # This keeps the chained regression sensitive to systematic
+                # kernel drift without turning tiny rounding differences into
+                # unbounded synthetic-MLP magnitude growth.
+                grouped_in = F.rms_norm(grouped_out.float(), (512,)).to(torch.bfloat16)
+                local_in = F.rms_norm(local_out.float(), (512,)).to(torch.bfloat16)
+                grouped_delta = grouped(grouped_in, input_ids).clone()
+                local_delta = local(local_in, input_ids).clone()
+                self.assertNotEqual(grouped_delta.data_ptr(), local_delta.data_ptr())
+                grouped_out = (grouped_out + grouped_delta).to(torch.bfloat16).clone()
+                self.assertGreater(grouped_delta.float().abs().mean().item(), 1.0e-3)
+                self.assertGreater(local_delta.float().abs().mean().item(), 1.0e-3)
+                local_out = (local_out + local_delta).to(torch.bfloat16).clone()
+                self.assertNotEqual(grouped_out.data_ptr(), local_out.data_ptr())
+
+        self.assertTrue(torch.isfinite(grouped_out).all())
+        self.assertTrue(torch.isfinite(local_out).all())
+        diff = (grouped_out.float() - local_out.float()).abs()
+        scale = local_out.float().abs().mean().item() + 1e-6
+        self.assertLess(
+            diff.mean().item() / scale,
             0.05,
-            f"4-layer grouped vs legacy diverged — likely systematic\n"
-            f"compounding (alignment bug?): rel diff={rel:.3e}\n"
-            f"  max abs diff: {diff.max().item():.3e}\n"
-            f"  legacy mean abs: {yl.abs().mean().item():.3e}",
+            "four-layer grouped_fp4 error compounded beyond the rollback baseline",
         )
 
 

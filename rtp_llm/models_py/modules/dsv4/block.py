@@ -14,7 +14,7 @@ import torch.nn as nn
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
-from rtp_llm.models_py.modules.dsv4.moe import MoE
+from rtp_llm.models_py.modules.dsv4.moe_layer import Dsv4MoeLayer
 
 _PrefillFastHCImpls = Tuple[Callable, Callable, Callable, Callable]
 
@@ -70,8 +70,11 @@ class Block(nn.Module):
         tp_rank: int = 0,
         ep_size: int = 1,
         ep_rank: int = 0,
+        world_size: Optional[int] = None,
+        world_rank: Optional[int] = None,
         max_tokens_per_rank: int = 8192,
         is_decode_role: bool = False,
+        moe_strategy: str = "auto",
         fp8_kv_cache: bool = False,
     ):
         super().__init__()
@@ -107,7 +110,7 @@ class Block(nn.Module):
             tp_rank=tp_rank,
         )
         self._cp_sync_after_attn_done = False
-        self.ffn = MoE(
+        self.ffn = Dsv4MoeLayer(
             layer_id=layer_id,
             dim=dim,
             moe_inter_dim=moe_inter_dim,
@@ -122,8 +125,11 @@ class Block(nn.Module):
             layer_weights=layer_weights,
             ep_size=ep_size,
             ep_rank=ep_rank,
+            world_size=world_size,
+            world_rank=world_rank,
             max_tokens_per_rank=max_tokens_per_rank,
             is_decode_role=is_decode_role,
+            strategy=moe_strategy,
         )
         # Framework loader already casts norms to bf16 (compute_dtype) and
         # hc_* tensors to fp32 (descriptor data_type); pass refs straight
@@ -166,10 +172,9 @@ class Block(nn.Module):
             return
         if os.environ.get("DSV4_CP_SYNC_AFTER_ATTN_ONCE", "1") == "0":
             return
-        if getattr(getattr(self.ffn, "_strategy", None), "name", "") not in (
-            "mega",
-            "mega_fused",
-            "mega_se",
+        if self.ffn.strategy_name not in (
+            "mega_moe",
+            "mega_moe_se",
         ):
             return
         if getattr(self.attn, "_cp_ctx", None) is None:

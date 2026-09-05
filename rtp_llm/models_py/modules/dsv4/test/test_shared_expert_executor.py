@@ -6,25 +6,23 @@ from unittest import mock
 import torch
 import torch.nn as nn
 
-from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
-    is_deep_gemm_e8m0_used,
-)
-from rtp_llm.models_py.modules.dsv4.moe.expert import Expert
-from rtp_llm.models_py.modules.dsv4.moe._shared_expert_triton import (
-    quant_bf16_fp8_packed_ue8m0,
-)
-from rtp_llm.models_py.modules.dsv4.moe._silu_mul_fp8_quant_triton import (
-    silu_mul_fp8_quant_packed_from_parts,
-)
-from rtp_llm.models_py.modules.dsv4.moe.shared_expert import (
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.expert import Expert
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert import (
+    _SHARED_EXPERT_STREAM_CACHE,
     FusedSharedExpertExecutor,
     FusedSharedExpertFastPath,
     OverlapSharedExpertExecutor,
     SequentialSharedExpertExecutor,
     W13SharedExpert,
-    _SHARED_EXPERT_STREAM_CACHE,
     combine_routed_and_shared,
     get_shared_expert_executor,
+)
+from rtp_llm.models_py.triton_kernels.moe.shared_expert import (
+    quant_bf16_fp8_packed_ue8m0,
+)
+from rtp_llm.models_py.triton_kernels.moe.silu_mul_fp8_quant import (
+    silu_mul_fp8_quant_packed_from_parts,
 )
 from rtp_llm.test.utils.numeric_util import calc_diff
 from rtp_llm.utils.model_weight import concat_0
@@ -97,6 +95,7 @@ def _make_shared_expert(
     w1_w, w1_s = _quant_weight(w1_bf16)
     w2_w, w2_s = _quant_weight(w2_bf16)
     w3_w, w3_s = _quant_weight(w3_bf16)
+    w13_w, w13_s = _quant_weight(concat_0([w1_bf16, w3_bf16]))
     split_ref = Expert(
         dim,
         inter,
@@ -115,8 +114,8 @@ def _make_shared_expert(
         dim,
         inter,
         expert_weights={
-            "w13_w": concat_0([w1_w, w3_w]),
-            "w13_s": FusedSharedExpertFastPath._merge_weight_scales(w1_s, w3_s),
+            "w13_w": w13_w,
+            "w13_s": w13_s,
             "w2_w": w2_w,
             "w2_s": w2_s,
         },
@@ -194,7 +193,7 @@ class TestSharedExpertExecutor(unittest.TestCase):
     def test_combine_preserves_fp32_accumulate_semantics(self):
         routed = torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32)
         shared = torch.tensor([[0.5, -0.25], [0.125, -0.5]], dtype=torch.float32)
-        with _env("DSV4_MOE_STRICT_FUSED", "0"):
+        with _env("MOE_STRICT_FUSED", "0"):
             got = combine_routed_and_shared(routed, shared, torch.bfloat16)
         ref = (routed.float() + shared.float()).to(torch.bfloat16)
         self.assertTrue(torch.equal(got, ref))
@@ -202,9 +201,7 @@ class TestSharedExpertExecutor(unittest.TestCase):
     def test_bf16_add_experimental_switch(self):
         routed = torch.randn(4, 8, dtype=torch.float32)
         shared = torch.randn(4, 8, dtype=torch.float32)
-        with _env("DSV4_MOE_STRICT_FUSED", "0"), _env(
-            "DSV4_SHARED_EXPERT_BF16_ADD", "1"
-        ):
+        with _env("MOE_STRICT_FUSED", "0"), _env("MOE_SHARED_EXPERT_BF16_ADD", "1"):
             got = combine_routed_and_shared(routed, shared, torch.bfloat16)
         ref = (routed.to(torch.bfloat16) + shared.to(torch.bfloat16)).to(torch.bfloat16)
         self.assertTrue(torch.equal(got, ref))
@@ -212,7 +209,7 @@ class TestSharedExpertExecutor(unittest.TestCase):
     def test_strict_rejects_bf16_add_switch(self):
         routed = torch.randn(4, 8, dtype=torch.float32)
         shared = torch.randn(4, 8, dtype=torch.float32)
-        with _env("DSV4_SHARED_EXPERT_BF16_ADD", "1"):
+        with _env("MOE_SHARED_EXPERT_BF16_ADD", "1"):
             with self.assertRaisesRegex(RuntimeError, "forbids"):
                 combine_routed_and_shared(routed, shared, torch.bfloat16)
 
@@ -223,19 +220,27 @@ class TestSharedExpertExecutor(unittest.TestCase):
             executor.start(_Shared(), x)
 
     def test_executor_dispatch(self):
-        os.environ.pop("DSV4_SHARED_EXPERT_MODE", None)
-        self.assertIsInstance(get_shared_expert_executor(), SequentialSharedExpertExecutor)
-        with _env("DSV4_SHARED_EXPERT_MODE", "sequential"):
-            self.assertIsInstance(get_shared_expert_executor(), SequentialSharedExpertExecutor)
-        with _env("DSV4_SHARED_EXPERT_MODE", "overlap"):
-            self.assertIsInstance(get_shared_expert_executor(), OverlapSharedExpertExecutor)
-        with _env("DSV4_SHARED_EXPERT_MODE", "auto"):
-            self.assertIsInstance(get_shared_expert_executor(), OverlapSharedExpertExecutor)
+        os.environ.pop("MOE_SHARED_EXPERT_MODE", None)
+        self.assertIsInstance(
+            get_shared_expert_executor(), SequentialSharedExpertExecutor
+        )
+        with _env("MOE_SHARED_EXPERT_MODE", "sequential"):
+            self.assertIsInstance(
+                get_shared_expert_executor(), SequentialSharedExpertExecutor
+            )
+        with _env("MOE_SHARED_EXPERT_MODE", "overlap"):
+            self.assertIsInstance(
+                get_shared_expert_executor(), OverlapSharedExpertExecutor
+            )
+        with _env("MOE_SHARED_EXPERT_MODE", "auto"):
+            self.assertIsInstance(
+                get_shared_expert_executor(), OverlapSharedExpertExecutor
+            )
 
     def test_sequential_executor(self):
         x = torch.randn(3, 4, dtype=torch.bfloat16)
         executor = SequentialSharedExpertExecutor()
-        with _env("DSV4_MOE_STRICT_FUSED", "0"):
+        with _env("MOE_STRICT_FUSED", "0"):
             executor.start(_Shared(), x)
         got = executor.finish()
         ref = _Shared()(x).float()
@@ -246,7 +251,7 @@ class TestSharedExpertExecutor(unittest.TestCase):
         x = torch.randn(33, 128, device="cuda", dtype=torch.bfloat16)
         shared = _Shared().cuda()
         overlap = OverlapSharedExpertExecutor()
-        with _env("DSV4_MOE_STRICT_FUSED", "0"):
+        with _env("MOE_STRICT_FUSED", "0"):
             overlap.start(shared, x)
         got = overlap.finish()
         ref = shared(x).float()
@@ -259,7 +264,7 @@ class TestSharedExpertExecutor(unittest.TestCase):
         first = OverlapSharedExpertExecutor()
         second = OverlapSharedExpertExecutor()
 
-        with _env("DSV4_MOE_STRICT_FUSED", "0"):
+        with _env("MOE_STRICT_FUSED", "0"):
             first.start(shared, x)
             first_stream = first._active_stream
             self.assertIsNotNone(first_stream)
@@ -287,18 +292,19 @@ class TestSharedExpertExecutor(unittest.TestCase):
         self.assertIn(device_index, _SHARED_EXPERT_STREAM_CACHE)
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
-    def test_overlap_capture_requires_precreated_stream(self):
+    def test_overlap_capture_uses_current_stream(self):
         _SHARED_EXPERT_STREAM_CACHE.clear()
         x = torch.randn(33, 128, device="cuda", dtype=torch.bfloat16)
         shared = _Shared().cuda()
         executor = OverlapSharedExpertExecutor()
 
-        with _env("DSV4_MOE_STRICT_FUSED", "0"), mock.patch(
+        with _env("MOE_STRICT_FUSED", "0"), mock.patch(
             "torch.cuda.is_current_stream_capturing",
             return_value=True,
         ):
-            with self.assertRaisesRegex(RuntimeError, "not created before CUDA graph capture"):
-                executor.start(shared, x)
+            executor.start(shared, x)
+            self.assertIsNone(executor._active_stream)
+            self.assertTrue(torch.equal(executor.finish(), shared(x).float()))
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
     def test_overlap_executor_captures_with_precreated_stream(self):
@@ -308,7 +314,7 @@ class TestSharedExpertExecutor(unittest.TestCase):
         executor = OverlapSharedExpertExecutor()
         out = torch.empty(x.shape, device=x.device, dtype=torch.float32)
 
-        with _env("DSV4_MOE_STRICT_FUSED", "0"):
+        with _env("MOE_STRICT_FUSED", "0"):
             executor.start(shared, x)
             warmup_stream = executor._active_stream
             self.assertIsNotNone(warmup_stream)
@@ -318,7 +324,7 @@ class TestSharedExpertExecutor(unittest.TestCase):
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 executor.start(shared, x)
-                self.assertIs(executor._active_stream, warmup_stream)
+                self.assertIsNone(executor._active_stream)
                 out.copy_(executor.finish())
 
             x.mul_(2.0)
@@ -334,8 +340,8 @@ class TestSharedExpertExecutor(unittest.TestCase):
         shared = _Shared().cuda()
         executor = OverlapSharedExpertExecutor()
 
-        with _env("DSV4_MOE_STRICT_FUSED", "0"), _env(
-            "DSV4_SHARED_EXPERT_STREAM_TOKEN_THRESHOLD", "1"
+        with _env("MOE_STRICT_FUSED", "0"), _env(
+            "MOE_SHARED_EXPERT_STREAM_TOKEN_THRESHOLD", "1"
         ):
             executor.start(shared, x)
             self.assertIsNone(executor._active_stream)
@@ -378,7 +384,9 @@ class TestSharedExpertExecutor(unittest.TestCase):
                 gemm_calls = []
 
                 def fake_with_record(a, b, output, *args, **kwargs):
-                    gemm_calls.append((tuple(a[0].shape), tuple(b[0].shape), tuple(output.shape)))
+                    gemm_calls.append(
+                        (tuple(a[0].shape), tuple(b[0].shape), tuple(output.shape))
+                    )
                     _fake_fp8_gemm_nt(a, b, output, *args, **kwargs)
 
                 with mock.patch(
