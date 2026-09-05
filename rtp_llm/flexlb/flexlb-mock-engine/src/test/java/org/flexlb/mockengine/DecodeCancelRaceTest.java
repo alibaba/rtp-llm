@@ -49,7 +49,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *       transiently pushing activeDecodeRequests to cap+1.
  *       {@link #activeDecodeRequestsNeverExceedsCapUnderCancelStorm} samples
  *       the counter continuously under a schedule/cancel/completion storm and
- *       asserts it never exceeds decodeMaxConcurrency in gated mode.</li>
+ *       asserts it never exceeds decodeMaxConcurrency (the hard gate is
+ *       always on).</li>
  * </ol>
  */
 class DecodeCancelRaceTest {
@@ -145,17 +146,16 @@ class DecodeCancelRaceTest {
     // ──────────── Test 2: P1-2 — cap never exceeded, even transiently ────────────
 
     /**
-     * Gated mode (decode.max_pending_requests = 0 → hard gate + unbounded
-     * queue) with a tiny cap. A dedicated sampler thread continuously reads
-     * activeDecodeRequests while schedule / cancel / completion drains race;
-     * the pre-fix code allowed a transient cap+1 here because cancel released
-     * the slot outside the lock before draining.
+     * Unconditional hard gate with a tiny cap. A dedicated sampler thread
+     * continuously reads activeDecodeRequests while schedule / cancel /
+     * completion drains race; the pre-fix code allowed a transient cap+1 here
+     * because cancel released the slot outside the lock before draining.
      */
     @Test
     void activeDecodeRequestsNeverExceedsCapUnderCancelStorm() throws Exception {
         // decode step 100 × sleep_scale 0.1 = 10 ms — completions fire while
         // the storm is still running, exercising the completion drain too.
-        MockPerformanceModel model = decodeModel(tempDir, 100.0, 0);
+        MockPerformanceModel model = decodeModel(tempDir, 100.0, null);
         int cap = 4;
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, cap);
 
@@ -232,5 +232,4 @@ class DecodeCancelRaceTest {
         return MockEngineTestSupport.decodeService(
                 model, port, services, scheduler, decodeMaxConcurrency);
     }
-
 }

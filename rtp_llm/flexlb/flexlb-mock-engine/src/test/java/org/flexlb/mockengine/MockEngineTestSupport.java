@@ -5,6 +5,7 @@ import io.grpc.stub.StreamObserver;
 import org.flexlb.engine.grpc.EngineRpcService;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.net.URI;
@@ -45,6 +46,36 @@ final class MockEngineTestSupport {
     static EngineRpcService.GenerateInputPB inputWithDecode(
             long requestId, int inputTokens, int decodePort, int outputTokens) {
         return input(requestId, inputTokens, outputTokens, decodePort);
+    }
+
+    /**
+     * Input carrying hash-channel block keys: the keys travel in the
+     * unique_key JSON ("block_cache_keys") exactly like the load client's
+     * traffic — shape() smuggles them out of the metadata channel the master
+     * never inspects (the data-link analysis' second channel).
+     */
+    static EngineRpcService.GenerateInputPB inputWithBlockKeys(
+            long requestId, int inputTokens, List<Long> blockKeys) {
+        String uniqueKey;
+        try {
+            uniqueKey = MAPPER.writeValueAsString(Map.of(
+                    "input_len", inputTokens,
+                    "block_cache_keys", blockKeys));
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        EngineRpcService.GenerateConfigPB.Builder config =
+                EngineRpcService.GenerateConfigPB.newBuilder()
+                        .setMaxNewTokens(1)
+                        .setUniqueKey(uniqueKey);
+        EngineRpcService.GenerateInputPB.Builder input =
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .setRequestId(requestId)
+                        .setGenerateConfig(config.build());
+        for (int token = 0; token < inputTokens; token++) {
+            input.addTokenIds(token);
+        }
+        return input.build();
     }
 
     private static EngineRpcService.GenerateInputPB input(

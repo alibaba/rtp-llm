@@ -20,6 +20,11 @@ final class MockEngineTestCluster implements AutoCloseable {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final ScheduledExecutorService scheduler;
+    // Cluster-level stats shared by every engine (matches the production
+    // single-cluster stats shape) so tests can census-assert across the
+    // cancel surfaces (injected / tracked / finished / unknown / tombstone).
+    private final JavaMockEngineCluster.ClusterStats stats =
+            new JavaMockEngineCluster.ClusterStats();
     private final Map<Integer, JavaMockEngineCluster.FastRpcService> services =
             new ConcurrentHashMap<>();
     private final List<JavaMockEngineCluster.FastRpcService> prefills = new ArrayList<>();
@@ -109,14 +114,26 @@ final class MockEngineTestCluster implements AutoCloseable {
                         services,
                         scheduler,
                         model,
-                        100,
-                        new JavaMockEngineCluster.ClusterStats());
+                        // Sizable pool: these behavioral tests (scheduling /
+                        // completion / latency) treat KV capacity as a NON-
+                        // constraint. Since the P-enqueue decode-KV reservation
+                        // (20260903) the whole in-flight population holds D-side
+                        // leases AT ENQUEUE (production prepare-stage semantics),
+                        // so a 100-block pool rejects past ~95 concurrent requests
+                        // on the 5% reserve watermark — a KV-rejection surface
+                        // these tests never intended to exercise.
+                        6144,
+                        stats);
         services.put(port, service);
         return service;
     }
 
     Map<Integer, JavaMockEngineCluster.FastRpcService> services() {
         return services;
+    }
+
+    JavaMockEngineCluster.ClusterStats stats() {
+        return stats;
     }
 
     List<JavaMockEngineCluster.FastRpcService> prefills() {
