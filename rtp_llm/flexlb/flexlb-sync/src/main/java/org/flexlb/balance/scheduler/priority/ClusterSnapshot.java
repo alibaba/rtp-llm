@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler.priority;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.sync.status.EngineWorkerStatus;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -29,12 +30,19 @@ public record ClusterSnapshot(
                 .getAvailability().getMaxEngineRequests();
         long decodeConcurrencyLimit = configuredDecodeConcurrency == null
                 ? 0L : configuredDecodeConcurrency;
+        EngineWorkerStatus health = new EngineWorkerStatus(registry);
         Map<String, PrefillEndpointSnapshot> prefills = new HashMap<>();
-        registry.getPrefillEndpoints().forEach((key, ep) ->
-                prefills.put(key, PrefillEndpointSnapshot.capture(ep, prefillQueueCapacity)));
+        registry.getPrefillEndpoints().forEach((key, ep) -> {
+            if (health.isPhysicalGroupHealthy(ep)) {
+                prefills.put(key, PrefillEndpointSnapshot.capture(ep, prefillQueueCapacity));
+            }
+        });
         Map<String, DecodeEndpointSnapshot> decodes = new HashMap<>();
-        registry.getDecodeEndpoints().forEach((key, ep) ->
-                decodes.put(key, DecodeEndpointSnapshot.capture(ep, decodeConcurrencyLimit)));
+        registry.getDecodeEndpoints().forEach((key, ep) -> {
+            if (health.isPhysicalGroupHealthy(ep)) {
+                decodes.put(key, DecodeEndpointSnapshot.capture(ep, decodeConcurrencyLimit));
+            }
+        });
         return new ClusterSnapshot(prefills, decodes);
     }
 }

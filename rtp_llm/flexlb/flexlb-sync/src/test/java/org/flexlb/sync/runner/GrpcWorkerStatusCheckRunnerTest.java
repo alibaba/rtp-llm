@@ -13,6 +13,7 @@ import org.flexlb.enums.KvCacheGroupMode;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
@@ -39,7 +40,7 @@ class GrpcWorkerStatusCheckRunnerTest {
 
     @Test
     void should_callGrpcServiceAndApplyWorkerMetadata_when_runnerExecutes() {
-        String ipPort = "127.0.0.1:8080";
+        String ipPort = "127.0.0.1:8080@0";
         WorkerStatus workerStatus = status(8080);
         EngineRpcService.WorkerStatusPB response = EngineRpcService.WorkerStatusPB.newBuilder()
                 .setRole(RoleType.PREFILL.getCode())
@@ -80,7 +81,7 @@ class GrpcWorkerStatusCheckRunnerTest {
 
     @Test
     void should_use_configured_worker_status_port() {
-        String ipPort = "127.0.0.1:8080";
+        String ipPort = "127.0.0.1:8080@0";
         WorkerStatus workerStatus = status(8080);
         when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
                 ArgumentMatchers.any(RoleType.class)))
@@ -97,7 +98,7 @@ class GrpcWorkerStatusCheckRunnerTest {
 
     @Test
     void should_refresh_task_lifecycle_when_status_version_is_unchanged() {
-        String ipPort = "127.0.0.1:8080";
+        String ipPort = "127.0.0.1:8080@0";
         WorkerStatus workerStatus = status(8080);
         workerStatus.getStatusVersion().set(100L);
         TaskInfo localTask = new TaskInfo();
@@ -133,7 +134,7 @@ class GrpcWorkerStatusCheckRunnerTest {
 
     @Test
     void should_notify_scheduler_for_advanced_running_only_status() {
-        String ipPort = "127.0.0.1:8080";
+        String ipPort = "127.0.0.1:8080@0";
         WorkerStatus workerStatus = status(8080);
         workerStatus.setRole(RoleType.DECODE);
         PriorityScheduler priorityScheduler = Mockito.mock(PriorityScheduler.class);
@@ -160,7 +161,7 @@ class GrpcWorkerStatusCheckRunnerTest {
 
     @Test
     void should_ignore_status_callback_from_expired_generation() {
-        String ipPort = "127.0.0.1:8080";
+        String ipPort = "127.0.0.1:8080@0";
         WorkerStatus expired = status(8080);
         WorkerStatus current = status(8080);
         Map<String, WorkerStatus> statuses = new ConcurrentHashMap<>();
@@ -187,13 +188,19 @@ class GrpcWorkerStatusCheckRunnerTest {
     }
 
     @Test
-    void should_remove_endpoint_after_consecutive_grpc_failures() {
-        String ipPort = "127.0.0.1:8080";
+    void should_exclude_all_siblings_only_after_three_consecutive_grpc_failures() {
+        String ipPort = "127.0.0.1:8080@0";
         WorkerStatus workerStatus = status(8080);
+        workerStatus.setMultiEngineNum(2);
+        WorkerStatus sibling = status(8080);
+        sibling.setEngineIndex(1);
+        sibling.setMultiEngineNum(2);
         Map<String, WorkerStatus> statuses = new ConcurrentHashMap<>();
         statuses.put(ipPort, workerStatus);
         EndpointRegistry registry = registry();
         registry.ensureEndpoint(RoleType.VIT, ipPort, workerStatus);
+        registry.ensureEndpoint(RoleType.VIT, sibling.getLogicalIpPort(), sibling);
+        var health = new EngineWorkerStatus(registry);
         when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
                 ArgumentMatchers.any(RoleType.class)))
                 .thenReturn(CompletableFuture.failedFuture(new RuntimeException("unavailable")));
@@ -203,8 +210,12 @@ class GrpcWorkerStatusCheckRunnerTest {
                 20L, null, registry, Runnable::run);
 
         runner.run();
+        assertEquals(2, health.selectRoutableModelWorkerStatus(RoleType.VIT, null).size());
         runner.run();
+        assertEquals(2, health.selectRoutableModelWorkerStatus(RoleType.VIT, null).size());
         runner.run();
+        assertTrue(health.selectRoutableModelWorkerStatus(RoleType.VIT, null).isEmpty());
+        assertTrue(sibling.isAlive());
 
         assertFalse(workerStatus.isAlive());
         assertNull(registry.get(RoleType.VIT, ipPort));
@@ -213,7 +224,7 @@ class GrpcWorkerStatusCheckRunnerTest {
 
     @Test
     void should_restore_endpoint_when_same_version_worker_recovers() {
-        String ipPort = "127.0.0.1:8080";
+        String ipPort = "127.0.0.1:8080@0";
         WorkerStatus workerStatus = status(8080);
         workerStatus.getStatusVersion().set(100L);
         Map<String, WorkerStatus> statuses = new ConcurrentHashMap<>();

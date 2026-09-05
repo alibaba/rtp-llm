@@ -25,6 +25,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
+import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
@@ -88,6 +89,7 @@ public class PriorityAdmissionScheduler {
     private final ConfigService configService;
     private final Router router;
     private final EndpointRegistry endpointRegistry;
+    private final EngineWorkerStatus engineWorkerStatus;
     private final PlanCommitter planCommitter;
     private final PrioritySchedulerReporter priorityReporter;
     private final BatchSchedulerReporter batchReporter;
@@ -219,6 +221,7 @@ public class PriorityAdmissionScheduler {
         this.configService = configService;
         this.router = router;
         this.endpointRegistry = endpointRegistry;
+        this.engineWorkerStatus = new EngineWorkerStatus(endpointRegistry);
         this.planCommitter = planCommitter;
         this.priorityReporter = priorityReporter;
         this.batchReporter = batchReporter;
@@ -980,6 +983,9 @@ public class PriorityAdmissionScheduler {
 
         DecodeEndpointSnapshot target = snapshot.decodes().get(proposal.endpointId());
         DecodeEndpoint decodeEp = target.endpoint();
+        if (!engineWorkerStatus.isPhysicalGroupHealthy(decodeEp)) {
+            return DecodeEvictionOutcome.CONFLICT;
+        }
         long expectedKvTokens = config.decodeKvReservationTokens(
                 seqLen, maxNewTokens, target.realKvTotal());
 
@@ -1003,6 +1009,9 @@ public class PriorityAdmissionScheduler {
         synchronized (future) {
           if (!registrar.isAdmissionOpen(ctx.getRequestId(), future)) {
             return DecodeEvictionOutcome.FAILED;
+          }
+          if (!engineWorkerStatus.isPhysicalGroupHealthy(decodeEp)) {
+            return DecodeEvictionOutcome.CONFLICT;
           }
           // Presence-guarded commit conditionally releases each victim still
           // holding its reservation; unrelated endpoint churn cannot abort it.
@@ -1140,7 +1149,8 @@ public class PriorityAdmissionScheduler {
                         ctx.getPriority(),
                         proposal.victims(), cancellation.getAckTimeoutMs(),
                         cancellation.getCompletionTimeoutMs(),
-                        () -> registrar.isAdmissionOpen(ctx.getRequestId(), future), detail);
+                        () -> registrar.isAdmissionOpen(ctx.getRequestId(), future)
+                                && engineWorkerStatus.isPhysicalGroupHealthy(decodeEp), detail);
 
         CompletableFuture<DecodePreemptionCoordinator.ExecutionResult> execution;
         synchronized (future) {
@@ -1359,7 +1369,7 @@ public class PriorityAdmissionScheduler {
             return DecodeEvictionOutcome.FAILED;
         }
         PrefillEndpoint prefillEp = endpointRegistry.getPrefill(
-                prefill.getServerIp() + ":" + prefill.getHttpPort());
+                prefill.getLogicalIpPort());
         if (prefillEp == null) {
             decodeEp.release(ctx.getRequestId());
             completeAdmissionError(future, StrategyErrorType.RESOURCE_EXHAUSTED,
@@ -1454,6 +1464,8 @@ public class PriorityAdmissionScheduler {
         status.setHttpPort(decodeEp.getHttpPort());
         status.setGrpcPort(CommonUtils.toGrpcPort(decodeEp.getHttpPort()));
         status.setDpRank(decodeEp.getStatus().getDpRank());
+        status.setSelectedEngineIndex(decodeEp.getStatus().getEngineIndex(),
+                decodeEp.getStatus().getMultiEngineNum());
         status.setGroup(decodeEp.getStatus().getGroup());
         status.setRequestId(ctx.getRequestId());
         return status;
@@ -1503,7 +1515,7 @@ public class PriorityAdmissionScheduler {
                 return PlacementOutcome.infeasible(null);
             }
 
-            String prefillIpPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
+            String prefillIpPort = prefill.getLogicalIpPort();
             WorkerEndpoint selectedEndpoint = prefill.getRole() == RoleType.PREFILL
                     ? endpointRegistry.getPrefill(prefillIpPort)
                     : endpointRegistry.get(prefill.getRole(), prefillIpPort);
@@ -1514,7 +1526,7 @@ public class PriorityAdmissionScheduler {
 
             DecodeEndpoint decodeEp = null;
             if (decode != null) {
-                decodeEp = endpointRegistry.getDecode(decode.getServerIp() + ":" + decode.getHttpPort());
+                decodeEp = endpointRegistry.getDecode(decode.getLogicalIpPort());
             }
 
             PriorityRequestEnvelope envelope = buildEnvelope(ctx, decodeEp);
@@ -1611,7 +1623,7 @@ public class PriorityAdmissionScheduler {
             ctx.setPlanType("normal");
         }
         ServerStatus prefill = plan.item().prefill();
-        ctx.setScheduledPrefillEndpoint(prefill.getServerIp() + ":" + prefill.getHttpPort());
+        ctx.setScheduledPrefillEndpoint(prefill.getLogicalIpPort());
         try {
             priorityReporter.reportNormalPlacement(plan.envelope().priority());
         } catch (RuntimeException telemetryFailure) {
@@ -1735,7 +1747,7 @@ public class PriorityAdmissionScheduler {
         for (ServerStatus serverStatus : routeResponse.getServerStatus()) {
             if (serverStatus != null && serverStatus.getRole() == RoleType.DECODE) {
                 DecodeEndpoint ep = endpointRegistry.getDecode(
-                        serverStatus.getServerIp() + ":" + serverStatus.getHttpPort());
+                        serverStatus.getLogicalIpPort());
                 if (ep != null) {
                     ep.release(serverStatus.getRequestId());
                 }

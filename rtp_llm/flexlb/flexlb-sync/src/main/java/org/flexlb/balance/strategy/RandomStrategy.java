@@ -58,7 +58,7 @@ public class RandomStrategy implements LoadBalanceStrategy {
                 ? balanceContext.getConfig()
                 : configService.loadBalanceConfig();
 
-        Map<String, WorkerEndpoint> workerEndpointMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
+        Map<String, WorkerEndpoint> workerEndpointMap = engineWorkerStatus.selectRoutableModelWorkerStatus(roleType, group);
 
         if (MapUtils.isEmpty(workerEndpointMap)) {
             logger.warn("No worker status map found");
@@ -87,7 +87,7 @@ public class RandomStrategy implements LoadBalanceStrategy {
     }
 
     private boolean isWorkerAvailable(FlexlbConfig config, RoleType roleType, WorkerEndpoint ep) {
-        if (ep == null || !ep.getStatus().isAlive()) {
+        if (ep == null || !engineWorkerStatus.isPhysicalGroupHealthy(ep)) {
             return false;
         }
 
@@ -99,6 +99,9 @@ public class RandomStrategy implements LoadBalanceStrategy {
     private ServerStatus buildServerStatus(WorkerEndpoint ep, RoleType roleType,
                                            BalanceContext balanceContext,
                                            FlexlbConfig config) {
+        if (!engineWorkerStatus.isPhysicalGroupHealthy(ep)) {
+            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+        }
         String requestId = balanceContext.getRequestId();
         ServerStatus result = new ServerStatus();
         try {
@@ -106,6 +109,8 @@ public class RandomStrategy implements LoadBalanceStrategy {
             result.setHttpPort(ep.getHttpPort());
             result.setGrpcPort(CommonUtils.toGrpcPort(ep.getHttpPort()));
             result.setDpRank(ep.getStatus().getDpRank());
+            result.setSelectedEngineIndex(ep.getStatus().getEngineIndex(),
+                    ep.getStatus().getMultiEngineNum());
             result.setRole(roleType);
             result.setGroup(ep.getStatus().getGroup());
             result.setRequestId(requestId);

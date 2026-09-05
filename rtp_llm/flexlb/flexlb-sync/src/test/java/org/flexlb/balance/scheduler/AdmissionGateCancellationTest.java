@@ -234,8 +234,8 @@ class AdmissionGateCancellationTest {
             await(finishRouting);
             return route;
         });
-        when(registry.getPrefill("10.0.0.1:8080")).thenReturn(prefill);
-        when(registry.getDecode("10.0.0.2:8081")).thenReturn(decode);
+        when(registry.getPrefill("10.0.0.1:8080@0")).thenReturn(prefill);
+        when(registry.getDecode("10.0.0.2:8081@0")).thenReturn(decode);
         when(prefill.getBatcher()).thenReturn(batcher);
         doAnswer(invocation -> {
             decodeReserved.set(false);
@@ -289,8 +289,8 @@ class AdmissionGateCancellationTest {
         route.setServerStatus(new ArrayList<>(route.getServerStatus()));
         route.getServerStatus().add(decodeStatus);
         when(router.route(any(BalanceContext.class))).thenReturn(route);
-        when(registry.getPrefill("10.0.0.1:8080")).thenReturn(prefill);
-        when(registry.getDecode("10.0.0.2:8081")).thenReturn(decode);
+        when(registry.getPrefill("10.0.0.1:8080@0")).thenReturn(prefill);
+        when(registry.getDecode("10.0.0.2:8081@0")).thenReturn(decode);
         when(prefill.getBatcher()).thenReturn(batcher);
         when(batcher.queueManager()).thenReturn(queueManager);
         when(batcher.tryOffer(any())).thenReturn(true);
@@ -331,8 +331,8 @@ class AdmissionGateCancellationTest {
         route.setServerStatus(new ArrayList<>(route.getServerStatus()));
         route.getServerStatus().add(decodeStatus);
         when(router.route(any(BalanceContext.class))).thenReturn(route);
-        when(registry.getPrefill("10.0.0.1:8080")).thenReturn(prefill);
-        when(registry.getDecode("10.0.0.2:8081")).thenReturn(decode);
+        when(registry.getPrefill("10.0.0.1:8080@0")).thenReturn(prefill);
+        when(registry.getDecode("10.0.0.2:8081@0")).thenReturn(decode);
         when(prefill.getBatcher()).thenReturn(batcher);
         when(batcher.queueManager()).thenReturn(queueManager);
         when(batcher.tryOffer(any())).thenThrow(new IllegalStateException("offer failed"));
@@ -395,8 +395,8 @@ class AdmissionGateCancellationTest {
             await(releaseRoute);
             return route;
         });
-        when(registry.getPrefill("10.0.0.1:8080")).thenReturn(prefill);
-        when(registry.getDecode("10.0.0.2:8081")).thenReturn(decode);
+        when(registry.getPrefill("10.0.0.1:8080@0")).thenReturn(prefill);
+        when(registry.getDecode("10.0.0.2:8081@0")).thenReturn(decode);
         when(prefill.getBatcher()).thenReturn(batcher);
         doAnswer(invocation -> {
             decodeReserved.set(false);
@@ -438,7 +438,7 @@ class AdmissionGateCancellationTest {
                 .thenReturn(true);
         when(endpointRegistry.getDecodeEndpoints())
                 .thenReturn(new ConcurrentHashMap<>(
-                        Map.of("10.0.0.2:8081", decode)));
+                        Map.of("10.0.0.2:8081@0", decode)));
 
         CompletableFuture<Response> result = scheduler.submit(context(String.valueOf(requestId)));
         assertTrue(scheduler.claimAdmissionMutation(String.valueOf(requestId), result));
@@ -473,7 +473,7 @@ class AdmissionGateCancellationTest {
         });
         when(endpointRegistry.getDecodeEndpoints())
                 .thenReturn(new ConcurrentHashMap<>(
-                        Map.of("10.0.0.2:8081", decode)));
+                        Map.of("10.0.0.2:8081@0", decode)));
         BalanceContext context = context(String.valueOf(requestId));
         CompletableFuture<Response> result = scheduler.submit(context);
         assertTrue(scheduler.claimAdmissionMutation(String.valueOf(requestId), result));

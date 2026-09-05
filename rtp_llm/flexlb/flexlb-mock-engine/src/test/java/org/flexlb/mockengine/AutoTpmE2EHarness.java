@@ -258,11 +258,13 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         ws.setIp("127.0.0.1");
         ws.setPort(httpPort);
         ws.setGrpcPort(grpcPort);
+        ws.setRole(role);
+        ws.setAlive(true);
         if (role == RoleType.DECODE) {
             ws.setAvailableKvCacheTokens(new AtomicLong(1_000_000L));
             ws.setTotalKvCacheTokens(new AtomicLong(2_000_000L));
         }
-        String ipPort = "127.0.0.1:" + httpPort;
+        String ipPort = ws.getLogicalIpPort();
         endpointRegistry.ensureEndpoint(role, ipPort, ws);
         statusByPort.put(grpcPort, ws);
         ipPortByEnginePort.put(grpcPort, ipPort);

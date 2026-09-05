@@ -439,7 +439,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                     return future;
                 }
 
-                String prefillIpPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
+                String prefillIpPort = prefill.getLogicalIpPort();
                 WorkerEndpoint selectedEndpoint = prefill.getRole() == RoleType.PREFILL
                         ? endpointRegistry.getPrefill(prefillIpPort)
                         : endpointRegistry.get(prefill.getRole(), prefillIpPort);
@@ -454,7 +454,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
                 DecodeEndpoint decodeEp = null;
                 if (decode != null) {
-                    String decodeIpPort = decode.getServerIp() + ":" + decode.getHttpPort();
+                    String decodeIpPort = decode.getLogicalIpPort();
                     decodeEp = endpointRegistry.getDecode(decodeIpPort);
                 }
 
@@ -3965,7 +3965,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
             return;
         }
         if (serverStatus.getRole() == RoleType.DECODE) {
-            String ipPort = serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
+            String ipPort = serverStatus.getLogicalIpPort();
             DecodeEndpoint ep = endpointRegistry.getDecode(ipPort);
             if (ep != null) {
                 ep.release(serverStatus.getRequestId());
@@ -4172,6 +4172,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         status.setHttpPort(src.getHttpPort());
         status.setGrpcPort(src.getGrpcPort());
         status.setDpRank(src.getDpRank());
+        status.setSelectedEngineIndex(src.getRoutingEngineIndex(),
+                src.getEngineIndex() == null ? 1 : Math.max(2, src.getRoutingEngineIndex() + 1));
         status.setPrefillTime(src.getPrefillTime());
         status.setGroup(src.getGroup());
         status.setDebugInfo(copyOf(src.getDebugInfo()));

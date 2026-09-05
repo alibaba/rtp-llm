@@ -117,7 +117,7 @@ class PrioritySchedulerTest {
                 new PriorityScheduler.EngineFencePolicy(2, 100, 100, 2));
 
         // Create endpoint and batcher for the worker that successRoute() returns
-        String ipPort = "10.0.0.1:8080";
+        String ipPort = "10.0.0.1:8080@0";
         WorkerStatus ws = new WorkerStatus();
         ws.setIp("10.0.0.1");
         ws.setPort(8080);
@@ -481,7 +481,7 @@ class PrioritySchedulerTest {
         WorkerStatus fusionStatus = workerStatus("10.0.0.9", 8090, 8091);
         fusionStatus.setRole(RoleType.PDFUSION);
         PrefillEndpoint fusion = (PrefillEndpoint) endpointRegistry.ensureEndpoint(
-                RoleType.PDFUSION, "10.0.0.9:8090", fusionStatus);
+                RoleType.PDFUSION, "10.0.0.9:8090@0", fusionStatus);
         when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
             String requestId = ((BalanceContext) invocation.getArgument(0)).getRequestId();
             Response response = new Response();
@@ -507,7 +507,7 @@ class PrioritySchedulerTest {
 
         WorkerStatus prefillStatus = workerStatus("10.0.0.9", 8090, 8091);
         PrefillEndpoint prefill = (PrefillEndpoint) endpointRegistry.ensureEndpoint(
-                RoleType.PREFILL, "10.0.0.9:8090", prefillStatus);
+                RoleType.PREFILL, "10.0.0.9:8090@0", prefillStatus);
         DecodeEndpoint decode = ensureDecodeEndpoint("10.0.0.8", 8180, 8181);
         when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
             String requestId = ((BalanceContext) invocation.getArgument(0)).getRequestId();
@@ -616,7 +616,7 @@ class PrioritySchedulerTest {
 
     @Test
     void postDeliveryFenceRetainsLedgersForNonTerminalCancelOutcomes() throws Exception {
-        PrefillEndpoint prefill = endpointRegistry.getPrefill("10.0.0.1:8080");
+        PrefillEndpoint prefill = endpointRegistry.getPrefill("10.0.0.1:8080@0");
         DecodeEndpoint decode = ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
         Map<Long, EngineCancelChannel.CancelOutcome> firstOutcomes = Map.of(
                 4_201L, EngineCancelChannel.CancelOutcome.notFound(),
@@ -668,7 +668,7 @@ class PrioritySchedulerTest {
 
     @Test
     void postDeliveryFenceUsesInternalCancelTimeoutWithoutConfigRead() throws Exception {
-        PrefillEndpoint prefill = endpointRegistry.getPrefill("10.0.0.1:8080");
+        PrefillEndpoint prefill = endpointRegistry.getPrefill("10.0.0.1:8080@0");
         DecodeEndpoint decode = ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
         long requestId = 4_205L;
         decode.reserve(String.valueOf(requestId), 128, 136, 50);
@@ -1066,7 +1066,7 @@ class PrioritySchedulerTest {
     void quarantinedFencesStopDelayedRetries_andCleanupProbesRoundRobin() throws Exception {
         config.queueScheduler().getLifecycle()
                 .setStaleInflightTimeoutMs(TimeUnit.MINUTES.toMillis(10));
-        PrefillEndpoint prefill = endpointRegistry.getPrefill("10.0.0.1:8080");
+        PrefillEndpoint prefill = endpointRegistry.getPrefill("10.0.0.1:8080@0");
         DecodeEndpoint decode = ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
         List<Long> requestIds = LongStream.rangeClosed(4_301L, 4_305L)
                 .boxed().toList();
@@ -1531,7 +1531,7 @@ class PrioritySchedulerTest {
         return new BatchItem(context(requestId), new CompletableFuture<>(), route,
                 PriorityScheduler.findServer(route, RoleType.PREFILL),
                 PriorityScheduler.findServer(route, RoleType.DECODE),
-                endpointRegistry.getPrefill("10.0.0.1:8080"), null,
+                endpointRegistry.getPrefill("10.0.0.1:8080@0"), null,
                 System.currentTimeMillis());
     }
 
@@ -1670,7 +1670,7 @@ class PrioritySchedulerTest {
             throws Exception {
         SchedulingTestConfig.usePriorityQueue(config);
 
-        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
+        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080@0");
         BatchItem item = new BatchItem(context("303"), new CompletableFuture<>(), successRoute("303"),
                 server(RoleType.PREFILL, "10.0.0.1", 8080, 8081, "303"),
                 server(RoleType.DECODE, "10.0.0.2", 8081, 8082, "303"),
@@ -1725,7 +1725,7 @@ class PrioritySchedulerTest {
                     sentBatches.add(request);
                     return CompletableFuture.failedFuture(new TimeoutException("lost ack"));
                 });
-        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
+        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080@0");
         BatchItem item = new BatchItem(context("305"), new CompletableFuture<>(), successRoute("305"),
                 server(RoleType.PREFILL, "10.0.0.1", 8080, 8081, "305"),
                 server(RoleType.DECODE, "10.0.0.2", 8081, 8082, "305"),
@@ -1758,7 +1758,7 @@ class PrioritySchedulerTest {
                     sentBatches.add(request);
                     return CompletableFuture.failedFuture(new TimeoutException("lost ack"));
                 });
-        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
+        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080@0");
         BatchItem item = new BatchItem(context("306"), new CompletableFuture<>(), successRoute("306"),
                 server(RoleType.PREFILL, "10.0.0.1", 8080, 8081, "306"),
                 server(RoleType.DECODE, "10.0.0.2", 8081, 8082, "306"),
@@ -1793,7 +1793,7 @@ class PrioritySchedulerTest {
     @Test
     void uncertainBatchDeliveryAfterConfirmedFutureDoesNotStartCancelReconciliation()
             throws Exception {
-        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
+        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080@0");
         BatchItem item = new BatchItem(context("307"), new CompletableFuture<>(), successRoute("307"),
                 server(RoleType.PREFILL, "10.0.0.1", 8080, 8081, "307"),
                 server(RoleType.DECODE, "10.0.0.2", 8081, 8082, "307"),
@@ -1827,7 +1827,7 @@ class PrioritySchedulerTest {
                     return CompletableFuture.failedFuture(new TimeoutException("lost ack"));
                 });
 
-        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
+        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080@0");
         BatchItem item = reconciliationItem("307", endpoint);
         assertTrue(scheduler.registerInflight(item));
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
@@ -1860,7 +1860,7 @@ class PrioritySchedulerTest {
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
                 .thenReturn(CompletableFuture.failedFuture(new TimeoutException("lost ack")));
 
-        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
+        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080@0");
         BatchItem item = reconciliationItem("308", endpoint);
         assertTrue(scheduler.registerInflight(item));
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
@@ -1894,7 +1894,7 @@ class PrioritySchedulerTest {
                     return CompletableFuture.failedFuture(new TimeoutException("lost ack"));
                 });
 
-        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
+        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080@0");
         BatchItem item = reconciliationItem("309", endpoint);
         assertTrue(scheduler.registerInflight(item));
         scheduler.onDecisionGroupReady(List.of(item), new DecisionGroupMetadata("test", 0));
@@ -2122,7 +2122,7 @@ class PrioritySchedulerTest {
         ws.setGrpcPort(8081);
         ws.setAlive(true);
         return (PrefillEndpoint) endpointRegistry.ensureEndpoint(
-                RoleType.PREFILL, "10.0.0.1:8080", ws);
+                RoleType.PREFILL, "10.0.0.1:8080@0", ws);
     }
 
     private DecodeEndpoint ensureDecodeEndpoint(String ip, int httpPort, int grpcPort) {
@@ -2132,7 +2132,7 @@ class PrioritySchedulerTest {
         ws.setGrpcPort(grpcPort);
         ws.setAlive(true);
         return (DecodeEndpoint) endpointRegistry.ensureEndpoint(
-                RoleType.DECODE, ip + ":" + httpPort, ws);
+                RoleType.DECODE, ws.getLogicalIpPort(), ws);
     }
 
     private void recreateScheduler(

@@ -24,7 +24,10 @@ import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_SELECTED_MATCH_TO
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_HIT_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_THEORY_TOTAL_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.mockito.ArgumentMatchers.anyDouble;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
@@ -123,5 +126,14 @@ class CacheMetricsReporterTest {
                 "engineIp", "10.0.0.1",
                 "decision", "CACHE_LEADER");
         verify(monitor).report(CACHE_AFFINITY_DECISION, tags, 1.0);
+    }
+    @Test
+    void reportsCacheUpdateLatencyWithIndexedEngineIp() {
+        reporter.reportUpdateEngineBlockCacheRT("10.0.0.8@1", "PREFILL", 0L, "1");
+
+        verify(monitor).report(
+                eq(CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT),
+                eq(FlexMetricTags.of("engineIp", "10.0.0.8@1", "role", "PREFILL", "success", "1")),
+                anyDouble());
     }
 }

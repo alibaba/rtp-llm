@@ -64,8 +64,8 @@ import static org.mockito.Mockito.when;
 /** Weak-ACK and typed original-Prefill CANCELED transaction tests. */
 class AcceptedCancelSchedulerTest {
 
-    private static final String PREFILL_IP_PORT = "10.0.0.1:8080";
-    private static final String DECODE_IP_PORT = "10.0.0.2:8081";
+    private static final String PREFILL_IP_PORT = "10.0.0.1:8080@0";
+    private static final String DECODE_IP_PORT = "10.0.0.2:8081@0";
     private static final long PRIORITY_PREEMPTED = 8429L;
 
     private ConfigService configService;
@@ -119,12 +119,16 @@ class AcceptedCancelSchedulerTest {
         prefill.setIp("10.0.0.1");
         prefill.setPort(8080);
         prefill.setGrpcPort(8081);
+        prefill.setAlive(true);
+        prefill.setRole(RoleType.PREFILL);
         endpointRegistry.ensureEndpoint(RoleType.PREFILL, PREFILL_IP_PORT, prefill);
 
         decodeStatus = new WorkerStatus();
         decodeStatus.setIp("10.0.0.2");
         decodeStatus.setPort(8081);
         decodeStatus.setGrpcPort(8082);
+        decodeStatus.setAlive(true);
+        decodeStatus.setRole(RoleType.DECODE);
         decodeStatus.setAvailableKvCacheTokens(new AtomicLong(10_000));
         decodeStatus.setTotalKvCacheTokens(new AtomicLong(20_000));
         endpointRegistry.ensureEndpoint(RoleType.DECODE, DECODE_IP_PORT, decodeStatus);

@@ -76,9 +76,9 @@ class PriorityConcurrencyStressTest {
     private static final int TOTAL = THREADS * REQUESTS_PER_THREAD;
     private static final int[] PRIORITIES = {30, 40, 50, 70};
 
-    private static final String PREFILL_IP_PORT = "10.0.0.1:8080";
-    private static final String PREFILL2_IP_PORT = "10.0.0.3:8080";
-    private static final String DECODE_IP_PORT = "10.0.0.2:8081";
+    private static final String PREFILL_IP_PORT = "10.0.0.1:8080@0";
+    private static final String PREFILL2_IP_PORT = "10.0.0.3:8080@0";
+    private static final String DECODE_IP_PORT = "10.0.0.2:8081@0";
 
     @Test
     @Timeout(60)
@@ -329,6 +329,8 @@ class PriorityConcurrencyStressTest {
             decodeWs.setIp("10.0.0.2");
             decodeWs.setPort(8081);
             decodeWs.setGrpcPort(8082);
+            decodeWs.setAlive(true);
+            decodeWs.setRole(RoleType.DECODE);
             decodeWs.setAvailableKvCacheTokens(new AtomicLong(1_000_000L));
             decodeWs.setTotalKvCacheTokens(new AtomicLong(2_000_000L));
             endpointRegistry.ensureEndpoint(RoleType.DECODE, DECODE_IP_PORT, decodeWs);
@@ -345,6 +347,8 @@ class PriorityConcurrencyStressTest {
             ws.setIp(ip);
             ws.setPort(8080);
             ws.setGrpcPort(8081);
+            ws.setAlive(true);
+            ws.setRole(RoleType.PREFILL);
             endpointRegistry.ensureEndpoint(RoleType.PREFILL, ipPort, ws);
         }
 

@@ -32,7 +32,9 @@ worker 选择契约，两者组合完成多角色多阶段路由。
    worker group 约束后续所有角色的候选集**（group 亲和链，如 DECODE 选中的 group 决定
    PREFILL 只能在同 group 中选）。任一角色失败立即返回
    `RoutingResult.failure(已成功列表, 失败角色, 错误信息)`。
-4. **响应**：全部成功 → success 响应（携带 `List<ServerStatus>`）；失败 → 先
+4. **响应**：全部成功 → success 响应（携带 `List<ServerStatus>`；物理
+   `server_ip/http_port/grpc_port` 保持不变，N>1 时每个成功项带逻辑 `engine_index`，
+   N=1 时省略该字段）；失败 → 先
    `rollBackRoutingFailure()` 再构造错误响应，错误码取
    `failedRoleType.getErrorType().getErrorCode()`。
 
@@ -49,10 +51,20 @@ worker 选择契约，两者组合完成多角色多阶段路由。
 | DECODE | `decodeLoadBalanceStrategy` | `WEIGHTED_CACHE` | `REMAINING_KV_CACHE` |
 | VIT | `vitLoadBalanceStrategy` | `RANDOM` | `WAIT_TIME` |
 
+### gRPC Schedule 响应
+
+`FlexlbService.Schedule` 的 `FlexlbServerStatusPB` 使用 `optional int32 engine_index = 6`。
+字段号 5 保持 reserved。N=1 不设置字段；N>1 设置所选 index，包含显式 0，调用方应通过
+字段 presence 区分这两种情况。`FlexlbServiceImpl` 从内部 `ServerStatus` 转换时保留该语义；
+master forwarding 透传 protobuf 响应。物理地址字段与既有 service path 不变，旧客户端可忽略
+新增字段。此字段不改变 `EnqueueBatch` 的派发协议。
+
 ## 回滚机制
 
 `DefaultRouter.rollBackRoutingFailure()`：对 `RoutingResult` 中已成功的每个 `ServerStatus`，
-以 `serverIp:httpPort` 调用对应策略的 `rollBack(ipPort, requestId)`。
+以内部 `serverIp:httpPort@routingEngineIndex` 调用对应策略的 `rollBack(ipPort, requestId)`。
+`routingEngineIndex` 不序列化且始终存在，因此 N=1 对外省略 `engine_index` 时仍精确回滚
+`@0`；N>1 的 wire `engine_index` 只负责把选择结果传给共享 frontend。
 
 回滚的实体是**选中时的本地记账**——`WorkerStatus.removeLocalTask(requestId)` 逆转
 `putLocalTask()`：从 `runningQueueTime` 扣回估算 prefill 时间（下限 0）、把
@@ -68,16 +80,22 @@ worker 选择契约，两者组合完成多角色多阶段路由。
 均实现 `LoadBalancer.select(ctx, roleType, group)`，注册名见 `LoadBalanceStrategyEnum`
 （RANDOM / SHORTEST_TTFT / CACHE_AFFINITY_FIRST / WEIGHTED_CACHE）。
 
+所有策略先通过 `EngineWorkerStatus.selectRoutableModelWorkerStatus()` 的公共健康门控：同一
+endpoint/group/物理 frontend 展开的 `multiEngineNum` 个逻辑 worker 必须齐全、index 唯一且
+全部 `alive`，否则整组从候选集中移除。该 AND 只约束健康；门控后的资源、队列、cache 命中、
+outstanding tokens 和 score 仍读取当前 `ip:httpPort@index` 自己的状态。
+
 ### RandomStrategy
 
-随机起点环形扫描，取第一个 `isAlive()` 的 worker。不看资源水位、不做 cache 匹配、
+公共物理健康门控后随机起点环形扫描，取第一个 `isAlive()` 的逻辑 worker。不看资源水位、不做 cache 匹配、
 **不 `putLocalTask()`**（因此 rollBack 为空实现）。
 
 ### ShortestTTFTStrategy（PREFILL/PDFUSION 默认）
 
 1. **候选过滤**：`isAlive()` 且 `ResourceMeasure.isResourceAvailable()`（PREFILL 用等待队列
    长度 + 滞回，见 [03-resource-management](03-resource-management.md)）。
-2. **cache 匹配**：`CacheAwareService.findMatchingEngines()`（见
+2. **cache 匹配**：`CacheAwareService.findMatchingEngines()`，用逻辑
+   `ip:httpPort@index` exact-match cache ownership（见
    [04-worker-sync-and-cache](04-worker-sync-and-cache.md)）。
 3. **打分**：每个 worker 计算
    `hitCacheTokens = blockSize × 匹配块数`，

@@ -63,4 +63,38 @@ public class EngineWorkerStatus {
         return Math.max(statusCount, endpointRegistry.getEndpointCount(roleType));
     }
 
+    /** Select logical endpoints only when all engines of their physical frontend are healthy. */
+    public Map<String, WorkerEndpoint> selectRoutableModelWorkerStatus(RoleType roleType, String group) {
+        Map<String, WorkerEndpoint> candidates = selectModelWorkerStatus(roleType, group);
+        candidates.entrySet().removeIf(entry -> !isPhysicalGroupHealthy(entry.getValue()));
+        return candidates;
+    }
+
+    /** Recheck the current sibling endpoints before committing a routing choice. */
+    public boolean isPhysicalGroupHealthy(WorkerEndpoint endpoint) {
+        WorkerStatus worker = endpoint == null ? null : endpoint.getStatus();
+        if (worker == null || !worker.isAlive() || worker.getMultiEngineNum() < 1) {
+            return false;
+        }
+        int expected = worker.getMultiEngineNum();
+        boolean[] indexes = new boolean[expected];
+        int count = 0;
+        boolean currentEndpoint = false;
+        for (WorkerEndpoint siblingEndpoint : endpointRegistry.getEndpoints(worker.getRole()).values()) {
+            WorkerStatus sibling = siblingEndpoint.getStatus();
+            if (sibling == null || !worker.getPhysicalGroupKey().equals(sibling.getPhysicalGroupKey())) {
+                continue;
+            }
+            int index = sibling.getEngineIndex();
+            if (sibling.getMultiEngineNum() != expected || index < 0 || index >= expected
+                    || indexes[index] || !sibling.isAlive()) {
+                return false;
+            }
+            indexes[index] = true;
+            count++;
+            currentEndpoint |= siblingEndpoint == endpoint;
+        }
+        return currentEndpoint && count == expected;
+    }
+
 }

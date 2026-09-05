@@ -465,7 +465,7 @@ public class EngineHealthReporter {
 
         FlexMetricTags metricTags = FlexMetricTags.of(
                 "model", modelName,
-                "engineIp", workerStatus.getIp(),
+                "engineIp", workerStatus.getIpIndex(),
                 "role", workerStatus.getRole().name());
 
         Long availableConcurrency = workerStatus.getAvailableConcurrency();
@@ -496,7 +496,7 @@ public class EngineHealthReporter {
         FlexMetricTags healthTags = FlexMetricTags.of(
                 "model", modelName,
                 "code", "0",
-                "engineIp", workerStatus.getIp(),
+                "engineIp", workerStatus.getIpIndex(),
                 "role", workerStatus.getRole().name());
         reportStatusHealthMetrics(healthTags, workerStatus,
                 workerStatus.getRunningQueueTime().get());
@@ -504,7 +504,7 @@ public class EngineHealthReporter {
         reportCacheCapacityMetrics(modelName, workerStatus);
 
         FlexMetricTags taskTags = FlexMetricTags.of(
-                "engineIp", workerStatus.getIp(),
+                "engineIp", workerStatus.getIpIndex(),
                 "role", workerStatus.getRole().name());
         monitor.report(ENGINE_WAITING_TASK_INFO_SIZE, taskTags, waitingTaskInfoSize);
         monitor.report(ENGINE_RUNNING_TASK_INFO_SIZE, taskTags, runningTaskInfoSize);
@@ -542,7 +542,7 @@ public class EngineHealthReporter {
         if (cacheLastUpdateTime > 0) {
             FlexMetricTags metricTags = FlexMetricTags.of(
                     "model", modelName,
-                    "engineIp", workerStatus.getIp(),
+                    "engineIp", workerStatus.getIpIndex(),
                     "role", workerStatus.getRole().name());
             monitor.report(CACHE_STATUS_CHECK_SUCCESS_PERIOD, metricTags, (double) System.nanoTime() / 1000 - cacheLastUpdateTime);
         }
@@ -550,7 +550,7 @@ public class EngineHealthReporter {
         if (cacheStatus != null) {
             FlexMetricTags engineMetricTags = FlexMetricTags.of(
                     "model", modelName,
-                    "engineIp", workerStatus.getIp(),
+                    "engineIp", workerStatus.getIpIndex(),
                     "role", workerStatus.getRole().name());
             monitor.report(CACHE_KEY_SIZE, engineMetricTags, cacheStatus.getCacheKeySize());
         }
@@ -565,7 +565,7 @@ public class EngineHealthReporter {
 
         FlexMetricTags metricTags = FlexMetricTags.of(
                 "model", modelName,
-                "engineIp", workerStatus.getIp(),
+                "engineIp", workerStatus.getIpIndex(),
                 "role", workerStatus.getRole().name());
         if (cacheStatus.getBlockSize() > 0) {
             monitor.report(CACHE_BLOCK_SIZE, metricTags, cacheStatus.getBlockSize());
@@ -623,7 +623,7 @@ public class EngineHealthReporter {
                     FlexMetricTags serverSelectionTags = FlexMetricTags.of(
                             "role", serverStatus.getRole().name(),
                             "strategy", strategyName(ctx, serverStatus.getRole()),
-                            "engineIp", serverStatus.getServerIp(),
+                            "engineIp", serverStatus.getIpIndex(),
                             "success", String.valueOf(isSuccess),
                             "code", String.valueOf(code)
                     );
@@ -707,8 +707,8 @@ public class EngineHealthReporter {
         monitor.report(org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO, FlexMetricTags.of(metricMap), totalPendingTask);
     }
 
-    public void reportCacheHitMetrics(RoleType roleType, long hitTokens, double hitRatio) {
-        cacheMetricsReporter.reportCacheHitMetrics(roleType, hitTokens, hitRatio);
+    public void reportCacheHitMetrics(RoleType roleType, String ipIndex, long hitTokens, double hitRatio) {
+        cacheMetricsReporter.reportCacheHitMetrics(roleType, ipIndex, hitTokens, hitRatio);
     }
 
     /**
@@ -754,7 +754,7 @@ public class EngineHealthReporter {
         CacheHitComparisonResult.KvcmDetails kvcmDetails = comparison.kvcmDetails();
         FlexMetricTags metricTags = FlexMetricTags.of(
                 "model", modelName,
-                "engineIp", comparison.worker(),
+                "engineIp", comparison.ipIndex(),
                 "role", comparison.role(),
                 "group", comparison.group(),
                 "taskState", comparison.state(),

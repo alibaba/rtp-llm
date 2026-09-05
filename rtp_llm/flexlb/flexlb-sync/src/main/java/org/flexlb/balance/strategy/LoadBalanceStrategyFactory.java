@@ -13,6 +13,10 @@ public class LoadBalanceStrategyFactory {
         loadBalanceStrategyMap.put(strategy, loadBalanceStrategy);
     }
 
+    public static void clear() {
+        loadBalanceStrategyMap.clear();
+    }
+
     public static LoadBalanceStrategy getLoadBalanceStrategy(LoadBalanceStrategyEnum strategy) {
         LoadBalanceStrategy loadBalanceStrategy = loadBalanceStrategyMap.get(strategy);
         if (loadBalanceStrategy == null) {

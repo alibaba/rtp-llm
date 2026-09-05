@@ -11,6 +11,8 @@ import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.List;
 import java.util.Map;
@@ -42,7 +44,7 @@ class LocalStandbyCacheMatchProviderTest {
         CompletableFuture<LocalStandbyHashResult> pendingHash = new CompletableFuture<>();
         when(hashService.getHashResult("request-1", null, 4096)).thenReturn(pendingHash);
         when(cacheManager.findMatchingEngines(List.of(101L), RoleType.PREFILL, "default"))
-                .thenReturn(Map.of("10.0.0.1:8080", 1));
+                .thenReturn(Map.of("10.0.0.1:8080@0", 1));
 
         try {
             CompletableFuture<CacheMatchResult> match = provider.asyncLocalStandbyMatch(query);
@@ -51,7 +53,7 @@ class LocalStandbyCacheMatchProviderTest {
             pendingHash.complete(new LocalStandbyHashResult(List.of(101L), 4096));
             CacheMatchResult result = match.get(1, TimeUnit.SECONDS);
 
-            assertEquals(1, result.hostMatch("10.0.0.1:8080").localMatchBlocks());
+            assertEquals(1, result.exactHostMatch("10.0.0.1:8080@0").localMatchBlocks());
             assertEquals(4096, result.blockSize());
             verify(cacheManager).findMatchingEngines(List.of(101L), RoleType.PREFILL, "default");
         } finally {
@@ -59,8 +61,10 @@ class LocalStandbyCacheMatchProviderTest {
         }
     }
 
-    @Test
-    void updatesRequestDerivedCacheMetadataAsynchronously() {
+    @ParameterizedTest
+    @CsvSource({"0, 1, 10.0.0.1:8080@0", "1, 2, 10.0.0.1:8080@1"})
+    void updatesRequestDerivedCacheMetadataAsynchronously(
+            int engineIndex, int multiEngineNum, String logicalIpPort) {
         LocalStandbyCacheManager cacheManager = mock(LocalStandbyCacheManager.class);
         LocalStandbyHashService hashService = mock(LocalStandbyHashService.class);
         LocalStandbyCacheMatchProvider provider =
@@ -82,6 +86,7 @@ class LocalStandbyCacheMatchProviderTest {
         selectedWorker.setHttpPort(8080);
         selectedWorker.setRole(RoleType.PREFILL);
         selectedWorker.setGroup("default");
+        selectedWorker.setSelectedEngineIndex(engineIndex, multiEngineNum);
 
         try {
             provider.updateFromRoutedRequest(request, List.of(selectedWorker));
@@ -90,7 +95,7 @@ class LocalStandbyCacheMatchProviderTest {
             pendingHash.complete(new LocalStandbyHashResult(List.of(11L, 22L), 4096));
 
             verify(cacheManager, timeout(1_000))
-                    .addRoutedRequestBlocks("10.0.0.1:8080", List.of(11L));
+                    .addRoutedRequestBlocks(logicalIpPort, List.of(11L));
         } finally {
             provider.shutdown();
         }

@@ -107,7 +107,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     private WorkerBatcher createBatcher(FlexlbConfig config, DecisionGroupHandler decisionHandler,
                                         BatchSchedulerReporter reporter) {
-        return new WorkerBatcher(status.getIpPort(), this, config, decisionHandler, reporter);
+        return new WorkerBatcher(status.getLogicalIpPort(), this, config, decisionHandler, reporter);
     }
 
     public WorkerBatcher getBatcher() {

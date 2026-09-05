@@ -78,8 +78,8 @@ import static org.mockito.Mockito.when;
  */
 class PlanCommitConcurrencyRedesignTest {
 
-    private static final String PREFILL_IP_PORT = "10.0.0.1:8080";
-    private static final String DECODE_IP_PORT = "10.0.0.2:8081";
+    private static final String PREFILL_IP_PORT = "10.0.0.1:8080@0";
+    private static final String DECODE_IP_PORT = "10.0.0.2:8081@0";
 
     private ConfigService configService;
     private Router router;
@@ -130,12 +130,16 @@ class PlanCommitConcurrencyRedesignTest {
         prefillWs.setIp("10.0.0.1");
         prefillWs.setPort(8080);
         prefillWs.setGrpcPort(8081);
+        prefillWs.setRole(RoleType.PREFILL);
+        prefillWs.setAlive(true);
         endpointRegistry.ensureEndpoint(RoleType.PREFILL, PREFILL_IP_PORT, prefillWs);
 
         decodeWs = new WorkerStatus();
         decodeWs.setIp("10.0.0.2");
         decodeWs.setPort(8081);
         decodeWs.setGrpcPort(8082);
+        decodeWs.setRole(RoleType.DECODE);
+        decodeWs.setAlive(true);
         decodeWs.setAvailableKvCacheTokens(new AtomicLong(1_000_000L));
         decodeWs.setTotalKvCacheTokens(new AtomicLong(2_000_000L));
         endpointRegistry.ensureEndpoint(RoleType.DECODE, DECODE_IP_PORT, decodeWs);

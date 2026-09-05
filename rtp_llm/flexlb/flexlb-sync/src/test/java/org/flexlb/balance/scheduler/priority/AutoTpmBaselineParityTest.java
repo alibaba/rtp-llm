@@ -69,8 +69,8 @@ import static org.mockito.Mockito.when;
  */
 class AutoTpmBaselineParityTest {
 
-    private static final String PREFILL_IP_PORT = "10.0.0.1:8080";
-    private static final String DECODE_IP_PORT = "10.0.0.2:8081";
+    private static final String PREFILL_IP_PORT = "10.0.0.1:8080@0";
+    private static final String DECODE_IP_PORT = "10.0.0.2:8081@0";
 
     @Test
     void decodeAcceptedWorkerStatusClosesLeaseAndReopensAdmissionCapacity() throws Exception {
@@ -350,12 +350,16 @@ class AutoTpmBaselineParityTest {
             prefillWs.setIp("10.0.0.1");
             prefillWs.setPort(8080);
             prefillWs.setGrpcPort(8081);
+            prefillWs.setAlive(true);
+            prefillWs.setRole(RoleType.PREFILL);
             endpointRegistry.ensureEndpoint(RoleType.PREFILL, PREFILL_IP_PORT, prefillWs);
 
             WorkerStatus decodeWs = new WorkerStatus();
             decodeWs.setIp("10.0.0.2");
             decodeWs.setPort(8081);
             decodeWs.setGrpcPort(8082);
+            decodeWs.setAlive(true);
+            decodeWs.setRole(RoleType.DECODE);
             decodeWs.setAvailableKvCacheTokens(new AtomicLong(1_000_000L));
             decodeWs.setTotalKvCacheTokens(new AtomicLong(2_000_000L));
             endpointRegistry.ensureEndpoint(RoleType.DECODE, DECODE_IP_PORT, decodeWs);
@@ -430,10 +434,10 @@ class AutoTpmBaselineParityTest {
             response.setRunningTaskInfo(Map.of(String.valueOf(requestId), task));
             if (role == RoleType.DECODE) {
                 endpointRegistry.getDecode(DECODE_IP_PORT)
-                        .onWorkerStatusUpdate(new WorkerStatus(), response);
+                        .onWorkerStatusUpdate(endpointRegistry.getDecode(DECODE_IP_PORT).getStatus(), response);
             } else if (role == RoleType.PREFILL) {
                 endpointRegistry.getPrefill(PREFILL_IP_PORT)
-                        .onWorkerStatusUpdate(new WorkerStatus(), response);
+                        .onWorkerStatusUpdate(endpointRegistry.getPrefill(PREFILL_IP_PORT).getStatus(), response);
             }
             scheduler.onWorkerStatusUpdate(response);
         }
@@ -463,7 +467,7 @@ class AutoTpmBaselineParityTest {
             response.setRole(RoleType.DECODE);
             response.setFinishedTaskInfo(Map.of(String.valueOf(requestId), task));
             endpointRegistry.getDecode(DECODE_IP_PORT)
-                    .onWorkerStatusUpdate(new WorkerStatus(), response);
+                    .onWorkerStatusUpdate(endpointRegistry.getDecode(DECODE_IP_PORT).getStatus(), response);
             scheduler.onWorkerStatusUpdate(response);
         }
 

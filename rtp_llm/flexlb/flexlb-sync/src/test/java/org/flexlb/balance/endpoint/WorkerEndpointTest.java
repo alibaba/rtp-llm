@@ -168,7 +168,7 @@ class WorkerEndpointTest {
 
     @Test
     void ipPort_format() {
-        assertEquals("10.0.0.1:8080", endpoint.ipPort());
+        assertEquals("10.0.0.1:8080@0", endpoint.ipPort());
     }
 
     // ==================== getStatus() returns live reference ====================

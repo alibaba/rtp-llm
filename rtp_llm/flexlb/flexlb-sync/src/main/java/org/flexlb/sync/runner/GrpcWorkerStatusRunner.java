@@ -79,7 +79,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                   EndpointRegistry endpointRegistry,
                                   Executor callbackExecutor,
                                   CacheAwareService cacheAwareService) {
-        this.ipPort = ipPort;
+        this.ipPort = workerStatus.getLogicalIpPort();
         String[] split = ipPort.split(":");
         this.ip = split[0];
         this.workerStatusPort = workerStatusPort;
@@ -115,7 +115,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
     private static int defaultWorkerStatusPort(String ipPort) {
         String[] split = ipPort.split(":");
-        return CommonUtils.toGrpcPort(Integer.parseInt(split[1]));
+        return CommonUtils.toGrpcPort(Integer.parseInt(split[1].split("@")[0]));
     }
 
     @Override
@@ -165,9 +165,10 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private void handleStatusResponse(WorkerStatusResponse newWorkerStatus, long startTime) {
         try {
             if (newWorkerStatus == null) {
+                workerStatus.setAlive(false);
                 logger.debug("query engine worker status via gRPC, response body is null");
                 engineHealthReporter.reportStatusCheckerFail(
-                        modelName, BalanceStatusEnum.RESPONSE_NULL, roleType);
+                        modelName, BalanceStatusEnum.RESPONSE_NULL, workerStatus.getIpIndex(), roleType);
                 return;
             }
             if (workerStatusMap != null && workerStatusMap.get(ipPort) != workerStatus) {
@@ -176,7 +177,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             }
             // Only report success worker status check info
             engineHealthReporter.reportStatusCheckRemoteInfo(
-                    modelName, newWorkerStatus.getRole().name(), startTime);
+                    modelName, workerStatus.getIpIndex(), newWorkerStatus.getRole().name(), startTime);
 
             Long responseVersion = newWorkerStatus.getStatusVersion();
             if (responseVersion == 0L) {
@@ -256,7 +257,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         } catch (Throwable e) {
             log("engine worker status check via gRPC exception, msg: " + e.getMessage());
             engineHealthReporter.reportStatusCheckerFail(
-                    modelName, BalanceStatusEnum.UNKNOWN_ERROR, roleType);
+                    modelName, BalanceStatusEnum.UNKNOWN_ERROR, workerStatus.getIpIndex(), roleType);
         }
     }
 
@@ -287,19 +288,19 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private void handleTaskStateUpdateResult(TaskStateUpdateResult updateResult) {
         for (long latencyMs : updateResult.decisionToWaitingObservedLatenciesMs()) {
             engineHealthReporter.reportFlexlbObservedMasterDecisionToWaitingConfirmationLatency(
-                    modelName, ip, roleType.getCode(), group, latencyMs);
+                    modelName, workerStatus.getIpIndex(), roleType.getCode(), group, latencyMs);
         }
         for (long latencyMs : updateResult.waitingToRunningObservedLatenciesMs()) {
             engineHealthReporter.reportFlexlbObservedWaitingToRunningLatency(
-                    modelName, ip, roleType.getCode(), group, latencyMs);
+                    modelName, workerStatus.getIpIndex(), roleType.getCode(), group, latencyMs);
         }
         for (long latencyMs : updateResult.engineWaitingToRunningLatenciesMs()) {
             engineHealthReporter.reportEngineObservedWaitingToRunningLatency(
-                    modelName, ip, roleType.getCode(), group, latencyMs);
+                    modelName, workerStatus.getIpIndex(), roleType.getCode(), group, latencyMs);
         }
         for (long latencyMs : updateResult.engineReceivedToWaitingLatenciesMs()) {
             engineHealthReporter.reportEngineObservedReceivedToWaitingLatency(
-                    modelName, ip, roleType.getCode(), group, latencyMs);
+                    modelName, workerStatus.getIpIndex(), roleType.getCode(), group, latencyMs);
         }
         if (cacheAwareService == null) {
             return;
@@ -333,13 +334,15 @@ public class GrpcWorkerStatusRunner implements Runnable {
         }
         for (TaskInfo task : finishedTaskInfo.values()) {
             engineHealthReporter.reportPrefillWorkerStatusTask(
-                    modelName, ip, roleType.getCode(), group, task);
+                    modelName, workerStatus.getIpIndex(), roleType.getCode(), group, task);
             Map<String, Object> event = new LinkedHashMap<>();
             event.put("event", "prefill_worker_status");
             event.put("requestId", task.getRequestId());
             event.put("model", modelName);
             event.put("workerIp", ip);
             event.put("workerPort", workerStatusPort);
+            event.put("engineIndex", workerStatus.getEngineIndex());
+            event.put("logicalWorker", workerStatus.getLogicalIpPort());
             event.put("role", roleType.getCode());
             event.put("group", group);
             event.put("inputQueueEnqueueTimeMs", task.getInputQueueEnqueueTimeMs());
@@ -397,10 +400,10 @@ public class GrpcWorkerStatusRunner implements Runnable {
         if (ex.getMessage() != null && ex.getMessage().toLowerCase().contains(DEADLINE_EXCEEDED_MESSAGE.toLowerCase())) {
             logger.debug("gRPC worker status check timeout, msg={}, ipPort: {}, rt: {}", ex.getMessage(), ipPort, System.nanoTime() / 1000 - createTimeUs);
             engineHealthReporter.reportStatusCheckerFail(
-                    modelName, BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, roleType);
+                    modelName, BalanceStatusEnum.WORKER_STATUS_GRPC_TIMEOUT, workerStatus.getIpIndex(), roleType);
         } else {
             engineHealthReporter.reportStatusCheckerFail(
-                    modelName, BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE, roleType);
+                    modelName, BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE, workerStatus.getIpIndex(), roleType);
         }
         workerStatus.refreshStatusHeartbeat(workerStatus.isAlive());
     }
