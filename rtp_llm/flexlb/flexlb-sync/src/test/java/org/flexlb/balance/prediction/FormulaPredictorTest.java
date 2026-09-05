@@ -324,6 +324,84 @@ class FormulaPredictorTest {
         assertTrue(result > 0, "Large batch should produce positive prediction");
     }
 
+    // ---- production DSv4 fit (explicit injection) ----
+
+    /**
+     * Production DSv4 prefill execution-time fit, injected explicitly by
+     * the test (verbatim the same expression the harness injects into
+     * generated FLEXLB_CONFIG documents and
+     * data/config/master_fixed_window.json). The production code default is
+     * the upstream legacy "1 ms/token" expression, so tests verifying the
+     * production-fit caliber construct their predictor with an explicit
+     * expression, never the code default.
+     */
+    private static final String DSV4_PRODUCTION_EXPRESSION =
+            "max(196, -68.612174288157 + 0.993068319341 * (max(0, 287.3980926717 + 2.30134977837751 * batchSize + "
+            + "0.158123254797307 * sum(hitCacheTokens / 1024.) + 0.575522710053703 * sum(computeTokens / 1024.) + "
+            + "0.0517623430739831 * sum(computeTokens / 1024. * computeTokens / 1024.) + 0.0395308136993267 * "
+            + "sum(hitCacheTokens / 1024. * computeTokens / 1024.) + 0.0104363634681015 * sum(hitCacheTokens / 1024. * "
+            + "hitCacheTokens / 1024.) + 0.575522710053703 * max(sum(computeTokens / 1024.) - 16, 0) + 2.82077211814514 "
+            + "* max(sum(computeTokens / 1024.) - 32, 0) - 0.0254671429192862 * max(sum(computeTokens / 1024.) - 64, 0) "
+            + "+ 2.15779213792494 * max(sum(computeTokens / 1024.) - 96, 0) + 0.247806025472364 * "
+            + "max(sum(hitCacheTokens / 1024.) - 32, 0) - 0.444522654549492 * max(sum(hitCacheTokens / 1024.) - 64, 0) "
+            + "- 0.427317020061895 * max(sum(hitCacheTokens / 1024.) - 128, 0) + 0.347029077528455 * "
+            + "max(sum(hitCacheTokens / 1024.) - 256, 0) - 0.298742307762735 * max(sum(hitCacheTokens / 1024.) - 384, "
+            + "0) + 2.30134977837751 * max(batchSize - 8, 0) - 3.54884859699154 * max(batchSize - 16, 0) - "
+            + "11.3438560779984 * max(batchSize - 24, 0) + 0.879751992138183 * sum(max(computeTokens / 1024. - 2, 0)) + "
+            + "0.636364578079591 * sum(max(computeTokens / 1024. - 4, 0)) - 0.0513345988517118 * sum(max(computeTokens "
+            + "/ 1024. - 8, 0)) - 0.332584389129357 * sum(max(hitCacheTokens / 1024. - 2, 0)) + 0.305819761192588 * "
+            + "sum(max(hitCacheTokens / 1024. - 4, 0)) - 0.287610979974721 * sum(max(hitCacheTokens / 1024. - 8, 0)) + "
+            + "0.191310200712013 * sum(max(hitCacheTokens / 1024. - 12, 0)) + 0.0130251644478961 * max(batchSize - 8, "
+            + "0) * sum(hitCacheTokens / 1024.) + 0.00981382840761646 * max(batchSize - 16, 0) * sum(hitCacheTokens / "
+            + "1024.) - 0.0299132587297009 * max(batchSize - 24, 0) * sum(hitCacheTokens / 1024.) + 0.0447455122487382 "
+            + "* max(batchSize - 8, 0) * sum(computeTokens / 1024.) + 0.0104635312001851 * max(batchSize - 16, 0) * "
+            + "sum(computeTokens / 1024.) + 0.0542737877321807 * max(batchSize - 24, 0) * sum(computeTokens / 1024.))))";
+
+    @Test
+    void dsv4ProductionFitPredictsProductionScalePrefillLatency() {
+        FormulaPredictor p = new FormulaPredictor(DSV4_PRODUCTION_EXPRESSION);
+
+        // All-miss single requests, verified against the production DSv4 fit:
+        // 512 -> ~219 ms, 32768 -> ~342 ms, 49152 -> ~494 ms. The legacy
+        // 1 ms/token default predicted 32768 -> 32768 ms (96x too slow).
+        long v512 = p.evaluator().estimateMs(512, 0);
+        long v32k = p.evaluator().estimateMs(32768, 0);
+        long v48k = p.evaluator().estimateMs(49152, 0);
+        assertTrue(v512 >= 210 && v512 <= 230,
+                "512 all-miss expected ~219ms, got " + v512);
+        assertTrue(v32k >= 330 && v32k <= 350,
+                "32768 all-miss expected ~342ms, got " + v32k);
+        assertTrue(v48k >= 480 && v48k <= 510,
+                "49152 all-miss expected ~494ms, got " + v48k);
+
+        // Cache hits shorten the prediction: 32768 with half cached ~274ms.
+        long v32kHalf = p.evaluator().estimateMs(32768, 16384);
+        assertTrue(v32kHalf >= 260 && v32kHalf <= 290,
+                "32768 half-cached expected ~274ms, got " + v32kHalf);
+        assertTrue(v32kHalf < v32k, "cache hits must reduce the prediction");
+    }
+
+    @Test
+    void dsv4ProductionFitEvaluatesInBatchModeWithBatchSizeStairs() {
+        FormulaPredictor p = new FormulaPredictor(DSV4_PRODUCTION_EXPRESSION);
+
+        long single = p.evaluator().estimateMs(512, 0);
+
+        List<PrefillBatchFeatures.Item> items = new ArrayList<>();
+        for (int i = 0; i < 32; i++) {
+            items.add(item(512, 0));
+        }
+        long batch = (long) p.evaluator().predictBatchMs(batchFeatures(items));
+
+        // batchSize stairs engage only in batch mode: a 32-request batch of
+        // 512-token all-miss requests predicts above a single request but
+        // stays in the same order of magnitude (continuous-batching fit).
+        assertTrue(batch > single,
+                "batch of 32 should exceed a single request, got " + batch);
+        assertTrue(batch < single * 4,
+                "batch penalty should stay moderate, got " + batch);
+    }
+
     // ---- power operator ----
 
     @Test
