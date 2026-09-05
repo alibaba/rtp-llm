@@ -36,7 +36,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -92,7 +91,7 @@ class DefaultRouterTest {
         when(decodeSelector.select(context, RoleType.DECODE, "g1"))
                 .thenReturn(PlacementResult.success(decode.selection));
         when(((PrefillEndpoint) prefill.endpoint).registerDirectRequest(
-                prefill.pin, 7L, 0L)).thenReturn(registration);
+                prefill.pin, 7L, 0L)).thenReturn(new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.ACQUIRED, registration));
         when(((DecodeEndpoint) decode.endpoint).reservePinned(
                 decode.pin, 7L, 32L, 48L, 50))
                 .thenReturn(reservation);
@@ -124,7 +123,7 @@ class DefaultRouterTest {
         when(decodeSelector.select(context, RoleType.DECODE, "g1"))
                 .thenReturn(PlacementResult.success(decode.selection));
         when(((PrefillEndpoint) prefill.endpoint).registerDirectRequest(
-                prefill.pin, 8L, 0L)).thenReturn(registration);
+                prefill.pin, 8L, 0L)).thenReturn(new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.ACQUIRED, registration));
         when(((DecodeEndpoint) decode.endpoint).reservePinned(
                 decode.pin, 8L, 32L, 48L, 50))
                 .thenThrow(new IllegalStateException("decode full"));
@@ -245,10 +244,9 @@ class DefaultRouterTest {
                 .thenReturn(WorkerBatcher.QueueReplacementStatus.SUCCESS);
         RequestRegistry lifecycle = mock(RequestRegistry.class);
         when(lifecycle.commitRoute(
-                any(ScheduledRequest.class), anyInt(), anyLong(),
-                any(BooleanSupplier.class)))
+                any(ScheduledRequest.class), any(BooleanSupplier.class)))
                 .thenAnswer(invocation -> invocation
-                        .getArgument(3, BooleanSupplier.class).getAsBoolean()
+                        .getArgument(1, BooleanSupplier.class).getAsBoolean()
                         ? PlacementResult.Status.SUCCESS
                         : PlacementResult.Status.CLOSED);
 
@@ -273,7 +271,10 @@ class DefaultRouterTest {
                 .thenReturn(new DecodeEndpoint.EngineDispatchPermitAcquisition(
                         DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
                         permit));
-        var member = PrefillAdmissionResources.prepareMember(committed.item());
+        when(lifecycle.prepareDecodeAcceptance(committed.item())).thenReturn(
+                org.flexlb.balance.delivery.CapacityBoundary.Attempt.accepted(
+                        mock(RequestRegistry.DeliveryAdmission.class)));
+        var member = PrefillAdmissionResources.prepareMember(committed.item(), lifecycle);
         assertTrue(member.accepted());
         PrefillAdmissionResources.rollbackMember(member.value(), null);
     }

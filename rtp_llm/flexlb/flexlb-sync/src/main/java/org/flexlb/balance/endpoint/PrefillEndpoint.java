@@ -69,6 +69,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private final PrefillTimePredictor predictor;
     private final WorkerBatcher runtime;
     private final PrefillState prefillState;
+    private final int maximumDirectRequests;
     private final EndpointEventProjector endpointEvents;
     private final BatchSchedulerReporter reporter;
     private final PlacementAvailability placementAvailability;
@@ -95,6 +96,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 endpointEvents, "endpointEvents");
         this.placementAvailability = java.util.Objects.requireNonNull(
                 placementAvailability, "placementAvailability");
+        Integer configuredLimit = config.getDispatcher().getMaxInflightRequestsPerPrefillWorker();
+        this.maximumDirectRequests = configuredLimit == null ? 0 : configuredLimit;
         this.predictor = createPredictor(config);
         this.runtime = new WorkerBatcher(
                 status.getIpPort(), this, config,
@@ -307,19 +310,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * rollback capability. The caller commits it only after every DIRECT role
      * has registered successfully.
      */
-    public PrefillState.DirectRegistration registerDirectRequest(
-            GenerationPin pin,
-            long requestId,
-            long predictedMs) {
+    public PrefillState.ReservationResult<PrefillState.DirectRegistration> registerDirectRequest(
+            GenerationPin pin, long requestId, long predictedMs) {
         requirePinnedGeneration(pin);
-        PrefillState.DirectRegistration registration =
-                prefillState.tryRegisterDirect(requestId, predictedMs);
-        if (registration == null) {
-            throw new IllegalStateException(
-                    "DIRECT request already has a live Prefill owner request_id="
-                            + requestId);
-        }
-        return registration;
+        return prefillState.tryRegisterDirect(requestId, predictedMs, maximumDirectRequests);
     }
 
     /** Exact counterpart cleanup; stale item generations are a no-op. */

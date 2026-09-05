@@ -282,7 +282,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             final CapacityBoundary.Attempt<PrefillAdmissionResources.Member>
                     memberAttempt;
             try {
-                memberAttempt = prepareMember(exact);
+                memberAttempt = prepareMember(exact, owner.requests);
             } catch (Throwable failure) {
                 return failed(failure);
             }

@@ -12,6 +12,8 @@ final class GlobalQueueEntry {
     final BalanceContext context;
     final CompletableFuture<Response> future;
     final int priority;
+    final String routingGroup;
+    long sequence;
     volatile boolean removed;
     volatile PlacementKey blockedKey;
     volatile WorkerEndpoint blockedEndpoint;
@@ -23,8 +25,14 @@ final class GlobalQueueEntry {
             BalanceContext context,
             CompletableFuture<Response> future,
             int priority) {
+        this(context, future, priority, null);
+    }
+
+    GlobalQueueEntry(BalanceContext context, CompletableFuture<Response> future,
+            int priority, String routingGroup) {
         this.context = context;
         this.future = future;
         this.priority = priority;
+        this.routingGroup = routingGroup;
     }
 }

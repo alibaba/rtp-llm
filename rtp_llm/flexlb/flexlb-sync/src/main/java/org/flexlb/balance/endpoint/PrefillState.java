@@ -45,7 +45,7 @@ public final class PrefillState {
         ENDPOINT_RETIRED
     }
 
-    public record ReservationResult<R extends Reservation>(
+    public record ReservationResult<R extends AutoCloseable>(
             CapacityStatus status,
             R reservation) {
         public ReservationResult {
@@ -552,12 +552,50 @@ public final class PrefillState {
     /** Queue and committed work captured at one ownership linearization point. */
     public record Snapshot(long capturedAtMs,
                            List<ScheduledRequest> activeItems,
-                           WorkSnapshot committedWork,
+                           WorkCapture work,
                            long pendingRequestCount) {
         public Snapshot {
             activeItems = List.copyOf(activeItems);
             Objects.requireNonNull(
-                    committedWork, "missing committed work snapshot");
+                    work, "missing committed work snapshot");
+        }
+    }
+
+    /** Immutable leaves copied under the ownership lock; projection runs outside it. */
+    public static final class WorkCapture {
+        private final long capturedAtMs;
+        private final List<WorkSnapshot.RequestWork> requests;
+        private final List<WorkSnapshot.BatchWork> batches;
+        private final long unknownRequestCount;
+        private volatile WorkSnapshot materialized;
+
+        private WorkCapture(long capturedAtMs, List<WorkSnapshot.RequestWork> requests,
+                            List<WorkSnapshot.BatchWork> batches, long unknownRequestCount) {
+            this.capturedAtMs = capturedAtMs;
+            this.requests = List.copyOf(requests);
+            this.batches = List.copyOf(batches);
+            this.unknownRequestCount = unknownRequestCount;
+        }
+
+        /** Shared lazy projection; callers never hold the endpoint ownership lock. */
+        public WorkSnapshot materialize() {
+            WorkSnapshot snapshot = materialized;
+            if (snapshot != null) {
+                return snapshot;
+            }
+            synchronized (this) {
+                if (materialized == null) {
+                    List<WorkSnapshot.RequestWork> orderedRequests = requests.stream()
+                            .sorted(Comparator.comparingLong(WorkSnapshot.RequestWork::requestId)).toList();
+                    List<WorkSnapshot.BatchWork> orderedBatches = batches.stream()
+                            .sorted(Comparator.comparingLong(WorkSnapshot.BatchWork::batchId))
+                            .map(batch -> new WorkSnapshot.BatchWork(batch.batchId(),
+                                    batch.requestIds().stream().sorted().toList(),
+                                    batch.phase(), batch.remainingWorkMs())).toList();
+                    materialized = new WorkSnapshot(capturedAtMs, orderedRequests, orderedBatches, unknownRequestCount);
+                }
+                return materialized;
+            }
         }
     }
 
@@ -616,6 +654,8 @@ public final class PrefillState {
     private final Runnable capacityAvailable;
     /** Monotonic ownership/work revision used by projection snapshots. */
     private volatile long mutationVersion;
+    /** Derived immutable work; ACTIVE queue mutations leave committed work unchanged. */
+    private WorkCapture committedWorkCapture;
     private long unknownEngineRequestCount;
     private int routeLeasesInUse;
     private int batchLeasesInUse;
@@ -1028,31 +1068,45 @@ public final class PrefillState {
      * the number of groups that may be in flight. Already ACTIVE requests are
      * staged against those same future groups and therefore deducted once.
      */
-    public int availableBatchPublicationCredits(
-            int maximumInflightBatches,
-            int maximumRequestsPerGroup,
-            int maximumQueuedRequests) {
-        if (maximumRequestsPerGroup <= 0 || maximumQueuedRequests <= 0) {
-            return 0;
+    public record PublicationCapacity(int maximumActiveRequests, int activeRequests) {
+        public int availableCredits() {
+            return Math.max(0, maximumActiveRequests - activeRequests);
         }
+    }
+
+    public PublicationCapacity batchPublicationCapacity(
+            int maximumInflightBatches, int maximumRequestsPerGroup,
+            int maximumQueuedRequests) {
         lock.lock();
         try {
-            long queueRoom = Math.max(
-                    0L, (long) maximumQueuedRequests - activeIndex.size());
-            if (maximumInflightBatches <= 0) {
-                return (int) Math.min((long) Integer.MAX_VALUE, queueRoom);
-            }
-            long freeBatches = Math.max(
-                    0L, (long) maximumInflightBatches - batchLeasesInUse);
-            long deliveryRoom = saturatedMultiply(
-                    freeBatches, maximumRequestsPerGroup);
-            long available = Math.min(
-                    queueRoom,
-                    Math.max(0L, deliveryRoom - activeIndex.size()));
-            if (available <= 0L) {
-                return 0;
-            }
-            return (int) Math.min((long) Integer.MAX_VALUE, available);
+            long freeBatches = Math.max(0L,
+                    (long) maximumInflightBatches - batchLeasesInUse);
+            long deliveryRoom = maximumInflightBatches <= 0
+                    ? Integer.MAX_VALUE : saturatedMultiply(freeBatches, maximumRequestsPerGroup);
+            int maximum = (int) Math.min(maximumQueuedRequests, deliveryRoom);
+            return new PublicationCapacity(Math.max(0, maximum), activeIndex.size());
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    public int availableBatchPublicationCredits(
+            int maximumInflightBatches, int maximumRequestsPerGroup,
+            int maximumQueuedRequests) {
+        return batchPublicationCapacity(maximumInflightBatches,
+                maximumRequestsPerGroup, maximumQueuedRequests).availableCredits();
+    }
+
+    public PublicationCapacity routePublicationCapacity(
+            int maximumRequests, int maximumQueuedRequests) {
+        lock.lock();
+        try {
+            long committed = Math.max(0L,
+                    routeCapacityUsedUnderLock() - activeIndex.size());
+            long room = maximumRequests <= 0 ? Integer.MAX_VALUE
+                    : Math.max(0L, (long) maximumRequests - committed);
+            return new PublicationCapacity((int) Math.min(maximumQueuedRequests, room),
+                    activeIndex.size());
         } finally {
             lock.unlock();
         }
@@ -1190,6 +1244,7 @@ public final class PrefillState {
             RequestEntry entry = requests.get(members.get(index).requestId());
             entry.commitIndividual(lease, nowMs);
         }
+        committedWorkCapture = null;
         mutationVersion++;
         return committedHandoff;
     }
@@ -1241,6 +1296,7 @@ public final class PrefillState {
         for (ScheduledRequest item : members) {
             requests.get(item.requestId()).commitBatch(work);
         }
+        committedWorkCapture = null;
         mutationVersion++;
         return committedHandoff;
     }
@@ -1266,19 +1322,23 @@ public final class PrefillState {
                         + item.requestId());
     }
 
-    public DirectRegistration tryRegisterDirect(
-            long requestId,
-            long predictedMs) {
+    public ReservationResult<DirectRegistration> tryRegisterDirect(
+            long requestId, long predictedMs, int maximumRequests) {
         lock.lock();
         try {
             if (requests.containsKey(requestId)) {
-                return null;
+                return new ReservationResult<>(CapacityStatus.REQUEST_ALREADY_RESERVED, null);
+            }
+            if (maximumRequests > 0 && saturatedAdd(liveRequestCountUnderLock(),
+                    unknownEngineRequestCount) >= maximumRequests) {
+                return new ReservationResult<>(CapacityStatus.CAPACITY_FULL, null);
             }
             RequestEntry entry = new RequestEntry(
                     requestId, predictedMs, clock.getAsLong());
             requests.put(requestId, entry);
+            committedWorkCapture = null;
             mutationVersion++;
-            return new DirectRegistration(entry);
+            return new ReservationResult<>(CapacityStatus.ACQUIRED, new DirectRegistration(entry));
         } finally {
             lock.unlock();
         }
@@ -1292,6 +1352,7 @@ public final class PrefillState {
                         "DIRECT rollback capability lost its exact owner");
             }
             if (requests.remove(entry.requestId, entry)) {
+                committedWorkCapture = null;
                 mutationVersion++;
             }
         } finally {
@@ -1330,6 +1391,7 @@ public final class PrefillState {
                     invalidateRemainingBatchPredictionUnderLock(reduction);
                 }
                 terminalized = true;
+                committedWorkCapture = null;
                 mutationVersion++;
             }
         } finally {
@@ -1462,12 +1524,10 @@ public final class PrefillState {
                             phase, nowMs));
             batchPhases.forEach(
                     (batch, phase) -> batch.observePhase(phase, nowMs));
-            long previousUnknownEngineRequestCount =
-                    unknownEngineRequestCount;
+            capacityReleased = nextUnknownEngineRequestCount < unknownEngineRequestCount;
             unknownEngineRequestCount = nextUnknownEngineRequestCount;
+            committedWorkCapture = null;
             mutationVersion++;
-            capacityReleased = unknownEngineRequestCount
-                    < previousUnknownEngineRequestCount;
         } finally {
             lock.unlock();
             notifyCapacityAvailable(capacityReleased);
@@ -1696,6 +1756,7 @@ public final class PrefillState {
             // exact prevalidated identities. Any invariant failure is captured
             // into the already materialized outcome and forces retirement.
             canonicalMutationStarted = true;
+            committedWorkCapture = null;
             mutationVersion++;
             for (Map.Entry<RequestEntry, TerminalObservation> settlement
                     : settlements.entrySet()) {
@@ -1724,11 +1785,8 @@ public final class PrefillState {
                 batch.phaseBaseMs = nowMs;
                 batch.touch(nowMs);
             });
-            long previousUnknownEngineRequestCount =
-                    unknownEngineRequestCount;
+            capacityReleased |= nextUnknownEngineRequestCount < unknownEngineRequestCount;
             unknownEngineRequestCount = nextUnknownEngineRequestCount;
-            capacityReleased |= unknownEngineRequestCount
-                    < previousUnknownEngineRequestCount;
             try {
                 committedPublication.run();
             } catch (Throwable failure) {
@@ -1936,6 +1994,7 @@ public final class PrefillState {
             routeLeasesInUse = 0;
             batchLeasesInUse = 0;
             unknownEngineRequestCount = 0L;
+            committedWorkCapture = null;
             mutationVersion++;
         } finally {
             lock.unlock();
@@ -2081,34 +2140,39 @@ public final class PrefillState {
         }
     }
 
-    public Snapshot snapshotUnderLock(Comparator<ScheduledRequest> activeOrder) {
+    public Snapshot snapshotUnderLock() {
         requireLock();
         long nowMs = clock.getAsLong();
-        List<ScheduledRequest> active = new ArrayList<>();
-        for (RequestEntry entry : requests.values()) {
-            if (entry.isActive()) {
-                active.add(entry.activeItem);
-            }
-        }
-        active.sort(activeOrder);
+        List<ScheduledRequest> active = new ArrayList<>(activeIndex.size());
+        activeIndex.forEach(active::add);
         return new Snapshot(
                 nowMs,
                 active,
-                committedSnapshotUnderLock(nowMs),
+                captureWorkUnderLock(nowMs),
                 saturatedAdd(liveRequestCountUnderLock(),
                         unknownEngineRequestCount));
     }
 
     public WorkSnapshot committedSnapshot() {
+        WorkCapture capture;
         lock.lock();
         try {
-            return committedSnapshotUnderLock(clock.getAsLong());
+            capture = captureCurrentWorkUnderLock(clock.getAsLong());
         } finally {
             lock.unlock();
         }
+        return capture.materialize();
     }
 
-    private WorkSnapshot committedSnapshotUnderLock(long nowMs) {
+    private WorkCapture captureWorkUnderLock(long nowMs) {
+        requireLock();
+        if (committedWorkCapture == null || committedWorkCapture.capturedAtMs > nowMs) {
+            committedWorkCapture = captureCurrentWorkUnderLock(nowMs);
+        }
+        return committedWorkCapture;
+    }
+
+    private WorkCapture captureCurrentWorkUnderLock(long nowMs) {
         requireLock();
         List<WorkSnapshot.RequestWork> individual = new ArrayList<>();
         IdentityHashMap<BatchWork, List<Long>> batchMembers =
@@ -2128,22 +2192,17 @@ public final class PrefillState {
                         .add(entry.requestId);
             }
         }
-        individual.sort(Comparator.comparingLong(
-                WorkSnapshot.RequestWork::requestId));
         List<WorkSnapshot.BatchWork> batches =
                 new ArrayList<>(batchMembers.size());
         for (Map.Entry<BatchWork, List<Long>> observed : batchMembers.entrySet()) {
             BatchWork batch = observed.getKey();
-            observed.getValue().sort(Long::compareTo);
             batches.add(new WorkSnapshot.BatchWork(
                     batch.lease.batchId,
                     observed.getValue(),
                     batch.servicePhase,
                     batch.remainingAt(nowMs)));
         }
-        batches.sort(Comparator.comparingLong(
-                WorkSnapshot.BatchWork::batchId));
-        return new WorkSnapshot(
+        return new WorkCapture(
                 nowMs,
                 individual,
                 batches,
@@ -2200,6 +2259,7 @@ public final class PrefillState {
                     "terminal request is not canonical request_id="
                             + entry.requestId);
         }
+        committedWorkCapture = null;
         mutationVersion++;
         if (lease != null) {
             closeOwnedLeaseUnderLock(lease);

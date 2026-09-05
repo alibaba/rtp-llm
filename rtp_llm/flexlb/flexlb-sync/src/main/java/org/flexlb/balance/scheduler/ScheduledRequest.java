@@ -209,6 +209,10 @@ public final class ScheduledRequest implements Prioritized {
             ServerStatus status,
             DecodeEndpoint endpoint,
             DecodeEndpoint.ReservationHandle reservation) {
+        /** Absence is a topology choice; a partial binding is still an error. */
+        boolean isAbsent() {
+            return status == null && endpoint == null && reservation == null;
+        }
     }
 
 }

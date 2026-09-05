@@ -455,7 +455,7 @@ class CostBasedDecodeStrategyTest {
         decodeStatuses.put("127.0.0.1:8080", worker);
 
         EndpointRegistry registry = createDecodeRegistry(decodeStatuses);
-        DecodeEndpoint endpoint = registry.getDecode("127.0.0.1:8080");
+        DecodeEndpoint endpoint = decodeEndpoint(registry, "127.0.0.1:8080");
         // n == 1 with the upstream self-inclusive average: the average IS
         // the engine's own load, so own > multiplier * avg can never hold —
         // a lone engine always stays selectable regardless of its load.
@@ -463,13 +463,7 @@ class CostBasedDecodeStrategyTest {
             reservePinned(endpoint, 400L + i, 0, 0, 50);
         }
 
-        // Upstream dropped the ResourceMeasureFactory indirection: the
-        // strategy now takes the DecodeResourceMeasure directly, so the
-        // mock measure is wired straight into the constructor.
-        DecodeResourceMeasure measure = Mockito.mock(DecodeResourceMeasure.class);
-        allowDecodeSelection(measure);
-        CostBasedDecodeStrategy strategy = new CostBasedDecodeStrategy(
-                new WorkerDirectory(registry), measure);
+        CostBasedDecodeStrategy strategy = availableStrategy(registry);
 
         Request request = new Request();
         request.setSeqLen(1);

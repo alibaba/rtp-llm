@@ -1,7 +1,6 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.config.ConfigService;
@@ -9,7 +8,6 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
@@ -41,9 +39,9 @@ import java.util.concurrent.locks.ReentrantLock;
  * <p>Plans are committed in queue order unless the exact endpoint selected by
  * one request is locally full. In that case the request is parked against that
  * endpoint and a later plan may commit only when it does not use the parked
- * endpoint. A selector-level miss has no concrete endpoint and therefore still
- * stops its ordered suffix. Planning concurrency is bounded by aggregate
- * delivery credits, while {@link WorkerBatcher} remains the sole SINGLE or
+ * endpoint. Selector misses block overlapping routing domains; explicit,
+ * disjoint groups can progress independently. Planning concurrency is bounded
+ * by the planner pool, while {@link WorkerBatcher} remains the sole SINGLE or
  * FIXED_WINDOW group owner. This keeps cache/KV
  * projections adjacent to each exact reservation while retaining planner
  * parallelism where the policy permits it.</p>
@@ -54,7 +52,6 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private static final int MIN_PLANNING_FRONTIER_SIZE = 1;
 
     private final DefaultRouter router;
-    private final EndpointRegistry endpointRegistry;
     private final BatchSchedulerReporter reporter;
     private final EvictionManager evictionManager;
     private final RequestRegistry lifecycle;
@@ -65,8 +62,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition changed = lock.newCondition();
     private final OrderedRequestQueue orderedQueue;
-    private final BlockedRequestIndex blockedRequests =
-            new BlockedRequestIndex();
+    private final BlockedRequestIndex blockedRequests;
     private final ExecutorService planners;
     private final Thread decisionThread;
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -76,7 +72,6 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     GlobalQueueCoordinator(
             ConfigService configService,
             DefaultRouter router,
-            EndpointRegistry endpointRegistry,
             BatchSchedulerReporter reporter,
             EvictionManager evictionManager,
             RequestRegistry lifecycle,
@@ -85,8 +80,6 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                 configService, "configService");
         this.configService = checkedConfig;
         this.router = Objects.requireNonNull(router, "router");
-        this.endpointRegistry = Objects.requireNonNull(
-                endpointRegistry, "endpointRegistry");
         this.reporter = Objects.requireNonNull(reporter, "reporter");
         this.evictionManager = Objects.requireNonNull(
                 evictionManager, "evictionManager");
@@ -94,6 +87,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         this.availability = Objects.requireNonNull(availability, "availability");
         this.priorityOrdering = resolvePriorityOrdering(checkedConfig);
         this.orderedQueue = new OrderedRequestQueue(priorityOrdering);
+        this.blockedRequests = new BlockedRequestIndex(priorityOrdering);
 
         AtomicInteger plannerId = new AtomicInteger();
         ThreadFactory plannerFactory = task -> {
@@ -124,7 +118,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             int priority) {
         Objects.requireNonNull(context, "context");
         Objects.requireNonNull(future, "future");
-        GlobalQueueEntry entry = new GlobalQueueEntry(context, future, normalizePriority(priority));
+        GlobalQueueEntry entry = new GlobalQueueEntry(context, future, normalizePriority(priority),
+                router.resolvePolicyGroup(context));
         lock.lock();
         try {
             if (closed.get()) {
@@ -233,13 +228,6 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                             restartFrontier = true;
                             break;
                         }
-                        if (blockedEndpoint == null) {
-                            // There is no exact engine identity to compare. Keep
-                            // strict frontier semantics for this case.
-                            closePlan(plan);
-                            plans.closeSubmitted();
-                            break;
-                        }
                         closePlan(plan);
                         // The next plan can use another engine immediately. Plans
                         // on this same engine are parked as well by the conflict
@@ -278,51 +266,18 @@ final class GlobalQueueCoordinator implements AutoCloseable {
 
     private List<GlobalQueueEntry> nextPlanningFrontier() {
         while (!closed.get()) {
-            long capacitySequence;
-            lock.lock();
-            try {
-                orderedQueue.pruneCompletedHeads();
-                if (orderedQueue.peekHead() == null) {
-                    awaitChanged();
-                    continue;
-                }
-                blockedRequests.clearStaleFrontier();
-                capacitySequence = availability.sequence();
-            } finally {
-                lock.unlock();
-            }
-
-            // Endpoint credit aggregation may inspect every Prefill endpoint.
-            // Keep it outside the global ordering lock so ingress/cancel never
-            // waits behind a large-fleet scan.
             int frontierSize = planningFrontierSize();
-
             lock.lock();
             try {
                 orderedQueue.pruneCompletedHeads();
-                if (orderedQueue.peekHead() == null) {
-                    continue;
-                }
-                blockedRequests.clearStaleFrontier();
-                if (frontierSize <= 0
-                        && availability.sequence() != capacitySequence) {
-                    // A capacity edge raced with the advisory scan. Recompute
-                    // instead of sleeping after the wakeup has linearized.
-                    continue;
-                }
                 List<GlobalQueueEntry> frontier = orderedQueue.snapshotPrefix(
-                        frontierSize,
-                        this::isEligible,
-                        blockedRequests.frontier());
-                if (frontier.isEmpty()) {
-                    // Every queued entry is parked, or the first otherwise
-                    // eligible entry is the selector-level frontier. A
-                    // capacity event, a cancellation, or a newly inserted
-                    // higher-priority request will wake the coordinator.
-                    awaitChanged();
-                    continue;
+                        frontierSize, this::isEligible);
+                if (!frontier.isEmpty()) {
+                    return frontier;
                 }
-                return frontier;
+                // Only queue mutations and relevant capacity events make a
+                // parked request eligible again. There is no timed retry.
+                awaitChanged();
             } finally {
                 lock.unlock();
             }
@@ -332,7 +287,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
 
     private boolean isEligible(GlobalQueueEntry entry) {
         return !entry.removed && !entry.future.isDone()
-                && !blockedRequests.isExactBlocked(entry);
+                && !blockedRequests.isBlocked(entry);
     }
 
     /**
@@ -362,7 +317,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
         try {
             PlacementResult<QueueRouteAdmission, PlacementKey> result =
-                    router.routeForQueue(entry.context);
+                    router.routeForQueue(entry.context, entry.routingGroup);
             if (result.status() == PlacementResult.Status.SUCCESS) {
                 return Plan.success(
                         entry, mutation, result.value(), availabilitySequence);
@@ -488,6 +443,9 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
         lock.lock();
         try {
+            if (blockedRequests.isSelectorBlocked(plan.entry)) {
+                return true;
+            }
             BlockedRequestIndex.Conflict conflict =
                     blockedRequests.conflict(plan.entry, admission);
             if (conflict == null) {
@@ -505,7 +463,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
 
     /**
      * Atomically close the plan-snapshot/availability-edge race and publish
-     * either an exact endpoint blocker or a strict selector frontier.
+     * either an exact endpoint blocker or a selector resource domain.
      *
      * @return false when a newer capacity edge requires immediate replanning
      */
@@ -523,7 +481,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                 return false;
             }
             if (endpoint == null) {
-                blockedRequests.parkFrontier(plan.entry, blocker);
+                blockedRequests.parkSelector(plan.entry, blocker);
                 changed.signal();
             } else {
                 parkEndpointUnderLock(plan.entry, blocker, endpoint);
@@ -595,34 +553,14 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         return configService.loadBalanceConfig().isPriorityOrdering();
     }
 
-    /**
-     * Resolve the independent requests admitted to one planning pass. The
-     * endpoint runtime owns dispatcher-specific credit accounting; this
-     * global pump neither groups requests nor interprets decision policy.
-     */
+    /** Bound each ordered pass by admitted work; the pipeline bounds CPU concurrency. */
     private int planningFrontierSize() {
-        var activeConfig = configService.loadBalanceConfig();
-        RoleType admissionRole = router.queueAdmissionRole();
-        long globalLimit = Math.max(
-                MIN_PLANNING_FRONTIER_SIZE,
-                activeConfig.queueScheduler().getCapacity()
+        // Planning owns CPU slots, not endpoint capacity. In particular, zero
+        // free credits must still allow exact-route priority rescue. Publication
+        // and replacement share the endpoint's authoritative capacity check.
+        return Math.max(MIN_PLANNING_FRONTIER_SIZE,
+                configService.loadBalanceConfig().queueScheduler().getCapacity()
                         .getMaxOutstandingRequestsGlobal());
-        long available = endpointRegistry
-                .availablePrefillDeliveryCredits(admissionRole);
-        if (available <= 0L) {
-            // With a live fleet, zero aggregate credit is authoritative:
-            // wait for an endpoint edge instead of selecting requests
-            // which cannot be committed. With no endpoint yet, route one
-            // request so the selector can establish its role/group wait.
-            return endpointRegistry.getEndpointCount(admissionRole) == 0
-                    ? MIN_PLANNING_FRONTIER_SIZE : 0;
-        }
-        // Capture the complete release budget, but PlanningPipeline keeps only
-        // plannerCount computations in flight and refills one as each ordered
-        // plan is consumed. This removes a barrier every plannerCount requests
-        // without allowing speculative work to exceed the planner pool.
-        long frontier = Math.min(available, globalLimit);
-        return (int) Math.max(MIN_PLANNING_FRONTIER_SIZE, frontier);
     }
 
     private void awaitChanged() {
@@ -691,7 +629,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             ScheduledRequest item) {
         try {
             reporter.reportRouteSubmitTimeMs(
-                    RoleType.PREFILL.name(),
+                    item.prefill().getRole().name(),
                     item.prefillEp().getIp(),
                     System.currentTimeMillis() - context.getStartTime());
         } catch (Throwable failure) {

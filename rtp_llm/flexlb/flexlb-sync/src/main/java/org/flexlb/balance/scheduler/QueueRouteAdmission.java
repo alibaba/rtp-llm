@@ -349,14 +349,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
             throw new IllegalStateException(
                     "queue admission ownership changed before publication");
         }
-        var lifecycleConfig = item.ctx().getConfig()
-                .queueScheduler().getLifecycle();
-        PlacementResult.Status committed =
-                lifecycle.commitRoute(
-                item,
-                lifecycleConfig.getMaxDeliveredNotAcceptedRequestsGlobal(),
-                lifecycleConfig.getDeliveredNotAcceptedTimeoutMs(),
-                activePublication);
+        PlacementResult.Status committed = lifecycle.commitRoute(item, activePublication);
         if (committed
                 == PlacementResult.Status.SUCCESS) {
             finishCommitted(route);

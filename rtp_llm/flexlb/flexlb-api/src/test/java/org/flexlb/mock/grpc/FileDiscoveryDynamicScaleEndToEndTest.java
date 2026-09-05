@@ -2,9 +2,8 @@ package org.flexlb.mock.grpc;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.tuple.Pair;
-import org.flexlb.balance.endpoint.EndpointEventSink;
-import org.flexlb.balance.scheduler.QueueRoutingResult;
-import org.flexlb.balance.scheduler.Router;
+import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.config.ModelMetaConfig;
@@ -49,12 +48,9 @@ import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -168,19 +164,9 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
 
         EngineSyncRunner prefillSyncRunner = new EngineSyncRunner(
                 MODEL_NAME,
-                // Upstream's directory refactor removed the shared static
-                // ledger (EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS), so the
-                // sync runner now takes the status map via constructor. Reuse
-                // the base fixture's WorkerDirectory map — it holds the
-                // preinitialized placeholder generations paired with the
-                // registry's preinitialized endpoints, so the FIRST sync pass
-                // retires them through the group-change path (detaching
-                // those endpoints) and republishes A/B from discovery. A bare
-                // new ConcurrentHashMap<>() would orphan the placeholder
-                // endpoints: every newly created generation would then hit
-                // "existing endpoint generation must be withdrawn before
-                // publication" and be retired, oscillating forever.
-                engineWorkerStatus.statusMap(RoleType.PREFILL),
+                // Share the fixture's directory so discovery retires and
+                // republishes the exact generations used by routing.
+                engineWorkerStatus,
                 workerAddressService,
                 statusCheckExecutor,
                 healthReporter,
@@ -192,13 +178,6 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                 new LongAdder(),
                 1L,
                 false,
-                // Upstream's EndpointEventSink now declares three retirement
-                // callbacks (no longer a functional interface), so a Mockito
-                // no-op mock replaces the former single-method lambda —
-                // same contract as upstream EngineSyncRunnerTest's
-                // RunnerTestSupport.eventSink().
-                mock(EndpointEventSink.class),
-                endpointRegistry,
                 STATUS_STALE_AFTER_US);
 
         syncScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -343,16 +322,16 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
      * so additions and evictions are reflected in routing immediately.
      */
     @Override
-    protected Router createRouter() {
-        Router roundRobin = mock(Router.class);
-        when(roundRobin.routeForQueue(any(BalanceContext.class))).thenAnswer(inv -> {
+    protected DefaultRouter createRouter() {
+        DefaultRouter roundRobin = mock(DefaultRouter.class);
+        when(roundRobin.routeForQueue(any(BalanceContext.class), any())).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
             List<String> candidates = new ArrayList<>(
                     endpointRegistry.endpointAddressSnapshot(RoleType.PREFILL));
             if (candidates.isEmpty()) {
                 Response empty = new Response();
                 empty.setSuccess(false);
-                return QueueRoutingResult.rejected(empty);
+                return PlacementResult.rejected(empty);
             }
             Collections.sort(candidates);
             String chosen = candidates.get(routerCounter.getAndIncrement() % candidates.size());

@@ -69,11 +69,6 @@ public final class DispatcherConfig {
                     "is supported only with BATCH");
         }
         if (maxInflightRequestsPerPrefillWorker != null) {
-            if (scheduler.getType() != SchedulerConfig.Type.QUEUE) {
-                throw new ConfigValidationException(
-                        "dispatcher.maxInflightRequestsPerPrefillWorker",
-                        "is supported only with QUEUE");
-            }
             if (maxInflightRequestsPerPrefillWorker <= 0) {
                 throw new ConfigValidationException(
                         "dispatcher.maxInflightRequestsPerPrefillWorker",

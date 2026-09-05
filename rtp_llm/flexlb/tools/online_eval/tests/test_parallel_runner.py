@@ -58,9 +58,7 @@ DEFAULT_LANES = parallel_runner.max_lanes(
     parallel_runner.MOCK_PORT_STRIDE, parallel_runner.MOCK_BASE_GRPC_PORT
 )
 
-# Family weights = per-case seconds x live case count (batch-window
-# profile, 2026-09 snapshot) — mirrors family_weights() without needing
-# the runner --list call inside unit tests.
+# Representative family weights for deterministic lane-packing tests.
 _FAMILY_WEIGHTS = {
     "master": 60 * 8,
     "engine_fault": 30 * 13,
@@ -70,7 +68,7 @@ _FAMILY_WEIGHTS = {
     "kv": 20 * 15,
     "cancel": 12 * 13,
     "balance": 15 * 6,
-    "direct": 8 * 1,
+    "priority": 30 * 1,
 }
 
 
@@ -85,8 +83,7 @@ class PlanLanesTest(unittest.TestCase):
         loads = [sum(_FAMILY_WEIGHTS[c] for c in lane) for lane in lanes]
         # 9 categories into 4 lanes: every lane gets work...
         self.assertTrue(all(lane for lane in lanes))
-        # ...and the packing stays within ~1.5x of the lightest lane
-        # (total ≈ 2434 units / 4 ≈ 609 ideal).
+        # ...and the packing stays within ~1.5x of the lightest lane.
         self.assertLessEqual(max(loads) / min(loads), 1.5)
 
     def test_single_lane_plan_uses_legacy_all_path(self):
@@ -95,22 +92,28 @@ class PlanLanesTest(unittest.TestCase):
         self.assertEqual([["all"]], lanes)
 
     def test_partial_subset_stays_per_category_at_parallel_one(self):
-        # --categories direct at parallel=1 must NOT become `--category all`
+        # --categories master at parallel=1 must NOT become `--category all`
         # (that would run the unrequested categories too).
         args = argparse.Namespace(
-            parallel=1, profile="batch-window", categories="direct"
+            parallel=1, profile="batch-window", categories="master"
         )
-        lanes, weights = parallel_runner._plan(args)
-        self.assertEqual([["direct"]], lanes)
-        self.assertEqual({"direct": 8}, weights)
+        with mock.patch.object(
+            parallel_runner, "family_weights", return_value=dict(_FAMILY_WEIGHTS)
+        ):
+            lanes, weights = parallel_runner._plan(args)
+        self.assertEqual([["master"]], lanes)
+        self.assertEqual({"master": _FAMILY_WEIGHTS["master"]}, weights)
 
     def test_kebab_case_category_normalizes(self):
         args = argparse.Namespace(
-            parallel=2, profile="batch-window", categories="engine-fault,direct"
+            parallel=2, profile="batch-window", categories="engine-fault,master"
         )
-        lanes, weights = parallel_runner._plan(args)
+        with mock.patch.object(
+            parallel_runner, "family_weights", return_value=dict(_FAMILY_WEIGHTS)
+        ):
+            lanes, weights = parallel_runner._plan(args)
         packed = sorted(c for lane in lanes for c in lane)
-        self.assertEqual(["direct", "engine_fault"], packed)
+        self.assertEqual(["engine_fault", "master"], packed)
         # spawn argv uses the runner's kebab-case choices
         self.assertEqual(
             "engine-fault", parallel_runner._runner_cli_name("engine_fault")
@@ -519,7 +522,7 @@ class PlanCaseShardTest(unittest.TestCase):
         ("status_a", "status"),
         ("status_b", "status"),
         ("kv_a", "kv"),
-        ("direct_a", "direct"),
+        ("master_a", "master"),
     ]
 
     def _args(self, **kw):
@@ -574,14 +577,14 @@ class PlanCaseShardTest(unittest.TestCase):
             parallel_runner.CATEGORY_WEIGHTS["status"], weights["status_a"]
         )
         self.assertEqual(
-            parallel_runner.CATEGORY_WEIGHTS["direct"], weights["direct_a"]
+            parallel_runner.CATEGORY_WEIGHTS["master"], weights["master_a"]
         )
 
     def test_categories_subset_bounds_the_case_pool(self):
-        args = self._args(categories="status,direct")
+        args = self._args(categories="status,master")
         lanes, weights, err = self._plan(args)
         packed = sorted(n for lane in lanes for n in lane)
-        self.assertEqual(["direct_a", "status_a", "status_b"], packed)
+        self.assertEqual(["master_a", "status_a", "status_b"], packed)
 
 
 class AggregateShardSchemaTest(unittest.TestCase):

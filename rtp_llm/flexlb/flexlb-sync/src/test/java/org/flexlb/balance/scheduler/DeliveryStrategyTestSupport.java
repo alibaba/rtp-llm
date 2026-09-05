@@ -262,6 +262,11 @@ final class DeliveryStrategyTestSupport {
         private Runnable beforeCompletion = () -> { };
 
         TestRequestRegistry() {
+            Mockito.when(requests.prepareDecodeAcceptance(Mockito.any())).thenAnswer(invocation -> {
+                RequestRegistry.DeliveryAdmission admission = Mockito.mock(RequestRegistry.DeliveryAdmission.class);
+                Mockito.when(admission.transferTo(Mockito.any())).thenReturn(true);
+                return CapacityBoundary.Attempt.accepted(admission);
+            });
             Mockito.doAnswer(invocation -> prepareIfOwned(
                     invocation.getArgument(0), invocation.getArgument(1)))
                     .when(requests).prepareIfOwned(

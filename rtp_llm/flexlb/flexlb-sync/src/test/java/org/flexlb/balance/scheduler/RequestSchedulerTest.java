@@ -27,7 +27,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.mock;
@@ -40,6 +39,46 @@ import static org.mockito.Mockito.when;
 class RequestSchedulerTest {
 
     @Test
+    void unavailableGroupMustNotStopAHealthyIndependentGroup() {
+        FlexlbConfig config = SchedulingTestConfig.batchConfig();
+        ConfigService service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(config);
+        DefaultRouter router = mock(DefaultRouter.class);
+        when(router.queueAdmissionRole()).thenReturn(RoleType.PREFILL);
+        EndpointRegistry endpoints = mock(EndpointRegistry.class);
+        when(endpoints.availablePrefillDeliveryCredits(RoleType.PREFILL)).thenReturn(1L);
+        RequestRegistry lifecycle = mock(RequestRegistry.class);
+        BalanceContext unavailable = RequestLifecycleTestSupport.context(config, 910001L);
+        BalanceContext healthy = RequestLifecycleTestSupport.context(config, 910002L);
+        CompletableFuture<Response> first = new CompletableFuture<>();
+        CompletableFuture<Response> second = new CompletableFuture<>();
+        int maximum = config.queueScheduler().getCapacity().getMaxOutstandingRequestsGlobal();
+        when(lifecycle.register(unavailable, maximum)).thenReturn(first);
+        when(lifecycle.register(healthy, maximum)).thenReturn(second);
+        when(lifecycle.claimAdmissionMutation(910001L, first)).thenReturn(mock(AdmissionMutation.class));
+        when(lifecycle.claimAdmissionMutation(910002L, second)).thenReturn(mock(AdmissionMutation.class));
+        when(router.resolvePolicyGroup(unavailable)).thenReturn("unavailable-group");
+        when(router.resolvePolicyGroup(healthy)).thenReturn("healthy-group");
+        when(router.routeForQueue(unavailable, "unavailable-group")).thenReturn(PlacementResult.blocked(new PlacementKey(RoleType.DECODE, "unavailable-group")));
+        QueueRouteAdmission healthyRoute = mock(QueueRouteAdmission.class);
+        when(router.routeForQueue(healthy, "healthy-group")).thenReturn(PlacementResult.success(healthyRoute));
+        when(healthyRoute.tryPublish(healthy, second, lifecycle))
+                .thenReturn(PlacementResult.success(mock(ScheduledRequest.class)));
+        RequestScheduler scheduler = new RequestScheduler(service, router, endpoints, mock(BatchSchedulerReporter.class), mock(EvictionManager.class), lifecycle, new PlacementAvailability());
+        try {
+            scheduler.submit(unavailable);
+            verify(router, timeout(500)).routeForQueue(unavailable, "unavailable-group");
+            scheduler.submit(healthy);
+            verify(router, timeout(500)).routeForQueue(healthy, "healthy-group");
+            verify(healthyRoute, timeout(500)).tryPublish(healthy, second, lifecycle);
+        } finally {
+            first.complete(new Response());
+            second.complete(new Response());
+            scheduler.closePlacement();
+        }
+    }
+
+    @Test
     void priorityRescueConsumesTheOriginalExactRoute() {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         SchedulingTestConfig.allowVictim(
@@ -50,7 +89,7 @@ class RequestSchedulerTest {
         when(router.queueAdmissionRole()).thenReturn(RoleType.PREFILL);
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
         when(endpointRegistry.availablePrefillDeliveryCredits(
-                RoleType.PREFILL)).thenReturn(1L);
+                RoleType.PREFILL)).thenReturn(0L);
         RequestRegistry lifecycle = mock(RequestRegistry.class);
         EvictionManager eviction = mock(EvictionManager.class);
         PlacementAvailability availability = new PlacementAvailability();
@@ -68,7 +107,7 @@ class RequestSchedulerTest {
         QueueRouteAdmission selectedRoute = mock(QueueRouteAdmission.class);
         PlacementKey blocker = PlacementKey.exact(
                 RoleType.PREFILL, "g1", "selected-prefill:8080");
-        when(router.routeForQueue(context)).thenReturn(
+        when(router.routeForQueue(context, null)).thenReturn(
                 PlacementResult.success(selectedRoute));
         when(selectedRoute.tryPublish(context, future, lifecycle))
                 .thenReturn(PlacementResult.blocked(blocker));
@@ -90,7 +129,7 @@ class RequestSchedulerTest {
 
             verify(eviction, timeout(1_000)).tryAdmit(
                     context, future, selectedRoute, selectedEndpoint);
-            verify(router, times(1)).routeForQueue(context);
+            verify(router, times(1)).routeForQueue(context, null);
         } finally {
             future.complete(new Response());
             scheduler.closePlacement();
@@ -122,7 +161,15 @@ class RequestSchedulerTest {
         when(lifecycle.register(context, maximum)).thenReturn(future);
         when(lifecycle.claimAdmissionMutation(899L, future)).thenReturn(
                 mock(AdmissionMutation.class));
-        when(router.routeForQueue(context)).thenReturn(
+        QueueRouteAdmission route = mock(QueueRouteAdmission.class);
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.ipPort()).thenReturn("127.0.0.1:8000");
+        when(route.blockedEndpoint()).thenReturn(endpoint);
+        when(route.tryPublish(context, future, lifecycle)).thenReturn(
+                PlacementResult.blocked(PlacementKey.exact(
+                        RoleType.PREFILL, "g1", "127.0.0.1:8000")));
+        when(router.routeForQueue(context, null)).thenReturn(
+                PlacementResult.success(route),
                 PlacementResult.rejected(RequestRegistry.buildErrorResponse(
                         StrategyErrorType.NO_PREFILL_WORKER, null)));
         PlacementAvailability availability = new PlacementAvailability();
@@ -136,19 +183,20 @@ class RequestSchedulerTest {
                 availability);
         try {
             scheduler.submit(context);
-            verify(router, after(100).never()).routeForQueue(context);
+            verify(route, timeout(1_000)).tryPublish(context, future, lifecycle);
+            verify(router, after(100).times(1)).routeForQueue(context, null);
 
             availableSlots.set(1);
             availability.capacityChanged(PlacementKey.exact(
                     RoleType.PREFILL, "g1", "127.0.0.1:8000"));
-            verify(router, timeout(1_000)).routeForQueue(context);
+            verify(router, timeout(1_000).times(2)).routeForQueue(context, null);
         } finally {
             scheduler.closePlacement();
         }
     }
 
     @Test
-    void planningFrontierUsesEndpointDeliveryCredits() {
+    void planningDoesNotDependOnFreeDeliveryCredits() {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         SchedulingTestConfig.useFifoQueue(config);
         SchedulingTestConfig.useFixedWindowDecision(config)
@@ -171,7 +219,7 @@ class RequestSchedulerTest {
         when(lifecycle.register(context, maximum)).thenReturn(future);
         when(lifecycle.claimAdmissionMutation(900L, future)).thenReturn(
                 mock(AdmissionMutation.class));
-        when(router.routeForQueue(context)).thenReturn(
+        when(router.routeForQueue(context, null)).thenReturn(
                 PlacementResult.rejected(RequestRegistry.buildErrorResponse(
                         StrategyErrorType.NO_PREFILL_WORKER, null)));
 
@@ -185,8 +233,8 @@ class RequestSchedulerTest {
                 new PlacementAvailability());
         scheduler.submit(context);
 
-        verify(router, timeout(1_000)).routeForQueue(context);
-        verify(endpointRegistry).availablePrefillDeliveryCredits(
+        verify(router, timeout(1_000)).routeForQueue(context, null);
+        verify(endpointRegistry, never()).availablePrefillDeliveryCredits(
                 RoleType.PREFILL);
         scheduler.closePlacement();
     }
@@ -217,7 +265,7 @@ class RequestSchedulerTest {
         when(lifecycle.register(gate, maximum)).thenReturn(gateFuture);
         when(lifecycle.claimAdmissionMutation(900L, gateFuture)).thenReturn(
                 mock(AdmissionMutation.class));
-        when(router.routeForQueue(gate)).thenAnswer(invocation -> {
+        when(router.routeForQueue(gate, null)).thenAnswer(invocation -> {
             gatePlanningStarted.countDown();
             releaseGatePlanning.await(5, TimeUnit.SECONDS);
             return PlacementResult.rejected(
@@ -234,7 +282,7 @@ class RequestSchedulerTest {
             when(lifecycle.register(context, maximum)).thenReturn(future);
             when(lifecycle.claimAdmissionMutation(requestId, future)).thenReturn(
                     mock(AdmissionMutation.class));
-            when(router.routeForQueue(context)).thenAnswer(invocation -> {
+            when(router.routeForQueue(context, null)).thenAnswer(invocation -> {
                 aggregatePlansStarted.countDown();
                 return PlacementResult.success(route);
             });
@@ -262,7 +310,7 @@ class RequestSchedulerTest {
             releaseGatePlanning.countDown();
             assertTrue(aggregatePlansStarted.await(5, TimeUnit.SECONDS),
                     "all aggregate slots must be submitted from one captured frontier");
-            verify(endpointRegistry, timeout(1_000).times(2))
+            verify(endpointRegistry, never())
                     .availablePrefillDeliveryCredits(RoleType.PREFILL);
         } finally {
             releaseGatePlanning.countDown();
@@ -293,10 +341,10 @@ class RequestSchedulerTest {
                 mock(AdmissionMutation.class));
         when(lifecycle.claimAdmissionMutation(911L, highFuture)).thenReturn(
                 mock(AdmissionMutation.class));
-        when(router.routeForQueue(lowPriority)).thenReturn(
+        when(router.routeForQueue(lowPriority, null)).thenReturn(
                 PlacementResult.blocked(
                         PlacementKey.anyGroup(RoleType.PREFILL)));
-        when(router.routeForQueue(highPriority)).thenReturn(
+        when(router.routeForQueue(highPriority, null)).thenReturn(
                 PlacementResult.rejected(RequestRegistry.buildErrorResponse(
                         StrategyErrorType.NO_PREFILL_WORKER, null)));
 
@@ -310,10 +358,10 @@ class RequestSchedulerTest {
                 new PlacementAvailability());
         try {
             scheduler.submit(lowPriority);
-            verify(router, timeout(1_000)).routeForQueue(lowPriority);
+            verify(router, timeout(1_000)).routeForQueue(lowPriority, null);
 
             scheduler.submit(highPriority);
-            verify(router, timeout(1_000)).routeForQueue(highPriority);
+            verify(router, timeout(1_000)).routeForQueue(highPriority, null);
             assertFalse(lowFuture.isDone());
         } finally {
             scheduler.closePlacement();
@@ -367,7 +415,7 @@ class RequestSchedulerTest {
         // the capacity edge. This mirrors the immutable deadline metadata
         // used by production ingress and removes a test-only race between
         // enqueue and the decision thread.
-        verify(router, timeout(1_000)).routeForQueue(expired);
+        verify(router, timeout(1_000)).routeForQueue(expired, null);
         expired.setSchedulingMetadata(SchedulingMetadata.explicit(
                 50, System.currentTimeMillis() - 1L));
         availability.capacityChanged(blocker);
@@ -375,8 +423,8 @@ class RequestSchedulerTest {
         // The global queue makes one ordered decision at a time.  The
         // follower is not speculatively routed behind a blocked head; once
         // the expired head is removed it receives its single fresh attempt.
-        verify(router, timeout(1_000).times(1)).routeForQueue(follower);
-        verify(router, times(1)).routeForQueue(expired);
+        verify(router, timeout(1_000).times(1)).routeForQueue(follower, null);
+        verify(router, times(1)).routeForQueue(expired, null);
         scheduler.closePlacement();
     }
 
@@ -416,11 +464,11 @@ class RequestSchedulerTest {
         CountDownLatch blockedRouteAttempts = new CountDownLatch(2);
         when(independentItem.prefillEp()).thenReturn(availableEndpoint);
         when(fullEndpoint.ipPort()).thenReturn("full-prefill:8080");
-        when(router.routeForQueue(blocked)).thenAnswer(invocation -> {
+        when(router.routeForQueue(blocked, null)).thenAnswer(invocation -> {
             blockedRouteAttempts.countDown();
             return PlacementResult.success(blockedRoute);
         });
-        when(router.routeForQueue(independent)).thenReturn(
+        when(router.routeForQueue(independent, null)).thenReturn(
                 PlacementResult.success(independentRoute));
         when(blockedRoute.tryPublish(blocked, blockedFuture, lifecycle))
                 .thenReturn(PlacementResult.blocked(exactBlocker));
@@ -495,9 +543,9 @@ class RequestSchedulerTest {
         ScheduledRequest olderItem = mock(ScheduledRequest.class);
         PlacementKey exactBlocker = PlacementKey.exact(
                 RoleType.PREFILL, "g1", "full-prefill:8080");
-        when(router.routeForQueue(older)).thenReturn(
+        when(router.routeForQueue(older, null)).thenReturn(
                 PlacementResult.success(olderRoute));
-        when(router.routeForQueue(younger)).thenReturn(
+        when(router.routeForQueue(younger, null)).thenReturn(
                 PlacementResult.success(youngerRoute));
         when(olderRoute.tryPublish(older, olderFuture, lifecycle))
                 .thenReturn(
@@ -564,7 +612,7 @@ class RequestSchedulerTest {
         when(committed.prefillEp()).thenReturn(mock(PrefillEndpoint.class));
         PlacementKey exactBlocker = PlacementKey.exact(
                 RoleType.PREFILL, "g1", "stale-prefill:8080");
-        when(router.routeForQueue(context)).thenReturn(
+        when(router.routeForQueue(context, null)).thenReturn(
                 PlacementResult.success(staleRoute),
                 PlacementResult.success(freshRoute));
         when(staleRoute.tryPublish(context, future, lifecycle))
@@ -587,7 +635,7 @@ class RequestSchedulerTest {
 
             verify(freshRoute, timeout(1_000))
                     .tryPublish(context, future, lifecycle);
-            verify(router, times(2)).routeForQueue(context);
+            verify(router, times(2)).routeForQueue(context, null);
         } finally {
             scheduler.closePlacement();
         }
@@ -602,57 +650,57 @@ class RequestSchedulerTest {
         assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
                 response.getCode());
         verify(fixture.router, timeout(1_000))
-                .routeForQueue(fixture.context);
+                .routeForQueue(fixture.context, null);
         verify(fixture.lifecycle, never())
                 .commitRoute(
-                        any(), anyInt(), anyLong(), any());
+                        any(), any());
         fixture.scheduler.closePlacement();
     }
 
     @Test
     void prioritySelectorMissWaitsWithoutInventingAnEvictionRoute() {
         Fixture fixture = new Fixture(true);
-        when(fixture.router.routeForQueue(fixture.context)).thenReturn(
+        when(fixture.router.routeForQueue(fixture.context, null)).thenReturn(
                 PlacementResult.blocked(
                         PlacementKey.anyGroup(RoleType.PREFILL)));
         CompletableFuture<Response> waiting =
                 fixture.scheduler.submit(fixture.context);
 
         verify(fixture.router, timeout(1_000))
-                .routeForQueue(fixture.context);
+                .routeForQueue(fixture.context, null);
         verify(fixture.evictionManager, never())
                 .tryAdmit(any(), any(), any(), any());
         assertFalse(waiting.isDone());
         verify(fixture.lifecycle, never())
                 .commitRoute(
-                        any(), anyInt(), anyLong(), any());
+                        any(), any());
         fixture.scheduler.closePlacement();
     }
 
     @Test
     void fifoTemporaryMissWaitsWithoutFallbackOrAcceptanceGuard() {
         Fixture fixture = new Fixture(false);
-        when(fixture.router.routeForQueue(fixture.context)).thenReturn(
+        when(fixture.router.routeForQueue(fixture.context, null)).thenReturn(
                 PlacementResult.blocked(
                         PlacementKey.anyGroup(RoleType.DECODE)));
         CompletableFuture<Response> waiting =
                 fixture.scheduler.submit(fixture.context);
 
         verify(fixture.router, timeout(1_000))
-                .routeForQueue(fixture.context);
+                .routeForQueue(fixture.context, null);
         assertFalse(waiting.isDone());
         verify(fixture.evictionManager, never())
                 .tryAdmit(any(), any(), any(), any());
         verify(fixture.lifecycle, never())
                 .commitRoute(
-                        any(), anyInt(), anyLong(), any());
+                        any(), any());
         fixture.scheduler.closePlacement();
     }
 
     @Test
     void initialPlacementFailureCompletesTheRegisteredGeneration() {
         Fixture fixture = new Fixture(false);
-        when(fixture.router.routeForQueue(fixture.context))
+        when(fixture.router.routeForQueue(fixture.context, null))
                 .thenThrow(new IllegalStateException("selector failed"));
 
         CompletableFuture<Response> returned =
@@ -716,7 +764,7 @@ class RequestSchedulerTest {
                         responseFuture.complete(invocation.getArgument(2));
                         return true;
                     });
-            when(router.routeForQueue(context)).thenReturn(
+            when(router.routeForQueue(context, null)).thenReturn(
                     PlacementResult.rejected(
                             RequestRegistry.buildErrorResponse(
                                     StrategyErrorType.NO_PREFILL_WORKER,

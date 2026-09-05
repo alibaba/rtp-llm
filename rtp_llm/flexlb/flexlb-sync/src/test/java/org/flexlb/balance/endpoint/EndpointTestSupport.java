@@ -228,7 +228,7 @@ public final class EndpointTestSupport {
             if (pin == null) {
                 throw new IllegalStateException("endpoint is retired");
             }
-            return endpoint.registerDirectRequest(pin, requestId, predictedMs);
+            return endpoint.registerDirectRequest(pin, requestId, predictedMs).reservation();
         }
     }
 
@@ -310,6 +310,13 @@ public final class EndpointTestSupport {
         private final List<ScheduledRequest> offerFailures =
                 new CopyOnWriteArrayList<>();
         TestRequestRuntime() {
+            org.mockito.Mockito.when(requests.prepareDecodeAcceptance(org.mockito.Mockito.any()))
+                    .thenAnswer(invocation -> {
+                        RequestRegistry.DeliveryAdmission admission =
+                                org.mockito.Mockito.mock(RequestRegistry.DeliveryAdmission.class);
+                        org.mockito.Mockito.when(admission.transferTo(org.mockito.Mockito.any())).thenReturn(true);
+                        return org.flexlb.balance.delivery.CapacityBoundary.Attempt.accepted(admission);
+                    });
             org.mockito.Mockito.doAnswer(invocation -> Optional.ofNullable(
                     ((Supplier<?>) invocation.getArgument(1)).get()))
                     .when(requests).prepareIfOwned(

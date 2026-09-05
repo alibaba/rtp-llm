@@ -494,8 +494,9 @@ class TransientCapacityQueueContractTest {
             assertEquals(publicationCredits,
                     fixture.decodeEndpoint.layeredAdmissionView().queuedCount(),
                     "only dispatcher-owned credits may leave the global queue");
-            assertEquals(publicationCredits,
-                    fixture.metrics.totalPlacementAttempts(),
+            assertEquals(waiting.size() - publicationCredits,
+                    fixture.runtime.scheduler().getQueuedRequestCount()
+                            - fixture.prefillEndpoint.queuedRequestCount(),
                     "work beyond the delivery budget must remain globally queued");
             assertEquals(List.of(), fixture.submission.requestIds());
         }
@@ -560,8 +561,9 @@ class TransientCapacityQueueContractTest {
             assertEquals(publicationCredits,
                     spareEndpoint.layeredAdmissionView().reserved().size(),
                     "only deliverable work should pin the dispatchable tier");
-            assertEquals(publicationCredits,
-                    fixture.metrics.totalPlacementAttempts(),
+            assertEquals(waiting.size() - publicationCredits,
+                    fixture.runtime.scheduler().getQueuedRequestCount()
+                            - fixture.prefillEndpoint.queuedRequestCount(),
                     "backpressured overflow must remain globally queued");
         }
     }
@@ -1095,10 +1097,10 @@ class TransientCapacityQueueContractTest {
 
         @Override
         public PlacementResult<QueueRouteAdmission, PlacementKey> routeForQueue(
-                BalanceContext context) {
+                BalanceContext context, String policyGroup) {
             long startedAt = metrics.placementStarted(context);
             try {
-                return delegate.routeForQueue(context);
+                return delegate.routeForQueue(context, policyGroup);
             } finally {
                 metrics.placementFinished(startedAt);
             }

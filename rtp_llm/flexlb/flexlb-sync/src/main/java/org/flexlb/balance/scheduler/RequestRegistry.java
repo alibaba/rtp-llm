@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
+import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
@@ -8,8 +9,10 @@ import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.balance.preemption.VictimTerminal;
+import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Response;
@@ -19,17 +22,21 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.util.Logger;
+import org.flexlb.util.PriorityNormalizer;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
@@ -79,11 +86,24 @@ public class RequestRegistry {
     /**
      * Exact cluster-wide QUEUE ownership bound. Unlike {@code requestSlots.size()},
      * this counter includes admissions which have not reached registration yet.
-     * The CAS increment is the capacity linearization point for every submit.
+     * A submit either increments this counter or transfers a locally reversible
+     * victim's exact permit without decrementing it.
      */
     private final AtomicInteger outstandingRequestCount = new AtomicInteger();
+    /** Serializes duplicate detection, permit transfer and canonical publication only. */
+    private final Object outstandingAdmissionLock = new Object();
+    /** Derived index of queued generations; delivery/terminal claims remove entries. */
+    private final Set<RequestSlot> outstandingCandidates = new ConcurrentSkipListSet<>(
+            Comparator.comparingInt(RequestSlot::admissionPriority)
+                    .thenComparing(Comparator.comparingLong(RequestSlot::createdAtMs).reversed())
+                    .thenComparingLong(RequestSlot::requestId));
     /** QUEUE requests whose Decode-acceptance guard remains active. */
     private final AtomicInteger decodeAcceptanceCount = new AtomicInteger();
+    private final Set<Runnable> decodeAcceptanceListeners = ConcurrentHashMap.newKeySet();
+    private static final RouteProjection.AdmissionBlockSemantics ACCEPTANCE_BLOCK =
+            new RouteProjection.AdmissionBlockSemantics("DELIVERY_CAPACITY_DECODE_ACCEPTANCE",
+                    RouteProjection.AfterProbeAdmission.UNAVAILABLE,
+                    "DECODE_ACCEPTANCE_GLOBAL", RoleType.DECODE);
     private final BatchSchedulerReporter reporter;
     private final RequestSchedulerReporter requestReporter;
     /** The sole canonical owner for admission, delivery, fence and terminal state. */
@@ -198,42 +218,50 @@ public class RequestRegistry {
                     "request scheduler is shutting down"));
         }
 
-        RequestSlot slot = new RequestSlot(
-                completionPublisher,
-                context.getRequestId());
-        RequestFuture future = slot.future();
+        RequestSlot slot = null;
+        TerminalAction displaced = null;
+        boolean acquired = false;
         boolean registered = false;
         try {
-            context.setEnqueueTime(System.currentTimeMillis());
-            RequestSlot prior =
-                    requestSlots.putIfAbsent(context.getRequestId(), slot);
-            if (prior != null) {
-                return CompletableFuture.completedFuture(buildErrorResponse(
-                        StrategyErrorType.INVALID_REQUEST,
-                        "duplicate request_id: " + context.getRequestId()));
-            }
-            registered = true;
-            synchronized (slot) {
-                slot.configureDeadlineError(
-                        StrategyErrorType.BATCH_SLO_EXPIRED);
-            }
-            if (!tryAcquireOutstandingPermit(maxOutstanding)) {
-                completeError(
-                        future,
-                        shuttingDown.get()
-                                || outstandingRequestCount.get()
-                                        == OUTSTANDING_ADMISSION_CLOSED
-                                ? StrategyErrorType.BATCH_DISPATCH_FAILED
-                                : StrategyErrorType.QUEUE_FULL,
-                        shuttingDown.get()
-                                ? "request scheduler is shutting down" : null);
-                return future;
-            }
-            synchronized (slot) {
-                if (!slot.bindOutstandingPermit(outstandingRequestCount)) {
-                    return future;
+            // Never execute endpoint cleanup, timer operations or public callbacks here.
+            // Slot reducers only remove from the concurrent index, never acquire this lock.
+            synchronized (outstandingAdmissionLock) {
+                if (requestSlots.containsKey(context.getRequestId())) {
+                    return CompletableFuture.completedFuture(buildErrorResponse(
+                            StrategyErrorType.INVALID_REQUEST,
+                            "duplicate request_id: " + context.getRequestId()));
+                }
+                if (context.requestExpired(System.currentTimeMillis())) {
+                    return CompletableFuture.completedFuture(buildErrorResponse(
+                            StrategyErrorType.BATCH_SLO_EXPIRED,
+                            "request scheduling deadline has expired"));
+                }
+                int priority = PriorityNormalizer.isValid(context.getPriority())
+                        ? context.getPriority() : PriorityNormalizer.DEFAULT_PRIORITY;
+                acquired = tryAcquireOutstandingPermit(maxOutstanding);
+                if (!acquired && !shuttingDown.get()) {
+                    displaced = claimOutstandingVictim(context.getConfig(), priority);
+                    acquired = displaced != null;
+                }
+                if (!acquired) {
+                    boolean closed = shuttingDown.get()
+                            || outstandingRequestCount.get() == OUTSTANDING_ADMISSION_CLOSED;
+                    return CompletableFuture.completedFuture(buildErrorResponse(
+                            closed ? StrategyErrorType.BATCH_DISPATCH_FAILED
+                                    : StrategyErrorType.QUEUE_FULL,
+                            closed ? "request scheduler is shutting down" : null));
+                }
+                slot = new RequestSlot(completionPublisher, context.getRequestId(),
+                        outstandingRequestCount, priority, outstandingCandidates::remove);
+                context.setEnqueueTime(System.currentTimeMillis());
+                synchronized (slot) {
+                    slot.configureDeadlineError(StrategyErrorType.BATCH_SLO_EXPIRED);
+                    requestSlots.put(context.getRequestId(), slot);
+                    registered = true;
+                    outstandingCandidates.add(slot);
                 }
             }
+            RequestFuture future = slot.future();
             if (shuttingDown.get()) {
                 completeError(
                         future,
@@ -258,14 +286,52 @@ public class RequestRegistry {
             String detail = "Submit failed: " + failure.getMessage();
             if (registered) {
                 completeError(
-                        future,
+                        slot.future(),
                         StrategyErrorType.BATCH_DISPATCH_FAILED,
                         detail);
-                return future;
+                return slot.future();
             }
             return CompletableFuture.completedFuture(buildErrorResponse(
                     StrategyErrorType.BATCH_DISPATCH_FAILED, detail));
+        } finally {
+            if (acquired && !registered) {
+                if (slot == null) {
+                    RequestSlot.releaseOutstandingPermit(outstandingRequestCount);
+                } else {
+                    slot.releaseOutstandingPermit();
+                }
+            }
+            submitTerminal(displaced);
         }
+    }
+
+    /** Claim only locally reversible work, then transfer its permit before cleanup. */
+    private TerminalAction claimOutstandingVictim(FlexlbConfig config, int priority) {
+        if (config == null || !config.isPriorityOrdering()) {
+            return null;
+        }
+        boolean allowPlaced = config.priorityOrdering().getPreemption() != null
+                && config.priorityOrdering().getPreemption().allows(VictimStage.PREFILL_QUEUED);
+        for (RequestSlot candidate : outstandingCandidates) {
+            if (candidate.admissionPriority() >= priority) {
+                break;
+            }
+            synchronized (candidate) {
+                if (!isCurrentSlot(candidate) || !candidate.canClaimLocalTerminal()
+                        || (!allowPlaced && candidate.activeItem() != null)) {
+                    continue;
+                }
+                String detail = "outstanding admission replaced by higher priority request";
+                TerminalAction action = beginTerminalLocked(candidate, true, true,
+                        slot -> slot.cancel(detail),
+                        buildErrorResponse(StrategyErrorType.PRIORITY_PREEMPTED, detail));
+                if (action != null) {
+                    candidate.transferOutstandingPermit();
+                    return action;
+                }
+            }
+        }
+        return null;
     }
 
     /**
@@ -293,21 +359,25 @@ public class RequestRegistry {
     // ==================== Exact inflight commit protocol ====================
 
     /** Bind one exact item before publishing it into its endpoint runtime. */
-    boolean commitItemForPublication(
+    boolean commitItemForPublication(ScheduledRequest item, BooleanSupplier publication) {
+        return commitRoute(item, publication) == PlacementResult.Status.SUCCESS;
+    }
+
+    PlacementResult.Status commitRoute(
             ScheduledRequest item,
             BooleanSupplier publication) {
         Objects.requireNonNull(publication, "publication");
         if (shuttingDown.get() || item == null || item.future().isDone()) {
-            return false;
+            return PlacementResult.Status.CLOSED;
         }
         RequestSlot slot = requestSlots.get(item.requestId());
         if (slot == null || !slot.ownsFuture(item.future())) {
-            return false;
+            return PlacementResult.Status.CLOSED;
         }
         synchronized (slot) {
             if (!isCurrentSlot(slot)
                     || !slot.tryBindItemForPublication(item)) {
-                return false;
+                return PlacementResult.Status.CLOSED;
             }
         }
 
@@ -315,7 +385,7 @@ public class RequestRegistry {
             // Endpoint publication may acquire its queue lock. It must never
             // run while the exact RequestSlot monitor is held.
             if (publication.getAsBoolean()) {
-                return true;
+                return PlacementResult.Status.SUCCESS;
             }
         } catch (RuntimeException | Error failure) {
             try {
@@ -333,90 +403,91 @@ public class RequestRegistry {
         synchronized (slot) {
             slot.rollbackItemPublication(item);
         }
-        return false;
+        return PlacementResult.Status.BLOCKED;
     }
 
-    PlacementResult.Status commitRoute(
-            ScheduledRequest item,
-            int acceptanceLimit,
-            long acceptanceTimeoutMs,
-            BooleanSupplier publication) {
-        Objects.requireNonNull(publication, "publication");
-        if (item == null || item.decodeEp() == null) {
-            return commitItemForPublication(item, publication)
-                    ? PlacementResult.Status.SUCCESS
-                    : PlacementResult.Status.CLOSED;
+    /** Prepared immediately before delivery, never while waiting in an endpoint queue. */
+    public CapacityBoundary.Attempt<DeliveryAdmission> prepareDecodeAcceptance(ScheduledRequest item) {
+        var policy = item.ctx().getConfig().queueScheduler().getLifecycle();
+        int limit = policy.getMaxDeliveredNotAcceptedRequestsGlobal();
+        if (!tryAcquireDecodeAcceptancePermit(limit)) {
+            return CapacityBoundary.Attempt.rejected(CapacityBoundary.unavailable(
+                    new DecodeAcceptanceAvailability(limit), ACCEPTANCE_BLOCK));
         }
-        if (acceptanceLimit < 0 || acceptanceTimeoutMs < 0L) {
-            throw new IllegalArgumentException(
-                    "Decode acceptance limits must be non-negative");
+        try {
+            return CapacityBoundary.Attempt.accepted(new DeliveryAdmission(
+                    this::releaseDecodeAcceptancePermit, policy.getDeliveredNotAcceptedTimeoutMs()));
+        } catch (Throwable failure) {
+            releaseDecodeAcceptancePermit();
+            throw failure;
         }
-        if (shuttingDown.get() || item.future().isDone()) {
-            return PlacementResult.Status.CLOSED;
-        }
-        RequestSlot slot = requestSlots.get(item.requestId());
-        if (slot == null || !slot.ownsFuture(item.future())) {
-            return PlacementResult.Status.CLOSED;
+    }
+
+    public final class DeliveryAdmission implements AutoCloseable {
+        private Runnable release;
+        private final long acceptanceTimeoutMs;
+
+        private DeliveryAdmission(Runnable release, long acceptanceTimeoutMs) {
+            this.release = release;
+            this.acceptanceTimeoutMs = acceptanceTimeoutMs;
         }
 
-        boolean permitAcquired = false;
-        try {
+        public boolean transferTo(ScheduledRequest item) {
+            RequestSlot slot = entryFor(item);
+            if (slot == null) {
+                return false;
+            }
             RequestSlot.AdmissionCleanup immediate;
             synchronized (slot) {
-                if (!isCurrentSlot(slot) || !slot.isOpen()) {
-                    return PlacementResult.Status.CLOSED;
+                if (!ownsPreparedDelivery(slot, item)) {
+                    return false;
                 }
-                if (!tryAcquireDecodeAcceptancePermit(acceptanceLimit)) {
-                    return PlacementResult.Status.LIMIT_REACHED;
-                }
-                permitAcquired = true;
-                if (!slot.tryBindItemForPublication(item)) {
-                    return PlacementResult.Status.CLOSED;
-                }
-                immediate = slot.bindAdmissionResources(
-                        this::releaseDecodeAcceptancePermit,
-                        acceptanceTimeoutMs);
-                permitAcquired = false;
-                if (immediate != null) {
-                    slot.rollbackItemPublication(item);
-                }
-            }
-            if (immediate != null) {
-                releaseAdmissionCleanup(immediate);
-                return PlacementResult.Status.CLOSED;
-            }
-            if (publication.getAsBoolean()) {
-                return PlacementResult.Status.SUCCESS;
-            }
-            releaseAdmissionCleanup(
-                    rollbackAdmissionPublication(slot, item));
-            return PlacementResult.Status.BLOCKED;
-        } catch (RuntimeException | Error failure) {
-            RequestSlot.AdmissionCleanup cleanup = null;
-            try {
-                synchronized (slot) {
-                    if (slot.activeItem() == item) {
-                        cleanup = slot.rollbackAdmissionPublication(item);
+                synchronized (this) {
+                    if (release == null) {
+                        throw new IllegalStateException("delivery admission already transferred");
                     }
-                }
-            } catch (RuntimeException | Error rollbackFailure) {
-                if (rollbackFailure != failure) {
-                    failure.addSuppressed(rollbackFailure);
+                    // Transfer only after binding succeeds. On failure the transaction
+                    // still owns cleanup, so no capacity callback runs under the slot lock.
+                    immediate = slot.bindAdmissionResources(release, acceptanceTimeoutMs);
+                    release = null;
                 }
             }
-            releaseAdmissionCleanup(cleanup);
-            throw failure;
-        } finally {
-            if (permitAcquired) {
-                releaseDecodeAcceptancePermit();
+            releaseAdmissionCleanup(immediate);
+            return true;
+        }
+
+        @Override
+        public void close() {
+            Runnable exactRelease;
+            synchronized (this) {
+                exactRelease = release;
+                release = null;
+            }
+            if (exactRelease != null) {
+                exactRelease.run();
             }
         }
     }
 
-    private RequestSlot.AdmissionCleanup rollbackAdmissionPublication(
-            RequestSlot slot, ScheduledRequest item) {
-        synchronized (slot) {
-            return slot.rollbackAdmissionPublication(item);
+    private final class DecodeAcceptanceAvailability implements CapacityBoundary.Availability {
+        private final int limit;
+
+        private DecodeAcceptanceAvailability(int limit) {
+            this.limit = limit;
+        }
+
+        public boolean isAvailable() {
+            int used = decodeAcceptanceCount.get();
+            return used != DECODE_ACCEPTANCE_CLOSED && used < Integer.MAX_VALUE
+                    && (limit <= 0 || used < limit);
+        }
+
+        public void addListener(Runnable listener) {
+            decodeAcceptanceListeners.add(listener);
+        }
+
+        public void removeListener(Runnable listener) {
+            decodeAcceptanceListeners.remove(listener);
         }
     }
 
@@ -682,6 +753,13 @@ public class RequestRegistry {
                         "Decode acceptance permit counter underflow");
             }
             if (decodeAcceptanceCount.compareAndSet(current, current - 1)) {
+                for (Runnable listener : decodeAcceptanceListeners) {
+                    try {
+                        listener.run();
+                    } catch (Throwable failure) {
+                        Logger.warn("Decode acceptance capacity listener failed", failure);
+                    }
+                }
                 return;
             }
         }

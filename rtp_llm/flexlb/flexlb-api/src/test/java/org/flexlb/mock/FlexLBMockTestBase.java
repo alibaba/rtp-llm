@@ -287,7 +287,7 @@ public abstract class FlexLBMockTestBase {
 
     protected DefaultRouter createRouter() {
         DefaultRouter fixedRouter = mock(DefaultRouter.class);
-        when(fixedRouter.routeForQueue(any(BalanceContext.class))).thenAnswer(inv -> {
+        when(fixedRouter.routeForQueue(any(BalanceContext.class), any())).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
             return schedulerRuntime.admittedRoute(
                     ctx, successRoute(ctx.getRequestId()));

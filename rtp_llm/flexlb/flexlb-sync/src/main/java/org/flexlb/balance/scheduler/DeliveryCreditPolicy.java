@@ -8,12 +8,12 @@ import java.util.Objects;
 /** Dispatcher-owned conversion from endpoint state to publication credits. */
 sealed interface DeliveryCreditPolicy {
 
-    int availableCredits(PrefillState state);
+    PrefillState.PublicationCapacity capacity(PrefillState state,
+                                             int maximumQueuedRequests,
+                                             int maximumRequestsPerDecision);
 
     static DeliveryCreditPolicy from(
-            DispatcherConfig dispatcher,
-            int maximumQueuedRequests,
-            int maximumRequestsPerDecision) {
+            DispatcherConfig dispatcher) {
         Objects.requireNonNull(dispatcher, "dispatcher");
         return switch (dispatcher.getType()) {
             case NON_BATCH -> new NonBatch(
@@ -21,9 +21,7 @@ sealed interface DeliveryCreditPolicy {
                             dispatcher.getMaxInflightRequestsPerPrefillWorker()));
             case BATCH -> new Batch(
                     unlimitedAsZero(
-                            dispatcher.getMaxInflightBatchesPerPrefillWorker()),
-                    maximumQueuedRequests,
-                    maximumRequestsPerDecision);
+                            dispatcher.getMaxInflightBatchesPerPrefillWorker()));
         };
     }
 
@@ -35,21 +33,22 @@ sealed interface DeliveryCreditPolicy {
             implements DeliveryCreditPolicy {
 
         @Override
-        public int availableCredits(PrefillState state) {
-            return state.availableRoutePublicationCredits(
-                    maximumInflightRequests);
+        public PrefillState.PublicationCapacity capacity(PrefillState state,
+                                                        int maximumQueuedRequests,
+                                                        int maximumRequestsPerDecision) {
+            return state.routePublicationCapacity(
+                    maximumInflightRequests, maximumQueuedRequests);
         }
     }
 
-    record Batch(
-            int maximumInflightBatches,
-            int maximumQueuedRequests,
-            int maximumRequestsPerDecision)
+    record Batch(int maximumInflightBatches)
             implements DeliveryCreditPolicy {
 
         @Override
-        public int availableCredits(PrefillState state) {
-            return state.availableBatchPublicationCredits(
+        public PrefillState.PublicationCapacity capacity(PrefillState state,
+                                                        int maximumQueuedRequests,
+                                                        int maximumRequestsPerDecision) {
+            return state.batchPublicationCapacity(
                     maximumInflightBatches,
                     maximumRequestsPerDecision,
                     maximumQueuedRequests);

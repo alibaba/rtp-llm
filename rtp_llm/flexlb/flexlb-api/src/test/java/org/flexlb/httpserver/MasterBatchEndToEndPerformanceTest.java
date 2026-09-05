@@ -833,12 +833,18 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 ? TimeUnit.SECONDS.toNanos(1) / targetQps
                 : 0L;
         long nextIssueNanos = trafficStartNanos;
+        long pacingLagNanos = 0L;
+        long issueCallNanos = 0L;
         for (int index = 0; index < requestCount; index++) {
             if (targetQps > 0) {
                 paceUntil(nextIssueNanos);
             }
             long issueStartedNanos = System.nanoTime();
+            if (targetQps > 0) {
+                pacingLagNanos += Math.max(0L, issueStartedNanos - nextIssueNanos);
+            }
             issueRequest(futures.get(index), serializedRequests[index], index);
+            issueCallNanos += System.nanoTime() - issueStartedNanos;
             if (targetQps > 0) {
                 // Preserve the configured open-loop rate after a scheduling or GC
                 // pause. Replaying missed slots as an immediate burst measures the
@@ -849,6 +855,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             }
         }
 
+        long issueElapsedNanos = System.nanoTime() - trafficStartNanos;
         try {
             CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new))
                     .get(30, TimeUnit.SECONDS);
@@ -879,6 +886,10 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             throw failure;
         }
         long elapsedNanos = System.nanoTime() - trafficStartNanos;
+        System.out.printf("FlexLB offered traffic: requests=%d target_qps=%d offered_qps=%.1f "
+                        + "pacing_lag_avg_us=%.3f issue_call_avg_us=%.3f%n",
+                requestCount, targetQps, requestCount * 1_000_000_000.0 / issueElapsedNanos,
+                pacingLagNanos / (1000.0 * requestCount), issueCallNanos / (1000.0 * requestCount));
         long[] latencies = new long[requestCount];
         List<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responses =
                 new ArrayList<>(requestCount);

@@ -30,7 +30,7 @@ class OrderedRequestQueueTest {
         assertEquals(2, queue.size());
         assertFalse(middle.linked);
         assertEquals(List.of(first, last), queue.snapshotPrefix(
-                10, candidate -> true, null));
+                10, candidate -> true));
     }
 
     @Test
@@ -47,7 +47,7 @@ class OrderedRequestQueueTest {
 
         assertSame(highSecond, queue.peekHead());
         assertEquals(List.of(highSecond, low), queue.snapshotPrefix(
-                10, candidate -> true, null));
+                10, candidate -> true));
         assertTrue(queue.hasHigherPriorityEntry(
                 low, candidate -> true));
     }

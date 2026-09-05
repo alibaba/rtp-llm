@@ -358,9 +358,11 @@ public final class RouteProjection {
         }
 
         public Inputs {
-            if (queue.capturedAtMs() != work.capturedAtMs()) {
+            // Committed work may reuse an older clock base while its ownership
+            // is unchanged. The projector rebases running duration to queue time.
+            if (queue.capturedAtMs() < work.capturedAtMs()) {
                 throw new IllegalArgumentException(
-                        "queue and work snapshots must share capturedAtMs");
+                        "work snapshot cannot be newer than its queue capture");
             }
             if (pendingRequestCount < 0L) {
                 throw new IllegalArgumentException(
