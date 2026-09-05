@@ -396,7 +396,7 @@ void KVCacheResource::ensureLinearBlockDependencies() {
 }
 
 size_t KVCacheResource::reuseBlockNum() const {
-    return device_reuse_block_num_ + memory_reuse_block_num_ + remote_reuse_block_num_;
+    return device_reuse_block_num_ + memory_reuse_block_num_ + disk_reuse_block_num_ + storage_backend_reuse_block_num_;
 }
 
 size_t KVCacheResource::deviceReuseBlockNum() const {
@@ -415,12 +415,20 @@ void KVCacheResource::setMemoryReuseBlockNum(size_t memory_reuse_blocks_num) {
     memory_reuse_block_num_ = memory_reuse_blocks_num;
 }
 
-size_t KVCacheResource::remoteReuseBlockNum() const {
-    return remote_reuse_block_num_;
+size_t KVCacheResource::diskReuseBlockNum() const {
+    return disk_reuse_block_num_;
 }
 
-void KVCacheResource::setRemoteReuseBlockNum(size_t remote_reuse_blocks_num) {
-    remote_reuse_block_num_ = remote_reuse_blocks_num;
+void KVCacheResource::setDiskReuseBlockNum(size_t disk_reuse_blocks_num) {
+    disk_reuse_block_num_ = disk_reuse_blocks_num;
+}
+
+size_t KVCacheResource::storageBackendReuseBlockNum() const {
+    return storage_backend_reuse_block_num_;
+}
+
+void KVCacheResource::setStorageBackendReuseBlockNum(size_t storage_backend_reuse_blocks_num) {
+    storage_backend_reuse_block_num_ = storage_backend_reuse_blocks_num;
 }
 
 bool KVCacheResource::lastBlockAligned() const {

@@ -62,6 +62,15 @@ public:
     };
 
 private:
+    struct LoadCacheResult {
+        ErrorInfo error_info;
+        size_t    loaded_cache_block_count = 0;
+
+        bool ok() const {
+            return error_info.ok();
+        }
+    };
+
     struct MTPModuleLoadPlan {
         size_t                  module_index;
         const EngineInitParams* engine_init_params;
@@ -80,10 +89,10 @@ private:
     void
     reportEarlyFinishTask(DecodeGenerateContext& decode_context, int64_t error_code, const std::string& error_message);
 
-    ErrorInfo              loadCache(const LoadKVCacheContext& load_context);
-    ErrorInfo              loadCacheForAllRank(DecodeGenerateContext& decode_context);
-    ErrorInfo              loadCacheAsyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
-    ErrorInfo              loadCacheSyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
+    LoadCacheResult        loadCache(const LoadKVCacheContext& load_context);
+    LoadCacheResult        loadCacheForAllRank(DecodeGenerateContext& decode_context);
+    LoadCacheResult        loadCacheAsyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
+    LoadCacheResult        loadCacheSyncForTp(DecodeGenerateContext& decode_context, LoadKVCacheContext& load_context);
     BroadcastLoadRequestPB constructRemoteLoadRequest(const LoadKVCacheContext&       load_context,
                                                       int                             index,
                                                       const std::vector<std::string>& peer_ips) const;
@@ -105,8 +114,17 @@ private:
                                                                size_t                  reuse_block_size,
                                                                bool                    use_hybrid,
                                                                size_t                  group_seq_size_per_block,
-                                                               size_t                  base_seq_size_per_block);
-    static grpc::Status                   generateRequestReadFailureStatus(bool cancelled);
+                                                               size_t                  base_seq_size_per_block,
+                                                               int                     physical_cp_size = 1);
+    static grpc::Status                     generateRequestReadFailureStatus(bool cancelled);
+    static size_t                           completedHandoffPrefixBlocks(size_t                   already_reused_blocks,
+                                                                         const std::vector<bool>& transferred_cache_keys);
+    static size_t              minLoadedCacheBlockCount(const std::vector<size_t>& rank_loaded_cache_block_counts);
+    static std::vector<size_t> completionQueueExpectedResponseCounts(size_t worker_size);
+    static int                 markLoadedCacheReuse(const std::shared_ptr<GenerateStream>& stream,
+                                                    const LoadCacheResult&                 load_result,
+                                                    int                                    seq_size_per_block,
+                                                    bool                                   use_independent_block_pools);
     // Classifies error.type for the synthesized Decode phase spans. Static and
     // side-effect free so the classification itself is unit testable.
     static const char* phaseErrorType(bool                         request_ok,

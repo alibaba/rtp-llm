@@ -275,10 +275,24 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     auto tryAddStridedD2DCopy = [&strided_d2d_copies, &d2d_copies](const torch::Tensor& src, torch::Tensor& dst) {
         if (!src.defined() || src.numel() <= 0)
             return;
+        RTP_LLM_CHECK_WITH_INFO(dst.defined() && src.dim() == dst.dim(),
+                                "CUDA graph strided copy rank mismatch: src_dim=%ld dst_dim=%ld",
+                                src.dim(),
+                                dst.defined() ? dst.dim() : -1);
         if (src.dim() < 2) {
+            RTP_LLM_CHECK_WITH_INFO(src.numel() <= dst.numel(),
+                                    "CUDA graph copy source numel=%ld exceeds destination numel=%ld",
+                                    src.numel(),
+                                    dst.numel());
             d2d_copies.add(src.data_ptr(), dst.data_ptr(), src.numel() * src.element_size());
             return;
         }
+        RTP_LLM_CHECK_WITH_INFO(src.size(0) <= dst.size(0) && src.size(1) <= dst.size(1),
+                                "CUDA graph strided copy source shape=(%ld,%ld) exceeds destination shape=(%ld,%ld)",
+                                src.size(0),
+                                src.size(1),
+                                dst.size(0),
+                                dst.size(1));
         strided_d2d_copies.add(src.data_ptr(),
                                dst.data_ptr(),
                                src.size(0),

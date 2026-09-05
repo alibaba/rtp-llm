@@ -915,6 +915,9 @@ class BackendTest(JitCacheTestBase):
         configs.jit_config.jit_cache_setup_timeout_s = 5
         configs.jit_config.manage_jit_cache = True
         configs.parallelism_config.world_size = world_size
+        configs.parallelism_config.world_rank = 0
+        configs.parallelism_config.dp_size = 1
+        configs.parallelism_config.tp_size = world_size
         return configs
 
     def patched_backend(self, *, cuda=True, device_count=1, signal_handler=None):
@@ -1032,9 +1035,10 @@ class BackendTest(JitCacheTestBase):
         class FakeBackendManager:
             instance = None
 
-            def __init__(self, _configs):
+            def __init__(self, _configs, shutdown_ready_event=None):
                 self.request_shutdown = mock.Mock()
                 self.serve_forever = mock.Mock()
+                self.shutdown_ready_event = shutdown_ready_event
                 FakeBackendManager.instance = self
 
             def start(self):
@@ -1091,9 +1095,10 @@ class BackendTest(JitCacheTestBase):
 
     @staticmethod
     def _fake_create(proc):
-        def fake(_gc, _cfg, _ctx, processes, readers):
+        def fake(_gc, _cfg, _ctx, processes, readers, shutdown_ready_events):
             processes.append(proc)
             readers.append(mock.Mock())
+            shutdown_ready_events.append(None)
 
         return fake
 
@@ -1165,6 +1170,23 @@ class BackendTest(JitCacheTestBase):
             backend._wait_for_ranks_startup(
                 [proc, proc], [pipe("success"), pipe("failed")], 2
             )
+
+    def test_rank_wait_repolls_without_an_extra_sleep(self):
+        reader = mock.Mock()
+        reader.poll.side_effect = [False, True]
+        reader.recv.return_value = {
+            "status": "success",
+            "message": "rank ready",
+        }
+        proc = mock.Mock()
+        proc.is_alive.return_value = True
+        proc.exitcode = None
+
+        with mock.patch.object(backend.time, "sleep") as sleep:
+            backend._wait_for_ranks_startup([proc], [reader], 1)
+
+        self.assertEqual(reader.poll.call_count, 2)
+        sleep.assert_not_called()
 
     def test_hard_exit_runs_bounded_cleanup(self):
         configs = self.make_configs(remote="/r")

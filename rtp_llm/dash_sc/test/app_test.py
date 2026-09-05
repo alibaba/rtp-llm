@@ -21,7 +21,6 @@ from rtp_llm.dash_sc.app import (
     _create_proxy_servicer_on_loop,
     _derive_echo_prefix_ids,
     _is_proxy_mode_enabled,
-    _pre_stop_drain_seconds,
     _wait_for_bind_barrier,
 )
 from rtp_llm.dash_sc.server import DashScGrpcDrainAioInterceptor, DashScGrpcServer
@@ -270,45 +269,36 @@ class ProxyModeEnvTest(TestCase):
 
 
 class PreStopDrainSecondsTest(TestCase):
-    def test_default_pre_stop_drain(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(_pre_stop_drain_seconds(), 120.0)
-
-    def test_env_pre_stop_drain(self) -> None:
-        with patch.dict(
-            os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "2.5"}, clear=True
-        ):
-            self.assertEqual(_pre_stop_drain_seconds(), 2.5)
-
-    def test_bad_pre_stop_drain_uses_default(self) -> None:
-        with patch.dict(
-            os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "bad"}, clear=True
-        ):
-            self.assertEqual(_pre_stop_drain_seconds(), 120.0)
-
     def test_effective_pre_stop_drain_clamps_to_shutdown_timeout(self) -> None:
         app = bg_app.DashScApp.__new__(bg_app.DashScApp)
-
-        class _ServerConfig:
-            shutdown_timeout = 10
-
-        app.server_config = _ServerConfig()
-        with patch.dict(
-            os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "30"}, clear=True
-        ):
-            self.assertEqual(app._effective_pre_stop_drain_seconds(), 9.0)
+        app.server_config = SimpleNamespace(
+            dash_sc_grpc_pre_stop_drain_seconds=30,
+            shutdown_timeout=10,
+            pre_stop_drain_headroom_seconds=-1,
+        )
+        self.assertEqual(app._effective_pre_stop_drain_seconds(), 9.0)
 
     def test_effective_pre_stop_drain_reserves_shutdown_headroom(self) -> None:
         app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+        app.server_config = SimpleNamespace(
+            dash_sc_grpc_pre_stop_drain_seconds=600,
+            shutdown_timeout=600,
+            pre_stop_drain_headroom_seconds=-1,
+        )
+        self.assertEqual(app._effective_pre_stop_drain_seconds(), 540.0)
 
-        class _ServerConfig:
-            shutdown_timeout = 600
+    def test_effective_pre_stop_drain_uses_parsed_server_config(self) -> None:
+        app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+        app.server_config = SimpleNamespace(
+            dash_sc_grpc_pre_stop_drain_seconds=0,
+            shutdown_timeout=-1,
+            pre_stop_drain_headroom_seconds=-1,
+        )
 
-        app.server_config = _ServerConfig()
         with patch.dict(
-            os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "600"}, clear=True
+            os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "120"}, clear=True
         ):
-            self.assertEqual(app._effective_pre_stop_drain_seconds(), 540.0)
+            self.assertEqual(app._effective_pre_stop_drain_seconds(), 0.0)
 
     def test_grpc_stop_grace_uses_remaining_pre_stop_budget(self) -> None:
         app = bg_app.DashScApp.__new__(bg_app.DashScApp)
@@ -347,12 +337,12 @@ class PreStopDrainSecondsTest(TestCase):
 
         class _ServerConfig:
             shutdown_timeout = 30
+            dash_sc_grpc_pre_stop_drain_seconds = 10
+            pre_stop_drain_headroom_seconds = -1
 
         app.server_config = _ServerConfig()
 
-        with patch.dict(
-            os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "10"}, clear=True
-        ), patch.object(
+        with patch.object(
             app._shutdown_manager, "drain_elapsed_seconds", return_value=9.0
         ), patch.object(
             app._shutdown_manager,
@@ -371,12 +361,12 @@ class PreStopDrainSecondsTest(TestCase):
 
         class _ServerConfig:
             shutdown_timeout = 30
+            dash_sc_grpc_pre_stop_drain_seconds = 10
+            pre_stop_drain_headroom_seconds = -1
 
         app.server_config = _ServerConfig()
 
-        with patch.dict(
-            os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "10"}, clear=True
-        ), patch.object(
+        with patch.object(
             app._shutdown_manager,
             "drain_elapsed_seconds",
             return_value=9.0,
@@ -400,6 +390,8 @@ class PreStopDrainSecondsTest(TestCase):
 
         class _ServerConfig:
             shutdown_timeout = 30
+            dash_sc_grpc_pre_stop_drain_seconds = 10
+            pre_stop_drain_headroom_seconds = -1
 
         app.server_config = _ServerConfig()
 
@@ -423,6 +415,8 @@ class PreStopDrainSecondsTest(TestCase):
 
         class _ServerConfig:
             shutdown_timeout = 30
+            dash_sc_grpc_pre_stop_drain_seconds = 0.1
+            pre_stop_drain_headroom_seconds = -1
 
         app.server_config = _ServerConfig()
 
@@ -434,19 +428,14 @@ class PreStopDrainSecondsTest(TestCase):
 
         service_loop = threading.Thread(target=app._shutdown_event.wait, daemon=True)
         service_loop.start()
-        with patch.dict(
-            os.environ,
-            {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "0.1"},
-            clear=True,
-        ):
-            handlers[signal.SIGUSR1](signal.SIGUSR1, None)
-            self.assertTrue(app._shutdown_manager.is_unavailable())
-            self.assertFalse(app._shutdown_manager.is_draining())
-            self.assertEqual(app._shutdown_manager.drain_reason(), "signal 10")
-            self.assertEqual(app._shutdown_manager.active_request_count(), 1)
-            self.assertFalse(app._shutdown_manager.try_begin_request())
-            self.assertEqual(app._shutdown_manager.finish_request(), 0)
-            service_loop.join(timeout=1.0)
+        handlers[signal.SIGUSR1](signal.SIGUSR1, None)
+        self.assertTrue(app._shutdown_manager.is_unavailable())
+        self.assertFalse(app._shutdown_manager.is_draining())
+        self.assertEqual(app._shutdown_manager.drain_reason(), "signal 10")
+        self.assertEqual(app._shutdown_manager.active_request_count(), 1)
+        self.assertFalse(app._shutdown_manager.try_begin_request())
+        self.assertEqual(app._shutdown_manager.finish_request(), 0)
+        service_loop.join(timeout=1.0)
 
         self.assertFalse(service_loop.is_alive())
         self.assertTrue(app._shutdown_manager.is_draining())
@@ -467,6 +456,8 @@ class PreStopDrainSecondsTest(TestCase):
 
         class _ServerConfig:
             shutdown_timeout = 30
+            dash_sc_grpc_pre_stop_drain_seconds = 10
+            pre_stop_drain_headroom_seconds = -1
 
         app.server_config = _ServerConfig()
 
@@ -476,10 +467,7 @@ class PreStopDrainSecondsTest(TestCase):
         with patch("rtp_llm.dash_sc.app.signal.signal", side_effect=capture_signal):
             app._install_signal_handlers()
 
-        with patch.dict(
-            os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "10"}, clear=True
-        ):
-            handlers[signal.SIGTERM](signal.SIGTERM, None)
+        handlers[signal.SIGTERM](signal.SIGTERM, None)
 
         self.assertFalse(app._shutdown_manager.try_begin_request())
         self.assertFalse(app._shutdown_manager.is_draining())
@@ -501,6 +489,8 @@ class PreStopDrainSecondsTest(TestCase):
 
         class _ServerConfig:
             shutdown_timeout = 30
+            dash_sc_grpc_pre_stop_drain_seconds = 10
+            pre_stop_drain_headroom_seconds = -1
 
         app.server_config = _ServerConfig()
 
@@ -510,14 +500,11 @@ class PreStopDrainSecondsTest(TestCase):
         with patch("rtp_llm.dash_sc.app.signal.signal", side_effect=capture_signal):
             app._install_signal_handlers()
 
-        with patch.dict(
-            os.environ, {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "10"}, clear=True
-        ):
-            handlers[signal.SIGUSR1](signal.SIGUSR1, None)
-            watchdog = app._pre_stop_timer
-            self.assertIsNotNone(watchdog)
-            with patch.object(watchdog, "cancel", wraps=watchdog.cancel) as cancel:
-                handlers[signal.SIGTERM](signal.SIGTERM, None)
+        handlers[signal.SIGUSR1](signal.SIGUSR1, None)
+        watchdog = app._pre_stop_timer
+        self.assertIsNotNone(watchdog)
+        with patch.object(watchdog, "cancel", wraps=watchdog.cancel) as cancel:
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
 
         cancel.assert_called_once()
         self.assertTrue(app._shutdown_requested)

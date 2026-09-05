@@ -681,66 +681,69 @@ class HybridAttentionType:
         ...
 class KVCacheConfig:
     enable_device_cache: bool
-    enable_memory_cache: bool
-    enable_memory_cache_sm_copy: bool
-    enable_prefix_tree_memory_cache: bool
-    enable_legacy_memory_connector_fallback: bool
-    enable_gpu_prefix_tree: bool
-    prefix_tree_memory_state_swa_pool_ratio: int
+    enable_host_cache: bool
+    enable_host_cache_pinned: bool
+    enable_disk_cache: bool
     enable_remote_cache: bool
+    write_cache_sync: bool
+    device_eviction_policy: str
+    host_eviction_policy: str
+    disk_eviction_policy: str
+    device_cache_min_free_blocks: int
     dsv4_fixed_pool_blocks: int
     dsv4_hca_state_pool_blocks: int
     dsv4_fixed_pool_use_memory: bool
+    block_tree_full_prefix_scan_interval_ms: int
+    block_tree_transfer_worker_count: int
+    block_tree_business_queue_max_size: int
+    block_tree_transfer_queue_max_size: int
+    block_tree_device_evict_low_watermark_ratio: float
+    block_tree_device_evict_high_watermark_ratio: float
+    block_tree_host_evict_low_watermark_ratio: float
+    block_tree_host_evict_high_watermark_ratio: float
+    block_tree_disk_evict_low_watermark_ratio: float
+    block_tree_disk_evict_high_watermark_ratio: float
     fp8_kv_cache: int
     kv_cache_mem_mb: int
     linear_step: int
     max_block_size_per_item: int
-    memory_cache_size_mb: int
-    memory_cache_sync_timeout_ms: int
-    enable_memory_cache_disk: bool
-    memory_cache_disk_paths: str
-    memory_cache_disk_size_mb: int
-    memory_cache_disk_buffered_io: bool
-    memory_cache_disk_sync_timeout_ms: int
+    host_cache_size_mb: int
+    host_cache_sync_timeout_ms: int
+    disk_cache_paths: str
+    disk_cache_size_mb: int
+    disk_cache_buffered_io: bool
+    disk_cache_sync_timeout_ms: int
+    disk_cache_staging_block_count: int
     multi_task_prompt: str
     multi_task_prompt_str: str
     multi_task_prompt_tokens: dict[str, list[int]]
-    reco_asyncwrapper_queue_size: int
-    reco_asyncwrapper_thread_num: int
-    reco_client_config: str
-    reco_enable_vipserver: bool
-    reco_get_broadcast_timeout: int
-    reco_get_timeout_ms: int
-    reco_instance_group: str
-    reco_instance_id_salt: str
-    reco_meta_channel_call_timeout: int
-    reco_meta_channel_connection_timeout: int
-    reco_meta_channel_retry_time: int
-    reco_model_extra_info: str
-    reco_model_sdk_config: str
-    reco_model_user_data: str
-    reco_put_broadcast_timeout: int
-    reco_put_timeout_ms: int
-    reco_server_address: str
-    reco_storage_queue_size: int
-    reco_storage_thread_num: int
-    reco_vipserver_domain: str
+    kvcm_asyncwrapper_queue_size: int
+    kvcm_asyncwrapper_thread_num: int
+    kvcm_client_config: str
+    kvcm_enable_vipserver: bool
+    kvcm_get_broadcast_timeout: int
+    kvcm_get_timeout_ms: int
+    kvcm_instance_group: str
+    kvcm_instance_id_salt: str
+    kvcm_meta_channel_call_timeout: int
+    kvcm_meta_channel_connection_timeout: int
+    kvcm_meta_channel_retry_time: int
+    kvcm_model_extra_info: str
+    kvcm_model_sdk_config: str
+    kvcm_model_user_data: str
+    kvcm_put_broadcast_timeout: int
+    kvcm_put_timeout_ms: int
+    kvcm_server_address: str
+    kvcm_storage_queue_size: int
+    kvcm_storage_thread_num: int
+    kvcm_vipserver_domain: str
     reserve_block_ratio: int
     reuse_cache: bool
     seq_size_per_block: int
     kernel_seq_size_per_block: int
-    enable_tiered_memory_cache: bool
-    enable_gpu_prefix_tree: bool
-    enable_prefix_tree_memory_cache: bool
-    enable_legacy_memory_connector_fallback: bool
-    prefix_tree_memory_state_swa_pool_ratio: int
-    enable_independent_group_eviction: bool
-    device_cache_min_free_blocks: int
-    load_cache_retry_times: int
     ssm_state_dtype: str
     test_block_num: int
     use_block_cache: int
-    write_cache_sync: bool
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -936,15 +939,6 @@ class CacheGroupType:
     FULL: typing.ClassVar[CacheGroupType]
     SWA: typing.ClassVar[CacheGroupType]
 
-class CacheReusePolicy:
-    REUSABLE: typing.ClassVar[CacheReusePolicy]
-    NON_REUSABLE: typing.ClassVar[CacheReusePolicy]
-
-class CacheEvictPolicy:
-    CHAIN: typing.ClassVar[CacheEvictPolicy]
-    INDEPENDENT: typing.ClassVar[CacheEvictPolicy]
-    NONE: typing.ClassVar[CacheEvictPolicy]
-
 class CacheMemoryPlacement:
     DEVICE: typing.ClassVar[CacheMemoryPlacement]
     HOST: typing.ClassVar[CacheMemoryPlacement]
@@ -972,7 +966,6 @@ class CpPrefillSliceLayout:
 
 class CacheReusePolicyDesc:
     enable_prefix_reuse: typing.Any
-    evict_policy: typing.Any
     def __init__(self) -> None: ...
 
 class CacheCapacityPolicyDesc:

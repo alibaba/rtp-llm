@@ -360,7 +360,6 @@ cc_library(
     deps = [
         ":exec_ops_hdr",
         "//rtp_llm/cpp/cache:cache",
-        "//rtp_llm/cpp/cache:cp_slot_mapper",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:device_pin",
         "//rtp_llm/models_py/bindings:op_defs",

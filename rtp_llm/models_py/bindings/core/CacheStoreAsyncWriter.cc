@@ -32,6 +32,9 @@ CacheStoreAsyncWriter::CacheStoreAsyncWriter(int                             dev
         }
         cache_config_ = std::shared_ptr<const CacheConfig>(cache_manager_, selected_config);
 
+        // Cache-store key/offset projection follows physical KV ownership, not
+        // forward-only CP execution. An unsharded allocator deliberately leaves
+        // this mapper null so every rank publishes the complete namespace.
         if (const auto cp_slot_mapper = cache_manager_->cpSlotMapper()) {
             cp_rank_ = cp_slot_mapper->cpRank();
             cp_size_ = cp_slot_mapper->cpSize();

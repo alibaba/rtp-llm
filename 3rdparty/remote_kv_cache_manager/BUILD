@@ -19,3 +19,11 @@ rpm_library(
         "kv_cache_manager_client.so",
     ],
 )
+
+cc_library(
+    name = "remote_kv_cache_manager_client_headers",
+    hdrs = [":remote_kv_cache_manager_client_hdrs_fg"],
+    include_prefix = "kvcm_client",
+    strip_include_prefix = "include",
+    visibility = ["//visibility:public"],
+)

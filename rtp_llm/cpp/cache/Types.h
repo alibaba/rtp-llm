@@ -3,15 +3,19 @@
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 #include <cstdint>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/CacheTier.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 
 namespace rtp_llm {
+
+class AsyncContext;
 
 class CompleteTokenIds;
 using CompleteTokenIdsPtr = std::shared_ptr<CompleteTokenIds>;
@@ -54,19 +58,20 @@ struct GroupBlockIdPair {
 static_assert(sizeof(GroupBlockIdPair) == 3 * sizeof(int32_t),
               "GroupBlockIdPair must match the three-column int32 tensor layout");
 
-struct MatchResult {
-    size_t           reuse_length = 0;
-    size_t           reuse_blocks = 0;
-    BlockIndicesType block_indices;
-};
-
 struct MallocInfo {
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
     int64_t                 request_id          = 0;
     bool                    verbose             = true;  // for failed log
     bool                    reuse_cache         = true;
-    bool                    enable_device_cache = true;
+    bool                    enable_cache_lookup = true;
+    // Per-request tier policy, already intersected with deployment-level
+    // availability by StreamCacheResource. A lookup must never attribute a hit
+    // to, or read data from, a tier disabled by the request.
+    bool enable_device_cache = true;
+    bool enable_host_cache   = true;
+    bool enable_disk_cache   = true;
+    bool enable_remote_cache = true;
     // Sparse tail-group cleanup is only valid for incremental allocation.
     // Prefill init keeps reused prefix slots intact because model-path kernels
     // still read them by prefix_length.
@@ -103,11 +108,35 @@ struct MallocResult {
                status == MallocStatus::NONE ? MallocStatus::INTERNAL_ERROR :
                                               status) {}
 
-    bool success   = false;
-    int  reuse_len = 0;
+    MallocResult(bool                          success,
+                 int                           reuse_len,
+                 int64_t                       match_cost_time_us,
+                 std::shared_ptr<AsyncContext> async_context,
+                 int                           host_reuse_len = 0,
+                 int                           disk_reuse_len = 0):
+        success(success),
+        reuse_len(reuse_len),
+        match_cost_time_us(match_cost_time_us),
+        status(success ? MallocStatus::NONE : MallocStatus::INTERNAL_ERROR),
+        async_context(std::move(async_context)),
+        host_reuse_len(host_reuse_len),
+        disk_reuse_len(disk_reuse_len) {}
 
+    bool         success            = false;
+    int          reuse_len          = 0;
     int64_t      match_cost_time_us = 0;
     MallocStatus status             = MallocStatus::INTERNAL_ERROR;
+
+    std::shared_ptr<AsyncContext> async_context = nullptr;
+
+    int host_reuse_len = 0;
+    int disk_reuse_len = 0;
+
+    int64_t match_end_time_us          = 0;
+    int64_t malloc_begin_time_us       = 0;
+    int64_t load_prepare_latency_us    = 0;
+    int64_t block_aligned_input_length = 0;
+    bool    load_attempted             = false;
 };
 
 struct FreeInfo {
@@ -121,6 +150,8 @@ struct InsertInfo {
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
     bool                    is_resident;
+    Tier                    target_tier{Tier::DEVICE};
+    bool                    write_remote{true};
 };
 
 }  // namespace rtp_llm

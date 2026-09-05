@@ -2,7 +2,20 @@ import functools
 import json
 import logging
 import os
+from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Union
+
+_REMOTE_CODE_LOCK_TIMEOUT_S = 300
+
+
+def _uses_remote_tokenizer_code(
+    model_config: Dict[str, Any], tokenizer_config: Dict[str, Any]
+) -> bool:
+    for config in (model_config, tokenizer_config):
+        auto_map = config.get("auto_map")
+        if isinstance(auto_map, dict) and auto_map.get("AutoTokenizer"):
+            return True
+    return False
 
 
 class BaseTokenizer:
@@ -27,13 +40,30 @@ class BaseTokenizer:
         extra_kwargs = self._transformers_v5_kwargs(tokenizer_config, tokenizer_obj)
         extra_kwargs.update(self._additional_kwargs(tokenizer_config))
         try:
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                tokenizer_path,
-                trust_remote_code=True,
-                verbose=False,
-                use_fast=True,
-                **extra_kwargs,
-            )
+            load_guard = nullcontext()
+            if _uses_remote_tokenizer_code(config_json, tokenizer_config):
+                # Transformers' dynamic-module lock is process-local, while
+                # local remote-code tokenizers are copied into one shared
+                # HF_MODULES_CACHE. Serialize the complete materialize/import
+                # boundary so another process cannot import a partially copied
+                # Python file. A cache-wide lock also matches Transformers'
+                # sanitized-basename destination namespace.
+                from filelock import FileLock
+                from transformers.dynamic_module_utils import HF_MODULES_CACHE
+
+                os.makedirs(HF_MODULES_CACHE, exist_ok=True)
+                lock_path = os.path.join(
+                    HF_MODULES_CACHE, ".rtp_llm_remote_tokenizer.lock"
+                )
+                load_guard = FileLock(lock_path, timeout=_REMOTE_CODE_LOCK_TIMEOUT_S)
+            with load_guard:
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    tokenizer_path,
+                    trust_remote_code=True,
+                    verbose=False,
+                    use_fast=True,
+                    **extra_kwargs,
+                )
         except Exception as e:
             logging.error(
                 f"AutoTokenizer.from_pretrained failed for tokenizer_path={tokenizer_path}, "

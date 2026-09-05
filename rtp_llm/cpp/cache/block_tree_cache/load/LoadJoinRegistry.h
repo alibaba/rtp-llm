@@ -1,0 +1,64 @@
+#pragma once
+
+#include <cstdint>
+#include <memory>
+#include <unordered_map>
+#include <vector>
+
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
+
+namespace rtp_llm {
+
+class LoadJoinRegistry {
+public:
+    explicit LoadJoinRegistry(BlockTree* tree): tree_(tree) {}
+
+    bool start(TreeNode*                                node,
+               size_t                                   group_set_id,
+               const std::vector<BlockIdxType>&         target_blocks,
+               const std::shared_ptr<LoadAsyncContext>& context,
+               bool                                     install_target_in_cache = true);
+    bool join(const std::shared_ptr<LoadAsyncContext>& context);
+    bool finish(TreeNode* node, size_t group_set_id, std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts);
+    bool eraseForContext(TreeNode* node, size_t group_set_id, uint64_t context_id);
+    bool installTargetInCache(TreeNode* node, size_t group_set_id) const;
+
+private:
+    struct Key {
+        TreeNode* node;
+        size_t    group_set_id;
+
+        bool operator==(const Key& other) const {
+            return node == other.node && group_set_id == other.group_set_id;
+        }
+    };
+
+    struct KeyHash {
+        size_t operator()(const Key& key) const {
+            const size_t node_hash  = std::hash<TreeNode*>{}(key.node);
+            const size_t group_hash = std::hash<size_t>{}(key.group_set_id);
+            return node_hash ^ (group_hash << 1);
+        }
+    };
+
+    struct Record {
+        struct ContextEntry {
+            std::weak_ptr<LoadAsyncContext> context;
+            bool                            install_target_in_cache{true};
+        };
+        using ContextMap = std::unordered_map<uint64_t, ContextEntry>;
+
+        std::vector<BlockIdxType> target_blocks;
+        uint64_t                  owner_context_id{0};
+        bool                      owner_install_target_in_cache{true};
+        ContextMap                joined_contexts;
+    };
+
+    using RecordMap = std::unordered_map<Key, Record, KeyHash>;
+
+    BlockTree* tree_;
+    RecordMap  records_;
+};
+
+}  // namespace rtp_llm

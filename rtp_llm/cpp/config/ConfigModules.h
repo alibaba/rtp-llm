@@ -37,7 +37,7 @@ struct PrefillCPConfig {
     bool kv_cache_sharded = false;
     // Explicit prefill CP size for decode-side fixed/SWA ring sizing; 0 = unset.
     int64_t prefill_cp_size = 0;
-    bool           is_enabled() const {
+    bool    is_enabled() const {
         return method != CPRotateMethod::DISABLED && method != CPRotateMethod::UNKNOWN
                && method != CPRotateMethod::PREFILL_CP;
     }
@@ -154,44 +154,56 @@ struct FMHAConfig {
     std::string to_string() const;
 };
 
+constexpr double kDefaultDeviceLowWatermarkRatio  = 0.82;
+constexpr double kDefaultDeviceHighWatermarkRatio = 0.90;
+constexpr double kDefaultHostLowWatermarkRatio    = 0.90;
+constexpr double kDefaultHostHighWatermarkRatio   = 0.94;
+constexpr double kDefaultDiskLowWatermarkRatio    = 0.92;
+constexpr double kDefaultDiskHighWatermarkRatio   = 0.97;
+
 struct KVCacheConfig {
     bool                                    reuse_cache           = false;
     std::string                             multi_task_prompt     = "";
     std::string                             multi_task_prompt_str = "";
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
-    int64_t                                 reserve_block_ratio               = 5;
-    int                                     max_block_size_per_item           = 16;
-    int64_t                                 memory_cache_size_mb              = 0;
-    int64_t                                 memory_cache_sync_timeout_ms      = 10000;
-    bool                                    enable_memory_cache_disk          = false;
-    std::string                             memory_cache_disk_paths           = "";
-    int64_t                                 memory_cache_disk_size_mb         = 0;
-    bool                                    memory_cache_disk_buffered_io     = true;
-    int64_t                                 memory_cache_disk_sync_timeout_ms = 30000;
-    int                                     linear_step                       = 1;  // for linear attention cache reuse
+    int64_t                                 reserve_block_ratio                             = 5;
+    int                                     max_block_size_per_item                         = 16;
+    int64_t                                 host_cache_size_mb                              = 0;
+    int64_t                                 host_cache_sync_timeout_ms                      = 10000;
+    std::string                             disk_cache_paths                                = "";
+    int64_t                                 disk_cache_size_mb                              = 0;
+    bool                                    disk_cache_buffered_io                          = true;
+    int64_t                                 disk_cache_sync_timeout_ms                      = 30000;
+    int64_t                                 disk_cache_staging_block_count                  = 4;
+    int64_t                                 memory_cache_max_descriptors_per_transfer_batch = 8;
+    int64_t                                 block_tree_transfer_worker_count                = 4;
+    int64_t                                 block_tree_business_queue_max_size              = 10000;
+    int64_t                                 block_tree_transfer_queue_max_size              = 10000;
+    double block_tree_device_evict_low_watermark_ratio  = kDefaultDeviceLowWatermarkRatio;
+    double block_tree_device_evict_high_watermark_ratio = kDefaultDeviceHighWatermarkRatio;
+    double block_tree_host_evict_low_watermark_ratio    = kDefaultHostLowWatermarkRatio;
+    double block_tree_host_evict_high_watermark_ratio   = kDefaultHostHighWatermarkRatio;
+    double block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
+    double block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
+    int    linear_step                                  = 1;  // for linear attention cache reuse
     // Fields merged from PyKvCacheConfig
-    int         fp8_kv_cache              = 0;
-    std::string ssm_state_dtype           = "bf16";
-    int64_t     kv_cache_mem_mb           = -1;
-    int         seq_size_per_block        = 64;
-    int         kernel_seq_size_per_block = 0;
-    int         test_block_num            = 0;
-    int         use_block_cache           = -1;  // -1 means not set, use Optional<int> equivalent
-    bool        enable_device_cache       = true;
-    bool        enable_memory_cache       = false;
-    // When true, memory-cache H2D/D2H may use split-KV SM scatter/gather (CUDA) when layout is eligible.
-    bool    enable_memory_cache_sm_copy             = false;
-    bool    enable_remote_cache                     = false;
-    bool    write_cache_sync                        = false;
-    bool    enable_tiered_memory_cache              = false;
-    bool    enable_gpu_prefix_tree                  = false;
-    bool    enable_prefix_tree_memory_cache         = false;
-    bool    enable_legacy_memory_connector_fallback = true;
-    int64_t prefix_tree_memory_state_swa_pool_ratio = 0;
-    bool    enable_independent_group_eviction       = false;
-    int64_t device_cache_min_free_blocks            = 0;
-    int     load_cache_retry_times                  = 1;  // Maximum retry attempts for load cache transfer failures
-
+    int         fp8_kv_cache                 = 0;
+    std::string ssm_state_dtype              = "bf16";
+    int64_t     kv_cache_mem_mb              = -1;
+    int         seq_size_per_block           = 64;
+    int         kernel_seq_size_per_block    = 0;
+    int         test_block_num               = 0;
+    int         use_block_cache              = -1;  // -1 means not set, use Optional<int> equivalent
+    bool        enable_device_cache          = true;
+    bool        enable_host_cache            = false;
+    bool        enable_host_cache_pinned     = true;
+    bool        enable_disk_cache            = false;
+    bool        enable_remote_cache          = false;
+    bool        write_cache_sync             = false;
+    std::string device_eviction_policy       = "lru";
+    std::string host_eviction_policy         = "lru";
+    std::string disk_eviction_policy         = "fifo";
+    int64_t     device_cache_min_free_blocks = 0;
 
     // DSV4 fixed-allocation pool block count. 0 means the fixed regions
     // (INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV) use the normal
@@ -206,27 +218,31 @@ struct KVCacheConfig {
     // CPU BlockPool for INDEXER_STATE / CSA_STATE / HCA_STATE / SWA_KV.
     bool dsv4_fixed_pool_use_memory = false;
 
-    // Remote connector configuration fields
-    bool        reco_enable_vipserver                = false;
-    std::string reco_vipserver_domain                = "";
-    std::string reco_server_address                  = "";
-    std::string reco_instance_group                  = "default";
-    uint32_t    reco_meta_channel_retry_time         = 3;
-    uint32_t    reco_meta_channel_connection_timeout = 6000;
-    uint32_t    reco_meta_channel_call_timeout       = 1500;
-    uint32_t    reco_storage_thread_num              = 4;
-    uint32_t    reco_storage_queue_size              = 2000;
-    int         reco_put_timeout_ms                  = 12000;
-    int         reco_get_timeout_ms                  = 12000;
-    std::string reco_model_sdk_config                = R"([{"type":"local","sdk_log_level":"DEBUG"}])";
-    std::string reco_model_user_data                 = "";
-    std::string reco_model_extra_info                = "";
-    std::string reco_instance_id_salt                = "";
-    size_t      reco_asyncwrapper_thread_num         = 16;
-    size_t      reco_asyncwrapper_queue_size         = 1000;
-    int         reco_get_broadcast_timeout           = 15000;
-    int         reco_put_broadcast_timeout           = 15000;
-    std::string reco_client_config                   = "";
+    // BlockTreeCache FULL prefix invariant scanner; interval 0 disables the scanner thread.
+    // Batch size and detail cap are scanner-internal constants, not user-tunable.
+    int64_t block_tree_full_prefix_scan_interval_ms = 0;
+
+    // KVCM storage backend configuration fields
+    bool        kvcm_enable_vipserver                = false;
+    std::string kvcm_vipserver_domain                = "";
+    std::string kvcm_server_address                  = "";
+    std::string kvcm_instance_group                  = "default";
+    uint32_t    kvcm_meta_channel_retry_time         = 3;
+    uint32_t    kvcm_meta_channel_connection_timeout = 6000;
+    uint32_t    kvcm_meta_channel_call_timeout       = 1500;
+    uint32_t    kvcm_storage_thread_num              = 4;
+    uint32_t    kvcm_storage_queue_size              = 2000;
+    int         kvcm_put_timeout_ms                  = 12000;
+    int         kvcm_get_timeout_ms                  = 12000;
+    std::string kvcm_model_sdk_config                = R"([{"type":"local","sdk_log_level":"DEBUG"}])";
+    std::string kvcm_model_user_data                 = "";
+    std::string kvcm_model_extra_info                = "";
+    std::string kvcm_instance_id_salt                = "";
+    size_t      kvcm_asyncwrapper_thread_num         = 16;
+    size_t      kvcm_asyncwrapper_queue_size         = 1000;
+    int         kvcm_get_broadcast_timeout           = 15000;
+    int         kvcm_put_broadcast_timeout           = 15000;
+    std::string kvcm_client_config                   = "";
     void        insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     std::string to_string() const;
 };
@@ -413,7 +429,7 @@ struct FIFOSchedulerConfig {
     //   "N"   -> 1 prefill : N decode (decode-heavy); "1" = strict alternation.
     //   "1/X" -> X prefill : 1 decode (prefill-heavy).
     //   invalid input falls back to "1".
-    std::string decode_prefill_ratio = "1";
+    std::string decode_prefill_ratio           = "1";
     bool        cp_force_single_prefill        = true;
     int64_t     max_inited_kv_cache_streams    = 0;
     int64_t     max_batch_tokens_without_cache = 0;
@@ -423,9 +439,9 @@ struct FIFOSchedulerConfig {
 struct GrammarConfig {
     bool constrained_json_disable_any_whitespace = false;
     // Service-level xgrammar matcher policy. Requests cannot override it.
-    bool                 terminate_without_stop_token = false;
-    int                  num_workers                  = 8;
-    std::string          tokenizer_info_json;
+    bool        terminate_without_stop_token = false;
+    int         num_workers                  = 8;
+    std::string tokenizer_info_json;
     // Byte cap on xgrammar's internal compiled-grammar cache; <=0 = unlimited.
     int64_t     compiler_cache_bytes = 512 * 1024 * 1024;
     std::string to_string() const;
