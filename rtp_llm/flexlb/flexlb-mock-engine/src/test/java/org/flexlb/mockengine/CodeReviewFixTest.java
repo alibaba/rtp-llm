@@ -121,6 +121,9 @@ class CodeReviewFixTest {
         JavaMockEngineCluster.FastRpcService decode = decodeServices.get(0);
         long requestId = 42L;
         int inputLen = 10;
+        // Block-pool caliber: inputLen=10 rounds up to ceil(10/1024)=1 block,
+        // so the lease pins 1 x spb = 1024 tokens.
+        long expectedKvTokens = 1024L;
         MockPerformanceModel.RequestShape shape = shapeOf(model, requestId, inputLen);
 
         // Directly invoke the private scheduleDecodeCompletion via reflection.
@@ -129,8 +132,8 @@ class CodeReviewFixTest {
         // After scheduling, all three counters must reflect the single request.
         assertEquals(1, getActiveDecodeRequests(decode),
                 "activeDecodeRequests should be 1 after scheduling");
-        assertEquals(inputLen, decode.getActiveKvTokens(),
-                "activeKvTokens should be " + inputLen + " after scheduling");
+        assertEquals(expectedKvTokens, decode.getActiveKvTokens(),
+                "activeKvTokens should be " + expectedKvTokens + " after scheduling");
         assertEquals(1, decode.getInflightCount(),
                 "pendingRequests should be 1 after scheduling");
         assertEquals(1, decode.getRunningCount(),
@@ -230,6 +233,8 @@ class CodeReviewFixTest {
         JavaMockEngineCluster.FastRpcService decode = decodeServices.get(0);
         long requestId = 99L;
         int inputLen = 10;
+        // Block-pool caliber: inputLen=10 rounds up to 1 block = 1024 tokens.
+        long expectedKvTokens = 1024L;
         MockPerformanceModel.RequestShape shape = shapeOf(model, requestId, inputLen);
 
         int nThreads = 50;
@@ -261,8 +266,8 @@ class CodeReviewFixTest {
         assertEquals(1, getActiveDecodeRequests(decode),
                 "activeDecodeRequests should be 1, not " + nThreads
                         + " (putIfAbsent must reject duplicates)");
-        assertEquals(inputLen, decode.getActiveKvTokens(),
-                "activeKvTokens should be " + inputLen + ", not " + (nThreads * inputLen)
+        assertEquals(expectedKvTokens, decode.getActiveKvTokens(),
+                "activeKvTokens should be " + expectedKvTokens + ", not " + (nThreads * expectedKvTokens)
                         + " (putIfAbsent must reject duplicates)");
         assertEquals(1, decode.getInflightCount(),
                 "pendingRequests should be 1, not " + nThreads

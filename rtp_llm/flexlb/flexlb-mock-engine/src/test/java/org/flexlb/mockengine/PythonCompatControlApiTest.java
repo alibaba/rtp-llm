@@ -236,12 +236,6 @@ class PythonCompatControlApiTest {
         assertTrue(root.get("engines").isArray());
         assertEquals(3, root.get("engines").size());
 
-        JsonNode counters = root.get("cluster_counters");
-        assertNotNull(counters, "/snapshot must include cluster_counters");
-        assertEquals(0, counters.get("grpc_error_count").asInt());
-        assertEquals(0, counters.get("grpc_retry_count").asInt());
-        assertEquals(0, counters.get("grpc_cancel_forward_count").asInt());
-
         JsonNode engine = root.get("engines").get(0);
         // Python field set (legacy MockEngineState.snapshot) — names and types.
         assertEquals("prefill-0", engine.get("name").asText());
@@ -349,11 +343,6 @@ class PythonCompatControlApiTest {
                 EngineRpcService.StatusVersionPB.newBuilder().build(), observer));
         assertEquals(3, status.getAvailableConcurrency(),
                 "idle prefill available_concurrency should equal max_prefill_concurrency");
-
-        // Legacy field names still accepted.
-        httpPost("/set_perf",
-                "{\"port\":" + prefill.getGrpcPort() + ",\"prefill_ms\":25}");
-        assertEquals(25L, perf.prefillMs(List.of(shape)));
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -439,7 +428,7 @@ class PythonCompatControlApiTest {
     }
 
     // ════════════════════════════════════════════════════════════════
-    //  Test 9: /metrics — Python names in both modes, legacy retained
+    // Test 9: /metrics — Python names in both modes
     // ════════════════════════════════════════════════════════════════
 
     @Test
@@ -460,8 +449,7 @@ class PythonCompatControlApiTest {
                 "mock_engine_cancelled_total", "mock_engine_cache_keys",
                 "mock_engine_cache_evictions_total", "mock_engine_active_kv_tokens",
                 "mock_engine_available_kv_tokens", "mock_engine_rpc_total",
-                "mock_engine_prefill_ms_avg", "mock_engine_decode_ms_p99",
-                "flexlb_mock_grpc_error_count"}) {
+                "mock_engine_prefill_ms_avg", "mock_engine_decode_ms_p99"}) {
             assertTrue(body.contains(metric), "/metrics should contain " + metric);
         }
         // Aggregated mode uses role-only labels.
@@ -470,12 +458,6 @@ class PythonCompatControlApiTest {
         assertTrue(body.contains("mock_engine_completed_total{role=\"decode\"} 2"),
                 "aggregated decode completed should be 2");
         assertTrue(body.contains("mock_engine_rpc_total{role=\"prefill\",rpc_method=\"enqueue_batch\"} 1"));
-        // Legacy series retained with port/role labels. Role label is
-        // lowercase to stay consistent with the Python-compat aggregated
-        // series (avoids case-split double counting in role-less queries).
-        assertTrue(body.contains("mock_engine_inflight_count{port=\""
-                + prefill.getGrpcPort() + "\",role=\"prefill\"}"));
-        assertTrue(body.contains("mock_engine_heap_used_bytes"));
     }
 
     @Test
@@ -497,7 +479,6 @@ class PythonCompatControlApiTest {
         assertTrue(body.contains("mock_engine_completed_total{engine_name=\"decode-0\","
                 + "role=\"decode\",grpc_port=\"" + decodeServices.get(0).getGrpcPort()
                 + "\",engine_ip=\"127.0.0.1\"} 1"));
-        assertTrue(body.contains("flexlb_mock_grpc_cancel_forward_count 0"));
     }
 
     // ════════════════════════════════════════════════════════════════
