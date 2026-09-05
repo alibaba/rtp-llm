@@ -39,6 +39,7 @@ except ImportError:
     _AITER_AVAILABLE = False
 
 try:
+    from rtp_llm.models_py.kernel_tuning import ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV
     from rtp_llm.models_py.modules.factory.attention import attn_factory
     from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
         AiterDecodeImplTriton,
@@ -1819,6 +1820,13 @@ class TestAiterPrefillAttnOpPagedCudaGraphWorkspace(unittest.TestCase):
     """Regression tests for fixed-address batch-prefill graph workspace."""
 
     def test_repeated_prepare_keeps_captured_workspace_addresses(self):
+        for enabled in ("0", "1"):
+            with self.subTest(stability_enabled=enabled), patch.dict(
+                "os.environ", {ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV: enabled}
+            ):
+                self._check_captured_workspace()
+
+    def _check_captured_workspace(self):
         from types import SimpleNamespace
 
         cfg = _make_attn_configs(head_num=4, head_num_kv=2, head_dim=8)
@@ -1861,6 +1869,34 @@ class TestAiterPrefillAttnOpPagedCudaGraphWorkspace(unittest.TestCase):
             "sanitized_block_table": op.sanitized_bt_buf.data_ptr(),
         }
         self.assertEqual(replay_ptrs, captured_ptrs)
+
+        # A graph belongs to its captured batch and block-table shape. Neither
+        # opt-in MoE stability nor a smaller request may resize its workspace.
+        for batch_size, block_columns in ((4, 4), (3, 5), (2, 4), (3, 3)):
+            with self.subTest(batch_size=batch_size, block_columns=block_columns):
+                changed_params = SimpleNamespace(
+                    cu_seqlens_q=torch.arange(
+                        batch_size + 1, dtype=torch.int32, device=device
+                    )
+                    * 8,
+                    cu_seqlens_k=torch.arange(
+                        batch_size + 1, dtype=torch.int32, device=device
+                    )
+                    * 40,
+                    kv_cache_block_id_device=torch.zeros(
+                        batch_size, block_columns, dtype=torch.int32, device=device
+                    ),
+                )
+                with self.assertRaisesRegex(ValueError, "recapture required"):
+                    op.prepare_cuda_graph(changed_params, attn_inputs)
+                self.assertEqual(op.seqlen_k_buf.data_ptr(), captured_ptrs["seqlen_k"])
+                self.assertEqual(
+                    op.kv_indptr_buf.data_ptr(), captured_ptrs["kv_indptr"]
+                )
+                self.assertEqual(
+                    op.sanitized_bt_buf.data_ptr(),
+                    captured_ptrs["sanitized_block_table"],
+                )
 
 
 @unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
