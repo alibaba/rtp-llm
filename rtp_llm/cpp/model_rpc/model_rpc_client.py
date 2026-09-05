@@ -4,7 +4,7 @@ import json
 import logging
 import math
 import time
-from typing import Any, AsyncGenerator, Dict, Optional, Union
+from typing import Any, AsyncGenerator, Callable, Dict, Optional, Union
 
 import grpc
 from google.protobuf.wrappers_pb2 import StringValue
@@ -32,6 +32,7 @@ from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.telemetry import attributes as trace_attrs
 from rtp_llm.telemetry import start_client_span
 from rtp_llm.utils.base_model_datatypes import (
+    PREFILL_CUDA_GRAPH_STATUS_NOT_REQUESTED,
     AuxInfo,
     GenerateConfig,
     GenerateInput,
@@ -466,6 +467,7 @@ def trans_input(input_py: GenerateInput):
         ) or str(input_pb.request_info.trace_id or input_py.request_id)
 
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
+    trans_embedding_inputs(input_py, input_pb)
     # Preserve main's regular GenerateConfig validation at the RPC boundary,
     # then assert (without mutating) that the request entrypoint prepared grammar.
     input_py.generate_config.validate()
@@ -672,6 +674,27 @@ def trans_multimodal_input(
         input_pb.multimodal_inputs.append(mm_input_pb)
 
 
+def trans_embedding_inputs(input_py: GenerateInput, input_pb: GenerateInputPB):
+    if input_py.input_embeddings is None:
+        return
+
+    embedding_inputs = input_py.input_embeddings
+    if len(embedding_inputs.embeddings) != len(embedding_inputs.embedding_locs):
+        raise ValueError(
+            f"input_embeddings count ({len(embedding_inputs.embeddings)}) "
+            f"!= embedding_locs count ({len(embedding_inputs.embedding_locs)})"
+        )
+
+    input_embeddings_pb = input_pb.input_embeddings
+
+    # 转换 embeddings
+    for emb in embedding_inputs.embeddings:
+        input_embeddings_pb.embeddings.add().CopyFrom(trans_from_tensor(emb))
+
+    # 转换 embedding_locs
+    input_embeddings_pb.embedding_locs.extend(embedding_inputs.embedding_locs)
+
+
 # 假设 trans_tensor 函数将 Protobuf 的 TensorPB 转换为 numpy array
 # from .utils import trans_tensor
 
@@ -784,6 +807,10 @@ def trans_output(
                 speculative_accepted_tokens_per_pos=list(
                     aux_info_pb.speculative_accepted_tokens_per_pos
                 ),
+                prefill_cuda_graph_status=(
+                    aux_info_pb.prefill_cuda_graph_status
+                    or PREFILL_CUDA_GRAPH_STATUS_NOT_REQUESTED
+                ),
                 aux_string=aux_info_pb.aux_string,
                 role_addrs=input_py.generate_config.role_addrs,
             )
@@ -856,6 +883,7 @@ class ModelRpcClient(object):
         client_config,
         max_rpc_timeout_ms: int = 0,
         decode_entrance: bool = False,
+        trans_output_fn: Optional[Callable] = None,
     ):
         """Initialize ModelRpcClient with addresses.
 
@@ -865,10 +893,14 @@ class ModelRpcClient(object):
                 the gRPC deadline. Callers normally pass pd_sep_config.max_rpc_timeout_ms
                 (args: --max_rpc_timeout_ms / env: MAX_RPC_TIMEOUT_MS).
             decode_entrance: Whether this is a decode entrance
+            trans_output_fn: Custom function to transform protobuf outputs to Python objects.
+                Signature: (GenerateInput, GenerateOutputsPB, StreamState) -> GenerateOutputs.
+                If None, uses the default implementation.
         """
         self._addresses = addresses
         self._max_rpc_timeout_ms = max_rpc_timeout_ms
         self._decode_entrance = decode_entrance
+        self._trans_output_fn = trans_output_fn or trans_output
         self._options = []
         for key, value in client_config.items():
             self._options.append((key, value))
@@ -1055,7 +1087,7 @@ class ModelRpcClient(object):
                 response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
-                output_py = trans_output(input_py, response, stream_state)
+                output_py = self._trans_output_fn(input_py, response, stream_state)
                 last_output = output_py
                 if use_fetch_response and _is_finished_response(response):
                     terminal_seen = True
@@ -1260,7 +1292,9 @@ class ModelRpcClient(object):
                         f"batch item {i} failed: {result_pb.error_info.error_message}",
                     )
                 stream_state = StreamState()
-                output = trans_output(inputs[i], result_pb.final_output, stream_state)
+                output = self._trans_output_fn(
+                    inputs[i], result_pb.final_output, stream_state
+                )
                 results.append(output)
             return results
 

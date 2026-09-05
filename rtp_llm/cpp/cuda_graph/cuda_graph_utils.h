@@ -62,6 +62,8 @@ public:
         py_model_inputs_.attention_inputs.decode_cu_seqlens        = inputs.attention_inputs.decode_cu_seqlens;
         py_model_inputs_.attention_inputs.sequence_lengths_plus_1_device =
             inputs.attention_inputs.sequence_lengths_plus_1_device;
+        py_model_inputs_.input_embedding_overrides = inputs.input_embedding_overrides;
+        py_model_inputs_.input_embedding_metadata  = inputs.input_embedding_metadata;
     }
 
 public:

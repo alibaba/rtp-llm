@@ -23,10 +23,14 @@ inline void graphCheck(cudaError_t result, const char* call_expr) {
 }  // namespace
 
 #if USING_ROCM
-py::module_& getGraphCaptureModule() {
+py::module_ getGraphCaptureModule() {
     RTP_LLM_CHECK_WITH_INFO(PyGILState_Check(), "getGraphCaptureModule requires GIL to be held");
-    static py::module_ graph_capture_module = py::module_::import("rtp_llm.models_py.distributed.rocm_rccl");
-    return graph_capture_module;
+    // Never retain a process-lifetime py::object here. Function-local statics
+    // are destroyed after Py_Finalize during Python extension teardown, and
+    // their late Py_DECREF can segfault an otherwise clean ROCm shutdown.
+    // import() is cheap after the first call because Python caches the module
+    // in sys.modules, while the returned reference is released under the GIL.
+    return py::module_::import("rtp_llm.models_py.distributed.rocm_rccl");
 }
 #endif
 
@@ -35,7 +39,7 @@ void register_graph_capture_nccl_comm(void* nccl_comm, int world_size, int rank)
     py::gil_scoped_acquire gil;
     if (world_size <= 1) {
         try {
-            py::module_& graph_capture = getGraphCaptureModule();
+            py::module_ graph_capture = getGraphCaptureModule();
             graph_capture.attr("set_graph_capture_nccl_comm")(static_cast<uintptr_t>(0), 0, rank);
         } catch (const py::error_already_set& e) {
             RTP_LLM_LOG_WARNING("Failed to clear NCCL comm for graph capture: %s", e.what());
@@ -48,7 +52,7 @@ void register_graph_capture_nccl_comm(void* nccl_comm, int world_size, int rank)
         return;
     }
     try {
-        py::module_& graph_capture = getGraphCaptureModule();
+        py::module_ graph_capture = getGraphCaptureModule();
         graph_capture.attr("set_graph_capture_nccl_comm")(reinterpret_cast<uintptr_t>(nccl_comm), world_size, rank);
         RTP_LLM_LOG_INFO("Registered NCCL comm for graph capture (rank=%d, world_size=%d)", rank, world_size);
     } catch (const py::error_already_set& e) {
@@ -72,7 +76,7 @@ void enter_graph_capture(GraphNcclCaptureContext* ctx) {
     py::gil_scoped_acquire gil;
     rocm::setHipGraphCaptureEnabled(true);
     try {
-        py::module_& graph_capture = getGraphCaptureModule();
+        py::module_ graph_capture = getGraphCaptureModule();
         if (ctx && ctx->comm_handle != 0) {
             graph_capture.attr("enter_graph_capture_mode")(ctx->comm_handle, ctx->world_size, ctx->rank);
         } else {
@@ -82,7 +86,7 @@ void enter_graph_capture(GraphNcclCaptureContext* ctx) {
         rocm::setHipGraphCaptureEnabled(false);
         const int rank = ctx ? ctx->rank : -1;
         try {
-            py::module_& graph_capture = getGraphCaptureModule();
+            py::module_ graph_capture = getGraphCaptureModule();
             graph_capture.attr("set_graph_capture_nccl_comm")(static_cast<uintptr_t>(0), 0, rank);
         } catch (const py::error_already_set& clear_e) {
             RTP_LLM_LOG_WARNING("Failed to clear NCCL comm after enter_graph_capture failure: %s", clear_e.what());
@@ -104,7 +108,7 @@ void exit_graph_capture(GraphNcclCaptureContext* ctx) {
     // function, regardless of success or failure.
     py::gil_scoped_acquire gil;
     try {
-        py::module_& graph_capture = getGraphCaptureModule();
+        py::module_ graph_capture = getGraphCaptureModule();
         graph_capture.attr("exit_graph_capture_mode")();
     } catch (const py::error_already_set& e) {
         const unsigned long long comm_handle = ctx ? static_cast<unsigned long long>(ctx->comm_handle) : 0ULL;
@@ -116,7 +120,7 @@ void exit_graph_capture(GraphNcclCaptureContext* ctx) {
                             world_size,
                             e.what());
         try {
-            py::module_& graph_capture = getGraphCaptureModule();
+            py::module_ graph_capture = getGraphCaptureModule();
             graph_capture.attr("set_graph_capture_nccl_comm")(static_cast<uintptr_t>(0), 0, rank);
         } catch (const py::error_already_set& clear_e) {
             RTP_LLM_LOG_WARNING("Failed to clear NCCL comm after exit_graph_capture failure: %s", clear_e.what());
@@ -204,7 +208,7 @@ void finish_capture_session() {
 #if USING_ROCM
     py::gil_scoped_acquire gil;
     try {
-        py::module_& graph_capture = getGraphCaptureModule();
+        py::module_ graph_capture = getGraphCaptureModule();
         graph_capture.attr("finish_hipgraph_capture_session")();
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_WARNING("Failed to finish capture session: %s", e.what());

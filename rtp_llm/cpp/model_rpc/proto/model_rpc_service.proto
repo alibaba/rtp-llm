@@ -243,6 +243,11 @@ message RequestInfoPB {
     string source_role = 5;
 }
 
+message InputEmbeddingsPB {
+    repeated TensorPB embeddings = 1;   // 和embedding_locs一一对应
+    repeated int32 embedding_locs = 2;  // embedding的在token ids中的起始位置
+}
+
 message GenerateInputPB {
     int64 request_id = 1;
     repeated int32 token_ids = 2;
@@ -257,6 +262,7 @@ message GenerateInputPB {
     // priority). Used as a metrics tag on engine-side TPS
     // reporting; never affects engine scheduling.
     int32 priority = 10;
+    InputEmbeddingsPB input_embeddings = 11;
 }
 
 message AuxInfoPB {
@@ -288,6 +294,7 @@ message AuxInfoPB {
     map<int32, int32> multimodal_lengths = 27;
     int32 speculative_draft_rounds = 28;
     repeated int32 speculative_accepted_tokens_per_pos = 29;
+    string prefill_cuda_graph_status = 30;
 }
 
 message PromptLogitsOutputPB {

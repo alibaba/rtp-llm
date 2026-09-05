@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
+#include "rtp_llm/cpp/models/PrefillCudaGraphEligibility.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
@@ -27,6 +28,7 @@
 
 #if USING_CUDA
 #include "c10/cuda/CUDACachingAllocator.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #endif
 
 #ifdef __linux__
@@ -83,6 +85,80 @@ bool shouldRefreshCacheStatusSnapshot(RoleType role_type, const std::list<Genera
         return stream && !stream->isFakeStream() && stream->isContextStream();
     });
 }
+
+#if USING_CUDA
+size_t positiveDelta(size_t larger, size_t smaller) {
+    return larger > smaller ? larger - smaller : 0;
+}
+
+class ScopedWarmUpCacheManagerBinding {
+public:
+    ScopedWarmUpCacheManagerBinding(ResourceContext& resource_context, std::shared_ptr<KVCacheManager> cache_manager):
+        resource_context_(resource_context), previous_cache_manager_(resource_context.cache_manager) {
+        resource_context_.cache_manager = std::move(cache_manager);
+    }
+
+    ~ScopedWarmUpCacheManagerBinding() {
+        resource_context_.cache_manager = std::move(previous_cache_manager_);
+    }
+
+    ScopedWarmUpCacheManagerBinding(const ScopedWarmUpCacheManagerBinding&)            = delete;
+    ScopedWarmUpCacheManagerBinding& operator=(const ScopedWarmUpCacheManagerBinding&) = delete;
+
+private:
+    ResourceContext&                resource_context_;
+    std::shared_ptr<KVCacheManager> previous_cache_manager_;
+};
+
+std::shared_ptr<KVCacheManager> createPrefillCudaGraphWarmUpCacheManager(const EngineInitParams& params) {
+    auto cache_config = CacheConfigCreator::createBasicConfig(
+        params.model_config_, params.parallelism_config, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
+    if (cache_config.kernel_seq_size_per_block == 0) {
+        cache_config.kernel_seq_size_per_block = cache_config.seq_size_per_block;
+    }
+
+    const auto capture_buckets = params.hw_kernel_config.prefill_cuda_graph_capture_seq_lens.empty() ?
+                                     defaultPrefillCudaGraphCaptureSeqLens(params.model_config_.max_seq_len) :
+                                     params.hw_kernel_config.prefill_cuda_graph_capture_seq_lens;
+    RTP_LLM_CHECK_WITH_INFO(!capture_buckets.empty(), "prefill CUDA graph warmup requires at least one capture bucket");
+    RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block > 0,
+                            "prefill CUDA graph warmup requires a positive KV block size");
+    RTP_LLM_CHECK_WITH_INFO(std::all_of(capture_buckets.begin(),
+                                        capture_buckets.end(),
+                                        [&](int bucket) {
+                                            return bucket > 0 && bucket <= params.model_config_.max_seq_len
+                                                   && bucket <= HWKernelConfig::kPrefillCudaGraphMaxCaptureTokens;
+                                        }),
+                            "prefill CUDA graph warmup buckets must be in [1, min(max_seq_len=%ld, limit=%d)]",
+                            params.model_config_.max_seq_len,
+                            HWKernelConfig::kPrefillCudaGraphMaxCaptureTokens);
+
+    const auto max_bucket_value = *std::max_element(capture_buckets.begin(), capture_buckets.end());
+    const auto max_bucket       = static_cast<size_t>(max_bucket_value);
+    // Block zero is reserved by the cache allocator. The remaining blocks must
+    // hold the full sentinel scratch sequence used by graph capture, plus one
+    // request-serving block required by permanent-reservation registration.
+    const auto scratch_blocks = (max_bucket + cache_config.seq_size_per_block - 1) / cache_config.seq_size_per_block;
+    cache_config.block_num    = static_cast<uint32_t>(std::max<size_t>(5, scratch_blocks + 2));
+
+    // This temporary pool exists only to materialize the permanent sentinel
+    // scratch rows during model warmup. It serves no concurrent requests, so
+    // the normal service reserve would unnecessarily reduce its capacity and
+    // can reject a valid scratch allocation for larger capture buckets.
+    KVCacheConfig warmup_kv_cache_config;
+    warmup_kv_cache_config.reserve_block_ratio = 0;
+    ParallelismConfig warmup_parallelism;
+    RuntimeConfig     warmup_runtime;
+    auto              cache_manager = std::make_shared<KVCacheManager>(cache_config,
+                                                          /*warmup=*/false,
+                                                          nullptr,
+                                                          warmup_kv_cache_config,
+                                                          warmup_parallelism,
+                                                          warmup_runtime);
+    RTP_LLM_CHECK_WITH_INFO(cache_manager->init(), "init prefill CUDA graph warmup KV cache manager failed");
+    return cache_manager;
+}
+#endif
 }  // anonymous namespace
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
@@ -260,6 +336,17 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
         size_t seq_size_per_block = model_config_.attn_config.tokens_per_block;
         size_t reserved_blocks    = (stream->seqLength() + seq_size_per_block - 1) / seq_size_per_block + reserve_step_;
         stream->fakeInitKVBlock(reserved_blocks);
+    } else if (mode == preRunMode::prefill_warm_up && resource_context_.cache_manager) {
+        // Prefill CUDA Graph capture needs a temporary real KV pool, while the
+        // framework warmup stream deliberately does not allocate request KV
+        // blocks. Keep the model-level KV tensor and per-request block table
+        // paired by routing every logical warmup block to reserved block zero.
+        // This preserves the max-length eager warmup used for memory sizing
+        // without consuming or publishing any real cache block.
+        const size_t seq_size_per_block = resource_context_.cache_manager->cacheConfig().seq_size_per_block;
+        RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0, "prefill CUDA graph warmup requires a positive KV block size");
+        const size_t reserved_blocks = (stream->seqLength() + seq_size_per_block - 1) / seq_size_per_block;
+        stream->fakeInitKVBlock(reserved_blocks);
     } else if (mode == preRunMode::build_system_prompt) {
         THROW_IF_STATUS_ERROR(stream->initKVBlock());
     };
@@ -337,16 +424,69 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     auto fake_input                                   = makeFakeInput(getWarmUpInputLength());
     fake_input->generate_config->num_return_sequences = runtime_config.fifo_scheduler_config.max_context_batch_size;
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
+
+    if (!params.hw_kernel_config.enable_prefill_cuda_graph) {
+        rtp_llm::setTraceMemory(true);
+        executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_));
+        THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
+        const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
+        rtp_llm::setTraceMemory(false);
+        (void)executor_.reset(nullptr);
+        cudaDeviceSynchronize();
+        c10::cuda::CUDACachingAllocator::emptyCache();
+        const auto device_status = getGpuExecStatus();
+        return WarmUpResult({device_status.device_memory_status.available_bytes, max_consumed});
+    }
+
+    // A normal prefill warmup historically has no CacheManager. Prefill CUDA
+    // Graph, however, needs a real KV layout and sentinel scratch blocks during
+    // construction. Capture against a minimal temporary pool so graph-owned
+    // tensors and graph-pool reservations are included in the runtime budget
+    // before the production KV pool consumes the remaining memory.
+    auto warmup_cache_manager = createPrefillCudaGraphWarmUpCacheManager(params);
+
+    const auto baseline_status    = getGpuExecStatus().device_memory_status;
+    const auto baseline_allocated = cuda_graph::graphAllocatedBytes();
+    const auto baseline_reserved  = cuda_graph::graphReservedBytes();
+
     rtp_llm::setTraceMemory(true);
-    executor_.reset(new NormalExecutor(params, nullptr, true, false, 0, mla_ops_type_));
-    THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
-    const auto max_consumed = getGpuExecStatus().device_memory_status.max_consumed_bytes;
+    executor_.reset(new NormalExecutor(params, warmup_cache_manager, true, false, 0, mla_ops_type_));
+    {
+        // NormalGenerateStream snapshots ResourceContext at construction. Bind
+        // the same temporary manager used by NormalExecutor so fakeInitKVBlock
+        // observes the captured cache topology; restore it before production
+        // cache initialization, including when preRun throws.
+        ScopedWarmUpCacheManagerBinding cache_binding(resource_context_, warmup_cache_manager);
+        THROW_IF_STATUSOR_ERROR(preRun(fake_input, preRunMode::prefill_warm_up));
+    }
+    cudaDeviceSynchronize();
+
+    const auto measured_status    = getGpuExecStatus().device_memory_status;
+    const auto measured_allocated = cuda_graph::graphAllocatedBytes();
+    const auto measured_reserved  = cuda_graph::graphReservedBytes();
+    // cudaMemGetInfo catches non-PyTorch allocations, allocated_bytes catches
+    // graph tensors that reuse an existing allocator pool, and reserved_bytes
+    // catches graph-pool rounding/fragmentation. The baseline is taken after
+    // the temporary KV pool is initialized, so that pool is not double-counted.
+    const auto measured_runtime_bytes =
+        std::max({positiveDelta(baseline_status.available_bytes, measured_status.available_bytes),
+                  positiveDelta(measured_allocated, baseline_allocated),
+                  positiveDelta(measured_reserved, baseline_reserved),
+                  measured_status.max_consumed_bytes});
+    RTP_LLM_LOG_INFO("prefill warmup runtime reservation: measured=%zu MiB allocated_delta=%zu MiB "
+                     "reserved_delta=%zu MiB free_delta=%zu MiB",
+                     measured_runtime_bytes / 1024 / 1024,
+                     positiveDelta(measured_allocated, baseline_allocated) / 1024 / 1024,
+                     positiveDelta(measured_reserved, baseline_reserved) / 1024 / 1024,
+                     positiveDelta(baseline_status.available_bytes, measured_status.available_bytes) / 1024 / 1024);
+
     rtp_llm::setTraceMemory(false);
     (void)executor_.reset(nullptr);
+    warmup_cache_manager.reset();
     cudaDeviceSynchronize();
     c10::cuda::CUDACachingAllocator::emptyCache();
     const auto device_status = getGpuExecStatus();
-    return WarmUpResult({device_status.device_memory_status.available_bytes, max_consumed});
+    return WarmUpResult({device_status.device_memory_status.available_bytes, measured_runtime_bytes});
 #endif
 }
 
@@ -368,8 +508,8 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     // value when the user passed --seq_size_per_block < 256.
     const int cache_gen_num_per_cycle =
         sp_config.type != SP_TYPE_NONE ? static_cast<int>(sp_config.gen_num_per_cycle) : 0;
-    auto cache_config = CacheConfigCreator::createBasicConfig(
-        model_config_, parallelism_config, false, cache_gen_num_per_cycle);
+    auto cache_config =
+        CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, cache_gen_num_per_cycle);
     cache_config.block_num = 5;
     // createBasicConfig's SingleConfigCreator / HybridConfigCreator paths can
     // leave kernel_seq_size_per_block at 0 (only the real createConfig path
@@ -456,7 +596,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       pd_sep_config,
                                                                       cache_store_config,
                                                                       use_cuda_malloc_block_pool);
-        resource_context_.role_type = pd_sep_config.role_type;
+        resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -481,7 +621,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       pd_sep_config,
                                                                       cache_store_config,
                                                                       use_cuda_malloc_block_pool);
-        resource_context_.role_type = pd_sep_config.role_type;
+        resource_context_.role_type     = pd_sep_config.role_type;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }

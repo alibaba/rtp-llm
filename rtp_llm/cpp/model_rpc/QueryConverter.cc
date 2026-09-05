@@ -4,9 +4,11 @@
 #include <optional>
 
 #include <numeric>
+#include <stdexcept>
 
 #include "RPCPool.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/cpp/engine_base/stream/InputEmbeddingsUtils.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
@@ -29,7 +31,7 @@ RoleType checkedRoleType(int value, const char* field_name) {
 }
 
 RoleType checkedRoleString(const std::string& value) {
-    std::string role = value;
+    std::string       role   = value;
     const std::string prefix = "RoleType.";
     if (role.rfind(prefix, 0) == 0) {
         role = role.substr(prefix.size());
@@ -54,7 +56,7 @@ RoleType checkedRoleString(const std::string& value) {
 
 RoleType transRoleAddrType(const RoleAddrPB& role_addr) {
     std::optional<RoleType> resolved;
-    auto merge = [&resolved](RoleType candidate, const char* source) {
+    auto                    merge = [&resolved](RoleType candidate, const char* source) {
         RTP_LLM_CHECK_WITH_INFO(!resolved.has_value() || *resolved == candidate,
                                 "conflicting RoleAddrPB role from %s: resolved=%d candidate=%d",
                                 source,
@@ -301,6 +303,32 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     // Auto-TPM QoS priority (task40): 0 = not set; TPS metrics tagging only.
     generate_input->priority = input->priority();
 
+    // 转换 input_embeddings
+    if (input->has_input_embeddings()) {
+        const auto& input_embeddings_pb = input->input_embeddings();
+
+        std::vector<torch::Tensor> embeddings;
+        std::vector<int32_t>       embedding_locs;
+
+        // 转换 embeddings
+        for (int i = 0; i < input_embeddings_pb.embeddings_size(); i++) {
+            embeddings.push_back(transTensor(input_embeddings_pb.embeddings(i)));
+        }
+
+        // 转换 embedding_locs
+        embedding_locs.resize(input_embeddings_pb.embedding_locs_size());
+        memcpy(embedding_locs.data(),
+               input_embeddings_pb.embedding_locs().data(),
+               input_embeddings_pb.embedding_locs_size() * sizeof(int32_t));
+
+        generate_input->input_embeddings      = embeddings;
+        generate_input->input_embeddings_locs = embedding_locs;
+        auto status                           = validateAndNormalizeInputEmbeddings(*generate_input);
+        if (!status.ok()) {
+            throw std::runtime_error(status.ToString());
+        }
+    }
+
     return generate_input;
 }
 
@@ -417,6 +445,7 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
             for (const auto accepted_tokens : response.aux_info.speculative_accepted_tokens_per_pos) {
                 aux_info->add_speculative_accepted_tokens_per_pos(accepted_tokens);
             }
+            aux_info->set_prefill_cuda_graph_status(response.aux_info.prefill_cuda_graph_status);
             aux_info->set_aux_string(aux_string);
             auto* mm_map = aux_info->mutable_multimodal_lengths();
             for (const auto& [key, value] : response.aux_info.multimodal_lengths) {

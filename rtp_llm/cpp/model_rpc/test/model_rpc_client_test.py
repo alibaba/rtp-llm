@@ -73,6 +73,7 @@ from rtp_llm.telemetry import CURRENT_TRACE_STATE, tracing
 from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutputs,
+    InputEmbeddings,
     RequestInfo,
 )
 
@@ -373,6 +374,30 @@ class ModelRpcClientTest(TestCase):
         actual = outputs.generate_outputs[0].aux_info
         self.assertEqual(actual.speculative_draft_rounds, 7)
         self.assertEqual(actual.speculative_accepted_tokens_per_pos, [6, 4, 2])
+
+    def test_trans_output_prefill_cuda_graph_status_compatibility(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2], dtype=torch.int32),
+            generate_config=GenerateConfig(aux_info=True),
+            request_id=1,
+            mm_inputs=[],
+        )
+        for wire_status, expected_status in (
+            ("replayed", "replayed"),
+            ("", "not_requested"),
+        ):
+            with self.subTest(wire_status=wire_status):
+                outputs_pb = GenerateOutputsPB()
+                output_pb = outputs_pb.flatten_output
+                output_pb.finished.append(False)
+                output_pb.aux_info.add().prefill_cuda_graph_status = wire_status
+
+                outputs = trans_output(input_py, outputs_pb, StreamState())
+
+                self.assertEqual(
+                    outputs.generate_outputs[0].aux_info.prefill_cuda_graph_status,
+                    expected_status,
+                )
 
     @unittest.skip("need fix")
     def test_generate_stream(self):
@@ -1692,6 +1717,34 @@ class ClientSpanSettlementTest(TestCase):
 
         self.assertEqual(raised.exception.exception_type, ExceptionType.UNKNOWN_ERROR)
         self.assertEqual(raised.exception.message, "future error")
+
+    def test_trans_input_serializes_input_embeddings(self):
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(),
+            request_id=123,
+            mm_inputs=[],
+            input_embeddings=InputEmbeddings(
+                embeddings=[
+                    torch.tensor([[1.0, 2.0], [3.0, 4.0]], dtype=torch.float32),
+                    torch.tensor([[5.0, 6.0]], dtype=torch.float32),
+                ],
+                embedding_locs=[0, 2],
+            ),
+        )
+
+        input_pb = trans_input(input_py)
+
+        self.assertEqual(len(input_pb.input_embeddings.embeddings), 2)
+        self.assertEqual(list(input_pb.input_embeddings.embedding_locs), [0, 2])
+        self.assertEqual(
+            list(input_pb.input_embeddings.embeddings[0].shape),
+            [2, 2],
+        )
+        self.assertEqual(
+            input_pb.input_embeddings.embeddings[0].fp32_data,
+            struct.pack("<ffff", 1.0, 2.0, 3.0, 4.0),
+        )
 
 
 if __name__ == "__main__":

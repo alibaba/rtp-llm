@@ -417,7 +417,9 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                  /*update_remote_generate=*/true,
                                  /*force_update_info=*/false,
                                  std::move(prompt_logits_output),
-                                 std::move(error_info)};
+                                 std::move(error_info),
+                                 stream->isContextStream() ? model_output.prefill_cuda_graph_status :
+                                                             PrefillCudaGraphStatus::NOT_REQUESTED};
     stream->update(update_info);
 }
 

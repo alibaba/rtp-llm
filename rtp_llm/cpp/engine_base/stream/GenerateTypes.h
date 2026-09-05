@@ -70,6 +70,11 @@ public:
         auto prefix_tensor =
             torch::from_blob(const_cast<int*>(prefix_prompt.data()), {(int64_t)prefix_prompt.size()}, torch::kInt32);
         input_ids = torch::cat({prefix_tensor, input_ids}, 0);
+        if (input_embeddings_locs) {
+            for (auto& loc : input_embeddings_locs.value()) {
+                loc += prefix_length;
+            }
+        }
     }
 
 public:
@@ -86,6 +91,10 @@ public:
     std::optional<torch::Tensor>                mm_locs;           // multimodal input locations
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
     std::optional<std::vector<torch::Tensor>>   mm_extra_input;
+
+    // extra input embeddings
+    std::optional<std::vector<torch::Tensor>> input_embeddings;
+    std::optional<std::vector<int32_t>>       input_embeddings_locs;
 
     int     prefix_length        = 0;
     int64_t begin_time_us        = 0;
@@ -129,6 +138,7 @@ struct AuxInfo {
     int32_t                      decode_memory_reuse_len  = 0;
     int32_t                      speculative_draft_rounds = 0;
     std::vector<int32_t>         speculative_accepted_tokens_per_pos;
+    std::string                  prefill_cuda_graph_status = "not_requested";
     std::optional<torch::Tensor> cum_log_probs;
     std::optional<torch::Tensor> all_probs;
     std::optional<torch::Tensor> softmax_probs;

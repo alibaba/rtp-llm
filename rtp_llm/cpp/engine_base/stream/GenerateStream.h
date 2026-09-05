@@ -46,6 +46,7 @@ struct StreamUpdateInfo {
     // prompt scoring
     std::optional<PromptLogitsOutput> prompt_logits;
     std::optional<ErrorInfo>          error_info;
+    PrefillCudaGraphStatus            prefill_cuda_graph_status{PrefillCudaGraphStatus::NOT_REQUESTED};
 };
 
 struct StreamSpecUpdateInfo {
@@ -157,10 +158,13 @@ public:
         return false;
     }
 
-    virtual void updateOutput(const StreamUpdateInfo& update_info) = 0;
-    void         update(const StreamUpdateInfo& update_info);
-    void         specUpdate(const StreamSpecUpdateInfo& update_info);
-    bool         updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
+    virtual void                   updateOutput(const StreamUpdateInfo& update_info) = 0;
+    virtual PrefillCudaGraphStatus prefillCudaGraphStatus() const {
+        return PrefillCudaGraphStatus::NOT_REQUESTED;
+    }
+    void update(const StreamUpdateInfo& update_info);
+    void specUpdate(const StreamSpecUpdateInfo& update_info);
+    bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
     virtual size_t scoreLen() const {
         return score_len_ == 0 ? 1 : score_len_;
@@ -269,6 +273,10 @@ public:
     bool                       hasMultimodalExtraInput() const;
     int                        multimodalFeaturesLength() const;
     torch::Tensor              multimodalLocations() const;
+
+    bool                              hasInputEmbeddings() const;
+    const std::vector<torch::Tensor>& inputEmbeddings() const;
+    const std::vector<int32_t>&       inputEmbeddingsLocs() const;
 
     int64_t getTimeoutMs() const;
     void    recordWaitLatency();
@@ -724,19 +732,19 @@ public:
     }
 
     bool reuseCache() const {
-        return generate_input_->generate_config->reuse_cache;
+        return !hasInputEmbeddings() && generate_input_->generate_config->reuse_cache;
     }
 
     bool enableDeviceCache() const {
-        return generate_input_->generate_config->enable_device_cache;
+        return !hasInputEmbeddings() && generate_input_->generate_config->enable_device_cache;
     }
 
     bool enableMemoryCache() const {
-        return generate_input_->generate_config->enable_memory_cache;
+        return !hasInputEmbeddings() && generate_input_->generate_config->enable_memory_cache;
     }
 
     bool enableRemoteCache() const {
-        return generate_input_->generate_config->enable_remote_cache;
+        return !hasInputEmbeddings() && generate_input_->generate_config->enable_remote_cache;
     }
 
     int64_t deadlineMs() const {

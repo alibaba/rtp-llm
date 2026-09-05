@@ -416,3 +416,12 @@ class FlashInferTRTLLMFMHAv2PrefillImpl(FMHAImplBase):
             common.copy_kv_cache_offset(
                 self.rope_params.kv_cache_offset, new_kv_cache_offset
             )
+
+    def supports_prefill_cuda_graph(self) -> bool:
+        configs = self.fmha_impl.attn_configs
+        return (
+            (is_sm90() or is_sm12x())
+            and configs.dtype == torch.bfloat16
+            and configs.kv_cache_dtype == KvCacheDataType.BASE
+            and configs.is_causal
+        )

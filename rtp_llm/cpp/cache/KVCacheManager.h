@@ -6,6 +6,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/Types.h"
@@ -107,9 +108,17 @@ public:
     size_t                  availableTokensNum() const;
     size_t                  totalBlocksNum() const;
     size_t                  maxAvailableTokensNum() const;
-    KVCacheInfo             getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
-    void                    refreshKVCacheInfoSnapshot();
-    KVCacheInfo             buildKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
+    // Register process-lifetime resources which consume cache blocks but are
+    // not user requests. Admission control must subtract these tokens from the
+    // largest request it advertises as serviceable.
+    bool        registerPermanentTokenReservation(int64_t                    reservation_id,
+                                                  size_t                     token_count,
+                                                  const std::vector<size_t>& physical_blocks_by_group = {});
+    void        releasePermanentTokenReservation(int64_t reservation_id);
+    size_t      permanentReservedTokensNum() const;
+    KVCacheInfo getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
+    void        refreshKVCacheInfoSnapshot();
+    KVCacheInfo buildKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
 
     // 系统资源管理
     void regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
@@ -198,6 +207,16 @@ private:
 
     mutable std::mutex          cache_store_mutex_;
     std::shared_ptr<CacheStore> cache_store_;
+
+    struct PermanentTokenReservation {
+        size_t              token_count{0};
+        std::vector<size_t> physical_blocks_by_group;
+    };
+
+    mutable std::mutex                                     permanent_token_reservations_mutex_;
+    std::unordered_map<int64_t, PermanentTokenReservation> permanent_token_reservations_;
+    size_t                                                 permanent_reserved_tokens_{0};
+    std::vector<size_t>                                    permanent_reserved_blocks_by_group_;
 };
 
 }  // namespace rtp_llm

@@ -204,6 +204,13 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("hidden_size"),
                   py::arg("cu_seq_len"));
 
+    rtp_ops_m.def("input_embedding_overlay",
+                  &input_embedding_overlay,
+                  "Apply graph-staged input embedding rows and consume their metadata",
+                  py::arg("inputs_embeds"),
+                  py::arg("input_embedding_overrides"),
+                  py::arg("input_embedding_metadata"));
+
     rtp_ops_m.def("fast_topk_v2",
                   &fast_topk_v2,
                   "Fast TopK v2 kernel",

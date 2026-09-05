@@ -6,6 +6,11 @@ import torch
 
 import rtp_llm.models_py.model_desc.deepseek_v4_dspark_model as dspark_model_module
 from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import DeepSeekV4DSparkModel
+from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
+from rtp_llm.models_py.modules.factory.attention.attn_factory import (
+    CudaGraphSelectionMode,
+    PrefillCudaGraphUnsupportedBackend,
+)
 from rtp_llm.models_py.speculative.dspark_proposer_mixin import map_context_rows
 from rtp_llm.ops.compute_ops import PyModelInputs
 
@@ -24,6 +29,19 @@ def _dspark_harness(gamma: int = 5) -> DeepSeekV4DSparkModel:
 
 
 class DSparkCudaGraphContractTest(unittest.TestCase):
+    def test_dsv4_descriptors_reject_prefill_graph_selection(self) -> None:
+        for model in (
+            DeepSeekV4Model.__new__(DeepSeekV4Model),
+            DeepSeekV4DSparkModel.__new__(DeepSeekV4DSparkModel),
+        ):
+            with self.subTest(model=type(model).__name__):
+                with self.assertRaises(PrefillCudaGraphUnsupportedBackend):
+                    model.prepare_fmha_impl(
+                        inputs=None,
+                        is_cuda_graph=True,
+                        cuda_graph_selection_mode=CudaGraphSelectionMode.PREFILL_GRAPH,
+                    )
+
     def test_forward_uses_fixed_role_entrypoints(self) -> None:
         model = _dspark_harness(gamma=3)
         model.v4 = SimpleNamespace(

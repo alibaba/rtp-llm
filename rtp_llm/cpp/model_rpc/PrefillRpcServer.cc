@@ -220,7 +220,18 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
     prefill_context.trace_server_address.clear();
     prefill_context.trace_server_port = 0;
     RTP_LLM_LOG_DEBUG("request [%ld] trans query", prefill_context.request_id);
-    prepareGenerateInput(prefill_context);
+    try {
+        prepareGenerateInput(prefill_context);
+    } catch (const std::exception& e) {
+        setContextError(prefill_context,
+                        ErrorInfo(ErrorCode::INVALID_PARAMS, std::string("Request parsing error: ") + e.what()));
+        return;
+    }
+    auto support_res = validateInputRuntimeSupport(*prefill_context.generate_input);
+    if (!support_res.ok()) {
+        setContextError(prefill_context, support_res);
+        return;
+    }
 
     RTP_LLM_LOG_DEBUG("request [%ld] get rpc connection", prefill_context.request_id);
 
@@ -334,6 +345,13 @@ GenerateRequestPB PrefillRpcServer::buildAllocateRequest(PrefillGenerateContext&
         auto*       ids_ptr = input->input_ids.data_ptr<int32_t>();
         for (size_t i = 0; i < input->input_ids.numel(); ++i) {
             new_request->add_token_ids(ids_ptr[i]);
+        }
+        if (input->input_embeddings_locs.has_value()) {
+            auto* mutable_input_embeddings = new_request->mutable_input_embeddings();
+            mutable_input_embeddings->clear_embedding_locs();
+            for (int32_t loc : input->input_embeddings_locs.value()) {
+                mutable_input_embeddings->add_embedding_locs(loc);
+            }
         }
     }
     for (const auto& address : prefill_context.prefill_worker_cache_store_addrs) {
@@ -572,6 +590,10 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     // prefill-side media usage metadata when forwarding their responses.
     const auto multimodal_lengths =
         prefill_context.generate_input ? prefill_context.generate_input->multimodalLengths() : std::map<int, int>{};
+    // Decode-side updates use NOT_REQUESTED, so the prefill worker is the
+    // authoritative source for this request-level status in PD separation.
+    const std::string prefill_cuda_graph_status =
+        prefillCudaGraphStatusString(prefill_context.getStream()->prefillCudaGraphStatus());
 
     auto first_token_rt_us = prefill_context.getStream()->getTimeInfo().first_token_rt_us;
     while (prefill_context.client_stream->Read(&response)) {
@@ -603,6 +625,8 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             response.mutable_flatten_output()->mutable_aux_info(i)->set_local_reuse_len(prefill_local_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_remote_reuse_len(prefill_remote_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_memory_reuse_len(prefill_memory_reuse_len);
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_cuda_graph_status(
+                prefill_cuda_graph_status);
 
             response.mutable_flatten_output()->mutable_aux_info(i)->set_prefill_total_reuse_len(
                 prefill_total_reuse_len);

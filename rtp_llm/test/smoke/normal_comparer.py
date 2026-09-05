@@ -69,6 +69,7 @@ class AuxInfo(BaseModel):
     beam_responses: Optional[List[str]] = None
     pd_sep: Optional[bool] = None
     softmax_probs: Optional[List[float]] = None
+    prefill_cuda_graph_status: Optional[str] = None
 
 
 class PromptLogitsGolden(BaseModel):
@@ -400,6 +401,7 @@ class NormalComparer(BaseComparer):
             "decode_local_reuse_len",
             "decode_remote_reuse_len",
             "decode_memory_reuse_len",
+            "prefill_cuda_graph_status",
         ]:
             expect_val = getattr(expect_aux, field)
             actual_val = getattr(actual_aux, field)

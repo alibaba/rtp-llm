@@ -457,6 +457,19 @@ TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseDifferentCapacityScope
     EXPECT_EQ(allocator->totalTokensNum(), 28u);
 }
 
+TEST_F(HybridPoolKVCacheAllocatorTest, MaxTokenCapacityRetainsDistributedReserveForAdmission) {
+    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
+    auto allocator = makeAllocator(config, RoleType::PDFUSION, /*reserve_block_ratio=*/25);
+    ASSERT_TRUE(allocator->init());
+
+    // The two pools expose 5 + 7 usable blocks. The aggregate reserve is a
+    // runtime allocation watermark, not a permanent loss of request capacity;
+    // actual malloc still enforces it after scheduler admission.
+    EXPECT_EQ(allocator->reserveBlocksNum(), 3u);
+    EXPECT_EQ(allocator->totalTokensNum(), 7u * 4u);
+    EXPECT_EQ(allocator->maxAvailableTokensNum(), 7u * 4u);
+}
+
 TEST_F(HybridPoolKVCacheAllocatorTest, TokenAggregatorsUseCPVirtualBlockSizeForFullGroups) {
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
     auto allocator = makeAllocator(config);
@@ -903,6 +916,30 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocReportsRetryablePerGroupCapacit
     allocator->free(FreeInfo{holder_resource, holder_tokens});
     auto retry_result = allocator->malloc(deferred_info);
     EXPECT_TRUE(retry_result.success);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, PermanentReservationReducesEachGroupsTotalCapacity) {
+    // The FULL pool exposes six usable blocks. Reserving one of them
+    // permanently leaves five, while seq_len=19 at batch=2 needs four common
+    // blocks plus two private tail blocks. This can never fit and must not be
+    // parked as a retryable allocation merely because all six blocks happen to
+    // be available in this synthetic allocator-only test.
+    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/10, /*full_block_num=*/7);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    auto       batch_res = makeBatchResource(/*batch_size=*/2, config);
+    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/2, /*seq_length=*/19, /*seq_size_per_block=*/4);
+    MallocInfo malloc_info{batch_res, token_ids};
+    malloc_info.enable_device_cache                = false;
+    malloc_info.reuse_cache                        = false;
+    malloc_info.verbose                            = false;
+    malloc_info.permanent_reserved_blocks_by_group = {/*linear=*/0, /*full=*/1};
+
+    const auto result = allocator->malloc(malloc_info);
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.status, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED);
+    EXPECT_EQ(batch_res->curBlocksNum(), 0);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesDeviceReuseReferencesOnReserveReject) {

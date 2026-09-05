@@ -3,9 +3,11 @@ import json
 import os
 import pickle
 import sys
+import tempfile
 from unittest import TestCase, main
 from unittest.mock import patch
 
+from rtp_llm.ops import HWKernelConfig
 from rtp_llm.utils.backend_registry import (
     register_backend_hook,
     reset_backend_registrations,
@@ -100,6 +102,9 @@ class ServerArgsSetTest(TestCase):
         os.environ["MM_VIDEO_MAX_FILE_SIZE_KB"] = "4096"
         os.environ["THINK_MODE"] = "adaptive"
         os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
+        os.environ["ENABLE_PREFILL_CUDA_GRAPH"] = "1"
+        os.environ["PREFILL_CUDA_GRAPH_MAX_REQUESTS"] = "4"
+        os.environ["PREFILL_CUDA_GRAPH_CAPTURE_CONFIG"] = "64,128,256"
 
         sys.argv = ["prog"]
 
@@ -188,6 +193,14 @@ class ServerArgsSetTest(TestCase):
 
         # Verify disable_flashinfer_hybrid_prefill
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
+        self.assertEqual(
+            py_env_configs.py_hw_kernel_config.prefill_cuda_graph_capture_seq_lens,
+            [64, 128, 256],
+        )
+        self.assertTrue(py_env_configs.py_hw_kernel_config.enable_prefill_cuda_graph)
+        self.assertEqual(
+            py_env_configs.py_hw_kernel_config.prefill_cuda_graph_max_requests, 4
+        )
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""
@@ -302,6 +315,88 @@ class ServerArgsSetTest(TestCase):
         self.assertFalse(py_env_configs.fmha_config.enable_paged_flashinfer_trt_fmha_v2)
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_native)
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
+        self.assertFalse(py_env_configs.py_hw_kernel_config.enable_prefill_cuda_graph)
+        self.assertEqual(
+            py_env_configs.py_hw_kernel_config.prefill_cuda_graph_max_requests, 8
+        )
+        self.assertEqual(
+            py_env_configs.py_hw_kernel_config.prefill_cuda_graph_capture_seq_lens,
+            HWKernelConfig().prefill_cuda_graph_capture_seq_lens,
+        )
+
+    def test_prefill_cuda_graph_cli_binding_and_validation(self):
+        from argparse import ArgumentTypeError
+
+        from rtp_llm.server.server_args import hw_kernel_group_args, server_args
+
+        configs = server_args.setup_args(
+            [
+                "--enable_prefill_cuda_graph",
+                "1",
+                "--prefill_cuda_graph_max_requests",
+                "3",
+                "--prefill_cuda_graph_capture_config",
+                "7,19,31",
+            ]
+        )
+        self.assertTrue(configs.py_hw_kernel_config.enable_prefill_cuda_graph)
+        self.assertEqual(configs.py_hw_kernel_config.prefill_cuda_graph_max_requests, 3)
+        self.assertEqual(
+            configs.py_hw_kernel_config.prefill_cuda_graph_capture_seq_lens,
+            [7, 19, 31],
+        )
+
+        self.assertEqual(
+            hw_kernel_group_args.PREFILL_CUDA_GRAPH_MAX_REQUESTS_LIMIT,
+            HWKernelConfig.prefill_cuda_graph_max_requests_limit,
+        )
+        self.assertEqual(
+            hw_kernel_group_args.PREFILL_CUDA_GRAPH_MAX_CAPTURE_TOKENS,
+            HWKernelConfig.prefill_cuda_graph_max_capture_tokens,
+        )
+        with self.assertRaisesRegex(ArgumentTypeError, "must not exceed 64"):
+            hw_kernel_group_args._prefill_cuda_graph_max_requests("65")
+        with self.assertRaisesRegex(ArgumentTypeError, "maximum is 64"):
+            hw_kernel_group_args._parse_prefill_cuda_graph_capture_config(
+                ",".join(str(i) for i in range(1, 66))
+            )
+        for invalid_config in (
+            "0,32",
+            "-1,32",
+            f"32,{hw_kernel_group_args.PREFILL_CUDA_GRAPH_MAX_CAPTURE_TOKENS + 1}",
+        ):
+            with self.subTest(invalid_config=invalid_config):
+                with self.assertRaises(ArgumentTypeError):
+                    hw_kernel_group_args._parse_prefill_cuda_graph_capture_config(
+                        invalid_config
+                    )
+
+        self.assertEqual(
+            hw_kernel_group_args._parse_prefill_cuda_graph_capture_config("64:1"),
+            list(range(1, 65)),
+        )
+        with self.assertRaisesRegex(ArgumentTypeError, "maximum is 64"):
+            hw_kernel_group_args._parse_prefill_cuda_graph_capture_config("65:1")
+
+        for bucket_count in (64, 65):
+            with tempfile.NamedTemporaryFile(mode="w", delete=False) as config_file:
+                config_file.write("\n".join(str(i) for i in range(1, bucket_count + 1)))
+                config_path = config_file.name
+            try:
+                if bucket_count == 64:
+                    self.assertEqual(
+                        hw_kernel_group_args._parse_prefill_cuda_graph_capture_config(
+                            config_path
+                        ),
+                        list(range(1, 65)),
+                    )
+                else:
+                    with self.assertRaisesRegex(ArgumentTypeError, "maximum is 64"):
+                        hw_kernel_group_args._parse_prefill_cuda_graph_capture_config(
+                            config_path
+                        )
+            finally:
+                os.unlink(config_path)
 
     def test_model_warm_up_env_and_global_master(self):
         os.environ["WARM_UP"] = "0"

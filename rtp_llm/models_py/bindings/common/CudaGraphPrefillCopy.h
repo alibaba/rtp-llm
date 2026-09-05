@@ -27,4 +27,8 @@ void cuda_graph_copy_large2small(at::Tensor& input_tensor,
                                  int64_t     hidden_size,
                                  at::Tensor& cu_seq_len);
 
+void input_embedding_overlay(at::Tensor& inputs_embeds,
+                             at::Tensor& input_embedding_overrides,
+                             at::Tensor& input_embedding_metadata);
+
 }  // namespace torch_ext
