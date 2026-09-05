@@ -96,7 +96,7 @@ py_test(
 py_test(
     name = "test_cp_linear_attn",
     srcs = ["test_cp_linear_attn.py"],
-    deps = py_test_deps + [":cp_test_utils"] + select({
+    deps = py_test_deps + [":cp_test_utils", "//rtp_llm:models"] + select({
         "@//:using_cu12_9_or_13_x86": flashinfer_deps,
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
@@ -104,12 +104,13 @@ py_test(
     tags = ["H20"],
     exec_properties = {'gpu': 'H20'},
     timeout = "long",
+    target_compatible_with = flashinfer_compatible_with,
 )
 
 py_test(
     name = "test_cp_relay_distributed",
     srcs = ["test_cp_relay_distributed.py"],
-    deps = py_test_deps + [":cp_test_utils"] + select({
+    deps = py_test_deps + [":cp_test_utils", "//rtp_llm:models"] + select({
         "@//:using_cu12_9_or_13_x86": flashinfer_deps,
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": [],

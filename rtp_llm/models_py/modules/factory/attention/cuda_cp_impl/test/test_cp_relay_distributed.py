@@ -14,16 +14,14 @@ from rtp_llm.models_py.distributed import collective_torch, user_buffers
 from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.model_desc.qwen3_next import (
     Qwen3NextGatedDeltaNet,
-    Qwen3NextMetadata,
+    Qwen3NextModel,
     fused_gdn_gating,
-)
-from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.linear_attn_utils import (
-    ZigzagCPPlan,
-    get_segment_valid_lengths,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.test.cp_test_utils import (
     build_cp_attn_inputs,
     compute_rank_positions,
+    compute_rank_valid_layout,
+    pad_ragged_tensor,
 )
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     causal_conv1d_fn,
@@ -59,6 +57,9 @@ class _RealRelayHarness(Qwen3NextGatedDeltaNet):
             use_ub_comm=use_user_buffers,
             prefill_cp_config=SimpleNamespace(kv_cache_sharded=False),
         )
+        self.config = SimpleNamespace(
+            linear_attention_config=SimpleNamespace(linear_conv_kernel_dim=4)
+        )
         self.prefill_gdn = SimpleNamespace(
             alog=torch.zeros(1, dtype=torch.bfloat16, device=conv_weights.device),
             dt_bias=torch.zeros(1, dtype=torch.bfloat16, device=conv_weights.device),
@@ -80,7 +81,8 @@ class _RealRelayHarness(Qwen3NextGatedDeltaNet):
 def _run_real_prefix_reuse(rank: int, use_user_buffers: bool) -> None:
     device = torch.device(f"cuda:{rank}")
     prefix_tokens = 64
-    new_tokens = 256
+    new_tokens = 257
+    padded_tokens = 512
     block_size = 64
     state_len = 3
     qkv_dim = 3 * 64
@@ -97,8 +99,8 @@ def _run_real_prefix_reuse(rank: int, use_user_buffers: bool) -> None:
     full_a = torch.randn_like(full_b)
     prefix_ssm_state = torch.randn(1, 64, 64, dtype=torch.bfloat16, device=device)
 
-    conv_cache = torch.zeros(6, state_len, qkv_dim, dtype=torch.bfloat16, device=device)
-    ssm_cache = torch.zeros(6, 1, 64, 64, dtype=torch.bfloat16, device=device)
+    conv_cache = torch.zeros(7, state_len, qkv_dim, dtype=torch.bfloat16, device=device)
+    ssm_cache = torch.zeros(7, 1, 64, 64, dtype=torch.bfloat16, device=device)
     conv_cache[1].copy_(full_mixed_qkv[prefix_tokens - state_len : prefix_tokens])
     ssm_cache[1].copy_(prefix_ssm_state)
     cached_prefix_conv = conv_cache[1].clone()
@@ -138,19 +140,26 @@ def _run_real_prefix_reuse(rank: int, use_user_buffers: bool) -> None:
             )
         )
 
-    rank_positions = compute_rank_positions([new_tokens], _WORLD_SIZE)[rank]
-    rank_indices = torch.tensor(rank_positions, dtype=torch.long, device=device)
     new_mixed_qkv = full_mixed_qkv[prefix_tokens:]
-    local_conv_cu = torch.tensor([0, 67, 134], dtype=torch.int32, device=device)
+    padded_mixed_qkv = pad_ragged_tensor(new_mixed_qkv, [new_tokens], [padded_tokens])
+    padded_b = pad_ragged_tensor(full_b, [new_tokens], [padded_tokens])
+    padded_a = pad_ragged_tensor(full_a, [new_tokens], [padded_tokens])
+    rank_positions = compute_rank_positions([padded_tokens], _WORLD_SIZE)[rank]
+    rank_indices = torch.tensor(rank_positions, dtype=torch.long, device=device)
+    valid_mask, reference_indices = compute_rank_valid_layout(
+        [new_tokens], [padded_tokens], _WORLD_SIZE, rank
+    )
+    valid_mask = valid_mask.to(device)
+    reference_indices = reference_indices.to(device)
     cp_inputs = build_cp_attn_inputs(
         sequence_lengths=[prefix_tokens + new_tokens],
-        cp_chunk_lengths=[new_tokens // _WORLD_SIZE],
+        cp_chunk_lengths=[padded_tokens // _WORLD_SIZE],
         cp_size=_WORLD_SIZE,
         tokens_per_block=block_size,
         prefix_lengths=[prefix_tokens],
         device=device,
     )
-    block_ids = torch.arange(1, 6, dtype=torch.int32, device=device).unsqueeze(0)
+    block_ids = torch.arange(1, 7, dtype=torch.int32, device=device).unsqueeze(0)
     attention_inputs = SimpleNamespace(
         input_lengths=cp_inputs.input_lengths,
         prefix_lengths=cp_inputs.prefix_lengths,
@@ -161,18 +170,8 @@ def _run_real_prefix_reuse(rank: int, use_user_buffers: bool) -> None:
         cache_store_writer=None,
         is_cuda_graph=False,
     )
-    cp_plan = ZigzagCPPlan(cp_size=_WORLD_SIZE, cp_rank=rank)
-    attn_meta = Qwen3NextMetadata(
-        cp_plan=cp_plan,
-        cp_segment_valid_lengths=get_segment_valid_lengths(
-            new_tokens, new_tokens // (2 * _WORLD_SIZE), _WORLD_SIZE
-        ),
-        cp_local_conv1d_meta=prepare_causal_conv1d_metadata(local_conv_cu, device),
-        cp_local_conv_cu_seqlens=local_conv_cu,
-        cp_local_conv_prefix_lengths=torch.zeros(2, dtype=torch.int32, device=device),
-        cp_local_valid_mask=torch.ones(
-            new_tokens // _WORLD_SIZE, dtype=torch.bool, device=device
-        ),
+    attn_meta = Qwen3NextModel._build_cp_linear_attn_metadata(
+        harness, attention_inputs, device
     )
     kv_cache = SimpleNamespace(
         kv_cache_base=torch.empty(1, 1, dtype=torch.bfloat16, device=device),
@@ -181,30 +180,32 @@ def _run_real_prefix_reuse(rank: int, use_user_buffers: bool) -> None:
 
     with torch.no_grad():
         actual_output = harness._forward_cp_prefill(
-            new_mixed_qkv[rank_indices].contiguous(),
-            torch.zeros(new_tokens // _WORLD_SIZE, 64, device=device),
-            full_b[rank_indices].contiguous(),
-            full_a[rank_indices].contiguous(),
+            padded_mixed_qkv[rank_indices].contiguous(),
+            torch.zeros(padded_tokens // _WORLD_SIZE, 64, device=device),
+            padded_b[rank_indices].contiguous(),
+            padded_a[rank_indices].contiguous(),
             attention_inputs,
             kv_cache,
             attn_meta,
         )
 
     torch.testing.assert_close(
-        actual_output,
-        expected_output.reshape(new_tokens, 64)[rank_indices],
+        actual_output[valid_mask],
+        expected_output.reshape(new_tokens, 64)[reference_indices],
         rtol=2e-2,
         atol=2e-2,
     )
-    block_ends = torch.arange(block_size, new_tokens + 1, block_size, device=device)
+    self_padding = actual_output[~valid_mask]
+    torch.testing.assert_close(self_padding, torch.zeros_like(self_padding))
+    block_ends = torch.tensor([64, 128, 192, 256, 257], device=device)
     tail_offsets = torch.arange(-state_len, 0, device=device)
     expected_conv_states = new_mixed_qkv[block_ends[:, None] + tail_offsets[None, :]]
     expected_ssm_states = torch.cat([expected_chunks[0, 1:], expected_final]).to(
         torch.bfloat16
     )
-    torch.testing.assert_close(conv_cache[2:6], expected_conv_states)
+    torch.testing.assert_close(conv_cache[2:7], expected_conv_states)
     torch.testing.assert_close(
-        ssm_cache[2:6], expected_ssm_states, rtol=2e-2, atol=2e-2
+        ssm_cache[2:7], expected_ssm_states, rtol=2e-2, atol=2e-2
     )
     torch.testing.assert_close(conv_cache[1], cached_prefix_conv)
     torch.testing.assert_close(ssm_cache[1], cached_prefix_ssm)

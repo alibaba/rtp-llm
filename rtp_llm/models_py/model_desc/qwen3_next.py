@@ -9,11 +9,12 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models.qwen3_next.constants import GDN_STATE_CHUNK_SIZE
 from rtp_llm.models_py.distributed.collective_torch import (
     Group,
     all_gather,
     all_reduce,
-    broadcast,
+    broadcast_from_group_rank,
 )
 from rtp_llm.models_py.model_desc.block_map import (
     get_group_tags_for_layers,
@@ -81,8 +82,6 @@ from rtp_llm.utils.swizzle_utils import (
 from rtp_llm.utils.util import to_torch_dtype
 
 logger = logging.getLogger(__name__)
-
-GDN_STATE_CHUNK_SIZE = 64
 
 
 @lru_cache(maxsize=None)
@@ -1227,7 +1226,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                             "communication"
                         )
             else:
-                broadcast(state, src=step.owner_rank, group=Group.TP)
+                broadcast_from_group_rank(state, src=step.owner_rank, group=Group.TP)
 
         if (
             local_block_states is not None

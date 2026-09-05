@@ -3,6 +3,7 @@ import io
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -26,6 +27,18 @@ _PINNED_DEVICES = {
 
 def _jit_env(**values):
     return {**_PINNED_DEVICES, "MODEL_TYPE": "fake_model", **values}
+
+
+class _ParallelismConfigProxy:
+    def __init__(self, wrapped, prefill_cp_config):
+        object.__setattr__(self, "_wrapped", wrapped)
+        object.__setattr__(self, "prefill_cp_config", prefill_cp_config)
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._wrapped, name, value)
 
 
 class ServerConfigPortLayoutTest(TestCase):
@@ -111,6 +124,42 @@ class GenerateConfigTest(TestCase):
             return_value=Qwen3NextBase,
         ), self.assertRaisesRegex(ValueError, "KV cache block size 96"):
             _configure_model_prefill_cp(configs)
+
+    def test_old_ops_alignment_field_is_optional_only_when_cp_is_disabled(self):
+        for missing_side in ("source", "target", "both"):
+            for enabled in (False, True):
+                with self.subTest(missing_side=missing_side, enabled=enabled):
+                    configs = PyEnvConfigs()
+                    method = (
+                        CPRotateMethod.ALL_GATHER
+                        if enabled
+                        else CPRotateMethod.DISABLED
+                    )
+                    configs.prefill_cp_config.method = method
+                    source = configs.prefill_cp_config
+                    target = configs.parallelism_config
+                    if missing_side in ("source", "both"):
+                        source = SimpleNamespace(
+                            method=method,
+                            comm_buffer_size=source.comm_buffer_size,
+                            kv_cache_sharded=source.kv_cache_sharded,
+                            is_enabled=lambda: enabled,
+                        )
+                    if missing_side in ("target", "both"):
+                        old_target = SimpleNamespace(
+                            method=CPRotateMethod.DISABLED,
+                            comm_buffer_size=0,
+                            kv_cache_sharded=False,
+                        )
+                        target = _ParallelismConfigProxy(target, old_target)
+
+                    if enabled:
+                        with self.assertRaisesRegex(
+                            RuntimeError, "update or rebuild the ops bindings"
+                        ):
+                            set_parallelism_config(target, py_prefill_cp_config=source)
+                    else:
+                        set_parallelism_config(target, py_prefill_cp_config=source)
 
     def test_cp_registry_errors_skip_only_non_model_roles(self):
         for role_type in (RoleType.FRONTEND, RoleType.VIT):

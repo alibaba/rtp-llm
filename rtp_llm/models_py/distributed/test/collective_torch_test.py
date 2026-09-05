@@ -19,6 +19,7 @@ from rtp_llm.models_py.distributed.collective_torch import (
     all_gather,
     all_reduce,
     broadcast,
+    broadcast_from_group_rank,
     destroy_distributed_environment,
     distributed_environment_initialized,
     init_distributed_environment,
@@ -128,6 +129,21 @@ def _test_broadcast_collective(
             assert torch.allclose(
                 tensor, expected
             ), f"Rank {rank} broadcast {group_type}: Expected {expected.cpu()}, got {tensor.cpu()}"
+
+            group_src = len(group_ranks) - 1
+            global_src = group_ranks[group_src]
+            tensor = torch.full(
+                (3,),
+                float(global_src + 1) if rank == global_src else 0.0,
+                device=f"cuda:{parallelism_config.local_rank}",
+            )
+            broadcast_from_group_rank(tensor, src=group_src, group=group_type)
+            torch.cuda.synchronize()
+            expected = torch.full_like(tensor, float(global_src + 1))
+            assert torch.equal(tensor, expected), (
+                f"Rank {rank} group-rank broadcast {group_type}: "
+                f"Expected {expected.cpu()}, got {tensor.cpu()}"
+            )
 
     # All ranks synchronize before next test
     torch.distributed.barrier()
@@ -259,12 +275,13 @@ def _test_reduce_scatter_collective(
             # mis-scatter (e.g. wrong offset) cannot be hidden by uniform
             # inputs. Chunk c on rank r holds the value (r+1) * (c+1).
             input_tensor = torch.empty(
-                group_size * chunk_size, hidden_dim,
+                group_size * chunk_size,
+                hidden_dim,
                 device=f"cuda:{parallelism_config.local_rank}",
             )
             for c in range(group_size):
-                input_tensor[c * chunk_size : (c + 1) * chunk_size] = (
-                    (rank + 1) * (c + 1)
+                input_tensor[c * chunk_size : (c + 1) * chunk_size] = (rank + 1) * (
+                    c + 1
                 )
 
             result = reduce_scatter(input_tensor, group=group_type)
@@ -277,10 +294,14 @@ def _test_reduce_scatter_collective(
             # If reduce_scatter mis-aligned chunks, expected != observed.
             expected_sum = sum(r + 1 for r in group_ranks)
             expected_chunk_value = expected_sum * (local_idx + 1)
-            expected = torch.ones(
-                chunk_size, hidden_dim,
-                device=f"cuda:{parallelism_config.local_rank}",
-            ) * expected_chunk_value
+            expected = (
+                torch.ones(
+                    chunk_size,
+                    hidden_dim,
+                    device=f"cuda:{parallelism_config.local_rank}",
+                )
+                * expected_chunk_value
+            )
 
             assert result.shape == (chunk_size, hidden_dim), (
                 f"Rank {rank} reduce_scatter {group_type}: "
@@ -322,7 +343,8 @@ def _test_allgather_reduce_scatter_roundtrip(
 
             # Each rank starts with its own scattered chunk
             original = torch.randn(
-                chunk_size, hidden_dim,
+                chunk_size,
+                hidden_dim,
                 device=f"cuda:{parallelism_config.local_rank}",
             )
 

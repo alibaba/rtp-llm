@@ -345,6 +345,37 @@ def compute_rank_positions(lengths: List[int], cp_size: int) -> List[List[int]]:
     return all_rank_positions
 
 
+def pad_ragged_tensor(
+    tensor: torch.Tensor, lengths: List[int], padded_lengths: List[int]
+) -> torch.Tensor:
+    pieces = []
+    offset = 0
+    for length, padded_length in zip(lengths, padded_lengths):
+        pieces.append(tensor[offset : offset + length])
+        pieces.append(tensor.new_zeros((padded_length - length, *tensor.shape[1:])))
+        offset += length
+    return torch.cat(pieces, dim=0)
+
+
+def compute_rank_valid_layout(
+    lengths: List[int], padded_lengths: List[int], cp_size: int, rank: int
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    valid_mask: List[bool] = []
+    reference_positions: List[int] = []
+    reference_offset = 0
+    for length, padded_length in zip(lengths, padded_lengths):
+        positions = zigzag_positions_for_rank(padded_length, cp_size, rank)
+        valid_mask.extend(position < length for position in positions)
+        reference_positions.extend(
+            reference_offset + position for position in positions if position < length
+        )
+        reference_offset += length
+    return (
+        torch.tensor(valid_mask, dtype=torch.bool),
+        torch.tensor(reference_positions, dtype=torch.long),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Generic correctness driver
 # ---------------------------------------------------------------------------
@@ -377,6 +408,9 @@ class CPAttnTestBase(unittest.TestCase):
         atol: float = 1e-2,
     ):
         af, ef = actual.float(), expected.float()
+        if af.numel() == 0:
+            self.assertEqual(af.shape, ef.shape)
+            return
         diff = (af - ef).abs()
         max_diff, mean_diff = diff.max().item(), diff.mean().item()
         logging.info(
@@ -403,6 +437,7 @@ class CPAttnTestBase(unittest.TestCase):
         rtol: float = 1e-2,
         atol: float = 1e-2,
         warmup: bool = False,
+        segment_size_alignment: int = 1,
     ):
         """Test CP attention **without** prefix cache.
 
@@ -410,9 +445,12 @@ class CPAttnTestBase(unittest.TestCase):
         allocated.  Attention output must still be correct; there is no cache to
         verify.
         """
-        assert all(sl % cp_size == 0 for sl in sequence_lengths)
-        cp_chunk_lengths = [sl // cp_size for sl in sequence_lengths]
-        assert all(cl % 2 == 0 for cl in cp_chunk_lengths)
+        padding_granularity = 2 * cp_size * segment_size_alignment
+        padded_lengths = [
+            math.ceil(length / padding_granularity) * padding_granularity
+            for length in sequence_lengths
+        ]
+        cp_chunk_lengths = [length // cp_size for length in padded_lengths]
 
         attn_cfg, par_cfg = make_configs(
             head_num=head_num,
@@ -447,15 +485,18 @@ class CPAttnTestBase(unittest.TestCase):
             cu_full.append(cu_full[-1] + sl)
         ref_output = reference_causal_attention(q_full, k_full, v_full, cu_full)
 
-        all_rank_pos = compute_rank_positions(sequence_lengths, cp_size)
+        padded_q = pad_ragged_tensor(q_full, sequence_lengths, padded_lengths)
+        padded_k = pad_ragged_tensor(k_full, sequence_lengths, padded_lengths)
+        padded_v = pad_ragged_tensor(v_full, sequence_lengths, padded_lengths)
+        all_rank_pos = compute_rank_positions(padded_lengths, cp_size)
         all_local_k = [
-            k_full[torch.tensor(p, device=self.device)].reshape(
+            padded_k[torch.tensor(p, device=self.device)].reshape(
                 -1, kv_head_num * head_dim
             )
             for p in all_rank_pos
         ]
         all_local_v = [
-            v_full[torch.tensor(p, device=self.device)].reshape(
+            padded_v[torch.tensor(p, device=self.device)].reshape(
                 -1, kv_head_num * head_dim
             )
             for p in all_rank_pos
@@ -464,9 +505,9 @@ class CPAttnTestBase(unittest.TestCase):
         rank_idx = torch.tensor(all_rank_pos[cp_rank], device=self.device)
         qkv = torch.cat(
             [
-                q_full[rank_idx].reshape(-1, head_num * head_dim),
-                k_full[rank_idx].reshape(-1, kv_head_num * head_dim),
-                v_full[rank_idx].reshape(-1, kv_head_num * head_dim),
+                padded_q[rank_idx].reshape(-1, head_num * head_dim),
+                padded_k[rank_idx].reshape(-1, kv_head_num * head_dim),
+                padded_v[rank_idx].reshape(-1, kv_head_num * head_dim),
             ],
             dim=-1,
         )
@@ -509,7 +550,15 @@ class CPAttnTestBase(unittest.TestCase):
             params = op.prepare(attn_inputs)
             output = op.forward(qkv, kv_cache, params)
 
-        self._assert_close(output, ref_output[rank_idx], rtol=rtol, atol=atol)
+        valid_mask, reference_idx = compute_rank_valid_layout(
+            sequence_lengths, padded_lengths, cp_size, cp_rank
+        )
+        self._assert_close(
+            output[valid_mask.to(self.device)],
+            ref_output[reference_idx.to(self.device)],
+            rtol=rtol,
+            atol=atol,
+        )
 
         if warmup:
             return
@@ -543,17 +592,16 @@ class CPAttnTestBase(unittest.TestCase):
         tokens_per_block: int = 16,
         rtol: float = 1e-2,
         atol: float = 1e-2,
+        segment_size_alignment: int = 1,
     ):
-        """Test CP attention **with** prefix cache.
-
-        Constraints:
-          - ``new_lengths[i] % cp_size == 0``
-          - ``(new_lengths[i] // cp_size) % 2 == 0``
-          - ``prefix_lengths[i] % tokens_per_block == 0``
-        """
+        """Test CP attention **with** prefix cache."""
         sequence_lengths = [p + n for p, n in zip(prefix_lengths, new_lengths)]
-        cp_chunk_lengths = [n // cp_size for n in new_lengths]
-        assert all(cl % 2 == 0 for cl in cp_chunk_lengths)
+        padding_granularity = 2 * cp_size * segment_size_alignment
+        padded_new_lengths = [
+            math.ceil(length / padding_granularity) * padding_granularity
+            for length in new_lengths
+        ]
+        cp_chunk_lengths = [length // cp_size for length in padded_new_lengths]
         assert all(pl % tokens_per_block == 0 for pl in prefix_lengths)
 
         attn_cfg, par_cfg = make_configs(
@@ -602,16 +650,18 @@ class CPAttnTestBase(unittest.TestCase):
             prefix_lengths,
         )
 
-        # Zigzag split on NEW tokens only
-        all_rank_pos = compute_rank_positions(new_lengths, cp_size)
+        padded_q = pad_ragged_tensor(new_q, new_lengths, padded_new_lengths)
+        padded_k = pad_ragged_tensor(new_k, new_lengths, padded_new_lengths)
+        padded_v = pad_ragged_tensor(new_v, new_lengths, padded_new_lengths)
+        all_rank_pos = compute_rank_positions(padded_new_lengths, cp_size)
         all_local_k = [
-            new_k[torch.tensor(p, device=self.device)].reshape(
+            padded_k[torch.tensor(p, device=self.device)].reshape(
                 -1, kv_head_num * head_dim
             )
             for p in all_rank_pos
         ]
         all_local_v = [
-            new_v[torch.tensor(p, device=self.device)].reshape(
+            padded_v[torch.tensor(p, device=self.device)].reshape(
                 -1, kv_head_num * head_dim
             )
             for p in all_rank_pos
@@ -620,9 +670,9 @@ class CPAttnTestBase(unittest.TestCase):
         rank_idx = torch.tensor(all_rank_pos[cp_rank], device=self.device)
         qkv = torch.cat(
             [
-                new_q[rank_idx].reshape(-1, head_num * head_dim),
-                new_k[rank_idx].reshape(-1, kv_head_num * head_dim),
-                new_v[rank_idx].reshape(-1, kv_head_num * head_dim),
+                padded_q[rank_idx].reshape(-1, head_num * head_dim),
+                padded_k[rank_idx].reshape(-1, kv_head_num * head_dim),
+                padded_v[rank_idx].reshape(-1, kv_head_num * head_dim),
             ],
             dim=-1,
         )
@@ -665,7 +715,15 @@ class CPAttnTestBase(unittest.TestCase):
             params = op.prepare(attn_inputs)
             output = op.forward(qkv, kv_cache, params)
 
-        self._assert_close(output, ref_output[rank_idx], rtol=rtol, atol=atol)
+        valid_mask, reference_idx = compute_rank_valid_layout(
+            new_lengths, padded_new_lengths, cp_size, cp_rank
+        )
+        self._assert_close(
+            output[valid_mask.to(self.device)],
+            ref_output[reference_idx.to(self.device)],
+            rtol=rtol,
+            atol=atol,
+        )
 
         cache_k, cache_v = extract_kv_from_paged_cache(
             kv_cache, sequence_lengths, tokens_per_block

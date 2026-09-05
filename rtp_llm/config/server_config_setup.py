@@ -337,19 +337,31 @@ def set_parallelism_config(
         )
 
     if py_prefill_cp_config:
-        if py_prefill_cp_config.segment_size_alignment <= 0:
-            raise ValueError(
-                "CP segment_size_alignment must be greater than 0, got "
-                f"{py_prefill_cp_config.segment_size_alignment}"
+        target_prefill_cp_config = parallelism_config.prefill_cp_config
+        source_has_alignment = hasattr(py_prefill_cp_config, "segment_size_alignment")
+        target_has_alignment = hasattr(
+            target_prefill_cp_config, "segment_size_alignment"
+        )
+        if source_has_alignment and target_has_alignment:
+            if py_prefill_cp_config.segment_size_alignment <= 0:
+                raise ValueError(
+                    "CP segment_size_alignment must be greater than 0, got "
+                    f"{py_prefill_cp_config.segment_size_alignment}"
+                )
+            target_prefill_cp_config.segment_size_alignment = (
+                py_prefill_cp_config.segment_size_alignment
             )
-        parallelism_config.prefill_cp_config.method = py_prefill_cp_config.method
-        parallelism_config.prefill_cp_config.comm_buffer_size = (
+        elif py_prefill_cp_config.is_enabled():
+            raise RuntimeError(
+                "CP segment_size_alignment is unavailable in this rtp_llm.ops "
+                "build; update or rebuild the ops bindings before enabling "
+                "context parallelism"
+            )
+        target_prefill_cp_config.method = py_prefill_cp_config.method
+        target_prefill_cp_config.comm_buffer_size = (
             py_prefill_cp_config.comm_buffer_size
         )
-        parallelism_config.prefill_cp_config.segment_size_alignment = (
-            py_prefill_cp_config.segment_size_alignment
-        )
-        parallelism_config.prefill_cp_config.kv_cache_sharded = (
+        target_prefill_cp_config.kv_cache_sharded = (
             py_prefill_cp_config.kv_cache_sharded
         )
         if hasattr(py_prefill_cp_config, "prefill_cp_size") and hasattr(
@@ -424,10 +436,16 @@ def _configure_model_prefill_cp(py_env_configs: PyEnvConfigs) -> None:
             f"Model {py_env_configs.model_args.model_type} returned invalid CP "
             f"alignment {segment_alignment}"
         )
+    target_prefill_cp_config = py_env_configs.parallelism_config.prefill_cp_config
+    if not hasattr(prefill_cp_config, "segment_size_alignment") or not hasattr(
+        target_prefill_cp_config, "segment_size_alignment"
+    ):
+        raise RuntimeError(
+            "CP segment_size_alignment is unavailable in this rtp_llm.ops build; "
+            "update or rebuild the ops bindings before enabling context parallelism"
+        )
     prefill_cp_config.segment_size_alignment = segment_alignment
-    py_env_configs.parallelism_config.prefill_cp_config.segment_size_alignment = (
-        segment_alignment
-    )
+    target_prefill_cp_config.segment_size_alignment = segment_alignment
 
     cache_block_size = py_env_configs.kv_cache_config.seq_size_per_block
     if cache_block_size > 0 and cache_block_size % segment_alignment != 0:

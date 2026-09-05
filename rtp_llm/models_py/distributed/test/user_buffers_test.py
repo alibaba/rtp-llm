@@ -100,13 +100,12 @@ def _test_send_recv_tensor(comm: UserBufferCommunicator, rank: int, world_size: 
     dst_tensor = torch.empty(
         [1024, 4096], dtype=torch.float32, device=torch.cuda.current_device()
     )
-    comm.send(src_tensor, next_rank)
-    comm.recv(dst_tensor, prev_rank)
+    assert comm.send_recv(src_tensor, next_rank, dst_tensor, prev_rank)
     expect_tensor = prev_rank * torch.ones(
         [1024, 4096], dtype=torch.float32, device=src_tensor.device
     )
     assert torch.equal(expect_tensor, dst_tensor)
-    logging.info(f"Rank {rank}: send recv valid tensor test passed")
+    logging.info(f"Rank {rank}: send_recv valid tensor test passed")
 
 
 def _test_all_gather_tensor(comm: UserBufferCommunicator, rank: int, world_size: int):

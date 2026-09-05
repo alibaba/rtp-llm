@@ -691,7 +691,16 @@ def broadcast(tensor: torch.Tensor, src: int, group: Group) -> None:
     torch.distributed.broadcast(tensor, src, group=process_group)
 
 
-def all_reduce(tensor: torch.Tensor, group: Group, *, inplace: bool = False) -> torch.Tensor:
+def broadcast_from_group_rank(tensor: torch.Tensor, src: int, group: Group) -> None:
+    """Broadcast from a source rank relative to the selected process group."""
+    process_group = _get_group(group)
+    global_src = torch.distributed.get_global_rank(process_group, src)
+    torch.distributed.broadcast(tensor, global_src, group=process_group)
+
+
+def all_reduce(
+    tensor: torch.Tensor, group: Group, *, inplace: bool = False
+) -> torch.Tensor:
     """All-reduce a tensor across all ranks in the group.
 
     Args:
@@ -797,7 +806,10 @@ def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
         dtype=input_tensor.dtype,
     )
     torch.distributed.reduce_scatter_tensor(
-        output_tensor, input_tensor, op=torch.distributed.ReduceOp.SUM, group=process_group
+        output_tensor,
+        input_tensor,
+        op=torch.distributed.ReduceOp.SUM,
+        group=process_group,
     )
     return output_tensor
 
@@ -821,6 +833,7 @@ __all__ = [
     "send",
     "recv",
     "broadcast",
+    "broadcast_from_group_rank",
     "all_reduce",
     "all_gather",
     "reduce_scatter",
