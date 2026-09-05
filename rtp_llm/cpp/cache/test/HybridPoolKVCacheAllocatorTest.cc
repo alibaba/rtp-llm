@@ -1162,7 +1162,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, CP8LinearReuseStoresOnlyThe1024StateForA1
     // A longer request consumes the complete 1024-token state, even though it
     // has additional aligned pages of its own.
     auto extension_res    = makeBatchResource(/*batch_size=*/1, config);
-    auto extension_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/1160, kBlockSize);
+    auto extension_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/2131, kBlockSize);
     initCacheKeys(extension_res, extension_tokens, kBlockSize);
     MallocInfo extension_malloc{extension_res, extension_tokens};
     extension_malloc.reuse_cache         = true;
@@ -1170,6 +1170,16 @@ TEST_F(HybridPoolKVCacheAllocatorTest, CP8LinearReuseStoresOnlyThe1024StateForA1
     auto extension_result                = allocator->malloc(extension_malloc);
     ASSERT_TRUE(extension_result.success);
     EXPECT_EQ(extension_result.reuse_len, 1024);
+    ASSERT_GT(extension_res->blocks(0, /*gid=*/0).size(), 7u);
+    const auto reused_linear_state = extension_res->blocks(0, /*gid=*/0)[7];
+    EXPECT_FALSE(isNullBlockIdx(reused_linear_state));
+
+    // StreamCacheResource performs a follow-up incremental allocation before
+    // forward. The matched state must remain readable across that second pass.
+    extension_tokens->setReserveStep(4);
+    auto extension_incr = allocator->malloc(extension_malloc);
+    ASSERT_TRUE(extension_incr.success);
+    EXPECT_EQ(extension_res->blocks(0, /*gid=*/0)[7], reused_linear_state);
     allocator->free(FreeInfo{extension_res, extension_tokens});
 
     // A shorter prefix cannot fall back to 896 from the 1024-token entry.

@@ -545,6 +545,38 @@ TEST_F(LinearKVCacheGroupTest, RequestCacheKeepsOnlyLatestAlignedCandidateAndTwo
         EXPECT_EQ(!isNullBlockIdx(blocks.blocks()[pos]), expected) << "pos=" << pos;
     }
 }
+
+TEST_F(LinearKVCacheGroupTest, RequestCacheKeepsOldPrefillReadStateAcrossAlignmentBoundary) {
+    auto block_pool = createBlockPool();
+    ASSERT_TRUE(block_pool->init());
+
+    auto               spec = makeLinearSpec(/*seq_size_per_block=*/4);
+    LinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0);
+    group.setRequestCacheMode(true);
+    group.setRequestCacheAlignmentBlocks(2);
+    ASSERT_TRUE(group.init());
+
+    BlockIds   blocks;
+    const auto reused = block_pool->malloc(1);
+    ASSERT_EQ(reused.size(), 1u);
+    blocks.assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, reused[0]});
+    const auto old_read_state = blocks.blocks()[3];
+
+    // The resumed Prefill crosses from the state at position 3 to a new
+    // candidate/tail at positions 5/6. Hybrid allocation calls malloc twice
+    // before forward, so position 3 must survive both calls.
+    ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/26, /*enable_reuse_cache=*/true));
+    ASSERT_TRUE(group.malloc(blocks, /*seq_len=*/26, /*enable_reuse_cache=*/true, /*reserve_step=*/4));
+    group.removeSkippedBlocks(blocks, /*enable_reuse_cache=*/true, /*reserve_step=*/4);
+
+    ASSERT_EQ(blocks.blocksNum(), 10u);
+    EXPECT_EQ(blocks.blocks()[3], old_read_state);
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[5]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[6]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[7]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[8]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[9]));
+}
 }  // namespace test
 }  // namespace rtp_llm
 

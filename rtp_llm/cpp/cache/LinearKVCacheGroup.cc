@@ -157,12 +157,30 @@ bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_re
     // their replacements. This prevents a long-running request from needing an
     // extra resident block at every 128-token rollover.
     if (request_cache_mode_) {
-        BlockIndicesType    stale_blocks;
-        std::vector<size_t> stale_positions;
-        const auto&         before_blocks = block_ids.blocks();
-        const int           stale_scan    = std::min(current_blocks_len, total_slots);
+        // A reused Prefill is allocated twice before forward. Its first pass
+        // adds the new tail, so preserve the sole stale aligned block: it is
+        // the matched state that causal-conv/KDA has not consumed yet.
+        int         stale_count    = 0;
+        int         read_state_pos = -1;
+        const auto& before_blocks  = block_ids.blocks();
+        const int   stale_scan     = std::min(current_blocks_len, total_slots);
         for (int i = 0; i < stale_scan; ++i) {
             if (!should_materialize(i) && !isNullBlockIdx(before_blocks[static_cast<size_t>(i)])) {
+                stale_count++;
+                if (enable_reuse_cache && (i + 1) % request_cache_alignment_blocks_ == 0) {
+                    read_state_pos = i;
+                }
+            }
+        }
+        if (stale_count != 1) {
+            read_state_pos = -1;
+        }
+
+        BlockIndicesType    stale_blocks;
+        std::vector<size_t> stale_positions;
+        for (int i = 0; i < stale_scan; ++i) {
+            if (i != read_state_pos && !should_materialize(i)
+                && !isNullBlockIdx(before_blocks[static_cast<size_t>(i)])) {
                 stale_blocks.push_back(before_blocks[static_cast<size_t>(i)]);
                 stale_positions.push_back(static_cast<size_t>(i));
             }
@@ -238,6 +256,12 @@ bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_re
 }
 
 void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
+    // malloc() already removes obsolete request-cache states while retaining
+    // the one prefix state needed by the imminent Prefill forward. Do not free
+    // that read dependency before the kernels run.
+    if (request_cache_mode_ && enable_reuse_cache) {
+        return;
+    }
     const auto& block_indices = block_ids.blocks();  // const view for reading current state
     if (block_indices.empty()) {
         return;

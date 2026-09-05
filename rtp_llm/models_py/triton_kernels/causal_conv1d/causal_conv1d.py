@@ -5,6 +5,7 @@
 # Adapted from https://github.com/Dao-AILab/causal-conv1d/blob/main/causal_conv1d/causal_conv1d_interface.py
 # Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/ops/causal_conv1d.py
 
+import os
 from dataclasses import dataclass
 from typing import Optional, Union
 
@@ -18,6 +19,43 @@ BLOCK_M = 8
 BLOCK_N = 256
 
 from rtp_llm.models_py.triton_kernels.causal_conv1d.op import cal_block_idx
+
+
+def _validate_prefix_state_blocks(
+    block_map: torch.Tensor,
+    prefix_lengths: torch.Tensor,
+    num_state_blocks: int,
+    seq_size_per_block: int,
+) -> None:
+    """Fail before launch when a reused prefix points at a sparse cache hole."""
+    prefix = prefix_lengths.to(device=block_map.device, dtype=torch.int64)
+    active = prefix > 0
+    if not torch.any(active):
+        return
+    if block_map.size(1) == 0:
+        raise RuntimeError("causal_conv1d reused prefix has an empty block map")
+
+    rows = torch.arange(prefix.numel(), device=block_map.device)[active]
+    positions = torch.div(
+        prefix[active] - 1,
+        seq_size_per_block,
+        rounding_mode="floor",
+    )
+    bad_position = positions >= block_map.size(1)
+    safe_positions = positions.clamp(max=block_map.size(1) - 1)
+    state_blocks = block_map[rows, safe_positions].to(torch.int64)
+    invalid = bad_position | (state_blocks < 0) | (state_blocks >= num_state_blocks)
+    if torch.any(invalid):
+        bad = torch.nonzero(invalid, as_tuple=False).flatten()[0]
+        raise RuntimeError(
+            "causal_conv1d reused prefix has invalid state block: "
+            f"request={int(rows[bad])}, prefix_length={int(prefix[rows[bad]])}, "
+            f"logical_block={int(positions[bad])}, "
+            f"physical_block={int(state_blocks[bad])}, "
+            f"block_map_width={block_map.size(1)}, "
+            f"num_state_blocks={num_state_blocks}, "
+            f"seq_size_per_block={seq_size_per_block}"
+        )
 
 
 @dataclass
@@ -583,6 +621,18 @@ def causal_conv1d_fn(
     if batch_ptr.device != x.device:
         batch_ptr = batch_ptr.to(x.device)
         token_chunk_offset_ptr = token_chunk_offset_ptr.to(x.device)
+
+    if (
+        os.environ.get("GLM5_VALIDATE_CAUSAL_CONV_BLOCK_MAP", "0") == "1"
+        and block_map is not None
+        and conv_states is not None
+    ):
+        _validate_prefix_state_blocks(
+            block_map,
+            prefix_lengths,
+            conv_states.size(0),
+            seq_size_per_block,
+        )
 
     grid = (grid_x, triton.cdiv(dim, BLOCK_N))
     _causal_conv1d_fwd_kernel[grid](
