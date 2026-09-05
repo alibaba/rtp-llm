@@ -836,13 +836,25 @@ class AiterPrefillAttnOpPaged:
             buffer.shape != required_shape or buffer.device != self.graph_device
         ):
             raise ValueError("Aiter graph buffer changed; recapture required")
-        if self.seqlen_k_buf is None or self.seqlen_k_buf.shape[0] < batch_size:
+        if self.seqlen_k_buf is None:
             self.seqlen_k_buf = torch.empty(
                 max(1, batch_size), dtype=torch.int32, device=self.graph_device
             )
-        if self.kv_indptr_buf is None or self.kv_indptr_buf.shape[0] < batch_size + 1:
+        elif self.seqlen_k_buf.shape[0] < batch_size:
+            raise ValueError(
+                "Aiter paged-prefill CUDA graph replay exceeds the captured "
+                f"seqlen_k capacity: capture={self.seqlen_k_buf.shape[0]}, "
+                f"replay={batch_size}"
+            )
+        if self.kv_indptr_buf is None:
             self.kv_indptr_buf = torch.zeros(
                 max(1, batch_size + 1), dtype=torch.int32, device=self.graph_device
+            )
+        elif self.kv_indptr_buf.shape[0] < batch_size + 1:
+            raise ValueError(
+                "Aiter paged-prefill CUDA graph replay exceeds the captured "
+                f"kv_indptr capacity: capture={self.kv_indptr_buf.shape[0]}, "
+                f"replay={batch_size + 1}"
             )
         if self.kv_page_indices_buf is None:
             self.kv_page_indices_buf = torch.zeros(
