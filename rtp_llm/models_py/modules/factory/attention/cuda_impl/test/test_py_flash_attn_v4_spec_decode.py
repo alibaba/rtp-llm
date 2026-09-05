@@ -75,7 +75,9 @@ def _full_impl_reference(
     page_table: torch.Tensor,
     kv_lengths: list[int],
     head_dim: int = HEAD_DIM,
-) -> torch.Tensor:
+    position_offsets: list[int] | None = None,
+    rotary_dim: int | None = None,
+) -> tuple[torch.Tensor, LayerKVCache]:
     prefix_lengths = [kv_len - QUERY_LEN for kv_len in kv_lengths]
     rope_qkv = apply_base_rope_to_qkv_reference(
         qkv,
@@ -83,7 +85,8 @@ def _full_impl_reference(
         NUM_Q_HEADS,
         NUM_KV_HEADS,
         head_dim,
-        position_offsets=prefix_lengths,
+        position_offsets=position_offsets or prefix_lengths,
+        rotary_dim=rotary_dim,
     )
     q_size = NUM_Q_HEADS * head_dim
     kv_size = NUM_KV_HEADS * head_dim
@@ -101,13 +104,14 @@ def _full_impl_reference(
         page_table,
         start_positions=torch.tensor(prefix_lengths, dtype=torch.int32),
     )
-    return compute_paged_prefill_reference(
+    output = compute_paged_prefill_reference(
         query,
         reference_cache,
         page_table,
         kv_lengths,
         [QUERY_LEN] * len(kv_lengths),
     )
+    return output, reference_cache
 
 
 class TestFlashAttn4SpecDecodeDisableGating(unittest.TestCase):
@@ -403,7 +407,9 @@ class _Fa4HopperCases:
     def _make_config(self) -> AttentionConfigs:
         return _make_config(self.page_size, self.head_dim)
 
-    def _make_impl(self, attn_inputs) -> FlashAttn4SpecDecodeImpl:
+    def _make_impl(
+        self, attn_inputs, config: AttentionConfigs | None = None
+    ) -> FlashAttn4SpecDecodeImpl:
         """Build the impl, then rebind its cos/sin cache to this shape's rope dim.
 
         getRopeCacheOnce is a std::call_once singleton keyed only on interleave, so
@@ -413,14 +419,19 @@ class _Fa4HopperCases:
         isolation each of them would really have. Safe after construction because
         __init__ only stores the tensor.
         """
-        config = self._make_config()
+        config = config or self._make_config()
         impl = FlashAttn4SpecDecodeImpl(config, attn_inputs)
         self.assertEqual(
             ROPE_MAX_POS, config.max_seq_len + config.gen_num_per_cycle + 1
         )
-        impl.rope_impl.cos_sin_cache = get_rope_cache(
-            config.rope_config, ROPE_MAX_POS, False
-        )
+        rope_style = config.rope_config.style
+        config.rope_config.style = RopeStyle.Base
+        try:
+            impl.rope_impl.cos_sin_cache = get_rope_cache(
+                config.rope_config, ROPE_MAX_POS, False
+            )
+        finally:
+            config.rope_config.style = rope_style
         return impl
 
     def _make_qkv(self, batch_size: int) -> torch.Tensor:
@@ -451,6 +462,15 @@ class _Fa4HopperCases:
         inputs.is_target_verify = is_target_verify
         return inputs
 
+    def _set_text_mrope_positions(self, inputs, position_offsets: list[int]) -> None:
+        positions = torch.cat(
+            [
+                torch.arange(offset, offset + QUERY_LEN, device=self.device)
+                for offset in position_offsets
+            ]
+        ).to(torch.int32)
+        inputs.combo_position_ids = positions.repeat_interleave(3)
+
     def _make_page_table(self, kv_lengths: list[int]) -> tuple[torch.Tensor, int]:
         page_count = self._calculate_total_blocks(kv_lengths, self.page_size)
         page_table = self._create_kv_cache_block_ids(
@@ -474,7 +494,7 @@ class _Fa4HopperCases:
     def _reference(self, qkv, cache_snapshot, page_table, kv_lengths):
         return _full_impl_reference(
             qkv, cache_snapshot, page_table, kv_lengths, self.head_dim
-        )
+        )[0]
 
     def _assert_eager_impl_matches_reference(
         self, is_target_verify: bool, kv_lengths: list[int]
@@ -608,6 +628,96 @@ class TestFlashAttn4SpecDecodeHopperPage64HeadDim256(
 ):
     page_size = 64
     head_dim = 256
+
+    def test_mrope_target_verify_uses_logical_positions(self) -> None:
+        kv_lengths = [193, 257]
+        position_offsets = [17, 29]
+        page_table, page_count = self._make_page_table(kv_lengths)
+        inputs = self._make_spec_inputs(kv_lengths, page_table, True)
+        self._set_text_mrope_positions(inputs, position_offsets)
+        config = self._make_config()
+        config.rope_config.style = RopeStyle.Mrope
+        config.rope_config.dim = 64
+        config.rope_config.index_factor = 3
+        cache = self._make_kv_cache(page_count)
+        cache_snapshot = cache.kv_cache_base.clone()
+        qkv = self._make_qkv(len(kv_lengths))
+        self.assertTrue(FlashAttn4SpecDecodeImpl.support(config, inputs))
+        expected, expected_cache = _full_impl_reference(
+            qkv,
+            cache_snapshot,
+            page_table,
+            kv_lengths,
+            self.head_dim,
+            position_offsets,
+            config.rope_config.dim,
+        )
+
+        actual = self._make_impl(inputs, config).forward(qkv.clone(), cache)
+
+        torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+        torch.testing.assert_close(
+            cache.kv_cache_base,
+            expected_cache.kv_cache_base,
+            rtol=2e-2,
+            atol=2e-2,
+        )
+
+    def test_mrope_cuda_graph_replay_refreshes_logical_positions(self) -> None:
+        kv_lengths = [193, 257]
+        capture_offsets = [17, 29]
+        replay_offsets = [47, 59]
+        page_table, page_count = self._make_page_table(kv_lengths)
+        inputs = self._make_spec_inputs(
+            kv_lengths, page_table, True, is_cuda_graph=True
+        )
+        self._set_text_mrope_positions(inputs, capture_offsets)
+        config = self._make_config()
+        config.rope_config.style = RopeStyle.Mrope
+        config.rope_config.dim = 64
+        config.rope_config.index_factor = 3
+        cache = self._make_kv_cache(page_count)
+        cache_snapshot = cache.kv_cache_base.clone()
+        capture_qkv = self._make_qkv(len(kv_lengths))
+        static_qkv = capture_qkv.clone()
+        impl = self._make_impl(inputs, config)
+
+        warmup_stream = torch.cuda.Stream()
+        warmup_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(warmup_stream):
+            impl.forward(static_qkv, cache)
+        torch.cuda.current_stream().wait_stream(warmup_stream)
+        static_qkv.copy_(capture_qkv)
+        cache.kv_cache_base.copy_(cache_snapshot)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = impl.forward(static_qkv, cache)
+
+        replay_qkv = torch.randn_like(static_qkv)
+        static_qkv.copy_(replay_qkv)
+        cache.kv_cache_base.copy_(cache_snapshot)
+        self._set_text_mrope_positions(inputs, replay_offsets)
+        impl.prepare_cuda_graph(inputs)
+        graph.replay()
+        torch.cuda.synchronize()
+
+        expected, expected_cache = _full_impl_reference(
+            replay_qkv,
+            cache_snapshot,
+            page_table,
+            kv_lengths,
+            self.head_dim,
+            replay_offsets,
+            config.rope_config.dim,
+        )
+        torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+        torch.testing.assert_close(
+            cache.kv_cache_base,
+            expected_cache.kv_cache_base,
+            rtol=2e-2,
+            atol=2e-2,
+        )
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")

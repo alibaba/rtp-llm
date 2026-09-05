@@ -23,12 +23,15 @@ def apply_base_rope_to_qkv_reference(
     head_dim: int,
     rope_base: float = 10000.0,
     position_offsets: Optional[Sequence[int]] = None,
+    rotary_dim: Optional[int] = None,
 ) -> torch.Tensor:
     """Apply non-interleaved Base RoPE to packed QKV in float32."""
     if position_offsets is None:
         position_offsets = [0] * len(input_lengths)
     if len(position_offsets) != len(input_lengths):
         raise ValueError("position_offsets and input_lengths must have equal size")
+    if rotary_dim is None:
+        rotary_dim = head_dim
 
     q_size = num_q_heads * head_dim
     kv_size = num_kv_heads * head_dim
@@ -45,8 +48,8 @@ def apply_base_rope_to_qkv_reference(
     inv_freq = 1.0 / (
         rope_base
         ** (
-            torch.arange(0, head_dim, 2, device=qkv.device, dtype=torch.float32)
-            / head_dim
+            torch.arange(0, rotary_dim, 2, device=qkv.device, dtype=torch.float32)
+            / rotary_dim
         )
     )
     freqs = torch.outer(positions, inv_freq)
@@ -57,8 +60,10 @@ def apply_base_rope_to_qkv_reference(
         x1, x2 = x.chunk(2, dim=-1)
         return torch.cat([-x2, x1], dim=-1)
 
-    q = q * cos + rotate_half(q) * sin
-    k = k * cos + rotate_half(k) * sin
+    q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
+    k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
+    q = torch.cat([q_rot * cos + rotate_half(q_rot) * sin, q_pass], dim=-1)
+    k = torch.cat([k_rot * cos + rotate_half(k_rot) * sin, k_pass], dim=-1)
     return torch.cat([q.flatten(1), k.flatten(1), v.float()], dim=-1).to(qkv.dtype)
 
 

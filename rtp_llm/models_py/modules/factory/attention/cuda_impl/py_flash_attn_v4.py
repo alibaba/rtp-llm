@@ -9,6 +9,7 @@ import torch
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
     MhaRotaryEmbeddingOp,
+    TextMropeEmbeddingOp,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferPrefillImplBase,
@@ -313,10 +314,14 @@ class FlashAttn4SpecDecodeImpl(PyFlashinferPrefillImplBase):
     def _create_rope_impl(self, attn_configs: AttentionConfigs) -> Any:
         if attn_configs.rope_config.style == RopeStyle.No:
             return None
+        if attn_configs.rope_config.style == RopeStyle.Mrope:
+            return TextMropeEmbeddingOp(attn_configs, self.attn_inputs)
         return MhaRotaryEmbeddingOp(attn_configs)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
         self.fmha_impl.prepare_cuda_graph(attn_inputs)
+        if isinstance(self.rope_impl, TextMropeEmbeddingOp):
+            self.rope_impl.prepare_cuda_graph(attn_inputs)
 
     @staticmethod
     def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
@@ -327,7 +332,6 @@ class FlashAttn4SpecDecodeImpl(PyFlashinferPrefillImplBase):
             and attn_configs.dtype == torch.bfloat16
             and attn_configs.kv_cache_dtype == KvCacheDataType.BASE
             and not attn_configs.use_mla
-            and attn_configs.rope_config.style != RopeStyle.Mrope
             and attn_configs.head_num % attn_configs.kv_head_num == 0
             and 8 <= attn_configs.size_per_head <= 512
             and attn_configs.size_per_head % 8 == 0

@@ -2,7 +2,9 @@
 
 import math
 import unittest
+from types import SimpleNamespace
 from typing import Tuple
+from unittest import mock
 
 import torch
 from flashinfer import get_batch_indices_positions, get_seq_lens
@@ -12,9 +14,13 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
     MhaRotaryEmbeddingOp,
+    TextMropeEmbeddingOp,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
     KVCacheWriteOp,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+    PyFlashinferPrefillImpl,
 )
 from rtp_llm.ops import AttentionConfigs, RopeStyle
 from rtp_llm.ops.compute_ops import (
@@ -198,6 +204,119 @@ class TestMhaRotaryEmbeddingOp(unittest.TestCase):
             # If device initialization fails, some tests may still work
             print(f"Warning: Failed to initialize device: {e}")
             self.device_initialized = False
+
+    def _create_text_mrope_inputs(
+        self, positions: torch.Tensor, *, target_verify: bool, draft_prefill: bool
+    ) -> PyAttentionInputs:
+        attn_inputs = PyAttentionInputs()
+        attn_inputs.is_target_verify = target_verify
+        attn_inputs.is_spec_draft_prefill = draft_prefill
+        attn_inputs.combo_position_ids = positions.repeat_interleave(3)
+        return attn_inputs
+
+    def test_text_mrope_matches_base_rope(self):
+        num_tokens = 5
+        head_dim = 256
+        rope_dim = 64
+        rope_base = 10_000_000
+        attn_config = create_test_attn_config(
+            head_num=8,
+            kv_head_num=2,
+            size_per_head=head_dim,
+            dtype=torch.bfloat16,
+        )
+        attn_config.rope_config.style = RopeStyle.Mrope
+        attn_config.rope_config.dim = rope_dim
+        attn_config.rope_config.base = rope_base
+        attn_config.rope_config.index_factor = 3
+        positions = torch.tensor([7, 8, 9, 10, 11], dtype=torch.int32, device="cuda")
+        attn_inputs = self._create_text_mrope_inputs(
+            positions, target_verify=True, draft_prefill=False
+        )
+        cos_sin_cache = create_cos_sin_cache(rope_dim, base=rope_base, device="cuda")
+        rope_cache = SimpleNamespace(data=cos_sin_cache)
+        with mock.patch(
+            "rtp_llm.models_py.modules.factory.attention.cuda_impl."
+            "flashinfer_rotary_emb.get_rope_cache_once",
+            return_value=rope_cache,
+        ) as get_rope_cache:
+            text_mrope_op = TextMropeEmbeddingOp(attn_config, attn_inputs)
+
+        effective_config = get_rope_cache.call_args.args[0]
+        self.assertEqual(effective_config.style, RopeStyle.Base)
+        self.assertEqual(effective_config.dim, rope_dim)
+        self.assertEqual(effective_config.base, rope_base)
+        self.assertEqual(effective_config.scale, attn_config.rope_config.scale)
+        self.assertEqual(
+            get_rope_cache.call_args.args[1],
+            attn_config.max_seq_len + attn_config.gen_num_per_cycle + 1,
+        )
+        self.assertEqual(
+            get_rope_cache.call_args.kwargs,
+            {"is_cuda": True, "interleave": False},
+        )
+        self.assertEqual(attn_config.rope_config.style, RopeStyle.Mrope)
+
+        base_config = create_test_attn_config(
+            head_num=8,
+            kv_head_num=2,
+            size_per_head=head_dim,
+            dtype=torch.bfloat16,
+        )
+        base_config.rope_config.dim = rope_dim
+        base_config.rope_config.base = rope_base
+        base_rope_op = MhaRotaryEmbeddingOp(base_config, cos_sin_cache)
+        base_rope_op.set_params(SimpleNamespace(positions_d=positions))
+
+        qkv = torch.randn(
+            num_tokens,
+            (8 + 2 * 2) * head_dim,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        expected = base_rope_op.forward(qkv.clone())
+        actual = text_mrope_op.forward(qkv.clone())
+
+        for actual_tensor, expected_tensor in zip(actual, expected):
+            torch.testing.assert_close(actual_tensor, expected_tensor, rtol=0, atol=0)
+
+    def test_text_mrope_selected_for_mtp_prefill_paths(self):
+        attn_config = create_test_attn_config()
+        attn_config.rope_config.style = RopeStyle.Mrope
+        attn_config.rope_config.index_factor = 3
+        positions = torch.arange(4, dtype=torch.int32, device="cuda")
+
+        for target_verify, draft_prefill in ((True, False), (False, True)):
+            with self.subTest(target_verify=target_verify, draft_prefill=draft_prefill):
+                impl = object.__new__(PyFlashinferPrefillImpl)
+                impl.attn_inputs = self._create_text_mrope_inputs(
+                    positions,
+                    target_verify=target_verify,
+                    draft_prefill=draft_prefill,
+                )
+                self.assertIsInstance(
+                    impl._create_rope_impl(attn_config), TextMropeEmbeddingOp
+                )
+
+    def test_text_mrope_cuda_graph_refreshes_positions(self):
+        attn_config = create_test_attn_config()
+        attn_config.rope_config.style = RopeStyle.Mrope
+        attn_config.rope_config.index_factor = 3
+        capture_positions = torch.tensor([3, 4, 5], dtype=torch.int32, device="cuda")
+        replay_positions = torch.tensor([13, 14, 15], dtype=torch.int32, device="cuda")
+        capture_inputs = self._create_text_mrope_inputs(
+            capture_positions, target_verify=True, draft_prefill=False
+        )
+        replay_inputs = self._create_text_mrope_inputs(
+            replay_positions, target_verify=True, draft_prefill=False
+        )
+        text_mrope_op = TextMropeEmbeddingOp(attn_config, capture_inputs)
+        position_buffer = text_mrope_op.position_ids
+
+        text_mrope_op.prepare_cuda_graph(replay_inputs)
+
+        self.assertIs(text_mrope_op.position_ids, position_buffer)
+        torch.testing.assert_close(text_mrope_op.position_ids, replay_positions)
 
     def test_fused_rope_vs_mha_rope(self):
         """Compare FusedRopeKVCachePrefillOpQOut (C++) vs MhaRotaryEmbeddingOp (Python)"""

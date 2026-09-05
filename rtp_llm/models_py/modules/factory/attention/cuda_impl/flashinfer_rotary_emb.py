@@ -1,11 +1,13 @@
 from typing import Any
 
 import torch
+from flashinfer import rope
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.base_rotary_embedding_op import (
     BaseRotaryEmbeddingOp,
 )
-from rtp_llm.ops import AttentionConfigs
+from rtp_llm.ops import AttentionConfigs, RopeConfig, RopeStyle, get_rope_cache_once
+from rtp_llm.ops.compute_ops import PyAttentionInputs
 
 
 class MhaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
@@ -87,3 +89,48 @@ class MhaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
         self._apply_rope(query, key, self.params)
 
         return query, key, value
+
+
+class TextMropeEmbeddingOp(MhaRotaryEmbeddingOp):
+    """Apply Base RoPE to MTP text tokens whose T/H/W positions are equal."""
+
+    def __init__(
+        self, attn_config: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> None:
+        rope_config = RopeConfig()
+        rope_config.style = RopeStyle.Base
+        rope_config.dim = attn_config.rope_config.dim
+        rope_config.base = attn_config.rope_config.base
+        rope_config.scale = attn_config.rope_config.scale
+        max_position_embeddings = (
+            attn_config.max_seq_len + attn_config.gen_num_per_cycle + 1
+        )
+        rope_cache = get_rope_cache_once(
+            rope_config,
+            max_position_embeddings,
+            is_cuda=True,
+            interleave=False,
+        )
+        super().__init__(attn_config, cos_sin_cache=rope_cache.data)
+        self.position_ids = self._text_position_ids(attn_inputs).contiguous()
+
+    @staticmethod
+    def _text_position_ids(attn_inputs: PyAttentionInputs) -> torch.Tensor:
+        return attn_inputs.combo_position_ids.view(-1, 3)[:, 0]
+
+    def _apply_rope(
+        self, query: torch.Tensor, key: torch.Tensor, _rope_params: Any
+    ) -> None:
+        assert self.cos_sin_cache is not None
+        rope._apply_rope_pos_ids_cos_sin_cache(  # type: ignore
+            q=query,
+            k=key,
+            q_rope=query,
+            k_rope=key,
+            cos_sin_cache=self.cos_sin_cache,
+            pos_ids=self.position_ids.narrow(0, 0, query.shape[0]),
+            interleave=self.is_neox_style,
+        )
+
+    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
+        self.position_ids.copy_(self._text_position_ids(attn_inputs), non_blocking=True)

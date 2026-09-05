@@ -14,12 +14,7 @@ from rtp_llm.multimodal.multimodal_mixin_register import get_multimodal_mixin_cl
 from rtp_llm.multimodal.multimodal_mixins.qwen3_5_moe.qwen3_5_moe_mixin import (
     Qwen3_5MoeMixin,
 )
-from rtp_llm.ops import (
-    HWKernelConfig,
-    HybridAttentionType,
-    ParallelismConfig,
-    RopeStyle,
-)
+from rtp_llm.ops import HWKernelConfig, HybridAttentionType, ParallelismConfig
 
 
 class Qwen35DenseMTPTest(unittest.TestCase):
@@ -38,7 +33,6 @@ class Qwen35DenseMTPTest(unittest.TestCase):
             list(config.hybrid_attention_config.hybrid_attention_types),
             [HybridAttentionType.NONE],
         )
-        self.assertEqual(config.attn_config.rope_config.style, RopeStyle.Base)
         self.assertEqual(len(config.kv_cache_spec_descs), 1)
 
     def test_dense_mtp_uses_dense_ffn_checkpoint_keys(self):
@@ -75,9 +69,7 @@ class Qwen35DenseMTPTest(unittest.TestCase):
         )
 
     def test_dense_mtp_uses_qwen35_multimodal_mixin(self):
-        self.assertIs(
-            get_multimodal_mixin_cls("qwen35_dense_mtp"), Qwen3_5MoeMixin
-        )
+        self.assertIs(get_multimodal_mixin_cls("qwen35_dense_mtp"), Qwen3_5MoeMixin)
 
     @staticmethod
     def _config():
