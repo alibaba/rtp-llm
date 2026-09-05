@@ -5,6 +5,7 @@ import math
 from typing import Any, Callable, NamedTuple, Optional
 
 import torch
+from flashinfer import rope
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
@@ -23,6 +24,38 @@ from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, rtp_llm_ops
 _FA4_TILE_M = 64
 _FA4_TILE_N = 32
 _FA4_MAX_SPLITS = 128
+
+
+# FlashInfer RoPE accepts one position per token, while MRoPE carries T/H/W positions.
+# target verification and draft prefill contain only generated text tokens, whose three
+# coordinates are equal, so gathering one axis is equivalent to applying full MRoPE.
+class _FlashAttn4TextMropeEmbeddingOp(MhaRotaryEmbeddingOp):
+    def __init__(
+        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> None:
+        super().__init__(attn_configs)
+        self.position_ids = attn_inputs.combo_position_ids.view(-1, 3)[
+            :, 0
+        ].contiguous()
+
+    def _apply_rope(
+        self, query: torch.Tensor, key: torch.Tensor, _rope_params: Any
+    ) -> None:
+        assert self.cos_sin_cache is not None
+        rope._apply_rope_pos_ids_cos_sin_cache(  # type: ignore
+            q=query,
+            k=key,
+            q_rope=query,
+            k_rope=key,
+            cos_sin_cache=self.cos_sin_cache,
+            pos_ids=self.position_ids.narrow(0, 0, query.shape[0]),
+            interleave=self.is_neox_style,
+        )
+
+    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
+        self.position_ids.copy_(
+            attn_inputs.combo_position_ids.view(-1, 3)[:, 0], non_blocking=True
+        )
 
 
 def _ceil_div(value: int, divisor: int) -> int:
@@ -313,10 +346,18 @@ class FlashAttn4SpecDecodeImpl(PyFlashinferPrefillImplBase):
     def _create_rope_impl(self, attn_configs: AttentionConfigs) -> Any:
         if attn_configs.rope_config.style == RopeStyle.No:
             return None
+        if attn_configs.rope_config.style == RopeStyle.Mrope:
+            attn_configs.rope_config.style = RopeStyle.Base
+            try:
+                return _FlashAttn4TextMropeEmbeddingOp(attn_configs, self.attn_inputs)
+            finally:
+                attn_configs.rope_config.style = RopeStyle.Mrope
         return MhaRotaryEmbeddingOp(attn_configs)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
         self.fmha_impl.prepare_cuda_graph(attn_inputs)
+        if isinstance(self.rope_impl, _FlashAttn4TextMropeEmbeddingOp):
+            self.rope_impl.prepare_cuda_graph(attn_inputs)
 
     @staticmethod
     def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
@@ -327,7 +368,6 @@ class FlashAttn4SpecDecodeImpl(PyFlashinferPrefillImplBase):
             and attn_configs.dtype == torch.bfloat16
             and attn_configs.kv_cache_dtype == KvCacheDataType.BASE
             and not attn_configs.use_mla
-            and attn_configs.rope_config.style != RopeStyle.Mrope
             and attn_configs.head_num % attn_configs.kv_head_num == 0
             and 8 <= attn_configs.size_per_head <= 512
             and attn_configs.size_per_head % 8 == 0
