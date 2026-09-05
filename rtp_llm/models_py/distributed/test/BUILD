@@ -40,6 +40,21 @@ py_test(
 )
 
 py_test(
+    name = "collective_torch_tp2_dp2_test",
+    srcs = ["collective_torch_test.py"],
+    main = "collective_torch_test.py",
+    args = ["TestCollectiveOperations.test_all_collectives_tp2_dp2"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = 'moderate',
+    env = {"GPU_COUNT": "4"},
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20', 'gpu_count':'4'},
+)
+
+py_test(
     name = "collective_torch_hipgraph_unit_test",
     srcs = ["collective_torch_hipgraph_unit_test.py"],
     deps = [

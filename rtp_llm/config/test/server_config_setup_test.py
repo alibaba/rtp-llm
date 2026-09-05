@@ -13,8 +13,9 @@ from rtp_llm.config.server_config_setup import (
     _configure_model_prefill_cp,
     set_parallelism_config,
     setup_and_configure_server,
+    setup_default_args,
 )
-from rtp_llm.ops import CPRotateMethod, NcclCommConfig, RoleType
+from rtp_llm.ops import CPRotateMethod, NcclCommConfig, RoleType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 
 # clear=True must preserve gpu_lock isolation across Torch lazy initialization.
@@ -91,6 +92,29 @@ class GenerateConfigTest(TestCase):
         )
         return configs
 
+    @staticmethod
+    def _old_ops_cp_configs(role_type: RoleType) -> PyEnvConfigs:
+        configs = PyEnvConfigs()
+        configs.model_args.model_type = "fake_model"
+        configs.role_config.role_type = role_type
+        configs.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+        source = configs.prefill_cp_config
+        configs.prefill_cp_config = SimpleNamespace(
+            method=source.method,
+            comm_buffer_size=source.comm_buffer_size,
+            kv_cache_sharded=source.kv_cache_sharded,
+            is_enabled=lambda: True,
+        )
+        old_target = SimpleNamespace(
+            method=CPRotateMethod.DISABLED,
+            comm_buffer_size=0,
+            kv_cache_sharded=False,
+        )
+        configs.parallelism_config = _ParallelismConfigProxy(
+            configs.parallelism_config, old_target
+        )
+        return configs
+
     def test_qwen_cp_alignment_propagates(self):
         from rtp_llm.models.qwen3_next.qwen3_next import Qwen3NextBase
 
@@ -125,7 +149,7 @@ class GenerateConfigTest(TestCase):
         ), self.assertRaisesRegex(ValueError, "KV cache block size 96"):
             _configure_model_prefill_cp(configs)
 
-    def test_old_ops_alignment_field_is_optional_only_when_cp_is_disabled(self):
+    def test_old_ops_alignment_field_is_optional_in_parallelism_setup(self):
         for missing_side in ("source", "target", "both"):
             for enabled in (False, True):
                 with self.subTest(missing_side=missing_side, enabled=enabled):
@@ -153,13 +177,44 @@ class GenerateConfigTest(TestCase):
                         )
                         target = _ParallelismConfigProxy(target, old_target)
 
-                    if enabled:
-                        with self.assertRaisesRegex(
-                            RuntimeError, "update or rebuild the ops bindings"
-                        ):
-                            set_parallelism_config(target, py_prefill_cp_config=source)
-                    else:
-                        set_parallelism_config(target, py_prefill_cp_config=source)
+                    set_parallelism_config(target, py_prefill_cp_config=source)
+
+    def test_setup_default_args_allows_explicit_frontend_with_old_cp_bindings(self):
+        configs = self._old_ops_cp_configs(RoleType.FRONTEND)
+
+        with patch("rtp_llm.model_factory.ModelFactory.get_model_cls") as get_model_cls:
+            setup_default_args(configs)
+
+        get_model_cls.assert_not_called()
+        self.assertEqual(configs.role_config.role_type, RoleType.FRONTEND)
+
+    def test_setup_default_args_allows_explicit_vit_with_old_cp_bindings(self):
+        configs = self._old_ops_cp_configs(RoleType.VIT)
+
+        with patch("rtp_llm.model_factory.ModelFactory.get_model_cls") as get_model_cls:
+            setup_default_args(configs)
+
+        get_model_cls.assert_not_called()
+        self.assertEqual(configs.role_config.role_type, RoleType.VIT)
+
+    def test_setup_default_args_normalizes_legacy_vit_with_old_cp_bindings(self):
+        configs = self._old_ops_cp_configs(RoleType.PDFUSION)
+        configs.vit_config.vit_separation = VitSeparation.VIT_SEPARATION_ROLE
+
+        with patch("rtp_llm.model_factory.ModelFactory.get_model_cls") as get_model_cls:
+            setup_default_args(configs)
+
+        get_model_cls.assert_not_called()
+        self.assertEqual(configs.role_config.role_type, RoleType.VIT)
+
+    def test_setup_default_args_rejects_model_role_with_old_cp_bindings(self):
+        configs = self._old_ops_cp_configs(RoleType.PDFUSION)
+        model_cls = SimpleNamespace(prefill_cp_alignment=lambda: 64)
+
+        with patch(
+            "rtp_llm.model_factory.ModelFactory.get_model_cls", return_value=model_cls
+        ), self.assertRaisesRegex(RuntimeError, "update or rebuild the ops bindings"):
+            setup_default_args(configs)
 
     def test_cp_registry_errors_skip_only_non_model_roles(self):
         for role_type in (RoleType.FRONTEND, RoleType.VIT):

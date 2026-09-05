@@ -14,6 +14,7 @@ from rtp_llm.ops import (
     PrefillCPConfig,
     RoleType,
     SpeculativeType,
+    VitSeparation,
 )
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 
@@ -351,12 +352,6 @@ def set_parallelism_config(
             target_prefill_cp_config.segment_size_alignment = (
                 py_prefill_cp_config.segment_size_alignment
             )
-        elif py_prefill_cp_config.is_enabled():
-            raise RuntimeError(
-                "CP segment_size_alignment is unavailable in this rtp_llm.ops "
-                "build; update or rebuild the ops bindings before enabling "
-                "context parallelism"
-            )
         target_prefill_cp_config.method = py_prefill_cp_config.method
         target_prefill_cp_config.comm_buffer_size = (
             py_prefill_cp_config.comm_buffer_size
@@ -457,6 +452,18 @@ def _configure_model_prefill_cp(py_env_configs: PyEnvConfigs) -> None:
 
 
 def setup_default_args(py_env_configs):
+    # Backward compat: VIT_SEPARATION=ROLE without ROLE_TYPE=VIT
+    if (
+        py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE
+        and py_env_configs.role_config.role_type == RoleType.PDFUSION
+    ):
+        logging.warning(
+            "VIT_SEPARATION=ROLE detected without ROLE_TYPE=VIT. "
+            "Auto-setting ROLE_TYPE=VIT for backward compatibility. "
+            "Please migrate to ROLE_TYPE=VIT explicitly."
+        )
+        py_env_configs.role_config.role_type = RoleType.VIT
+
     set_parallelism_config(
         py_env_configs.parallelism_config,
         py_prefill_cp_config=py_env_configs.prefill_cp_config,

@@ -69,3 +69,9 @@ py_test(
         'gpu': 'MI308X-ROCM7',
     },
 )
+
+py_test(
+    name = "test_static_fp8_ffn_loader",
+    srcs = ["test_static_fp8_ffn_loader.py"],
+    deps = py_test_deps,
+)
