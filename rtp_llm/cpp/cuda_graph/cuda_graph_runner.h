@@ -104,18 +104,18 @@ private:
     void replayAndSyncCheck(int key, const char* key_type);
 
     bool isEmbeddingStylePrefillCudaGraph() const {
-        return is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ == max_seq_len_;
+        return is_prefill_cuda_graph_mode_ && sp_steps_ == 0;
     }
-    bool isMtpDraftPrefillCudaGraph() const {
-        return is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
+    bool isSpecDraftPrefillCudaGraph() const {
+        return is_prefill_cuda_graph_mode_ && sp_steps_ > 0;
     }
-    bool usesFixedCapacityMtpDraftPrefillCudaGraph() const {
+    bool usesFixedCapacitySpecDraftPrefillCudaGraph() const {
         // DSpARK propose/commit now run as construction-time-role decode graphs
         // (is_prefill_cuda_graph_mode_ == false), so only the HC-shaped MTP draft
         // prefill keeps the fixed-capacity Python path: slicing its output buffer
         // would mismatch the forward_decode [B * q_len, dim] result in
         // captureOneGraphInstance.
-        return isMtpDraftPrefillCudaGraph() && hc_mult_ > 1;
+        return isSpecDraftPrefillCudaGraph() && hc_mult_ > 1;
     }
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);

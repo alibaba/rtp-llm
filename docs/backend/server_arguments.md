@@ -34,6 +34,7 @@ This page lists server arguments used to configure the behavior and performance 
 | `--enable_paged_open_source_fmha` | Enables Paged open-source FMHA implementation. | True |
 | `--disable_flashinfer_native` | Disables FlashInfer native attention backends. | False |
 | `--disable_flashinfer_hybrid_prefill` | Disables FlashInfer native Hybrid Prefill implementation. | True |
+| `--enable_fa4_spec_decode` | Enables the FA4 attention backend for speculative decoding target verify and draft prefill. Requires SM90, BF16, and a non-quantized KV cache; the kernel is only packaged in the CUDA 12.9 x86 build. Set to False to fall back to the FlashInfer/TRT prefill path. | True |
 | `--enable_xqa` | Enables XQA feature (requires SM90+ GPU). | True |
 
 ### Removed FMHA options

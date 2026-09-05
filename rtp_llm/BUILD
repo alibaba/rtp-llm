@@ -626,6 +626,13 @@ py_package(
     ],
 )
 
+fa4_whl_packages = select({
+    "@//:using_cuda12_9_x86": [
+        "3rdparty.vllm_flash_attention.vllm_flash_attention",
+    ],
+    "//conditions:default": [],
+})
+
 py_package(
     name = "rtp_llm_package",
     deps = [
@@ -633,11 +640,34 @@ py_package(
     ] + jit_deps(),
     packages = [
         "rtp_llm",
-    ] + select({
+    ] + fa4_whl_packages + select({
         "@//:using_cuda12": deep,
         "//conditions:default": [],
     }),
 )
+
+fa4_whl_reqs = select({
+    "@//:using_cuda12_9_x86": [
+        "nvidia-cutlass-dsl==4.5.3",
+        "quack-kernels==0.5.0",
+        "torch-c-dlpack-ext==0.1.5",
+    ],
+    "//conditions:default": [],
+})
+
+# The cuda12 / cuda13 locks resolve 0.1.9 / 0.1.10, so FA4's lower bound cannot
+# be applied globally.
+tvm_ffi_req = select({
+    "@//:using_cuda12_9_x86": ["apache-tvm-ffi>=0.1.12,<0.2"],
+    "//conditions:default": ["apache-tvm-ffi"],
+})
+
+fa4_whl_strip_prefixes = select({
+    "@//:using_cuda12_9_x86": [
+        "3rdparty/vllm_flash_attention/",
+    ],
+    "//conditions:default": [],
+})
 
 whl_reqs = [
     "filelock>=3.20.0",
@@ -695,12 +725,11 @@ whl_reqs = [
     "bitsandbytes",
     "portalocker",
     "concurrent_log_handler",
-    "apache-tvm-ffi",
     "xgrammar==0.2.5",
     # OTel trace runtime; keep the pinned protobuf compatibility constraint.
     "opentelemetry-sdk==1.44.0",
     "opentelemetry-exporter-otlp-proto-http==1.15.0",
-] + whl_deps() + platform_deps() + xft_dep
+] + tvm_ffi_req + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(
     name = "rtp_llm_frontend_whl",
@@ -782,7 +811,8 @@ py_wheel(
         ":rtp_llm_package",
         "@rtp_deps//:extension_package"
     ],
-    requires = whl_reqs,
+    requires = whl_reqs + fa4_whl_reqs,
+    strip_path_prefixes = fa4_whl_strip_prefixes,
 )
 
 py_wheel(
@@ -795,9 +825,10 @@ py_wheel(
         ":rtp_llm_package",
         "@rtp_deps//:extension_package",
     ],
-    requires = whl_reqs + [
+    requires = whl_reqs + fa4_whl_reqs + [
         "kserve",
     ] + xft_dep + arch_with_version_dep,
+    strip_path_prefixes = fa4_whl_strip_prefixes,
 )
 
 py_package(

@@ -216,12 +216,13 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     }
 
     // Calculate cu_seqlens
-    int    batch_size               = py_attn_inputs.input_lengths.size(0);
-    size_t context_batch_size       = py_attn_inputs.prefix_lengths.size(0);
-    size_t decode_batch_size        = py_attn_inputs.sequence_lengths.size(0);
-    py_attn_inputs.dtype            = dataTypeToTorchType(description_.data_type);
-    py_attn_inputs.is_prefill       = !decode_batch_size;
-    py_attn_inputs.is_target_verify = inputs.is_target_verify;
+    int    batch_size                    = py_attn_inputs.input_lengths.size(0);
+    size_t context_batch_size            = py_attn_inputs.prefix_lengths.size(0);
+    size_t decode_batch_size             = py_attn_inputs.sequence_lengths.size(0);
+    py_attn_inputs.dtype                 = dataTypeToTorchType(description_.data_type);
+    py_attn_inputs.is_prefill            = !decode_batch_size;
+    py_attn_inputs.is_target_verify      = inputs.is_target_verify;
+    py_attn_inputs.is_spec_draft_prefill = inputs.is_spec_draft_prefill;
     RTP_LLM_CHECK_WITH_INFO(
         context_batch_size + decode_batch_size == batch_size,
         "batch size check failed context_batch_size[%ld] decode_batch_size[%ld] total_batch_size[%ld]",
@@ -834,8 +835,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             RTP_LLM_PROFILE_SCOPE("py_model.forward(cuda_graph)");
             DevicePerfWrapper wrapper(enable_device_perf_, "cuda graph python forward");
             RTP_LLM_LOG_DEBUG(
-                "[PyWrappedModel] using CUDA graph forward, is_target_verify=%d, is_prefill=%d, graph_bs=%d",
+                "[PyWrappedModel] using CUDA graph forward, is_target_verify=%d, is_spec_draft_prefill=%d, "
+                "is_prefill=%d, graph_bs=%d",
                 py_model_inputs.attention_inputs.is_target_verify,
+                py_model_inputs.attention_inputs.is_spec_draft_prefill,
                 py_model_inputs.attention_inputs.is_prefill,
                 graph_state_.current_real_graph_bs);
             py_model_inputs.attention_inputs.is_s_padded = true;
@@ -846,8 +849,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
             DevicePerfWrapper wrapper(enable_device_perf_, "normal forward");
-            RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
+            RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, "
+                              "is_spec_draft_prefill=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,
+                              py_model_inputs.attention_inputs.is_spec_draft_prefill,
                               py_model_inputs.attention_inputs.is_prefill);
             held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
             auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
