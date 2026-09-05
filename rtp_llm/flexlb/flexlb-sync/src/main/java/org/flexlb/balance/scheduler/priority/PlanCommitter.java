@@ -18,6 +18,8 @@ public class PlanCommitter {
     public enum CommitResult {
         /** Plan applied; item queued on the prefill batcher. */
         SUCCESS,
+        /** Placement lost physical-group health before admission commit. */
+        UNHEALTHY,
         /** Offer to prefill batcher failed (stopped/full) or duplicate request id. */
         OFFER_FAILED
     }

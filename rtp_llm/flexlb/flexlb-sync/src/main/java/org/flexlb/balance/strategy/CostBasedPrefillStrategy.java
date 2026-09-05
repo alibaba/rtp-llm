@@ -467,11 +467,13 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         Map<String, Integer> rejections = new HashMap<>();
 
         PrefillEndpoint[] excludedEligible = new PrefillEndpoint[1];
+        Map<String, WorkerEndpoint> healthyEndpoints =
+                engineWorkerStatus.selectRoutableModelWorkerStatus(roleType, group);
         int registered = engineWorkerStatus.forEachModelWorkerEndpoint(roleType, group, (ipPort, ep) -> {
             if (!(ep instanceof PrefillEndpoint pe)) {
                 return;
             }
-            if (!engineWorkerStatus.isPhysicalGroupHealthy(pe)) {
+            if (healthyEndpoints.get(ipPort) != pe) {
                 rejections.merge("NOT_ALIVE", 1, Integer::sum);
                 return;
             }

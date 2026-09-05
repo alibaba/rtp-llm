@@ -328,6 +328,10 @@ class WorkerBatcherTest {
         SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1);
         SchedulingTestConfig.useBatchDispatcher(config).setMaxInflightBatchesPerPrefillWorker(0);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        WorkerStatus status = new WorkerStatus();
+        status.setIp("10.0.0.1");
+        status.setPort(8080);
+        when(endpoint.getStatus()).thenReturn(status);
         CountDownLatch delivered = new CountDownLatch(1);
         WorkerBatcher batcher = new WorkerBatcher(
                 "condition-worker", endpoint, config, new DecisionGroupHandler() {

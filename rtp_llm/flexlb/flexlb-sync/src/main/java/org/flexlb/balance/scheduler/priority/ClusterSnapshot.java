@@ -1,7 +1,10 @@
 package org.flexlb.balance.scheduler.priority;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.EngineWorkerStatus;
 
 import java.util.HashMap;
@@ -32,17 +35,11 @@ public record ClusterSnapshot(
                 ? 0L : configuredDecodeConcurrency;
         EngineWorkerStatus health = new EngineWorkerStatus(registry);
         Map<String, PrefillEndpointSnapshot> prefills = new HashMap<>();
-        registry.getPrefillEndpoints().forEach((key, ep) -> {
-            if (health.isPhysicalGroupHealthy(ep)) {
-                prefills.put(key, PrefillEndpointSnapshot.capture(ep, prefillQueueCapacity));
-            }
-        });
+        health.selectRoutableModelWorkerStatus(RoleType.PREFILL, null).forEach((key, ep) ->
+                prefills.put(key, PrefillEndpointSnapshot.capture((PrefillEndpoint) ep, prefillQueueCapacity)));
         Map<String, DecodeEndpointSnapshot> decodes = new HashMap<>();
-        registry.getDecodeEndpoints().forEach((key, ep) -> {
-            if (health.isPhysicalGroupHealthy(ep)) {
-                decodes.put(key, DecodeEndpointSnapshot.capture(ep, decodeConcurrencyLimit));
-            }
-        });
+        health.selectRoutableModelWorkerStatus(RoleType.DECODE, null).forEach((key, ep) ->
+                decodes.put(key, DecodeEndpointSnapshot.capture((DecodeEndpoint) ep, decodeConcurrencyLimit)));
         return new ClusterSnapshot(prefills, decodes);
     }
 }

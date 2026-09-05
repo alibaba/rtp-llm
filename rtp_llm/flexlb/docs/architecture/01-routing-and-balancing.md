@@ -84,6 +84,8 @@ master forwarding 透传 protobuf 响应。物理地址字段与既有 service p
 endpoint/group/物理 frontend 展开的 `multiEngineNum` 个逻辑 worker 必须齐全、index 唯一且
 全部 `alive`，否则整组从候选集中移除。该 AND 只约束健康；门控后的资源、队列、cache 命中、
 outstanding tokens 和 score 仍读取当前 `ip:httpPort@index` 自己的状态。
+候选筛选按物理组一次计算健康状态；最终路由选择及 admission 提交（含 prefill queue
+抢占）重新检查当前组健康，失效时释放 incoming 的预留并拒绝提交，保留已有 victim。
 
 ### RandomStrategy
 

@@ -46,6 +46,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -172,6 +173,95 @@ class PriorityEvictionSchedulerTest {
         verify(priorityReporter).reportEvictionPlan(eq(70), eq("prefill_queue_full"), eq("feasible"));
         verify(priorityReporter).reportEvictionCommit(eq(70), eq("prefill_queue_full"), eq("success"));
         verify(priorityReporter).reportVictim(eq(30), eq(70), eq("prefill_queued"), eq("prefill_queue_full"));
+    }
+
+    @Test
+    void sibling_failure_before_prefill_eviction_preserves_victim_and_rejects_incoming() throws Exception {
+        WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
+        DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
+        endpointRegistry.getPrefill(PREFILL_IP_PORT).getStatus().setMultiEngineNum(2);
+        WorkerStatus sibling = new WorkerStatus();
+        sibling.setIp("10.0.0.1");
+        sibling.setPort(8080);
+        sibling.setGrpcPort(8081);
+        sibling.setRole(RoleType.PREFILL);
+        sibling.setEngineIndex(1);
+        sibling.setMultiEngineNum(2);
+        sibling.setAlive(true);
+        endpointRegistry.ensureEndpoint(RoleType.PREFILL, sibling.getLogicalIpPort(), sibling);
+
+        CompletableFuture<Response> victim = scheduler.submit(context("6", 30));
+        await(() -> batcher.queueSize() == 1);
+        doAnswer(invocation -> {
+            sibling.getConsecutiveFailures().set(3);
+            endpointRegistry.remove(RoleType.PREFILL, sibling.getLogicalIpPort(), sibling);
+            return null;
+        }).when(priorityReporter).reportEvictionPlan(eq(70), eq("prefill_queue_full"), eq("feasible"));
+
+        CompletableFuture<Response> incoming = scheduler.submit(context("7", 70));
+
+        assertFalse(victim.isDone(), "An unhealthy target must not evict an existing queued request");
+        Response response = incoming.get(2, TimeUnit.SECONDS);
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode());
+        assertEquals(1, batcher.queueSize());
+        assertEquals(1, decodeEp.getInflightCount());
+        verify(priorityReporter, never()).reportVictim(anyInt(), anyInt(), anyString(), anyString());
+        verify(priorityReporter, never()).reportEvictionCommit(eq(70), eq("prefill_queue_full"), eq("success"));
+        assertTrue(sentBatches.isEmpty());
+    }
+
+    @Test
+    void sibling_failure_after_routing_rejects_normal_commit_without_queueing() throws Exception {
+        WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
+        DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
+        endpointRegistry.getPrefill(PREFILL_IP_PORT).getStatus().setMultiEngineNum(2);
+        WorkerStatus sibling = new WorkerStatus();
+        sibling.setIp("10.0.0.1");
+        sibling.setPort(8080);
+        sibling.setGrpcPort(8081);
+        sibling.setRole(RoleType.PREFILL);
+        sibling.setEngineIndex(1);
+        sibling.setMultiEngineNum(2);
+        sibling.setAlive(true);
+        endpointRegistry.ensureEndpoint(RoleType.PREFILL, sibling.getLogicalIpPort(), sibling);
+        when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
+            BalanceContext ctx = invocation.getArgument(0);
+            decodeEp.reserve(ctx.getRequestId(), 128, 136);
+            Response response = successRoute(ctx.getRequestId());
+            sibling.getConsecutiveFailures().set(3);
+            endpointRegistry.remove(RoleType.PREFILL, sibling.getLogicalIpPort(), sibling);
+            return response;
+        });
+
+        Response response = scheduler.submit(context("8", 70)).get(2, TimeUnit.SECONDS);
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode());
+        assertEquals(0, batcher.queueSize());
+        assertEquals(0, decodeEp.getInflightCount());
+        assertTrue(sentBatches.isEmpty());
+    }
+
+    @Test
+    void normal_commit_rejects_selected_decode_removed_after_routing() throws Exception {
+        WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
+        DecodeEndpoint decode = endpointRegistry.getDecode(DECODE_IP_PORT);
+        when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
+            BalanceContext ctx = invocation.getArgument(0);
+            decode.reserve(ctx.getRequestId(), 128, 136);
+            Response response = successRoute(ctx.getRequestId());
+            endpointRegistry.remove(RoleType.DECODE, decode.ipPort(), decode.getStatus());
+            return response;
+        });
+
+        Response response = scheduler.submit(context("9", 70)).get(2, TimeUnit.SECONDS);
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode());
+        assertEquals(0, batcher.queueSize());
+        assertEquals(0, endpointRegistry.getEndpointCount(RoleType.DECODE));
+        assertTrue(sentBatches.isEmpty());
     }
 
     @Test

@@ -213,7 +213,7 @@ public class EndpointRegistry {
     }
 
     private void prepareEndpointMetrics(RoleType roleType, WorkerStatus status) {
-        reporter.prepareEndpointMetrics(roleType.name(), status.getIp());
+        reporter.prepareEndpointMetrics(roleType.name(), status.getIpIndex());
     }
 
     public void close() {

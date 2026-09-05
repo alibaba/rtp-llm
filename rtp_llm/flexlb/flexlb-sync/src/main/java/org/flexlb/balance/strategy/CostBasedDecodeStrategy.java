@@ -85,11 +85,13 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         }
         List<DecodeEndpoint> result = new ArrayList<>(engineWorkerStatus.getModelWorkerCapacity(roleType));
         Map<String, Integer> rejections = new HashMap<>();
+        Map<String, WorkerEndpoint> healthyEndpoints =
+                engineWorkerStatus.selectRoutableModelWorkerStatus(roleType, group);
         int registered = engineWorkerStatus.forEachModelWorkerEndpoint(roleType, group, (ipPort, ep) -> {
             if (!(ep instanceof DecodeEndpoint de)) {
                 return;
             }
-            if (!engineWorkerStatus.isPhysicalGroupHealthy(de)) {
+            if (healthyEndpoints.get(ipPort) != de) {
                 rejections.merge("NOT_ALIVE", 1, Integer::sum);
                 return;
             }

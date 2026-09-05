@@ -547,7 +547,11 @@ public class PriorityAdmissionScheduler {
                     outcome.plan.decodeEp().markQueuedPhase(ctx.getRequestId());
                 }
                 PlanCommitter.CommitResult result =
-                        planCommitter.commit(outcome.plan, registrar);
+                        commitPlacement(outcome.plan, registrar);
+                if (result == PlanCommitter.CommitResult.UNHEALTHY) {
+                    rejectUnhealthyPlacement(outcome.plan);
+                    return;
+                }
                 if (result == PlanCommitter.CommitResult.SUCCESS) {
                     onCommitted(ctx, outcome.plan);
                     bindAdmissionLease(outcome.plan, registrar, permit);
@@ -720,6 +724,11 @@ public class PriorityAdmissionScheduler {
         // registration and the queue replacement/direct-offer edge are one
         // request-local unit with respect to Cancel and deadline.
         synchronized (item.future()) {
+            if (!isPlacementHealthy(plan)) {
+                completeAdmissionError(item.future(), StrategyErrorType.NO_AVAILABLE_WORKER,
+                        AdmissionRejectReason.UNSPECIFIED, "worker group became unhealthy before admission");
+                return EvictionOutcome.REJECTED;
+            }
             if (!registrar.isAdmissionOpen(item.requestId(), item.future())
                     || !registrar.registerInflight(item)) {
                 Logger.warn("[priority-scheduler] eviction commit rejected: request_id={}",
@@ -1395,7 +1404,11 @@ public class PriorityAdmissionScheduler {
         // normal path); every failure path below releases the reservation,
         // which clears the mark.
         decodeEp.markQueuedPhase(ctx.getRequestId());
-        PlanCommitter.CommitResult result = planCommitter.commit(plan, registrar);
+        PlanCommitter.CommitResult result = commitPlacement(plan, registrar);
+        if (result == PlanCommitter.CommitResult.UNHEALTHY) {
+            rejectUnhealthyPlacement(plan);
+            return DecodeEvictionOutcome.FAILED;
+        }
         if (result == PlanCommitter.CommitResult.SUCCESS) {
             onCommitted(ctx, plan);
             bindAdmissionLease(plan, registrar, permit);
@@ -1546,6 +1559,27 @@ public class PriorityAdmissionScheduler {
         }
     }
 
+    private PlanCommitter.CommitResult commitPlacement(NormalPlacementPlan plan,
+                                                        InflightRegistrar registrar) {
+        synchronized (plan.item().future()) {
+            if (!isPlacementHealthy(plan)) {
+                return PlanCommitter.CommitResult.UNHEALTHY;
+            }
+            return planCommitter.commit(plan, registrar);
+        }
+    }
+
+    private void rejectUnhealthyPlacement(NormalPlacementPlan plan) {
+        releaseDecodeReservation(plan);
+        completeAdmissionError(plan.item().future(), StrategyErrorType.NO_AVAILABLE_WORKER,
+                AdmissionRejectReason.UNSPECIFIED, "worker group became unhealthy before admission");
+    }
+
+    private boolean isPlacementHealthy(NormalPlacementPlan plan) {
+        return engineWorkerStatus.isPhysicalGroupHealthy(plan.prefillEp())
+                && (plan.item().decode() == null || engineWorkerStatus.isPhysicalGroupHealthy(plan.decodeEp()));
+    }
+
     private PriorityRequestEnvelope buildEnvelope(BalanceContext ctx,
                                                   DecodeEndpoint decodeEp) {
         long seqLen = ctx.getRequest().getSeqLen();
@@ -1634,7 +1668,7 @@ public class PriorityAdmissionScheduler {
         try {
             batchReporter.reportRouteSubmitTimeMs(
                     RoleType.PREFILL.name(),
-                    plan.prefillEp().getIp(),
+                    plan.prefillEp().getStatus().getIpIndex(),
                     System.currentTimeMillis() - ctx.getStartTime());
         } catch (RuntimeException telemetryFailure) {
             Logger.warn("[priority-scheduler] failed to report route-submit latency: request_id={}",

@@ -101,6 +101,7 @@ class PrioritySchedulerTest {
 
         when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
+            endpointRegistry.getDecode("10.0.0.2:8081@0").reserve(ctx.getRequestId(), 128, 136);
             return successRoute(ctx.getRequestId());
         });
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
@@ -122,17 +123,72 @@ class PrioritySchedulerTest {
         ws.setIp("10.0.0.1");
         ws.setPort(8080);
         ws.setGrpcPort(8081);
+        ws.setRole(RoleType.PREFILL);
+        ws.setAlive(true);
         ServerStatus prefill = new ServerStatus();
         prefill.setServerIp("10.0.0.1");
         prefill.setHttpPort(8080);
         prefill.setGrpcPort(8081);
         prefill.setRole(RoleType.PREFILL);
         endpointRegistry.ensureEndpoint(RoleType.PREFILL, ipPort, ws);
+        ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
     }
 
     @AfterEach
     void tearDown() {
         scheduler.shutdown();
+    }
+
+    @Test
+    void fifo_submit_rejects_sibling_failure_after_routing_without_queueing() throws Exception {
+        PrefillEndpoint prefill = endpointRegistry.getPrefill("10.0.0.1:8080@0");
+        prefill.getStatus().setRole(RoleType.PREFILL);
+        prefill.getStatus().setAlive(true);
+        prefill.getStatus().setMultiEngineNum(2);
+        WorkerStatus sibling = workerStatus("10.0.0.1", 8080, 8081);
+        sibling.setRole(RoleType.PREFILL);
+        sibling.setEngineIndex(1);
+        sibling.setMultiEngineNum(2);
+        endpointRegistry.ensureEndpoint(RoleType.PREFILL, sibling.getLogicalIpPort(), sibling);
+        DecodeEndpoint decode = ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
+        decode.getStatus().setRole(RoleType.DECODE);
+        when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
+            BalanceContext ctx = invocation.getArgument(0);
+            decode.reserve(ctx.getRequestId(), 128, 136);
+            Response response = successRoute(ctx.getRequestId());
+            sibling.getConsecutiveFailures().set(3);
+            endpointRegistry.remove(RoleType.PREFILL, sibling.getLogicalIpPort(), sibling);
+            return response;
+        });
+
+        Response response = scheduler.submit(context("90000")).get(2, TimeUnit.SECONDS);
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode());
+        assertEquals(0, prefill.getBatcher().queueSize());
+        assertEquals(0, decode.getInflightCount());
+        assertTrue(sentBatches.isEmpty());
+    }
+
+    @Test
+    void fifo_submit_rejects_selected_decode_removed_after_routing() throws Exception {
+        PrefillEndpoint prefill = endpointRegistry.getPrefill("10.0.0.1:8080@0");
+        DecodeEndpoint decode = ensureDecodeEndpoint("10.0.0.2", 8081, 8082);
+        when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
+            BalanceContext ctx = invocation.getArgument(0);
+            decode.reserve(ctx.getRequestId(), 128, 136);
+            Response response = successRoute(ctx.getRequestId());
+            endpointRegistry.remove(RoleType.DECODE, decode.ipPort(), decode.getStatus());
+            return response;
+        });
+
+        Response response = scheduler.submit(context("90002")).get(2, TimeUnit.SECONDS);
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), response.getCode());
+        assertEquals(0, prefill.getBatcher().queueSize());
+        assertEquals(0, endpointRegistry.getEndpointCount(RoleType.DECODE));
+        assertTrue(sentBatches.isEmpty());
     }
 
     @Test
@@ -216,6 +272,7 @@ class PrioritySchedulerTest {
         when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
             BalanceContext ctx = inv.getArgument(0);
             String requestId = ctx.getRequestId();
+            endpointRegistry.getDecode("10.0.0.2:8081@0").reserve(requestId, 128, 136);
             return successRouteWithPrefillDp(requestId, requestId.equals("71") ? 0 : 1);
         });
 
@@ -506,6 +563,7 @@ class PrioritySchedulerTest {
                 .setMaxInflightRequestsPerPrefillWorker(1);
 
         WorkerStatus prefillStatus = workerStatus("10.0.0.9", 8090, 8091);
+        prefillStatus.setRole(RoleType.PREFILL);
         PrefillEndpoint prefill = (PrefillEndpoint) endpointRegistry.ensureEndpoint(
                 RoleType.PREFILL, "10.0.0.9:8090@0", prefillStatus);
         DecodeEndpoint decode = ensureDecodeEndpoint("10.0.0.8", 8180, 8181);
@@ -560,6 +618,7 @@ class PrioritySchedulerTest {
     void routePublicationFenceRejectsPreemptionUntilAck_andUsesRequestIdForTerminal()
             throws Exception {
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        when(prefill.getStatus()).thenReturn(workerStatus("10.0.0.1", 8080, 8081));
         PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
         when(prefill.getPredictor()).thenReturn(predictor);
         when(prefill.tryCommitRequest(ArgumentMatchers.anyString(), anyLong(), anyInt()))
@@ -697,6 +756,7 @@ class PrioritySchedulerTest {
     void blockingFrontendContinuationCannotHoldEntryLockOrBlockSiblingRoutePublication()
             throws Exception {
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        when(prefill.getStatus()).thenReturn(workerStatus("10.0.0.1", 8080, 8081));
         PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
         when(prefill.getPredictor()).thenReturn(predictor);
         when(prefill.tryCommitRequest(ArgumentMatchers.anyString(), anyLong(), anyInt()))
@@ -749,6 +809,7 @@ class PrioritySchedulerTest {
                 new PriorityScheduler.CompletionExecutorPolicy(1, 1));
 
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        when(prefill.getStatus()).thenReturn(workerStatus("10.0.0.1", 8080, 8081));
         PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
         when(prefill.getPredictor()).thenReturn(predictor);
         when(prefill.tryCommitRequest(ArgumentMatchers.anyString(), anyLong(), anyInt())).thenReturn(true);
@@ -852,6 +913,7 @@ class PrioritySchedulerTest {
                 new PriorityScheduler.CompletionExecutorPolicy(1, 1));
 
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        when(prefill.getStatus()).thenReturn(workerStatus("10.0.0.1", 8080, 8081));
         PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
         when(prefill.getPredictor()).thenReturn(predictor);
         when(prefill.tryCommitRequest(ArgumentMatchers.anyString(), anyLong(), anyInt())).thenReturn(true);
@@ -943,6 +1005,7 @@ class PrioritySchedulerTest {
                 new PriorityScheduler.CompletionExecutorPolicy(1, 4));
 
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        when(prefill.getStatus()).thenReturn(workerStatus("10.0.0.1", 8080, 8081));
         PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
         when(prefill.getPredictor()).thenReturn(predictor);
         when(prefill.tryCommitRequest(ArgumentMatchers.anyString(), anyLong(), anyInt())).thenReturn(true);
@@ -998,6 +1061,7 @@ class PrioritySchedulerTest {
                 new PriorityScheduler.CompletionExecutorPolicy(1, 4));
 
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+        when(prefill.getStatus()).thenReturn(workerStatus("10.0.0.1", 8080, 8081));
         PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
         when(prefill.getPredictor()).thenReturn(predictor);
         when(prefill.tryCommitRequest(ArgumentMatchers.anyString(), anyLong(), anyInt())).thenReturn(true);
@@ -1381,6 +1445,7 @@ class PrioritySchedulerTest {
             routeEntered.countDown();
             assertTrue(releaseRoute.await(5, TimeUnit.SECONDS));
             BalanceContext routedContext = invocation.getArgument(0);
+            endpointRegistry.getDecode("10.0.0.2:8081@0").reserve(routedContext.getRequestId(), 128, 136);
             return successRoute(routedContext.getRequestId());
         });
 
@@ -2121,6 +2186,7 @@ class PrioritySchedulerTest {
         ws.setPort(8080);
         ws.setGrpcPort(8081);
         ws.setAlive(true);
+        ws.setRole(RoleType.PREFILL);
         return (PrefillEndpoint) endpointRegistry.ensureEndpoint(
                 RoleType.PREFILL, "10.0.0.1:8080@0", ws);
     }
@@ -2131,6 +2197,7 @@ class PrioritySchedulerTest {
         ws.setPort(httpPort);
         ws.setGrpcPort(grpcPort);
         ws.setAlive(true);
+        ws.setRole(RoleType.DECODE);
         return (DecodeEndpoint) endpointRegistry.ensureEndpoint(
                 RoleType.DECODE, ws.getLogicalIpPort(), ws);
     }

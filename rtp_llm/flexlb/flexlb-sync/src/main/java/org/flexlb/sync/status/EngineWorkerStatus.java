@@ -6,8 +6,13 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.BiConsumer;
 
 @Component
@@ -66,7 +71,18 @@ public class EngineWorkerStatus {
     /** Select logical endpoints only when all engines of their physical frontend are healthy. */
     public Map<String, WorkerEndpoint> selectRoutableModelWorkerStatus(RoleType roleType, String group) {
         Map<String, WorkerEndpoint> candidates = selectModelWorkerStatus(roleType, group);
-        candidates.entrySet().removeIf(entry -> !isPhysicalGroupHealthy(entry.getValue()));
+        Map<String, List<WorkerEndpoint>> groups = new HashMap<>();
+        for (WorkerEndpoint endpoint : candidates.values()) {
+            groups.computeIfAbsent(endpoint.getStatus().getPhysicalGroupKey(), key -> new ArrayList<>())
+                    .add(endpoint);
+        }
+        Set<WorkerEndpoint> healthy = new HashSet<>();
+        for (List<WorkerEndpoint> siblings : groups.values()) {
+            if (isHealthySiblingGroup(siblings)) {
+                healthy.addAll(siblings);
+            }
+        }
+        candidates.entrySet().removeIf(entry -> !healthy.contains(entry.getValue()));
         return candidates;
     }
 
@@ -76,25 +92,36 @@ public class EngineWorkerStatus {
         if (worker == null || !worker.isAlive() || worker.getMultiEngineNum() < 1) {
             return false;
         }
-        int expected = worker.getMultiEngineNum();
-        boolean[] indexes = new boolean[expected];
-        int count = 0;
-        boolean currentEndpoint = false;
-        for (WorkerEndpoint siblingEndpoint : endpointRegistry.getEndpoints(worker.getRole()).values()) {
-            WorkerStatus sibling = siblingEndpoint.getStatus();
-            if (sibling == null || !worker.getPhysicalGroupKey().equals(sibling.getPhysicalGroupKey())) {
-                continue;
+        String groupKey = worker.getPhysicalGroupKey();
+        List<WorkerEndpoint> siblings = new ArrayList<>();
+        for (WorkerEndpoint sibling : endpointRegistry.getEndpoints(worker.getRole()).values()) {
+            if (sibling.getStatus() != null
+                    && groupKey.equals(sibling.getStatus().getPhysicalGroupKey())) {
+                siblings.add(sibling);
             }
+        }
+        return siblings.contains(endpoint) && isHealthySiblingGroup(siblings);
+    }
+
+    private boolean isHealthySiblingGroup(List<WorkerEndpoint> siblings) {
+        if (siblings.isEmpty()) {
+            return false;
+        }
+        int expected = siblings.getFirst().getStatus().getMultiEngineNum();
+        if (expected < 1 || siblings.size() != expected) {
+            return false;
+        }
+        boolean[] indexes = new boolean[expected];
+        for (WorkerEndpoint endpoint : siblings) {
+            WorkerStatus sibling = endpoint.getStatus();
             int index = sibling.getEngineIndex();
             if (sibling.getMultiEngineNum() != expected || index < 0 || index >= expected
                     || indexes[index] || !sibling.isAlive()) {
                 return false;
             }
             indexes[index] = true;
-            count++;
-            currentEndpoint |= siblingEndpoint == endpoint;
         }
-        return currentEndpoint && count == expected;
+        return true;
     }
 
 }

@@ -760,9 +760,6 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
             if (!(ep instanceof PrefillEndpoint pe)) {
                 continue;
             }
-            if (!engineWorkerStatus.isPhysicalGroupHealthy(pe)) {
-                continue;
-            }
             if (!measure.isResourceAvailable(pe)) {
                 continue;
             }

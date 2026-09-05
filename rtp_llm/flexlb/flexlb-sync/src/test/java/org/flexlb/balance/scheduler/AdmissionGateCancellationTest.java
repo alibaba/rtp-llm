@@ -13,6 +13,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -291,6 +292,7 @@ class AdmissionGateCancellationTest {
         when(router.route(any(BalanceContext.class))).thenReturn(route);
         when(registry.getPrefill("10.0.0.1:8080@0")).thenReturn(prefill);
         when(registry.getDecode("10.0.0.2:8081@0")).thenReturn(decode);
+        configureHealthyEndpoints(registry, prefill, decode);
         when(prefill.getBatcher()).thenReturn(batcher);
         when(batcher.queueManager()).thenReturn(queueManager);
         when(batcher.tryOffer(any())).thenReturn(true);
@@ -333,6 +335,7 @@ class AdmissionGateCancellationTest {
         when(router.route(any(BalanceContext.class))).thenReturn(route);
         when(registry.getPrefill("10.0.0.1:8080@0")).thenReturn(prefill);
         when(registry.getDecode("10.0.0.2:8081@0")).thenReturn(decode);
+        configureHealthyEndpoints(registry, prefill, decode);
         when(prefill.getBatcher()).thenReturn(batcher);
         when(batcher.queueManager()).thenReturn(queueManager);
         when(batcher.tryOffer(any())).thenThrow(new IllegalStateException("offer failed"));
@@ -536,4 +539,25 @@ class AdmissionGateCancellationTest {
             throw new AssertionError(error);
         }
     }
+    private static void configureHealthyEndpoints(EndpointRegistry registry,
+                                                   PrefillEndpoint prefill,
+                                                   DecodeEndpoint decode) {
+        WorkerStatus prefillStatus = new WorkerStatus();
+        prefillStatus.setIp("10.0.0.1");
+        prefillStatus.setPort(8080);
+        prefillStatus.setRole(RoleType.PREFILL);
+        prefillStatus.setAlive(true);
+        WorkerStatus decodeStatus = new WorkerStatus();
+        decodeStatus.setIp("10.0.0.2");
+        decodeStatus.setPort(8081);
+        decodeStatus.setRole(RoleType.DECODE);
+        decodeStatus.setAlive(true);
+        when(prefill.getStatus()).thenReturn(prefillStatus);
+        when(decode.getStatus()).thenReturn(decodeStatus);
+        when(registry.getEndpoints(RoleType.PREFILL))
+                .thenAnswer(invocation -> Map.of(prefillStatus.getLogicalIpPort(), prefill));
+        when(registry.getEndpoints(RoleType.DECODE))
+                .thenAnswer(invocation -> Map.of(decodeStatus.getLogicalIpPort(), decode));
+    }
+
 }

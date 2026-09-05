@@ -1,9 +1,13 @@
 package org.flexlb.balance.endpoint;
 
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.metric.MicrometerFlexMonitor;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -12,6 +16,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DecodeEndpointTest {
@@ -26,6 +31,44 @@ class DecodeEndpointTest {
         status.setPort(8080);
         status.setGrpcPort(8081);
         endpoint = new DecodeEndpoint(status);
+    }
+
+    @Test
+    void batchMetricsKeepSiblingEngineReservationsSeparate() {
+        status.setMultiEngineNum(2);
+        WorkerStatus siblingStatus = new WorkerStatus();
+        siblingStatus.setIp("10.0.0.1");
+        siblingStatus.setPort(8080);
+        siblingStatus.setEngineIndex(1);
+        siblingStatus.setMultiEngineNum(2);
+        DecodeEndpoint sibling = new DecodeEndpoint(siblingStatus);
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        try {
+            BatchSchedulerReporter reporter = new BatchSchedulerReporter(new MicrometerFlexMonitor(registry));
+            reporter.init();
+            endpoint.reserve("100", 500, 500);
+            sibling.reserve("200", 300, 300);
+            sibling.reserve("201", 400, 400);
+
+            endpoint.reportBatchMetrics(reporter);
+            sibling.reportBatchMetrics(reporter);
+
+            Gauge firstInflight = registry.find("flexlb.app.flexlb.inflight.request.count")
+                    .tags("role", "DECODE", "engineIp", "10.0.0.1@0").gauge();
+            Gauge secondInflight = registry.find("flexlb.app.flexlb.inflight.request.count")
+                    .tags("role", "DECODE", "engineIp", "10.0.0.1@1").gauge();
+            assertNotNull(firstInflight, "engine 0 must expose its own inflight gauge");
+            assertNotNull(secondInflight, "engine 1 must expose its own inflight gauge");
+            assertEquals(1.0, firstInflight.value());
+            assertEquals(2.0, secondInflight.value());
+            assertEquals(500.0, registry.get("flexlb.app.flexlb.decode.inflight.kv.reserved.tokens")
+                    .tags("role", "DECODE", "engineIp", "10.0.0.1@0").gauge().value());
+            assertEquals(700.0, registry.get("flexlb.app.flexlb.decode.inflight.kv.reserved.tokens")
+                    .tags("role", "DECODE", "engineIp", "10.0.0.1@1").gauge().value());
+        } finally {
+            registry.close();
+            sibling.close();
+        }
     }
 
     @Test
