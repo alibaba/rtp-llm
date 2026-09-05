@@ -1141,6 +1141,7 @@ class ModelSpecificConfig:
     def to_string(self) -> str:
         ...
 class MoeConfig:
+    b12x_zeroed_energy_limit: float
     deep_ep_num_sm: int
     fake_balance_expert: bool
     fp4_moe_op: str
@@ -1153,6 +1154,8 @@ class MoeConfig:
     use_deepep_low_latency: bool
     use_deepep_moe: bool
     use_deepep_p2p_low_latency: bool
+    use_mori_ep: bool
+
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
