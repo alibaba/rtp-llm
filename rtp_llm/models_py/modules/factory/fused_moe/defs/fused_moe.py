@@ -28,6 +28,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import (
 )
 
 SKIP_TP_ALLREDUCE_ARG: Final[Literal["skip_tp_allreduce"]] = "skip_tp_allreduce"
+ROW_SCATTER_TARGET_ARG: Final[Literal["row_scatter_target"]] = "row_scatter_target"
+ROW_SCATTER_READY_ARG: Final[Literal["row_scatter_ready"]] = "row_scatter_ready"
 
 
 class FinalizeArgs(TypedDict, total=False):
@@ -36,6 +38,8 @@ class FinalizeArgs(TypedDict, total=False):
     a1_shape: torch.Size
     original_num_tokens: int
     skip_tp_allreduce: bool
+    row_scatter_target: torch.Tensor
+    row_scatter_ready: torch.cuda.Event
 
 
 @dataclass
@@ -126,6 +130,21 @@ class FusedMoeDataRouter(ABC):
 
         A router must only override this capability when its finalize path
         delegates to the shared skip decision (or an equivalent implementation).
+        """
+        return False
+
+    @property
+    def supports_row_scatter_finalize(self) -> bool:
+        """Whether ``finalize`` consumes ``row_scatter_target``.
+
+        Only routers whose combine output is already fully reduced per token,
+        and which therefore reassemble the TP token slices with an all_gather,
+        can trade that all_gather for a scatter-add into the caller's buffer.
+
+        An implementer must accumulate into the buffer rather than overwrite it,
+        and must touch only the rows this rank owns. The buffer arrives holding
+        another branch's partial sum and the caller reduces every row, so
+        overwriting drops that branch and writing foreign rows double-counts.
         """
         return False
 
@@ -246,12 +265,28 @@ class FusedMoe(torch.nn.Module):
         extra_expert_args: Optional[Dict[str, Any]] = None,
         extra_finalize_args: Optional[FinalizeArgs] = None,
         skip_tp_allreduce: bool = False,
+        row_scatter_target: Optional[torch.Tensor] = None,
+        row_scatter_ready: Optional[torch.cuda.Event] = None,
     ) -> torch.Tensor:
 
         if skip_tp_allreduce and not self.router.supports_skip_tp_allreduce:
             raise ValueError(
                 "skip_tp_allreduce is only supported by routers that "
                 "advertise supports_skip_tp_allreduce"
+            )
+
+        if (
+            row_scatter_target is not None
+            and not self.router.supports_row_scatter_finalize
+        ):
+            raise ValueError(
+                "row_scatter_target is only supported by routers that "
+                "advertise supports_row_scatter_finalize"
+            )
+
+        if row_scatter_ready is not None and row_scatter_target is None:
+            raise ValueError(
+                "row_scatter_ready has nothing to guard without row_scatter_target"
             )
 
         a1 = hidden_states
@@ -308,6 +343,10 @@ class FusedMoe(torch.nn.Module):
                 SKIP_TP_ALLREDUCE_ARG: skip_tp_allreduce,
             }
         )
+        if row_scatter_target is not None:
+            finalize_args[ROW_SCATTER_TARGET_ARG] = row_scatter_target
+            if row_scatter_ready is not None:
+                finalize_args[ROW_SCATTER_READY_ARG] = row_scatter_ready
 
         output = self.router.finalize(
             combine_payload,

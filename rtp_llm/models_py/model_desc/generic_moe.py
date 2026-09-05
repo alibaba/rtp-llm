@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 from torch import nn
@@ -32,6 +32,24 @@ from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 logger = logging.getLogger(__name__)
+
+# One shared-expert side stream per device, reused by every MoE layer. It has to
+# exist before the first captured forward, because a captured fork records an edge
+# to an already-running stream, and reusing one avoids per-forward churn.
+_SHARED_EXPERT_STREAMS: Dict[int, torch.cuda.Stream] = {}
+
+
+def _ensure_shared_expert_stream(
+    device: torch.device,
+) -> Optional[torch.cuda.Stream]:
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return None
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    stream = _SHARED_EXPERT_STREAMS.get(index)
+    if stream is None:
+        stream = torch.cuda.Stream(device=torch.device("cuda", index))
+        _SHARED_EXPERT_STREAMS[index] = stream
+    return stream
 
 
 class GenericMoeLayer(nn.Module):
@@ -119,8 +137,43 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert_gate = None
             self.sigmoid_gate_scale_add = None
 
+        # Reduction strategy, decided by router capability. "partial" means the
+        # value still needs summing over Group.TP. Two partials can be added
+        # locally and then share one collective; an already-complete branch
+        # cannot join, since the reduction would sum it tp_size times.
+        #
+        #   one collective
+        #     use_unified_tp_allreduce   routed partial              \
+        #                                shared partial              /  add -> all_reduce
+        #
+        #     use_ep_unified_allreduce   routed partial, scattered   \
+        #                                shared partial              /  add -> all_reduce
+        #
+        #     pure TP leaves routed a full-width partial; EP has to scatter-add
+        #     this rank's token slice to get one.
+        #
+        #   two collectives
+        #     use_ep_shared_allreduce    routed complete via all_gather  \
+        #                                shared partial -> all_reduce    /  add
+        #
+        #   no flag: each branch completes on its own, then a local add. The
+        #   router reduces or gathers according to its own tp size, which follows
+        #   the attention view and is independent of ffn_tp_size; DenseMLP
+        #   all-reduces the shared output unless ffn_tp_size == 1.
+        #
+        #   counts are Group.TP only; the EP all_to_all is not included
+        self.use_ep_unified_allreduce = (
+            self.shared_expert is not None
+            and self.ffn_tp_size > 1
+            and self.ep_size > 1
+            and self.ffn_tp_size == router_tp_size
+            and router.supports_row_scatter_finalize
+        )
         self.use_ep_shared_allreduce = (
-            self.shared_expert is not None and self.ffn_tp_size > 1 and self.ep_size > 1
+            self.shared_expert is not None
+            and self.ffn_tp_size > 1
+            and self.ep_size > 1
+            and not self.use_ep_unified_allreduce
         )
         self.use_unified_tp_allreduce = (
             self.shared_expert is not None
@@ -129,11 +182,20 @@ class GenericMoeLayer(nn.Module):
             and self.ffn_tp_size == router_tp_size
             and router.supports_skip_tp_allreduce
         )
+        # The shared branch has no data dependency on the routed branch, so it
+        # can run on a side stream alongside the whole routed chain.
+        self.shared_expert_stream: Optional[torch.cuda.Stream] = None
+        self.shared_expert_ready: Optional[torch.cuda.Event] = None
+        if self.use_ep_unified_allreduce:
+            self.shared_expert_stream = _ensure_shared_expert_stream(self.w1.device)
+            if self.shared_expert_stream is not None:
+                self.shared_expert_ready = torch.cuda.Event()
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
-                "GenericMoE unified TP all-reduce %s "
+                "GenericMoE unified TP all-reduce %s, EP unified all-reduce %s "
                 "(router=%s, ffn_tp_size=%d, router_tp_size=%d, ep_size=%d)",
                 "enabled" if self.use_unified_tp_allreduce else "disabled",
+                "enabled" if self.use_ep_unified_allreduce else "disabled",
                 type(router).__name__,
                 self.ffn_tp_size,
                 router_tp_size,
@@ -166,6 +228,41 @@ class GenericMoeLayer(nn.Module):
             gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
             return torch.sigmoid(gate_output) * shared_expert_output
         return shared_expert_output
+
+    def _shared_expert_partial(
+        self, hidden_states: torch.Tensor
+    ) -> Tuple[torch.Tensor, Optional[torch.cuda.Event]]:
+        """Produce the gated TP-partial shared output for use_ep_unified_allreduce.
+
+        Returns the buffer plus, when the work was issued on the side stream,
+        the event the router must wait on before accumulating into it.
+        """
+        assert self.shared_expert is not None
+        if self.shared_expert_stream is None:
+            return (
+                self._gate_shared_expert_output(
+                    hidden_states,
+                    self.shared_expert(hidden_states, skip_allreduce=True),
+                ),
+                None,
+            )
+
+        stream = self.shared_expert_stream
+        current = torch.cuda.current_stream(hidden_states.device)
+        stream.wait_stream(current)
+        # record_stream stops the allocator from handing these blocks to a later
+        # allocation once their references drop, while the side stream still
+        # reads them.
+        hidden_states.record_stream(stream)
+        with torch.cuda.stream(stream):
+            shared_partial = self._gate_shared_expert_output(
+                hidden_states,
+                self.shared_expert(hidden_states, skip_allreduce=True),
+            )
+        shared_partial.record_stream(current)
+        assert self.shared_expert_ready is not None
+        self.shared_expert_ready.record(stream)
+        return shared_partial, self.shared_expert_ready
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, _ = hidden_states.shape
@@ -211,6 +308,33 @@ class GenericMoeLayer(nn.Module):
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
 
+        if self.use_ep_unified_allreduce:
+            assert self.shared_expert is not None
+            # Issued before fused_moe and on a side stream, so the shared branch
+            # overlaps the routed chain instead of delaying it.
+            row_scatter_target, shared_ready = self._shared_expert_partial(
+                hidden_states
+            )
+            try:
+                experts_output = self.fused_moe(
+                    hidden_states=hidden_states,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    activation="SiGLU",
+                    row_scatter_target=row_scatter_target,
+                    row_scatter_ready=shared_ready,
+                )
+            except Exception:
+                # The router joins on the success path. When the routed chain
+                # raises instead, the side stream is still writing the buffer,
+                # so anything the caller does after unwinding would race with it.
+                if shared_ready is not None:
+                    torch.cuda.current_stream(hidden_states.device).wait_event(
+                        shared_ready
+                    )
+                raise
+            return all_reduce(experts_output, group=Group.TP, inplace=True)
+
         # In pure-TP mode both the routed experts and the shared expert produce
         # TP-partial outputs.  Reduce their sum once instead of reducing each
         # path separately.  This is especially important for decode, where the
@@ -240,9 +364,9 @@ class GenericMoeLayer(nn.Module):
                 )
                 experts_output = all_reduce(experts_output, group=Group.TP)
             elif self.use_ep_shared_allreduce:
-                # EP mode: routed expert output is already complete
-                # (EP combine via all_to_all / all_gather aggregated across ranks).
-                # Only the shared expert output is TP-partial and needs all_reduce.
+                # The router already reassembled the routed output with an
+                # all_gather, so it is complete and cannot join a merged
+                # reduction; only the shared branch still needs one.
                 shared_expert_output = self._gate_shared_expert_output(
                     hidden_states, shared_expert_output
                 )

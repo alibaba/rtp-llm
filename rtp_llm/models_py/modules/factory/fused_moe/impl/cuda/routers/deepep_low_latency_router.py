@@ -14,6 +14,8 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
+    ROW_SCATTER_READY_ARG,
+    ROW_SCATTER_TARGET_ARG,
     CombineForwardPayload,
     ExpertForwardPayload,
     ExpertTokensMetadata,
@@ -98,6 +100,21 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
     def handle(self) -> Optional[Tuple[Any, ...]]:
         return self._handle
 
+    @property
+    def supports_row_scatter_finalize(self) -> bool:
+        return True
+
+    def _tp_token_slice(self, num_tokens: int) -> Tuple[int, int]:
+        """Return this rank's ``(begin, size)`` window into ``num_tokens``.
+
+        The windows partition the tokens, which is what lets the row-scatter
+        finalize replace the routed all_gather with a reduction.
+        """
+        tp_size = self.config.tp_size
+        tp_token_size = (num_tokens + tp_size - 1) // tp_size
+        slice_begin = min(tp_token_size * self.config.tp_rank, num_tokens)
+        return slice_begin, min(num_tokens - slice_begin, tp_token_size)
+
     def _prepare_pre_tp_slice(
         self,
         a1: torch.Tensor,
@@ -115,12 +132,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         # Convert topk_ids to int64
         topk_ids = topk_ids.to(torch.int64)
         # Slice by tp
-        tp_size = self.config.tp_size
-        tp_rank = self.config.tp_rank
-        token_num = a1.size(0)
-        tp_token_size = (token_num + tp_size - 1) // tp_size
-        slice_begin = min(tp_token_size * tp_rank, token_num)
-        slice_size = min(token_num - slice_begin, tp_token_size)
+        slice_begin, slice_size = self._tp_token_slice(a1.size(0))
         tp_dispatch_input = torch.narrow(a1, 0, slice_begin, slice_size)
         tp_topk_ids = torch.narrow(topk_ids, 0, slice_begin, slice_size)
         tp_topk_weights = torch.narrow(topk_weights, 0, slice_begin, slice_size)
@@ -281,6 +293,38 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             combined_x = gatherd_output[:original_num_tokens, :]
         return combined_x
 
+    def _finalize_row_scatter(
+        self,
+        combined_x: torch.Tensor,
+        target: torch.Tensor,
+        original_num_tokens: int,
+        ready_event: Optional[torch.cuda.Event] = None,
+    ) -> torch.Tensor:
+        """Accumulate this rank's token slice into the caller's full-size buffer.
+
+        Summing these buffers across the TP group reproduces what the all_gather
+        assembled, and the ragged tail needs no padding because ranks no longer
+        have to contribute equal-length shards.
+        """
+        # Join before touching the buffer: the caller reduces every row, so even
+        # a rank whose slice is empty needs the producer's writes visible.
+        if ready_event is not None:
+            torch.cuda.current_stream(target.device).wait_event(ready_event)
+
+        assert combined_x.dim() == 2
+        assert target.shape == (original_num_tokens, combined_x.size(1))
+        assert target.dtype == combined_x.dtype
+
+        slice_begin, slice_size = self._tp_token_slice(original_num_tokens)
+        assert combined_x.size(0) == slice_size, (
+            f"combine returned {combined_x.size(0)} rows, expected the "
+            f"dispatched slice size {slice_size}"
+        )
+
+        if slice_size > 0:
+            target.narrow(0, slice_begin, slice_size).add_(combined_x)
+        return target
+
     def finalize(
         self,
         payload: CombineForwardPayload,
@@ -317,8 +361,17 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         # Normal finalize
         combined_x = self._normal_finalize(combine_args)
 
-        # Finalize post tp gather
-        combined_x = self._finalize_post_tp_gather(combined_x, extra_finalize_args)
+        assert extra_finalize_args is not None
+        row_scatter_target = extra_finalize_args.get(ROW_SCATTER_TARGET_ARG)
+        if row_scatter_target is not None:
+            combined_x = self._finalize_row_scatter(
+                combined_x,
+                row_scatter_target,
+                extra_finalize_args["original_num_tokens"],
+                extra_finalize_args.get(ROW_SCATTER_READY_ARG),
+            )
+        else:
+            combined_x = self._finalize_post_tp_gather(combined_x, extra_finalize_args)
         # reset handle
         self._handle = None
 
