@@ -135,19 +135,19 @@ public class CacheMetricsReporter {
     /**
      * Report local cache metrics for a single engine
      *
-     * @param engineIp   Engine IP
+     * @param ipIndex    metrics identity in {@code ip@engineIndex} format
      * @param role       Engine role
      * @param cacheCount Cache count
      */
-    public void reportEngineLocalMetrics(String engineIp, String role, int cacheCount) {
-        if (engineIp == null) {
+    public void reportEngineLocalMetrics(String ipIndex, String role, int cacheCount) {
+        if (ipIndex == null) {
             return;
         }
 
         // Calculate cache count and bytes
         long cacheBytes = calculateEngineCacheBytes(cacheCount);
 
-        FlexMetricTags tags = FlexMetricTags.of("engineIp", engineIp, "role", role);
+        FlexMetricTags tags = FlexMetricTags.of("engineIp", ipIndex, "role", role);
 
         monitor.report(CACHE_ENGINE_LOCAL_COUNT, tags, cacheCount);
         monitor.report(CACHE_ENGINE_LOCAL_BYTES, tags, cacheBytes);
@@ -172,13 +172,13 @@ public class CacheMetricsReporter {
      * Report cache hit rate metrics
      *
      * @param roleType  Role type
+     * @param ipIndex   indexed engine IP in {@code ip@engineIndex} format
      * @param hitTokens Number of hit tokens
      * @param hitRatio  Hit percentage
      */
-    public void reportCacheHitMetrics(RoleType roleType, long hitTokens, double hitRatio) {
-        FlexMetricTags baseTags = FlexMetricTags.of(
-                "role", roleType.name()
-        );
+    public void reportCacheHitMetrics(RoleType roleType, String ipIndex, long hitTokens, double hitRatio) {
+
+        FlexMetricTags baseTags = FlexMetricTags.of("role", roleType.name(), "engineIp", ipIndex);
 
         // Report hit token count and hit percentage
         monitor.report(CACHE_HIT_COUNT, baseTags, hitTokens);
@@ -187,13 +187,11 @@ public class CacheMetricsReporter {
     }
 
     public void reportKvcmSelectedMatch(RoleType roleType,
-                                        String engineIp,
+                                        String ipIndex,
                                         long localMatchTokens,
                                         long p2pFetchTokens,
                                         long p2pTotalMatchTokens) {
-        FlexMetricTags tags = FlexMetricTags.of(
-                "role", roleType.name(),
-                "engineIp", engineIp);
+        FlexMetricTags tags = FlexMetricTags.of("role", roleType.name(), "engineIp", ipIndex);
         monitor.report(CACHE_KVCM_SELECTED_LOCAL_MATCH_TOKENS, tags, localMatchTokens);
         monitor.report(CACHE_KVCM_SELECTED_P2P_FETCH_TOKENS, tags, p2pFetchTokens);
         monitor.report(CACHE_KVCM_SELECTED_P2P_TOTAL_MATCH_TOKENS, tags, p2pTotalMatchTokens);
@@ -454,20 +452,14 @@ public class CacheMetricsReporter {
     /**
      * Report local cache metadata update time in microseconds.
      *
-     * @param role         Engine role
-     * @param startTime    Start time in microseconds
-     * @param success      Whether successful
+     * @param ipIndex   metrics identity in {@code ip@engineIndex} format
+     * @param role      Engine role
+     * @param startTime Start time in microseconds
+     * @param success   Whether successful
      */
-    public void reportUpdateEngineBlockCacheRT(String role, long startTime, String success) {
-        FlexMetricTags tags = FlexMetricTags.of(
-                "role", role,
-                "success", success
-        );
-        monitor.report(CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT, tags, ((double) System.nanoTime() / 1000) - startTime);
-    }
-
-    public void reportUpdateEngineBlockCacheRT(String engineIpPort, String role, long startTime, String success) {
-        FlexMetricTags tags = FlexMetricTags.of("engineIpPort", engineIpPort, "role", role, "success", success);
+    public void reportUpdateEngineBlockCacheRT(
+            String ipIndex, String role, long startTime, String success) {
+        FlexMetricTags tags = FlexMetricTags.of("engineIp", ipIndex, "role", role, "success", success);
 
         monitor.report(CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT, tags, ((double) System.nanoTime() / 1000) - startTime);
     }
@@ -475,23 +467,20 @@ public class CacheMetricsReporter {
     /**
      * Report cache diff calculation metrics
      *
+     * @param ipIndex           metrics identity in {@code ip@engineIndex} format
      * @param role              Role
      * @param addedBlocksSize   Number of added blocks
      * @param removedBlocksSize Number of removed blocks
      */
-    public void reportCacheDiffMetrics(String role, int addedBlocksSize, int removedBlocksSize) {
-        FlexMetricTags tags = FlexMetricTags.of(
-                "role", role != null ? role : "unknown"
-        );
-        reportCacheDiffMetrics(tags, addedBlocksSize, removedBlocksSize);
-    }
-
-    public void reportCacheDiffMetrics(String engineIp, String role, int addedBlocksSize, int removedBlocksSize) {
-        if (engineIp == null) {
+    public void reportCacheDiffMetrics(
+            String ipIndex, String role, int addedBlocksSize, int removedBlocksSize) {
+        if (ipIndex == null) {
             return;
         }
 
-        FlexMetricTags tags = FlexMetricTags.of("engineIp", engineIp, "role", role != null ? role : "unknown");
+        FlexMetricTags tags = FlexMetricTags.of(
+                "engineIp", ipIndex,
+                "role", role != null ? role : "unknown");
 
         reportCacheDiffMetrics(tags, addedBlocksSize, removedBlocksSize);
     }

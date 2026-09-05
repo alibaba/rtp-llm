@@ -107,7 +107,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     private WorkerBatcher createBatcher(FlexlbConfig config, DecisionGroupHandler decisionHandler,
                                         BatchSchedulerReporter reporter) {
-        return new WorkerBatcher(status.getIpPort(), this, config, decisionHandler, reporter);
+        return new WorkerBatcher(status.getLogicalIpPort(), this, config, decisionHandler, reporter);
     }
 
     public WorkerBatcher getBatcher() {
@@ -861,23 +861,23 @@ public class PrefillEndpoint extends WorkerEndpoint {
      */
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
         int queueSize = batcher.queueSize();
-        reporter.reportBatcherQueueSize(RoleType.PREFILL.name(), getIp(), queueSize);
+        reporter.reportBatcherQueueSize(RoleType.PREFILL.name(), getStatus().getIpIndex(), queueSize);
         // Priority-bucketed batch queue length — single-report with priority tag.
         // Empty queue fallback: report priority=0 depth=0 so tagged panels don't gap.
         Map<Integer, Integer> sizeByPriority = batcher.queueSizeByPriority();
         if (sizeByPriority.isEmpty()) {
-            reporter.reportBatcherQueueDepthByPriority(RoleType.PREFILL.name(), getIp(), 0, 0);
+            reporter.reportBatcherQueueDepthByPriority(RoleType.PREFILL.name(), getStatus().getIpIndex(), 0, 0);
         } else {
             sizeByPriority.forEach((priority, size) ->
-                    reporter.reportBatcherQueueDepthByPriority(RoleType.PREFILL.name(), getIp(), priority, size));
+                    reporter.reportBatcherQueueDepthByPriority(RoleType.PREFILL.name(), getStatus().getIpIndex(), priority, size));
         }
-        reporter.reportInflightBatchCount(RoleType.PREFILL.name(), getIp(), getInflightBatchCount());
-        reporter.reportInflightRequestCount(RoleType.PREFILL.name(), getIp(), getInflightRequestCount());
+        reporter.reportInflightBatchCount(RoleType.PREFILL.name(), getStatus().getIpIndex(), getInflightBatchCount());
+        reporter.reportInflightRequestCount(RoleType.PREFILL.name(), getStatus().getIpIndex(), getInflightRequestCount());
         long nowMs = System.currentTimeMillis();
         long maxAgeMs = Math.max(
                 InflightEvictor.maxAgeMs(inflightBatches, nowMs),
                 requestLedger.maxAge(nowMs));
-        reporter.reportInflightMaxAgeMs(RoleType.PREFILL.name(), getIp(), maxAgeMs);
+        reporter.reportInflightMaxAgeMs(RoleType.PREFILL.name(), getStatus().getIpIndex(), maxAgeMs);
     }
 
     /**
@@ -914,19 +914,19 @@ public class PrefillEndpoint extends WorkerEndpoint {
         // a metrics outage cannot suppress the scheduler's WorkerStatus
         // reducer or prevent the remaining observations.
         try {
-            reporter.reportBatchPredictedTimeMs(RoleType.PREFILL.name(), getIp(), predictedMs);
+            reporter.reportBatchPredictedTimeMs(RoleType.PREFILL.name(), getStatus().getIpIndex(), predictedMs);
         } catch (RuntimeException telemetryFailure) {
             logger.warn("batch predicted-time metric failed: batchId={} engine={}",
                     batchId, getIp(), telemetryFailure);
         }
         try {
-            reporter.reportBatchActualTimeMs(RoleType.PREFILL.name(), getIp(), actualMs);
+            reporter.reportBatchActualTimeMs(RoleType.PREFILL.name(), getStatus().getIpIndex(), actualMs);
         } catch (RuntimeException telemetryFailure) {
             logger.warn("batch actual-time metric failed: batchId={} engine={}",
                     batchId, getIp(), telemetryFailure);
         }
         try {
-            reporter.reportBatchPredictGapMs(RoleType.PREFILL.name(), getIp(), gapMs);
+            reporter.reportBatchPredictGapMs(RoleType.PREFILL.name(), getStatus().getIpIndex(), gapMs);
         } catch (RuntimeException telemetryFailure) {
             logger.warn("batch prediction-gap metric failed: batchId={} engine={}",
                     batchId, getIp(), telemetryFailure);

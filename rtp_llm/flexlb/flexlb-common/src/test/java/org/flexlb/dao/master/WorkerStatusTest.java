@@ -7,6 +7,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import java.util.Map;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -21,6 +23,47 @@ class WorkerStatusTest {
         workerStatus = new WorkerStatus();
         // Default state: available
         workerStatus.getResourceAvailable().set(true);
+    }
+
+    @Test
+    void distinguishesPhysicalAddressFromLogicalWorkerIdentity() {
+        workerStatus.setIp("10.0.0.1");
+        workerStatus.setPort(8080);
+        workerStatus.setEngineIndex(1);
+
+        assertEquals("10.0.0.1:8080", workerStatus.getIpPort());
+        assertEquals("10.0.0.1:8080", workerStatus.getPhysicalIpPort());
+        assertEquals("10.0.0.1:8080@1", workerStatus.getLogicalIpPort());
+        assertEquals("10.0.0.1@1", workerStatus.getIpIndex());
+    }
+
+    @Test
+    void propagatesEngineIndexIntoCacheHitFeedback() {
+        workerStatus.setIp("127.0.0.1");
+        workerStatus.setPort(8080);
+        workerStatus.setEngineIndex(1);
+
+        TaskInfo localTask = new TaskInfo();
+        localTask.setRequestId("request-identity");
+        localTask.setInputLength(200);
+        localTask.setPrefixLength(100);
+        localTask.setPredictedPrefixLength(100);
+        localTask.setCacheMatchSource("KVCM");
+        workerStatus.putLocalTask("request-identity", localTask);
+
+        TaskInfo runningTask = new TaskInfo();
+        runningTask.setRequestId("request-identity");
+        runningTask.setInputLength(200);
+        runningTask.setPrefixLength(120);
+        runningTask.setPrefixLengthValid(true);
+
+        var updateResult = workerStatus.updateTaskStates(
+                Map.of(), Map.of("request-identity", runningTask), Map.of());
+
+        assertEquals(1, updateResult.cacheHitFeedbacks().size());
+        CacheHitFeedback feedback = updateResult.cacheHitFeedbacks().getFirst();
+        assertEquals("127.0.0.1:8080@1", feedback.logicalWorkerId());
+        assertEquals("127.0.0.1@1", feedback.ipIndex());
     }
 
     @ParameterizedTest

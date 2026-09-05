@@ -134,7 +134,7 @@ class EngineSyncRunnerTest {
 
     @Test
     void should_start_new_worker_expiration_window_at_discovery_time() {
-        String ipPort = "127.0.0.1:8080";
+        String ipPort = "127.0.0.1:8080@0";
         Mockito.when(workerAddressService.getEngineWorkerList(modelName, RoleType.VIT))
                 .thenReturn(List.of(WorkerHost.of("127.0.0.1", 8080)));
         EngineSyncRunner runner = new EngineSyncRunner(
@@ -155,7 +155,7 @@ class EngineSyncRunnerTest {
         EndpointRegistry registry = new EndpointRegistry(
                 configService, () -> null, Mockito.mock(BatchSchedulerReporter.class));
         Map<String, WorkerStatus> statuses = new ConcurrentHashMap<>();
-        String ipPort = "127.0.0.1:8080";
+        String ipPort = "127.0.0.1:8080@0";
         WorkerStatus status = new WorkerStatus();
         status.setRole(RoleType.PREFILL);
         status.setIp("127.0.0.1");
@@ -205,7 +205,7 @@ class EngineSyncRunnerTest {
 
         runner.run();
 
-        assertEquals(RoleType.PREFILL, workerStatusMap.get("127.0.0.1:61000").getRole());
+        assertEquals(RoleType.PREFILL, workerStatusMap.get("127.0.0.1:61000@0").getRole());
         verify(statusCheckExecutor, times(2)).submit(any(Runnable.class));
     }
 
@@ -230,7 +230,7 @@ class EngineSyncRunnerTest {
         submittedTasks.getAllValues().get(0).run();
         verify(engineGrpcService).getWorkerStatusAsync(
                 "127.0.0.1", 18081, -1L, syncRequestTimeoutMs, RoleType.PREFILL);
-        assertEquals(8081, workerStatusMap.get("127.0.0.1:8080").getGrpcPort());
+        assertEquals(8081, workerStatusMap.get("127.0.0.1:8080@0").getGrpcPort());
     }
 
     @Test
@@ -248,4 +248,31 @@ class EngineSyncRunnerTest {
         verify(statusCheckExecutor).submit(any(GrpcWorkerStatusRunner.class));
         verify(statusCheckExecutor, never()).submit(any(GrpcCacheStatusCheckRunner.class));
     }
+    @Test
+    void createsIndependentLogicalWorkersAndDoesNotReviveUnprobedWorkers() {
+        WorkerHost zero = new WorkerHost("127.0.0.1", 8080, 8081, 8085, 18002,
+                "site", "group", "deployment", 0, 2, "service");
+        WorkerHost one = new WorkerHost("127.0.0.1", 8080, 8081, 8085, 18003,
+                "site", "group", "deployment", 1, 2, "service");
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
+                .thenReturn(List.of(zero, one));
+        EngineSyncRunner runner = new EngineSyncRunner(
+                modelName, workerStatusMap, workerAddressService, statusCheckExecutor,
+                engineHealthReporter, engineGrpcService, RoleType.PREFILL,
+                cacheAwareService, syncRequestTimeoutMs, syncCount,
+                syncEngineStatusInterval, true, false, null, null);
+        runner.run();
+        assertEquals(2, workerStatusMap.size());
+        WorkerStatus first = workerStatusMap.get(zero.getLogicalIpPort());
+        WorkerStatus second = workerStatusMap.get(one.getLogicalIpPort());
+        assertFalse(first.isAlive());
+        assertFalse(second.isAlive());
+        assertEquals(0, first.getEngineIndex());
+        assertEquals(1, second.getEngineIndex());
+        assertEquals(first.getPhysicalGroupKey(), second.getPhysicalGroupKey());
+        runner.run();
+        assertFalse(first.isAlive());
+        assertFalse(second.isAlive());
+    }
+
 }

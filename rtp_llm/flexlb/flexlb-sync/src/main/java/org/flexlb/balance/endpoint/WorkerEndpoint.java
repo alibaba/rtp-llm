@@ -37,7 +37,7 @@ public abstract class WorkerEndpoint {
     // ==================== identity (delegated to status) ====================
 
     public String ipPort() {
-        return status.getIpPort();
+        return status.getLogicalIpPort();
     }
 
     public String getIp() {

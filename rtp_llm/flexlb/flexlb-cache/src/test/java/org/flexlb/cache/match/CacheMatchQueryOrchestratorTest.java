@@ -56,7 +56,7 @@ class CacheMatchQueryOrchestratorTest {
         CacheMatchResult result = orchestrator().findMatchingEngines(query);
 
         assertEquals(CacheMatchSource.LOCAL_SYNC, result.source());
-        assertEquals(2, result.hostMatch("10.0.0.1:8080").localMatchBlocks());
+        assertEquals(2, result.exactHostMatch("10.0.0.1:8080").localMatchBlocks());
         verify(kvcmProvider, never()).findMatchingEngines(
                 org.mockito.ArgumentMatchers.any(),
                 org.mockito.ArgumentMatchers.any(),
@@ -77,7 +77,7 @@ class CacheMatchQueryOrchestratorTest {
         CacheMatchResult result = orchestrator().findMatchingEngines(query);
 
         assertEquals(CacheMatchSource.KVCM, result.source());
-        assertEquals(1, result.hostMatch("10.0.0.2:8080").localMatchBlocks());
+        assertEquals(1, result.exactHostMatch("10.0.0.2:8080").localMatchBlocks());
         verify(comparisonService).trackLocalStandbyPrediction(query);
     }
 
@@ -147,7 +147,7 @@ class CacheMatchQueryOrchestratorTest {
         CacheMatchResult result = orchestrator().findMatchingEngines(query);
 
         assertEquals(CacheMatchSource.KVCM, result.source());
-        assertEquals(1, result.hostMatch("10.0.0.2:8080").localMatchBlocks());
+        assertEquals(1, result.exactHostMatch("10.0.0.2:8080").localMatchBlocks());
     }
 
     @Test
@@ -169,7 +169,7 @@ class CacheMatchQueryOrchestratorTest {
         CacheMatchResult result = orchestrator().findMatchingEngines(standbyQuery);
 
         assertEquals(CacheMatchSource.LOCAL_STANDBY, result.source());
-        assertEquals(1, result.hostMatch("10.0.0.3:8080").localMatchBlocks());
+        assertEquals(1, result.exactHostMatch("10.0.0.3:8080").localMatchBlocks());
     }
 
     @Test

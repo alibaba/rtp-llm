@@ -1370,11 +1370,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * Called periodically by {@link org.flexlb.balance.scheduler.PriorityScheduler}.
      */
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
-        reporter.reportInflightRequestCount(RoleType.DECODE.name(), getIp(), getInflightCount());
-        reporter.reportDecodeTotalLoad(getIp(), getTotalLoad());
-        reporter.reportDecodeInflightKvReserved(getIp(), inflightKvReserved());
-        reporter.reportDecodeInflightHardKvReserved(getIp(), inflightHardKvReserved());
-        reporter.reportInflightMaxAgeMs(RoleType.DECODE.name(), getIp(),
+        reporter.reportInflightRequestCount(RoleType.DECODE.name(), getStatus().getIpIndex(), getInflightCount());
+        reporter.reportDecodeTotalLoad(getStatus().getIpIndex(), getTotalLoad());
+        reporter.reportDecodeInflightKvReserved(getStatus().getIpIndex(), inflightKvReserved());
+        reporter.reportDecodeInflightHardKvReserved(getStatus().getIpIndex(), inflightHardKvReserved());
+        reporter.reportInflightMaxAgeMs(RoleType.DECODE.name(), getStatus().getIpIndex(),
                 InflightEvictor.maxAgeMs(inflightRequests, System.currentTimeMillis()));
     }
 

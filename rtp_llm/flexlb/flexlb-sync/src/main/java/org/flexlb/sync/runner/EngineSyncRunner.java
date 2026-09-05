@@ -110,7 +110,7 @@ public class EngineSyncRunner implements Runnable {
 
             // Remove if not in latest engine list
             Set<String> latestValidIpPorts = latestEngineWorkerList.stream()
-                    .map(WorkerHost::getIpPort)
+                    .map(WorkerHost::getLogicalIpPort)
                     .collect(Collectors.toSet());
             logger.debug("Current cached worker size: {}, latest worker list size: {}", cachedWorkerStatuses.size(), latestEngineWorkerList.size());
             for (Map.Entry<String, WorkerStatus> entry: cachedWorkerStatuses.entrySet()) {
@@ -140,7 +140,7 @@ public class EngineSyncRunner implements Runnable {
 
             logger.debug("Submitting status check tasks for {} workers", latestEngineWorkerList.size());
             for (WorkerHost host : latestEngineWorkerList) {
-                String workerIpPort = host.getIpPort();
+                String workerIpPort = host.getLogicalIpPort();
                 String site = host.getSite();
 
                 WorkerStatus workerStatus = getOrCreateWorkerStatus(cachedWorkerStatuses, host);
@@ -168,7 +168,7 @@ public class EngineSyncRunner implements Runnable {
                         try {
                             logger.debug("Submitting GrpcCacheStatusCheckRunner for worker: {}, site: {}", workerIpPort, site);
                             GrpcCacheStatusCheckRunner grpcCacheStatusCheckRunner
-                                    = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
+                                    = new GrpcCacheStatusCheckRunner(modelName, host, roleType,
                                     workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
                                     syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
                                     cacheFullSnapshotDebugMode, statusCheckExecutor);
@@ -231,13 +231,17 @@ public class EngineSyncRunner implements Runnable {
 
     private WorkerStatus getOrCreateWorkerStatus(
             Map<String, WorkerStatus> workerStatuses, WorkerHost host) {
-        String workerIpPort = host.getIpPort();
+        String workerIpPort = host.getLogicalIpPort();
         WorkerStatus workerStatus = workerStatuses.get(workerIpPort);
         if (workerStatus == null) {
             workerStatus = new WorkerStatus();
             workerStatus.setIp(host.getIp());
             workerStatus.setPort(host.getPort());
             workerStatus.setGrpcPort(host.getGrpcPort());
+            workerStatus.setEngineIndex(host.getEngineIndex());
+            workerStatus.setMultiEngineNum(host.getMultiEngineNum());
+            workerStatus.setEndpointAddress(host.getEndpointAddress());
+            workerStatus.setAlive(false);
             workerStatus.setRole(roleType);
             workerStatus.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
             workerStatuses.put(workerIpPort, workerStatus);
@@ -252,10 +256,9 @@ public class EngineSyncRunner implements Runnable {
             workerStatus.setRole(roleType);
         }
         if (endpointRegistry != null) {
-            if (!workerStatus.isAlive()) {
-                workerStatus.setAlive(true);
+            if (workerStatus.isAlive()) {
+                ensureEndpoint(workerIpPort, workerStatus);
             }
-            ensureEndpoint(workerIpPort, workerStatus);
         }
         return workerStatus;
     }

@@ -88,7 +88,7 @@ class ShortestTtftCacheAffinityTest {
 
         addWorker("10.0.0.1", 0);
         addWorker("10.0.0.2", 650);
-        stubCacheMatches(Map.of("10.0.0.2:8080", 3));
+        stubCacheMatches(Map.of("10.0.0.2:8080@0", 3));
 
         ServerStatus result = strategy.select(buildContext(1000, "1", config), RoleType.PREFILL, null);
 
@@ -96,7 +96,7 @@ class ShortestTtftCacheAffinityTest {
         assertEquals("10.0.0.2", result.getServerIp());
         assertEquals(768, result.getDebugInfo().getHitCacheLen());
         Mockito.verify(engineHealthReporter).reportCacheAffinityDecision(
-                RoleType.PREFILL, "10.0.0.2", "CACHE_LEADER");
+                RoleType.PREFILL, "10.0.0.2@0", "CACHE_LEADER");
     }
 
     @Test
@@ -105,17 +105,17 @@ class ShortestTtftCacheAffinityTest {
         useFixedCandidatePool(config, 2);
         addWorker("10.0.0.1", 0);
         addWorker("10.0.0.2", 0);
-        stubCacheMatches(Map.of("10.0.0.1:8080", 3));
+        stubCacheMatches(Map.of("10.0.0.1:8080@0", 3));
 
-        endpointRegistry.getPrefill("10.0.0.1:8080").getLastSelectedTime().set(2000L);
-        endpointRegistry.getPrefill("10.0.0.2:8080").getLastSelectedTime().set(1000L);
+        endpointRegistry.getPrefill("10.0.0.1:8080@0").getLastSelectedTime().set(2000L);
+        endpointRegistry.getPrefill("10.0.0.2:8080@0").getLastSelectedTime().set(1000L);
 
         ServerStatus result = strategy.select(buildContext(1000, "11", config), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.1", result.getServerIp());
         Mockito.verify(engineHealthReporter).reportCacheAffinityDecision(
-                RoleType.PREFILL, "10.0.0.1", "CACHE_LEADER");
+                RoleType.PREFILL, "10.0.0.1@0", "CACHE_LEADER");
     }
 
     @Test
@@ -123,7 +123,7 @@ class ShortestTtftCacheAffinityTest {
         FlexlbConfig config = cacheAffinityConfig(50, 5);
         addWorker("10.0.0.1", 0);
         addWorker("10.0.0.2", 650);
-        stubCacheMatches(Map.of("10.0.0.2:8080", 3));
+        stubCacheMatches(Map.of("10.0.0.2:8080@0", 3));
 
         ServerStatus result = strategy.select(buildContext(1000, "2", config), RoleType.PREFILL, null);
 
@@ -136,7 +136,7 @@ class ShortestTtftCacheAffinityTest {
         FlexlbConfig config = cacheAffinityConfig(200, 30);
         addWorker("10.0.0.1", 0);
         addWorker("10.0.0.2", 250);
-        stubCacheMatches(Map.of("10.0.0.2:8080", 1));
+        stubCacheMatches(Map.of("10.0.0.2:8080@0", 1));
 
         ServerStatus result = strategy.select(buildContext(1000, "3", config), RoleType.PREFILL, null);
 
@@ -163,8 +163,8 @@ class ShortestTtftCacheAffinityTest {
         addWorker("10.0.0.1", 0);
         addWorker("10.0.0.2", 10);
 
-        endpointRegistry.getPrefill("10.0.0.1:8080").getLastSelectedTime().set(2000L);
-        endpointRegistry.getPrefill("10.0.0.2:8080").getLastSelectedTime().set(1000L);
+        endpointRegistry.getPrefill("10.0.0.1:8080@0").getLastSelectedTime().set(2000L);
+        endpointRegistry.getPrefill("10.0.0.2:8080@0").getLastSelectedTime().set(1000L);
 
         ServerStatus result = strategy.select(buildContext(1000, "42", config), RoleType.PREFILL, null);
 
@@ -200,9 +200,9 @@ class ShortestTtftCacheAffinityTest {
         FlexlbConfig config = cacheAffinityConfig(1000, 0);
         addWorker("10.0.0.1", 0);
         addWorker("10.0.0.2", 0);
-        stubCacheMatches(Map.of("10.0.0.2:8080", 3));
+        stubCacheMatches(Map.of("10.0.0.2:8080@0", 3));
         BalanceContext context = buildContext(1000, "5", config);
-        context.setExcludedPrefillIpPort("10.0.0.2:8080");
+        context.setExcludedPrefillIpPort("10.0.0.2:8080@0");
 
         ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
 
@@ -215,7 +215,7 @@ class ShortestTtftCacheAffinityTest {
         FlexlbConfig config = cacheAffinityConfig(1000, 0);
         addWorker("10.0.0.1", 0);
         BalanceContext context = buildContext(1000, "6", config);
-        context.setExcludedPrefillIpPort("10.0.0.1:8080");
+        context.setExcludedPrefillIpPort("10.0.0.1:8080@0");
 
         ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
 
@@ -228,7 +228,7 @@ class ShortestTtftCacheAffinityTest {
         FlexlbConfig config = cacheAffinityConfig(100, 5);
         addWorker("10.0.0.1", 0);
         addWorker("10.0.0.2", 800);
-        stubCacheMatches(Map.of("10.0.0.2:8080", 1));
+        stubCacheMatches(Map.of("10.0.0.2:8080@0", 1));
         BalanceContext context = buildContext(4096, "7", config);
         context.getRequest().setCacheKeyBlockSize(1024L);
 
@@ -248,7 +248,7 @@ class ShortestTtftCacheAffinityTest {
         WorkerStatus p2pWorker = addWorker("10.0.0.2", 100);
         Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class)))
                 .thenReturn(new CacheMatchResult(
-                        Map.of(p2pWorker.getIpPort(), new HostCacheMatch(0, 4, 4)),
+                        Map.of(p2pWorker.getLogicalIpPort(), new HostCacheMatch(0, 4, 4)),
                         CacheMatchSource.KVCM,
                         25L,
                         256L));
@@ -287,7 +287,7 @@ class ShortestTtftCacheAffinityTest {
         existing.setInputLength(800L);
         existing.setPrefixLength(0L);
         cacheLeader.putLocalTask("700", existing);
-        stubCacheMatches(Map.of(cacheLeader.getIpPort(), 3));
+        stubCacheMatches(Map.of(cacheLeader.getLogicalIpPort(), 3));
 
         BalanceContext context = buildContext(1000, "72", config);
         ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
@@ -309,8 +309,8 @@ class ShortestTtftCacheAffinityTest {
         addWorker("10.0.0.2", 650);
         addWorker("10.0.0.3", 550);
         stubCacheMatches(Map.of(
-                "10.0.0.2:8080", 3,
-                "10.0.0.3:8080", 2));
+                "10.0.0.2:8080@0", 3,
+                "10.0.0.3:8080@0", 2));
 
         strategy = new ShortestTTFTStrategy(
                 engineWorkerStatus,
@@ -352,8 +352,8 @@ class ShortestTtftCacheAffinityTest {
         addWorker("10.0.0.2", 0);
         addWorker("10.0.0.3", 190);
         stubCacheMatches(Map.of(
-                "10.0.0.1:8080", 1,
-                "10.0.0.3:8080", 1));
+                "10.0.0.1:8080@0", 1,
+                "10.0.0.3:8080@0", 1));
 
         strategy = new ShortestTTFTStrategy(
                 engineWorkerStatus,
@@ -388,7 +388,7 @@ class ShortestTtftCacheAffinityTest {
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.3", result.getServerIp());
         Mockito.verify(engineHealthReporter).reportCacheAffinityDecision(
-                RoleType.PREFILL, "10.0.0.3", "CACHE_AFFINITY_FALLBACK");
+                RoleType.PREFILL, "10.0.0.3@0", "CACHE_AFFINITY_FALLBACK");
     }
 
     @Test
@@ -397,10 +397,10 @@ class ShortestTtftCacheAffinityTest {
         useFixedCandidatePool(config, 2);
         addWorker("10.0.0.1", 0);
         addWorker("10.0.0.2", 0);
-        stubCacheMatches(Map.of("10.0.0.1:8080", 3));
+        stubCacheMatches(Map.of("10.0.0.1:8080@0", 3));
 
-        PrefillEndpoint cacheLeader = endpointRegistry.getPrefill("10.0.0.1:8080");
-        PrefillEndpoint coldPeer = endpointRegistry.getPrefill("10.0.0.2:8080");
+        PrefillEndpoint cacheLeader = endpointRegistry.getPrefill("10.0.0.1:8080@0");
+        PrefillEndpoint coldPeer = endpointRegistry.getPrefill("10.0.0.2:8080@0");
         cacheLeader.getLastSelectedTime().set(1000L);
         coldPeer.getLastSelectedTime().set(2000L);
         AtomicInteger claimRounds = new AtomicInteger();
@@ -429,7 +429,7 @@ class ShortestTtftCacheAffinityTest {
         assertEquals("10.0.0.2", result.getServerIp());
         assertEquals(2, claimRounds.get());
         Mockito.verify(engineHealthReporter).reportCacheAffinityDecision(
-                RoleType.PREFILL, "10.0.0.2", "CACHE_AFFINITY_FALLBACK");
+                RoleType.PREFILL, "10.0.0.2@0", "CACHE_AFFINITY_FALLBACK");
     }
 
     private FlexlbConfig cacheAffinityConfig(long maxExtraTtftMs, double minHitRate) {
@@ -458,7 +458,7 @@ class ShortestTtftCacheAffinityTest {
         WorkerStatus worker = createWorker(ip, estimatedWaitMs);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS
                 .getPrefillStatusMap()
-                .put(ip + ":8080", worker);
+                .put(ip + ":8080@0", worker);
         return worker;
     }
 
@@ -476,7 +476,7 @@ class ShortestTtftCacheAffinityTest {
         worker.setRunningTaskList(new HashMap<>());
 
         PrefillEndpoint endpoint = (PrefillEndpoint) endpointRegistry.ensureEndpoint(
-                RoleType.PREFILL, ip + ":8080", worker);
+                RoleType.PREFILL, ip + ":8080@0", worker);
         if (estimatedWaitMs > 0) {
             long batchId = 900000L + ip.hashCode();
             endpoint.commitBatch(

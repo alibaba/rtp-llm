@@ -85,11 +85,13 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         }
         List<DecodeEndpoint> result = new ArrayList<>(engineWorkerStatus.getModelWorkerCapacity(roleType));
         Map<String, Integer> rejections = new HashMap<>();
+        Map<String, WorkerEndpoint> healthyEndpoints =
+                engineWorkerStatus.selectRoutableModelWorkerStatus(roleType, group);
         int registered = engineWorkerStatus.forEachModelWorkerEndpoint(roleType, group, (ipPort, ep) -> {
             if (!(ep instanceof DecodeEndpoint de)) {
                 return;
             }
-            if (!de.getStatus().isAlive()) {
+            if (healthyEndpoints.get(ipPort) != de) {
                 rejections.merge("NOT_ALIVE", 1, Integer::sum);
                 return;
             }
@@ -233,6 +235,9 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
     private ServerStatus buildServerStatus(DecodeEndpoint optimalEndpoint, long seqLen,
                                            long declaredOutputTokens, RoleType roleType,
                                            BalanceContext balanceContext) {
+        if (!engineWorkerStatus.isPhysicalGroupHealthy(optimalEndpoint)) {
+            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+        }
         String requestId = balanceContext.getRequestId();
         ServerStatus result = new ServerStatus();
         try {
@@ -258,6 +263,8 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             result.setHttpPort(optimalEndpoint.getHttpPort());
             result.setGrpcPort(CommonUtils.toGrpcPort(optimalEndpoint.getHttpPort()));
             result.setDpRank(optimalEndpoint.getStatus().getDpRank());
+            result.setSelectedEngineIndex(optimalEndpoint.getStatus().getEngineIndex(),
+                    optimalEndpoint.getStatus().getMultiEngineNum());
             result.setGroup(optimalEndpoint.getStatus().getGroup());
             result.setRequestId(requestId);
         } catch (Exception e) {

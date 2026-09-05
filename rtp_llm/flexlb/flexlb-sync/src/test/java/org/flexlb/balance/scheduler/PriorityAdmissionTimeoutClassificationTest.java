@@ -40,7 +40,7 @@ import static org.mockito.Mockito.when;
 /** End-to-end coverage for the existing typed PRIORITY admission-timeout contract. */
 class PriorityAdmissionTimeoutClassificationTest {
 
-    private static final String PREFILL_IP_PORT = "10.0.0.1:8080";
+    private static final String PREFILL_IP_PORT = "10.0.0.1:8080@0";
 
     private PriorityScheduler scheduler;
     private EndpointRegistry endpointRegistry;
@@ -85,6 +85,8 @@ class PriorityAdmissionTimeoutClassificationTest {
         status.setIp("10.0.0.1");
         status.setPort(8080);
         status.setGrpcPort(8081);
+        status.setRole(RoleType.PREFILL);
+        status.setAlive(true);
         endpointRegistry.ensureEndpoint(RoleType.PREFILL, PREFILL_IP_PORT, status);
         prefillEndpoint = endpointRegistry.getPrefill(PREFILL_IP_PORT);
     }

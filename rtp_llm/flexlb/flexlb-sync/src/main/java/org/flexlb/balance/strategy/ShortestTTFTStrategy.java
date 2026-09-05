@@ -180,7 +180,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
                 selected.ep().getIp(),
                 selected.hitCache());
 
-        reportCacheHitMetrics(roleType, selected.hitCache(), seqLen);
+        reportCacheHitMetrics(roleType, selected.ep().getStatus().getIpIndex(), selected.hitCache(), seqLen);
         reportRoutingCacheMatchMetrics(
                 roleType,
                 selected.hitCache(),
@@ -297,7 +297,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
                     cacheAffinityDecision,
                     outstandingThreshold,
                     config);
-            reportCacheAffinityDecision(roleType, selected.ep().getIp(), reason);
+            reportCacheAffinityDecision(roleType, selected.ep().getStatus().getIpIndex(), reason);
             Logger.debug(
                     "ShortestTtft decision - role: {}, group: {}, selected: {}, "
                             + "selectedTtftMs: {}, hitTokens: {}, reason: {}",
@@ -549,8 +549,8 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
                 candidates.contains(scored),
                 candidates.contains(scored),
                 selected.equals(scored),
-                worker.getIpPort().equals(cacheLeader),
-                worker.getIpPort().equals(shortest),
+                worker.getLogicalIpPort().equals(cacheLeader),
+                worker.getLogicalIpPort().equals(shortest),
                 outstandingThreshold <= 0L
                         || outstandingUncachedTokens + requestUncachedTokens
                                 <= outstandingThreshold,
@@ -666,7 +666,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
                 Logger.debug("ShortestTTFT: skipping endpoint without predictor, ip={}", ep.getIp());
                 continue;
             }
-            HostCacheMatch match = cacheMatchResult.hostMatch(ep.ipPort());
+            HostCacheMatch match = cacheMatchResult.hostMatch(ep.getStatus());
             long localMatchBlocks = match == null ? 0L : match.localMatchBlocks();
             long p2pFetchBlocks = match == null ? 0L : match.p2pFetchBlocks();
             long p2pTotalMatchBlocks = match == null ? 0L : match.p2pTotalMatchBlocks();
@@ -746,7 +746,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
                                                         String group,
                                                         ResourceMeasureIndicatorEnum indicator,
                                                         String excludedIpPort) {
-        Map<String, WorkerEndpoint> workerEndpointMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
+        Map<String, WorkerEndpoint> workerEndpointMap = engineWorkerStatus.selectRoutableModelWorkerStatus(roleType, group);
         if (MapUtils.isEmpty(workerEndpointMap)) {
             return new ArrayList<>();
         }
@@ -758,9 +758,6 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         PrefillEndpoint excludedEligible = null;
         for (WorkerEndpoint ep : workerEndpointMap.values()) {
             if (!(ep instanceof PrefillEndpoint pe)) {
-                continue;
-            }
-            if (!pe.getStatus().isAlive()) {
                 continue;
             }
             if (!measure.isResourceAvailable(pe)) {
@@ -796,9 +793,9 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
 
     // ==================== Metrics & ServerStatus (mirrors CostBasedPrefillStrategy) ====================
 
-    private void reportCacheHitMetrics(RoleType roleType, long hitCacheTokens, long seqLen) {
+    private void reportCacheHitMetrics(RoleType roleType, String ipIndex, long hitCacheTokens, long seqLen) {
         double hitRate = seqLen > 0 ? hitCacheTokens / (double) seqLen : 0.0;
-        engineHealthReporter.reportCacheHitMetrics(roleType, hitCacheTokens, hitRate);
+        engineHealthReporter.reportCacheHitMetrics(roleType, ipIndex, hitCacheTokens, hitRate);
     }
 
     private void reportRoutingCacheMatchMetrics(RoleType roleType,
@@ -820,6 +817,10 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         long ttft = selected.ttft();
         long bestCacheHit = selected.hitCache();
 
+        if (!engineWorkerStatus.isPhysicalGroupHealthy(ep)) {
+            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+        }
+
         // DIRECT owns its reservation here; QUEUE owns reservations in the scheduler.
         if (strategyOwnsInflightTracking(balanceContext)) {
             ep.commitBatch(requestId, selected.prefillMs(), Collections.emptyList());
@@ -836,7 +837,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
             recordKvcmMatch(
                     task,
                     cacheMatchResult,
-                    cacheMatchResult.hostMatch(ep.ipPort()),
+                    cacheMatchResult.hostMatch(ep.getStatus()),
                     balanceContext.getRequest().getSeqLen());
             workerStatus.putLocalTask(lifecycleRequestId, task);
         }
@@ -855,6 +856,8 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
         result.setHttpPort(ep.getHttpPort());
         result.setGrpcPort(CommonUtils.toGrpcPort(ep.getHttpPort()));
         result.setDpRank(ep.getStatus().getDpRank());
+        result.setSelectedEngineIndex(ep.getStatus().getEngineIndex(),
+                ep.getStatus().getMultiEngineNum());
         result.setDebugInfo(debugInfo);
         return result;
     }

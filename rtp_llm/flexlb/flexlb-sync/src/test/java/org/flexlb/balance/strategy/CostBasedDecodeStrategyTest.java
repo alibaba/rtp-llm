@@ -62,6 +62,7 @@ class CostBasedDecodeStrategyTest {
                 Mockito.mock(BatchSchedulerReporter.class));
         for (Map.Entry<String, WorkerStatus> entry : workerMap.entrySet()) {
             WorkerStatus ws = entry.getValue();
+            ws.setRole(RoleType.DECODE);
             ws.setGrpcPort(9090);
             DecodeEndpoint ep = (DecodeEndpoint) registry.ensureEndpoint(
                     RoleType.DECODE, entry.getKey(), ws);
@@ -96,6 +97,45 @@ class CostBasedDecodeStrategyTest {
     }
 
     @Test
+    void routesSelectedEngineAndRejectsUnhealthySibling() {
+        WorkerStatus engine0 = createWorkerStatus("127.0.0.8");
+        WorkerStatus engine1 = createWorkerStatus("127.0.0.8");
+        engine0.setMultiEngineNum(2);
+        engine1.setMultiEngineNum(2);
+        engine1.setEngineIndex(1);
+        for (WorkerStatus worker : java.util.List.of(engine0, engine1)) {
+            worker.getTotalKvCacheTokens().set(10000);
+            worker.getAvailableKvCacheTokens().set(9000);
+        }
+        EndpointRegistry registry = createDecodeRegistry(Map.of(
+                engine0.getLogicalIpPort(), engine0, engine1.getLogicalIpPort(), engine1));
+        ResourceMeasureFactory factory = Mockito.mock(ResourceMeasureFactory.class);
+        DecodeResourceMeasure measure = Mockito.mock(DecodeResourceMeasure.class);
+        Mockito.when(factory.getMeasure(any())).thenReturn(measure);
+        Mockito.when(measure.isResourceAvailable(any())).thenAnswer(invocation ->
+                ((DecodeEndpoint) invocation.getArgument(0)).getStatus().getEngineIndex() == 1);
+        CostBasedDecodeStrategy strategy = new CostBasedDecodeStrategy(new EngineWorkerStatus(registry), factory);
+        Request request = new Request();
+        request.setRequestId("multi-engine");
+        request.setSeqLen(100);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        context.setConfig(configService.loadBalanceConfig());
+
+        ServerStatus result = strategy.select(context, RoleType.DECODE, null);
+
+        Assertions.assertTrue(result.isSuccess());
+        Assertions.assertEquals(1, result.getEngineIndex());
+        Assertions.assertEquals("127.0.0.8:8080@1", result.getLogicalIpPort());
+        Assertions.assertEquals(1, new com.fasterxml.jackson.databind.ObjectMapper()
+                .valueToTree(result).get("engine_index").asInt());
+        strategy.rollBack(registry.getDecode(result.getLogicalIpPort()), request.getRequestId());
+        engine0.setAlive(false);
+        Assertions.assertFalse(strategy.select(context, RoleType.DECODE, null).isSuccess());
+        registry.close();
+    }
+
+    @Test
     void should_use_uniform_distribution_when_all_cache_usages_are_equal() {
         Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
 
@@ -109,9 +149,9 @@ class CostBasedDecodeStrategyTest {
         worker3.getTotalKvCacheTokens().set(10000);
         worker3.getAvailableKvCacheTokens().set(9000);
 
-        decodeMap.put("127.0.0.1:8080", worker1);
-        decodeMap.put("127.0.0.2:8080", worker2);
-        decodeMap.put("127.0.0.3:8080", worker3);
+        decodeMap.put("127.0.0.1:8080@0", worker1);
+        decodeMap.put("127.0.0.2:8080@0", worker2);
+        decodeMap.put("127.0.0.3:8080@0", worker3);
 
         EndpointRegistry registry = createDecodeRegistry(decodeMap);
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(registry);
@@ -152,9 +192,9 @@ class CostBasedDecodeStrategyTest {
         worker3.getTotalKvCacheTokens().set(10000);
         worker3.getAvailableKvCacheTokens().set(9000);
 
-        decodeMap.put("127.0.0.1:8080", worker1);
-        decodeMap.put("127.0.0.2:8080", worker2);
-        decodeMap.put("127.0.0.3:8080", worker3);
+        decodeMap.put("127.0.0.1:8080@0", worker1);
+        decodeMap.put("127.0.0.2:8080@0", worker2);
+        decodeMap.put("127.0.0.3:8080@0", worker3);
 
         EndpointRegistry registry = createDecodeRegistry(decodeMap);
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(registry);
@@ -186,7 +226,7 @@ class CostBasedDecodeStrategyTest {
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
         worker1.setGroup("group-a");
 
-        modelStatus.getDecodeStatusMap().put("127.0.0.1:8080", worker1);
+        modelStatus.getDecodeStatusMap().put("127.0.0.1:8080@0", worker1);
 
         EndpointRegistry registry = createDecodeRegistry(modelStatus.getDecodeStatusMap());
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(registry);
@@ -223,8 +263,8 @@ class CostBasedDecodeStrategyTest {
         worker2.getTotalKvCacheTokens().set(10000);
         worker2.getAvailableKvCacheTokens().set(8500);
 
-        decodeMap.put("127.0.0.1:8080", worker1);
-        decodeMap.put("127.0.0.2:8080", worker2);
+        decodeMap.put("127.0.0.1:8080@0", worker1);
+        decodeMap.put("127.0.0.2:8080@0", worker2);
 
         EndpointRegistry registry = createDecodeRegistry(decodeMap);
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(registry);
@@ -253,7 +293,7 @@ class CostBasedDecodeStrategyTest {
                 String selectedIp = status.getServerIp();
                 selectionCount.put(selectedIp, selectionCount.getOrDefault(selectedIp, 0) + 1);
                 costBasedDecodeStrategy.rollBack(
-                        registry.get(RoleType.DECODE, selectedIp + ":8080"), String.valueOf(1000L + i));
+                        registry.get(RoleType.DECODE, status.getLogicalIpPort()), String.valueOf(1000L + i));
             }
         }
 
@@ -282,7 +322,7 @@ class CostBasedDecodeStrategyTest {
             // With 15 workers using 800K tokens and one empty worker, the previous
             // average-centered formula evaluated exp(750), which overflows to Infinity.
             worker.getAvailableKvCacheTokens().set(i == 1 ? 1_000_000 : 200_000);
-            decodeMap.put(ip + ":8080", worker);
+            decodeMap.put(ip + ":8080@0", worker);
         }
 
         EndpointRegistry registry = createDecodeRegistry(decodeMap);
@@ -311,7 +351,7 @@ class CostBasedDecodeStrategyTest {
             Assertions.assertEquals("127.0.0.1", status.getServerIp(),
                     "The worker with the lowest KV usage should have the highest stable weight");
             costBasedDecodeStrategy.rollBack(
-                    registry.get(RoleType.DECODE, status.getServerIp() + ":8080"), String.valueOf(requestId));
+                    registry.get(RoleType.DECODE, status.getLogicalIpPort()), String.valueOf(requestId));
         }
     }
 
@@ -327,8 +367,8 @@ class CostBasedDecodeStrategyTest {
         worker2.getTotalKvCacheTokens().set(1000);
         worker2.getAvailableKvCacheTokens().set(800);
 
-        decodeMap.put("127.0.0.1:8080", worker1);
-        decodeMap.put("127.0.0.2:8080", worker2);
+        decodeMap.put("127.0.0.1:8080@0", worker1);
+        decodeMap.put("127.0.0.2:8080@0", worker2);
 
         EndpointRegistry registry = createDecodeRegistry(decodeMap);
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(registry);
@@ -365,8 +405,8 @@ class CostBasedDecodeStrategyTest {
         worker2.getTotalKvCacheTokens().set(1000);
         worker2.getAvailableKvCacheTokens().set(100);
 
-        decodeMap.put("127.0.0.1:8080", worker1);
-        decodeMap.put("127.0.0.2:8080", worker2);
+        decodeMap.put("127.0.0.1:8080@0", worker1);
+        decodeMap.put("127.0.0.2:8080@0", worker2);
 
         EndpointRegistry registry = createDecodeRegistry(decodeMap);
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(registry);

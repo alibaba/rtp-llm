@@ -22,6 +22,25 @@ KVCM（外部 KV Cache Manager）、LOCAL_STANDBY（KVCM 的本地兜底）。
     一个在途状态检查**；
   - **仅当 `!kvcmEnabled`** 时提交 `GrpcCacheStatusCheckRunner`（`cacheCheckInProgress` CAS）。
 
+一个服务发现 frontend 会按 Endpoint `multi_engine_num` 展开为 N 个逻辑 worker，map key
+统一为 `ip:httpPort@index`（N=1 也是 `@0`）。frontend HTTP/gRPC 地址保持共享；第 i 个
+`GrpcWorkerStatusRunner` 独立连接 `worker_status_port + i`。N>1 必须显式配置 status base，
+配置加载时同时校验 count、base 和 `base + N - 1 <= 65535`。
+
+worker 地址表示由不可变 `WorkerIdentity` 一次性预计算并保存，调用方不再解析或临时拼接：
+
+| 表示 | 格式 | 用途 |
+|---|---|---|
+| raw IP | `ip` | 网络连接与服务发现 |
+| raw port | `port` | 共享 frontend 端口 |
+| raw engine index | `engineIndex` | 逻辑引擎序号 |
+| physical IP-port | `ip:port` | 共享 frontend 身份、物理健康分组 |
+| logical IP-port | `ip:port@index` | 路由、rollback、KVCM 与 cache key |
+| metrics IP-index | `ip@index` | 所有可归属具体引擎的 `engineIp` 指标标签 |
+
+`WorkerHost` 在服务发现展开时持有该 identity；`WorkerStatus` 更新任一 raw 字段时原子替换
+整份 identity，保证三种派生表示来自同一个快照。N=1 也保留 `@0`。
+
 ### GrpcWorkerStatusRunner
 
 gRPC `getWorkerStatus`（VIT 走 multimodal 变体）携带 `latest_finished_version` 做增量拉取。
@@ -34,6 +53,10 @@ dp/tp size、内嵌 `cache_status`、`block_hash_lookahead_tokens`、`cache_matc
 处理逻辑：版本号新才全量更新（并发/任务表/队列时间）；版本号旧也更新 alive、时间戳并做任务
 对账；`cache_status` 总量恒更新（used = total − available）。带 `CacheHitFeedback` 的完成
 任务会异步送 `CacheAwareService.buildCacheHitComparison`（预测 vs 实际命中对比，出指标 + pv 日志）。
+连续 3 次 RPC 失败会把该逻辑 worker 标为不健康并移除其 endpoint；公共 physical AND
+gate 同时将所有 siblings 排除出路由候选，成功状态恢复且整组健康后才重新可路由。
+新发现的 worker 在首次接受有效状态前不可路由。空响应标为不健康；未初始化状态
+（`status_version=0`）与响应处理异常跳过本轮更新。
 
 ### WorkerStatus 的本地预测与对账
 
@@ -77,6 +100,10 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
   `calculateDiff` 在专用 ForkJoinPool 上并行算 added/removed，diff 大小回馈动态间隔服务。
 - `KvCacheManager`：门面——`findMatchingEngines`（候选来自 `WorkerStatusProvider`）、
   `updateEngineCache`（diff 后双表应用）、`removeStaleEngineCaches`、`clear`。
+
+上述 LOCAL_SYNC key、KVCM `host_ip_port`、LOCAL_STANDBY 映射与 cache-hit comparison 均使用
+逻辑 `ip:httpPort@index`。KVCM 对 N=1 worker 兼容旧 physical `ip:httpPort` key：logical key
+未命中时才回退查询 physical key；N>1 或非 KVCM source 仍要求 exact match，无法匹配时按零命中忽略。
 
 ### KVCM（外部 KV Cache Manager）
 

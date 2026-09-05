@@ -3,9 +3,14 @@ package org.flexlb.cache.domain;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonPropertyOrder;
+import org.flexlb.dao.master.WorkerIdentity;
 
 /**
  * Cache-hit comparison result and PV log payload.
+ *
+ * @param workerIdentity worker identity providing the routing/PV identity
+ *                       {@code ip:port@engineIndex} and the metrics identity
+ *                       {@code ip@engineIndex}; omitted from PV JSON itself
  */
 @JsonPropertyOrder({
         "event", "requestId", "source", "role", "group", "worker", "state", "inputTokens",
@@ -17,13 +22,24 @@ public record CacheHitComparisonResult(
         String source,
         String role,
         String group,
-        String worker,
+        @JsonIgnore WorkerIdentity workerIdentity,
         String state,
         long inputTokens,
         Actual actual,
         @JsonIgnore HitComparison routing,
         HitComparison localStandby,
         @JsonIgnore KvcmDetails kvcmDetails) {
+
+    /** Routing/PV identity in {@code ip:port@engineIndex} format. */
+    @JsonProperty("worker")
+    public String worker() {
+        return workerIdentity == null ? null : workerIdentity.getLogicalIpPort();
+    }
+
+    /** Metrics identity in {@code ip@engineIndex} format; omitted from PV JSON. */
+    public String ipIndex() {
+        return workerIdentity == null ? null : workerIdentity.getIpIndex();
+    }
 
     @JsonProperty("kvcm")
     public KvcmComparison kvcm() {

@@ -259,4 +259,62 @@ class EngineWorkerStatusTest {
         assertEquals(1, selected.size());
         assertSame(registered, selected.get(ipPort));
     }
+    @Test
+    void requiresCompleteHealthySiblingGroupWithoutMergingResources() {
+        WorkerStatus zero = logicalWorker(0);
+        WorkerStatus one = logicalWorker(1);
+        var first = registry.ensureEndpoint(RoleType.PREFILL, zero.getLogicalIpPort(), zero);
+        assertFalse(engineWorkerStatus.isPhysicalGroupHealthy(first));
+        registry.ensureEndpoint(RoleType.PREFILL, one.getLogicalIpPort(), one);
+        one.getResourceAvailable().set(false);
+        assertEquals(2, engineWorkerStatus.selectRoutableModelWorkerStatus(RoleType.PREFILL, "group1").size());
+        assertTrue(engineWorkerStatus.isPhysicalGroupHealthy(first));
+        one.setAlive(false);
+        assertTrue(engineWorkerStatus.selectRoutableModelWorkerStatus(RoleType.PREFILL, "group1").isEmpty());
+        assertFalse(engineWorkerStatus.isPhysicalGroupHealthy(first));
+        one.setAlive(true);
+        registry.remove(RoleType.PREFILL, one.getLogicalIpPort(), one);
+        assertFalse(engineWorkerStatus.isPhysicalGroupHealthy(first));
+        registry.close();
+    }
+
+    @Test
+    void candidateHealthFilteringScalesLinearlyWithWorkerCount() {
+        AtomicInteger groupReads = new AtomicInteger();
+        int workerCount = 20;
+        for (int i = 0; i < workerCount; i++) {
+            WorkerStatus status = new WorkerStatus() {
+                @Override
+                public String getPhysicalGroupKey() {
+                    groupReads.incrementAndGet();
+                    return super.getPhysicalGroupKey();
+                }
+            };
+            status.setIp("127.0.0." + i);
+            status.setPort(8080);
+            status.setRole(RoleType.DECODE);
+            status.setAlive(true);
+            registry.ensureEndpoint(RoleType.DECODE, status.getLogicalIpPort(), status);
+        }
+        assertEquals(workerCount,
+                engineWorkerStatus.selectRoutableModelWorkerStatus(RoleType.DECODE, null).size());
+        assertTrue(groupReads.get() <= workerCount * 2,
+                "candidate selection must not rescan all workers for each candidate: " + groupReads.get());
+        registry.close();
+    }
+
+    private WorkerStatus logicalWorker(int index) {
+        WorkerStatus status = new WorkerStatus();
+        status.setIp("127.0.0.1");
+        status.setPort(8080);
+        status.setGrpcPort(8081);
+        status.setRole(RoleType.PREFILL);
+        status.setGroup("group1");
+        status.setEndpointAddress("service-a");
+        status.setEngineIndex(index);
+        status.setMultiEngineNum(2);
+        status.setAlive(true);
+        return status;
+    }
+
 }

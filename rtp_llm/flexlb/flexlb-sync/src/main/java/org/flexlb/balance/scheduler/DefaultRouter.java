@@ -169,7 +169,7 @@ public class DefaultRouter implements Router {
 
         List<ServerStatus> partialResults = routingResult.serverStatusList();
         for (ServerStatus serverStatus : partialResults) {
-            String serverIpPort = serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
+            String serverIpPort = serverStatus.getLogicalIpPort();
             String requestId = balanceContext.getRequestId();
             RoleType role = serverStatus.getRole();
 

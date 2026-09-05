@@ -85,9 +85,9 @@ class ShortestTTFTStrategyTest {
     void selectsWorkerWithLowestTTFT() {
         Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         // Worker 1: TTFT = estimateMs(1000,0)=1000 + wait 100 = 1100
-        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 100));
+        prefillMap.put("10.0.0.1:8080@0", createWorker("10.0.0.1", 100));
         // Worker 2: TTFT = estimateMs(1000,0)=1000 + wait 50 = 1050  (lower)
-        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 50));
+        prefillMap.put("10.0.0.2:8080@0", createWorker("10.0.0.2", 50));
 
         ServerStatus result = strategy.select(buildContext(1000, "1"), RoleType.PREFILL, null);
 
@@ -99,13 +99,13 @@ class ShortestTTFTStrategyTest {
     void unavailableWaitEstimateCannotWinBySignedOverflow() {
         Map<String, WorkerStatus> prefillMap =
                 EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
-        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
-        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
+        prefillMap.put("10.0.0.1:8080@0", createWorker("10.0.0.1", 0));
+        prefillMap.put("10.0.0.2:8080@0", createWorker("10.0.0.2", 0));
 
         PrefillEndpoint first = Mockito.spy(
-                endpointRegistry.getPrefill("10.0.0.1:8080"));
+                endpointRegistry.getPrefill("10.0.0.1:8080@0"));
         Mockito.doReturn(Long.MAX_VALUE).when(first).realWaitTimeMs();
-        endpointRegistry.getPrefillEndpoints().put("10.0.0.1:8080", first);
+        endpointRegistry.getPrefillEndpoints().put("10.0.0.1:8080@0", first);
 
         ServerStatus mixed = strategy.select(
                 buildContext(1000, "8001"), RoleType.PREFILL, null);
@@ -115,9 +115,9 @@ class ShortestTTFTStrategyTest {
                 "an unavailable wait sentinel must not wrap into the minimum TTFT");
 
         PrefillEndpoint second = Mockito.spy(
-                endpointRegistry.getPrefill("10.0.0.2:8080"));
+                endpointRegistry.getPrefill("10.0.0.2:8080@0"));
         Mockito.doReturn(Long.MAX_VALUE).when(second).realWaitTimeMs();
-        endpointRegistry.getPrefillEndpoints().put("10.0.0.2:8080", second);
+        endpointRegistry.getPrefillEndpoints().put("10.0.0.2:8080@0", second);
 
         ServerStatus allUnavailable = strategy.select(
                 buildContext(1000, "8002"), RoleType.PREFILL, null);
@@ -133,9 +133,9 @@ class ShortestTTFTStrategyTest {
 
         Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         // TTFTs: 600, 510, 700 — worker 2 has the lowest
-        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 100));
-        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 10));
-        prefillMap.put("10.0.0.3:8080", createWorker("10.0.0.3", 200));
+        prefillMap.put("10.0.0.1:8080@0", createWorker("10.0.0.1", 100));
+        prefillMap.put("10.0.0.2:8080@0", createWorker("10.0.0.2", 10));
+        prefillMap.put("10.0.0.3:8080@0", createWorker("10.0.0.3", 200));
 
         // candidateCount = min(1, 3) = 1 → only lowest-TTFT worker in pool, short-circuit
         ServerStatus result = strategy.select(buildContext(500, "1", config), RoleType.PREFILL, null);
@@ -152,13 +152,13 @@ class ShortestTTFTStrategyTest {
 
         Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         // Both have same TTFT (estimateMs(500,0)=500 + wait 0 = 500)
-        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
-        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
+        prefillMap.put("10.0.0.1:8080@0", createWorker("10.0.0.1", 0));
+        prefillMap.put("10.0.0.2:8080@0", createWorker("10.0.0.2", 0));
 
         // Same TTFT, but different lastSelectedTime — CAS should pick the least-recently-selected
-        PrefillEndpoint ep1 = endpointRegistry.getPrefill("10.0.0.1:8080");
+        PrefillEndpoint ep1 = endpointRegistry.getPrefill("10.0.0.1:8080@0");
         ep1.getLastSelectedTime().set(1000);  // earlier → less recently used
-        PrefillEndpoint ep2 = endpointRegistry.getPrefill("10.0.0.2:8080");
+        PrefillEndpoint ep2 = endpointRegistry.getPrefill("10.0.0.2:8080@0");
         ep2.getLastSelectedTime().set(2000);  // later  → more recently used
 
         ServerStatus result = strategy.select(buildContext(500, "1", config), RoleType.PREFILL, null);
@@ -172,13 +172,13 @@ class ShortestTTFTStrategyTest {
     void cacheHitReducesTTFT() {
         Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         // Both have wait=0; TTFT is driven by estimateMs alone
-        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
-        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
+        prefillMap.put("10.0.0.1:8080@0", createWorker("10.0.0.1", 0));
+        prefillMap.put("10.0.0.2:8080@0", createWorker("10.0.0.2", 0));
 
         // Give worker 2 a cache hit: 3 blocks * 256 = 768 hit tokens
         // estimateMs(1000, 768) = (1000-768) + 0.3*768 = 232 + 230 = 462  <  estimateMs(1000, 0) = 1000
         Map<String, Integer> cacheResults = new HashMap<>();
-        cacheResults.put("10.0.0.2:8080", 3);
+        cacheResults.put("10.0.0.2:8080@0", 3);
         Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class)))
                 .thenReturn(localMatches(cacheResults, 256L));
 
@@ -224,8 +224,8 @@ class ShortestTTFTStrategyTest {
         config.setDispatcher(new NonBatchDispatcherConfig());
         Map<String, WorkerStatus> prefillMap =
                 EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
-        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 1000));
-        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080");
+        prefillMap.put("10.0.0.1:8080@0", createWorker("10.0.0.1", 1000));
+        PrefillEndpoint endpoint = endpointRegistry.getPrefill("10.0.0.1:8080@0");
         BalanceContext context = buildContext(500, "43", config);
 
         ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
@@ -253,7 +253,7 @@ class ShortestTTFTStrategyTest {
         useRatioCandidatePool(config, 0.3, 0);
 
         Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
-        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        prefillMap.put("10.0.0.1:8080@0", createWorker("10.0.0.1", 0));
 
         ServerStatus result = strategy.select(buildContext(500, "1", config), RoleType.PREFILL, null);
 
@@ -272,12 +272,12 @@ class ShortestTTFTStrategyTest {
         for (int i = 1; i <= 5; i++) {
             String ip = "10.0.0." + i;
             // TTFTs: 500, 600, 700, 800, 900
-            prefillMap.put(ip + ":8080", createWorker(ip, (i - 1) * 100));
+            prefillMap.put(ip + ":8080@0", createWorker(ip, (i - 1) * 100));
         }
         // Make the lowest-TTFT worker (10.0.0.1) recently selected
-        endpointRegistry.getPrefill("10.0.0.1:8080").getLastSelectedTime().set(1_000_000L);
+        endpointRegistry.getPrefill("10.0.0.1:8080@0").getLastSelectedTime().set(1_000_000L);
         // Make the 2nd-lowest (10.0.0.2) least recently selected
-        endpointRegistry.getPrefill("10.0.0.2:8080").getLastSelectedTime().set(0L);
+        endpointRegistry.getPrefill("10.0.0.2:8080@0").getLastSelectedTime().set(0L);
 
         ServerStatus result1 = strategy.select(buildContext(500, "1", config), RoleType.PREFILL, null);
         assertTrue(result1.isSuccess());
@@ -290,14 +290,14 @@ class ShortestTTFTStrategyTest {
         for (int i = 1; i <= 10; i++) {
             String ip = "10.0.1." + i;
             // TTFTs: 500, 510, 520, 530, …, 590
-            prefillMap.put(ip + ":8080", createWorker(ip, (i - 1) * 10));
+            prefillMap.put(ip + ":8080@0", createWorker(ip, (i - 1) * 10));
         }
         // Worker 1 (lowest TTFT): most recently selected
-        endpointRegistry.getPrefill("10.0.1.1:8080").getLastSelectedTime().set(1_000_000L);
+        endpointRegistry.getPrefill("10.0.1.1:8080@0").getLastSelectedTime().set(1_000_000L);
         // Worker 2 (2nd lowest): slightly less recent
-        endpointRegistry.getPrefill("10.0.1.2:8080").getLastSelectedTime().set(999_999L);
+        endpointRegistry.getPrefill("10.0.1.2:8080@0").getLastSelectedTime().set(999_999L);
         // Worker 3 (3rd lowest): least recently selected (oldest)
-        endpointRegistry.getPrefill("10.0.1.3:8080").getLastSelectedTime().set(0L);
+        endpointRegistry.getPrefill("10.0.1.3:8080@0").getLastSelectedTime().set(0L);
 
         ServerStatus result2 = strategy.select(buildContext(500, "2", config), RoleType.PREFILL, null);
         assertTrue(result2.isSuccess());
@@ -312,13 +312,13 @@ class ShortestTTFTStrategyTest {
     void reportsCandidateMaxAndSelectedRoutingCacheMatchTokens() {
         Map<String, WorkerStatus> prefillMap =
                 EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
-        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 5000));
-        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
+        prefillMap.put("10.0.0.1:8080@0", createWorker("10.0.0.1", 5000));
+        prefillMap.put("10.0.0.2:8080@0", createWorker("10.0.0.2", 0));
 
         Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class)))
                 .thenReturn(localMatches(Map.of(
-                        "10.0.0.1:8080", 4,
-                        "10.0.0.2:8080", 1), 1024L));
+                        "10.0.0.1:8080@0", 4,
+                        "10.0.0.2:8080@0", 1), 1024L));
 
         BalanceContext context = buildContext(4096, "1");
         context.getRequest().setCacheKeyBlockSize(1024L);
@@ -335,7 +335,35 @@ class ShortestTTFTStrategyTest {
 
     // ==================== Helpers (mirrors CostBasedPrefillStrategyTest) ====================
 
+    @Test
+    void routesLogicalEngineAndRejectsUnhealthySibling() {
+        WorkerStatus engine0 = createWorker("10.0.0.8", 0, 0, 2);
+        WorkerStatus engine1 = createWorker("10.0.0.8", 0, 1, 2);
+        org.flexlb.balance.resource.PrefillResourceMeasure measure =
+                (org.flexlb.balance.resource.PrefillResourceMeasure) resourceMeasureFactory.getMeasure(
+                        new FlexlbConfig().resourceMeasureFor(RoleType.PREFILL));
+        Mockito.when(measure.isResourceAvailable(any())).thenAnswer(invocation ->
+                ((PrefillEndpoint) invocation.getArgument(0)).getStatus().getEngineIndex() == 1);
+
+        ServerStatus selected = strategy.select(buildContext(100, "multi-engine"), RoleType.PREFILL, null);
+
+        assertTrue(selected.isSuccess());
+        assertEquals(1, selected.getEngineIndex());
+        assertEquals("10.0.0.8:8080@1", selected.getLogicalIpPort());
+        assertEquals(1, new com.fasterxml.jackson.databind.ObjectMapper()
+                .valueToTree(selected).get("engine_index").asInt());
+        engine0.setAlive(false);
+        assertFalse(strategy.select(buildContext(100, "unhealthy"), RoleType.PREFILL, null).isSuccess());
+        engine0.setAlive(true);
+        engine1.setMultiEngineNum(1);
+        assertFalse(strategy.select(buildContext(100, "incomplete"), RoleType.PREFILL, null).isSuccess());
+    }
+
     private WorkerStatus createWorker(String ip, long estimatedWaitMs) {
+        return createWorker(ip, estimatedWaitMs, 0, 1);
+    }
+
+    private WorkerStatus createWorker(String ip, long estimatedWaitMs, int index, int count) {
         WorkerStatus w = new WorkerStatus();
         w.setIp(ip);
         w.setPort(8080);
@@ -347,7 +375,9 @@ class ShortestTTFTStrategyTest {
         w.setCacheStatus(cacheStatus);
         w.setRunningTaskList(new HashMap<>());
 
-        String ipPort = ip + ":8080";
+        w.setEngineIndex(index);
+        w.setMultiEngineNum(count);
+        String ipPort = w.getLogicalIpPort();
         w.setGrpcPort(8081);
         PrefillEndpoint ep = (PrefillEndpoint) endpointRegistry.ensureEndpoint(
                 RoleType.PREFILL, ipPort, w);

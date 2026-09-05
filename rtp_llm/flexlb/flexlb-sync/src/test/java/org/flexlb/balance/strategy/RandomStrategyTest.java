@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
@@ -78,10 +79,12 @@ class RandomStrategyTest {
     }
 
     private void registerPrefill(String ipPort, WorkerStatus ws) {
+        ws.setRole(RoleType.PREFILL);
         endpointRegistry.ensureEndpoint(RoleType.PREFILL, ipPort, ws);
     }
 
     private void registerDecode(String ipPort, WorkerStatus ws) {
+        ws.setRole(RoleType.DECODE);
         endpointRegistry.ensureEndpoint(RoleType.DECODE, ipPort, ws);
     }
 
@@ -122,8 +125,8 @@ class RandomStrategyTest {
         Map<String, WorkerStatus> prefillStatusMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
 
         WorkerStatus workerStatus = createWorkerStatus("127.0.0.1");
-        prefillStatusMap.put("127.0.0.1:8080", workerStatus);
-        registerPrefill("127.0.0.1:8080", workerStatus);
+        prefillStatusMap.put("127.0.0.1:8080@0", workerStatus);
+        registerPrefill("127.0.0.1:8080@0", workerStatus);
 
         Request req = new Request();
         req.setRequestId("random-request");
@@ -134,6 +137,41 @@ class RandomStrategyTest {
         ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
+        assertNull(result.getEngineIndex());
+        assertEquals(0, result.getRoutingEngineIndex());
+        assertEquals("127.0.0.1:8080@0", result.getLogicalIpPort());
+        assertFalse(new ObjectMapper().valueToTree(result).has("engine_index"));
+    }
+
+    @Test
+    void shouldRemoveAllPhysicalSiblingsWhenOneEngineIsDown() {
+        Map<String, WorkerStatus> workers =
+                EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        WorkerStatus engine0 = createWorkerStatus("127.0.0.1");
+        engine0.setEndpointAddress("service-a");
+        engine0.setMultiEngineNum(2);
+        WorkerStatus engine1 = createWorkerStatus("127.0.0.1");
+        engine1.setEndpointAddress("service-a");
+        engine1.setEngineIndex(1);
+        engine1.setMultiEngineNum(2);
+        workers.put(engine0.getLogicalIpPort(), engine0);
+        workers.put(engine1.getLogicalIpPort(), engine1);
+        registerPrefill(engine0.getLogicalIpPort(), engine0);
+        registerPrefill(engine1.getLogicalIpPort(), engine1);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(new Request());
+
+        ServerStatus healthy = randomStrategy.select(context, RoleType.PREFILL, null);
+
+        assertTrue(healthy.isSuccess());
+        assertNotNull(healthy.getEngineIndex());
+        assertEquals(healthy.getEngineIndex(), healthy.getRoutingEngineIndex());
+        assertEquals(
+                healthy.getRoutingEngineIndex(),
+                new ObjectMapper().valueToTree(healthy).get("engine_index").asInt());
+        engine1.setAlive(false);
+
+        assertFalse(randomStrategy.select(context, RoleType.PREFILL, null).isSuccess());
     }
 
     @Test
@@ -144,12 +182,12 @@ class RandomStrategyTest {
         WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
         WorkerStatus worker3 = createWorkerStatus("127.0.0.3");
 
-        prefillStatusMap.put("127.0.0.1:8080", worker1);
-        prefillStatusMap.put("127.0.0.2:8080", worker2);
-        prefillStatusMap.put("127.0.0.3:8080", worker3);
-        registerPrefill("127.0.0.1:8080", worker1);
-        registerPrefill("127.0.0.2:8080", worker2);
-        registerPrefill("127.0.0.3:8080", worker3);
+        prefillStatusMap.put("127.0.0.1:8080@0", worker1);
+        prefillStatusMap.put("127.0.0.2:8080@0", worker2);
+        prefillStatusMap.put("127.0.0.3:8080@0", worker3);
+        registerPrefill("127.0.0.1:8080@0", worker1);
+        registerPrefill("127.0.0.2:8080@0", worker2);
+        registerPrefill("127.0.0.3:8080@0", worker3);
 
         Request req = new Request();
         req.setRequestId("random-request");
@@ -169,12 +207,12 @@ class RandomStrategyTest {
     @Test
     void should_work_with_different_role_types() {
         WorkerStatus prefillWorker = createWorkerStatus("127.0.0.1");
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("127.0.0.1:8080", prefillWorker);
-        registerPrefill("127.0.0.1:8080", prefillWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("127.0.0.1:8080@0", prefillWorker);
+        registerPrefill("127.0.0.1:8080@0", prefillWorker);
 
         WorkerStatus decodeWorker = createWorkerStatus("127.0.0.2");
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("127.0.0.2:8080", decodeWorker);
-        registerDecode("127.0.0.2:8080", decodeWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("127.0.0.2:8080@0", decodeWorker);
+        registerDecode("127.0.0.2:8080@0", decodeWorker);
 
         Request req = new Request();
         req.setRequestId("random-request");
@@ -194,8 +232,8 @@ class RandomStrategyTest {
         WorkerStatus vitWorker = createWorkerStatus("127.0.0.3");
         vitWorker.setRole(RoleType.VIT);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap()
-                .put("127.0.0.3:8080", vitWorker);
-        endpointRegistry.ensureEndpoint(RoleType.VIT, "127.0.0.3:8080", vitWorker);
+                .put("127.0.0.3:8080@0", vitWorker);
+        endpointRegistry.ensureEndpoint(RoleType.VIT, "127.0.0.3:8080@0", vitWorker);
 
         BalanceContext context = new BalanceContext();
         context.setRequest(new Request());
@@ -207,8 +245,8 @@ class RandomStrategyTest {
     void should_work_with_group_parameter() {
         WorkerStatus worker = createWorkerStatus("127.0.0.1");
         worker.setGroup("group-a");
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("127.0.0.1:8080", worker);
-        registerPrefill("127.0.0.1:8080", worker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("127.0.0.1:8080@0", worker);
+        registerPrefill("127.0.0.1:8080@0", worker);
 
         Request req = new Request();
         req.setRequestId("random-request");
@@ -225,8 +263,8 @@ class RandomStrategyTest {
     void should_return_error_when_no_workers_in_specified_group() {
         WorkerStatus worker = createWorkerStatus("127.0.0.1");
         worker.setGroup("group-a");
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("127.0.0.1:8080", worker);
-        registerPrefill("127.0.0.1:8080", worker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("127.0.0.1:8080@0", worker);
+        registerPrefill("127.0.0.1:8080@0", worker);
 
         Request req = new Request();
         req.setRequestId("random-request");
@@ -256,12 +294,12 @@ class RandomStrategyTest {
         WorkerStatus worker2 = createWorkerStatus("127.0.0.2");
         WorkerStatus worker3 = createWorkerStatus("127.0.0.3");
 
-        prefillStatusMap.put("127.0.0.1:8080", worker1);
-        prefillStatusMap.put("127.0.0.2:8080", worker2);
-        prefillStatusMap.put("127.0.0.3:8080", worker3);
-        registerPrefill("127.0.0.1:8080", worker1);
-        registerPrefill("127.0.0.2:8080", worker2);
-        registerPrefill("127.0.0.3:8080", worker3);
+        prefillStatusMap.put("127.0.0.1:8080@0", worker1);
+        prefillStatusMap.put("127.0.0.2:8080@0", worker2);
+        prefillStatusMap.put("127.0.0.3:8080@0", worker3);
+        registerPrefill("127.0.0.1:8080@0", worker1);
+        registerPrefill("127.0.0.2:8080@0", worker2);
+        registerPrefill("127.0.0.3:8080@0", worker3);
 
         Request req = new Request();
         req.setRequestId("random-request");
@@ -301,12 +339,12 @@ class RandomStrategyTest {
 
         WorkerStatus deadWorker = createWorkerStatus("127.0.0.1");
         deadWorker.setAlive(false);
-        prefillStatusMap.put("127.0.0.1:8080", deadWorker);
-        registerPrefill("127.0.0.1:8080", deadWorker);
+        prefillStatusMap.put("127.0.0.1:8080@0", deadWorker);
+        registerPrefill("127.0.0.1:8080@0", deadWorker);
 
         WorkerStatus aliveWorker = createWorkerStatus("127.0.0.2");
-        prefillStatusMap.put("127.0.0.2:8080", aliveWorker);
-        registerPrefill("127.0.0.2:8080", aliveWorker);
+        prefillStatusMap.put("127.0.0.2:8080@0", aliveWorker);
+        registerPrefill("127.0.0.2:8080@0", aliveWorker);
 
         Request req = new Request();
         req.setRequestId("random-request");
@@ -337,10 +375,10 @@ class RandomStrategyTest {
 
         WorkerStatus unavailableWorker = createWorkerStatus("127.0.0.1");
         WorkerStatus availableWorker = createWorkerStatus("127.0.0.2");
-        decodeStatusMap.put("127.0.0.1:8080", unavailableWorker);
-        decodeStatusMap.put("127.0.0.2:8080", availableWorker);
-        registerDecode("127.0.0.1:8080", unavailableWorker);
-        registerDecode("127.0.0.2:8080", availableWorker);
+        decodeStatusMap.put("127.0.0.1:8080@0", unavailableWorker);
+        decodeStatusMap.put("127.0.0.2:8080@0", availableWorker);
+        registerDecode("127.0.0.1:8080@0", unavailableWorker);
+        registerDecode("127.0.0.2:8080@0", availableWorker);
 
         Mockito.when(resourceMeasure.isResourceAvailable(
                 Mockito.argThat(ep -> ep != null && "127.0.0.1".equals(ep.getIp())))).thenReturn(false);
@@ -367,9 +405,9 @@ class RandomStrategyTest {
         worker.getTotalKvCacheTokens().set(1_000L);
         worker.getAvailableKvCacheTokens().set(1_000L);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap()
-                .put("127.0.0.4:8080", worker);
-        registerDecode("127.0.0.4:8080", worker);
-        DecodeEndpoint endpoint = endpointRegistry.getDecode("127.0.0.4:8080");
+                .put("127.0.0.4:8080@0", worker);
+        registerDecode("127.0.0.4:8080@0", worker);
+        DecodeEndpoint endpoint = endpointRegistry.getDecode("127.0.0.4:8080@0");
 
         config.setScheduler(new DirectSchedulerConfig());
         config.setDispatcher(new NonBatchDispatcherConfig());
@@ -385,8 +423,8 @@ class RandomStrategyTest {
 
         WorkerStatus worker = createWorkerStatus("127.0.0.1");
         worker.setGroup("group-x");
-        prefillStatusMap.put("127.0.0.1:8080", worker);
-        registerPrefill("127.0.0.1:8080", worker);
+        prefillStatusMap.put("127.0.0.1:8080@0", worker);
+        registerPrefill("127.0.0.1:8080@0", worker);
 
         Request req = new Request();
         req.setRequestId("random-request");
@@ -410,8 +448,8 @@ class RandomStrategyTest {
         prefillStatusMap.clear();
 
         WorkerStatus worker = createWorkerStatus("127.0.0.1");
-        prefillStatusMap.put("127.0.0.1:8080", worker);
-        registerPrefill("127.0.0.1:8080", worker);
+        prefillStatusMap.put("127.0.0.1:8080@0", worker);
+        registerPrefill("127.0.0.1:8080@0", worker);
 
         Request req = new Request();
         req.setRequestId("random-request");

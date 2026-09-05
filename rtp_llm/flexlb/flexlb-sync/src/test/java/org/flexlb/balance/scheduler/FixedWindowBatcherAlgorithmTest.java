@@ -60,7 +60,9 @@ class FixedWindowBatcherAlgorithmTest {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
         when(endpoint.getPredictor()).thenReturn(predictor);
-        when(endpoint.getIp()).thenReturn("127.0.0.1");
+        WorkerStatus status = new WorkerStatus();
+        status.setIp("127.0.0.1");
+        when(endpoint.getStatus()).thenReturn(status);
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
         when(predictor.predictBatchMs(anyList())).thenReturn(500.0);
 
@@ -84,7 +86,9 @@ class FixedWindowBatcherAlgorithmTest {
     void dispatchesAtFixedWindowWhenPredictionIsBelowThreshold() throws InterruptedException {
         FlexlbConfig config = batchConfig();
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
-        when(endpoint.getIp()).thenReturn("127.0.0.1");
+        WorkerStatus status = new WorkerStatus();
+        status.setIp("127.0.0.1");
+        when(endpoint.getStatus()).thenReturn(status);
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
         DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         BatcherContext context = context(
@@ -103,7 +107,9 @@ class FixedWindowBatcherAlgorithmTest {
     void dispatchesWhenBatchReachesMaxSize() throws InterruptedException {
         FlexlbConfig config = batchConfig();
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
-        when(endpoint.getIp()).thenReturn("127.0.0.1");
+        WorkerStatus status = new WorkerStatus();
+        status.setIp("127.0.0.1");
+        when(endpoint.getStatus()).thenReturn(status);
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
         DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         BatchItem[] items = new BatchItem[32];
@@ -134,7 +140,7 @@ class FixedWindowBatcherAlgorithmTest {
         status.setMaxBatchTokensSize(100);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
-        when(endpoint.getIp()).thenReturn("127.0.0.1");
+        status.setIp("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
 
         DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
@@ -169,7 +175,7 @@ class FixedWindowBatcherAlgorithmTest {
         status.setMaxBatchTokensSize(engineBatchTokenLimit);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
-        when(endpoint.getIp()).thenReturn("127.0.0.1");
+        status.setIp("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
 
         BatchItem[] items = new BatchItem[13];
@@ -203,7 +209,7 @@ class FixedWindowBatcherAlgorithmTest {
         status.getAvailableKvCacheTokens().set(70);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
-        when(endpoint.getIp()).thenReturn("127.0.0.1");
+        status.setIp("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
 
         long now = System.currentTimeMillis() - 1_000;
@@ -239,7 +245,7 @@ class FixedWindowBatcherAlgorithmTest {
         status.setMaxBatchTokensSize(engineBatchTokenLimit);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
-        when(endpoint.getIp()).thenReturn("127.0.0.1");
+        status.setIp("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
 
         BatchItem[] items = new BatchItem[requestCount];
@@ -281,7 +287,7 @@ class FixedWindowBatcherAlgorithmTest {
         status.setMaxSeqLen(100);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
-        when(endpoint.getIp()).thenReturn("127.0.0.1");
+        status.setIp("127.0.0.1");
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
 
         DecisionGroupHandler handler = mock(DecisionGroupHandler.class);

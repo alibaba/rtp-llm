@@ -44,7 +44,9 @@ public class GlobalCacheIndex {
      * Add cache block to specified engine
      *
      * @param blockCacheKey Cache block hash value
-     * @param engineIpPort  Engine IP:Port
+     * @param engineIpPort  logical worker identity in {@code ip:port@engineIndex} format; the
+     *                      index identifies one independently routable engine behind the physical
+     *                      frontend
      */
     public void addCacheBlock(Long blockCacheKey, String engineIpPort) {
         if (blockCacheKey == null || engineIpPort == null) {
@@ -71,7 +73,7 @@ public class GlobalCacheIndex {
     /**
      * Remove cache block from specified engine
      *
-     * @param engineIp      Engine IP
+     * @param engineIp      logical worker identity in {@code ip:port@engineIndex} format
      * @param blockCacheKey Cache block hash value
      */
     public void removeCacheBlock(String engineIp, Long blockCacheKey) {
@@ -104,7 +106,7 @@ public class GlobalCacheIndex {
     /**
      * Remove an engine
      *
-     * @param engineIp Engine IP
+     * @param engineIp logical worker identity in {@code ip:port@engineIndex} format
      */
     public void removeAllCacheBlockOfEngine(String engineIp) {
         if (engineIp == null) {
@@ -133,9 +135,9 @@ public class GlobalCacheIndex {
     /**
      * Calculate engine prefix match length based on prefix matching
      *
-     * @param engineIpPorts  Engine IP:Port list
+     * @param engineIpPorts  logical worker identities in {@code ip:port@engineIndex} format
      * @param blockCacheKeys Ordered cache block hash value list
-     * @return Map<EngineIP:EnginePort, PrefixMatchLength>
+     * @return prefix match lengths keyed by logical worker identity
      */
     public Map<String, Integer> batchCalculatePrefixMatchLength(List<String> engineIpPorts,
                                                                 List<Long> blockCacheKeys) {
@@ -149,9 +151,9 @@ public class GlobalCacheIndex {
     /**
      * Prefix match calculation
      *
-     * @param engineIpPorts  Engine IP:Port list
+     * @param engineIpPorts  logical worker identities in {@code ip:port@engineIndex} format
      * @param blockCacheKeys Ordered cache block hash value list
-     * @return Map<EngineIP:EnginePort, PrefixMatchLength>
+     * @return prefix match lengths keyed by logical worker identity
      */
     private Map<String, Integer> calculatePrefixMatchLength(List<String> engineIpPorts,
                                                             List<Long> blockCacheKeys) {

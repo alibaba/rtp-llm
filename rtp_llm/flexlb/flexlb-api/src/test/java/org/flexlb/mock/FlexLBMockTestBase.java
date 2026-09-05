@@ -118,14 +118,14 @@ public abstract class FlexLBMockTestBase {
         prefillGrpcPort = mockPrefillWorker.getPort();
         prefillHttpPort = prefillGrpcPort - 1;
         prefillIp = "127.0.0.1";
-        prefillIpPort = prefillIp + ":" + prefillHttpPort;
+        prefillIpPort = prefillIp + ":" + prefillHttpPort + "@0";
 
         mockDecodeWorker = new MockDecodeWorker(createDecodeBehavior());
         mockDecodeWorker.start(0);
         decodeGrpcPort = mockDecodeWorker.getPort();
         decodeHttpPort = decodeGrpcPort - 1;
         decodeIp = "127.0.0.1";
-        decodeIpPort = decodeIp + ":" + decodeHttpPort;
+        decodeIpPort = decodeIp + ":" + decodeHttpPort + "@0";
 
         log.info("Mock workers started: prefill=127.0.0.1:{}(grpc={}), decode=127.0.0.1:{}(grpc={})",
                 prefillHttpPort, prefillGrpcPort, decodeHttpPort, decodeGrpcPort);
@@ -359,7 +359,7 @@ public abstract class FlexLBMockTestBase {
      * Start an additional mock prefill worker and register it in the EndpointRegistry.
      *
      * <p>The worker is automatically stopped in {@code @AfterEach}.  Tests can use
-     * {@link #workerIpPort(MockWorker)} to get the worker's {@code ip:httpPort} key
+     * {@link #workerIpPort(MockWorker)} to get the worker's {@code ip:httpPort@0} key
      * for routing and endpoint lookups.
      *
      * @param behavior behavior configuration for the new worker
@@ -371,7 +371,7 @@ public abstract class FlexLBMockTestBase {
         int grpcPort = worker.getPort();
         int httpPort = grpcPort - 1;
         String ip = "127.0.0.1";
-        String ipPort = ip + ":" + httpPort;
+        String ipPort = ip + ":" + httpPort + "@0";
 
         WorkerStatus ws = new WorkerStatus();
         ws.setIp(ip);
@@ -395,10 +395,10 @@ public abstract class FlexLBMockTestBase {
     }
 
     /**
-     * Get the {@code ip:httpPort} string for a mock worker (for routing/endpoint lookup).
+     * Get the {@code ip:httpPort@0} string for a mock worker (for routing/endpoint lookup).
      */
     protected static String workerIpPort(MockWorker worker) {
-        return "127.0.0.1:" + worker.getHttpPort();
+        return "127.0.0.1:" + worker.getHttpPort() + "@0";
     }
 
     /**
@@ -422,7 +422,7 @@ public abstract class FlexLBMockTestBase {
         String ip = "192.0.2." + workerIndex;
         int httpPort = 61_000;
         int grpcPort = httpPort + 1;
-        String ipPort = ip + ":" + httpPort;
+        String ipPort = ip + ":" + httpPort + "@0";
 
         WorkerStatus ws = new WorkerStatus();
         ws.setIp(ip);

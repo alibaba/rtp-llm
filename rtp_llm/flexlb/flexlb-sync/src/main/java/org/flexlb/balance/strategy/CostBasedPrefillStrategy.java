@@ -114,7 +114,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         long bestCacheHit = survivors.cacheHit(selectedIndex);
         long selectedScore = survivors.score(selectedIndex);
         long selectedPrefillMs = survivors.prefillMs(selectedIndex);
-        reportCacheHitMetrics(roleType, bestCacheHit, seqLen);
+        reportCacheHitMetrics(roleType, best.getStatus().getIpIndex(), bestCacheHit, seqLen);
 
         return buildServerStatus(
                 best,
@@ -173,7 +173,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         if (selectedIndex >= 0) {
             String reason = affinity.reason().name();
             reportCacheAffinityDecision(
-                    roleType, survivors.endpoint(selectedIndex).getIp(), reason);
+                    roleType, survivors.endpoint(selectedIndex).getStatus().getIpIndex(), reason);
             Logger.debug(
                     "CostBasedPrefill cache-affinity decision - role: {}, group: {}, "
                             + "selected: {}, minScoreMs: {}, selectedScoreMs: {}, "
@@ -467,11 +467,13 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         Map<String, Integer> rejections = new HashMap<>();
 
         PrefillEndpoint[] excludedEligible = new PrefillEndpoint[1];
+        Map<String, WorkerEndpoint> healthyEndpoints =
+                engineWorkerStatus.selectRoutableModelWorkerStatus(roleType, group);
         int registered = engineWorkerStatus.forEachModelWorkerEndpoint(roleType, group, (ipPort, ep) -> {
             if (!(ep instanceof PrefillEndpoint pe)) {
                 return;
             }
-            if (!pe.getStatus().isAlive()) {
+            if (healthyEndpoints.get(ipPort) != pe) {
                 rejections.merge("NOT_ALIVE", 1, Integer::sum);
                 return;
             }
@@ -568,7 +570,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         if (seqLen <= 0L) {
             return 0L;
         }
-        HostCacheMatch match = cacheMatchResult.hostMatch(ep.ipPort());
+        HostCacheMatch match = cacheMatchResult.hostMatch(ep.getStatus());
         if (match == null) {
             return 0L;
         }
@@ -606,9 +608,9 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         return Math.max(0L, rawHit);
     }
 
-    private void reportCacheHitMetrics(RoleType roleType, long hitCacheTokens, long seqLen) {
+    private void reportCacheHitMetrics(RoleType roleType, String ipIndex, long hitCacheTokens, long seqLen) {
         double hitRate = seqLen > 0 ? hitCacheTokens / (double) seqLen : 0.0;
-        engineHealthReporter.reportCacheHitMetrics(roleType, hitCacheTokens, hitRate);
+        engineHealthReporter.reportCacheHitMetrics(roleType, ipIndex, hitCacheTokens, hitRate);
     }
 
     private ServerStatus buildServerStatus(PrefillEndpoint ep,
@@ -618,6 +620,10 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                                            long selectedPrefillMs,
                                            BalanceContext balanceContext,
                                            long bestCacheHit) {
+        if (!engineWorkerStatus.isPhysicalGroupHealthy(ep)) {
+            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+        }
+
         // DIRECT owns its reservation here; QUEUE owns reservations in the scheduler.
         if (strategyOwnsInflightTracking(balanceContext)) {
             ep.commitBatch(requestId, selectedPrefillMs, Collections.emptyList());
@@ -637,6 +643,8 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         result.setHttpPort(ep.getHttpPort());
         result.setGrpcPort(CommonUtils.toGrpcPort(ep.getHttpPort()));
         result.setDpRank(ep.getStatus().getDpRank());
+        result.setSelectedEngineIndex(ep.getStatus().getEngineIndex(),
+                ep.getStatus().getMultiEngineNum());
         result.setDebugInfo(debugInfo);
         return result;
     }

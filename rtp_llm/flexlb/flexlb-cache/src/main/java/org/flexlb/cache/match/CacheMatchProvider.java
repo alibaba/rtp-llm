@@ -14,6 +14,11 @@ public interface CacheMatchProvider {
 
     CacheMatchSource source();
 
+    /**
+     * Finds cache matches keyed by logical worker identity in
+     * {@code ip:port@engineIndex} format. The index identifies one independently routable
+     * engine behind the physical frontend.
+     */
     Map<String, HostCacheMatch> findMatchingEngines(
             String requestId,
             List<Long> blockCacheKeys,

@@ -149,12 +149,12 @@ class DefaultRouterTest {
         WorkerStatus dummyPrefillWorker = new WorkerStatus();
         dummyPrefillWorker.setIp("192.168.1.1");
         dummyPrefillWorker.setPort(8080);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080", dummyPrefillWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080@0", dummyPrefillWorker);
 
         WorkerStatus dummyDecodeWorker = new WorkerStatus();
         dummyDecodeWorker.setIp("192.168.1.2");
         dummyDecodeWorker.setPort(8081);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081", dummyDecodeWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081@0", dummyDecodeWorker);
 
         ServerStatus prefillServerStatus = new ServerStatus();
         prefillServerStatus.setSuccess(true);
@@ -186,7 +186,7 @@ class DefaultRouterTest {
         WorkerStatus dummyPrefillWorker = new WorkerStatus();
         dummyPrefillWorker.setIp("192.168.1.1");
         dummyPrefillWorker.setPort(8080);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080", dummyPrefillWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080@0", dummyPrefillWorker);
 
         ServerStatus prefillServerStatus = new ServerStatus();
         prefillServerStatus.setSuccess(false);
@@ -208,7 +208,7 @@ class DefaultRouterTest {
         WorkerStatus dummyFusionWorker = new WorkerStatus();
         dummyFusionWorker.setIp("192.168.1.3");
         dummyFusionWorker.setPort(8082);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.3:8082", dummyFusionWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.3:8082@0", dummyFusionWorker);
 
         ServerStatus fusionServerStatus = new ServerStatus();
         fusionServerStatus.setSuccess(true);
@@ -233,7 +233,7 @@ class DefaultRouterTest {
         WorkerStatus dummyFusionWorker = new WorkerStatus();
         dummyFusionWorker.setIp("192.168.1.3");
         dummyFusionWorker.setPort(8082);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.3:8082", dummyFusionWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.3:8082@0", dummyFusionWorker);
 
         ServerStatus fusionServerStatus = new ServerStatus();
         fusionServerStatus.setSuccess(false);
@@ -255,12 +255,12 @@ class DefaultRouterTest {
         WorkerStatus dummyFusionWorker = new WorkerStatus();
         dummyFusionWorker.setIp("192.168.1.3");
         dummyFusionWorker.setPort(8082);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.3:8082", dummyFusionWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.3:8082@0", dummyFusionWorker);
 
         WorkerStatus dummyVitWorker = new WorkerStatus();
         dummyVitWorker.setIp("192.168.1.4");
         dummyVitWorker.setPort(8083);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.4:8083", dummyVitWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.4:8083@0", dummyVitWorker);
 
         ServerStatus fusionServerStatus = new ServerStatus();
         fusionServerStatus.setSuccess(true);
@@ -292,12 +292,12 @@ class DefaultRouterTest {
         WorkerStatus dummyFusionWorker = new WorkerStatus();
         dummyFusionWorker.setIp("192.168.1.3");
         dummyFusionWorker.setPort(8082);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.3:8082", dummyFusionWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.3:8082@0", dummyFusionWorker);
 
         WorkerStatus dummyVitWorker = new WorkerStatus();
         dummyVitWorker.setIp("192.168.1.4");
         dummyVitWorker.setPort(8083);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.4:8083", dummyVitWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.4:8083@0", dummyVitWorker);
 
         ServerStatus fusionServerStatus = new ServerStatus();
         fusionServerStatus.setSuccess(true);
@@ -339,7 +339,7 @@ class DefaultRouterTest {
         WorkerStatus dummyDecodeWorker = new WorkerStatus();
         dummyDecodeWorker.setIp("192.168.1.2");
         dummyDecodeWorker.setPort(8081);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081", dummyDecodeWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081@0", dummyDecodeWorker);
 
         ServerStatus decodeServerStatus = new ServerStatus();
         decodeServerStatus.setSuccess(false);
@@ -360,12 +360,12 @@ class DefaultRouterTest {
         WorkerStatus dummyDecodeWorker = new WorkerStatus();
         dummyDecodeWorker.setIp("192.168.1.2");
         dummyDecodeWorker.setPort(8081);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081", dummyDecodeWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081@0", dummyDecodeWorker);
 
         WorkerStatus dummyPrefillWorker = new WorkerStatus();
         dummyPrefillWorker.setIp("192.168.1.1");
         dummyPrefillWorker.setPort(8080);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080", dummyPrefillWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080@0", dummyPrefillWorker);
 
         ServerStatus decodeServerStatus = new ServerStatus();
         decodeServerStatus.setSuccess(true);
@@ -381,7 +381,7 @@ class DefaultRouterTest {
         when(prefillStrategy.select(any(BalanceContext.class), eq(RoleType.PREFILL), any())).thenReturn(prefillServerStatus);
 
         // Ensure endpoint registry returns a non-null endpoint so rollback proceeds
-        lenient().when(endpointRegistry.get(RoleType.DECODE, "192.168.1.2:8081"))
+        lenient().when(endpointRegistry.get(RoleType.DECODE, "192.168.1.2:8081@0"))
                 .thenReturn(Mockito.mock(WorkerEndpoint.class));
 
         // Execute
@@ -399,7 +399,7 @@ class DefaultRouterTest {
         WorkerStatus dummyVitWorker = new WorkerStatus();
         dummyVitWorker.setIp("192.168.1.5");
         dummyVitWorker.setPort(8084);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.5:8084", dummyVitWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.5:8084@0", dummyVitWorker);
 
         ServerStatus vitServerStatus = new ServerStatus();
         vitServerStatus.setSuccess(true);
@@ -422,7 +422,7 @@ class DefaultRouterTest {
         WorkerStatus dummyVitWorker = new WorkerStatus();
         dummyVitWorker.setIp("192.168.1.5");
         dummyVitWorker.setPort(8084);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.5:8084", dummyVitWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.5:8084@0", dummyVitWorker);
 
         ServerStatus vitServerStatus = new ServerStatus();
         vitServerStatus.setSuccess(false);
@@ -444,12 +444,12 @@ class DefaultRouterTest {
         WorkerStatus dummyFusionWorker = new WorkerStatus();
         dummyFusionWorker.setIp("192.168.1.3");
         dummyFusionWorker.setPort(8082);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.3:8082", dummyFusionWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.3:8082@0", dummyFusionWorker);
 
         WorkerStatus dummyVitWorker = new WorkerStatus();
         dummyVitWorker.setIp("192.168.1.4");
         dummyVitWorker.setPort(8083);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.4:8083", dummyVitWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.4:8083@0", dummyVitWorker);
 
         ServerStatus fusionServerStatus = new ServerStatus();
         fusionServerStatus.setSuccess(true);
@@ -481,17 +481,17 @@ class DefaultRouterTest {
         WorkerStatus dummyPrefillWorker = new WorkerStatus();
         dummyPrefillWorker.setIp("192.168.1.1");
         dummyPrefillWorker.setPort(8080);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080", dummyPrefillWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080@0", dummyPrefillWorker);
 
         WorkerStatus dummyDecodeWorker = new WorkerStatus();
         dummyDecodeWorker.setIp("192.168.1.2");
         dummyDecodeWorker.setPort(8081);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081", dummyDecodeWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081@0", dummyDecodeWorker);
 
         WorkerStatus dummyVitWorker = new WorkerStatus();
         dummyVitWorker.setIp("192.168.1.5");
         dummyVitWorker.setPort(8084);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.5:8084", dummyVitWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.5:8084@0", dummyVitWorker);
 
         ServerStatus prefillServerStatus = new ServerStatus();
         prefillServerStatus.setSuccess(true);
@@ -530,12 +530,12 @@ class DefaultRouterTest {
         WorkerStatus dummyDecodeWorker = new WorkerStatus();
         dummyDecodeWorker.setIp("192.168.1.2");
         dummyDecodeWorker.setPort(8081);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081", dummyDecodeWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081@0", dummyDecodeWorker);
 
         WorkerStatus dummyPrefillWorker = new WorkerStatus();
         dummyPrefillWorker.setIp("192.168.1.1");
         dummyPrefillWorker.setPort(8080);
-        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080", dummyPrefillWorker);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080@0", dummyPrefillWorker);
 
         Request actualRequest = new Request();
         actualRequest.setRequestId("12345");

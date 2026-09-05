@@ -30,6 +30,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.env.Environment;
@@ -122,6 +123,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     private final ConfigService configService;
     private final Router router;
     private final EndpointRegistry endpointRegistry;
+    private final EngineWorkerStatus engineWorkerStatus;
     private final BatchEnqueueDelivery batchEnqueueDelivery;
     private final DecisionDelivery<List<BatchItem>> routeDecisionDelivery;
     private final BatchSchedulerReporter reporter;
@@ -213,6 +215,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         this.configService = configService;
         this.router = router;
         this.endpointRegistry = endpointRegistry;
+        this.engineWorkerStatus = new EngineWorkerStatus(endpointRegistry);
         this.batchEnqueueDelivery = new BatchEnqueueDelivery(batchDispatcher);
         this.routeDecisionDelivery = Objects.requireNonNull(routeDecisionDelivery);
         this.reporter = reporter;
@@ -439,7 +442,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                     return future;
                 }
 
-                String prefillIpPort = prefill.getServerIp() + ":" + prefill.getHttpPort();
+                String prefillIpPort = prefill.getLogicalIpPort();
                 WorkerEndpoint selectedEndpoint = prefill.getRole() == RoleType.PREFILL
                         ? endpointRegistry.getPrefill(prefillIpPort)
                         : endpointRegistry.get(prefill.getRole(), prefillIpPort);
@@ -454,7 +457,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
                 DecodeEndpoint decodeEp = null;
                 if (decode != null) {
-                    String decodeIpPort = decode.getServerIp() + ":" + decode.getHttpPort();
+                    String decodeIpPort = decode.getLogicalIpPort();
                     decodeEp = endpointRegistry.getDecode(decodeIpPort);
                 }
 
@@ -472,6 +475,9 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 synchronized (generation) {
                     if (!generation.isOpen()) {
                         generationClosed = true;
+                    } else if (!engineWorkerStatus.isPhysicalGroupHealthy(prefillEp)
+                            || (decode != null && !engineWorkerStatus.isPhysicalGroupHealthy(decodeEp))) {
+                        commitError = StrategyErrorType.NO_AVAILABLE_WORKER;
                     } else {
                         InflightEntry existing = inflight.putIfAbsent(ctx.getRequestId(), entry);
                         if (existing != null || terminalStates.containsKey(ctx.getRequestId())) {
@@ -540,9 +546,11 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 if (generationClosed || commitError != null) {
                     rollback(item);
                     if (commitError != null) {
-                        String detail = commitError == StrategyErrorType.INVALID_REQUEST
-                                ? "duplicate request_id: " + ctx.getRequestId()
-                                : "priority scheduler is shutting down";
+                        String detail = switch (commitError) {
+                            case INVALID_REQUEST -> "duplicate request_id: " + ctx.getRequestId();
+                            case NO_AVAILABLE_WORKER -> "worker group became unhealthy before admission";
+                            default -> "priority scheduler is shutting down";
+                        };
                         completeError(future, commitError, detail);
                     }
                     return future;
@@ -553,7 +561,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 try {
                     reporter.reportRouteSubmitTimeMs(
                             RoleType.PREFILL.name(),
-                            prefillEp.getIp(),
+                            prefillEp.getStatus().getIpIndex(),
                             System.currentTimeMillis() - ctx.getStartTime());
                 } catch (RuntimeException telemetryFailure) {
                     Logger.warn("Failed to record route-submit telemetry: request_id={}",
@@ -2997,7 +3005,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 oldestEnqueueByPriority.merge(
                         item.priority(), item.enqueuedAtMs(), Math::min);
             }
-            String engineIp = prefillEp != null ? prefillEp.getIp() : "";
+            String engineIp = prefillEp != null ? prefillEp.getStatus().getIpIndex() : "";
             for (Map.Entry<Integer, Long> waitEntry
                     : oldestEnqueueByPriority.entrySet()) {
                 reporter.reportBatchWaitTimeMs(
@@ -3272,7 +3280,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         Response response = buildSuccessResponse(item);
         long batchEnqueueStartedAtMs = entry.lifecycle.getBatchEnqueueStartedAtMs();
         PrefillEndpoint prefill = item.prefillEp();
-        String prefillIp = prefill != null ? prefill.getIp() : "";
+        String prefillIp = prefill != null ? prefill.getStatus().getIpIndex() : "";
         RequestLifecycleSnapshot snapshot = entry.lifecycle.markDeliveryConfirmed();
         if (snapshot.state() != RequestLifecycleState.ACKNOWLEDGED) {
             return null;
@@ -3971,7 +3979,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
             return;
         }
         if (serverStatus.getRole() == RoleType.DECODE) {
-            String ipPort = serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
+            String ipPort = serverStatus.getLogicalIpPort();
             DecodeEndpoint ep = endpointRegistry.getDecode(ipPort);
             if (ep != null) {
                 ep.release(serverStatus.getRequestId());
@@ -4178,6 +4186,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         status.setHttpPort(src.getHttpPort());
         status.setGrpcPort(src.getGrpcPort());
         status.setDpRank(src.getDpRank());
+        status.setSelectedEngineIndex(src.getRoutingEngineIndex(),
+                src.getEngineIndex() == null ? 1 : Math.max(2, src.getRoutingEngineIndex() + 1));
         status.setPrefillTime(src.getPrefillTime());
         status.setGroup(src.getGroup());
         status.setDebugInfo(copyOf(src.getDebugInfo()));

@@ -65,8 +65,8 @@ import static org.mockito.Mockito.when;
  */
 class DecodeEvictionSchedulerTest {
 
-    private static final String PREFILL_IP_PORT = "10.0.0.1:8080";
-    private static final String DECODE_IP_PORT = "10.0.0.2:8081";
+    private static final String PREFILL_IP_PORT = "10.0.0.1:8080@0";
+    private static final String DECODE_IP_PORT = "10.0.0.2:8081@0";
 
     private ConfigService configService;
     private Router router;
@@ -140,12 +140,16 @@ class DecodeEvictionSchedulerTest {
         prefillWs.setIp("10.0.0.1");
         prefillWs.setPort(8080);
         prefillWs.setGrpcPort(8081);
+        prefillWs.setAlive(true);
+        prefillWs.setRole(RoleType.PREFILL);
         endpointRegistry.ensureEndpoint(RoleType.PREFILL, PREFILL_IP_PORT, prefillWs);
 
         WorkerStatus decodeWs = new WorkerStatus();
         decodeWs.setIp("10.0.0.2");
         decodeWs.setPort(8081);
         decodeWs.setGrpcPort(8082);
+        decodeWs.setAlive(true);
+        decodeWs.setRole(RoleType.DECODE);
         decodeWs.setAvailableKvCacheTokens(new AtomicLong(128L));
         decodeWs.setTotalKvCacheTokens(new AtomicLong(256L));
         endpointRegistry.ensureEndpoint(RoleType.DECODE, DECODE_IP_PORT, decodeWs);
@@ -208,6 +212,38 @@ class DecodeEvictionSchedulerTest {
         verify(priorityReporter).reportEvictionCommit(eq(70), eq("decode_kv_full"), eq("success"));
         verify(priorityReporter).reportVictim(eq(30), eq(70), eq("decode_reserved"), eq("decode_kv_full"));
         verify(priorityReporter).reportVictimKvTokens(eq(30), eq("decode_reserved"), eq(128L));
+    }
+
+    @Test
+    void unhealthySiblingPreventsDecodeEvictionWithoutChangingReservations() throws Exception {
+        DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
+        decodeEp.getStatus().setMultiEngineNum(2);
+        WorkerStatus sibling = new WorkerStatus();
+        sibling.setIp("10.0.0.2");
+        sibling.setPort(8081);
+        sibling.setGrpcPort(8082);
+        sibling.setRole(RoleType.DECODE);
+        sibling.setEngineIndex(1);
+        sibling.setMultiEngineNum(2);
+        sibling.setAlive(true);
+        endpointRegistry.ensureEndpoint(RoleType.DECODE, sibling.getLogicalIpPort(), sibling);
+
+        CompletableFuture<Response> victim = scheduler.submit(context("81", 30));
+        await(() -> decodeEp.reservedView().containsKey("81"));
+        long reservedTokens = decodeEp.inflightHardKvReserved();
+        sibling.setAlive(false);
+
+        Response incoming = scheduler.submit(context("82", 70)).get(2, TimeUnit.SECONDS);
+
+        assertFalse(incoming.isSuccess());
+        assertFalse(victim.isDone());
+        assertTrue(decodeEp.reservedView().containsKey("81"));
+        assertFalse(decodeEp.reservedView().containsKey("82"));
+        assertEquals(reservedTokens, decodeEp.inflightHardKvReserved());
+        assertEquals(1, decodeEp.getInflightCount());
+        verify(priorityReporter, never()).reportEvictionCommit(anyInt(), anyString(), anyString());
+        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(),
+                any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong());
     }
 
     @Test

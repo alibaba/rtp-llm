@@ -23,13 +23,13 @@ class KvcmCacheMatchProviderTest {
         KvcmGrpcClient client = mock(KvcmGrpcClient.class);
         when(client.findMatchingEngines(
                 "request-1", List.of(11L), 2192, RoleType.PREFILL, "default"))
-                .thenReturn(Map.of("10.0.0.1:8080", new HostCacheMatch(1, 0, 1)));
+                .thenReturn(Map.of("10.0.0.1:8080@1", new HostCacheMatch(1, 0, 1)));
         KvcmCacheMatchProvider provider = new KvcmCacheMatchProvider(client);
 
         Map<String, HostCacheMatch> result = provider.findMatchingEngines(
                 "request-1", List.of(11L), 2192, RoleType.PREFILL, "default");
 
-        assertEquals(1, result.get("10.0.0.1:8080").localMatchBlocks());
+        assertEquals(1, result.get("10.0.0.1:8080@1").localMatchBlocks());
         verify(client).findMatchingEngines(
                 "request-1", List.of(11L), 2192, RoleType.PREFILL, "default");
     }
