@@ -324,7 +324,7 @@ void KVCacheConnectorCoordinator::asyncReadAfterMatch(std::shared_ptr<FusedAsync
         connectors_.size());
 
     // matchedBlockCount(), reuseBlockNum() and the asyncRead range are all
-    // ordinals in this resource's (possibly CP-canonical) cache-key timeline.
+    // global cache-key blocks. Connectors own any CP-canonical conversion.
     int                                        already_reuse_num = fused_read_context->resource()->reuseBlockNum();
     std::vector<std::shared_ptr<AsyncContext>> connector_read_contexts;
     for (int i = 0; i < match_contexts.size(); i++) {

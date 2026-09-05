@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/MTPModelConfigHelper.h"
+#include "rtp_llm/cpp/pybind/ConfigExtract.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
@@ -211,10 +212,7 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
         auto grammar_config         = engine_config.attr("grammar_config").cast<GrammarConfig>();
 
         // Extract vit_config
-        VitConfig vit_config_cpp;
-        if (!vit_config.is_none()) {
-            vit_config_cpp.vit_separation = static_cast<VitSeparation>(vit_config.attr("vit_separation").cast<int>());
-        }
+        const VitConfig vit_config_cpp = extractVitConfig(vit_config);
 
         py::object py_layers_weights = model.attr("weight").attr("weights");
         py::object py_global_weights = model.attr("weight").attr("global_weights");

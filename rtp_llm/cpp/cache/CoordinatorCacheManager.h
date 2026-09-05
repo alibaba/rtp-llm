@@ -67,10 +67,9 @@ public:
     incrKVCacheRef(const KVCacheResource& kvcache_resource, const CacheKeysType& cache_keys, bool is_connector = false);
 
     virtual GroupedCacheLayerLayout allLayerCacheBase() const;
-    virtual bool                    updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                                                  const std::vector<int>&        block_src_batch,
-
-                                                  bool                            copy_last_block,
+    virtual bool                    updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
+                                                  const std::vector<int>&         block_src_batch,
+                                                  int                             previous_seq_len,
                                                   std::vector<TaggedBlockIdPair>& block_update_mapping);
     const CacheConfig&              cacheConfig() const {
         return config_;
@@ -184,10 +183,10 @@ protected:
                                                     int  target_batch_size) const;
     virtual void decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false);
     bool         cpShardThisGroupForCapacity(std::string_view tag) const;
-    size_t       logicalSeqSizePerBlockForCapacity(std::string_view tag) const;
-    int          cpEffectiveSeqLenForAlloc(std::string_view tag, int seq_len) const;
-    int          deviceCacheMetricTokensPerBlock() const;
-
+    // Returns tokens in the global sequence covered before one tag-local block-table slot is sealed. This is an
+    // alignment span, not a cache-key-block or kernel-block count.
+    size_t                             groupBlockAlignmentTokens(std::string_view tag) const;
+    int                                cpEffectiveSeqLenForAlloc(std::string_view tag, int seq_len) const;
     const CacheConfig                  config_;
     AllocationType                     allocation_type_;
     SharedBlockCachePtr                shared_block_cache_;
@@ -199,7 +198,9 @@ protected:
     int64_t reserve_block_ratio_{0};
 
 private:
-    int  reuseCache(const CacheKeysType&                 cache_keys,
+    // Returns the reusable prefix length in global cache-key blocks
+    // (`CacheConfig::seq_size_per_block` tokens each).
+    int  reuseCache(const CacheKeysType&                 full_cache_keys,
                     BatchKVCacheResource&                kv_resource,
                     const std::shared_ptr<CPSlotMapper>& cp_mapper);
     void referenceBlocks(std::string_view tag, const BlockIndicesType& blocks, bool is_connector = false) const;
@@ -212,6 +213,7 @@ private:
                           int               failed_need_blocks) const;
     bool skipReuseCacheGroup(std::string_view tag) const;
     bool cpCompactSwaGroup(std::string_view tag, const std::shared_ptr<CPSlotMapper>& mapper) const;
+    bool needsBeamTailCopy(std::string_view tag, int previous_seq_len) const;
     void rollbackBlockIdsToSize(std::string_view           tag,
                                 BlockIds&                  block_ids,
                                 size_t                     original_size,

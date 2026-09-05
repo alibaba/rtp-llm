@@ -120,8 +120,8 @@ TEST_F(FullCacheManagerTest, MatchTest) {
     FullCacheManager group1(cache_group, block_pool, shared_cache.get());
 
     // Put items into shared cache: cache_key -> blocks_by_group (group 0 = block_idx)
-    shared_cache->put(101, {{"full", 1}}, false);
-    shared_cache->put(102, {{"full", 2}}, false);
+    shared_cache->put(101, {{"full", 1}}, {}, false, BlockDependency{});
+    shared_cache->put(102, {{"full", 2}}, {}, false, BlockDependency{});
 
     // zero match
     CacheKeysType cache_keys    = {103, 104, 105, 106};
@@ -140,8 +140,8 @@ TEST_F(FullCacheManagerTest, MatchTest) {
     ASSERT_EQ(match_result2.block_indices, expected_result);
 
     // all match
-    shared_cache->put(103, {{"full", 3}}, false);
-    shared_cache->put(104, {{"full", 4}}, false);
+    shared_cache->put(103, {{"full", 3}}, {}, false, BlockDependency{});
+    shared_cache->put(104, {{"full", 4}}, {}, false, BlockDependency{});
 
     cache_keys         = {101, 102, 103, 104};
     auto match_result3 = group1.match(cache_keys);

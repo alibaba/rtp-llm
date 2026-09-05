@@ -23,12 +23,22 @@ std::string getBitHashStr(uint64_t bithash, size_t width = 64) {
 }  // namespace
 
 void validateRemoteCacheTopology(const CacheConfig& cache_config) {
-    const auto& groups         = cache_config.groups();
-    const auto  full_group_num = std::count_if(groups.begin(), groups.end(), [](const CacheGroup& group) {
+    const auto& groups                    = cache_config.groups();
+    const auto  full_group_num            = std::count_if(groups.begin(), groups.end(), [](const CacheGroup& group) {
         return group.policy.group_type == CacheGroupType::FULL;
     });
-    RTP_LLM_CHECK_WITH_INFO(groups.size() == 1 && full_group_num == 1,
-                            "remote cache requires exactly one FULL cache group, groups=%zu full_groups=%zu",
+    const bool  remote_topology_supported = groups.size() == 1 && full_group_num == 1;
+    if (!remote_topology_supported) {
+        RTP_LLM_LOG_ERROR("remote cache initialization rejected: remote cache now supports exactly one FULL cache "
+                          "group; multi-group remote cache support has been removed. Disable remote cache or configure "
+                          "a single FULL group. groups=%zu full_groups=%zu",
+                          groups.size(),
+                          static_cast<size_t>(full_group_num));
+    }
+    RTP_LLM_CHECK_WITH_INFO(remote_topology_supported,
+                            "remote cache now supports exactly one FULL cache group; multi-group remote cache support "
+                            "has been removed. Disable remote cache or configure a single FULL group. groups=%zu "
+                            "full_groups=%zu",
                             groups.size(),
                             static_cast<size_t>(full_group_num));
 }

@@ -1,9 +1,25 @@
 """Python wrapper for KVCacheConfig with additional convenience methods."""
 
 import json
+import os
 from typing import Any, Optional
 
 from rtp_llm.ops import KVCacheConfig as CppKVCacheConfig
+
+
+def resolve_seq_size_per_block(
+    configured_tokens_per_block: int, model_tokens_per_block: int = 0
+) -> int:
+    """Resolve the physical KV block size, treating only zero as unset."""
+    if configured_tokens_per_block != 0:
+        return configured_tokens_per_block
+    if model_tokens_per_block > 0:
+        return model_tokens_per_block
+    if os.path.exists("/dev/kfd"):
+        return 16
+    if os.path.exists("/dev/alixpu"):
+        return 256
+    return 64
 
 
 class KVCacheConfig(CppKVCacheConfig):

@@ -61,6 +61,12 @@ struct CacheGroup {
     size_t storedKernelBlocksPerKvBlock() const {
         return policy.group_type == CacheGroupType::FULL ? kernelBlocksPerKvBlock() : 1;
     }
+
+    uint32_t maxRepresentableBlockNum() const {
+        constexpr uint64_t max_block_idx = static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+        const uint64_t     ratio         = storedKernelBlocksPerKvBlock();
+        return static_cast<uint32_t>(std::min(max_block_idx, (max_block_idx + 1) / ratio));
+    }
 };
 
 // PP: cross-stage agreed block counts keyed by cache group tag. A group

@@ -878,7 +878,7 @@ TEST_F(KVCacheManagerTest, OrdinarySinglePreservesLegacyBatchZeroForwardInsertio
     const auto dependency = evicted->cacheResource(0).blockDependencies()[0];
     EXPECT_FALSE(dependency.has_parent);
     EXPECT_EQ(dependency.parent_key, 0);
-    EXPECT_EQ(dependency.ordinal, 0u);
+    EXPECT_EQ(dependency.ordinal, 7u);
     EXPECT_EQ(shared_cache->allCacheKeys(), (CacheKeysType{101}));
     EXPECT_EQ(shared_cache->version(), 1);
     EXPECT_EQ(pool->blockCacheRefBlocksNum(), 2u);
@@ -1623,9 +1623,9 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_MergesDeviceAndMemoryKeys_Dedup) {
     ASSERT_NE(shared_cache, nullptr);
     {
         const auto& tag = kv_cache_manager->cacheConfig().soleGroupForLayer(0).tag;
-        shared_cache->put(10, {{tag, 1}}, false);
-        shared_cache->put(11, {{tag, 2}}, false);
-        shared_cache->put(12, {{tag, 3}}, false);
+        shared_cache->put(10, {{tag, 1}}, {}, false, BlockDependency{});
+        shared_cache->put(11, {{tag, 2}}, {}, false, BlockDependency{});
+        shared_cache->put(12, {{tag, 3}}, {}, false, BlockDependency{});
     }
 
     // Inject a lightweight memory connector with a MemoryBlockCache snapshot:
@@ -1675,8 +1675,8 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     ASSERT_NE(shared_cache, nullptr);
 
     const auto& tag = kv_cache_manager->cacheConfig().soleGroupForLayer(0).tag;
-    shared_cache->put(10, {{tag, 1}}, false);
-    shared_cache->put(11, {{tag, 2}}, false);
+    shared_cache->put(10, {{tag, 1}}, {}, false, BlockDependency{});
+    shared_cache->put(11, {{tag, 2}}, {}, false, BlockDependency{});
 
     kv_cache_manager->refreshKVCacheInfoSnapshot();
 
@@ -1686,7 +1686,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSnapshotForCacheKeysWhenEnabled) {
     std::sort(first_keys.begin(), first_keys.end());
     EXPECT_EQ(first_keys, (std::vector<CacheKeyType>{10, 11}));
 
-    shared_cache->put(12, {{tag, 3}}, false);
+    shared_cache->put(12, {{tag, 3}}, {}, false, BlockDependency{});
 
     auto unchanged = kv_cache_manager->getKVCacheInfo(first.version, /*need_cache_keys=*/true);
     EXPECT_EQ(unchanged.version, first.version);

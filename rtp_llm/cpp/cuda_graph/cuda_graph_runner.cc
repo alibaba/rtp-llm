@@ -1,10 +1,12 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/cpp/cuda_graph/combo_position_ids_validation.h"
+#include "rtp_llm/cpp/cuda_graph/strided_copy_validation.h"
 
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
@@ -162,43 +164,20 @@ int inferTotalTokensNoSync(const PyModelInputs& inputs) {
     return inputs.attention_inputs.total_tokens > 0 ? inputs.attention_inputs.total_tokens : 0;
 }
 
-void validateStridedCopy(const torch::Tensor& src, const torch::Tensor& dst, const char* path) {
-    RTP_LLM_CHECK_WITH_INFO(src.defined() && dst.defined(), "%s strided copy requires defined tensors", path);
-    RTP_LLM_CHECK_WITH_INFO(src.scalar_type() == dst.scalar_type(),
-                            "%s strided copy dtype mismatch: src=%s dst=%s",
-                            path,
-                            c10::toString(src.scalar_type()),
-                            c10::toString(dst.scalar_type()));
-    if (src.dim() < 2) {
-        RTP_LLM_CHECK_WITH_INFO(src.numel() <= dst.numel(),
-                                "%s copy source elements %ld exceed destination %ld",
-                                path,
-                                src.numel(),
-                                dst.numel());
-        return;
+std::string tensorShapeForLog(const torch::Tensor& tensor) {
+    if (!tensor.defined()) {
+        return "<undefined>";
     }
-    RTP_LLM_CHECK_WITH_INFO(src.dim() == 2 && dst.dim() == 2,
-                            "%s strided copy supports only matching 2D tensors: src_dim=%ld dst_dim=%ld",
-                            path,
-                            src.dim(),
-                            dst.dim());
-    const size_t row_bytes  = static_cast<size_t>(src.size(1)) * src.element_size();
-    const size_t src_stride = static_cast<size_t>(src.stride(0)) * src.element_size();
-    const size_t dst_stride = static_cast<size_t>(dst.stride(0)) * dst.element_size();
-    RTP_LLM_CHECK_WITH_INFO(row_bytes > 0, "%s strided copy requires positive row width", path);
-    RTP_LLM_CHECK_WITH_INFO(src.size(0) <= dst.size(0) && src.size(1) <= dst.size(1),
-                            "%s strided copy source shape [%ld,%ld] exceeds destination [%ld,%ld]",
-                            path,
-                            src.size(0),
-                            src.size(1),
-                            dst.size(0),
-                            dst.size(1));
-    RTP_LLM_CHECK_WITH_INFO(row_bytes <= src_stride && row_bytes <= dst_stride,
-                            "%s strided copy row width %zu exceeds strides src=%zu dst=%zu",
-                            path,
-                            row_bytes,
-                            src_stride,
-                            dst_stride);
+    std::ostringstream shape;
+    shape << "[";
+    for (int64_t i = 0; i < tensor.dim(); ++i) {
+        if (i > 0) {
+            shape << ",";
+        }
+        shape << tensor.size(i);
+    }
+    shape << "]";
+    return shape.str();
 }
 
 }  // namespace
@@ -332,11 +311,9 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         if (!src.defined() || src.numel() <= 0)
             return;
         if (src.dim() < 2) {
-            validateStridedCopy(src, dst, "cuda_graph.d2d");
             d2d_copies.add(src.data_ptr(), dst.data_ptr(), src.numel() * src.element_size());
             return;
         }
-        validateStridedCopy(src, dst, "cuda_graph.d2d");
         strided_d2d_copies.add(src.data_ptr(),
                                dst.data_ptr(),
                                src.size(0),
@@ -357,7 +334,6 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         if (!src.defined() || src.numel() <= 0 || !dst.defined() || dst.is_cuda())
             return;
         if (src.is_cuda()) {
-            validateStridedCopy(src, dst, "cuda_graph.d2h");
             RTP_LLM_PROFILE_SCOPE("stridedCopyHost(D2H)");
             if (src.dim() < 2) {
                 dst.view({-1}).narrow(0, 0, src.numel()).copy_(src, /*non_blocking=*/true);
@@ -368,7 +344,6 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             return;
         }
         RTP_LLM_PROFILE_SCOPE("stridedCopyHost");
-        validateStridedCopy(src, dst, "cuda_graph.h2h");
         if (src.dim() < 2) {
             memcpy(dst.data_ptr(), src.data_ptr(), src.numel() * src.element_size());
             return;
@@ -698,11 +673,9 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
             return;
         }
         if (src.dim() < 2) {
-            validateStridedCopy(src, dst, "cuda_graph.update_d2d");
             d2d_copies.add(src.data_ptr(), dst.data_ptr(), src.numel() * src.element_size());
             return;
         }
-        validateStridedCopy(src, dst, "cuda_graph.update_d2d");
         strided_d2d_copies.add(src.data_ptr(),
                                dst.data_ptr(),
                                src.size(0),
@@ -863,6 +836,57 @@ bool CudaGraphRunner::canReplaySelectedGraph(const PyModelInputs& inputs, const 
                 static_cast<unsigned long long>(fallback_count));
         }
         return false;
+    }
+
+    const auto& captured_inputs = graph_it->second.mem_hold_.py_model_inputs_;
+    auto        compatible =
+        [this,
+         graph_key](const torch::Tensor& src, const torch::Tensor& dst, std::string_view tag, const char* location) {
+            std::string reason;
+            if (isStridedCopyCompatible(src, dst, &reason)) {
+                return true;
+            }
+            const uint64_t fallback_count = block_table_fallback_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+            if ((fallback_count & (fallback_count - 1)) == 0) {
+                RTP_LLM_LOG_WARNING(
+                    "CUDA graph block table is incompatible with graph key %d: tag=%.*s location=%s src_shape=%s "
+                    "dst_shape=%s reason=%s; fallback to normal run (fallback_count=%llu)",
+                    graph_key,
+                    static_cast<int>(tag.size()),
+                    tag.data(),
+                    location,
+                    tensorShapeForLog(src).c_str(),
+                    tensorShapeForLog(dst).c_str(),
+                    reason.c_str(),
+                    static_cast<unsigned long long>(fallback_count));
+            }
+            return false;
+        };
+
+    if (inputs.attention_inputs_by_group.empty()) {
+        return compatible(inputs.attention_inputs.kv_cache_kernel_block_id,
+                          captured_inputs.attention_inputs.kv_cache_kernel_block_id,
+                          "<flat>",
+                          "host")
+               && compatible(inputs.attention_inputs.kv_cache_kernel_block_id_device,
+                             captured_inputs.attention_inputs.kv_cache_kernel_block_id_device,
+                             "<flat>",
+                             "device");
+    }
+    for (const auto& tag : kv_cache_group_tags_) {
+        const auto src_it = inputs.attention_inputs_by_group.find(tag);
+        const auto dst_it = captured_inputs.attention_inputs_by_group.find(tag);
+        if (src_it == inputs.attention_inputs_by_group.end()
+            || dst_it == captured_inputs.attention_inputs_by_group.end()) {
+            return false;
+        }
+        if (!compatible(src_it->second.kv_cache_kernel_block_id, dst_it->second.kv_cache_kernel_block_id, tag, "host")
+            || !compatible(src_it->second.kv_cache_kernel_block_id_device,
+                           dst_it->second.kv_cache_kernel_block_id_device,
+                           tag,
+                           "device")) {
+            return false;
+        }
     }
     return true;
 }

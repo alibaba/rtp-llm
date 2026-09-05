@@ -576,7 +576,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.dsv4_hca_state_pool_blocks);
             },
             [](py::tuple t) {
-                if (t.size() != 43 && t.size() != 54 && t.size() != 56)
+                if (t.size() != 43 && t.size() != 54 && t.size() != 56 && t.size() != 57)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -1764,7 +1764,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 CacheCapacityPolicyDesc c;
-                if (t.size() != 2)
+                // The previous 3-item layout appended charge_to_paged_budget.
+                // That field no longer has runtime semantics; accept and ignore it.
+                if (t.size() != 2 && t.size() != 3)
                     throw std::runtime_error("Invalid CacheCapacityPolicyDesc state!");
                 c.reservable         = t[0].cast<std::optional<bool>>();
                 c.explicit_block_num = t[1].cast<std::optional<uint32_t>>();
@@ -1800,12 +1802,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
             },
             [](py::tuple t) {
                 CacheCpPolicyDesc c;
-                if (t.size() != 4)
+                // The previous 5-item layout stored scale_seq_size at index 2.
+                // CP geometry now derives this behavior from the finalized policy.
+                if (t.size() != 4 && t.size() != 5)
                     throw std::runtime_error("Invalid CacheCpPolicyDesc state!");
-                c.mapping              = t[0].cast<std::optional<CpBlockMappingMode>>();
-                c.slice                = t[1].cast<std::optional<CpBlockSliceMode>>();
-                c.align_payload        = t[2].cast<std::optional<bool>>();
-                c.prefill_slice_layout = t[3].cast<std::optional<CpPrefillSliceLayout>>();
+                const size_t current_field_offset = t.size() == 5 ? 1 : 0;
+                c.mapping                         = t[0].cast<std::optional<CpBlockMappingMode>>();
+                c.slice                           = t[1].cast<std::optional<CpBlockSliceMode>>();
+                c.align_payload                   = t[2 + current_field_offset].cast<std::optional<bool>>();
+                c.prefill_slice_layout = t[3 + current_field_offset].cast<std::optional<CpPrefillSliceLayout>>();
                 return c;
             }));
 
@@ -1820,6 +1825,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("entry_count_mode", &KVCacheSpecDesc::entry_count_mode)
         .def_readwrite("explicit_entry_count", &KVCacheSpecDesc::explicit_entry_count)
         .def_readwrite("compression_ratio", &KVCacheSpecDesc::compression_ratio)
+        .def_readwrite("kernel_tokens_per_block_alignment", &KVCacheSpecDesc::kernel_tokens_per_block_alignment)
         .def_readwrite("state_ring_overlap", &KVCacheSpecDesc::state_ring_overlap)
         .def_readwrite("state_ring_include_gen_num_per_cycle", &KVCacheSpecDesc::state_ring_include_gen_num_per_cycle)
         .def_readwrite("block_stride_bytes_override", &KVCacheSpecDesc::block_stride_bytes_override)
@@ -1850,12 +1856,19 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.reuse,
                                       self.capacity,
                                       self.tail,
-                                      self.cp);
+                                      self.cp,
+                                      self.kernel_tokens_per_block_alignment);
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
-                if (t.size() != 19)
+                if (t.size() != 19 && t.size() != 20)
                     throw std::runtime_error("Invalid KVCacheSpecDesc state!");
+                const bool current_layout = t.size() == 20 && py::isinstance<py::int_>(t[19]);
+                const bool legacy_layout  = t.size() == 20 && !current_layout;
+                if (legacy_layout && !t[17].is_none()) {
+                    throw std::runtime_error("KVCacheSpecDesc legacy memory policy is not supported; "
+                                             "convert the pickle offline with the previous RTP-LLM version");
+                }
                 c.tag                                  = t[0].cast<std::string>();
                 c.cache_type                           = t[1].cast<KVCacheSpecType>();
                 c.dtype                                = t[2].cast<DataType>();
@@ -1873,8 +1886,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.group_type                           = t[14].cast<std::optional<CacheGroupType>>();
                 c.reuse                                = t[15].cast<std::optional<CacheReusePolicyDesc>>();
                 c.capacity                             = t[16].cast<std::optional<CacheCapacityPolicyDesc>>();
-                c.tail                                 = t[17].cast<std::optional<CacheTailPolicyDesc>>();
-                c.cp                                   = t[18].cast<std::optional<CacheCpPolicyDesc>>();
+                c.tail = t[legacy_layout ? 18 : 17].cast<std::optional<CacheTailPolicyDesc>>();
+                c.cp   = t[legacy_layout ? 19 : 18].cast<std::optional<CacheCpPolicyDesc>>();
+                if (current_layout) {
+                    c.kernel_tokens_per_block_alignment = t[19].cast<uint32_t>();
+                }
                 return c;
             }));
 

@@ -32,8 +32,8 @@ public:
     ~AsyncMatchContext() override = default;
 
 public:
-    // Number of matched entries in the resource's cache-key timeline. The
-    // coordinator uses this as the end ordinal for subsequent connector reads.
+    // Number of matched global cache-key blocks. CP-canonical entry counts are
+    // connector-internal and must be converted before crossing this interface.
     virtual size_t matchedBlockCount() const = 0;
 };
 

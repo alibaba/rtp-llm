@@ -240,6 +240,13 @@ void CacheConfig::finalizeBlockNums(uint32_t                   global_block_num,
                 rule_blocks = override_it->second;
             }
         }
+        RTP_LLM_CHECK_WITH_INFO(
+            rule_blocks <= group_config.maxRepresentableBlockNum(),
+            "cache group tag=%s block_num=%u exceeds BlockIdxType/kernel expansion limit=%u (ratio=%zu)",
+            group_config.tag.c_str(),
+            rule_blocks,
+            group_config.maxRepresentableBlockNum(),
+            group_config.storedKernelBlocksPerKvBlock());
         group_config.block_num = rule_blocks;
     }
 

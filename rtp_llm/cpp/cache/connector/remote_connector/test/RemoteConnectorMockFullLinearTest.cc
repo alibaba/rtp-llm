@@ -141,8 +141,8 @@ private:
 
 // The remote connector's accepted set is exactly one FULL cache group and nothing else.
 // A 1-FULL-plus-2-LINEAR topology is therefore rejected, and it is rejected at construction
-// time — before init(), before any meta client exists. Only the failure stage and category
-// are asserted here; the message text is free to change in this phase.
+// time — before init(), before any meta client exists. The diagnostic is part of the migration
+// contract: it states that multi-group support was removed and names the supported topology.
 TEST_F(RemoteConnectorMockFullLinearTest, test_construct_rejects_full_plus_linear_remote_topology) {
     const auto& groups = cache_config_.groups();
     ASSERT_EQ(groups.size(), 3u);
@@ -163,15 +163,20 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_construct_rejects_full_plus_linea
     // Failure stage: construction, ahead of any remote client creation.
     EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _)).Times(0);
     // Failure category: invalid-configuration check failure (rtp_llm::RTPException).
-    EXPECT_THROW(std::make_shared<RemoteConnector>(cache_config_,
-                                                   kv_cache_config_,
-                                                   runtime_config_,
-                                                   parallelism_config_,
-                                                   sp_config_,
-                                                   nullptr,
-                                                   0,
-                                                   coordinator_cache_manager),
-                 rtp_llm::RTPException);
+    try {
+        (void)std::make_shared<RemoteConnector>(cache_config_,
+                                                kv_cache_config_,
+                                                runtime_config_,
+                                                parallelism_config_,
+                                                sp_config_,
+                                                nullptr,
+                                                0,
+                                                coordinator_cache_manager);
+        FAIL() << "expected multi-group remote topology to be rejected";
+    } catch (const rtp_llm::RTPException& e) {
+        EXPECT_THAT(std::string(e.what()), HasSubstr("remote cache now supports exactly one FULL cache group"));
+        EXPECT_THAT(std::string(e.what()), HasSubstr("multi-group remote cache support has been removed"));
+    }
 
     rtp_llm::StaticConfig::user_ft_core_dump_on_exception = saved_core_dump_on_exception;
 }

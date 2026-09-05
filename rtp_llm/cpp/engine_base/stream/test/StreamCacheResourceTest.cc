@@ -341,13 +341,43 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdates
     EXPECT_EQ(stream_->memoryReuseLength(), expected_memory_reuse_len);
 }
 
-TEST_F(StreamCacheResourceTest, testCPShardedConnectorReuseUsesCanonicalBlockWidth) {
+TEST_F(StreamCacheResourceTest, testCPShardedConnectorReuseCountersStayInGlobalBlocks) {
     prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
 
     cache_manager_->cp_slot_mapper_ =
         std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, resource.seqSizePerBlock());
 
+    auto match_child = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
+    auto kv_resource = std::make_shared<KVCacheResource>();
+    kv_resource->setDeviceReuseBlockNum(8);
+    kv_resource->setMemoryReuseBlockNum(2);
+    std::shared_ptr<Meta> meta;
+    auto                  read_context = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, meta);
+
+    resource.updateReuseLengthsFromContext(read_context);
+
+    const int global_block_tokens = resource.seqSizePerBlock();
+    EXPECT_EQ(stream_->initialReuseLength(), 10 * global_block_tokens);
+    EXPECT_EQ(stream_->reuseLength(), 10 * global_block_tokens);
+    EXPECT_EQ(stream_->localReuseLength(), 10 * global_block_tokens);
+    EXPECT_EQ(stream_->memoryReuseLength(), 2 * global_block_tokens);
+}
+
+TEST_F(StreamCacheResourceTest, testCPShardedAllLogicalGroupsKeepLogicalReuseWidth) {
+    auto config = init_config();
+    auto groups = config.groups();
+    ASSERT_EQ(groups.size(), 1u);
+    groups[0].policy.cp_mapping = CpBlockMappingMode::NONE;
+    CacheConfig logical_config(std::move(groups), config.layers(), config.layer_num);
+    test::copyCacheConfigScalars(config, logical_config);
+    prepareResourceWithCacheConfig(
+        std::move(logical_config), /*input_tokens=*/{1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, RoleType::PDFUSION);
+    auto& resource = stream_->streamCacheResource();
+
+    cache_manager_->cp_slot_mapper_ =
+        std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, resource.seqSizePerBlock());
     auto match_child = std::make_shared<testing::NiceMock<MockAsyncContext>>();
     auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
     auto kv_resource = std::make_shared<KVCacheResource>();
@@ -358,12 +388,10 @@ TEST_F(StreamCacheResourceTest, testCPShardedConnectorReuseUsesCanonicalBlockWid
 
     resource.updateReuseLengthsFromContext(read_context);
 
-    const int canonical_block_tokens = resource.seqSizePerBlock() * 2;
-    EXPECT_EQ(resource.reuseBlockTokens(), canonical_block_tokens);
-    EXPECT_EQ(stream_->initialReuseLength(), 3 * canonical_block_tokens);
-    EXPECT_EQ(stream_->reuseLength(), 3 * canonical_block_tokens);
-    EXPECT_EQ(stream_->localReuseLength(), 3 * canonical_block_tokens);
-    EXPECT_EQ(stream_->memoryReuseLength(), canonical_block_tokens);
+    EXPECT_EQ(stream_->initialReuseLength(), 3 * resource.seqSizePerBlock());
+    EXPECT_EQ(stream_->reuseLength(), 3 * resource.seqSizePerBlock());
+    EXPECT_EQ(stream_->localReuseLength(), 3 * resource.seqSizePerBlock());
+    EXPECT_EQ(stream_->memoryReuseLength(), resource.seqSizePerBlock());
 }
 
 TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyForFirstMalloc) {

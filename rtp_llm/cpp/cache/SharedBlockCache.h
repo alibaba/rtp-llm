@@ -85,13 +85,12 @@ public:
 
     void init(const CacheConfig& config, const std::map<std::string, BlockPoolPtr>& group_pools);
 
-    void put(CacheKeyType cache_key, const std::map<std::string, BlockIdxType>& blocks_by_group, bool is_resident);
     void put(CacheKeyType                               cache_key,
              const std::map<std::string, BlockIdxType>& blocks_by_group,
              const std::map<std::string, bool>&         group_matchable,
              bool                                       is_resident,
-             NamespaceId                                namespace_id,
-             const BlockDependency&                     dependency);
+             const BlockDependency&                     dependency,
+             NamespaceId                                namespace_id = kGpuLogicalNamespace);
 
     BlockIdxType matchGroup(CacheKeyType cache_key, std::string_view tag);
 

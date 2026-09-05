@@ -490,7 +490,7 @@ public:
 
     bool updateKVBlock(const BatchKVCacheResourcePtr&,
                        const std::vector<int>&,
-                       bool,
+                       int,
                        std::vector<TaggedBlockIdPair>&) override {
         return false;
     }

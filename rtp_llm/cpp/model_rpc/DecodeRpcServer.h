@@ -97,9 +97,15 @@ private:
     BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext&       load_context,
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
-    static std::map<std::string, BlockIds> decodeGroupBlockIds(const BroadcastLoadRequestPB& request,
-                                                               const CacheConfig&            cache_config);
-    static std::string makeRequestKeyForGroup(int64_t request_id, size_t layer_id, const std::string& tag);
+    static ErrorInfo       decodeGroupBlockIds(const BroadcastLoadRequestPB&    request,
+                                               const CacheConfig&               cache_config,
+                                               std::map<std::string, BlockIds>& block_ids_by_group);
+    static ErrorInfo       validateGroupBlockIdsGeometry(const CacheConfig&                     cache_config,
+                                                         const std::map<std::string, BlockIds>& block_ids_by_group,
+                                                         size_t                                 cache_key_count,
+                                                         int64_t                                reuse_block_size,
+                                                         int32_t                                prefill_cp_size);
+    static std::string     makeRequestKeyForGroup(int64_t request_id, size_t layer_id, const std::string& tag);
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);
     static std::vector<MTPModuleLoadPlan> makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params);
@@ -114,7 +120,7 @@ private:
                                                                bool                    use_hybrid,
                                                                size_t                  group_seq_size_per_block,
                                                                size_t                  base_seq_size_per_block);
-    static grpc::Status                   generateRequestReadFailureStatus(bool cancelled);
+    static grpc::Status                     generateRequestReadFailureStatus(bool cancelled);
     // Classifies error.type for the synthesized Decode phase spans. Static and
     // side-effect free so the classification itself is unit testable.
     static const char* phaseErrorType(bool                         request_ok,

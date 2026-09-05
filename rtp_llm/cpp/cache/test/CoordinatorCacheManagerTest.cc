@@ -171,14 +171,20 @@ static ModelConfig makeProModelConfig() {
 
 // Build a DSV4 7-pool CacheConfig.
 static CacheConfig makeDSV4CoordinatorConfig(uint32_t                block_num        = 200,
-                                             std::optional<uint32_t> hca_state_blocks = std::nullopt) {
+                                             std::optional<uint32_t> hca_state_blocks = std::nullopt,
+                                             int                     prefill_cp_size  = 1) {
     auto mc                                            = makeProModelConfig();
     mc.hybrid_attention_config.enable_hybrid_attention = true;
     if (hca_state_blocks.has_value()) {
         setDsv4ExplicitPoolBlocks(mc, "hca_state", *hca_state_blocks);
     }
     ParallelismConfig pc;
-    auto              config = CacheConfigCreator::createBasicConfig(mc, pc, KVCacheConfig{}, 0);
+    if (prefill_cp_size > 1) {
+        pc.role_type                          = RoleType::PREFILL;
+        pc.tp_size                            = prefill_cp_size;
+        pc.prefill_cp_config.kv_cache_sharded = true;
+    }
+    auto config = CacheConfigCreator::createBasicConfig(mc, pc, KVCacheConfig{}, 0);
     config.finalizeBlockNums(block_num, RuntimeConfig{});
     return config;
 }
@@ -393,7 +399,7 @@ static BlockIdxType seedCacheItem(const CoordinatorCacheManagerPtr& coordinator_
     EXPECT_EQ(blocks.size(), 1u);
     config.group(tag);
     auto shared_cache = coordinator_cache_manager->sharedBlockCache();
-    shared_cache->put(key, {{std::string(tag), blocks[0]}}, is_resident);
+    shared_cache->put(key, {{std::string(tag), blocks[0]}}, {}, is_resident, BlockDependency{});
     // SharedBlockCache::put() internally calls pool->blockCacheReference()
     pool->requestFree(blocks);
     return blocks[0];
@@ -520,11 +526,11 @@ TEST_F(CoordinatorCacheManagerTest, InitCreatesIndependentBlockPoolPerGroup) {
     EXPECT_EQ(coordinator_cache_manager->blockPool("full")->totalBlocksNum(), 8u - 1u);
 }
 
-TEST_F(CoordinatorCacheManagerTest, OrdinarySingleMtpUsesExactMainAndProposeMemoryLayouts) {
+TEST_F(CoordinatorCacheManagerTest, OrdinarySingleMtpUsesCompatibleMainAndProposeMemoryLayouts) {
     auto score_config = makeOrdinaryMtpModelConfig(
         /*num_layers=*/2, /*kv_head_num=*/1, /*size_per_head=*/8, KvCacheDataType::BASE);
     auto propose_config = makeOrdinaryMtpModelConfig(
-        /*num_layers=*/1, /*kv_head_num=*/2, /*size_per_head=*/16, KvCacheDataType::FP8);
+        /*num_layers=*/1, /*kv_head_num=*/1, /*size_per_head=*/8, KvCacheDataType::BASE);
 
     KVCacheConfig kv_cache_config;
     kv_cache_config.test_block_num = 6;
@@ -552,10 +558,10 @@ TEST_F(CoordinatorCacheManagerTest, OrdinarySingleMtpUsesExactMainAndProposeMemo
     EXPECT_EQ(legacy_contract.memory_layouts[1].layer_num, 1u);
     EXPECT_EQ(legacy_contract.memory_layouts[2].layer_num, 1u);
     EXPECT_EQ(legacy_contract.memory_layouts[0].kv_scale_stride_bytes, 0u);
-    EXPECT_GT(legacy_contract.memory_layouts[1].kv_scale_stride_bytes, 0u);
+    EXPECT_EQ(legacy_contract.memory_layouts[1].kv_scale_stride_bytes, 0u);
     EXPECT_EQ(legacy_contract.memory_layouts[1].kv_block_stride_bytes,
               config.mtp_sub_configs[0]->soleGroupForLayer(0).spec->block_size_bytes());
-    EXPECT_NE(legacy_contract.memory_layouts[0].kv_block_stride_bytes,
+    EXPECT_EQ(legacy_contract.memory_layouts[0].kv_block_stride_bytes,
               legacy_contract.memory_layouts[1].kv_block_stride_bytes);
 
     size_t expected_offset = 0;
@@ -1748,7 +1754,8 @@ TEST_F(CoordinatorCacheManagerTest, DSV4SharedBlockCacheIsUnifiedAcrossGroups) {
     auto pool0  = coordinator_cache_manager->blockPool("swa_kv");
     auto blocks = pool0->malloc(1);
     ASSERT_EQ(blocks.size(), 1u);
-    shared_cache->put(/*cache_key=*/42, {{"swa_kv", blocks[0]}}, /*is_resident=*/false);
+    shared_cache->put(
+        /*cache_key=*/42, {{"swa_kv", blocks[0]}}, {}, /*is_resident=*/false, BlockDependency{});
     EXPECT_TRUE(shared_cache->contains(42));
 
     // The same cache is returned by the coordinator_cache_manager accessor.
@@ -1759,12 +1766,13 @@ TEST_F(CoordinatorCacheManagerTest, DSV4SharedBlockCacheIsUnifiedAcrossGroups) {
 }
 
 TEST_F(CoordinatorCacheManagerTest, DSV4CPShardedInsertThenReuseSamePrefix) {
-    auto config                    = makeDSV4CoordinatorConfig(/*block_num=*/64);
+    auto config = makeDSV4CoordinatorConfig(/*block_num=*/64, /*hca_state_blocks=*/std::nullopt, /*prefill_cp_size=*/2);
     auto coordinator_cache_manager = makeCoordinatorCacheManager(config);
     ASSERT_TRUE(coordinator_cache_manager->init());
 
     const int spb     = static_cast<int>(config.seq_size_per_block);
     const int seq_len = 10 * spb + 17;
+    ASSERT_EQ(config.group("swa_kv").seqSizePerBlock(), 2u * config.seq_size_per_block);
 
     CacheKeysType full_keys;
     for (int i = 0; i < 10; ++i) {
@@ -1804,23 +1812,67 @@ TEST_F(CoordinatorCacheManagerTest, DSV4CPShardedInsertThenReuseSamePrefix) {
     auto result = coordinator_cache_manager->malloc(hit_malloc);
 
     ASSERT_TRUE(result.success);
-    // 10 full keys under cp_size=2 subsample to 5 canonical match keys;
-    // initMallocForCommonLen always drops the last canonical match key (it may
-    // be a partial tail, and fully reusing the input would leave no prefill
-    // tokens to compute), so only 4 canonical blocks are reusable.
-    EXPECT_EQ(result.reuse_len, 4 * spb * 2);
+    // The request's eleventh key is the partial tail. All ten complete global
+    // cache-key blocks are reusable, represented by five canonical entries.
+    EXPECT_EQ(result.reuse_len, 10 * spb);
+    EXPECT_EQ(hit_res->cacheResource(0).deviceReuseBlockNum(), 10u);
+    EXPECT_EQ(hit_res->cacheResource(0).deviceReuseBlockNum() * config.seq_size_per_block,
+              static_cast<size_t>(result.reuse_len));
 
     FreeInfo hit_free{hit_res, hit_tokens};
     coordinator_cache_manager->free(hit_free);
 }
 
-TEST_F(CoordinatorCacheManagerTest, DSV4CPShardedEvictionMarksCanonicalResource) {
-    auto config                    = makeDSV4CoordinatorConfig(/*block_num=*/64);
+TEST_F(CoordinatorCacheManagerTest, DSV4NonCpInsertMapsWidePhysicalBlocksToEndingKeys) {
+    auto config = makeDSV4CoordinatorConfig(/*block_num=*/64, /*hca_state_blocks=*/std::nullopt, /*prefill_cp_size=*/2);
     auto coordinator_cache_manager = makeCoordinatorCacheManager(config);
     ASSERT_TRUE(coordinator_cache_manager->init());
 
     const int spb     = static_cast<int>(config.seq_size_per_block);
     const int seq_len = 10 * spb + 17;
+    ASSERT_EQ(config.group("swa_kv").seqSizePerBlock(), 2u * config.seq_size_per_block);
+
+    CacheKeysType full_keys;
+    for (int i = 0; i < 10; ++i) {
+        full_keys.push_back(1000 + i);
+    }
+    CacheKeysType request_keys = full_keys;
+    request_keys.push_back(2000);  // partial tail key present on the incoming request.
+
+    auto seed_res = makeBatchResource(/*batch_size=*/1, config);
+    seed_res->setBatchCacheKeys(0, full_keys);
+    auto seed_tokens = makeCompleteTokenIds(/*batch_size=*/1, seq_len, spb);
+
+    MallocInfo seed_malloc{seed_res, seed_tokens};
+    seed_malloc.reuse_cache         = true;
+    seed_malloc.enable_device_cache = false;
+    ASSERT_TRUE(coordinator_cache_manager->malloc(seed_malloc).success);
+    coordinator_cache_manager->insertIntoCache(InsertInfo{seed_res, seed_tokens, /*is_resident=*/false});
+    coordinator_cache_manager->free(FreeInfo{seed_res, seed_tokens});
+
+    auto hit_res = makeBatchResource(/*batch_size=*/1, config);
+    hit_res->setBatchCacheKeys(0, request_keys);
+    auto hit_tokens = makeCompleteTokenIds(/*batch_size=*/1, seq_len, spb);
+
+    MallocInfo hit_malloc{hit_res, hit_tokens};
+    hit_malloc.reuse_cache         = true;
+    hit_malloc.enable_device_cache = true;
+    const auto result              = coordinator_cache_manager->malloc(hit_malloc);
+
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.reuse_len, 10 * spb);
+    EXPECT_EQ(hit_res->cacheResource(0).deviceReuseBlockNum(), 10u);
+    coordinator_cache_manager->free(FreeInfo{hit_res, hit_tokens});
+}
+
+TEST_F(CoordinatorCacheManagerTest, DSV4CPShardedEvictionMarksCanonicalResource) {
+    auto config = makeDSV4CoordinatorConfig(/*block_num=*/64, /*hca_state_blocks=*/std::nullopt, /*prefill_cp_size=*/2);
+    auto coordinator_cache_manager = makeCoordinatorCacheManager(config);
+    ASSERT_TRUE(coordinator_cache_manager->init());
+
+    const int spb     = static_cast<int>(config.seq_size_per_block);
+    const int seq_len = 10 * spb + 17;
+    ASSERT_EQ(config.group("swa_kv").seqSizePerBlock(), 2u * config.seq_size_per_block);
 
     CacheKeysType full_keys;
     for (int i = 0; i < 10; ++i) {
@@ -1858,18 +1910,22 @@ TEST_F(CoordinatorCacheManagerTest, DSV4CPShardedEvictionMarksCanonicalResource)
 
     KVCacheResource canonical_source;
     canonical_source.setCacheKeys(full_keys);
-    const auto expected_canonical = canonical_source.localCacheKeys(cp_mapper->cpSize() - 1, cp_mapper->cpSize());
+    const auto expected_canonical    = canonical_source.localCacheKeys(cp_mapper->cpSize() - 1, cp_mapper->cpSize());
+    const auto expected_dependencies = cp_mapper->canonicalBlockDependencies(expected_canonical);
     ASSERT_FALSE(evicted->cacheKeys(0).empty());
     const auto& dependencies = evicted->cacheResource(0).blockDependencies();
     ASSERT_EQ(dependencies.size(), evicted->cacheKeys(0).size());
     for (size_t i = 0; i < dependencies.size(); ++i) {
         EXPECT_NE(std::find(expected_canonical.begin(), expected_canonical.end(), evicted->cacheKeys(0)[i]),
                   expected_canonical.end());
-        const size_t source_pos = static_cast<size_t>(evicted->cacheKeys(0)[i] - full_keys.front());
-        ASSERT_LT(source_pos, full_dependencies.size());
-        EXPECT_EQ(dependencies[i].has_parent, full_dependencies[source_pos].has_parent);
-        EXPECT_EQ(dependencies[i].parent_key, full_dependencies[source_pos].parent_key);
-        EXPECT_EQ(dependencies[i].ordinal, full_dependencies[source_pos].ordinal);
+        const auto expected_it =
+            std::find(expected_canonical.begin(), expected_canonical.end(), evicted->cacheKeys(0)[i]);
+        ASSERT_NE(expected_it, expected_canonical.end());
+        const size_t canonical_pos = static_cast<size_t>(expected_it - expected_canonical.begin());
+        ASSERT_LT(canonical_pos, expected_dependencies.size());
+        EXPECT_EQ(dependencies[i].has_parent, expected_dependencies[canonical_pos].has_parent);
+        EXPECT_EQ(dependencies[i].parent_key, expected_dependencies[canonical_pos].parent_key);
+        EXPECT_EQ(dependencies[i].ordinal, expected_dependencies[canonical_pos].ordinal);
     }
 }
 

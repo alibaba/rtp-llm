@@ -1490,6 +1490,75 @@ TEST_F(LayerCacheBufferUtilTest, FullRoundRobinUsesGlobalKeyOrdinalsWithDifferen
     EXPECT_EQ(buffer->blockIdMap().at(1011), 43);
 }
 
+TEST_F(LayerCacheBufferUtilTest, CanonicalFullRoundRobinResourceIsNotProjectedTwice) {
+    CacheConfig config;
+    auto        full_spec                = std::make_shared<MHAKVCacheSpec>();
+    full_spec->seq_size_per_block        = 8;
+    full_spec->kernel_seq_size_per_block = 8;
+    CacheGroup full;
+    full.tag                  = "full";
+    full.spec                 = std::move(full_spec);
+    full.policy               = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    config                    = CacheConfig({std::move(full)}, {{"full"}}, /*main_layer_num=*/1);
+    config.seq_size_per_block = 8;
+
+    KVCacheResource logical;
+    logical.initGroups(config);
+    logical.setCacheKeys({10, 11, 12, 13});
+    logical.mutableBlockIds("full").assign({101, 103});
+
+    KVCacheResource canonical;
+    canonical.initGroups(config);
+    canonical.setCacheKeys({11, 13});
+    canonical.setCacheKeysAreCpCanonical(true);
+    canonical.mutableBlockIds("full").assign({101, 103});
+
+    auto logical_buffer = LayerCacheBufferUtil::convertLayer(
+        config, logical, 0, 0, "full", /*start_key_ordinal=*/0, /*key_count=*/-1, /*cp_rank=*/1, /*cp_size=*/2);
+    auto canonical_buffer = LayerCacheBufferUtil::convertLayer(
+        config, canonical, 0, 0, "full", /*start_key_ordinal=*/0, /*key_count=*/-1, /*cp_rank=*/1, /*cp_size=*/2);
+
+    ASSERT_NE(logical_buffer, nullptr);
+    ASSERT_NE(canonical_buffer, nullptr);
+    EXPECT_EQ(logical_buffer->blockIdMap(), (std::map<CacheKeyType, BlockIdxType>{{11, 101}, {13, 103}}));
+    EXPECT_EQ(canonical_buffer->blockIdMap(), logical_buffer->blockIdMap());
+}
+
+TEST_F(LayerCacheBufferUtilTest, CanonicalCompactSwaResourceIsNotProjectedTwice) {
+    CacheConfig config;
+    auto        swa_spec                = std::make_shared<MHAKVCacheSpec>();
+    swa_spec->seq_size_per_block        = 8;
+    swa_spec->kernel_seq_size_per_block = 8;
+    CacheGroup swa;
+    swa.tag                       = "swa";
+    swa.spec                      = std::move(swa_spec);
+    swa.policy                    = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    swa.policy.active_tail_blocks = 2;
+    config                        = CacheConfig({std::move(swa)}, {{"swa"}}, /*main_layer_num=*/1);
+    config.seq_size_per_block     = 8;
+
+    KVCacheResource logical;
+    logical.initGroups(config);
+    logical.setCacheKeys({20, 21, 22, 23});
+    logical.mutableBlockIds("swa").assign({201, 203});
+
+    KVCacheResource canonical;
+    canonical.initGroups(config);
+    canonical.setCacheKeys({21, 23});
+    canonical.setCacheKeysAreCpCanonical(true);
+    canonical.mutableBlockIds("swa").assign({201, 203});
+
+    auto logical_buffer = LayerCacheBufferUtil::convertLayer(
+        config, logical, 0, 0, "swa", /*start_key_ordinal=*/0, /*key_count=*/-1, /*cp_rank=*/0, /*cp_size=*/2);
+    auto canonical_buffer = LayerCacheBufferUtil::convertLayer(
+        config, canonical, 0, 0, "swa", /*start_key_ordinal=*/0, /*key_count=*/-1, /*cp_rank=*/0, /*cp_size=*/2);
+
+    ASSERT_NE(logical_buffer, nullptr);
+    ASSERT_NE(canonical_buffer, nullptr);
+    EXPECT_EQ(logical_buffer->blockIdMap(), (std::map<CacheKeyType, BlockIdxType>{{21, 201}, {23, 203}}));
+    EXPECT_EQ(canonical_buffer->blockIdMap(), logical_buffer->blockIdMap());
+}
+
 TEST_F(LayerCacheBufferUtilTest, CompactSwaUsesConfigurableTailAndTransientPhysicalOrdinal) {
     CacheConfig config;
     auto        swa_spec                = std::make_shared<MHAKVCacheSpec>();

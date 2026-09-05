@@ -175,7 +175,7 @@ public:
     }
     bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                        const std::vector<int>&         block_src_batch,
-                       bool                            copy_last_block,
+                       int                             previous_seq_len,
                        std::vector<TaggedBlockIdPair>& block_update_mapping) override {
         return false;
     }

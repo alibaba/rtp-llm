@@ -4,6 +4,8 @@ from pathlib import Path
 from unittest import TestCase, main
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.deepseek_v4 import DeepSeekV4, DeepSeekV4DSpark
 from rtp_llm.models.dsv4_kv_cache import (
     CSA_KV_TAG,
@@ -136,6 +138,7 @@ class Dsv4KvCacheSpecTest(TestCase):
             )
             self.assertEqual(by_tag[tag].dtype, DataType.TYPE_UINT8, tag)
             self.assertEqual(by_tag[tag].entry_dtype, DataType.TYPE_UINT8, tag)
+            self.assertEqual(by_tag[tag].kernel_tokens_per_block_alignment, 128, tag)
         for tag in (INDEXER_STATE_TAG, CSA_STATE_TAG, HCA_STATE_TAG, SWA_KV_TAG):
             self.assertEqual(by_tag[tag].cache_type, KVCacheSpecType.OPAQUE_STATE, tag)
             self.assertTrue(by_tag[tag].is_state_cache, tag)
@@ -329,15 +332,29 @@ class Dsv4PostBuildModelConfigTest(TestCase):
             DSV4_HCA_STATE_POOL_BLOCKS,
         )
 
-    def test_post_build_promotes_default_block_size(self):
-        config = self._model_config()
+    def test_model_factory_materializes_dsv4_block_default(self):
+        configs = PyEnvConfigs()
 
-        DeepSeekV4._post_build_model_config(config)
-
-        self.assertEqual(config.attn_config.tokens_per_block, DSV4_TOKENS_PER_BLOCK)
-        self.assertEqual(
-            config.attn_config.kernel_tokens_per_block, DSV4_TOKENS_PER_BLOCK
+        ModelFactory._materialize_kv_cache_block_size(
+            DeepSeekV4, configs.kv_cache_config
         )
+
+        self.assertEqual(
+            configs.kv_cache_config.seq_size_per_block, DSV4_TOKENS_PER_BLOCK
+        )
+
+    def test_model_args_reject_non_fp8_kv_cache(self):
+        from rtp_llm.models_py.model_desc.deepseek_v4_model import (
+            _args_from_model_config,
+        )
+
+        config = self._model_config()
+        config.attn_config.kv_cache_dtype = KvCacheDataType.BASE
+
+        with self.assertRaisesRegex(
+            ValueError, "DeepSeek-V4 currently supports only FP8 KV cache"
+        ):
+            _args_from_model_config(config)
 
     def test_post_build_keeps_explicit_block_size(self):
         config = self._model_config(tokens_per_block=128)

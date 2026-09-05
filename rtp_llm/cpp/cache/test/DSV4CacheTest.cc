@@ -2542,7 +2542,7 @@ TEST_F(DSV4CoordinatorCacheManagerTest, PrefixCacheReusePagedGroupsOnly) {
         auto blocks = block_pools.at(group.tag)->malloc(static_cast<int>(cached_keys.size()));
         ASSERT_EQ(blocks.size(), cached_keys.size());
         for (size_t i = 0; i < cached_keys.size(); ++i) {
-            shared_cache->put(cached_keys[i], {{group.tag, blocks[i]}}, true);
+            shared_cache->put(cached_keys[i], {{group.tag, blocks[i]}}, {}, true, BlockDependency{});
         }
         cached_blocks[group.tag] = blocks;
         block_pools.at(group.tag)->requestFree(blocks);
@@ -2609,7 +2609,7 @@ TEST_F(DSV4CoordinatorCacheManagerTest, PrefixCacheReuseRequiresSWATailHit) {
         auto blocks = block_pools.at(tag)->malloc(static_cast<int>(cached_keys.size()));
         ASSERT_EQ(blocks.size(), cached_keys.size());
         for (size_t i = 0; i < cached_keys.size(); ++i) {
-            shared_cache->put(cached_keys[i], {{tag, blocks[i]}}, true);
+            shared_cache->put(cached_keys[i], {{tag, blocks[i]}}, {}, true, BlockDependency{});
         }
         cached_blocks[tag] = blocks;
         block_pools.at(tag)->requestFree(blocks);
@@ -2662,7 +2662,7 @@ TEST_F(DSV4CoordinatorCacheManagerTest, PrefixCacheReuseDoesNotRequireHCAStateHi
             if (group.policy.group_type != CacheGroupType::FULL && i + 1 < cached_keys.size()) {
                 continue;
             }
-            shared_cache->put(cached_keys[i], {{group.tag, blocks[i]}}, true);
+            shared_cache->put(cached_keys[i], {{group.tag, blocks[i]}}, {}, true, BlockDependency{});
         }
         cached_blocks[group.tag] = blocks;
         block_pools.at(group.tag)->requestFree(blocks);
@@ -2714,7 +2714,7 @@ TEST_F(DSV4CoordinatorCacheManagerTest, PrefixCacheReuseAcceptsSingleLatestSWATa
             if (group.policy.group_type != CacheGroupType::FULL && i + 1 < cached_keys.size()) {
                 continue;
             }
-            shared_cache->put(cached_keys[i], {{group.tag, blocks[i]}}, true);
+            shared_cache->put(cached_keys[i], {{group.tag, blocks[i]}}, {}, true, BlockDependency{});
         }
         block_pools.at(group.tag)->requestFree(blocks);
     }
@@ -2759,7 +2759,7 @@ TEST_F(DSV4CoordinatorCacheManagerTest, FlashPrefixCacheReusePagedGroupsOnly) {
         auto blocks = block_pools.at(group.tag)->malloc(static_cast<int>(cached_keys.size()));
         ASSERT_EQ(blocks.size(), cached_keys.size());
         for (size_t i = 0; i < cached_keys.size(); ++i) {
-            shared_cache->put(cached_keys[i], {{group.tag, blocks[i]}}, true);
+            shared_cache->put(cached_keys[i], {{group.tag, blocks[i]}}, {}, true, BlockDependency{});
         }
         cached_blocks[group.tag] = blocks;
         block_pools.at(group.tag)->requestFree(blocks);
@@ -2942,7 +2942,7 @@ TEST_F(DSV4CoordinatorCacheManagerTest, SWAGroupParticipatesInPrefixCacheReuse) 
     {
         auto blocks = block_pools.at("hca_kv")->malloc(2);
         for (size_t i = 0; i < 2; ++i) {
-            shared_cache->put(cached_keys[i], {{"hca_kv", blocks[i]}}, true);
+            shared_cache->put(cached_keys[i], {{"hca_kv", blocks[i]}}, {}, true, BlockDependency{});
         }
         populated_blocks_a = blocks;
         block_pools.at("hca_kv")->requestFree(blocks);
@@ -2950,7 +2950,7 @@ TEST_F(DSV4CoordinatorCacheManagerTest, SWAGroupParticipatesInPrefixCacheReuse) 
     {
         auto blocks = block_pools.at("csa_state")->malloc(2);
         for (size_t i = 0; i < 2; ++i) {
-            shared_cache->put(cached_keys[i], {{"csa_state", blocks[i]}}, true);
+            shared_cache->put(cached_keys[i], {{"csa_state", blocks[i]}}, {}, true, BlockDependency{});
         }
         populated_blocks_b = blocks;
         block_pools.at("csa_state")->requestFree(blocks);
@@ -2989,7 +2989,7 @@ TEST_F(DSV4CoordinatorCacheManagerTest, SWAPrefixCacheRestoresTailReuse) {
     for (const auto& group : config.groups()) {
         auto blocks = block_pools.at(group.tag)->malloc(2);
         for (size_t i = 0; i < 2; ++i) {
-            shared_cache->put(cached_keys[i], {{group.tag, blocks[i]}}, true);
+            shared_cache->put(cached_keys[i], {{group.tag, blocks[i]}}, {}, true, BlockDependency{});
         }
         cached_blocks[group.tag] = blocks;
         block_pools.at(group.tag)->requestFree(blocks);

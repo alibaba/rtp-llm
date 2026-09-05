@@ -40,5 +40,11 @@ def sm120_suites():
                 smoke_args = "--act_type FP16 --warm_up 0",
                 gpu_type = ["RTX_5000_PRO"],
             ),
+            smoke_test(
+                name = "embedding_bert_sm120",
+                task_info = "data/model/bert/q_r.json",
+                smoke_args = "--seq_size_per_block 16 --act_type FP16",
+                gpu_type = ["RTX_5000_PRO"],
+            ),
         ],
     )

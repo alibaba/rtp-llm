@@ -480,9 +480,9 @@ TEST_F(LinearCacheManagerTest, PutIntoCacheSkipsNullBlocks) {
     auto block2 = block_pool->malloc(1)[0];
 
     // Only put entries with non-NULL blocks (simulating coordinator-level filtering)
-    shared_cache->put(101, {{"linear", block1}}, /*is_resident=*/false);
+    shared_cache->put(101, {{"linear", block1}}, {}, /*is_resident=*/false, BlockDependency{});
 
-    shared_cache->put(103, {{"linear", block2}}, /*is_resident=*/false);
+    shared_cache->put(103, {{"linear", block2}}, {}, /*is_resident=*/false, BlockDependency{});
 
     EXPECT_FALSE(shared_cache->contains(100));
     EXPECT_TRUE(shared_cache->contains(101));
@@ -505,7 +505,7 @@ TEST_F(LinearCacheManagerTest, MatchSingleKeyReturnsMatchedBlockOrEmpty) {
     auto blocks = block_pool->malloc(1);
     ASSERT_EQ(blocks.size(), 1u);
 
-    shared_cache->put(123, {{"linear", blocks[0]}}, /*is_resident=*/false);
+    shared_cache->put(123, {{"linear", blocks[0]}}, {}, /*is_resident=*/false, BlockDependency{});
 
     auto hit = group.matchSingleKey(123);
     ASSERT_EQ(hit.block_indices.size(), 1u);
@@ -570,7 +570,7 @@ TEST_F(LinearCacheManagerTest, MallocEnsuresFreeBlocksByEvictingCache) {
     // Put one block into cache (non-resident) and release request reference so it becomes evictable.
     auto cached = block_pool->malloc(1);
     ASSERT_EQ(cached.size(), 1u);
-    shared_cache->put(123, {{"linear", cached[0]}}, /*is_resident=*/false);
+    shared_cache->put(123, {{"linear", cached[0]}}, {}, /*is_resident=*/false, BlockDependency{});
     block_pool->requestFree(cached);
 
     // Exhaust the remaining free blocks so malloc must evict from cache to proceed.

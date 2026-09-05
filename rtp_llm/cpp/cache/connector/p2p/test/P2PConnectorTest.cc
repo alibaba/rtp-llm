@@ -261,6 +261,15 @@ TEST(P2PConnectorAsyncMatchContextTest, MatchedBlockCountUsesCacheKeyTimelineIns
     EXPECT_EQ(ctx.matchedBlockCount(), 3u);
 }
 
+TEST(P2PConnectorAsyncMatchContextTest, CanonicalTimelineReportsGlobalCacheKeyBlocks) {
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->setCacheKeys({101, 103, 105, 107});
+    resource->setCacheKeysAreCpCanonical(true);
+
+    P2PConnectorAsyncMatchContext ctx(resource, /*cp_size=*/2);
+    EXPECT_EQ(ctx.matchedBlockCount(), 8u);
+}
+
 TEST(P2PConnectorAsyncMatchContextTest, MatchedBlockCountIsZeroForNullOrEmptyTimeline) {
     P2PConnectorAsyncMatchContext null_ctx(nullptr);
     EXPECT_EQ(null_ctx.matchedBlockCount(), 0u);

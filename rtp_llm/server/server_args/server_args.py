@@ -324,9 +324,10 @@ class EnvArgumentParser(argparse.ArgumentParser):
                 while i < len(args):
                     arg = args[i]
                     if arg.startswith("--"):
+                        option = arg.split("=", 1)[0]
                         # Find the action for this option
                         for action_item in self._actions:
-                            if arg in action_item.option_strings:
+                            if option in action_item.option_strings:
                                 provided_args.add(action_item.dest)
                                 # Check if this action requires a value
                                 if action_item.nargs in (None, "?", 1):
@@ -343,9 +344,10 @@ class EnvArgumentParser(argparse.ArgumentParser):
                 while i < len(sys.argv):
                     arg = sys.argv[i]
                     if arg.startswith("--"):
+                        option = arg.split("=", 1)[0]
                         # Find the action for this option
                         for action_item in self._actions:
-                            if arg in action_item.option_strings:
+                            if option in action_item.option_strings:
                                 provided_args.add(action_item.dest)
                                 # Check if this action requires a value
                                 if action_item.nargs in (None, "?", 1):

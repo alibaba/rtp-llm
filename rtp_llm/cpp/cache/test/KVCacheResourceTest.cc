@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <string>
+#include <type_traits>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -13,6 +14,11 @@ namespace rtp_llm {
 namespace test {
 
 namespace {
+
+using MutableBlockIdsFn         = BlockIds& (KVCacheResource::*)(std::string_view);
+using MutableBlockIdsForLayerFn = BlockIds& (KVCacheResource::*)(int, std::string_view);
+static_assert(std::is_same_v<decltype(&KVCacheResource::mutableBlockIds), MutableBlockIdsFn>);
+static_assert(std::is_same_v<decltype(&KVCacheResource::mutableBlockIdsForLayer), MutableBlockIdsForLayerFn>);
 
 CacheGroup makeResourceGroup(std::string tag, CacheGroupType type) {
     auto spec                       = std::make_shared<MHAKVCacheSpec>();
@@ -155,9 +161,14 @@ TEST(KVCacheResourceTest, TagAccessKeepsSameLayerGroupsIndependent) {
     resource.mutableBlockIdsForLayer(0, "full").add(BlockIndicesType{1, 2});
     resource.mutableBlockIdsForLayer(0, "linear").add(BlockIndicesType{7});
 
-    EXPECT_EQ(resource.blocksForLayer(0, "full"), (BlockIndicesType{1, 2}));
-    EXPECT_EQ(resource.blocksForLayer(0, "linear"), (BlockIndicesType{7}));
-    EXPECT_NE(&resource.blockIds("full"), &resource.blockIds("linear"));
+    const KVCacheResource& const_resource = resource;
+    EXPECT_EQ(const_resource.blocks("full"), (BlockIndicesType{1, 2}));
+    EXPECT_EQ(const_resource.blocksForLayer(0, "full"), (BlockIndicesType{1, 2}));
+    EXPECT_EQ(const_resource.blocksForLayer(0, "linear"), (BlockIndicesType{7}));
+    EXPECT_EQ(const_resource.blockIdsForLayer(0, "full").blocks(), (BlockIndicesType{1, 2}));
+    EXPECT_NE(&const_resource.blockIds("full"), &const_resource.blockIds("linear"));
+    EXPECT_THROW(const_resource.blockIds("missing"), std::exception);
+    EXPECT_THROW(const_resource.blockIdsForLayer(0, "missing"), std::exception);
 }
 
 TEST(KVCacheResourceTest, BlocksByGroupOwnsOneBlockTablePerTag) {

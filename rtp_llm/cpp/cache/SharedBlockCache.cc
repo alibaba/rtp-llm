@@ -43,17 +43,10 @@ void SharedBlockCache::init(const CacheConfig& config, const std::map<std::strin
 
 void SharedBlockCache::put(CacheKeyType                               cache_key,
                            const std::map<std::string, BlockIdxType>& blocks_by_group,
-                           bool                                       is_resident) {
-    BlockDependency dependency;
-    put(cache_key, blocks_by_group, {}, is_resident, kDefaultNamespace, dependency);
-}
-
-void SharedBlockCache::put(CacheKeyType                               cache_key,
-                           const std::map<std::string, BlockIdxType>& blocks_by_group,
                            const std::map<std::string, bool>&         group_matchable,
                            bool                                       is_resident,
-                           NamespaceId                                namespace_id,
-                           const BlockDependency&                     dependency) {
+                           const BlockDependency&                     dependency,
+                           NamespaceId                                namespace_id) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(mu_);
     for (const auto& [tag, block_id] : blocks_by_group) {

@@ -214,6 +214,84 @@ TEST(CacheConfigCreatorTest, BasicSingleConfigUsesTheUnifiedPhysicalAndKernelOve
     EXPECT_EQ(config.group("default").block_num, 0u);
 }
 
+TEST(CacheConfigCreatorTest, ZeroIsTheOnlyUnsetSequenceBlockSize) {
+    auto model                         = makeMhaModel();
+    model.attn_config.tokens_per_block = 128;
+
+    KVCacheConfig kv_cache;
+    auto          default_config = CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0);
+    EXPECT_EQ(default_config.seq_size_per_block, 128u);
+    EXPECT_EQ(default_config.group("default").kernelSeqSizePerBlock(), 128u);
+
+    kv_cache.seq_size_per_block = 64;
+    auto explicit_64            = CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0);
+    EXPECT_EQ(explicit_64.seq_size_per_block, 64u);
+    EXPECT_EQ(explicit_64.group("default").kernelSeqSizePerBlock(), 64u);
+
+    kv_cache.seq_size_per_block        = 32;
+    kv_cache.kernel_seq_size_per_block = 16;
+    auto explicit_32                   = CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0);
+    EXPECT_EQ(explicit_32.seq_size_per_block, 32u);
+    EXPECT_EQ(explicit_32.group("default").kernelSeqSizePerBlock(), 16u);
+
+    kv_cache.seq_size_per_block = -1;
+    EXPECT_THROW(CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0), std::runtime_error);
+    kv_cache.seq_size_per_block        = 64;
+    kv_cache.kernel_seq_size_per_block = -1;
+    EXPECT_THROW(CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0), std::runtime_error);
+    kv_cache.kernel_seq_size_per_block = 48;
+    EXPECT_THROW(CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0), std::runtime_error);
+}
+
+TEST(CacheConfigCreatorTest, CompressedDescriptorEnforcesKernelBlockAlignment) {
+    auto  model                                  = makeSparseMlaModel(/*layer_num=*/1);
+    auto& compressed                             = model.kv_cache_spec_descs[0][1];
+    compressed.entry_count_mode                  = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
+    compressed.compression_ratio                 = 4;
+    compressed.kernel_tokens_per_block_alignment = 128;
+
+    KVCacheConfig kv_cache;
+    kv_cache.seq_size_per_block        = 64;
+    kv_cache.kernel_seq_size_per_block = 64;
+    const auto error                   = runtimeErrorMessage(
+        [&]() { (void)CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0); });
+    EXPECT_NE(error.find("must be >= 128 and a multiple of 128"), std::string::npos) << error;
+
+    kv_cache.seq_size_per_block        = 128;
+    kv_cache.kernel_seq_size_per_block = 128;
+    EXPECT_NO_THROW((void)CacheConfigCreator::createBasicConfig(model, ParallelismConfig{}, kv_cache, 0));
+}
+
+TEST(CacheConfigCreatorTest, ExplicitSequenceBlockSizeIsSharedBySpeculativeConfigs) {
+    auto score                           = makeMhaModel(/*layer_num=*/2, /*tag=*/"default");
+    auto propose                         = makeMhaModel(/*layer_num=*/1, /*tag=*/"default");
+    score.attn_config.tokens_per_block   = 128;
+    propose.attn_config.tokens_per_block = 128;
+
+    KVCacheConfig kv_cache      = fixedBlockConfig();
+    kv_cache.seq_size_per_block = 64;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_MTP;
+    sp_config.gen_num_per_cycle = 2;
+    const auto config           = CacheConfigCreator::createSpConfig(score,
+                                                           propose,
+                                                           ParallelismConfig{},
+                                                           RuntimeConfig{},
+                                                           kv_cache,
+                                                           sp_config,
+                                                           std::nullopt,
+                                                           /*is_mtp=*/true,
+                                                           /*is_eagle=*/false);
+
+    EXPECT_EQ(config.seq_size_per_block, 64u);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    for (const auto& sub_config : config.mtp_sub_configs) {
+        ASSERT_NE(sub_config, nullptr);
+        EXPECT_EQ(sub_config->seq_size_per_block, 64u);
+        EXPECT_EQ(sub_config->group("default").seqSizePerBlock(), 64u);
+    }
+}
+
 TEST(CacheConfigCreatorTest, CreateConfigLowersOrdinaryMhaToFixedFinalRecord) {
     const CacheSemanticSnapshot expected = {{"default",
                                              KVCacheSpecType::MultiHeadAttention,

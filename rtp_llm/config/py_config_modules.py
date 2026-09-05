@@ -263,8 +263,39 @@ class DistributeConfig:
         )
 
 
+# Keep these transport defaults aligned with cpp/config/ConfigModules.h::MMTransportConfig.
+MM_TRANSPORT_MODE_GRPC = "grpc"
+MM_TRANSPORT_MODE_RDMA = "rdma"
+MM_TRANSPORT_MODES = (MM_TRANSPORT_MODE_GRPC, MM_TRANSPORT_MODE_RDMA)
+DEFAULT_MM_TIMEOUT_MS = 120000
+
+
+class MMRdmaConfig:
+    def __init__(self):
+        self.bind_ip: str = ""
+        self.port: int = 0
+        self.connect_timeout_ms: int = 250
+        self.read_timeout_ms: int = 3000
+        self.qp_count: int = 8
+        self.slot_gc_timeout_ms: int = 60 * 1000
+        self.max_slot_bytes: int = 1024 * 1024 * 1024
+        self.max_receipt_bytes: int = 8 * 1024 * 1024 * 1024
+
+
+class MMControlConfig:
+    def __init__(self):
+        self.release_timeout_ms: int = 1000
+
+
+class MMTransportConfig:
+    def __init__(self):
+        self.mode: str = MM_TRANSPORT_MODE_GRPC
+        self.control = MMControlConfig()
+        self.rdma = MMRdmaConfig()
+
+
 class VitConfig:
-    DEFAULT_MM_TIMEOUT_MS: int = 120000
+    DEFAULT_MM_TIMEOUT_MS: int = DEFAULT_MM_TIMEOUT_MS
     DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB: int = 100 * 1024
     DEFAULT_MM_VIDEO_MAX_FILE_SIZE_KB: int = 2 * 1024 * 1024
 
@@ -296,6 +327,7 @@ class VitConfig:
         self.disable_access_log: bool = False
         self.use_local_preprocess: bool = False
         self.vit_proxy_load_balance_strategy: str = "round_robin"
+        self.output_transport = MMTransportConfig()
         # Cross-request GPU batching is inferred from gpu_max_batch_size alone:
         # == 1 -> serial (one request per forward, no wait window); > 1 -> merge
         # compatible requests within gpu_batch_wait_ms. Default 1 keeps the old
@@ -344,6 +376,9 @@ class VitConfig:
         }
 
     def to_string(self):
+        transport = self.output_transport
+        control = transport.control
+        rdma = transport.rdma
         return (
             f"vit_separation: {self.vit_separation}\n"
             f"vit_trt: {self.vit_trt}\n"
@@ -368,6 +403,16 @@ class VitConfig:
             f"disable_access_log: {self.disable_access_log}\n"
             f"use_local_preprocess: {self.use_local_preprocess}\n"
             f"vit_proxy_load_balance_strategy: {self.vit_proxy_load_balance_strategy}\n"
+            f"mm_transport_mode: {transport.mode}\n"
+            f"mm_rdma_bind_ip: {rdma.bind_ip}\n"
+            f"mm_rdma_port: {rdma.port}\n"
+            f"mm_rdma_connect_timeout_ms: {rdma.connect_timeout_ms}\n"
+            f"mm_rdma_read_timeout_ms: {rdma.read_timeout_ms}\n"
+            f"mm_rdma_qp_count: {rdma.qp_count}\n"
+            f"mm_rdma_release_timeout_ms: {control.release_timeout_ms}\n"
+            f"mm_rdma_slot_gc_timeout_ms: {rdma.slot_gc_timeout_ms}\n"
+            f"mm_rdma_max_slot_bytes: {rdma.max_slot_bytes}\n"
+            f"mm_rdma_max_receipt_bytes: {rdma.max_receipt_bytes}\n"
             f"gpu_batch_wait_ms: {self.gpu_batch_wait_ms}\n"
             f"gpu_max_batch_size: {self.gpu_max_batch_size}\n"
             f"gpu_max_batch_images: {self.gpu_max_batch_images}\n"

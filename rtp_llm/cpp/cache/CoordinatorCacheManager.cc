@@ -80,7 +80,7 @@ MallocResult CoordinatorCacheManager::initMalloc(const MallocInfo& malloc_info) 
             if (malloc_info.batch_kv_cache_resource) {
                 const auto& cache_keys      = malloc_info.batch_kv_cache_resource->cacheKeys(0);
                 size_t      match_keys_size = cache_keys.size();
-                device_input_length         = static_cast<int64_t>(match_keys_size) * deviceCacheMetricTokensPerBlock();
+                device_input_length         = static_cast<int64_t>(match_keys_size) * seqSizePerBlock();
             }
 
             if (device_input_length > 0) {
@@ -143,11 +143,16 @@ int CoordinatorCacheManager::estimateBatchPeakNeedBlocks(const BatchKVCacheResou
     const int per_sequence_growth = estimatePeakNeedBlocks(
         batch_kv_cache_resource->cacheResource(0), seq_len, remaining_tokens, reserve_step, enable_reuse_cache);
 
-    // Full blocks remain shared when the batch expands, but every additional sequence needs a physical copy of the
-    // current partial tail before it can diverge.
-    const int expanded_sequences = target_width - current_batch_size;
-    const int tail_copy_blocks   = expanded_sequences > 0 && seq_len % seqSizePerBlock() != 0 ? expanded_sequences : 0;
-    return target_width * per_sequence_growth + tail_copy_blocks;
+    // Full blocks remain shared when the batch expands. Charge one possible physical-tail copy per configured group
+    // for every additional sequence. This intentionally loose upper bound covers heterogeneous and CP group geometry;
+    // updateKVBlock applies the exact per-group boundary check when the concrete fork mapping is known.
+    const int     expanded_sequences = target_width - current_batch_size;
+    const int64_t tail_copy_blocks =
+        expanded_sequences > 0 ? static_cast<int64_t>(expanded_sequences) * config_.groupNums() : 0;
+    const int64_t peak_need = static_cast<int64_t>(target_width) * per_sequence_growth + tail_copy_blocks;
+    RTP_LLM_CHECK_WITH_INFO(
+        peak_need <= std::numeric_limits<int>::max(), "estimated cache block peak exceeds int range: %ld", peak_need);
+    return static_cast<int>(peak_need);
 }
 
 uint32_t CoordinatorCacheManager::convertToGlobalLayerId(size_t model_id, int local_layer_id) const {
@@ -184,24 +189,24 @@ bool CoordinatorCacheManager::cpShardThisGroupForCapacity(std::string_view tag) 
     return cp_slot_mapper_ && cp_slot_mapper_->isSharded() && cp_slot_mapper_->blockRoundRobinGroup(config_, tag);
 }
 
-size_t CoordinatorCacheManager::logicalSeqSizePerBlockForCapacity(std::string_view tag) const {
-    if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
+size_t CoordinatorCacheManager::groupBlockAlignmentTokens(std::string_view tag) const {
+    if (cp_slot_mapper_ && cp_slot_mapper_->isSharded() && cp_slot_mapper_->blockRoundRobinGroup(config_, tag)) {
         return cp_slot_mapper_->logicalSeqSizePerBlock(config_, tag);
     }
     return config_.group(tag).seqSizePerBlock();
+}
+
+bool CoordinatorCacheManager::needsBeamTailCopy(std::string_view tag, int previous_seq_len) const {
+    const size_t alignment_tokens = groupBlockAlignmentTokens(tag);
+    RTP_LLM_CHECK_WITH_INFO(
+        alignment_tokens > 0, "cache group tag=%s has invalid block alignment span", std::string(tag).c_str());
+    return static_cast<size_t>(previous_seq_len) % alignment_tokens != 0;
 }
 
 int CoordinatorCacheManager::cpEffectiveSeqLenForAlloc(std::string_view tag, int seq_len) const {
     return (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) ?
                cp_slot_mapper_->effectiveSeqLenForAlloc(config_, tag, seq_len) :
                seq_len;
-}
-
-int CoordinatorCacheManager::deviceCacheMetricTokensPerBlock() const {
-    if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
-        return cp_slot_mapper_->virtualBlockSize();
-    }
-    return seqSizePerBlock();
 }
 
 namespace {
@@ -687,7 +692,7 @@ size_t CoordinatorCacheManager::minTokenCapacity(bool use_available_blocks, bool
             }
             saw_group        = true;
             const auto block = use_available_blocks ? pool->availableBlocksNum() : pool->totalBlocksNum();
-            min_tokens       = std::min(min_tokens, block * logicalSeqSizePerBlockForCapacity(group.tag));
+            min_tokens       = std::min(min_tokens, block * groupBlockAlignmentTokens(group.tag));
         }
         return std::make_pair(saw_group, min_tokens);
     };
@@ -736,7 +741,7 @@ KVCacheTokenCapacity CoordinatorCacheManager::tokenCapacity(size_t default_seq_s
         if (!pool) {
             continue;
         }
-        const size_t seq_size = logicalSeqSizePerBlockForCapacity(group.tag);
+        const size_t seq_size = groupBlockAlignmentTokens(group.tag);
         total_tokens          = std::min(total_tokens, pool->totalBlocksNum() * seq_size);
         available_tokens      = std::min(available_tokens, pool->availableBlocksNum() * seq_size);
         has_pool              = true;
@@ -1102,7 +1107,7 @@ bool CoordinatorCacheManager::cpCompactSwaGroup(std::string_view                
     return mapper && mapper->isSharded() && mapper->compactLastRankGroup(config_, tag);
 }
 
-int CoordinatorCacheManager::reuseCache(const CacheKeysType&                 cache_keys,
+int CoordinatorCacheManager::reuseCache(const CacheKeysType&                 full_cache_keys,
                                         BatchKVCacheResource&                kv_resource,
                                         const std::shared_ptr<CPSlotMapper>& cp_mapper) {
     const bool no_reusable_group = std::all_of(config_.groups().begin(),
@@ -1112,116 +1117,140 @@ int CoordinatorCacheManager::reuseCache(const CacheKeysType&                 cac
         return 0;
     }
 
-    // Under cp shard, FULL groups index block_ids by cp-virtual-block units
-    // (one entry covers cp_size physical blocks). LINEAR/SWA groups index by
-    // raw block_size logical blocks. So when populating tail blocks for
-    // LINEAR/SWA we need to scale the array length and matched-block position
-    // back to the logical-block coordinate system.
-    const int cp_scale              = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
-    int       min_full_reuse_blocks = static_cast<int>(cache_keys.size());
-    std::unordered_map<std::string, BlockIndicesType> full_matched_blocks;
-
-    for (const auto& tag : full_group_tags_) {
-        auto match_result     = singleTypeManager(tag)->match(cache_keys);
-        min_full_reuse_blocks = std::min(min_full_reuse_blocks, static_cast<int>(match_result.reuse_blocks));
-        full_matched_blocks.emplace(tag, std::move(match_result.block_indices));
-    }
-
-    int                           pos = min_full_reuse_blocks - 1;
-    std::vector<BlockIdxType>     linear_tail_blocks(linear_group_tags_.size(), NULL_BLOCK_IDX);
-    std::vector<BlockIndicesType> swa_tail_blocks(swa_group_tags_.size());
-    const bool                    has_tail_groups = !linear_group_tags_.empty() || !swa_group_tags_.empty();
-    for (; pos >= 0 && has_tail_groups; --pos) {
-        bool                          all_tail_groups_matched = true;
-        std::vector<BlockIdxType>     candidate_linear_tail_blocks(linear_group_tags_.size(), NULL_BLOCK_IDX);
-        std::vector<BlockIndicesType> candidate_swa_tail_blocks(swa_group_tags_.size());
-        for (size_t i = 0; i < linear_group_tags_.size(); ++i) {
-            auto result =
-                singleTypeManager(linear_group_tags_[i])->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
-            if (result.block_indices.empty()) {
-                all_tail_groups_matched = false;
-                break;
-            }
-            candidate_linear_tail_blocks[i] = result.block_indices[0];
-        }
-        if (!all_tail_groups_matched) {
-            continue;
-        }
-        for (size_t i = 0; i < swa_group_tags_.size(); ++i) {
-            const auto& tag = swa_group_tags_[i];
-            if (skipReuseCacheGroup(tag)) {
-                continue;
-            }
-            auto result = singleTypeManager(tag)->matchSingleKey(cache_keys[static_cast<size_t>(pos)]);
-            if (result.block_indices.empty()) {
-                all_tail_groups_matched = false;
-                break;
-            }
-            candidate_swa_tail_blocks[i].push_back(result.block_indices[0]);
-        }
-        if (all_tail_groups_matched) {
-            linear_tail_blocks = std::move(candidate_linear_tail_blocks);
-            swa_tail_blocks    = std::move(candidate_swa_tail_blocks);
-            break;
-        }
-    }
-
-    const int reuse_blocks_len = has_tail_groups ? std::max(pos + 1, 0) : std::max(min_full_reuse_blocks, 0);
-    if (reuse_blocks_len <= 0) {
+    const CPSlotMapper passthrough_mapper;
+    const auto&        mapper                    = cp_mapper ? *cp_mapper : passthrough_mapper;
+    const size_t       alignment_unit_key_blocks = mapper.reuseScanAlignmentKeyBlocks(config_);
+    const size_t       candidate_units =
+        full_cache_keys.empty() ? 0 : (full_cache_keys.size() - 1) / alignment_unit_key_blocks;
+    if (candidate_units == 0) {
         return 0;
     }
 
-    for (const auto& tag : full_group_tags_) {
-        BlockIndicesType full_blocks = full_matched_blocks.at(tag);
-        if (static_cast<int>(full_blocks.size()) > reuse_blocks_len) {
-            full_blocks.resize(static_cast<size_t>(reuse_blocks_len));
-        }
-        kv_resource.mutableBlockIds(0, tag).assign(std::move(full_blocks));
-    }
+    std::map<std::string, BlockIndicesType> full_matches;
+    std::map<std::string, BlockIndicesType> best_tail_matches;
+    size_t                                  full_prefix_units = 0;
+    size_t                                  best_tail_units   = 0;
+    const bool                              has_tail_groups   = !linear_group_tags_.empty() || !swa_group_tags_.empty();
 
-    // LINEAR/SWA arrays are sized in logical-block units (cp_size× larger
-    // than the FULL groups' cp-virtual-block units). The matched tail block
-    // corresponds to the LAST logical block in the canonical (last-rank)
-    // namespace, so its index is `(reuse_blocks_len * cp_size) - 1` in
-    // logical units, NOT `reuse_blocks_len - 1`.
-    const int logical_reuse_len = reuse_blocks_len * cp_scale;
-    for (size_t i = 0; i < linear_group_tags_.size(); ++i) {
-        const auto& tag = linear_group_tags_[i];
-        kv_resource.mutableBlockIds(0, tag).assign(
-            BlockIndicesType(static_cast<size_t>(logical_reuse_len), NULL_BLOCK_IDX));
-        kv_resource.mutableBlockIds(0, tag).setAt(static_cast<size_t>(logical_reuse_len - 1), linear_tail_blocks[i]);
-    }
-    for (size_t i = 0; i < swa_group_tags_.size(); ++i) {
-        const auto& tag             = swa_group_tags_[i];
-        const int   group_reuse_len = cpCompactSwaGroup(tag, cp_mapper) ? reuse_blocks_len : logical_reuse_len;
-        kv_resource.mutableBlockIds(0, tag).assign(
-            BlockIndicesType(static_cast<size_t>(group_reuse_len), NULL_BLOCK_IDX));
-        if (skipReuseCacheGroup(tag)) {
+    auto plan_for_prefix = [&](std::string_view tag, size_t prefix_key_blocks) {
+        const size_t physical_blocks = mapper.physicalBlocksForCacheKeyPrefix(config_, tag, prefix_key_blocks);
+        return mapper.buildCacheKeyBlockPlan(config_, tag, full_cache_keys.size(), physical_blocks);
+    };
+    auto match_pair = [&](std::string_view tag, const CacheStoreBlockPair& pair) {
+        RTP_LLM_CHECK_WITH_INFO(pair.key_index >= 0 && static_cast<size_t>(pair.key_index) < full_cache_keys.size(),
+                                "reuse cache-key ordinal=%d out of range=%zu for tag=%.*s",
+                                pair.key_index,
+                                full_cache_keys.size(),
+                                static_cast<int>(tag.size()),
+                                tag.data());
+        return shared_block_cache_->matchGroup(full_cache_keys[static_cast<size_t>(pair.key_index)], tag);
+    };
+
+    for (size_t unit = 0; unit < candidate_units; ++unit) {
+        const size_t prefix_key_blocks = std::min((unit + 1) * alignment_unit_key_blocks, full_cache_keys.size());
+        bool         all_full_matched  = true;
+        for (const auto& tag : full_group_tags_) {
+            const auto plan   = plan_for_prefix(tag, prefix_key_blocks);
+            auto&      blocks = full_matches[tag];
+            blocks.resize(plan.size(), NULL_BLOCK_IDX);
+            for (const auto& pair : plan) {
+                const size_t offset = static_cast<size_t>(pair.offset_index);
+                RTP_LLM_CHECK(offset < blocks.size());
+                if (!isNullBlockIdx(blocks[offset])) {
+                    continue;
+                }
+                const auto block = match_pair(tag, pair);
+                if (isNullBlockIdx(block)) {
+                    all_full_matched = false;
+                    break;
+                }
+                blocks[offset] = block;
+            }
+            if (!all_full_matched) {
+                break;
+            }
+        }
+        if (!all_full_matched) {
+            break;
+        }
+        full_prefix_units = unit + 1;
+
+        if (!has_tail_groups) {
             continue;
         }
-        const size_t tail_begin =
-            static_cast<size_t>(std::max(group_reuse_len - static_cast<int>(swa_tail_blocks[i].size()), 0));
-        for (size_t j = 0; j < swa_tail_blocks[i].size(); ++j) {
-            kv_resource.mutableBlockIds(0, tag).setAt(tail_begin + j, swa_tail_blocks[i][j]);
+        bool                                    all_tail_groups_matched = true;
+        std::map<std::string, BlockIndicesType> candidate_tail_matches;
+        auto                                    match_tail = [&](const std::string& tag, bool skip) {
+            const auto       plan = plan_for_prefix(tag, prefix_key_blocks);
+            BlockIndicesType blocks(plan.size(), NULL_BLOCK_IDX);
+            if (skip) {
+                candidate_tail_matches.emplace(tag, std::move(blocks));
+                return true;
+            }
+            if (plan.empty()) {
+                return false;
+            }
+            const auto& pair  = plan.back();
+            const auto  block = match_pair(tag, pair);
+            if (isNullBlockIdx(block)) {
+                return false;
+            }
+            blocks[static_cast<size_t>(pair.offset_index)] = block;
+            candidate_tail_matches.emplace(tag, std::move(blocks));
+            return true;
+        };
+        for (const auto& tag : linear_group_tags_) {
+            if (!match_tail(tag, /*skip=*/false)) {
+                all_tail_groups_matched = false;
+                break;
+            }
+        }
+        if (all_tail_groups_matched) {
+            for (const auto& tag : swa_group_tags_) {
+                if (!match_tail(tag, skipReuseCacheGroup(tag))) {
+                    all_tail_groups_matched = false;
+                    break;
+                }
+            }
+        }
+        if (all_tail_groups_matched) {
+            best_tail_units   = unit + 1;
+            best_tail_matches = std::move(candidate_tail_matches);
         }
     }
-    return reuse_blocks_len;
+
+    const size_t reuse_key_blocks = has_tail_groups ? best_tail_units : full_prefix_units;
+    if (reuse_key_blocks == 0) {
+        return 0;
+    }
+    const size_t reused_prefix_key_blocks =
+        std::min(reuse_key_blocks * alignment_unit_key_blocks, full_cache_keys.size());
+    for (const auto& tag : full_group_tags_) {
+        const auto plan   = plan_for_prefix(tag, reused_prefix_key_blocks);
+        auto       blocks = full_matches.at(tag);
+        blocks.resize(plan.size());
+        kv_resource.mutableBlockIds(0, tag).assign(std::move(blocks));
+    }
+    for (const auto& tag : linear_group_tags_) {
+        kv_resource.mutableBlockIds(0, tag).assign(best_tail_matches.at(tag));
+    }
+    for (const auto& tag : swa_group_tags_) {
+        kv_resource.mutableBlockIds(0, tag).assign(best_tail_matches.at(tag));
+    }
+    RTP_LLM_CHECK_WITH_INFO(reused_prefix_key_blocks <= static_cast<size_t>(std::numeric_limits<int>::max()),
+                            "reuse global cache-key block count exceeds int range: %zu",
+                            reused_prefix_key_blocks);
+    return static_cast<int>(reused_prefix_key_blocks);
 }
 
 MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& malloc_info) {
     auto&     kv_resource = malloc_info.batch_kv_cache_resource;
     const int batch_size  = kv_resource->batchSize();
 
-    const int   seq_len        = malloc_info.complete_token_ids->seqLength();
-    const int   common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), seq_len);
-    const auto& cp_mapper      = cp_slot_mapper_;
-    // A CP-sharded FULL group defines the canonical reuse unit. Topologies without
-    // FULL groups use the logical cache-key block size for LINEAR/SWA matching.
-    const SingleTypeCacheManagerPtr reuse_group =
-        full_group_tags_.empty() ? SingleTypeCacheManagerPtr{} : singleTypeManager(full_group_tags_.front());
-    const int reuse_unit_tokens =
-        (reuse_group ? cpLogicalSeqSizeForGroup(cp_mapper, config_, full_group_tags_.front(), seqSizePerBlock()) :
-                       seqSizePerBlock());
+    const int   seq_len           = malloc_info.complete_token_ids->seqLength();
+    const int   common_seq_len    = std::min(malloc_info.complete_token_ids->commonSeqLength(), seq_len);
+    const auto& cp_mapper         = cp_slot_mapper_;
+    const int   reuse_unit_tokens = seqSizePerBlock();
 
     const auto&                                cache_keys         = kv_resource->cacheKeys(0);
     int64_t                                    match_cost_time_us = 0;
@@ -1233,16 +1262,11 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
 
     const bool match_device_cache = malloc_info.enable_device_cache;
     if (match_device_cache) {
-        // CP-sharded: subsample to last-rank canonical key namespace before matching.
-        CacheKeysType cp_keys = cpCanonicalCacheKeys(cp_mapper, cache_keys);
-        // Always drop the last match key, CP-sharded or not. It may be a partial
-        // tail; and even when it is a full block, fully reusing the input leaves
-        // no prefill tokens to compute. Keeping every canonical key under CP
-        // sharding is exactly that degenerate case: zero prefill tokens left.
-        CacheKeysType match_keys(cp_keys.begin(), cp_keys.empty() ? cp_keys.end() : cp_keys.end() - 1);
-        auto          begin_us = currentTimeUs();
-        reuse_blocks           = reuseCache(match_keys, *kv_resource, cp_mapper);
-        match_cost_time_us     = currentTimeUs() - begin_us;
+        // reuseCache chooses one common cache-key block coordinate system and
+        // drops its final unit before projecting each group to physical slots.
+        auto begin_us      = currentTimeUs();
+        reuse_blocks       = reuseCache(cache_keys, *kv_resource, cp_mapper);
+        match_cost_time_us = currentTimeUs() - begin_us;
 
         for (const auto& group : config_.groups()) {
             const auto&      blocks = kv_resource->blocks(0, group.tag);
@@ -1416,13 +1440,18 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info) {
         if (!single_type_managers_[0]->prefixReuseEnabled() || batch_size == 0) {
             return;
         }
-        const auto& cache_keys = kv_cache_resource->cacheKeys(/*batch_id=*/0);
-        const auto& blocks     = kv_cache_resource->blocks(/*batch_id=*/0, full_group_tags_.front());
-        const auto  block_num  = std::min(cache_keys.size(), blocks.size());
-        if (block_num > 0) {
-            single_type_managers_[0]->insertIntoCache(CacheKeysType(cache_keys.begin(), cache_keys.begin() + block_num),
-                                                      BlockIndicesType(blocks.begin(), blocks.begin() + block_num),
-                                                      insert_info.is_resident);
+        const auto& cache_keys   = kv_cache_resource->cacheKeys(/*batch_id=*/0);
+        const auto& dependencies = kv_cache_resource->cacheResource(/*batch_id=*/0).blockDependencies();
+        const auto& blocks       = kv_cache_resource->blocks(/*batch_id=*/0, full_group_tags_.front());
+        const auto  block_num    = std::min(cache_keys.size(), blocks.size());
+        for (size_t i = 0; i < block_num; ++i) {
+            if (isNullBlockIdx(blocks[i])) {
+                continue;
+            }
+            const auto dependency =
+                i < dependencies.size() ? dependencies[i] : BlockDependency{false, 0, static_cast<uint32_t>(i)};
+            shared_block_cache_->put(
+                cache_keys[i], {{full_group_tags_.front(), blocks[i]}}, {}, insert_info.is_resident, dependency);
         }
         return;
     }
@@ -1435,6 +1464,24 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info) {
         const auto& full_dependencies = kv_cache_resource->cacheResource(batch_id).blockDependencies();
 
         if (!cp_active) {
+            const CPSlotMapper                      passthrough_mapper;
+            std::map<std::string, BlockIndicesType> blocks_by_key;
+            for (const auto& group : config_.groups()) {
+                auto& keyed_blocks = blocks_by_key[group.tag];
+                keyed_blocks.resize(full_keys.size(), NULL_BLOCK_IDX);
+                if (skipReuseCacheGroup(group.tag)) {
+                    continue;
+                }
+                const auto&  blocks              = kv_cache_resource->blocks(batch_id, group.tag);
+                const size_t keys_per_physical   = passthrough_mapper.cacheKeysPerPhysicalBlock(config_, group.tag);
+                const size_t max_physical_blocks = (full_keys.size() + keys_per_physical - 1) / keys_per_physical;
+                const auto   plan                = passthrough_mapper.buildCacheKeyBlockPlan(
+                    config_, group.tag, full_keys.size(), std::min(blocks.size(), max_physical_blocks));
+                for (const auto& pair : plan) {
+                    keyed_blocks[static_cast<size_t>(pair.key_index)] = blocks[static_cast<size_t>(pair.offset_index)];
+                }
+            }
+
             // Preserve the legacy non-CP GPU reuse surface: aggregate all groups
             // under one key. The prefix tree only receives extra dependency
             // metadata here.
@@ -1444,19 +1491,9 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info) {
                 std::map<std::string, BlockIdxType> groups;
                 bool                                has_valid = false;
                 for (const auto& group : config_.groups()) {
-                    const auto&  tag      = group.tag;
-                    BlockIdxType block_id = NULL_BLOCK_IDX;
-                    if (skipReuseCacheGroup(tag)) {
-                        groups.emplace(tag, block_id);
-                        continue;
-                    }
-                    const auto& blocks = kv_cache_resource->blocks(batch_id, tag);
-                    if (i >= blocks.size()) {
-                        groups.emplace(tag, block_id);
-                        continue;
-                    }
-                    if (!isNullBlockIdx(blocks[i])) {
-                        block_id  = blocks[i];
+                    const auto& tag      = group.tag;
+                    const auto  block_id = blocks_by_key.at(tag)[i];
+                    if (!isNullBlockIdx(block_id)) {
                         has_valid = true;
                     }
                     groups.emplace(tag, block_id);
@@ -1465,12 +1502,7 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info) {
                     const auto dependency = i < full_dependencies.size() ?
                                                 full_dependencies[i] :
                                                 BlockDependency{false, 0, static_cast<uint32_t>(i)};
-                    shared_block_cache_->put(full_keys[i],
-                                             groups,
-                                             {},
-                                             insert_info.is_resident,
-                                             SharedBlockCache::kGpuLogicalNamespace,
-                                             dependency);
+                    shared_block_cache_->put(full_keys[i], groups, {}, insert_info.is_resident, dependency);
                 }
             }
             continue;
@@ -1480,12 +1512,12 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info) {
         // merges multiple puts on the same key into one item with each group's block id
         // populated independently (NULL_BLOCK_IDX entries are skipped by the merge path).
         //
-        // CP per-group key namespace: paged FULL groups use cp-subsampled (last-rank) keys
-        // to align 1:1 with rank-local blocks; non-paged groups (SWA / LINEAR) keep the
-        // full key sequence so their tail blocks (real entries at positions >= length-2)
-        // get inserted alongside the keys that the reuseCache tail-loop later queries.
+        // CP per-group key namespace: canonical groups use the last logical
+        // cache-key ordinal of each virtual block; logical groups use the last
+        // ordinal covered by each tag-local physical block. reuseCache consumes
+        // the same plan in the opposite direction.
         CacheKeysType         cp_keys         = cpCanonicalCacheKeys(cp_mapper, full_keys);
-        BlockDependenciesType cp_dependencies = cp_mapper->canonicalBlockDependencies(full_dependencies);
+        BlockDependenciesType cp_dependencies = cp_mapper->canonicalBlockDependencies(cp_keys);
         auto                  token_ids       = insert_info.complete_token_ids->completeTokenIdsVec(batch_id);
         if (token_ids.size() <= 1) {
             continue;
@@ -1497,36 +1529,38 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info) {
             if (skipReuseCacheGroup(tag)) {
                 continue;
             }
-            const int            raw_group_seq = singleTypeManager(tag)->seqSizePerBlock();
-            const bool           gp_sharded    = cpBlockRoundRobinGroup(cp_mapper, config_, tag);
-            const bool           compact_swa   = cpCompactSwaGroup(tag, cp_mapper);
-            const bool           use_cp_keys   = cp_active && (gp_sharded || compact_swa);
-            const CacheKeysType& src_keys      = use_cp_keys ? cp_keys : full_keys;
-            const auto&          dependencies  = use_cp_keys ? cp_dependencies : full_dependencies;
-            const auto           namespace_id =
+            const int  raw_group_seq = singleTypeManager(tag)->seqSizePerBlock();
+            const bool use_cp_keys   = cp_mapper->usesCpCanonicalKeys(config_, tag);
+            const auto namespace_id =
                 use_cp_keys ? SharedBlockCache::kGpuCpCanonicalNamespace : SharedBlockCache::kGpuLogicalNamespace;
-            if (src_keys.empty()) {
-                continue;
-            }
             const int    group_seq_size  = cpLogicalSeqSizeForGroup(cp_mapper, config_, tag, raw_group_seq);
             const size_t full_blocks_num = token_len / static_cast<size_t>(group_seq_size);
-            const size_t n               = std::min(src_keys.size(), full_blocks_num);
             const auto&  blocks          = kv_cache_resource->blocks(batch_id, tag);
-            const size_t loop_end        = std::min(n, blocks.size());
+            const size_t physical_blocks = std::min(full_blocks_num, blocks.size());
+            const auto   plan = cp_mapper->buildCacheKeyBlockPlan(config_, tag, full_keys.size(), physical_blocks);
 
             // Reverse iterate so prefix-base keys land at MRU end (matches non-CP path).
-            for (size_t pos = loop_end; pos > 0; --pos) {
-                const size_t i = pos - 1;
-                if (isNullBlockIdx(blocks[i])) {
+            for (size_t pos = plan.size(); pos > 0; --pos) {
+                const auto& pair       = plan[pos - 1];
+                const auto  key_index  = static_cast<size_t>(pair.key_index);
+                const auto  block_slot = static_cast<size_t>(pair.offset_index);
+                RTP_LLM_CHECK(key_index < full_keys.size());
+                RTP_LLM_CHECK(block_slot < blocks.size());
+                if (isNullBlockIdx(blocks[block_slot])) {
                     continue;
                 }
                 std::map<std::string, BlockIdxType> groups;
                 for (const auto& other_group : config_.groups()) {
-                    groups.emplace(other_group.tag, other_group.tag == tag ? blocks[i] : NULL_BLOCK_IDX);
+                    groups.emplace(other_group.tag, other_group.tag == tag ? blocks[block_slot] : NULL_BLOCK_IDX);
                 }
-                const auto dependency =
-                    i < dependencies.size() ? dependencies[i] : BlockDependency{false, 0, static_cast<uint32_t>(i)};
-                shared_block_cache_->put(src_keys[i], groups, {}, insert_info.is_resident, namespace_id, dependency);
+                const size_t dependency_index =
+                    use_cp_keys ? key_index / static_cast<size_t>(cp_mapper->cpSize()) : key_index;
+                const auto& dependencies = use_cp_keys ? cp_dependencies : full_dependencies;
+                const auto  dependency   = dependency_index < dependencies.size() ?
+                                               dependencies[dependency_index] :
+                                               BlockDependency{false, 0, static_cast<uint32_t>(dependency_index)};
+                shared_block_cache_->put(
+                    full_keys[key_index], groups, {}, insert_info.is_resident, dependency, namespace_id);
             }
         }
     }
@@ -1632,7 +1666,7 @@ void CoordinatorCacheManager::decrKVCacheRef(const KVCacheResource& kvcache_reso
 
 bool CoordinatorCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                                             const std::vector<int>&         block_src_batch,
-                                            bool                            copy_last_block,
+                                            int                             previous_seq_len,
                                             std::vector<TaggedBlockIdPair>& block_update_mapping) {
     block_update_mapping.clear();
     if (block_src_batch.empty()) {
@@ -1641,6 +1675,12 @@ bool CoordinatorCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batc
 
     const int old_batch_size = batch_kv_cache_resource->batchSize();
     const int new_batch_size = static_cast<int>(block_src_batch.size());
+    RTP_LLM_CHECK_WITH_INFO(previous_seq_len >= 0, "previous_seq_len must be non-negative, got %d", previous_seq_len);
+
+    std::map<std::string, bool> needs_copy;
+    for (const auto& group : config_.groups()) {
+        needs_copy.emplace(group.tag, needsBeamTailCopy(group.tag, previous_seq_len));
+    }
 
     std::vector<int> batch_fork_count(old_batch_size, 0);
     for (const int old_batch_idx : block_src_batch) {
@@ -1657,10 +1697,10 @@ bool CoordinatorCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batc
     }
     for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
         const int fork_count = batch_fork_count[old_batch_idx];
-        if (fork_count > 1 && copy_last_block) {
+        if (fork_count > 1) {
             for (const auto& group : config_.groups()) {
                 const auto& tag = group.tag;
-                if (!batch_kv_cache_resource->blocks(old_batch_idx, tag).empty()) {
+                if (needs_copy.at(tag) && !batch_kv_cache_resource->blocks(old_batch_idx, tag).empty()) {
                     new_blocks_num.at(tag) += fork_count - 1;
                 }
             }
@@ -1795,7 +1835,7 @@ bool CoordinatorCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batc
                 auto&       block_ids = batch_kv_cache_resource->mutableBlockIds(new_batch_idx, tag);
                 singleTypeManager(tag)->reference(block_ids, old_resources[old_batch_idx].blocks(tag));
 
-                if (copy_last_block && !block_ids.blocks().empty()) {
+                if (needs_copy.at(tag) && !block_ids.blocks().empty()) {
                     const int  old_block       = block_ids.popBack();
                     const bool old_block_valid = !isNullBlockIdx(old_block) && old_block > 0;
                     if (old_block_valid) {

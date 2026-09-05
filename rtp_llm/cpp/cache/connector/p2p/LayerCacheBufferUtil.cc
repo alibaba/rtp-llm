@@ -63,12 +63,15 @@ bool visitSelectedBlocks(const CacheConfig&     config,
     }
     validateGroupPacking(config, resource, layer_id, tag);
 
-    const auto& group      = config.groupForLayer(layer_id, tag);
-    const auto& block_ids  = resource.blockIdsForLayer(layer_id, tag);
-    const auto& cache_keys = resource.cacheKeys();
-    const auto  mapping    = cp_size > 1 ? group.policy.cp_mapping : CpBlockMappingMode::NONE;
-    const auto  world_size = static_cast<size_t>(cp_size);
-    const auto  rank       = static_cast<size_t>(cp_rank);
+    const bool  cp_canonical   = resource.cacheKeysAreCpCanonical();
+    const int   effective_rank = cp_canonical ? 0 : cp_rank;
+    const int   effective_size = cp_canonical ? 1 : cp_size;
+    const auto& group          = config.groupForLayer(layer_id, tag);
+    const auto& block_ids      = resource.blockIdsForLayer(layer_id, tag);
+    const auto& cache_keys     = resource.cacheKeys();
+    const auto  mapping        = effective_size > 1 ? group.policy.cp_mapping : CpBlockMappingMode::NONE;
+    const auto  world_size     = static_cast<size_t>(effective_size);
+    const auto  rank           = static_cast<size_t>(effective_rank);
 
     const size_t local_block_count = block_ids.blocks().size();
     size_t       physical_capacity = local_block_count;
@@ -78,9 +81,10 @@ bool visitSelectedBlocks(const CacheConfig&     config,
         physical_capacity = local_block_count * world_size;
     }
 
-    const size_t keys_per_physical_block = group.seqSizePerBlock() / config.seq_size_per_block;
-    const size_t available_key_count     = std::min(cache_keys.size(), physical_capacity * keys_per_physical_block);
-    const size_t key_begin               = static_cast<size_t>(start_key_ordinal);
+    const CPSlotMapper mapper(effective_rank, effective_size, static_cast<int>(config.seq_size_per_block));
+    const size_t       keys_per_physical_block = mapper.cacheKeysPerPhysicalBlock(config, tag);
+    const size_t       available_key_count = std::min(cache_keys.size(), physical_capacity * keys_per_physical_block);
+    const size_t       key_begin           = static_cast<size_t>(start_key_ordinal);
     if (key_begin >= available_key_count) {
         return false;
     }
@@ -95,9 +99,8 @@ bool visitSelectedBlocks(const CacheConfig&     config,
     const size_t physical_end   = (key_end + keys_per_physical_block - 1) / keys_per_physical_block;
     bool         found          = false;
 
-    const CPSlotMapper mapper(cp_rank, cp_size, static_cast<int>(config.seq_size_per_block));
-    const bool         use_hybrid = group.policy.group_type != CacheGroupType::FULL;
-    const auto         plan       = mapper.buildStorePlan(group.policy, physical_end, physical_begin, use_hybrid);
+    const bool use_hybrid = group.policy.group_type != CacheGroupType::FULL;
+    const auto plan       = mapper.buildStorePlan(group.policy, physical_end, physical_begin, use_hybrid);
     for (const auto& pair : plan) {
         const size_t physical_position = static_cast<size_t>(pair.key_index);
         if (physical_position < physical_begin) {

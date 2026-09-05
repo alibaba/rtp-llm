@@ -244,7 +244,7 @@ TEST_F(SWACacheManagerTest, MatchSingleKey_NotFound) {
 
 TEST_F(SWACacheManagerTest, MatchSingleKey_Found) {
     auto group = makeGroup(4);
-    shared_cache_->put(101, {{"swa", 1}}, false);
+    shared_cache_->put(101, {{"swa", 1}}, {}, false, BlockDependency{}, SharedBlockCache::kGpuLogicalNamespace);
 
     auto result = group.matchSingleKey(101);
     ASSERT_EQ(result.block_indices.size(), 1u);
@@ -625,7 +625,13 @@ TEST_F(SWACacheManagerTest, PutIntoCache_SkipsNullBlocks) {
     // Simulate coordinator_cache_manager-level insertIntoCache: only put non-NULL blocks
     for (size_t i = 0; i < keys.size() && i < block_ids.blocksNum(); ++i) {
         if (!isNullBlockIdx(block_ids.blocks()[i])) {
-            shared_cache_->put(keys[i], {{"swa", block_ids.blocks()[i]}}, false);
+            const BlockDependency dependency{i > 0, i > 0 ? keys[i - 1] : CacheKeyType{0}, static_cast<uint32_t>(i)};
+            shared_cache_->put(keys[i],
+                               {{"swa", block_ids.blocks()[i]}},
+                               {},
+                               false,
+                               dependency,
+                               SharedBlockCache::kGpuLogicalNamespace);
         }
     }
 

@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -40,9 +41,19 @@ void validateRemoteCacheTopologyBeforeAllocation(const CacheConfig& cache_config
         std::count_if(cache_config.groups().begin(), cache_config.groups().end(), [](const CacheGroup& group) {
             return group.policy.group_type == CacheGroupType::FULL;
         });
-    RTP_LLM_CHECK_WITH_INFO(group_num == 1 && full_group_num == 1
-                                && cache_config.groups().front().policy.group_type == CacheGroupType::FULL,
-                            "remote cache requires exactly one FULL cache group, groups=%zu full_groups=%zu",
+    const bool remote_topology_supported = group_num == 1 && full_group_num == 1
+                                           && cache_config.groups().front().policy.group_type == CacheGroupType::FULL;
+    if (!remote_topology_supported) {
+        RTP_LLM_LOG_ERROR("remote cache initialization rejected: remote cache now supports exactly one FULL cache "
+                          "group; multi-group remote cache support has been removed. Disable remote cache or configure "
+                          "a single FULL group. groups=%zu full_groups=%zu",
+                          group_num,
+                          static_cast<size_t>(full_group_num));
+    }
+    RTP_LLM_CHECK_WITH_INFO(remote_topology_supported,
+                            "remote cache now supports exactly one FULL cache group; multi-group remote cache support "
+                            "has been removed. Disable remote cache or configure a single FULL group. groups=%zu "
+                            "full_groups=%zu",
                             group_num,
                             static_cast<size_t>(full_group_num));
 }
@@ -358,11 +369,11 @@ void KVCacheManager::blockBatchCopy(const std::vector<TaggedBlockIdPair>& copy_m
 
 bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                                    const std::vector<int>&         block_src_batch,
-                                   bool                            copy_last_block,
+                                   int                             previous_seq_len,
                                    std::vector<TaggedBlockIdPair>& block_update_mapping) {
     RTP_LLM_PROFILE_FUNCTION();
     return coordinator_cache_manager_->updateKVBlock(
-        batch_kv_cache_resource, block_src_batch, copy_last_block, block_update_mapping);
+        batch_kv_cache_resource, block_src_batch, previous_seq_len, block_update_mapping);
 }
 
 // 地址转换和缓冲区访问

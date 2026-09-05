@@ -169,17 +169,17 @@ const BlockIndicesType& KVCacheResource::blocks(std::string_view tag) const {
 }
 
 const BlockIndicesType& KVCacheResource::blocksForLayer(int layer_id, std::string_view tag) const {
-    return mutableBlockIdsForLayer(layer_id, tag).blocks();
+    return blockIdsForLayer(layer_id, tag).blocks();
 }
 
-BlockIds& KVCacheResource::mutableBlockIds(std::string_view tag) const {
+BlockIds& KVCacheResource::mutableBlockIds(std::string_view tag) {
     const auto value = std::string(tag);
     const auto it    = blocks_by_group_.find(value);
     RTP_LLM_CHECK_WITH_INFO(it != blocks_by_group_.end(), "KVCacheResource missing tag=%s", value.c_str());
     return it->second;
 }
 
-BlockIds& KVCacheResource::mutableBlockIdsForLayer(int layer_id, std::string_view tag) const {
+BlockIds& KVCacheResource::mutableBlockIdsForLayer(int layer_id, std::string_view tag) {
     RTP_LLM_CHECK_WITH_INFO(layerContainsTag(layer_id, tag),
                             "KVCacheResource layer=%d does not own tag=%s",
                             layer_id,
@@ -188,11 +188,18 @@ BlockIds& KVCacheResource::mutableBlockIdsForLayer(int layer_id, std::string_vie
 }
 
 const BlockIds& KVCacheResource::blockIds(std::string_view tag) const {
-    return mutableBlockIds(tag);
+    const auto value = std::string(tag);
+    const auto it    = blocks_by_group_.find(value);
+    RTP_LLM_CHECK_WITH_INFO(it != blocks_by_group_.end(), "KVCacheResource missing tag=%s", value.c_str());
+    return it->second;
 }
 
 const BlockIds& KVCacheResource::blockIdsForLayer(int layer_id, std::string_view tag) const {
-    return mutableBlockIdsForLayer(layer_id, tag);
+    RTP_LLM_CHECK_WITH_INFO(layerContainsTag(layer_id, tag),
+                            "KVCacheResource layer=%d does not own tag=%s",
+                            layer_id,
+                            std::string(tag).c_str());
+    return blockIds(tag);
 }
 
 bool KVCacheResource::layerContainsTag(int layer_id, std::string_view tag) const {

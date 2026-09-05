@@ -698,26 +698,6 @@ private:
         return res;
     }
 
-    std::shared_ptr<KVCacheResource> makeHybridCacheResource(const CacheKeysType&             cache_keys,
-                                                             const std::vector<BlockIdxType>& group0_blocks,
-                                                             const std::vector<BlockIdxType>& group1_blocks,
-                                                             size_t                           reuse_len = 0) const {
-        auto res = std::make_shared<KVCacheResource>();
-        res->setCacheKeys(cache_keys);
-        (void)group1_blocks;
-        const size_t layer_num = static_cast<size_t>(cache_config_.layer_all_num);
-        RTP_LLM_CHECK_WITH_INFO(layer_num == 4, "test helper expects 4 layers, got %zu", layer_num);
-        res->initGroups(cache_config_);
-        auto block_indices = group0_blocks;
-        if (block_indices.size() < cache_keys.size()) {
-            block_indices.resize(cache_keys.size(), NULL_BLOCK_IDX);
-        }
-        res->mutableBlockIds("default").assign(block_indices);
-        res->setDeviceReuseBlockNum(reuse_len);
-        res->setLastBlockAligned(true);
-        return res;
-    }
-
     // Put items into memory block cache.
     // If `is_complete_flags` is empty, all items are treated as "complete" by default.
     std::vector<BlockIdxType> putItemsToCache(const CacheKeysType&        keys,
@@ -2137,19 +2117,6 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnNull_WhenNoPrefixMatched) {
     EXPECT_EQ(match_ctx, nullptr);
 }
 
-TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnMatchedNum_WithHybridGroups) {
-    CacheKeysType cache_keys{71001, 71002, 71003};
-    auto          res = makeHybridCacheResource(cache_keys,
-                                       /*group0_blocks=*/{1, 2, 3},
-                                       /*group1_blocks=*/{4, 5, 6});
-    ASSERT_EQ(res->layerNum(), static_cast<int>(cache_config_.layer_all_num));
-    putItemsToCache({cache_keys[0]}, memoryCacheBlockBytes());
-
-    auto ctx = connector_->asyncMatch(res, std::make_shared<TestReadMeta>(true));
-    ASSERT_NE(ctx, nullptr);
-    EXPECT_EQ(ctx->matchedBlockCount(), 1u);
-}
-
 TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnMatchedNum_WhenPrefixMatchedAndStopAtFirstMiss) {
     CacheKeysType                          cache_keys{72001, 72002, 72003};
     std::vector<std::vector<BlockIdxType>> lbs_vec{{1, 1, 1}, {2, 2, 2}, {3, 3, 3}, {4, 4, 4}};
@@ -2410,6 +2377,43 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_IncrementsReuseLen_ByMatche
     ASSERT_TRUE(waitUntilDone(ctx));
     EXPECT_TRUE(ctx->success());
     EXPECT_EQ(res->reuseBlockNum(), 2u);  // last cache key will not be read
+}
+
+TEST_F(KVCacheMemoryConnectorTest, CpCanonicalReadConvertsOnlyConnectorEntryRange) {
+    connector_.reset();
+    ParallelismConfig parallelism;
+    parallelism.role_type                          = RoleType::PREFILL;
+    parallelism.tp_size                            = 2;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    connector_                                     = std::make_shared<KVCacheMemoryConnector>(
+        cache_config_, kv_cache_config_, parallelism, coordinator_cache_manager_, server_addrs_);
+    ASSERT_TRUE(connector_->init());
+
+    const CacheKeysType cache_keys{50001, 50003, 50005};
+    const size_t        mem_size = memoryCacheBlockBytes();
+    ASSERT_EQ(putItemsToCache(cache_keys, mem_size).size(), cache_keys.size());
+    std::vector<std::vector<BlockIdxType>> lbs_vec(4, std::vector<BlockIdxType>{1, 2, 3});
+    auto                                   res = makeCacheResource(cache_keys, lbs_vec);
+    res->setCacheKeysAreCpCanonical(true);
+    auto meta = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true, /*enable_remote_cache=*/false, "");
+
+    res->setDeviceReuseBlockNum(1);
+    EXPECT_ANY_THROW((void)connector_->asyncMatch(res, meta));
+    res->setDeviceReuseBlockNum(0);
+    auto match_ctx = connector_->asyncMatch(res, meta);
+    ASSERT_NE(match_ctx, nullptr);
+    EXPECT_EQ(match_ctx->matchedBlockCount(), 4u);
+
+    EXPECT_ANY_THROW(
+        (void)connector_->asyncRead(res, meta, match_ctx, /*start_read_block_index=*/1, /*read_block_num=*/2));
+    EXPECT_ANY_THROW(
+        (void)connector_->asyncRead(res, meta, match_ctx, /*start_read_block_index=*/0, /*read_block_num=*/1));
+
+    auto read_ctx = connector_->asyncRead(res, meta, match_ctx, /*start_read_block_index=*/0, /*read_block_num=*/2);
+    ASSERT_NE(read_ctx, nullptr);
+    ASSERT_TRUE(waitUntilDone(read_ctx));
+    EXPECT_TRUE(read_ctx->success());
+    EXPECT_EQ(res->memoryReuseBlockNum(), 2u);
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_Success_RemovesLoadedBlocksFromMemoryCache) {
@@ -3938,6 +3942,57 @@ TEST_F(KVCacheMemoryConnectorDualPoolTest, Init_PureFullUsesSinglePool) {
     EXPECT_NE(conn->block_cache_, nullptr);
     EXPECT_EQ(conn->complete_pool_, nullptr);
     EXPECT_EQ(conn->incomplete_pool_, nullptr);
+}
+
+TEST_F(KVCacheMemoryConnectorDualPoolTest, AsyncMatchUsesBothGroupsForCommonPrefix) {
+    auto cfg = createHybridCacheConfig(/*layer_num=*/2, /*block_num=*/10, /*seq_size_per_block=*/8, /*linear_step=*/4);
+    coordinator_cache_manager_ = std::make_shared<CoordinatorCacheManager>(cfg, AllocationType::DEVICE);
+    ASSERT_TRUE(coordinator_cache_manager_->init());
+    auto conn = createConnector(cfg);
+    ASSERT_TRUE(conn->isDualPool());
+
+    const CacheKeysType cache_keys{91001, 91002, 91999};
+    auto                memory_blocks = conn->complete_pool_->malloc(2);
+    ASSERT_EQ(memory_blocks.size(), 2u);
+    for (size_t i = 0; i < memory_blocks.size(); ++i) {
+        MemoryDiskBlockCache::CacheItem item;
+        item.cache_key    = cache_keys[i];
+        item.backing_type = CacheBackingType::MEMORY;
+        item.block_index  = static_cast<BlockIdxType>(memory_blocks[i]);
+        item.is_complete  = true;
+        conn->block_cache_->putCommitted(item);
+        conn->complete_pool_->blockCacheReference({static_cast<BlockIdxType>(memory_blocks[i])});
+        conn->complete_pool_->requestFree({memory_blocks[i]});
+    }
+
+    const BlockIndicesType complete_default{1, 2, 3};
+    const BlockIndicesType complete_swa{4, 5, 6};
+    auto                   make_resource = [&](BlockIndicesType default_blocks, BlockIndicesType swa_blocks) {
+        return makeHybridResource(cfg, cache_keys, {std::move(default_blocks)}, {std::move(swa_blocks)});
+    };
+
+    auto complete = make_resource(complete_default, complete_swa);
+    ASSERT_EQ(complete->groupNums(), 2);
+    ASSERT_EQ(complete->blocksByGroup().size(), 2u);
+    EXPECT_EQ(complete->blocks("default"), complete_default);
+    EXPECT_EQ(complete->blocks("swa_kv"), complete_swa);
+    auto complete_match = conn->asyncMatch(complete, std::make_shared<TestReadMeta>(true));
+    ASSERT_NE(complete_match, nullptr);
+    EXPECT_EQ(complete_match->matchedBlockCount(), 2u);
+
+    auto default_incomplete_blocks = complete_default;
+    default_incomplete_blocks[1]   = NULL_BLOCK_IDX;
+    auto default_incomplete        = make_resource(default_incomplete_blocks, complete_swa);
+    auto default_match             = conn->asyncMatch(default_incomplete, std::make_shared<TestReadMeta>(true));
+    ASSERT_NE(default_match, nullptr);
+    EXPECT_EQ(default_match->matchedBlockCount(), 1u);
+
+    auto swa_incomplete_blocks = complete_swa;
+    swa_incomplete_blocks[1]   = NULL_BLOCK_IDX;
+    auto swa_incomplete        = make_resource(complete_default, swa_incomplete_blocks);
+    auto swa_match             = conn->asyncMatch(swa_incomplete, std::make_shared<TestReadMeta>(true));
+    ASSERT_NE(swa_match, nullptr);
+    EXPECT_EQ(swa_match->matchedBlockCount(), 1u);
 }
 
 TEST_F(KVCacheMemoryConnectorDualPoolTest, AsyncMatch_AdvancesOnlyOnCompleteHit) {

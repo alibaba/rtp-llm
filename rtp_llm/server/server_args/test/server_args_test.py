@@ -19,16 +19,23 @@ class ServerArgsPyEnvConfigsTest(TestCase):
         from rtp_llm.server.server_args import server_args
 
         cases = [
-            ("cli", {}, ["--dsv4_fixed_pool_use_memory", "1"]),
-            ("env", {"DSV4_FIXED_POOL_USE_MEMORY": "1"}, []),
+            ("cli-space", {}, ["--dsv4_fixed_pool_use_memory", "1"], ["prog"]),
+            ("cli-equals", {}, ["--dsv4_fixed_pool_use_memory=1"], ["prog"]),
+            ("sys-argv-equals", {}, None, ["prog", "--dsv4_fixed_pool_use_memory=1"]),
+            ("env", {"DSV4_FIXED_POOL_USE_MEMORY": "1"}, [], ["prog"]),
         ]
-        for source, env, args in cases:
+        for source, env, args, argv in cases:
             with (
                 self.subTest(source=source),
                 patch.dict(os.environ, env, clear=True),
+                patch.object(sys, "argv", argv),
                 self.assertLogs(level="WARNING") as logs,
             ):
-                configs = server_args.setup_args(args)
+                configs = (
+                    server_args.setup_args(args)
+                    if args is not None
+                    else server_args.setup_args()
+                )
 
             self.assertFalse(
                 hasattr(configs.kv_cache_config, "dsv4_fixed_pool_use_memory")

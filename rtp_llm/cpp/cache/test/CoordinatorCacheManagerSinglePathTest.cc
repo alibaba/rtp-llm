@@ -521,6 +521,33 @@ TEST_F(CoordinatorCacheManagerSinglePathTest, InsertIntoCacheAsResident) {
     coordinator_cache_manager_->insertIntoCache(insert_info);
 }
 
+TEST_F(CoordinatorCacheManagerSinglePathTest, SingleFullInsertPreservesLogicalDependencyChain) {
+    auto config                = createSingleTypeTestConfig(/*layer_num=*/1, /*block_num=*/8, /*seq_size_per_block=*/4);
+    auto shared_cache          = std::make_shared<SharedBlockCache>();
+    coordinator_cache_manager_ = std::make_shared<CoordinatorCacheManager>(config, AllocationType::HOST);
+    coordinator_cache_manager_->setSharedBlockCache(shared_cache);
+    ASSERT_TRUE(coordinator_cache_manager_->init());
+
+    auto resource = createBatchKVCacheResource(/*batch_size=*/1, config);
+    auto tokens   = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+    ASSERT_TRUE(coordinator_cache_manager_->malloc(MallocInfo{resource, tokens}).success);
+    resource->cacheResource(0).setCacheKeysAndBlockDependencies(
+        CacheKeysType{100, 101, 102}, BlockDependenciesType{{false, 0, 0}, {true, 100, 1}, {true, 101, 2}});
+
+    coordinator_cache_manager_->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false});
+    auto evicted = shared_cache->selectAndEvict(/*min_blocks=*/1);
+
+    ASSERT_EQ(evicted.evictions.size(), 3u);
+    EXPECT_EQ(evicted.evictions[0].cache_key, 100);
+    EXPECT_EQ(evicted.evictions[1].cache_key, 101);
+    EXPECT_EQ(evicted.evictions[2].cache_key, 102);
+    for (const auto& item : evicted.evictions) {
+        EXPECT_TRUE(item.has_dependency);
+        EXPECT_EQ(item.dependency_namespace, SharedBlockCache::kGpuLogicalNamespace);
+    }
+    coordinator_cache_manager_->free(FreeInfo{resource, tokens});
+}
+
 TEST_F(CoordinatorCacheManagerSinglePathTest, PrefixReuseDisabledSkipsMatchAndInsert) {
     auto config = createSingleTypeTestConfig(
         /*layer_num=*/4, /*block_num=*/12, /*seq_size_per_block=*/4, /*enable_prefix_reuse=*/false);
@@ -536,7 +563,7 @@ TEST_F(CoordinatorCacheManagerSinglePathTest, PrefixReuseDisabledSkipsMatchAndIn
     ASSERT_EQ(cached_blocks.size(), 4u);
     const auto& tag = config.soleGroupForLayer(0).tag;
     for (size_t i = 0; i < cached_blocks.size(); ++i) {
-        shared_cache->put(static_cast<CacheKeyType>(100 + i), {{tag, cached_blocks[i]}}, true);
+        shared_cache->put(static_cast<CacheKeyType>(100 + i), {{tag, cached_blocks[i]}}, {}, true, BlockDependency{});
     }
     block_pool->requestFree(cached_blocks);
     ASSERT_FALSE(shared_cache->empty());
@@ -1254,13 +1281,20 @@ TEST_F(CoordinatorCacheManagerSinglePathTest, MallocWithZeroSeqLength) {
     coordinator_cache_manager_ = std::make_shared<CoordinatorCacheManager>(config);
     coordinator_cache_manager_->init();
 
-    auto batch_resource     = createBatchKVCacheResource(1, config);
-    auto complete_token_ids = createCompleteTokenIds(1, 0);
+    auto       batch_resource     = createBatchKVCacheResource(1, config);
+    auto       complete_token_ids = createCompleteTokenIds(1, 0);
+    const auto free_before        = coordinator_cache_manager_->freeBlocksNum();
+    const auto available_before   = coordinator_cache_manager_->availableBlocksNum();
 
     MallocInfo malloc_info{batch_resource, complete_token_ids};
     auto       result = coordinator_cache_manager_->malloc(malloc_info);
-    // not crash
-    EXPECT_TRUE(result.success || !result.success);
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.status, MallocStatus::NONE);
+    EXPECT_EQ(result.reuse_len, 0);
+    EXPECT_EQ(batch_resource->curBlocksNum(), 0);
+    EXPECT_EQ(batch_resource->blocksNum(0, "default"), 0);
+    EXPECT_EQ(coordinator_cache_manager_->freeBlocksNum(), free_before);
+    EXPECT_EQ(coordinator_cache_manager_->availableBlocksNum(), available_before);
 }
 
 TEST_F(CoordinatorCacheManagerSinglePathTest, FreeEmptyBatchResource) {
@@ -1532,7 +1566,8 @@ TEST_F(CoordinatorCacheManagerSinglePathTest, EstimateBatchPeakNeedBlocksAccount
                                                                       /*target_batch_size=*/4),
               6);
 
-    // An aligned tail remains shared while the batch expands.
+    // Admission deliberately reserves one possible copy for each additional sequence even when this snapshot is
+    // aligned, because beam expansion can be delayed until a later writable-tail position.
     EXPECT_EQ(coordinator_cache_manager_->estimateBatchPeakNeedBlocks(resource,
                                                                       /*seq_len=*/12,
                                                                       /*common_seq_len=*/8,
@@ -1540,7 +1575,7 @@ TEST_F(CoordinatorCacheManagerSinglePathTest, EstimateBatchPeakNeedBlocksAccount
                                                                       /*reserve_step=*/0,
                                                                       /*enable_reuse_cache=*/false,
                                                                       /*target_batch_size=*/4),
-              0);
+              2);
 
     auto empty_resource = createBatchKVCacheResource(/*batch_size=*/1, config);
     // Empty resource: two prompt blocks are shared and one future block is private per target batch.
@@ -1579,7 +1614,7 @@ TEST_F(CoordinatorCacheManagerSinglePathTest, EstimateBatchPeakCoversPartialTail
 
     std::vector<TaggedBlockIdPair> block_update_mapping;
     ASSERT_TRUE(coordinator_cache_manager_->updateKVBlock(
-        resource, /*block_src_batch=*/{0, 0, 0, 0}, /*copy_last_block=*/true, block_update_mapping));
+        resource, /*block_src_batch=*/{0, 0, 0, 0}, /*previous_seq_len=*/5, block_update_mapping));
     EXPECT_EQ(resource->batchSize(), 4);
     EXPECT_EQ(block_update_mapping.size(), 3);
     EXPECT_EQ(coordinator_cache_manager_->freeBlocksNum(), 0);

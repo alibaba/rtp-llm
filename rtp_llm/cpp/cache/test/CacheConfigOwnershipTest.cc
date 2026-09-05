@@ -1,6 +1,7 @@
 #include <set>
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -200,6 +201,25 @@ TEST(CacheConfigOwnershipTest, FinalizeBlockNumsIsRepeatableAndRecomputesEveryGr
 TEST(CacheConfigOwnershipTest, FinalizeBlockNumsRejectsZeroGlobalBlocks) {
     auto config = makeConfig({makeGroup("full")}, {{"full"}});
     EXPECT_THROW(config.finalizeBlockNums(0, RuntimeConfig{}), std::runtime_error);
+}
+
+TEST(CacheConfigOwnershipTest, FinalizeBlockNumsEnforcesBlockIndexExpansionLimit) {
+    constexpr uint32_t kMaxBlockIdx = static_cast<uint32_t>(std::numeric_limits<int32_t>::max());
+
+    auto unexpanded = makeConfig({makeSigGroup("full", 1, 8, 8, 64, 0)}, {{"full"}});
+    EXPECT_EQ(unexpanded.group("full").maxRepresentableBlockNum(), kMaxBlockIdx);
+    EXPECT_NO_THROW(unexpanded.finalizeBlockNums(kMaxBlockIdx, RuntimeConfig{}));
+
+    auto       expanded       = makeConfig({makeSigGroup("full", 1, 8, 2, 64, 0)}, {{"full"}});
+    const auto expanded_limit = static_cast<uint32_t>((static_cast<uint64_t>(kMaxBlockIdx) + 1) / 4);
+    EXPECT_EQ(expanded.group("full").maxRepresentableBlockNum(), expanded_limit);
+    EXPECT_NO_THROW(expanded.finalizeBlockNums(expanded_limit, RuntimeConfig{}));
+    EXPECT_THROW(expanded.finalizeBlockNums(expanded_limit + 1, RuntimeConfig{}), std::runtime_error);
+
+    auto explicit_group                      = makeSigGroup("full", 1, 8, 4, 64, 0);
+    explicit_group.policy.explicit_block_num = static_cast<uint32_t>((static_cast<uint64_t>(kMaxBlockIdx) + 1) / 2 + 1);
+    auto explicit_config                     = makeConfig({std::move(explicit_group)}, {{"full"}});
+    EXPECT_THROW(explicit_config.finalizeBlockNums(1, RuntimeConfig{}), std::runtime_error);
 }
 
 TEST(CacheConfigOwnershipTest, TransitionalBlockLayoutPreservesCountsUntilFinalization) {

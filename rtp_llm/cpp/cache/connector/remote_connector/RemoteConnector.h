@@ -103,9 +103,12 @@ private:
     remote_connector::ClientWrapper::ConfigMap genClientConfig();
     std::pair<std::shared_ptr<RemoteConnectorConfig::LocationSpecInfoMap>,
               std::shared_ptr<RemoteConnectorConfig::LocationSpecGroups>>
-         genLocationSpecInfoMapAndGroups(int64_t tp_size);
-    void printInfo() const;
-    int  SetCudaDeviceOnce() const;
+           genLocationSpecInfoMapAndGroups(int64_t tp_size);
+    void   printInfo() const;
+    int    SetCudaDeviceOnce() const;
+    int    connectorCpSize() const;
+    size_t connectorEntryCount(const KVCacheResource& resource, size_t global_key_blocks) const;
+    size_t globalKeyBlockCount(const KVCacheResource& resource, size_t connector_entries) const;
 
 private:
     struct InitParams {
@@ -214,6 +217,8 @@ private:
         state_.setState(state);
     }
 
+    // Both counters are global cache-key blocks. `locations_ptr_` remains in
+    // remote connector entry (CP-canonical when projected) coordinates.
     size_t                                       prev_reuse_blocks_num_ = 0;
     size_t                                       matched_block_count_   = 0;
     std::shared_ptr<kv_cache_manager::Locations> locations_ptr_ = std::make_shared<kv_cache_manager::Locations>();

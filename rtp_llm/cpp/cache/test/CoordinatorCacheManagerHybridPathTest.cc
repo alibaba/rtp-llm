@@ -68,6 +68,31 @@ static CacheConfig makeReorderedTinyHybridConfig() {
     return config;
 }
 
+static CacheConfig makePerGroupBlockSizeConfig() {
+    CacheConfig config;
+    config.dtype              = DataType::TYPE_FP16;
+    config.block_num          = 10;
+    config.seq_size_per_block = 4;
+
+    auto full_spec            = makeMhaSpec("full4", 4, DataType::TYPE_FP16, 1, 1);
+    auto compact_spec         = makeMhaSpec("compact8", 8, DataType::TYPE_FP16, 1, 1);
+    auto compact_policy       = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    compact_policy.cp_mapping = CpBlockMappingMode::COMPACT_LAST_RANK;
+    assignCacheConfigFromGroupedSpecs(config,
+                                      /*main_layer_num=*/2,
+                                      {full_spec, compact_spec},
+                                      {{0}, {1}},
+                                      {CacheGroupType::FULL, CacheGroupType::FULL},
+                                      {"full4", "compact8"},
+                                      {defaultCacheGroupPolicy(CacheGroupType::FULL), compact_policy});
+    setGroupBlockLayout(config,
+                        {config.block_num, config.block_num},
+                        {full_spec->block_size_bytes(), compact_spec->block_size_bytes()},
+                        {0, 0});
+    config.finalizeBlockNums(config.block_num, RuntimeConfig{});
+    return config;
+}
+
 static ModelConfig makeTinyModelConfig(uint32_t num_layers) {
     ModelConfig cfg;
     cfg.num_layers                   = static_cast<int64_t>(num_layers);
@@ -227,7 +252,7 @@ static std::vector<BlockIdxType> allocateAndCache(BlockPoolPtr         block_poo
     EXPECT_EQ(blocks.size(), keys.size());
 
     for (size_t i = 0; i < keys.size(); ++i) {
-        shared_cache->put(keys[i], {{std::string(tag), blocks[i]}}, is_resident);
+        shared_cache->put(keys[i], {{std::string(tag), blocks[i]}}, {}, is_resident, BlockDependency{});
     }
 
     block_pool->requestFree(blocks);
@@ -243,7 +268,7 @@ static std::vector<BlockIdxType> allocateAndCacheKeepAllocated(BlockPoolPtr     
     EXPECT_EQ(blocks.size(), keys.size());
 
     for (size_t i = 0; i < keys.size(); ++i) {
-        shared_cache->put(keys[i], {{std::string(tag), blocks[i]}}, is_resident);
+        shared_cache->put(keys[i], {{std::string(tag), blocks[i]}}, {}, is_resident, BlockDependency{});
     }
 
     return blocks;
@@ -751,7 +776,9 @@ TEST_F(CoordinatorCacheManagerHybridPathTest, MergeMtpRejectsIncompatibleDefault
             FAIL() << "expected an incompatible default FULL group alias to be rejected";
         } catch (const std::runtime_error& e) {
             const std::string message = e.what();
-            EXPECT_NE(message.find("missing group mapping for sub layer=0"), std::string::npos);
+            EXPECT_NE(message.find("incompatible MTP shared pool"), std::string::npos);
+            EXPECT_NE(message.find("target={tag=full"), std::string::npos);
+            EXPECT_NE(message.find("source={tag=default"), std::string::npos);
         }
     };
 
@@ -805,10 +832,96 @@ TEST_F(CoordinatorCacheManagerHybridPathTest, MergeMtpRejectsIncompatibleDefault
                         {stride_group.block_num},
                         {stride_group.kv_block_stride_bytes + 1},
                         {stride_group.kv_scale_stride_bytes});
-    CacheTopologyPair       target_topology{target.groups(), target.layers()};
-    const CacheTopologyPair propose_topology{different_group_stride.groups(), different_group_stride.layers()};
-    EXPECT_NO_THROW(CacheConfigCreator::mergeMTPModule(
-        target_topology, propose_topology, /*module_index=*/0, /*main_layer_num=*/1));
+    expect_no_compatible_alias(target, different_group_stride);
+}
+
+TEST_F(CoordinatorCacheManagerHybridPathTest, MergeMtpValidatesExactTagSharedPoolLayout) {
+    struct Layout {
+        KVCacheSpecType  type               = KVCacheSpecType::MultiHeadAttention;
+        DataType         dtype              = DataType::TYPE_FP16;
+        uint32_t         physical_tokens    = 4;
+        uint32_t         kernel_tokens      = 2;
+        size_t           block_bytes        = 16;
+        size_t           scale_bytes        = 4;
+        size_t           kv_stride_bytes    = 20;
+        size_t           scale_stride_bytes = 6;
+        CacheGroupPolicy policy             = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    };
+    const auto make_config = [](const Layout& layout) {
+        auto spec                       = std::make_shared<TestKVCacheSpec>();
+        spec->type                      = layout.type;
+        spec->dtype                     = layout.dtype;
+        spec->seq_size_per_block        = layout.physical_tokens;
+        spec->kernel_seq_size_per_block = layout.kernel_tokens;
+        spec->k_block_bytes             = layout.block_bytes / 2;
+        spec->v_block_bytes             = layout.block_bytes - spec->k_block_bytes;
+        spec->k_scale_bytes             = layout.scale_bytes / 2;
+        spec->v_scale_bytes             = layout.scale_bytes - spec->k_scale_bytes;
+
+        CacheGroup group;
+        group.tag                   = "full";
+        group.spec                  = std::move(spec);
+        group.policy                = layout.policy;
+        group.block_num             = 4;
+        group.kv_block_stride_bytes = layout.kv_stride_bytes;
+        group.kv_scale_stride_bytes = layout.scale_stride_bytes;
+        return CacheConfig({std::move(group)}, {{"full"}}, /*main_layer_num=*/1);
+    };
+    const Layout compatible;
+    const auto   expect_incompatible = [&](const Layout& propose_layout) {
+        auto target_config  = make_config(compatible);
+        auto propose_config = make_config(propose_layout);
+        try {
+            mergeMtpModuleForTest(target_config, propose_config, /*module_index=*/0, /*main_layer_num=*/1);
+            FAIL() << "expected an incompatible exact-tag MTP shared pool to be rejected";
+        } catch (const std::runtime_error& e) {
+            const std::string message = e.what();
+            EXPECT_NE(message.find("incompatible MTP shared pool"), std::string::npos);
+            EXPECT_NE(message.find("target={tag=full"), std::string::npos);
+            EXPECT_NE(message.find("source={tag=full"), std::string::npos);
+        }
+    };
+
+    auto target_config  = make_config(compatible);
+    auto propose_config = make_config(compatible);
+    EXPECT_NO_THROW(mergeMtpModuleForTest(target_config, propose_config, /*module_index=*/0, /*main_layer_num=*/1));
+    EXPECT_EQ(target_config.groupLayerIds("full"), std::vector<int>({0, 1}));
+
+    auto different_policy                       = compatible;
+    different_policy.policy.enable_prefix_reuse = false;
+    expect_incompatible(different_policy);
+
+    auto different_type = compatible;
+    different_type.type = KVCacheSpecType::MultiHeadLatentAttention;
+    expect_incompatible(different_type);
+
+    auto different_dtype  = compatible;
+    different_dtype.dtype = DataType::TYPE_BF16;
+    expect_incompatible(different_dtype);
+
+    auto different_physical_tokens            = compatible;
+    different_physical_tokens.physical_tokens = 8;
+    expect_incompatible(different_physical_tokens);
+
+    auto different_kernel_tokens          = compatible;
+    different_kernel_tokens.kernel_tokens = 1;
+    expect_incompatible(different_kernel_tokens);
+
+    auto different_block_bytes        = compatible;
+    different_block_bytes.block_bytes = 20;
+    expect_incompatible(different_block_bytes);
+
+    auto different_scale_bytes        = compatible;
+    different_scale_bytes.scale_bytes = 8;
+    expect_incompatible(different_scale_bytes);
+
+    auto different_kv_stride            = compatible;
+    different_kv_stride.kv_stride_bytes = 24;
+    expect_incompatible(different_kv_stride);
+
+    auto different_scale_stride               = compatible;
+    different_scale_stride.scale_stride_bytes = 8;
+    expect_incompatible(different_scale_stride);
 }
 
 TEST_F(CoordinatorCacheManagerHybridPathTest, MergeMtpPrefersExactDefaultGroupMatch) {
@@ -920,6 +1033,29 @@ TEST_F(CoordinatorCacheManagerHybridPathTest, MergeMtpDoesNotAliasMultiGroupProp
         FAIL() << "expected a multi-group propose config not to use the default alias";
     } catch (const std::runtime_error& e) {
         EXPECT_NE(std::string(e.what()).find("missing group mapping for sub layer=0"), std::string::npos);
+    }
+}
+
+TEST_F(CoordinatorCacheManagerHybridPathTest, MergeMtpRejectsUnmappedProposeTagEvenWithSharedLayerMapping) {
+    auto main_config = makeSingleLayerCacheConfig(
+        makeMhaSpec("full", /*tokens_per_block=*/4, DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/1),
+        CacheGroupType::FULL,
+        "full");
+
+    CacheConfig propose_config;
+    rtp_llm::test::assignCacheConfigFromGroupedSpecs(
+        propose_config,
+        /*main_layer_num=*/1,
+        {makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 1), makeMhaSpec("proposal_only", 4, DataType::TYPE_FP16, 1, 1)},
+        {{0}, {0}},
+        {CacheGroupType::FULL, CacheGroupType::FULL},
+        {"full", "proposal_only"});
+
+    try {
+        mergeMtpModuleForTest(main_config, propose_config, /*module_index=*/0, /*main_layer_num=*/1);
+        FAIL() << "expected an unmapped proposal-only tag to be rejected";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("unmapped propose tag=proposal_only"), std::string::npos);
     }
 }
 
@@ -1185,7 +1321,7 @@ TEST_F(CoordinatorCacheManagerHybridPathTest, UpdateKVBlockForksSharedBlocksAcro
     std::vector<TaggedBlockIdPair> update_mapping;
     ASSERT_TRUE(coordinator_cache_manager->updateKVBlock(batch_res,
                                                          /*block_src_batch=*/std::vector<int>{0, 0},
-                                                         /*copy_last_block=*/false,
+                                                         /*previous_seq_len=*/8,
                                                          update_mapping));
 
     EXPECT_TRUE(update_mapping.empty());
@@ -1216,6 +1352,68 @@ TEST_F(CoordinatorCacheManagerHybridPathTest, UpdateKVBlockForksSharedBlocksAcro
     EXPECT_EQ(coordinator_cache_manager->freeBlocksNum(), free_before);
 }
 
+TEST_F(CoordinatorCacheManagerHybridPathTest, UpdateKVBlockCopiesTailsPerGroupPhysicalBoundary) {
+    const auto run_case = [](int previous_seq_len, const std::vector<std::string>& expected_copy_tags) {
+        auto config      = makePerGroupBlockSizeConfig();
+        auto coordinator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::HOST);
+        EXPECT_TRUE(coordinator->init());
+
+        auto full_blocks    = coordinator->blockPool("full4")->malloc(1);
+        auto compact_blocks = coordinator->blockPool("compact8")->malloc(1);
+        EXPECT_EQ(full_blocks.size(), 1u);
+        EXPECT_EQ(compact_blocks.size(), 1u);
+        auto resource = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100});
+        resource->mutableBlockIds(0, "full4").assign(full_blocks);
+        resource->mutableBlockIds(0, "compact8").assign(compact_blocks);
+
+        std::vector<TaggedBlockIdPair> update_mapping;
+        EXPECT_TRUE(coordinator->updateKVBlock(resource, {0, 0}, previous_seq_len, update_mapping));
+        std::vector<std::string> copied_tags;
+        for (const auto& update : update_mapping) {
+            copied_tags.push_back(update.tag);
+        }
+        EXPECT_EQ(copied_tags, expected_copy_tags);
+        EXPECT_EQ(resource->blocks(1, "full4").back(), full_blocks.front());
+        EXPECT_EQ(resource->blocks(1, "compact8").back(), compact_blocks.front());
+        if (std::find(expected_copy_tags.begin(), expected_copy_tags.end(), "full4") == expected_copy_tags.end()) {
+            EXPECT_EQ(resource->blocks(0, "full4").back(), full_blocks.front());
+        } else {
+            EXPECT_NE(resource->blocks(0, "full4").back(), full_blocks.front());
+        }
+        if (std::find(expected_copy_tags.begin(), expected_copy_tags.end(), "compact8") == expected_copy_tags.end()) {
+            EXPECT_EQ(resource->blocks(0, "compact8").back(), compact_blocks.front());
+        } else {
+            EXPECT_NE(resource->blocks(0, "compact8").back(), compact_blocks.front());
+        }
+        coordinator->free(FreeInfo{resource, nullptr});
+    };
+
+    run_case(/*previous_seq_len=*/4, {"compact8"});
+    run_case(/*previous_seq_len=*/8, {});
+    run_case(/*previous_seq_len=*/5, {"full4", "compact8"});
+}
+
+TEST_F(CoordinatorCacheManagerHybridPathTest, BeamExpansionEstimateUsesAllGroupUpperBound) {
+    auto config      = makePerGroupBlockSizeConfig();
+    auto coordinator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::HOST);
+    ASSERT_TRUE(coordinator->init());
+
+    auto resource = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100});
+    resource->setBatchBlocks(/*batch_id=*/0, "full4", {1});
+    resource->setBatchBlocks(/*batch_id=*/0, "compact8", {1});
+
+    // At token 4 only compact8 needs an immediate copy, but admission reserves both groups because beam expansion may
+    // be delayed. The deliberate one-block overestimate prevents a later allocation failure.
+    EXPECT_EQ(coordinator->estimateBatchPeakNeedBlocks(resource,
+                                                       /*seq_len=*/4,
+                                                       /*common_seq_len=*/4,
+                                                       /*remaining_tokens=*/0,
+                                                       /*reserve_step=*/0,
+                                                       /*enable_reuse_cache=*/false,
+                                                       /*target_batch_size=*/2),
+              2);
+}
+
 TEST_F(CoordinatorCacheManagerHybridPathTest, UpdateKVBlockCopyLastBlockAcrossGroups) {
     auto config                    = makeTinyHybridConfig();
     auto coordinator_cache_manager = std::make_shared<CoordinatorCacheManager>(config, AllocationType::HOST);
@@ -1240,7 +1438,7 @@ TEST_F(CoordinatorCacheManagerHybridPathTest, UpdateKVBlockCopyLastBlockAcrossGr
     std::vector<TaggedBlockIdPair> update_mapping{{"stale", 1, 2}};
     ASSERT_TRUE(coordinator_cache_manager->updateKVBlock(batch_res,
                                                          /*block_src_batch=*/std::vector<int>{0, 0},
-                                                         /*copy_last_block=*/true,
+                                                         /*previous_seq_len=*/5,
                                                          update_mapping));
 
     ASSERT_EQ(update_mapping.size(), 2u);
@@ -1296,7 +1494,7 @@ TEST_F(CoordinatorCacheManagerHybridPathTest, UpdateKVBlockReservationFailureLea
     std::vector<TaggedBlockIdPair> update_mapping{{"stale", 1, 2}};
     EXPECT_FALSE(coordinator_cache_manager->updateKVBlock(batch_res,
                                                           /*block_src_batch=*/std::vector<int>{0, 0},
-                                                          /*copy_last_block=*/true,
+                                                          /*previous_seq_len=*/5,
                                                           update_mapping));
 
     EXPECT_TRUE(update_mapping.empty());
@@ -1332,7 +1530,8 @@ TEST_F(CoordinatorCacheManagerHybridPathTest, UpdateKVBlockReorderedTopologyPres
     batch_res->mutableBlockIds(0, kTinyFullTag).assign(full_blocks);
 
     std::vector<TaggedBlockIdPair> update_mapping;
-    ASSERT_TRUE(coordinator_cache_manager->updateKVBlock(batch_res, {0, 0}, true, update_mapping));
+    ASSERT_TRUE(coordinator_cache_manager->updateKVBlock(
+        batch_res, /*block_src_batch=*/{0, 0}, /*previous_seq_len=*/5, update_mapping));
     ASSERT_EQ(update_mapping.size(), 2u);
     for (const auto& update : update_mapping) {
         EXPECT_EQ(update.src, 1);
@@ -1370,7 +1569,8 @@ TEST_F(CoordinatorCacheManagerHybridPathTest, UpdateKVBlockReorderedTopologyRoll
     const auto full_refs     = full_pool->requestRefBlocksNum();
 
     std::vector<TaggedBlockIdPair> update_mapping{{"stale", 1, 2}};
-    EXPECT_FALSE(coordinator_cache_manager->updateKVBlock(batch_res, {0, 0}, true, update_mapping));
+    EXPECT_FALSE(coordinator_cache_manager->updateKVBlock(
+        batch_res, /*block_src_batch=*/{0, 0}, /*previous_seq_len=*/5, update_mapping));
     EXPECT_TRUE(update_mapping.empty());
     EXPECT_EQ(batch_res->blocks(0, kTinyLinearTag), linear_before);
     EXPECT_EQ(batch_res->blocks(0, kTinyFullTag), full_before);
@@ -1405,7 +1605,7 @@ TEST_F(CoordinatorCacheManagerHybridPathTest, UpdateKVBlockReusesDroppedBatchCap
     std::vector<TaggedBlockIdPair> update_mapping;
     ASSERT_TRUE(coordinator_cache_manager->updateKVBlock(batch_res,
                                                          /*block_src_batch=*/std::vector<int>{1, 1},
-                                                         /*copy_last_block=*/true,
+                                                         /*previous_seq_len=*/5,
                                                          update_mapping));
 
     ASSERT_EQ(update_mapping.size(), 2u);
@@ -1826,7 +2026,8 @@ TEST_F(CoordinatorCacheManagerHybridPathTest, EstimateBatchPeakNeedBlocksAccount
                                                                      /*target_batch_size=*/2),
               0);
 
-    // No future growth is needed, regardless of the target width.
+    // No token growth is needed, but admission reserves one possible tail copy in every group for the additional
+    // sequence because beam expansion may happen after this aligned snapshot.
     EXPECT_EQ(coordinator_cache_manager->estimateBatchPeakNeedBlocks(resource,
                                                                      /*seq_len=*/12,
                                                                      /*common_seq_len=*/8,
@@ -1834,7 +2035,7 @@ TEST_F(CoordinatorCacheManagerHybridPathTest, EstimateBatchPeakNeedBlocksAccount
                                                                      /*reserve_step=*/0,
                                                                      /*enable_reuse_cache=*/false,
                                                                      /*target_batch_size=*/3),
-              0);
+              2);
 
     // Four more tokens add one block in each group for each current batch.
     EXPECT_EQ(coordinator_cache_manager->estimateBatchPeakNeedBlocks(resource,
@@ -1846,7 +2047,8 @@ TEST_F(CoordinatorCacheManagerHybridPathTest, EstimateBatchPeakNeedBlocksAccount
                                                                      /*target_batch_size=*/2),
               4);
 
-    // One future block in each group is charged at the requested target width.
+    // One future block in each group is charged at the requested target width, plus one possible tail copy per group
+    // for the additional sequence.
     EXPECT_EQ(coordinator_cache_manager->estimateBatchPeakNeedBlocks(resource,
                                                                      /*seq_len=*/12,
                                                                      /*common_seq_len=*/8,
@@ -1854,7 +2056,7 @@ TEST_F(CoordinatorCacheManagerHybridPathTest, EstimateBatchPeakNeedBlocksAccount
                                                                      /*reserve_step=*/0,
                                                                      /*enable_reuse_cache=*/false,
                                                                      /*target_batch_size=*/3),
-              6);
+              8);
 
     resource->setBatchBlocks(/*batch_id=*/0, kTinyLinearTag, {NULL_BLOCK_IDX, 10, 11, NULL_BLOCK_IDX});
     resource->setBatchBlocks(/*batch_id=*/1, kTinyLinearTag, {NULL_BLOCK_IDX, 10, 12, NULL_BLOCK_IDX});
@@ -1870,6 +2072,25 @@ TEST_F(CoordinatorCacheManagerHybridPathTest, EstimateBatchPeakNeedBlocksAccount
                                                                      /*enable_reuse_cache=*/false,
                                                                      /*target_batch_size=*/2),
               0);
+
+    // The global tail is unaligned, so admission conservatively charges every
+    // configured group for both additional sequences.
+    EXPECT_EQ(coordinator_cache_manager->estimateBatchPeakNeedBlocks(resource,
+                                                                     /*seq_len=*/13,
+                                                                     /*common_seq_len=*/8,
+                                                                     /*remaining_tokens=*/0,
+                                                                     /*reserve_step=*/0,
+                                                                     /*enable_reuse_cache=*/false,
+                                                                     /*target_batch_size=*/4),
+              4);
+    EXPECT_THROW(coordinator_cache_manager->estimateBatchPeakNeedBlocks(resource,
+                                                                        /*seq_len=*/13,
+                                                                        /*common_seq_len=*/8,
+                                                                        /*remaining_tokens=*/0,
+                                                                        /*reserve_step=*/0,
+                                                                        /*enable_reuse_cache=*/false,
+                                                                        std::numeric_limits<int>::max()),
+                 std::runtime_error);
 }
 
 TEST_F(CoordinatorCacheManagerHybridPathTest, FreshUnalignedMultiSequencePeakFitsIndependentPools) {
