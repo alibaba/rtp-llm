@@ -444,6 +444,47 @@ class CostBasedDecodeStrategyTest {
                 "a shared snapshot must not collapse every plan onto one endpoint");
     }
 
+    @Test
+    void singleCandidateSkipsOutlierRejection() {
+        // Upstream's directory refactor replaced the shared static ledger
+        // (EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS) with the per-test
+        // decodeStatuses map, so this outlier-rejection guard rides the same
+        // local-directory contract as every other test here.
+        WorkerStatus worker = createWorkerStatus("127.0.0.1");
+        setKv(worker, 10_000, 10_000);
+        decodeStatuses.put("127.0.0.1:8080", worker);
+
+        EndpointRegistry registry = createDecodeRegistry(decodeStatuses);
+        DecodeEndpoint endpoint = registry.getDecode("127.0.0.1:8080");
+        // n == 1 with the upstream self-inclusive average: the average IS
+        // the engine's own load, so own > multiplier * avg can never hold —
+        // a lone engine always stays selectable regardless of its load.
+        for (int i = 0; i < 6; i++) {
+            reservePinned(endpoint, 400L + i, 0, 0, 50);
+        }
+
+        // Upstream dropped the ResourceMeasureFactory indirection: the
+        // strategy now takes the DecodeResourceMeasure directly, so the
+        // mock measure is wired straight into the constructor.
+        DecodeResourceMeasure measure = Mockito.mock(DecodeResourceMeasure.class);
+        allowDecodeSelection(measure);
+        CostBasedDecodeStrategy strategy = new CostBasedDecodeStrategy(
+                new WorkerDirectory(registry), measure);
+
+        Request request = new Request();
+        request.setSeqLen(1);
+        request.setRequestId(500L);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        context.setConfig(configService.loadBalanceConfig());
+
+        ServerStatus status = selectStatus(
+                strategy, context, RoleType.DECODE, null);
+        Assertions.assertTrue(status.isSuccess());
+        Assertions.assertEquals("127.0.0.1", status.getServerIp(),
+                "a lone engine's self-inclusive average equals its own load, so it must stay selectable");
+    }
+
     private static void setKv(
             WorkerStatus worker, long totalKv, long availableKv) {
         StrategyTestSupport.publish(worker, StrategyTestSupport.response(
@@ -467,6 +508,19 @@ class CostBasedDecodeStrategyTest {
             EndpointRegistry registry,
             String address) {
         return (DecodeEndpoint) registry.get(RoleType.DECODE, address);
+    }
+
+    /** Non-queued inflight reservation: each call raises engineLoad by one. */
+    private static void reservePinned(
+            DecodeEndpoint endpoint,
+            long requestId,
+            long kvTokens,
+            long expectedKvTokens,
+            int priority) {
+        try (var pin = endpoint.tryPinGeneration()) {
+            endpoint.reservePinned(
+                    pin, requestId, kvTokens, expectedKvTokens, priority);
+        }
     }
 
     private static ServerStatus selectStatus(
