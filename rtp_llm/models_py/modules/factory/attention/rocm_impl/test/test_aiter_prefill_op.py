@@ -1293,6 +1293,60 @@ class TestAiterPrefillAttnOpTritonCudaGraphWorkspace(unittest.TestCase):
 
 
 @unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillAttnOp module")
+class TestAiterPrefillAttnOpPagedCudaGraphWorkspace(unittest.TestCase):
+    """Regression tests for fixed-address batch-prefill graph workspace."""
+
+    def test_repeated_prepare_keeps_captured_workspace_addresses(self):
+        from types import SimpleNamespace
+
+        cfg = _make_attn_configs(head_num=4, head_num_kv=2, head_dim=8)
+        cfg.kernel_tokens_per_block = 16
+        op = AiterPrefillAttnOpPaged(cfg)
+        device = torch.device("cuda")
+        block_table = torch.zeros(3, 4, dtype=torch.int32, device=device)
+        fmha_params = SimpleNamespace(
+            cu_seqlens_q=torch.tensor(
+                [0, 8, 16, 24], dtype=torch.int32, device=device
+            ),
+            cu_seqlens_k=torch.tensor(
+                [0, 40, 80, 120], dtype=torch.int32, device=device
+            ),
+            kv_cache_block_id_device=block_table,
+        )
+        attn_inputs = SimpleNamespace(
+            input_lengths_device=torch.full(
+                (3,), 8, dtype=torch.int32, device=device
+            ),
+            prefix_lengths_device=torch.full(
+                (3,), 32, dtype=torch.int32, device=device
+            ),
+            kv_cache_kernel_block_id_device=block_table,
+            kv_cache_block_id_device=block_table,
+        )
+
+        op.prepare_cuda_graph(fmha_params, attn_inputs)
+        captured_ptrs = {
+            "seqlen_k": op.seqlen_k_buf.data_ptr(),
+            "kv_indptr": op.kv_indptr_buf.data_ptr(),
+            "kv_page_indices": op.kv_page_indices_buf.data_ptr(),
+            "descale": op.descale_buf.data_ptr(),
+            "sanitized_block_table": op.sanitized_bt_buf.data_ptr(),
+        }
+
+        op.prepare_cuda_graph(fmha_params, attn_inputs)
+
+        replay_ptrs = {
+            "seqlen_k": op.seqlen_k_buf.data_ptr(),
+            "kv_indptr": op.kv_indptr_buf.data_ptr(),
+            "kv_page_indices": op.kv_page_indices_buf.data_ptr(),
+            "descale": op.descale_buf.data_ptr(),
+            "sanitized_block_table": op.sanitized_bt_buf.data_ptr(),
+        }
+        self.assertEqual(replay_ptrs, captured_ptrs)
+
+
+@unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
 @unittest.skipUnless(_AITER_AVAILABLE, "Requires aiter")
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires ROCm attention wrapper module")
 class TestAiterPrefillTritonCudaGraphNumerics(unittest.TestCase):
