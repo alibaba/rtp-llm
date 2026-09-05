@@ -128,6 +128,7 @@ export FLEXLB_CONFIG='{
     "enqueueRpcTimeoutMs": 5000
   },
   "router": {
+    "availabilityHysteresisPercent": 15,
     "groupSelector": {
       "defaultTargets": [
         {"group": "default-group", "weight": 1}
@@ -144,17 +145,19 @@ export FLEXLB_CONFIG='{
     },
     "roles": {
       "prefill": {
-        "executionTimeEstimator": {
-          "type": "FORMULA",
-          "expression": "sum(computeTokens) + 0.3*sum(hitCacheTokens)"
+        "availability": {
+          "maxPendingRequests": 64
         },
-        "candidateChoice": {
-          "type": "RANDOM_WITHIN_TOLERANCE",
-          "relativeTolerance": 0.1,
-          "minimumToleranceMs": 20,
-          "outlierRejection": {
-            "maxPendingVsAverageMultiplier": 3.0,
-            "maxProjectedDrainVsAverageMultiplier": 3.0
+        "selector": {
+          "type": "ESTIMATED_TTFT",
+          "candidateChoice": {
+            "type": "RANDOM_WITHIN_TOLERANCE",
+            "relativeTolerance": 0.1,
+            "minimumToleranceMs": 20,
+            "outlierRejection": {
+              "maxPendingVsAverageMultiplier": 3.0,
+              "maxProjectedDrainVsAverageMultiplier": 3.0
+            }
           }
         },
         "cacheAffinity": {
@@ -170,12 +173,17 @@ export FLEXLB_CONFIG='{
         "kvReservation": {
           "maxOutputTokensForEstimate": 1000
         },
-        "decayPerToken": 0.001,
-        "loadDecayPerRequest": 1.0,
-        "outlierRejection": {
-          "maxEngineLoadVsAverageMultiplier": 3.0,
-          "maxKvUsedVsAverageMultiplier": 3.0
+        "selector": {
+          "type": "KV_USAGE_WEIGHTED_RANDOM",
+          "decayPerToken": 0.001,
+          "outlierRejection": {
+            "maxEngineLoadVsAverageMultiplier": 3.0,
+            "maxKvUsedVsAverageMultiplier": 3.0
+          }
         }
+      },
+      "vit": {
+        "selector": {"type": "RANDOM"}
       }
     }
   },
@@ -270,7 +278,7 @@ request is considered first, `SINGLE`/`FIXED_WINDOW` choose how many requests fo
 one decision group, and `NON_BATCH`/`BATCH` choose whether the frontend or Master
 sends them.
 
-`FIXED_WINDOW` is bounded by `maxRequests` (any positive value),
+`FIXED_WINDOW` is bounded by `maxRequests` (1–1024),
 `maxCollectionWaitMs`, and the optional
 inclusive group-growth cap `maxPredictedExecutionMs`: reaching the cap dispatches
 the group without waiting for the collection window; another request is not
@@ -282,31 +290,49 @@ decision-group limits live only under `scheduler.decision`, waiting-queue limits
 live only under `scheduler.capacity`, and `dispatcher` contains only delivery and
 delivery-backpressure settings. Omitting `scheduler.decision` uses
 `FIXED_WINDOW`; select `SINGLE` explicitly when that behavior is required.
-Omitting `schemaVersion` means v2; other explicit versions are rejected.
+An explicitly declared `schemaVersion: 1` is migrated once at startup before
+binding to the schema-v2 runtime model. A v1 `NON_BATCH` queue with no decision
+becomes `SINGLE`; a v1 `BATCH` queue with no decision becomes `FIXED_WINDOW`,
+and its `maxRequests`, `maxCollectionWaitMs`, and
+`maxWaitingRequestsPerPrefillWorker` fields move to their v2 owners. Existing
+`scheduler.decision` and `scheduler.capacity` fields remain authoritative after
+the shadowed legacy values pass their original v1 validation. An active
+`earlyDispatchPredictedExecutionMs` is rejected because its equality boundary
+cannot be represented exactly by `maxPredictedExecutionMs`. A v1 explicit
+`maxPredictedExecutionMs` is rejected for the same reason: equality did not
+trigger immediate dispatch under v1 but does under v2. Omitting `schemaVersion`
+means v2; other explicit versions are rejected.
 
 Production-style examples migrated from the former field-level environment variables:
 
 - [QUEUE + PRIORITY + NON_BATCH](docs/config-examples/flexlb-queue-priority-non-batch.json)
 - [QUEUE + PRIORITY + BATCH](docs/config-examples/flexlb-queue-priority-batch.json)
 
-DIRECT uses the same fixed role-selection pipelines as QUEUE. A compact DIRECT
-configuration is:
+DIRECT uses the same role routing configuration as QUEUE. For example, a compact
+DIRECT configuration with explicit random prefill/decode selection is:
 
 ```bash
 export FLEXLB_CONFIG='{
   "schemaVersion": 2,
   "scheduler": {"type": "DIRECT"},
-  "dispatcher": {"type": "NON_BATCH"}
+  "dispatcher": {"type": "NON_BATCH"},
+  "router": {
+    "roles": {
+      "prefill": {"selector": {"type": "RANDOM"}},
+      "decode": {"selector": {"type": "RANDOM"}},
+      "vit": {"selector": {"type": "RANDOM"}}
+    }
+  }
 }'
 ```
 
-PREFILL and PDFUSION share the estimated-TTFT pipeline, configured by
-`candidateChoice`: `BEST_ONLY`, `RANDOM_WITHIN_TOLERANCE`, or
-`LEAST_RECENTLY_USED_IN_POOL`. Decode uses KV-weighted selection and VIT uses
-random selection; these fixed algorithms are not represented as configuration.
+PREFILL and PDFUSION share the prefill selector. Prefill selector types are
+`RANDOM` and `ESTIMATED_TTFT`; the latter supports `BEST_ONLY`,
+`RANDOM_WITHIN_TOLERANCE`, or `LEAST_RECENTLY_USED_IN_POOL` candidate choice.
 The candidate pool for `LEAST_RECENTLY_USED_IN_POOL` is tagged as either
 `{"type":"RATIO","ratio":0.3,"minimumWorkers":1}` or
-`{"type":"FIXED","workers":2}`.
+`{"type":"FIXED","workers":2}`. Decode selector types are `RANDOM` and
+`KV_USAGE_WEIGHTED_RANDOM`; VIT currently supports `RANDOM`.
 
 `ESTIMATED_TTFT` is a deterministic frozen-snapshot projection, not a promise
 about future wall-clock latency. It inserts the incoming request using the live
@@ -382,12 +408,10 @@ Authorization: Bearer <token>
 - **FlexLB behavior**: one strict JSON document in `FLEXLB_CONFIG`.
 - **Prefill execution formula**:
   `router.roles.prefill.executionTimeEstimator.expression` when estimator type is
-  `FORMULA`.
-- **Routing strategy parameters**: Prefill `candidateChoice` and Decode
-  `decayPerToken`/`loadDecayPerRequest`/`outlierRejection` under their role
-  objects. Decode combines KV usage and queued ownership as soft exponential
-  weights; it never hard-collapses a concurrent planning window onto the one
-  endpoint that happened to be least loaded in a shared snapshot.
+  `FORMULA`. Omitting the estimator applies the code default: the production
+  DSv4 prefill fit (`RoutingConfig.FormulaEstimatorConfig.DEFAULT_EXPRESSION`).
+- **Routing strategy parameters**: the tagged selector objects under
+  `router.roles.prefill`, `router.roles.decode`, and `router.roles.vit`.
 - **Traffic group selection**: `router.groupSelector` inside the same document.
 - **Backend topology**: `MODEL_SERVICE_CONFIG`.
 - **ZooKeeper consistency**: `FLEXLB_SYNC_CONSISTENCY_CONFIG`.
