@@ -14,6 +14,7 @@ from rtp_llm.ops import (
     PrefillCPConfig,
     RoleType,
     SpeculativeType,
+    VitSeparation,
 )
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 
@@ -337,11 +338,25 @@ def set_parallelism_config(
         )
 
     if py_prefill_cp_config:
-        parallelism_config.prefill_cp_config.method = py_prefill_cp_config.method
-        parallelism_config.prefill_cp_config.comm_buffer_size = (
+        target_prefill_cp_config = parallelism_config.prefill_cp_config
+        source_has_alignment = hasattr(py_prefill_cp_config, "segment_size_alignment")
+        target_has_alignment = hasattr(
+            target_prefill_cp_config, "segment_size_alignment"
+        )
+        if source_has_alignment and target_has_alignment:
+            if py_prefill_cp_config.segment_size_alignment <= 0:
+                raise ValueError(
+                    "CP segment_size_alignment must be greater than 0, got "
+                    f"{py_prefill_cp_config.segment_size_alignment}"
+                )
+            target_prefill_cp_config.segment_size_alignment = (
+                py_prefill_cp_config.segment_size_alignment
+            )
+        target_prefill_cp_config.method = py_prefill_cp_config.method
+        target_prefill_cp_config.comm_buffer_size = (
             py_prefill_cp_config.comm_buffer_size
         )
-        parallelism_config.prefill_cp_config.kv_cache_sharded = (
+        target_prefill_cp_config.kv_cache_sharded = (
             py_prefill_cp_config.kv_cache_sharded
         )
         if hasattr(py_prefill_cp_config, "prefill_cp_size") and hasattr(
@@ -381,7 +396,74 @@ def _infer_model_type(ckpt_path: str) -> Optional[str]:
         return None
 
 
+def _configure_model_prefill_cp(py_env_configs: PyEnvConfigs) -> None:
+    prefill_cp_config = py_env_configs.prefill_cp_config
+    if not prefill_cp_config.is_enabled():
+        return
+
+    # These processes do not execute the language-model forward and may share
+    # the backend's environment without participating in context parallelism.
+    if py_env_configs.role_config.role_type in (RoleType.FRONTEND, RoleType.VIT):
+        return
+
+    if py_env_configs.device_resource_config.enable_layer_micro_batch:
+        raise ValueError(
+            "Context parallelism cannot be combined with layer micro-batching: "
+            "the layer micro-batch forward path does not apply CP input/output "
+            "processing. Set ENABLE_LAYER_MICRO_BATCH=0 when CP_ROTATE_METHOD "
+            "is enabled."
+        )
+
+    # Use the lazy-aware factory instead of exposing a second model registry API.
+    from rtp_llm.model_factory import ModelFactory
+
+    try:
+        model_cls = ModelFactory.get_model_cls(py_env_configs.model_args.model_type)
+    except KeyError as error:
+        raise ValueError(
+            "Cannot configure context parallelism for unknown model_type="
+            f"{py_env_configs.model_args.model_type}"
+        ) from error
+
+    segment_alignment = model_cls.prefill_cp_alignment()
+    if segment_alignment <= 0:
+        raise ValueError(
+            f"Model {py_env_configs.model_args.model_type} returned invalid CP "
+            f"alignment {segment_alignment}"
+        )
+    target_prefill_cp_config = py_env_configs.parallelism_config.prefill_cp_config
+    if not hasattr(prefill_cp_config, "segment_size_alignment") or not hasattr(
+        target_prefill_cp_config, "segment_size_alignment"
+    ):
+        raise RuntimeError(
+            "CP segment_size_alignment is unavailable in this rtp_llm.ops build; "
+            "update or rebuild the ops bindings before enabling context parallelism"
+        )
+    prefill_cp_config.segment_size_alignment = segment_alignment
+    target_prefill_cp_config.segment_size_alignment = segment_alignment
+
+    cache_block_size = py_env_configs.kv_cache_config.seq_size_per_block
+    if cache_block_size > 0 and cache_block_size % segment_alignment != 0:
+        raise ValueError(
+            f"KV cache block size {cache_block_size} is incompatible with CP for "
+            f"{py_env_configs.model_args.model_type}, whose cache-state kernel "
+            f"requires a multiple of {segment_alignment}"
+        )
+
+
 def setup_default_args(py_env_configs):
+    # Backward compat: VIT_SEPARATION=ROLE without ROLE_TYPE=VIT
+    if (
+        py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE
+        and py_env_configs.role_config.role_type == RoleType.PDFUSION
+    ):
+        logging.warning(
+            "VIT_SEPARATION=ROLE detected without ROLE_TYPE=VIT. "
+            "Auto-setting ROLE_TYPE=VIT for backward compatibility. "
+            "Please migrate to ROLE_TYPE=VIT explicitly."
+        )
+        py_env_configs.role_config.role_type = RoleType.VIT
+
     set_parallelism_config(
         py_env_configs.parallelism_config,
         py_prefill_cp_config=py_env_configs.prefill_cp_config,
@@ -427,6 +509,8 @@ def setup_default_args(py_env_configs):
         logging.info("set SEQ_SIZE_PER_BLOCK 256 by default")
     if py_env_configs.kv_cache_config.seq_size_per_block == 0:
         py_env_configs.kv_cache_config.seq_size_per_block = 64
+
+    _configure_model_prefill_cp(py_env_configs)
 
     # Set NCCL_P2P_DISABLE for RTX GPUs or when CUDA is not available
     # Frontend doesn't need this setting

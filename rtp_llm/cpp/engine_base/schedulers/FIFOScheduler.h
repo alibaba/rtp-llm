@@ -125,6 +125,7 @@ private:
     // excluded). 0 disables it.
     const size_t max_batch_tokens_without_cache_ = 0;
     const size_t prefill_cp_size_                = 1;
+    const size_t prefill_cp_segment_alignment_   = 1;
 
     // Consumed (exchanged to 0) from the const fillExtraMetrics() reporting hook.
     mutable std::atomic<int64_t> pending_group_fallback_count_ = 0;

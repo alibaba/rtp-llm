@@ -40,6 +40,40 @@ py_test(
 )
 
 py_test(
+    name = "collective_torch_tp2_dp2_test",
+    srcs = ["collective_torch_test.py"],
+    main = "collective_torch_test.py",
+    args = [
+        "TestCollectiveOperations.test_all_collectives_tp2_dp2",
+        "TestDistributedEnvironment.test_all_reduce_copies_separate_rocm_result_into_input",
+        "TestDistributedEnvironment.test_all_reduce_passes_input_as_symmetric_memory_output",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = 'moderate',
+    env = {"GPU_COUNT": "4"},
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20', 'gpu_count':'4'},
+)
+
+py_test(
+    name = "collective_torch_all_reduce_contract_test",
+    srcs = ["collective_torch_test.py"],
+    main = "collective_torch_test.py",
+    args = [
+        "TestDistributedEnvironment.test_all_reduce_copies_separate_rocm_result_into_input",
+        "TestDistributedEnvironment.test_all_reduce_passes_input_as_symmetric_memory_output",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = "short",
+)
+
+py_test(
     name = "collective_torch_hipgraph_unit_test",
     srcs = ["collective_torch_hipgraph_unit_test.py"],
     deps = [
@@ -60,6 +94,36 @@ py_test(
    env = {"GPU_COUNT": "4"},
    tags = ["open_skip", "H20"],
    exec_properties = {'gpu':'H20', 'gpu_count':'4'},
+)
+
+py_test(
+    name = "user_buffers_send_recv_test",
+    srcs = ["user_buffers_test.py"],
+    main = "user_buffers_test.py",
+    args = ["TestUserBufferCommunicator.test_user_buffers_worldsize_2"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:user_buffers",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    env = {"GPU_COUNT": "2"},
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20', 'gpu_count':'2'},
+)
+
+py_test(
+    name = "user_buffers_tp2_dp2_test",
+    srcs = ["user_buffers_test.py"],
+    main = "user_buffers_test.py",
+    args = ["TestUserBufferCommunicator.test_user_buffers_tp2_dp2"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:user_buffers",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    env = {"GPU_COUNT": "4"},
+    tags = ["H20"],
+    exec_properties = {'gpu':'H20', 'gpu_count':'4'},
 )
 
 py_test(

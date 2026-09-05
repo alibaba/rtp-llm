@@ -8,23 +8,29 @@ import logging
 import multiprocessing as mp
 import os
 import unittest
+from unittest import mock
 
 logging.basicConfig(level=logging.INFO)
 
 import torch
 
+from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import (
     Group,
     _get_group,
+    _get_symm_mem,
     all_gather,
     all_reduce,
     broadcast,
+    broadcast_from_group_rank,
     destroy_distributed_environment,
     distributed_environment_initialized,
     init_distributed_environment,
     recv,
+    recv_from_group_rank,
     reduce_scatter,
     send,
+    send_to_group_rank,
 )
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 from rtp_llm.test.utils.port_util import PortManager
@@ -67,18 +73,21 @@ def _test_all_reduce_collective(
         # Only test if this rank is in the group
         if rank in group_ranks:
             logging.info(f"Rank {rank} all_reduce: {group_type} {group_ranks}")
-            tensor = torch.ones(3, device=f"cuda:{parallelism_config.local_rank}") * (
-                rank + 1
-            )
-            all_reduce(tensor, group=group_type)
+            dtype = torch.bfloat16 if group_type == Group.TP else torch.float32
+            tensor = torch.ones(
+                4, dtype=dtype, device=f"cuda:{parallelism_config.local_rank}"
+            ) * (rank + 1)
+            if group_type == Group.TP:
+                symm_mem_comm = _get_symm_mem().get_symm_mem_communicator()
+                assert symm_mem_comm is not None
+                assert symm_mem_comm.should_torch_symm_mem_allreduce(tensor)
+            result = all_reduce(tensor, group=group_type)
+            assert result is tensor
             torch.cuda.synchronize()
             torch.distributed.barrier(group=process_group)
 
             expected_sum = sum(r + 1 for r in group_ranks)
-            expected = (
-                torch.ones(3, device=f"cuda:{parallelism_config.local_rank}")
-                * expected_sum
-            )
+            expected = torch.ones_like(tensor) * expected_sum
             logging.info(f"Rank {rank} expected: {expected.cpu()}, got {tensor.cpu()}")
             assert torch.allclose(
                 tensor, expected
@@ -128,6 +137,21 @@ def _test_broadcast_collective(
             assert torch.allclose(
                 tensor, expected
             ), f"Rank {rank} broadcast {group_type}: Expected {expected.cpu()}, got {tensor.cpu()}"
+
+            group_src = len(group_ranks) - 1
+            global_src = group_ranks[group_src]
+            tensor = torch.full(
+                (3,),
+                float(global_src + 1) if rank == global_src else 0.0,
+                device=f"cuda:{parallelism_config.local_rank}",
+            )
+            broadcast_from_group_rank(tensor, src=group_src, group=group_type)
+            torch.cuda.synchronize()
+            expected = torch.full_like(tensor, float(global_src + 1))
+            assert torch.equal(tensor, expected), (
+                f"Rank {rank} group-rank broadcast {group_type}: "
+                f"Expected {expected.cpu()}, got {tensor.cpu()}"
+            )
 
     # All ranks synchronize before next test
     torch.distributed.barrier()
@@ -184,6 +208,23 @@ def _test_send_recv_collective(
                 ), f"Rank {rank} send/recv {group_type}: Expected [1,2,3], got {tensor.cpu()}"
 
             torch.distributed.barrier(group=process_group)
+
+            if group_type == Group.TP:
+                src_group_rank = 0
+                dst_group_rank = 1
+                if rank == group_ranks[src_group_rank]:
+                    tensor = torch.tensor(
+                        [float(rank + 1)],
+                        device=f"cuda:{parallelism_config.local_rank}",
+                    )
+                    send_to_group_rank(tensor, dst=dst_group_rank, group=group_type)
+                elif rank == group_ranks[dst_group_rank]:
+                    tensor = torch.zeros(
+                        1, device=f"cuda:{parallelism_config.local_rank}"
+                    )
+                    recv_from_group_rank(tensor, src=src_group_rank, group=group_type)
+                    assert tensor.item() == float(group_ranks[src_group_rank] + 1)
+                torch.distributed.barrier(group=process_group)
 
     # All ranks synchronize before next test
     torch.distributed.barrier()
@@ -259,12 +300,13 @@ def _test_reduce_scatter_collective(
             # mis-scatter (e.g. wrong offset) cannot be hidden by uniform
             # inputs. Chunk c on rank r holds the value (r+1) * (c+1).
             input_tensor = torch.empty(
-                group_size * chunk_size, hidden_dim,
+                group_size * chunk_size,
+                hidden_dim,
                 device=f"cuda:{parallelism_config.local_rank}",
             )
             for c in range(group_size):
-                input_tensor[c * chunk_size : (c + 1) * chunk_size] = (
-                    (rank + 1) * (c + 1)
+                input_tensor[c * chunk_size : (c + 1) * chunk_size] = (rank + 1) * (
+                    c + 1
                 )
 
             result = reduce_scatter(input_tensor, group=group_type)
@@ -277,10 +319,14 @@ def _test_reduce_scatter_collective(
             # If reduce_scatter mis-aligned chunks, expected != observed.
             expected_sum = sum(r + 1 for r in group_ranks)
             expected_chunk_value = expected_sum * (local_idx + 1)
-            expected = torch.ones(
-                chunk_size, hidden_dim,
-                device=f"cuda:{parallelism_config.local_rank}",
-            ) * expected_chunk_value
+            expected = (
+                torch.ones(
+                    chunk_size,
+                    hidden_dim,
+                    device=f"cuda:{parallelism_config.local_rank}",
+                )
+                * expected_chunk_value
+            )
 
             assert result.shape == (chunk_size, hidden_dim), (
                 f"Rank {rank} reduce_scatter {group_type}: "
@@ -322,7 +368,8 @@ def _test_allgather_reduce_scatter_roundtrip(
 
             # Each rank starts with its own scattered chunk
             original = torch.randn(
-                chunk_size, hidden_dim,
+                chunk_size,
+                hidden_dim,
                 device=f"cuda:{parallelism_config.local_rank}",
             )
 
@@ -554,6 +601,38 @@ class TestDistributedEnvironment(unittest.TestCase):
 
     def setUp(self):
         mp.set_start_method("spawn", force=True)
+
+    def test_all_reduce_copies_separate_rocm_result_into_input(self):
+        tensor = torch.zeros(4)
+        reduced = torch.full_like(tensor, 3)
+        rocm = mock.Mock()
+        rocm.should_use_capture_collectives.return_value = True
+        rocm.capture_all_reduce.return_value = reduced
+
+        with mock.patch.object(
+            collective_torch, "_get_rocm_rccl", return_value=rocm
+        ), mock.patch.object(collective_torch, "_get_group", return_value=object()):
+            result = all_reduce(tensor, Group.TP)
+
+        self.assertIs(result, tensor)
+        torch.testing.assert_close(tensor, reduced)
+
+    def test_all_reduce_passes_input_as_symmetric_memory_output(self):
+        tensor = torch.zeros(4, dtype=torch.bfloat16)
+        communicator = mock.Mock()
+        communicator.should_torch_symm_mem_allreduce.return_value = True
+        communicator.all_reduce.side_effect = lambda _, out: out.fill_(2)
+        symm_mem = mock.Mock()
+        symm_mem.get_symm_mem_communicator.return_value = communicator
+
+        with mock.patch.object(
+            collective_torch, "_get_rocm_rccl", return_value=None
+        ), mock.patch.object(collective_torch, "_get_symm_mem", return_value=symm_mem):
+            result = all_reduce(tensor, Group.TP)
+
+        self.assertIs(result, tensor)
+        torch.testing.assert_close(tensor, torch.full_like(tensor, 2))
+        self.assertIs(communicator.all_reduce.call_args.kwargs["out"], tensor)
 
     def test_distributed_environment_initialized(self):
         """Test checking if distributed environment is initialized"""

@@ -180,6 +180,32 @@ class TestPCPAllGatherOverlapAttnOp(CPAttnTestBase):
             tokens_per_block=16,
         )
 
+    def test_no_prefix_production_alignment_padding(self):
+        self.run_no_prefix(
+            batch_size=1,
+            sequence_lengths=[257],
+            cp_size=2,
+            cp_rank=1,
+            tokens_per_block=64,
+            segment_size_alignment=64,
+        )
+
+    def test_prefix_production_alignment_padding(self):
+        self.run_with_prefix(
+            batch_size=2,
+            new_lengths=[257, 129],
+            prefix_lengths=[64, 64],
+            cp_size=2,
+            cp_rank=0,
+            tokens_per_block=64,
+            segment_size_alignment=64,
+        )
+
+    def test_warmup_without_kv_cache(self):
+        self.run_no_prefix(
+            batch_size=1, sequence_lengths=[32], cp_size=2, cp_rank=0, warmup=True
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

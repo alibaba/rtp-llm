@@ -3,16 +3,19 @@ import io
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
 from rtp_llm.config.engine_config import EngineConfig, setup_pd_sep_config
 from rtp_llm.config.py_config_modules import PyEnvConfigs, ServerConfig
 from rtp_llm.config.server_config_setup import (
+    _configure_model_prefill_cp,
     set_parallelism_config,
     setup_and_configure_server,
+    setup_default_args,
 )
-from rtp_llm.ops import CPRotateMethod, NcclCommConfig, RoleType
+from rtp_llm.ops import CPRotateMethod, NcclCommConfig, RoleType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 
 # clear=True must preserve gpu_lock isolation across Torch lazy initialization.
@@ -25,6 +28,18 @@ _PINNED_DEVICES = {
 
 def _jit_env(**values):
     return {**_PINNED_DEVICES, "MODEL_TYPE": "fake_model", **values}
+
+
+class _ParallelismConfigProxy:
+    def __init__(self, wrapped, prefill_cp_config):
+        object.__setattr__(self, "_wrapped", wrapped)
+        object.__setattr__(self, "prefill_cp_config", prefill_cp_config)
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._wrapped, name, value)
 
 
 class ServerConfigPortLayoutTest(TestCase):
@@ -57,6 +72,170 @@ class ServerConfigPortLayoutTest(TestCase):
 
 
 class GenerateConfigTest(TestCase):
+
+    @staticmethod
+    def _qwen_cp_configs() -> PyEnvConfigs:
+        configs = PyEnvConfigs()
+        configs.model_args.model_type = "qwen35_dense"
+        configs.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+        configs.kv_cache_config.seq_size_per_block = 256
+        parallelism = configs.parallelism_config
+        parallelism.tp_size = 4
+        parallelism.world_size = 4
+        parallelism.dp_size = 1
+        parallelism.ep_size = 1
+        parallelism.pp_size = 1
+        parallelism.ffn_sp_size = 1
+        configs.role_config.role_type = RoleType.PDFUSION
+        set_parallelism_config(
+            parallelism, py_prefill_cp_config=configs.prefill_cp_config
+        )
+        return configs
+
+    @staticmethod
+    def _old_ops_cp_configs(role_type: RoleType) -> PyEnvConfigs:
+        configs = PyEnvConfigs()
+        configs.model_args.model_type = "fake_model"
+        configs.role_config.role_type = role_type
+        configs.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+        source = configs.prefill_cp_config
+        configs.prefill_cp_config = SimpleNamespace(
+            method=source.method,
+            comm_buffer_size=source.comm_buffer_size,
+            kv_cache_sharded=source.kv_cache_sharded,
+            is_enabled=lambda: True,
+        )
+        old_target = SimpleNamespace(
+            method=CPRotateMethod.DISABLED,
+            comm_buffer_size=0,
+            kv_cache_sharded=False,
+        )
+        configs.parallelism_config = _ParallelismConfigProxy(
+            configs.parallelism_config, old_target
+        )
+        return configs
+
+    def test_qwen_cp_alignment_propagates(self):
+        from rtp_llm.models.qwen3_next.qwen3_next import Qwen3NextBase
+
+        configs = self._qwen_cp_configs()
+        with patch(
+            "rtp_llm.model_factory.ModelFactory.get_model_cls",
+            return_value=Qwen3NextBase,
+        ):
+            _configure_model_prefill_cp(configs)
+
+        self.assertEqual(configs.prefill_cp_config.segment_size_alignment, 64)
+        self.assertEqual(
+            configs.parallelism_config.prefill_cp_config.segment_size_alignment, 64
+        )
+
+    def test_cp_rejects_invalid_alignment_and_cache_block_size(self):
+        configs = PyEnvConfigs()
+        configs.prefill_cp_config.segment_size_alignment = 0
+        with self.assertRaisesRegex(ValueError, "must be greater than 0"):
+            set_parallelism_config(
+                configs.parallelism_config,
+                py_prefill_cp_config=configs.prefill_cp_config,
+            )
+
+        from rtp_llm.models.qwen3_next.qwen3_next import Qwen3NextBase
+
+        configs = self._qwen_cp_configs()
+        configs.kv_cache_config.seq_size_per_block = 96
+        with patch(
+            "rtp_llm.model_factory.ModelFactory.get_model_cls",
+            return_value=Qwen3NextBase,
+        ), self.assertRaisesRegex(ValueError, "KV cache block size 96"):
+            _configure_model_prefill_cp(configs)
+
+    def test_old_ops_alignment_field_is_optional_in_parallelism_setup(self):
+        for missing_side in ("source", "target", "both"):
+            for enabled in (False, True):
+                with self.subTest(missing_side=missing_side, enabled=enabled):
+                    configs = PyEnvConfigs()
+                    method = (
+                        CPRotateMethod.ALL_GATHER
+                        if enabled
+                        else CPRotateMethod.DISABLED
+                    )
+                    configs.prefill_cp_config.method = method
+                    source = configs.prefill_cp_config
+                    target = configs.parallelism_config
+                    if missing_side in ("source", "both"):
+                        source = SimpleNamespace(
+                            method=method,
+                            comm_buffer_size=source.comm_buffer_size,
+                            kv_cache_sharded=source.kv_cache_sharded,
+                            is_enabled=lambda: enabled,
+                        )
+                    if missing_side in ("target", "both"):
+                        old_target = SimpleNamespace(
+                            method=CPRotateMethod.DISABLED,
+                            comm_buffer_size=0,
+                            kv_cache_sharded=False,
+                        )
+                        target = _ParallelismConfigProxy(target, old_target)
+
+                    set_parallelism_config(target, py_prefill_cp_config=source)
+
+    def test_setup_default_args_allows_explicit_frontend_with_old_cp_bindings(self):
+        configs = self._old_ops_cp_configs(RoleType.FRONTEND)
+
+        with patch("rtp_llm.model_factory.ModelFactory.get_model_cls") as get_model_cls:
+            setup_default_args(configs)
+
+        get_model_cls.assert_not_called()
+        self.assertEqual(configs.role_config.role_type, RoleType.FRONTEND)
+
+    def test_setup_default_args_allows_explicit_vit_with_old_cp_bindings(self):
+        configs = self._old_ops_cp_configs(RoleType.VIT)
+
+        with patch("rtp_llm.model_factory.ModelFactory.get_model_cls") as get_model_cls:
+            setup_default_args(configs)
+
+        get_model_cls.assert_not_called()
+        self.assertEqual(configs.role_config.role_type, RoleType.VIT)
+
+    def test_setup_default_args_normalizes_legacy_vit_with_old_cp_bindings(self):
+        configs = self._old_ops_cp_configs(RoleType.PDFUSION)
+        configs.vit_config.vit_separation = VitSeparation.VIT_SEPARATION_ROLE
+
+        with patch("rtp_llm.model_factory.ModelFactory.get_model_cls") as get_model_cls:
+            setup_default_args(configs)
+
+        get_model_cls.assert_not_called()
+        self.assertEqual(configs.role_config.role_type, RoleType.VIT)
+
+    def test_setup_default_args_rejects_model_role_with_old_cp_bindings(self):
+        configs = self._old_ops_cp_configs(RoleType.PDFUSION)
+        model_cls = SimpleNamespace(prefill_cp_alignment=lambda: 64)
+
+        with patch(
+            "rtp_llm.model_factory.ModelFactory.get_model_cls", return_value=model_cls
+        ), self.assertRaisesRegex(RuntimeError, "update or rebuild the ops bindings"):
+            setup_default_args(configs)
+
+    def test_cp_registry_errors_skip_only_non_model_roles(self):
+        for role_type in (RoleType.FRONTEND, RoleType.VIT):
+            configs = PyEnvConfigs()
+            configs.model_args.model_type = "missing_model"
+            configs.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+            configs.role_config.role_type = role_type
+            with patch(
+                "rtp_llm.model_factory.ModelFactory.get_model_cls"
+            ) as get_model_cls:
+                _configure_model_prefill_cp(configs)
+            get_model_cls.assert_not_called()
+
+        configs = PyEnvConfigs()
+        configs.model_args.model_type = "missing_model"
+        configs.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+        with patch(
+            "rtp_llm.model_factory.ModelFactory.get_model_cls",
+            side_effect=KeyError("missing_model"),
+        ), self.assertRaisesRegex(ValueError, "unknown model_type=missing_model"):
+            _configure_model_prefill_cp(configs)
 
     @patch.dict(
         "os.environ",

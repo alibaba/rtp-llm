@@ -17,7 +17,7 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_and_configure_server
-from rtp_llm.ops import RoleType, SpeculativeType, VitSeparation
+from rtp_llm.ops import RoleType, SpeculativeType
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
 from rtp_llm.utils.process_manager import (
@@ -647,18 +647,6 @@ def start_server(py_env_configs: PyEnvConfigs):
             py_env_configs.server_config.backend_post_frontend_drain_seconds
         ),
     )
-    # Backward compat: VIT_SEPARATION=ROLE without ROLE_TYPE=VIT
-    if (
-        py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE
-        and py_env_configs.role_config.role_type == RoleType.PDFUSION
-    ):
-        logging.warning(
-            "VIT_SEPARATION=ROLE detected without ROLE_TYPE=VIT. "
-            "Auto-setting ROLE_TYPE=VIT for backward compatibility. "
-            "Please migrate to ROLE_TYPE=VIT explicitly."
-        )
-        py_env_configs.role_config.role_type = RoleType.VIT
-
     dash_sc_enabled = py_env_configs.role_config.role_type != RoleType.VIT
     py_env_configs.server_config.validate_port_layout(dash_sc_enabled=dash_sc_enabled)
 

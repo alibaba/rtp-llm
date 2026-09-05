@@ -1,7 +1,7 @@
 import copy
-import math
 import functools
 import logging
+import math
 from typing import Any, Dict, List, Optional, Union
 
 import torch
@@ -152,6 +152,11 @@ class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
             (W.post_ln_static_quant, get_tensor_reciprocal),
             (W.post_ln_static_quant_reciprocal, get_tensor_from_scalar),
         ],
+        # gate+up are fused into ffn_w13 for dense models and share ffn_w3's input
+        W.ffn_w13: [
+            (W.post_ln_static_quant, get_tensor_reciprocal),
+            (W.post_ln_static_quant_reciprocal, get_tensor_from_scalar),
+        ],
         W.moe_w1: [
             (W.moe_w1_input_s, get_list_tensor_reciprocal),
             (W.moe_w1_input_sr, get_list_tensor_from_scalar),
@@ -280,9 +285,18 @@ class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
                 src_weight_info,
                 W.attn_qkv_s,
                 [
-                    CkptWeightInfo(weights[0].name[: -len(W_SUFFIX)] + self.qs_suffix),
-                    CkptWeightInfo(weights[1].name[: -len(W_SUFFIX)] + self.qs_suffix),
-                    CkptWeightInfo(weights[2].name[: -len(W_SUFFIX)] + self.qs_suffix),
+                    CkptWeightInfo(
+                        weights[0].name[: -len(W_SUFFIX)] + self.qs_suffix,
+                        get_tensor_from_scalar,
+                    ),
+                    CkptWeightInfo(
+                        weights[1].name[: -len(W_SUFFIX)] + self.qs_suffix,
+                        get_tensor_from_scalar,
+                    ),
+                    CkptWeightInfo(
+                        weights[2].name[: -len(W_SUFFIX)] + self.qs_suffix,
+                        get_tensor_from_scalar,
+                    ),
                 ],
                 stack_,
                 data_type=torch.float32,
@@ -345,7 +359,7 @@ class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
             create_w8a8_fp8_weight(
                 src_weight_info,
                 W.attn_o_s,
-                [CkptWeightInfo(w_name + self.qs_suffix)],
+                [CkptWeightInfo(w_name + self.qs_suffix, get_tensor_from_scalar)],
                 identity,
                 data_type=torch.float32,
                 config=src_weight_info.config,
@@ -459,8 +473,12 @@ class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
                     src_weight,
                     s,
                     [
-                        CkptWeightInfo(w1_name + self.qs_suffix, identity),
-                        CkptWeightInfo(w3_name + self.qs_suffix, identity),
+                        CkptWeightInfo(
+                            w1_name + self.qs_suffix, get_tensor_from_scalar
+                        ),
+                        CkptWeightInfo(
+                            w3_name + self.qs_suffix, get_tensor_from_scalar
+                        ),
                     ],
                     concat_w13,
                     data_type=torch.float32,
@@ -500,7 +518,7 @@ class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
                 create_w8a8_fp8_weight(
                     src_weight,
                     s,
-                    [CkptWeightInfo(w_name + self.qs_suffix, identity)],
+                    [CkptWeightInfo(w_name + self.qs_suffix, get_tensor_from_scalar)],
                     identity,
                     data_type=torch.float32,
                     config=src_weight.config,
@@ -587,6 +605,28 @@ class Fp8PerTensorCompressedWeight(CompositeWeight, QuantWeight):
                 input_scale = input_scale.max()
                 processed_res[input_scale_r_str] = input_scale
                 processed_res[intput_scale_str] = 1.0 / input_scale
+            return processed_res
+
+        # The checkpoint stores one per-tensor scale per projection, but gate+up share a
+        # single fused kernel, so requantize both halves onto the larger scale to keep the
+        # weight scale a scalar.
+        if self.kernel.name is W.ffn_w13 and kernel_scale is not None:
+            scales = kernel_scale.flatten()
+            max_scale = scales.max()
+            half_size = kernel_weight.shape[0] // scales.numel()
+            for shard_id in range(scales.numel()):
+                if scales[shard_id] == max_scale:
+                    continue
+                start = shard_id * half_size
+                dq_weight = (
+                    kernel_weight[start : start + half_size, :].to(torch.float32)
+                    * scales[shard_id]
+                )
+                kernel_weight[start : start + half_size, :] = (
+                    dq_weight / max_scale
+                ).to(torch.float8_e4m3fn)
+            processed_res[self.kernel.name] = kernel_weight
+            processed_res[weight_scale_name] = max_scale.reshape(1)
             return processed_res
 
         # handle qkv_proj quant weight
