@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 #include "rtp_llm/cpp/cache/BufferTypes.h"
+#include "rtp_llm/cpp/cache/CacheGroupTagOrder.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
@@ -31,7 +32,6 @@ struct LayerKVCache {
     torch::Tensor kv_scale_base;
     int           seq_size_per_block = 0;
     int           layer_id           = -1;
-    int           group_id           = -1;
     std::string   tag                = "default";
 
     LayerKVCache() = default;
@@ -39,14 +39,12 @@ struct LayerKVCache {
     LayerKVCache(torch::Tensor kv_cache_base,
                  int           seq_size_per_block,
                  int           layer_id      = -1,
-                 int           group_id      = -1,
                  std::string   tag           = "default",
                  torch::Tensor kv_scale_base = {}):
         kv_cache_base(std::move(kv_cache_base)),
         kv_scale_base(std::move(kv_scale_base)),
         seq_size_per_block(seq_size_per_block),
         layer_id(layer_id),
-        group_id(group_id),
         tag(std::move(tag)) {}
 };
 
@@ -54,17 +52,21 @@ struct LayerKVCache {
 // Call getLayerCache(global_layer_id) to obtain a per-layer LayerKVCache.
 class KVCache {
 public:
-    explicit KVCache(rtp_llm::GroupedCacheLayerLayout grouped_layout): grouped_layout_(std::move(grouped_layout)) {}
+    KVCache(rtp_llm::GroupedCacheLayerLayout grouped_layout, const rtp_llm::CacheConfig& config):
+        grouped_layout_(std::move(grouped_layout)), config_(config), group_tags_(buildSortedGroupTags(config_)) {}
+
+    KVCache(rtp_llm::GroupedCacheLayerLayout grouped_layout, std::shared_ptr<const rtp_llm::CacheConfig> config):
+        KVCache(std::move(grouped_layout), checkedConfig(config)) {}
 
     LayerKVCache getLayerCache(int layer_id) const {
         validateLayer(layer_id);
-        const auto& group = grouped_layout_.topology().soleGroupForLayer(layer_id);
+        const auto& group = config_.soleGroupForLayer(layer_id);
         return getLayerCache(layer_id, group.tag);
     }
 
     LayerKVCache getLayerCache(int layer_id, const std::string& tag) const {
         validateLayer(layer_id);
-        const auto& group        = grouped_layout_.topology().groupForLayer(layer_id, tag);
+        const auto& group        = config_.groupForLayer(layer_id, tag);
         const auto& group_layout = grouped_layout_.group(tag);
         const auto  layer        = static_cast<size_t>(layer_id);
         if (group_layout.empty() || !group_layout.hasLayer(layer)) {
@@ -76,7 +78,7 @@ public:
     std::vector<LayerKVCache> getLayerCacheGroups(int layer_id) const {
         validateLayer(layer_id);
         const auto  layer = static_cast<size_t>(layer_id);
-        const auto& tags  = grouped_layout_.topology().layer(layer_id).group_tags;
+        const auto& tags  = config_.groupsForLayer(layer_id);
 
         std::vector<LayerKVCache> layer_caches;
         layer_caches.reserve(tags.size());
@@ -90,37 +92,53 @@ public:
         return layer_caches;
     }
 
+    // Canonical (sorted unique) tag order. Callers must treat this as a set of
+    // identities; the position of a tag carries no meaning.
     const std::vector<std::string>& groupTags() const {
-        return grouped_layout_.topology().groupTagsSnapshot();
+        return group_tags_;
     }
 
     size_t layerCount() const {
-        return grouped_layout_.topology().layers().size();
+        return config_.layers().size();
     }
 
     int getSeqSizePerBlock(const std::string& tag) const {
-        return static_cast<int>(grouped_layout_.topology().group(tag).seq_size_per_block);
+        return static_cast<int>(config_.group(tag).seqSizePerBlock());
     }
 
     int getKernelSeqSizePerBlock(const std::string& tag) const {
-        return static_cast<int>(grouped_layout_.topology().group(tag).kernel_seq_size_per_block);
+        return static_cast<int>(config_.group(tag).kernelSeqSizePerBlock());
     }
 
 private:
+    static const rtp_llm::CacheConfig& checkedConfig(const std::shared_ptr<const rtp_llm::CacheConfig>& config) {
+        RTP_LLM_CHECK_WITH_INFO(config != nullptr, "KVCache requires a non-null config");
+        return *config;
+    }
+
+    static std::vector<std::string> buildSortedGroupTags(const rtp_llm::CacheConfig& config) {
+        std::vector<std::string> tags;
+        tags.reserve(config.groups().size());
+        for (const auto& group : config.groups()) {
+            tags.push_back(group.tag);
+        }
+        return rtp_llm::sortedCacheGroupTags(tags, "model KV cache");
+    }
+
     void validateLayer(int layer_id) const {
         if (layer_id < 0 || static_cast<size_t>(layer_id) >= layerCount()) {
             throw std::runtime_error("Invalid layer index: " + std::to_string(layer_id));
         }
     }
 
-    static int64_t kernelBlocksPerPhysicalBlock(const rtp_llm::GroupBase& group) {
-        RTP_LLM_CHECK_WITH_INFO(group.kernel_seq_size_per_block > 0
-                                    && group.seq_size_per_block % group.kernel_seq_size_per_block == 0,
+    static int64_t kernelBlocksPerPhysicalBlock(const rtp_llm::CacheGroup& group) {
+        RTP_LLM_CHECK_WITH_INFO(group.kernelSeqSizePerBlock() > 0
+                                    && group.seqSizePerBlock() % group.kernelSeqSizePerBlock() == 0,
                                 "invalid block subdivision for tag=%s physical=%zu kernel=%zu",
                                 group.tag.c_str(),
-                                group.seq_size_per_block,
-                                group.kernel_seq_size_per_block);
-        return static_cast<int64_t>(group.seq_size_per_block / group.kernel_seq_size_per_block);
+                                group.seqSizePerBlock(),
+                                group.kernelSeqSizePerBlock());
+        return static_cast<int64_t>(group.kernelBlocksPerKvBlock());
     }
 
     static torch::Tensor reshapeMlaTensor(const torch::Tensor& tensor,
@@ -150,19 +168,14 @@ private:
     }
 
     LayerKVCache
-    makeLayerCache(int layer_id, const rtp_llm::GroupBase& group, const rtp_llm::BlockBufferPtrInfo& buffers) const {
+    makeLayerCache(int layer_id, const rtp_llm::CacheGroup& group, const rtp_llm::BlockBufferPtrInfo& buffers) const {
         RTP_LLM_CHECK_WITH_INFO(buffers.kv_addr.defined(),
                                 "KV cache tensor must be defined for layer=%d tag=%s",
                                 layer_id,
                                 group.tag.c_str());
 
-        const int    group_id = static_cast<int>(grouped_layout_.topology().groupIdForTag(group.tag));
-        LayerKVCache result(buffers.kv_addr,
-                            static_cast<int>(group.seq_size_per_block),
-                            layer_id,
-                            group_id,
-                            group.tag,
-                            buffers.kv_scale_addr);
+        LayerKVCache result(
+            buffers.kv_addr, static_cast<int>(group.seqSizePerBlock()), layer_id, group.tag, buffers.kv_scale_addr);
 
         const auto spec_type = group.spec->type;
         if (group.policy.group_type != rtp_llm::CacheGroupType::FULL
@@ -174,13 +187,13 @@ private:
         const int64_t physical_block_num  = buffers.kv_addr.size(0);
         const int64_t blocks_per_physical = kernelBlocksPerPhysicalBlock(group);
         const int64_t kernel_block_num    = physical_block_num * blocks_per_physical;
-        const int64_t kernel_seq_size     = static_cast<int64_t>(group.kernel_seq_size_per_block);
+        const int64_t kernel_seq_size     = static_cast<int64_t>(group.kernelSeqSizePerBlock());
         result.seq_size_per_block         = static_cast<int>(kernel_seq_size);
 
         if (spec_type == rtp_llm::KVCacheSpecType::MultiHeadAttention) {
             const int64_t local_kv_heads = static_cast<int64_t>(group.local_kv_head_num);
             RTP_LLM_CHECK_WITH_INFO(local_kv_heads > 0, "MHA tag=%s has no local KV heads", group.tag.c_str());
-            const int64_t physical_seq_size = static_cast<int64_t>(group.seq_size_per_block);
+            const int64_t physical_seq_size = static_cast<int64_t>(group.seqSizePerBlock());
             const int64_t k_block_elems     = static_cast<int64_t>(group.spec->k_block_size());
             RTP_LLM_CHECK_WITH_INFO(k_block_elems > 0 && k_block_elems % (local_kv_heads * physical_seq_size) == 0,
                                     "MHA tag=%s cannot derive head dimension from k_block_size=%ld heads=%ld seq=%ld",
@@ -240,6 +253,8 @@ private:
     }
 
     const rtp_llm::GroupedCacheLayerLayout grouped_layout_;
+    const rtp_llm::CacheConfig             config_;
+    const std::vector<std::string>         group_tags_;
 };
 
 struct PyModelInitResources {
@@ -345,7 +360,7 @@ struct PyMultimodalInputs {
     std::vector<torch::Tensor> mm_extra_input;
 };
 
-using AttentionInputsByTag = std::map<std::string, PyAttentionInputs>;
+using AttnInputsByGroup = std::map<std::string, PyAttentionInputs>;
 
 struct PyModelInputs {
     torch::Tensor      input_ids;
@@ -354,14 +369,10 @@ struct PyModelInputs {
     PyEmbeddingInputs  embedding_inputs;
     PyMultimodalInputs multimodal_inputs;
     // C++ common/single-group fast path. Python sees this field through a
-    // property which returns either this object or attention_inputs_by_tag.
-    PyAttentionInputs    attention_inputs;
-    AttentionInputsByTag attention_inputs_by_tag;
-    BertEmbeddingInputs  bert_embedding_inputs;
-
-    bool hasAttentionInputsByTag() const {
-        return !attention_inputs_by_tag.empty();
-    }
+    // property which returns either this object or attention_inputs_by_group.
+    PyAttentionInputs   attention_inputs;
+    AttnInputsByGroup   attention_inputs_by_group;
+    BertEmbeddingInputs bert_embedding_inputs;
 };
 
 struct PyModelOutputs {

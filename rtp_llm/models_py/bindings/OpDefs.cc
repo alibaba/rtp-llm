@@ -26,35 +26,31 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<LayerKVCache>(m, "LayerKVCache")
         .def(pybind11::init<>())
-        .def(
-            pybind11::init([](torch::Tensor    kv_cache_base,
-                              int              seq_size_per_block,
-                              int              layer_id,
-                              int              group_id,
-                              std::string      tag,
-                              pybind11::object kv_scale_base) {
-                torch::Tensor scale;
-                if (!kv_scale_base.is_none()) {
-                    scale = kv_scale_base.cast<torch::Tensor>();
-                }
-                return LayerKVCache(
-                    std::move(kv_cache_base), seq_size_per_block, layer_id, group_id, std::move(tag), std::move(scale));
-            }),
-            pybind11::arg("kv_cache_base"),
-            pybind11::arg("seq_size_per_block"),
-            pybind11::arg("layer_id")      = -1,
-            pybind11::arg("group_id")      = -1,
-            pybind11::arg("tag")           = "default",
-            pybind11::arg("kv_scale_base") = pybind11::none())
+        .def(pybind11::init([](torch::Tensor    kv_cache_base,
+                               int              seq_size_per_block,
+                               int              layer_id,
+                               std::string      tag,
+                               pybind11::object kv_scale_base) {
+                 torch::Tensor scale;
+                 if (!kv_scale_base.is_none()) {
+                     scale = kv_scale_base.cast<torch::Tensor>();
+                 }
+                 return LayerKVCache(
+                     std::move(kv_cache_base), seq_size_per_block, layer_id, std::move(tag), std::move(scale));
+             }),
+             pybind11::arg("kv_cache_base"),
+             pybind11::arg("seq_size_per_block"),
+             pybind11::arg("layer_id")      = -1,
+             pybind11::arg("tag")           = "default",
+             pybind11::arg("kv_scale_base") = pybind11::none())
         .def_readwrite("kv_cache_base", &LayerKVCache::kv_cache_base, "Key/value cache tensor (per-layer view)")
         .def_readwrite("kv_scale_base", &LayerKVCache::kv_scale_base, "Key/value cache scale tensor")
         .def_readonly("seq_size_per_block", &LayerKVCache::seq_size_per_block, "Sequence size per block")
         .def_readonly("layer_id", &LayerKVCache::layer_id, "Global layer id")
-        .def_readonly("group_id", &LayerKVCache::group_id, "Cache group id (-1 = default)")
         .def_readonly("tag", &LayerKVCache::tag, "Cache group tag");
 
     pybind11::class_<KVCache>(m, "KVCache")
-        .def_property_readonly("group_tags", &KVCache::groupTags, "Cache group tags in topology group id order")
+        .def_property_readonly("group_tags", &KVCache::groupTags, "Cache group tags in canonical sorted order")
         .def_property_readonly("layer_count", &KVCache::layerCount, "Number of model-local cache layers")
         .def("get_layer_cache",
              static_cast<LayerKVCache (KVCache::*)(int) const>(&KVCache::getLayerCache),
@@ -218,10 +214,10 @@ void registerPyOpDefs(pybind11::module& m) {
                  if (pybind11::isinstance<PyAttentionInputs>(attention_inputs)) {
                      result.attention_inputs = attention_inputs.cast<PyAttentionInputs>();
                  } else {
-                     result.attention_inputs_by_tag = attention_inputs.cast<AttentionInputsByTag>();
-                     RTP_LLM_CHECK_WITH_INFO(!result.attention_inputs_by_tag.empty(),
+                     result.attention_inputs_by_group = attention_inputs.cast<AttnInputsByGroup>();
+                     RTP_LLM_CHECK_WITH_INFO(!result.attention_inputs_by_group.empty(),
                                              "attention_inputs tag map must not be empty");
-                     result.attention_inputs = result.attention_inputs_by_tag.begin()->second;
+                     result.attention_inputs = result.attention_inputs_by_group.begin()->second;
                  }
                  return result;
              }),
@@ -240,9 +236,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_property(
             "attention_inputs",
             [](PyModelInputs& self) -> pybind11::object {
-                if (!self.attention_inputs_by_tag.empty()) {
+                if (!self.attention_inputs_by_group.empty()) {
                     pybind11::dict result;
-                    for (auto& [tag, inputs] : self.attention_inputs_by_tag) {
+                    for (auto& [tag, inputs] : self.attention_inputs_by_group) {
                         result[pybind11::str(tag)] = pybind11::cast(
                             &inputs, pybind11::return_value_policy::reference_internal, pybind11::cast(&self));
                     }
@@ -253,14 +249,14 @@ void registerPyOpDefs(pybind11::module& m) {
             },
             [](PyModelInputs& self, pybind11::object value) {
                 if (pybind11::isinstance<PyAttentionInputs>(value)) {
-                    self.attention_inputs        = value.cast<PyAttentionInputs>();
-                    self.attention_inputs_by_tag = {};
+                    self.attention_inputs          = value.cast<PyAttentionInputs>();
+                    self.attention_inputs_by_group = {};
                     return;
                 }
-                auto by_tag = value.cast<AttentionInputsByTag>();
-                RTP_LLM_CHECK_WITH_INFO(!by_tag.empty(), "attention_inputs tag map must not be empty");
-                self.attention_inputs        = by_tag.begin()->second;
-                self.attention_inputs_by_tag = std::move(by_tag);
+                auto inputs_by_group = value.cast<AttnInputsByGroup>();
+                RTP_LLM_CHECK_WITH_INFO(!inputs_by_group.empty(), "attention_inputs tag map must not be empty");
+                self.attention_inputs          = inputs_by_group.begin()->second;
+                self.attention_inputs_by_group = std::move(inputs_by_group);
             },
             "A PyAttentionInputs value or a tag-to-PyAttentionInputs mapping")
         .def_readwrite(

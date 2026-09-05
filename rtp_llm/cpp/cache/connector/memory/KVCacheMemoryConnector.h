@@ -7,6 +7,8 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "autil/LockFreeThreadPool.h"
@@ -26,23 +28,23 @@ namespace rtp_llm {
 
 class BlockPool;
 class BroadcastManager;
-class KVCacheAllocator;
+class CoordinatorCacheManager;
 class MemoryAsyncContext;
 struct StagedMemoryCopyScratch;
 
 class KVCacheMemoryConnector: public KVCacheConnector {
 public:
-    KVCacheMemoryConnector(const CacheConfig&                       cache_config,
-                           const KVCacheConfig&                     kv_cache_config,
-                           const ParallelismConfig&                 parallelism_config,
-                           const std::shared_ptr<KVCacheAllocator>& allocator,
-                           const std::vector<std::string>&          tp_addrs,
-                           const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr);
-    KVCacheMemoryConnector(const CacheConfig&                       cache_config,
-                           const KVCacheConfig&                     kv_cache_config,
-                           const std::shared_ptr<KVCacheAllocator>& allocator,
-                           const std::vector<std::string>&          tp_addrs,
-                           const kmonitor::MetricsReporterPtr&      metrics_reporter = nullptr);
+    KVCacheMemoryConnector(const CacheConfig&                              cache_config,
+                           const KVCacheConfig&                            kv_cache_config,
+                           const ParallelismConfig&                        parallelism_config,
+                           const std::shared_ptr<CoordinatorCacheManager>& coordinator_cache_manager,
+                           const std::vector<std::string>&                 tp_addrs,
+                           const kmonitor::MetricsReporterPtr&             metrics_reporter = nullptr);
+    KVCacheMemoryConnector(const CacheConfig&                              cache_config,
+                           const KVCacheConfig&                            kv_cache_config,
+                           const std::shared_ptr<CoordinatorCacheManager>& coordinator_cache_manager,
+                           const std::vector<std::string>&                 tp_addrs,
+                           const kmonitor::MetricsReporterPtr&             metrics_reporter = nullptr);
     ~KVCacheMemoryConnector() override;
 
 public:
@@ -69,42 +71,54 @@ public:
 
 private:
     struct LayerTagSlot {
-        int         layer_id{-1};
-        std::string tag;
-        int         group_id{-1};
-        size_t      stride_bytes{0};
+        int            layer_id{-1};
+        std::string    tag;
+        size_t         kv_block_stride_bytes{0};
+        size_t         kv_scale_stride_bytes{0};
+        size_t         stride_bytes{0};
+        CacheBlockKind block_kind{CacheBlockKind::COMPLETE};
+        // Derived connector capability resolved once at the boundary: a FULL
+        // group is copied as a whole block regardless of completeness.
+        bool is_full_only{false};
     };
+    struct LayerTagBlock {
+        int          layer_id{-1};
+        std::string  tag;
+        BlockIdxType pool_block_id{NULL_BLOCK_IDX};
+    };
+    using LayerTagBlocks          = std::vector<LayerTagBlock>;
+    using LayerTagPoolBlockTables = std::vector<std::unordered_map<std::string, const BlockIds*>>;
     struct CopyInfoPerKey {
-        CacheKeyType              cache_key{0};
-        CacheBlockKind            kind{CacheBlockKind::COMPLETE};
-        CacheBackingType          backing_type{CacheBackingType::MEMORY};
-        BlockIdxType              mem_block{NULL_BLOCK_IDX};
-        BlockIdxType              src_mem_block{NULL_BLOCK_IDX};
-        CacheBackingType          src_backing_type{CacheBackingType::MEMORY};
-        int32_t                   src_disk_slot{-1};
-        int32_t                   disk_slot{-1};
-        size_t                    block_size{0};
-        std::vector<BlockIdxType> gpu_blocks;
-        std::vector<uint8_t>      slot_valid_mask;
-        bool                      is_complete{true};
-        bool                      request_released{false};
-        uint64_t                  generation{0};
-        uint64_t                  src_generation{0};
+        CacheKeyType         cache_key{0};
+        CacheBlockKind       kind{CacheBlockKind::COMPLETE};
+        CacheBackingType     backing_type{CacheBackingType::MEMORY};
+        BlockIdxType         mem_block{NULL_BLOCK_IDX};
+        BlockIdxType         src_mem_block{NULL_BLOCK_IDX};
+        CacheBackingType     src_backing_type{CacheBackingType::MEMORY};
+        int32_t              src_disk_slot{-1};
+        int32_t              disk_slot{-1};
+        size_t               block_size{0};
+        LayerTagBlocks       tagged_gpu_blocks;
+        std::vector<uint8_t> slot_valid_mask;
+        bool                 is_complete{true};
+        bool                 request_released{false};
+        uint64_t             generation{0};
+        uint64_t             src_generation{0};
     };
     struct NormalizedCopyItem {
-        BlockIdxType              mem_block{NULL_BLOCK_IDX};
-        std::vector<BlockIdxType> gpu_blocks;
-        bool                      is_complete{true};
-        bool                      layer_kind{true};
-        CacheBackingType          backing_type{CacheBackingType::MEMORY};
-        int32_t                   disk_slot{-1};
-        CacheBlockKind            kind{CacheBlockKind::COMPLETE};
-        bool                      has_src_mem_block{false};
-        BlockIdxType              src_mem_block{NULL_BLOCK_IDX};
-        std::vector<uint8_t>      slot_valid_mask;
-        CacheBackingType          src_backing_type{CacheBackingType::MEMORY};
-        bool                      has_src_disk_slot{false};
-        int32_t                   src_disk_slot{-1};
+        BlockIdxType         mem_block{NULL_BLOCK_IDX};
+        LayerTagBlocks       tagged_gpu_blocks;
+        bool                 is_complete{true};
+        bool                 layer_kind{true};
+        CacheBackingType     backing_type{CacheBackingType::MEMORY};
+        int32_t              disk_slot{-1};
+        CacheBlockKind       kind{CacheBlockKind::COMPLETE};
+        bool                 has_src_mem_block{false};
+        BlockIdxType         src_mem_block{NULL_BLOCK_IDX};
+        std::vector<uint8_t> slot_valid_mask;
+        CacheBackingType     src_backing_type{CacheBackingType::MEMORY};
+        bool                 has_src_disk_slot{false};
+        int32_t              src_disk_slot{-1};
     };
     using NormalizedCopyItems = std::vector<NormalizedCopyItem>;
     enum class CopyDirection {
@@ -117,25 +131,16 @@ private:
     };
 
     std::shared_ptr<CopyPlan> buildCopyPlanForRead(const CacheKeysType&             cache_keys,
-                                                   const LayerAttnBlockIds&         layer_attn_block_ids,
+                                                   const LayerTagPoolBlockTables&   layer_tag_block_ids,
                                                    const std::vector<LayerTagSlot>& slots,
                                                    int                              start_index,
                                                    int                              read_num);
-    std::shared_ptr<CopyPlan> buildCopyPlanForRead(const CacheKeysType& cache_keys,
-                                                   const LayerBlockIds& layer_block_ids,
-                                                   int                  start_index,
-                                                   int                  read_num);
     std::shared_ptr<CopyPlan> buildCopyPlanForWrite(const CacheKeysType&             cache_keys,
-                                                    const LayerAttnBlockIds&         layer_attn_block_ids,
+                                                    const LayerTagPoolBlockTables&   layer_tag_block_ids,
                                                     const std::vector<LayerTagSlot>& slots,
                                                     int                              start_index,
                                                     int                              write_num,
                                                     bool&                            no_need_write);
-    std::shared_ptr<CopyPlan> buildCopyPlanForWrite(const CacheKeysType& cache_keys,
-                                                    const LayerBlockIds& layer_block_ids,
-                                                    int                  start_index,
-                                                    int                  write_num,
-                                                    bool&                no_need_write);
     std::shared_ptr<CopyPlan> createCopyPlan(const std::vector<CopyInfoPerKey>& copy_infos,
                                              const CopyDirection&               direction);
     bool startCopyAsync(const std::shared_ptr<MemoryAsyncContext>& context, const std::shared_ptr<CopyPlan>& copy_plan);
@@ -145,17 +150,12 @@ private:
          sendMemoryRequest(const MemoryOperationRequestPB& mem_req, int64_t timeout_ms) const;
     void printCopyPlan(const std::shared_ptr<CopyPlan>& copy_plan) const;
 
-    bool prepareCopyBuffers(BlockIdxType                     mem_block,
-                            const std::vector<BlockIdxType>& gpu_blocks,
-                            CopyDirection                    direction,
-                            bool                             is_complete,
-                            std::vector<torch::Tensor>&      dst,
-                            std::vector<torch::Tensor>&      src);
-    bool prepareLayerCopyBuffers(BlockIdxType                     mem_block,
-                                 const std::vector<BlockIdxType>& gpu_blocks,
-                                 CopyDirection                    direction,
-                                 std::vector<torch::Tensor>&      dst,
-                                 std::vector<torch::Tensor>&      src);
+    bool prepareCopyBuffers(BlockIdxType                mem_block,
+                            const LayerTagBlocks&       tagged_gpu_blocks,
+                            CopyDirection               direction,
+                            bool                        is_complete,
+                            std::vector<torch::Tensor>& dst,
+                            std::vector<torch::Tensor>& src);
     bool appendCopyBytesToBuffers(const BlockInfo&            mem_block,
                                   const BlockInfo&            gpu_block,
                                   size_t                      byte_off,
@@ -173,10 +173,8 @@ private:
                                 const std::vector<LayerTagSlot>& slots);
     bool validateCopyItemBacking(const MemoryOperationRequestPB::CopyItem& item) const;
 
-    // Typed-group fast paths for the tag-keyed memory copy. Both consume already-normalized items, so the
-    // per-slot gpu block for slots[i] is items[k].gpu_blocks[i] (see normalizeCopyItemGpuBlocks). Both are
-    // best-effort: they return false whenever the layout is not expressible as flat tiles, and the caller
-    // falls back to copyMemoryItemsGeneric.
+    // Typed-group fast paths consume semantic (layer, tag, block) records. Both are best-effort: they return
+    // false whenever the layout is not expressible as flat tiles, and the caller falls back to the generic path.
     bool                     tryCopyCacheWithBatchedMemoryCopy(const NormalizedCopyItems&       items,
                                                                CopyDirection                    direction,
                                                                const std::vector<LayerTagSlot>& slots);
@@ -186,45 +184,42 @@ private:
     StagedMemoryCopyScratch& stagedCopyScratchForDevice(int device_index);
 
     void                             checkLayerBlockStrideBytes() const;
-    std::vector<LayerTagSlot>        layerTagSlots() const;
-    static std::vector<BlockIdxType> normalizeCopyItemGpuBlocks(const MemoryOperationRequestPB::CopyItem& item,
+    static std::vector<LayerTagSlot> buildPoolBlockMemoryLayout(const CacheConfig& cache_config);
+    const std::vector<LayerTagSlot>& poolBlockMemoryLayout() const;
+    static LayerTagBlocks            normalizeCopyItemGpuBlocks(const MemoryOperationRequestPB::CopyItem& item,
                                                                 const std::vector<LayerTagSlot>&          slots);
     static NormalizedCopyItem        normalizeCopyItem(const MemoryOperationRequestPB::CopyItem& item,
                                                        const std::vector<LayerTagSlot>&          slots);
-    bool                             hasTypedLayerTagSlots(const std::vector<LayerTagSlot>& slots) const;
+    bool                             hasTypedPoolBlockMemoryLayout(const std::vector<LayerTagSlot>& slots) const;
     bool                             usesTypedMemoryPoolLayout(const std::vector<LayerTagSlot>& slots) const;
     bool                             supportsTypedPrefixCacheLayout(const std::vector<LayerTagSlot>& slots) const;
-    bool                             checkLayerBlocks(const LayerBlockIds& layer_block_ids, size_t required_len) const;
-    LayerAttnBlockIds                resourceLayerRegionBlocks(const KVCacheResource&           resource,
-                                                               const std::vector<LayerTagSlot>& slots) const;
-    bool                             checkLayerRegionBlocks(const LayerAttnBlockIds&         layer_attn_block_ids,
-                                                            const std::vector<LayerTagSlot>& slots,
-                                                            size_t                           required_len) const;
-    bool                             gpuBlocksAllValid(const LayerBlockIds& layer_block_ids, size_t key_index) const;
-    bool                             gpuBlocksAllValid(const LayerAttnBlockIds&         layer_attn_block_ids,
+    LayerTagPoolBlockTables          resourceLayerTagPoolBlockTables(const KVCacheResource&           resource,
+                                                                     const std::vector<LayerTagSlot>& slots) const;
+    bool                             checkLayerTagPoolBlockTables(const LayerTagPoolBlockTables&   layer_tag_block_ids,
+                                                                  const std::vector<LayerTagSlot>& slots,
+                                                                  size_t                           required_len) const;
+    bool                             gpuBlocksAllValid(const LayerTagPoolBlockTables&   layer_tag_block_ids,
                                                        const std::vector<LayerTagSlot>& slots,
                                                        size_t                           key_index) const;
     bool                             usePrefixTreeMemoryCache() const;
-    CacheGroupPolicy                 groupPolicyForSlot(const LayerTagSlot& slot) const;
-    CacheBlockKind                   kindForSlot(const LayerTagSlot& slot) const;
-    bool                             kindRequiredAt(const LayerAttnBlockIds&         layer_attn_block_ids,
+    bool                             kindRequiredAt(const LayerTagPoolBlockTables&   layer_tag_block_ids,
                                                     const std::vector<LayerTagSlot>& slots,
                                                     size_t                           key_index,
                                                     CacheBlockKind                   kind) const;
-    std::vector<uint8_t>             prefixSlotValidMask(const LayerAttnBlockIds&         layer_attn_block_ids,
+    std::vector<uint8_t>             prefixSlotValidMask(const LayerTagPoolBlockTables&   layer_tag_block_ids,
                                                          const std::vector<LayerTagSlot>& slots,
                                                          size_t                           key_index,
                                                          CacheBlockKind                   kind) const;
     size_t                    prefixKindBlockSize(CacheBlockKind kind, const std::vector<LayerTagSlot>& slots) const;
     std::shared_ptr<CopyPlan> buildPrefixCopyPlanForRead(const CacheKeysType&             cache_keys,
                                                          const BlockDependenciesType&     dependencies,
-                                                         const LayerAttnBlockIds&         layer_attn_block_ids,
+                                                         const LayerTagPoolBlockTables&   layer_tag_block_ids,
                                                          const std::vector<LayerTagSlot>& slots,
                                                          int                              start_index,
                                                          int                              read_num);
     std::shared_ptr<CopyPlan> buildPrefixCopyPlanForWrite(const CacheKeysType&             cache_keys,
                                                           const BlockDependenciesType&     dependencies,
-                                                          const LayerAttnBlockIds&         layer_attn_block_ids,
+                                                          const LayerTagPoolBlockTables&   layer_tag_block_ids,
                                                           const std::vector<LayerTagSlot>& slots,
                                                           int                              start_index,
                                                           int                              write_num,
@@ -263,7 +258,7 @@ private:
     size_t                     maxDiskSlotStrideBytes() const;
 
     bool isDualPool() const;
-    bool isFullOnlySlot(const LayerTagSlot& slot) const;
+    bool isFullOnlyLayoutEntry(const LayerTagSlot& slot) const;
     bool mallocBlocksFromPool(const std::shared_ptr<BlockPool>&        pool,
                               const std::shared_ptr<MemoryBlockCache>& cache,
                               size_t                                   need_blocks,
@@ -284,7 +279,6 @@ private:
     void                       initBlockPool();
     void                       initDiskBlockPools();
     bool                       diskCacheEnabled() const;
-    bool                       copyItemUsesLayerBlocks(const NormalizedCopyItem& item) const;
     int64_t                    copyPlanTimeoutMs(const std::shared_ptr<CopyPlan>& copy_plan) const;
     std::shared_ptr<BlockPool> createBlockPool(size_t block_size, size_t pool_size_mb) const;
     std::string                blockPoolDebugString() const;
@@ -293,33 +287,36 @@ private:
     void                       putToCache(CopyInfoPerKey& copy_info);
     bool putToCache(const MemoryDiskBlockCache::CacheItem& item, bool already_has_cache_ref = false);
 
-    void reportMatchMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num);
-    void reportReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
-    void reportWriteMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t write_block_num);
-    void reportCopyMetrics(bool success, int64_t latency_us, CopyDirection direction);
-    void reportCopyTaskMetrics(bool          success,
-                               int64_t       latency_us,
-                               int64_t       queue_wait_us,
-                               int64_t       broadcast_setup_us,
-                               int64_t       wait_done_us,
-                               int64_t       copy_item_num,
-                               int64_t       disk_item_num,
-                               CopyDirection direction);
-    void reportDiskMatchMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num);
-    void reportDiskReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
-    void reportDiskWriteMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t write_block_num);
-    void reportDiskCopyMetrics(bool success, int64_t latency_us, CopyDirection direction);
-    int  cpSizeForMetrics() const;
-    int  cacheKeyTokensPerBlockForMetrics() const;
-    void reportEvictionLifetime(CacheBlockKind kind, CacheBackingType backing_type, int64_t created_time_us);
-    void reportMetricsLoop();
+    void   reportMatchMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num);
+    void   reportReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
+    void   reportWriteMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t write_block_num);
+    void   reportCopyMetrics(bool success, int64_t latency_us, CopyDirection direction);
+    void   reportCopyTaskMetrics(bool          success,
+                                 int64_t       latency_us,
+                                 int64_t       queue_wait_us,
+                                 int64_t       broadcast_setup_us,
+                                 int64_t       wait_done_us,
+                                 int64_t       copy_item_num,
+                                 int64_t       disk_item_num,
+                                 CopyDirection direction);
+    void   reportDiskMatchMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num);
+    void   reportDiskReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
+    void   reportDiskWriteMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t write_block_num);
+    void   reportDiskCopyMetrics(bool success, int64_t latency_us, CopyDirection direction);
+    int    connectorCpSize() const;
+    size_t connectorEntryCount(const KVCacheResource& resource, size_t global_key_blocks) const;
+    size_t globalKeyBlockCount(const KVCacheResource& resource, size_t connector_entries) const;
+    int    cacheKeyTokensPerBlockForMetrics() const;
+    void   reportEvictionLifetime(CacheBlockKind kind, CacheBackingType backing_type, int64_t created_time_us);
+    void   reportMetricsLoop();
 
 private:
-    const CacheConfig&                cache_config_;
-    const KVCacheConfig&              kv_cache_config_;
-    const ParallelismConfig           parallelism_config_;
-    std::shared_ptr<KVCacheAllocator> allocator_;
-    const std::vector<std::string>    tp_addrs_;
+    const CacheConfig                        cache_config_;
+    const std::vector<LayerTagSlot>          pool_block_memory_layout_;
+    const KVCacheConfig&                     kv_cache_config_;
+    const ParallelismConfig                  parallelism_config_;
+    std::shared_ptr<CoordinatorCacheManager> coordinator_cache_manager_;
+    const std::vector<std::string>           tp_addrs_;
 
     std::shared_ptr<BlockPool>                              block_pool_;
     mutable std::mutex                                      malloc_mutex_;

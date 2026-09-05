@@ -16,7 +16,6 @@ namespace rtp_llm {
 class CompleteTokenIds;
 using CompleteTokenIdsPtr = std::shared_ptr<CompleteTokenIds>;
 
-typedef int32_t          GroupIdType;
 typedef std::vector<int> LayerIdsType;
 
 struct BlockAddrInfo {
@@ -43,10 +42,10 @@ struct TaggedBlockIdPair {
     BlockIdxType dst;
 };
 
-// Process-local tensor representation. group_id is resolved from a stable tag
-// immediately before execution and is never used as an external identity.
+// Process-local tensor representation. The index is resolved from a stable tag
+// in canonical group order and is never used as an external identity.
 struct GroupBlockIdPair {
-    GroupIdType  group_id;
+    int32_t      group_index;
     BlockIdxType src;
     BlockIdxType dst;
 };

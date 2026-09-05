@@ -35,15 +35,15 @@ struct GptModelInputs {
     // shape [decoder_batch_size + context_batch_size], int32
     // sequence_lengths holds current sequence length for incremental decoding requests,
     // shape [decoder_batch_size], int32
-    mutable torch::Tensor combo_tokens;             // [cumulated_seq_len]
-    torch::Tensor         input_lengths;            // [batch_size]
-    torch::Tensor         sequence_lengths;         // [decoder_batch_size]
-    torch::Tensor         lm_output_indexes;        // selected output rows
+    mutable torch::Tensor combo_tokens;       // [cumulated_seq_len]
+    torch::Tensor         input_lengths;      // [batch_size]
+    torch::Tensor         sequence_lengths;   // [decoder_batch_size]
+    torch::Tensor         lm_output_indexes;  // selected output rows
     // Kept for ModelInputsLogger/legacy micro-batch consumers; the async
     // scheduling redesign no longer populates it (stays undefined).
-    torch::Tensor         lm_output_lengths;        // [total_batch_size]
-    torch::Tensor         prefix_lengths;           // [context_batch_size]
-    torch::Tensor         sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
+    torch::Tensor lm_output_lengths;        // [total_batch_size]
+    torch::Tensor prefix_lengths;           // [context_batch_size]
+    torch::Tensor sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
 
     torch::Tensor combo_tokens_type_ids;  // [cumulated_seq_len]
     torch::Tensor combo_position_ids;     // [cumulated_seq_len]
@@ -53,13 +53,18 @@ struct GptModelInputs {
 
     torch::Tensor attention_mask;  // [batch_size, seq_len, seq_len]
 
+    // Cache-group dimension (dim 0) of the block tables below and
+    // kv_cache_group_types uses canonical sorted-tag order (see
+    // rtp_llm/cpp/cache/CacheGroupTagOrder.h). The first column of
+    // kv_cache_update_mapping is the corresponding group_index. Identity is
+    // always the tag; the index exists only while packing and unpacking tensors.
     // - single-type cache: [batch_size, block_nums]
     // - hybrid cache: [group_nums, batch_size, block_nums]
     torch::Tensor kv_cache_block_id;
     torch::Tensor kv_cache_kernel_block_id;  // [group, batch, kernel_blocks], int32
 
     torch::Tensor kv_cache_group_types;     // [group_num], int32, Convention: 0 -> LINEAR, 1 -> FULL.
-    torch::Tensor kv_cache_update_mapping;  // [block_copy_num, 3]: group_id, src block, dst block
+    torch::Tensor kv_cache_update_mapping;  // [block_copy_num, 3]: group_index, src block, dst block
 
     std::optional<std::vector<torch::Tensor>> multimodal_features;  // all features in gathered stream stored here
     torch::Tensor text_tokens_mask;  // text part in multimodal input tokens [cumulated_seq_len]
@@ -73,14 +78,9 @@ struct GptModelInputs {
     torch::Tensor request_id;             // int64, [context_batch_size]
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
     torch::Tensor cache_keys;             // [context_batch_size]
-    // Physical KV-manager block strides. These are independent of any kernel-block view exposed to attention ops.
-    size_t kv_block_stride_bytes;
-    size_t kv_scale_stride_bytes;
-    size_t seq_size_per_block;
-    size_t kernel_seq_size_per_block = 0;  // 0 means same as seq_size_per_block
-    bool   pd_separation             = false;
-    bool   decode_entrance           = false;
-    bool   use_opaque_kv_cache_store = false;
+    bool          pd_separation             = false;
+    bool          decode_entrance           = false;
+    bool          use_opaque_kv_cache_store = false;
 
     bool need_all_logits = false;
     // Set when any stream requests return_all_hidden_states. Gates whether the
@@ -100,6 +100,14 @@ struct GptModelInputs {
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
+    // Canonical sorted cache tags naming every group-dimension entry above.
+    // Entry i of the block tables and group types belongs to
+    // kv_cache_group_tags[i]; each update-mapping row's group_index selects from
+    // the same order. Filled by the gatherer for logging and for cross-checking
+    // the consuming adapter. Not TP-synced: a non-root rank leaves it empty and
+    // re-derives the identical order from its own CacheConfig, which is exactly
+    // why the order is sorted rather than inherited from local record order.
+    std::vector<std::string> kv_cache_group_tags;
 
 public:
     std::string debugString(bool force = false) const;

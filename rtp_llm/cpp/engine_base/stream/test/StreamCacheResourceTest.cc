@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
-#include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/test/mock/MockCoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/connector/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
@@ -71,13 +71,24 @@ protected:
                                        role_type);
     }
 
-    void prepareResourceWithCacheConfig(const CacheConfig&      cache_config,
+    void prepareResourceWithCacheConfig(CacheConfig             cache_config,
                                         const std::vector<int>& input_tokens,
                                         bool                    reuse_cache,
                                         RoleType                role_type) {
-        cache_manager_ = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr);
+        cache_manager_ =
+            std::make_shared<KVCacheManager>(std::move(cache_config), /*warmup=*/false, /*metrics_reporter=*/nullptr);
         ASSERT_TRUE(cache_manager_->init());
-        ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
+        // Every cache group owns an independent block pool sized to its own block_num, and each
+        // pool keeps block 0 back as the null block, so the free count is sum(block_num - 1) over
+        // the declared groups: 8 for the single-group MHA plans, 16 for the two-group hybrid plan.
+        // This must stay an accurate expectation: ASSERT_* here only returns from this helper, so a
+        // stale value leaves stream_ null and the caller crashes on the next dereference.
+        size_t expected_free_blocks = 0;
+        for (const auto& group : cache_manager_->cacheConfig().groups()) {
+            ASSERT_GT(group.block_num, 0u);
+            expected_free_blocks += static_cast<size_t>(group.block_num) - 1;
+        }
+        ASSERT_EQ(cache_manager_->freeBlocksNum(), expected_free_blocks);
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager_;
         resource_context.reuse_cache   = reuse_cache;
@@ -98,10 +109,13 @@ protected:
         stream_->generate_status_->status = StreamState::RUNNING;
     }
 
+    // Every CHECK_BLOCK caller builds its manager from init_config(), i.e.
+    // makeSimpleMhaCacheConfig, whose single cache group is tagged "default".
+    // The tag is the group's only identity.
     void checkBlockFunc(BatchKVCacheResource& batch_resource, int outter_size, int inner_size) {
         ASSERT_EQ(batch_resource.batchSize(), outter_size);
         for (int i = 0; i < outter_size; ++i) {
-            ASSERT_EQ(batch_resource.blocks(i, 0).size(), inner_size);
+            ASSERT_EQ(batch_resource.blocks(i, "default").size(), inner_size);
         }
     };
 
@@ -281,11 +295,11 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdates
     resource.resource_context_.enable_memory_cache                 = true;
     stream_->generate_input_->generate_config->enable_memory_cache = true;
 
-    auto mock_coord =
-        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
-                                                                             cache_manager_->kv_cache_config_,
-                                                                             cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_);
+    auto mock_coord = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
     ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
     cache_manager_->coordinator_ = mock_coord;
 
@@ -327,13 +341,43 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_TriggersLoadCacheSync_AndUpdates
     EXPECT_EQ(stream_->memoryReuseLength(), expected_memory_reuse_len);
 }
 
-TEST_F(StreamCacheResourceTest, testCPShardedConnectorReuseUsesCanonicalBlockWidth) {
+TEST_F(StreamCacheResourceTest, testCPShardedConnectorReuseCountersStayInGlobalBlocks) {
     prepareResource(/*reuse_cache=*/true);
     auto& resource = stream_->streamCacheResource();
 
     cache_manager_->cp_slot_mapper_ =
         std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, resource.seqSizePerBlock());
 
+    auto match_child = std::make_shared<testing::NiceMock<MockAsyncContext>>();
+    auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
+    auto kv_resource = std::make_shared<KVCacheResource>();
+    kv_resource->setDeviceReuseBlockNum(8);
+    kv_resource->setMemoryReuseBlockNum(2);
+    std::shared_ptr<Meta> meta;
+    auto                  read_context = std::make_shared<FusedAsyncReadContext>(fused_match, kv_resource, meta);
+
+    resource.updateReuseLengthsFromContext(read_context);
+
+    const int global_block_tokens = resource.seqSizePerBlock();
+    EXPECT_EQ(stream_->initialReuseLength(), 10 * global_block_tokens);
+    EXPECT_EQ(stream_->reuseLength(), 10 * global_block_tokens);
+    EXPECT_EQ(stream_->localReuseLength(), 10 * global_block_tokens);
+    EXPECT_EQ(stream_->memoryReuseLength(), 2 * global_block_tokens);
+}
+
+TEST_F(StreamCacheResourceTest, testCPShardedAllLogicalGroupsKeepLogicalReuseWidth) {
+    auto config = init_config();
+    auto groups = config.groups();
+    ASSERT_EQ(groups.size(), 1u);
+    groups[0].policy.cp_mapping = CpBlockMappingMode::NONE;
+    CacheConfig logical_config(std::move(groups), config.layers(), config.layer_num);
+    test::copyCacheConfigScalars(config, logical_config);
+    prepareResourceWithCacheConfig(
+        std::move(logical_config), /*input_tokens=*/{1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, RoleType::PDFUSION);
+    auto& resource = stream_->streamCacheResource();
+
+    cache_manager_->cp_slot_mapper_ =
+        std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, resource.seqSizePerBlock());
     auto match_child = std::make_shared<testing::NiceMock<MockAsyncContext>>();
     auto fused_match = std::make_shared<FusedAsyncContext>(std::vector<std::shared_ptr<AsyncContext>>{match_child});
     auto kv_resource = std::make_shared<KVCacheResource>();
@@ -344,12 +388,10 @@ TEST_F(StreamCacheResourceTest, testCPShardedConnectorReuseUsesCanonicalBlockWid
 
     resource.updateReuseLengthsFromContext(read_context);
 
-    const int canonical_block_tokens = resource.seqSizePerBlock() * 2;
-    EXPECT_EQ(resource.reuseBlockTokens(), canonical_block_tokens);
-    EXPECT_EQ(stream_->initialReuseLength(), 3 * canonical_block_tokens);
-    EXPECT_EQ(stream_->reuseLength(), 3 * canonical_block_tokens);
-    EXPECT_EQ(stream_->localReuseLength(), 3 * canonical_block_tokens);
-    EXPECT_EQ(stream_->memoryReuseLength(), canonical_block_tokens);
+    EXPECT_EQ(stream_->initialReuseLength(), 3 * resource.seqSizePerBlock());
+    EXPECT_EQ(stream_->reuseLength(), 3 * resource.seqSizePerBlock());
+    EXPECT_EQ(stream_->localReuseLength(), 3 * resource.seqSizePerBlock());
+    EXPECT_EQ(stream_->memoryReuseLength(), resource.seqSizePerBlock());
 }
 
 TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyForFirstMalloc) {
@@ -367,34 +409,37 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
     stream_->generate_input_->generate_config->enable_memory_cache = true;
     resource.resource_context_.enable_memory_cache                 = true;
 
-    auto allocator             = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
-    cache_manager_->allocator_ = allocator;
+    auto coordinator_manager =
+        std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    cache_manager_->coordinator_cache_manager_ = coordinator_manager;
 
-    auto mock_coord =
-        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
-                                                                             cache_manager_->kv_cache_config_,
-                                                                             cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_);
+    auto mock_coord = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
     ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
     cache_manager_->coordinator_ = mock_coord;
     EXPECT_CALL(*mock_coord, asyncRead(testing::_)).WillOnce(testing::Return(nullptr));
 
     testing::InSequence seq;
-    EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
+    EXPECT_CALL(*coordinator_manager, initMallocForCommonLen(testing::_))
         .WillOnce(testing::Invoke([&](const MallocInfo& info) -> MallocResult {
             EXPECT_FALSE(info.reuse_cache);
             EXPECT_FALSE(info.enable_device_cache);
             return {true, 0};
         }));
 
-    EXPECT_CALL(*allocator, incrMalloc(testing::_))
+    EXPECT_CALL(*coordinator_manager, incrMalloc(testing::_))
         .WillOnce(testing::Invoke([&](const MallocInfo& info) -> MallocResult {
             // initKVBlock should force-disable cache reuse on the first malloc for decode hybrid.
             EXPECT_FALSE(info.reuse_cache);
             EXPECT_FALSE(info.enable_device_cache);
             // Simulate a successful allocation so subsequent calls go through incrMalloc path.
+            // prepareHybridResource() uses makeSimpleHybridMhaCacheConfig, whose linear group
+            // is tagged "linear"; that is the group this mock used to fill.
             for (int b = 0; b < info.batch_kv_cache_resource->batchSize(); ++b) {
-                auto& block_ids = info.batch_kv_cache_resource->mutableBlockIds(b, /*group_id=*/0);
+                auto& block_ids = info.batch_kv_cache_resource->mutableBlockIds(b, "linear");
                 block_ids.assign(BlockIndicesType{/*block=*/1});
             }
             return {true, 0};
@@ -426,11 +471,11 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TriggersStoreCacheAsync_Wh
     resource.resource_context_.enable_device_cache                 = false;
     stream_->generate_input_->generate_config->enable_device_cache = false;
 
-    auto mock_coord =
-        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
-                                                                             cache_manager_->kv_cache_config_,
-                                                                             cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_);
+    auto mock_coord = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
 
     cache_manager_->coordinator_ = mock_coord;
 
@@ -463,11 +508,11 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_DoesNotStoreCacheAsync_Whe
     resource.resource_context_.enable_memory_cache                 = true;
     stream_->generate_input_->generate_config->enable_memory_cache = true;
 
-    auto mock_coord =
-        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
-                                                                             cache_manager_->kv_cache_config_,
-                                                                             cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_);
+    auto mock_coord = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
 
     cache_manager_->coordinator_ = mock_coord;
 
@@ -493,11 +538,11 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TieredMemoryCache_EvictsDe
     resource.resource_context_.enable_tiered_memory_cache          = true;
     resource.resource_context_.device_cache_min_free_blocks        = 8;
 
-    auto mock_coord =
-        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
-                                                                             cache_manager_->kv_cache_config_,
-                                                                             cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_);
+    auto mock_coord = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
 
     cache_manager_->coordinator_ = mock_coord;
 
@@ -564,11 +609,11 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_WithMemoryCache_SubmitsLoad) 
     resource.resource_context_.enable_memory_cache                 = true;
     stream_->generate_input_->generate_config->enable_memory_cache = true;
 
-    auto mock_coord =
-        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
-                                                                             cache_manager_->kv_cache_config_,
-                                                                             cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_);
+    auto mock_coord = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
     ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
     cache_manager_->coordinator_ = mock_coord;
 
@@ -592,11 +637,11 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_CoordinatorReturnsNull_Return
     resource.resource_context_.enable_memory_cache                 = true;
     stream_->generate_input_->generate_config->enable_memory_cache = true;
 
-    auto mock_coord =
-        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
-                                                                             cache_manager_->kv_cache_config_,
-                                                                             cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_);
+    auto mock_coord = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
     ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
     cache_manager_->coordinator_ = mock_coord;
 
@@ -623,11 +668,11 @@ TEST_F(StreamCacheResourceTest, testLoadCacheDone_Pending_ReturnsFalse) {
     resource.resource_context_.enable_memory_cache                 = true;
     stream_->generate_input_->generate_config->enable_memory_cache = true;
 
-    auto mock_coord =
-        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
-                                                                             cache_manager_->kv_cache_config_,
-                                                                             cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_);
+    auto mock_coord = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
     ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
     cache_manager_->coordinator_ = mock_coord;
 
@@ -650,11 +695,11 @@ TEST_F(StreamCacheResourceTest, testLoadCacheDone_Done_ReturnsTrue_ClearsContext
     resource.resource_context_.enable_memory_cache                 = true;
     stream_->generate_input_->generate_config->enable_memory_cache = true;
 
-    auto mock_coord =
-        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
-                                                                             cache_manager_->kv_cache_config_,
-                                                                             cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_);
+    auto mock_coord = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
     ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
     cache_manager_->coordinator_ = mock_coord;
 
@@ -694,11 +739,11 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_ThenLoadCacheDone_UpdatesReus
     resource.resource_context_.enable_memory_cache                 = true;
     stream_->generate_input_->generate_config->enable_memory_cache = true;
 
-    auto mock_coord =
-        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
-                                                                             cache_manager_->kv_cache_config_,
-                                                                             cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_);
+    auto mock_coord = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
     ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
     cache_manager_->coordinator_ = mock_coord;
 
@@ -792,11 +837,11 @@ TEST_F(StreamCacheResourceTest, testInitKVBlock_SecondCallDoesNotOverwriteReuseL
     resource.resource_context_.enable_memory_cache                 = true;
     stream_->generate_input_->generate_config->enable_memory_cache = true;
 
-    auto mock_coord =
-        std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(cache_manager_->config_,
-                                                                             cache_manager_->kv_cache_config_,
-                                                                             cache_manager_->runtime_config_,
-                                                                             cache_manager_->allocator_);
+    auto mock_coord = std::make_shared<testing::NiceMock<MockKVCacheConnectorCoordinator>>(
+        cache_manager_->config_,
+        cache_manager_->kv_cache_config_,
+        cache_manager_->runtime_config_,
+        cache_manager_->coordinator_cache_manager_);
     ON_CALL(*mock_coord, hasActiveConnectors()).WillByDefault(testing::Return(true));
     cache_manager_->coordinator_ = mock_coord;
 

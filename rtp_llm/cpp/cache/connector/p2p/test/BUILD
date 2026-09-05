@@ -101,6 +101,7 @@ cc_test(
         "main.cc",
     ],
     deps = [
+        "//rtp_llm/cpp/cache:cache_core",
         "//rtp_llm/cpp/cache/connector/p2p:connector",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",

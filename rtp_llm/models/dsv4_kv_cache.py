@@ -13,10 +13,10 @@ of independent pools selected by its ``compress_ratios`` entry:
   ==========  ====================================================
 
 C++ turns the resulting per-layer desc lists into the cache topology through
-``HybridPoolConfigCreator`` (``validateHybridPoolDescs`` ->
+``CacheConfigCreator`` (``validateHybridPoolDescs`` ->
 ``buildLayerSpecsFromDescs`` -> ``populateGroupsFromLayerSpecs`` ->
 ``setupIndependentPoolSizes``), which is only reached when
-``hybrid_attention_config.enable_independent_kv_cache_pools`` is set.
+the hybrid attention configuration is enabled.
 
 This module is the production twin of
 ``rtp_llm/cpp/cache/test/CacheConfigTestUtils.h`` (``makeDsv4Desc`` /
@@ -32,14 +32,12 @@ true of ``ModelConfig.kv_cache_spec_descs`` (a ``std::vector<std::vector<...>>``
 mutate the Python list first, then assign it once.
 """
 
-from typing import Optional, Sequence
+from typing import Sequence
 
 from rtp_llm.ops import (
     CacheCapacityPolicyDesc,
     CacheCpPolicyDesc,
     CacheEvictPolicy,
-    CacheMemoryPlacement,
-    CacheMemoryPolicyDesc,
     CacheReusePolicyDesc,
     CacheTailPolicyDesc,
     CpBlockSliceMode,
@@ -80,15 +78,6 @@ _COMPRESSED_KV_KIND = "compressed_kv"
 _FIXED_STATE_KIND = "fixed_state"
 _SLIDING_WINDOW_KV_KIND = "sliding_window_kv"
 
-# The four "fixed" pools that ``--dsv4_fixed_pool_use_memory`` may move to
-# pinned host memory.
-DSV4_FIXED_POOL_TAGS: tuple[str, ...] = (
-    INDEXER_STATE_TAG,
-    CSA_STATE_TAG,
-    HCA_STATE_TAG,
-    SWA_KV_TAG,
-)
-
 
 def _make_dsv4_desc(
     tag: str,
@@ -109,6 +98,7 @@ def _make_dsv4_desc(
         desc.is_state_cache = False
         desc.entry_count_mode = OpaqueBlockEntryCountMode.KERNEL_BLOCK_COMPRESSED
         desc.compression_ratio = compression_ratio
+        desc.kernel_tokens_per_block_alignment = 128
         if desc.entry_elems == DSV4_FP8_KV_ENTRY_BYTES:
             desc.block_stride_bytes_alignment = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES
         # Compressed pools deliberately carry no ``cp`` policy and leave
@@ -138,7 +128,6 @@ def _make_dsv4_desc(
         cp.slice = CpBlockSliceMode.PAYLOAD_BYTES
         capacity = CacheCapacityPolicyDesc()
         capacity.explicit_block_num = DSV4_HCA_STATE_POOL_BLOCKS
-        capacity.charge_to_paged_budget = True
         desc.capacity = capacity
         reuse.enable_prefix_reuse = False
         tail = CacheTailPolicyDesc()
@@ -154,38 +143,10 @@ def _make_dsv4_desc(
             desc.block_stride_bytes_alignment = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES
 
     desc.state_ring_include_gen_num_per_cycle = True
-    cp.scale_seq_size = True
     desc.block_stride_alignment_min_entries = DSV4_SWA_WINDOW_ENTRIES
     desc.reuse = reuse
     desc.cp = cp
     return desc
-
-
-def _is_host_resident(desc: KVCacheSpecDesc) -> bool:
-    memory = desc.memory
-    return (
-        memory is not None
-        and memory.placement is not None
-        and memory.placement != CacheMemoryPlacement.DEVICE
-    )
-
-
-def _use_host_pinned_memory(desc: KVCacheSpecDesc) -> None:
-    """Move a pool to pinned host memory.
-
-    ``memory.placement`` and ``capacity.charge_to_paged_budget`` must move
-    together: a host-resident pool that still charges the paged HBM budget
-    trips ``checkGroupResidencyBudget`` in ``rtp_llm/cpp/cache/CacheConfig.h``.
-    """
-    memory = CacheMemoryPolicyDesc()
-    memory.placement = CacheMemoryPlacement.HOST_PINNED
-    desc.memory = memory
-
-    capacity = desc.capacity
-    if capacity is None:
-        capacity = CacheCapacityPolicyDesc()
-    capacity.charge_to_paged_budget = False
-    desc.capacity = capacity
 
 
 def apply_dsv4_explicit_pool_blocks(
@@ -199,8 +160,6 @@ def apply_dsv4_explicit_pool_blocks(
     before ``layer_descs`` is assigned to ``model_config.kv_cache_spec_descs``:
     the pybind getter returns a copy, so mutating a read-back list is a no-op.
 
-    Unlike the C++ test helper this never re-enables ``charge_to_paged_budget``
-    on a host-resident pool, so the residency/budget pair stays consistent.
     """
     for descs in layer_descs:
         for desc in descs:
@@ -210,9 +169,6 @@ def apply_dsv4_explicit_pool_blocks(
             if capacity is None:
                 capacity = CacheCapacityPolicyDesc()
             capacity.explicit_block_num = block_num
-            capacity.charge_to_paged_budget = block_num > 0 and not _is_host_resident(
-                desc
-            )
             desc.capacity = capacity
 
 
@@ -222,7 +178,6 @@ def build_dsv4_kv_cache_spec_descs(
     fp8_kv: bool,
     head_dim: int,
     indexer_head_dim: int,
-    fixed_pool_use_host_memory: bool = False,
 ) -> list[list[KVCacheSpecDesc]]:
     """Build the per-layer DSv4 desc lists.
 
@@ -240,9 +195,6 @@ def build_dsv4_kv_cache_spec_descs(
         fp8_kv: ``attn_config.kv_cache_dtype == KvCacheDataType.FP8``.
         head_dim: ``attn_config.size_per_head``.
         indexer_head_dim: ``attn_config.indexer_head_dim``.
-        fixed_pool_use_host_memory: place the four fixed pools
-            (``indexer_state`` / ``csa_state`` / ``hca_state`` / ``swa_kv``) in
-            pinned host memory and take them off the paged HBM budget.
     """
     if layer_num <= 0:
         raise ValueError(f"dsv4 kv cache descs require layer_num > 0, got {layer_num}")
@@ -298,10 +250,6 @@ def build_dsv4_kv_cache_spec_descs(
         DataType.TYPE_UINT8,
     )
 
-    if fixed_pool_use_host_memory:
-        for desc in (indexer_state, csa_state, hca_state, swa_kv):
-            _use_host_pinned_memory(desc)
-
     ratios = list(layer_compress_ratios)
     layer_descs: list[list[KVCacheSpecDesc]] = []
     for layer_id in range(layer_num):
@@ -313,22 +261,3 @@ def build_dsv4_kv_cache_spec_descs(
         else:
             layer_descs.append([swa_kv])
     return layer_descs
-
-
-def resolve_dsv4_tokens_per_block(
-    tokens_per_block: int,
-    framework_default: int = 64,
-) -> Optional[int]:
-    """Return the physical block size DSv4 should run with, or None to keep.
-
-    ``HybridPoolConfigCreator::createHybridAttentionPoolConfig`` takes
-    ``kv_cache_config.seq_size_per_block`` only when it differs from the
-    framework default of 64, otherwise it falls back to
-    ``attn_config.tokens_per_block``; and ``createBasicConfig`` (the warm-up
-    path) zeroes ``seq_size_per_block`` entirely, so ``attn_config`` is the only
-    channel that reaches both paths.  Promote the default to 256, but leave an
-    explicit ``--seq_size_per_block`` alone so the two paths stay in agreement.
-    """
-    if tokens_per_block == framework_default:
-        return DSV4_TOKENS_PER_BLOCK
-    return None

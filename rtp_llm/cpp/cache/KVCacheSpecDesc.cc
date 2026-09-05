@@ -1,11 +1,55 @@
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 
+#include <limits>
+
 #include "rtp_llm/cpp/cache/KVCacheSpec.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 
-KVCacheSpecPtr SpecBuilder::build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
+uint32_t effectiveCacheCpSize(const SpecBuildContext& ctx) {
+    if (ctx.parallelism_config == nullptr || !ctx.parallelism_config->prefill_cp_config.kv_cache_sharded) {
+        return 1;
+    }
+    const auto& parallelism_config = *ctx.parallelism_config;
+    if (parallelism_config.role_type == RoleType::PREFILL && parallelism_config.tp_size > 1) {
+        return static_cast<uint32_t>(parallelism_config.tp_size);
+    }
+    if (parallelism_config.role_type == RoleType::DECODE && parallelism_config.prefill_cp_config.is_prefill_enabled()) {
+        RTP_LLM_CHECK_WITH_INFO(
+            parallelism_config.prefill_cp_config.prefill_cp_size > 1,
+            "compact CP decode requires explicit prefill_cp_size when PREFILL_CP and kv_cache_sharded are enabled");
+        return static_cast<uint32_t>(parallelism_config.prefill_cp_config.prefill_cp_size);
+    }
+    return 1;
+}
+
+namespace {
+
+uint32_t physicalBlockSpan(const CacheGroupPolicy& policy, const SpecBuildContext& ctx) {
+    return policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK ? effectiveCacheCpSize(ctx) : 1;
+}
+
+}  // namespace
+
+BuiltLayerSpec SpecBuilder::build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
+    const auto policy                  = groupPolicy(desc);
+    auto       finalized_ctx           = ctx;
+    const auto base_seq_size_per_block = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
+    const auto span                    = physicalBlockSpan(policy, ctx);
+    RTP_LLM_CHECK_WITH_INFO(base_seq_size_per_block <= std::numeric_limits<uint32_t>::max() / span,
+                            "KVCacheSpecDesc tag=%s physical seq size overflow: base=%u span=%u",
+                            desc.tag.c_str(),
+                            base_seq_size_per_block,
+                            span);
+    finalized_ctx.seq_size_per_block = base_seq_size_per_block * span;
+    finalized_ctx.kernel_seq_size_per_block =
+        ctx.kernel_seq_size_per_block == 0 ? base_seq_size_per_block : ctx.kernel_seq_size_per_block;
+    auto spec = buildSpec(desc, finalized_ctx);
+    return {desc.tag, std::move(spec), policy};
+}
+
+KVCacheSpecPtr SpecBuilder::buildSpec(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
     RTP_LLM_CHECK_WITH_INFO(!desc.tag.empty(), "KVCacheSpecDesc tag must not be empty");
     switch (desc.cache_type) {
         case KVCacheSpecType::MultiHeadAttention:
@@ -61,12 +105,6 @@ CacheGroupPolicy SpecBuilder::groupPolicy(const KVCacheSpecDesc& desc) {
         if (desc.capacity->explicit_block_num.has_value()) {
             policy.explicit_block_num = *desc.capacity->explicit_block_num;
         }
-        if (desc.capacity->charge_to_paged_budget.has_value()) {
-            policy.charge_to_paged_budget = *desc.capacity->charge_to_paged_budget;
-        }
-    }
-    if (desc.memory.has_value() && desc.memory->placement.has_value()) {
-        policy.memory_placement = *desc.memory->placement;
     }
     if (desc.tail.has_value()) {
         if (desc.tail->active_tail_blocks.has_value()) {

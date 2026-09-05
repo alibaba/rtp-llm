@@ -4,7 +4,7 @@ Exposes qwen3-style decode primitives as free functions so the Model
 class stays thin:
 
 * ``build_paged_pool_specs`` — per-attn_type paged pool geometry
-* ``build_metadata_eager``   — DSv4DecodeAttnMetadata from raw attn_inputs
+* ``build_metadata_eager``   — FP8 decode metadata from raw attn_inputs
 * ``forward_layers``         — per-layer loop body (embed → layers → reduce + norm)
 * ``forward_decode``         — full decode arm (metadata dispatch + per-layer + packing)
 
@@ -12,7 +12,7 @@ Paired with :mod:`rtp_llm.models_py.modules.dsv4.prefill.forward`, which
 does the same job for the prefill path.
 
 Nothing here holds state. The CUDA-graph-captured metadata (kept alive
-inside ``DSv4DecodeFmhaImpl``) is looked up by the caller; this module
+inside ``DSv4DecodeFmhaImplFP8``) is looked up by the caller; this module
 only builds the *eager* metadata when ``fmha_impl`` isn't a persistent
 decode impl.
 """
@@ -31,18 +31,14 @@ from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     CSA_KV,
     CSA_STATE,
-    DSV4_KERNEL_ROW_TAGS,
     HCA_KV,
     HCA_STATE,
     INDEXER_KV,
     INDEXER_STATE,
     SWA_KV,
     build_block_tables_for_tags,
+    primary_attention_inputs,
 )
-from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
-    group_tags as _kv_cache_group_tags,
-)
-from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
 
 # DSV4 paged (FULL) + fixed/state pool tags, in the probe order the metadata
 # allocator expects. SWA_KV lives on every layer; CSA/HCA/INDEXER only on the
@@ -56,38 +52,6 @@ _DSV4_DECODE_POOL_TAGS: Tuple[str, ...] = (
     HCA_STATE,
     INDEXER_STATE,
 )
-
-
-def _dsv4_kernel_tokens_per_block(kv_cache: Any) -> int:
-    """No-fallback accessor for the FULL pools' kernel tokens-per-block.
-
-    The tag-driven KVCache exposes this per cache group
-    (``get_kernel_seq_size_per_block(tag)``); every DSV4 paged pool shares the
-    one value ``DSV4CacheConfigHelper`` writes, so the first kernel-row tag the
-    topology carries is authoritative. Surfaces the C++ propagation bug instead
-    of silently sizing block tables with the wrong stride.
-    """
-    if kv_cache is None:
-        raise RuntimeError(
-            "DSV4 decode: kv_cache is None when sizing paged pool specs."
-        )
-    tags = _kv_cache_group_tags(kv_cache)
-    getter = getattr(kv_cache, "get_kernel_seq_size_per_block", None)
-    if getter is not None:
-        for tag in DSV4_KERNEL_ROW_TAGS:
-            if tag not in tags:
-                continue
-            try:
-                ksb = int(getter(tag))
-            except RuntimeError:
-                continue
-            if ksb > 0:
-                return ksb
-    raise RuntimeError(
-        "DSV4 KVCache kernel_seq_size_per_block is unavailable for every paged "
-        "tag (expected >0 for one of %r). group_tags=%r."
-        % (list(DSV4_KERNEL_ROW_TAGS), tags)
-    )
 
 
 def _dsv4_pool_tokens_per_block(kv_cache: Any, tag: str) -> int:
@@ -107,10 +71,9 @@ def build_paged_pool_specs(
     stride on layer 0 (all layers share the same allocator geometry per
     cache tag).
 
-    ``max_blocks_per_req`` MUST match the framework's runtime block_table
-    width — the framework uniformly allocates
-    ``ceil(max_seq_len / kernel_seq_size_per_block) + 1`` columns for
-    every pool. Under-sizing here truncates the framework block_table
+    ``max_blocks_per_req`` MUST match each tagged runtime block_table width:
+    ``ceil(max_seq_len / pool_tokens_per_block) + 1``. Under-sizing here
+    truncates the framework block_table
     on copy in ``update_decode_metadata_in_place``, leaving zero block-
     ids in the unfilled tail; the captured graph then reads block_id=0
     for real decode positions, computes a slot in pool block 0, and
@@ -127,11 +90,6 @@ def build_paged_pool_specs(
                 "build_paged_pool_specs: max_seq_len required to size paged "
                 "block tables to match the framework allocator."
             )
-    # Framework's block_table width per pool. Add +1 slack for the same
-    # reason the C++ allocator does (last-token-of-prefill + first-decode
-    # may bridge a block boundary mid-step).
-    ksb = _dsv4_kernel_tokens_per_block(kv_cache)
-    max_blocks_per_req = (max_seq_len + ksb - 1) // ksb + 1
     # ``_pool_entries_per_block`` reads ``self._kv_cache`` which is only
     # bound during ``Attention.forward_decode``'s try/finally. Caller
     # (decode/forward.forward_decode) invokes us BEFORE the layer forward
@@ -162,6 +120,11 @@ def build_paged_pool_specs(
                         kv_cache,
                         tag,
                     )
+                    # Each tagged block table is sized from its own finalized
+                    # group geometry. Add one bridge block for prefill->decode.
+                    max_blocks_per_req = (
+                        max_seq_len + tokens_per_block - 1
+                    ) // tokens_per_block + 1
                     specs[tag] = (
                         entries_per_block,
                         tokens_per_block,
@@ -180,9 +143,8 @@ def build_metadata_eager(
     device: torch.device,
     paged_pool_specs: Dict[str, Tuple[int, int, int]],
     kv_cache: Optional[Any] = None,
-    fp8_kv_cache: bool = False,
-) -> Optional[Any]:  # DSv4DecodeAttnMetadata | None
-    """Build ``DSv4DecodeAttnMetadata`` inline from framework attn inputs.
+) -> Optional[Any]:  # DSv4DecodeAttnMetadataFP8 | None
+    """Build FP8 decode metadata inline from framework attention inputs.
 
     ``attn_inputs`` is ``PyModelInputs.attention_inputs``: either a single
     ``PyAttentionInputs`` or the ``{tag: PyAttentionInputs}`` mapping DSV4 gets
@@ -190,22 +152,16 @@ def build_metadata_eager(
     entry; block tables are collected per tag.
 
     Only used on the eager path (``fmha_impl`` is None or not a
-    ``DSv4DecodeFmhaImpl``). CUDA-graph capture has its own persistent
-    metadata owned by ``DSv4DecodeFmhaImpl.metadata`` — the caller
+    ``DSv4DecodeFmhaImplFP8``). CUDA-graph capture has its own persistent
+    metadata owned by ``DSv4DecodeFmhaImplFP8.metadata`` — the caller
     checks the fmha_impl type and picks.
 
     Returns ``None`` when the incoming batch is empty (bs == 0) so the
     caller can short-circuit to an empty ``PyModelOutputs``.
 
-    Per-request first-token position is read from ``attn.sequence_lengths``
-    (normal decode) or ``attn.prefix_lengths`` (target verify). The FP8
-    branch passes ``attn`` straight through and lets
-    :func:`build_decode_metadata_fp8` derive + clamp ``start_pos``
-    internally via :func:`_build_start_pos_from_attention_inputs`; the
-    BF16 branch builds + clamps ``start_pos`` here before calling the
-    legacy :func:`build_decode_metadata`. Both clamp to
-    ``[0, max_seq_len - q_len]`` so the whole ``[start_pos, start_pos + q_len)``
-    window stays within KV/compressed pool capacity.
+    ``build_decode_metadata_fp8`` derives and clamps each request's first-token
+    position from ``attn.sequence_lengths`` (normal decode) or
+    ``attn.prefix_lengths`` (target verify).
     """
     # Target verify is a multi-token decode. C++ MtpExecutor (see
     # MtpExecutor.cc:879-958) clears ``sequence_lengths`` and stashes the
@@ -245,42 +201,12 @@ def build_metadata_eager(
             paged_block_tables[tag] = block_table
             paged_entries_per_block[tag] = int(paged_pool_specs[tag][0])
 
-    if fp8_kv_cache:
-        from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
-            build_decode_metadata_fp8,
-        )
-
-        return build_decode_metadata_fp8(
-            attention_inputs=attn,
-            q_len=q_len,
-            window_size=int(v4_args.window_size),
-            head_dim=int(v4_args.head_dim),
-            max_seq_len=max_s,
-            compress_ratios=list(v4_args.compress_ratios)[: v4_args.n_layers],
-            index_topk=int(v4_args.index_topk),
-            device=device,
-            paged_block_tables=paged_block_tables or None,
-            paged_pool_entries_per_block=paged_entries_per_block or None,
-            paged_pool_tokens_per_block=paged_tokens_per_block or None,
-        )
-
-    # BF16 path: legacy ``build_decode_metadata`` takes a raw ``start_pos``
-    # tensor. Derive + clamp here so it shares semantics with the FP8 branch
-    # (whole [start_pos, start_pos+q_len) window inside KV capacity).
-    from rtp_llm.models_py.modules.dsv4.decode.decode_attn_metadata import (
-        build_decode_metadata,
+    from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
+        build_decode_metadata_fp8,
     )
 
-    if is_target_verify:
-        start_pos = attn.prefix_lengths
-    else:
-        start_pos = attn.sequence_lengths
-    start_pos = start_pos.to(device=device, dtype=torch.int32)
-    max_start = max(0, max_s - q_len)
-    start_pos = torch.clamp(start_pos, min=0, max=max_start)
-
-    return build_decode_metadata(
-        start_pos=start_pos,
+    return build_decode_metadata_fp8(
+        attention_inputs=attn,
         q_len=q_len,
         window_size=int(v4_args.window_size),
         head_dim=int(v4_args.head_dim),
@@ -290,6 +216,7 @@ def build_metadata_eager(
         device=device,
         paged_block_tables=paged_block_tables or None,
         paged_pool_entries_per_block=paged_entries_per_block or None,
+        paged_pool_tokens_per_block=paged_tokens_per_block or None,
     )
 
 
@@ -297,7 +224,7 @@ def forward_layers(
     v4: Any,
     kv_cache: Optional[Any],
     input_ids: torch.Tensor,  # [T_total]
-    attn_metadata: Any,  # DSv4DecodeAttnMetadata
+    attn_metadata: Any,  # DSv4DecodeAttnMetadataFP8
     prepare_hidden_fn: Optional[Any] = None,
 ) -> torch.Tensor:
     """qwen3-style decode per-layer loop. Same body shape as the prefill
@@ -380,7 +307,7 @@ def forward_decode(
     kv_cache: Optional[Any],
     v4_args: Any,
     inputs: Any,  # PyModelInputs
-    fmha_impl: Any = None,  # Optional[DSv4DecodeFmhaImpl]
+    fmha_impl: Any = None,  # Optional[DSv4DecodeFmhaImplFP8]
     prepare_hidden_fn: Optional[Any] = None,
 ) -> Any:  # PyModelOutputs
     """Batched decode arm — full orchestration used by
@@ -388,39 +315,23 @@ def forward_decode(
 
     Two metadata paths:
 
-    * **CUDA-graph path** (``fmha_impl`` is a ``DSv4DecodeFmhaImpl``): read
+    * **CUDA-graph path** (``fmha_impl`` is a ``DSv4DecodeFmhaImplFP8``): read
       ``fmha_impl.metadata`` as-is. It was populated either in
-      ``DSv4DecodeFmhaImpl.__init__`` (initial dtype-check forward) or by
+      ``DSv4DecodeFmhaImplFP8.__init__`` (initial dtype-check forward) or by
       C++ ``prepare_cuda_graph`` before each replay. Reading
       ``attn.sequence_lengths`` here during stream capture would trigger a
       CPU→CUDA copy that's illegal inside a graph.
-    * **Eager path**: build :class:`DSv4DecodeAttnMetadata` inline via
+    * **Eager path**: build :class:`DSv4DecodeAttnMetadataFP8` inline via
       :func:`build_metadata_eager`.
 
     Input ``inputs.input_ids`` arrives flat ``[T_total]``; we view as
     ``[B, q_len]``, dispatch to :func:`forward_layers`, then re-pack to
     ``[T_total, dim]`` for the sampler.
     """
-    from rtp_llm.models_py.modules.dsv4.decode.decode_fmha_impl import (
-        DSv4DecodeFmhaImpl,
+    from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
+        DSv4DecodeFmhaImplFP8,
     )
     from rtp_llm.ops.compute_ops import PyModelOutputs
-
-    # FP8 decode has a separate, non-inheriting FmhaImpl class. Include both
-    # in the graph-path dispatch so the CUDA-graph capture (which passes an
-    # ``fmha_impl`` via ``prepare_fmha_impl``) reads the impl's persistent
-    # metadata instead of falling through to ``build_metadata_eager`` — the
-    # eager path does CPU→GPU copies on ``attn.sequence_lengths`` which are
-    # rejected inside a CUDA stream capture.
-    _graph_impl_types: Tuple[type, ...] = (DSv4DecodeFmhaImpl,)
-    try:
-        from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
-            DSv4DecodeFmhaImplFP8,
-        )
-
-        _graph_impl_types = (DSv4DecodeFmhaImpl, DSv4DecodeFmhaImplFP8)
-    except ImportError:
-        pass
 
     # ``attention_inputs`` is a ``{tag: PyAttentionInputs}`` mapping for the
     # multi-group DSV4 cache; keep the raw value for per-tag block-table
@@ -437,7 +348,7 @@ def forward_decode(
         input_ids = input_ids.to(param_dev)
     input_ids = input_ids.reshape(-1)
 
-    if isinstance(fmha_impl, _graph_impl_types):
+    if isinstance(fmha_impl, DSv4DecodeFmhaImplFP8):
         meta = fmha_impl.metadata
     else:
         paged_specs = build_paged_pool_specs(
@@ -449,7 +360,6 @@ def forward_decode(
             param_dev,
             paged_specs,
             kv_cache=kv_cache,
-            fp8_kv_cache=bool(getattr(v4, "fp8_kv_cache", False)),
         )
         if meta is None:
             # Empty batch (B == 0) — short-circuit with zero-row hidden.

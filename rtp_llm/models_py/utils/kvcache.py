@@ -65,7 +65,6 @@ class SingleGroupKVCacheAdapter:
             self._layer_tensors[layer_id],
             self._seq_size_per_block,
             layer_id=layer_id,
-            group_id=0,
             tag=self._tag,
             kv_scale_base=self._layer_scale_tensors[layer_id],
         )

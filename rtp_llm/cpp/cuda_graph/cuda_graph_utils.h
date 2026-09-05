@@ -13,8 +13,8 @@ namespace rtp_llm {
 // Debug utilities for printing tensor information
 void printTensorInfo(const std::string& name, const torch::Tensor& tensor, int max_print_size = 20);
 void debugPrintPyModelInputs(const torch_ext::PyModelInputs& inputs);
-// Copy common attention metadata to every tag while retaining each tag's block tables.
-void refreshTaggedAttentionInputs(torch_ext::PyModelInputs& inputs);
+// Copy common attention metadata to every group while retaining each group's block tables.
+void refreshGroupAttentionInputs(torch_ext::PyModelInputs& inputs);
 
 }  // namespace rtp_llm
 
@@ -36,7 +36,7 @@ public:
         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id = inputs.attention_inputs.kv_cache_kernel_block_id;
         py_model_inputs_.attention_inputs.kv_cache_block_id_device = inputs.attention_inputs.kv_cache_block_id_device;
         py_model_inputs_.attention_inputs.kv_cache_block_id        = inputs.attention_inputs.kv_cache_block_id;
-        py_model_inputs_.attention_inputs_by_tag                   = inputs.attention_inputs_by_tag;
+        py_model_inputs_.attention_inputs_by_group                 = inputs.attention_inputs_by_group;
         py_model_inputs_.attention_inputs.prefix_lengths           = inputs.attention_inputs.prefix_lengths;
         py_model_inputs_.attention_inputs.prefix_lengths_device    = inputs.attention_inputs.prefix_lengths_device;
         py_model_inputs_.attention_inputs.combo_position_ids       = inputs.attention_inputs.combo_position_ids;

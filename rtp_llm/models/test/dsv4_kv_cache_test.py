@@ -1,7 +1,12 @@
+import json
+import tempfile
+from pathlib import Path
 from unittest import TestCase, main
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.models.deepseek_v4 import DeepSeekV4
+from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.model_factory import ModelFactory
+from rtp_llm.models.deepseek_v4 import DeepSeekV4, DeepSeekV4DSpark
 from rtp_llm.models.dsv4_kv_cache import (
     CSA_KV_TAG,
     CSA_STATE_TAG,
@@ -21,7 +26,6 @@ from rtp_llm.models.dsv4_kv_cache import (
 )
 from rtp_llm.ops import (
     CacheEvictPolicy,
-    CacheMemoryPlacement,
     CpBlockSliceMode,
     CpPrefillSliceLayout,
     DataType,
@@ -39,15 +43,48 @@ INDEXER_HEAD_DIM = 128
 FRAMEWORK_DEFAULT_TOKENS_PER_BLOCK = 64
 
 
+class Dsv4ConfigFactoryTest(TestCase):
+    def test_real_config_factory_for_target_and_dspark(self):
+        config_json = {
+            "num_hidden_layers": 2,
+            "hidden_size": 16,
+            "vocab_size": 32,
+            "num_attention_heads": 2,
+            "head_dim": 8,
+            "qk_rope_head_dim": 4,
+            "compress_ratios": [0, 4, 0],
+            "o_groups": 1,
+            "o_lora_rank": 4,
+            "index_head_dim": 4,
+            "index_n_heads": 1,
+            "index_topk": 1,
+            "routed_scaling_factor": 1.0,
+            "num_experts_per_tok": 1,
+            "n_routed_experts": 2,
+            "moe_intermediate_size": 8,
+            "n_shared_experts": 1,
+        }
+        with tempfile.TemporaryDirectory() as ckpt_path:
+            Path(ckpt_path, "config.json").write_text(json.dumps(config_json))
+
+            target = DeepSeekV4._create_config(ckpt_path)
+            dspark = DeepSeekV4DSpark._create_config(ckpt_path)
+
+        self.assertEqual(target.num_layers, 2)
+        self.assertEqual(list(target.attn_config.layer_compress_ratios), [0, 4])
+        self.assertEqual(dspark.num_layers, 1)
+        self.assertEqual(list(dspark.attn_config.layer_compress_ratios), [0])
+        self.assertTrue(dspark.is_mtp)
+
+
 class Dsv4KvCacheSpecTest(TestCase):
-    def _build(self, fp8_kv=True, fixed_pool_use_host_memory=False):
+    def _build(self, fp8_kv=True):
         return build_dsv4_kv_cache_spec_descs(
             layer_num=len(LAYER_COMPRESS_RATIOS),
             layer_compress_ratios=LAYER_COMPRESS_RATIOS,
             fp8_kv=fp8_kv,
             head_dim=HEAD_DIM,
             indexer_head_dim=INDEXER_HEAD_DIM,
-            fixed_pool_use_host_memory=fixed_pool_use_host_memory,
         )
 
     def _by_tag(self, layer_descs):
@@ -101,6 +138,7 @@ class Dsv4KvCacheSpecTest(TestCase):
             )
             self.assertEqual(by_tag[tag].dtype, DataType.TYPE_UINT8, tag)
             self.assertEqual(by_tag[tag].entry_dtype, DataType.TYPE_UINT8, tag)
+            self.assertEqual(by_tag[tag].kernel_tokens_per_block_alignment, 128, tag)
         for tag in (INDEXER_STATE_TAG, CSA_STATE_TAG, HCA_STATE_TAG, SWA_KV_TAG):
             self.assertEqual(by_tag[tag].cache_type, KVCacheSpecType.OPAQUE_STATE, tag)
             self.assertTrue(by_tag[tag].is_state_cache, tag)
@@ -194,14 +232,12 @@ class Dsv4KvCacheSpecTest(TestCase):
             cp = by_tag[tag].cp
             self.assertIsNotNone(cp, tag)
             self.assertTrue(cp.align_payload, tag)
-            self.assertTrue(cp.scale_seq_size, tag)
             self.assertEqual(cp.prefill_slice_layout, CpPrefillSliceLayout.PAYLOAD, tag)
             self.assertEqual(cp.slice, CpBlockSliceMode.PAYLOAD_BYTES, tag)
 
         swa_cp = by_tag[SWA_KV_TAG].cp
         self.assertIsNotNone(swa_cp)
         self.assertTrue(swa_cp.align_payload)
-        self.assertTrue(swa_cp.scale_seq_size)
         self.assertEqual(swa_cp.prefill_slice_layout, CpPrefillSliceLayout.BLOCK_STRIDE)
         self.assertEqual(swa_cp.slice, CpBlockSliceMode.EQUAL_BYTES)
 
@@ -216,7 +252,6 @@ class Dsv4KvCacheSpecTest(TestCase):
         self.assertEqual(
             hca_state.capacity.explicit_block_num, DSV4_HCA_STATE_POOL_BLOCKS
         )
-        self.assertTrue(hca_state.capacity.charge_to_paged_budget)
         self.assertFalse(hca_state.reuse.enable_prefix_reuse)
         self.assertIsNotNone(hca_state.tail)
         self.assertEqual(hca_state.tail.active_tail_blocks, 1)
@@ -233,43 +268,15 @@ class Dsv4KvCacheSpecTest(TestCase):
             self.assertIsNone(by_tag[tag].capacity, tag)
             self.assertIsNone(by_tag[tag].tail, tag)
 
-    def test_no_memory_placement_by_default(self):
+    def test_descriptors_have_no_memory_policy_key(self):
         for desc in self._by_tag(self._build()).values():
-            self.assertIsNone(desc.memory, desc.tag)
-
-    def test_host_pinned_fixed_pools_leave_paged_budget(self):
-        by_tag = self._by_tag(self._build(fixed_pool_use_host_memory=True))
-        for tag in (INDEXER_STATE_TAG, CSA_STATE_TAG, HCA_STATE_TAG, SWA_KV_TAG):
-            desc = by_tag[tag]
-            self.assertIsNotNone(desc.memory, tag)
-            self.assertEqual(
-                desc.memory.placement, CacheMemoryPlacement.HOST_PINNED, tag
-            )
-            self.assertIsNotNone(desc.capacity, tag)
-            self.assertFalse(desc.capacity.charge_to_paged_budget, tag)
-        # hca_state keeps its explicit sizing while leaving the HBM budget.
-        self.assertEqual(
-            by_tag[HCA_STATE_TAG].capacity.explicit_block_num,
-            DSV4_HCA_STATE_POOL_BLOCKS,
-        )
-        # Compressed pools stay on device.
-        for tag in (CSA_KV_TAG, HCA_KV_TAG, INDEXER_KV_TAG):
-            self.assertIsNone(by_tag[tag].memory, tag)
-            self.assertIsNone(by_tag[tag].capacity, tag)
+            self.assertFalse(hasattr(desc, "memory"), desc.tag)
 
     def test_explicit_pool_blocks_helper(self):
         layer_descs = self._build()
         apply_dsv4_explicit_pool_blocks(layer_descs, SWA_KV_TAG, 512)
         swa = self._by_tag(layer_descs)[SWA_KV_TAG]
         self.assertEqual(swa.capacity.explicit_block_num, 512)
-        self.assertTrue(swa.capacity.charge_to_paged_budget)
-
-    def test_explicit_pool_blocks_helper_keeps_host_pool_off_budget(self):
-        layer_descs = self._build(fixed_pool_use_host_memory=True)
-        apply_dsv4_explicit_pool_blocks(layer_descs, SWA_KV_TAG, 512)
-        swa = self._by_tag(layer_descs)[SWA_KV_TAG]
-        self.assertEqual(swa.capacity.explicit_block_num, 512)
-        self.assertFalse(swa.capacity.charge_to_paged_budget)
 
     def test_rejects_zero_layers(self):
         with self.assertRaises(ValueError):
@@ -298,10 +305,6 @@ class Dsv4PostBuildModelConfigTest(TestCase):
         config = self._model_config()
 
         DeepSeekV4._post_build_model_config(config)
-
-        self.assertTrue(
-            config.hybrid_attention_config.enable_independent_kv_cache_pools
-        )
         self.assertEqual(
             list(config.hybrid_attention_config.hybrid_attention_types),
             [HybridAttentionType.NONE] * config.num_layers,
@@ -312,15 +315,46 @@ class Dsv4PostBuildModelConfigTest(TestCase):
             [HCA_KV_TAG, HCA_STATE_TAG, SWA_KV_TAG],
         )
 
-    def test_post_build_promotes_default_block_size(self):
+    def test_post_build_keeps_dsv4_descriptors_device_only(self):
         config = self._model_config()
 
         DeepSeekV4._post_build_model_config(config)
 
-        self.assertEqual(config.attn_config.tokens_per_block, DSV4_TOKENS_PER_BLOCK)
+        by_tag = {
+            desc.tag: desc
+            for layer_descs in config.kv_cache_spec_descs
+            for desc in layer_descs
+        }
+        for tag, desc in by_tag.items():
+            self.assertFalse(hasattr(desc, "memory"), tag)
         self.assertEqual(
-            config.attn_config.kernel_tokens_per_block, DSV4_TOKENS_PER_BLOCK
+            by_tag[HCA_STATE_TAG].capacity.explicit_block_num,
+            DSV4_HCA_STATE_POOL_BLOCKS,
         )
+
+    def test_model_factory_materializes_dsv4_block_default(self):
+        configs = PyEnvConfigs()
+
+        ModelFactory._materialize_kv_cache_block_size(
+            DeepSeekV4, configs.kv_cache_config
+        )
+
+        self.assertEqual(
+            configs.kv_cache_config.seq_size_per_block, DSV4_TOKENS_PER_BLOCK
+        )
+
+    def test_model_args_reject_non_fp8_kv_cache(self):
+        from rtp_llm.models_py.model_desc.deepseek_v4_model import (
+            _args_from_model_config,
+        )
+
+        config = self._model_config()
+        config.attn_config.kv_cache_dtype = KvCacheDataType.BASE
+
+        with self.assertRaisesRegex(
+            ValueError, "DeepSeek-V4 currently supports only FP8 KV cache"
+        ):
+            _args_from_model_config(config)
 
     def test_post_build_keeps_explicit_block_size(self):
         config = self._model_config(tokens_per_block=128)

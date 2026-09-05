@@ -1,18 +1,18 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 
-class CacheTopology;
+struct CacheConfig;
 
 using CacheKeyType = int64_t;
 using BlockIdxType = int32_t;
@@ -23,10 +23,20 @@ inline bool isNullBlockIdx(BlockIdxType block_idx) {
     return block_idx == NULL_BLOCK_IDX;
 }
 
+// Legacy block tables and wire records use block 0 as their missing/default
+// value. Keep NULL_BLOCK_IDX internal to request-owned sparse metadata.
+inline BlockIdxType toLegacyBlockIdx(BlockIdxType block_idx) {
+    RTP_LLM_CHECK_WITH_INFO(block_idx >= NULL_BLOCK_IDX, "invalid internal block id=%d", block_idx);
+    return isNullBlockIdx(block_idx) ? 0 : block_idx;
+}
+
 using CacheKeysType    = std::vector<CacheKeyType>;
 using BlockIndicesType = std::vector<BlockIdxType>;
 
 struct BlockDependency {
+    // Dependency metadata belongs to the request's global cache-key timeline. Filtered resource views preserve the
+    // original ordinal and may retain a parent_key that is absent from the view so prefix-tree caches can attach it
+    // when the parent becomes available.
     bool         has_parent{false};
     CacheKeyType parent_key{0};
     uint32_t     ordinal{0};
@@ -34,74 +44,55 @@ struct BlockDependency {
 
 using BlockDependenciesType = std::vector<BlockDependency>;
 
+// Request-owned physical block bindings. The vector index is the GroupBlockPosition
+// for the owning cache group. The owning group injects kernel_blocks_per_block at
+// construction; kernelBlocks() derives its view on demand through a stateless helper
+// and never persists a second block-ID vector.
 class BlockIds {
 public:
-    explicit BlockIds(size_t kernel_blocks_per_kv_block = 1):
-        kernel_blocks_per_kv_block_(kernel_blocks_per_kv_block > 0 ? kernel_blocks_per_kv_block : 1) {}
+    explicit BlockIds(size_t kernel_blocks_per_block = 1);
 
     size_t blocksNum() const;
 
+    size_t                  kernelBlocksNum() const;
     const BlockIndicesType& blocks() const;
+    BlockIndicesType        kernelBlocks() const;
 
-    const BlockIndicesType& kernelBlocks() const;
-
-    size_t kernelBlocksPerKvBlock() const;
+    // Expand physical block IDs into a caller-owned buffer without allocating temporary storage.
+    // Returns the number of entries written.
+    size_t writeKernelBlocks(BlockIdxType* data, size_t num) const;
 
     // Remove and return the last physical block ID.
     BlockIdxType popBack();
 
     // Append new physical block IDs to the tail.
     void add(const BlockIndicesType& ids);
-    void remove(const std::vector<size_t>& indices);
+    void remove(const std::vector<size_t>& positions);
 
     // Swap the physical block IDs at positions pos_a and pos_b.
-    // Corresponding kernel slots for both positions are updated incrementally.
     void swap(size_t pos_a, size_t pos_b);
 
-    void assign(const BlockIndicesType& new_block_indices);
-    void assign(BlockIndicesType&& new_block_indices);
+    void assign(const BlockIndicesType& new_block_ids);
+    void assign(BlockIndicesType&& new_block_ids);
     void setAt(size_t pos, BlockIdxType val);
 
     void resize(size_t new_size, BlockIdxType value = NULL_BLOCK_IDX);
 
 private:
-    // Update the kernel slots that correspond to physical block position `pos`.
-    void updateKernelSlotAt(size_t pos, BlockIdxType val);
-    // Update all kernel slots
-    void syncKernelBlocks();
-
-    BlockIndicesType block_indices;
-    // Kernel-granularity block IDs, always maintained.
-    // Size is always block_indices.size() * kernel_blocks_per_kv_block_.
-    // When kernel_blocks_per_kv_block_ == 1, kernel_block_indices_ mirrors block_indices.
-    BlockIndicesType kernel_block_indices_;
-    size_t           kernel_blocks_per_kv_block_ = 1;
+    BlockIndicesType block_ids_;
+    const size_t     kernel_blocks_per_block_;
 };
-
-using GroupBlockIds = std::vector<std::shared_ptr<BlockIds>>;
-// Legacy per-layer view. Valid only when each layer maps to exactly one group.
-using LayerBlockIds     = std::vector<std::shared_ptr<BlockIds>>;
-using LayerAttnBlockIds = std::vector<std::vector<std::shared_ptr<BlockIds>>>;
 
 class KVCacheResource {
 public:
-    void initGroups(std::shared_ptr<const CacheTopology> topology);
+    void initGroups(const CacheConfig& config);
     void resizeBlocks(int reserver_blocks, int value = 0);
 
-    int                     blocksNum(int group_id) const;
     int                     blocksNum(std::string_view tag) const;
-    const BlockIndicesType& blocks(int group_id) const;
     const BlockIndicesType& blocks(std::string_view tag) const;
-    const BlockIndicesType& blocks(int layer_id, int group_id) const;
     const BlockIndicesType& blocksForLayer(int layer_id, std::string_view tag) const;
-    const BlockIndicesType& kernelBlocks(int group_id) const;
-    const BlockIndicesType& kernelBlocks(std::string_view tag) const;
-    const BlockIndicesType& kernelBlocks(int layer_id, int group_id) const;
-    const BlockIndicesType& kernelBlocksForLayer(int layer_id, std::string_view tag) const;
-    BlockIds&               mutableBlockIds(int group_id) const;
-    BlockIds&               mutableBlockIds(std::string_view tag) const;
-    BlockIds&               mutableBlockIds(int layer_id, int group_id) const;
-    BlockIds&               mutableBlockIdsForLayer(int layer_id, std::string_view tag) const;
+    BlockIds&               mutableBlockIds(std::string_view tag);
+    BlockIds&               mutableBlockIdsForLayer(int layer_id, std::string_view tag);
 
     const BlockIds& blockIds(std::string_view tag) const;
     const BlockIds& blockIdsForLayer(int layer_id, std::string_view tag) const;
@@ -112,26 +103,22 @@ public:
     int layerNum() const;
     int groupNums() const;
 
-    GroupBlockIds&       groupBlocks();
-    const GroupBlockIds& groupBlocks() const;
+    // Group-owned physical bindings. The string key is the stable group tag and
+    // scopes each numeric block ID.
+    const std::map<std::string, BlockIds>& blocksByGroup() const;
 
-    LayerBlockIds            layerBlocks() const;
-    const LayerAttnBlockIds& layerGroupBlocks() const;
-    int                      groupId(int layer_id, int group_id) const;
+    bool layerOwnsTag(int layer_id, std::string_view tag) const;
 
-    CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
-    void                 setCacheKeys(const CacheKeysType& keys);
-    void                 setCacheKeys(CacheKeysType&& keys);
+    void                 setCacheKeysAndBlockDependencies(CacheKeysType keys, BlockDependenciesType dependencies);
+    void                 setCacheKeys(CacheKeysType keys);
     bool                 cacheKeysAreCpCanonical() const;
     void                 setCacheKeysAreCpCanonical(bool cache_keys_are_cp_canonical);
+    void                 appendCacheKey(CacheKeyType key);
+    void                 popBackCacheKey();
+    void                 clearCacheKeys();
 
-    BlockDependenciesType&       blockDependencies();
     const BlockDependenciesType& blockDependencies() const;
-    void                         setBlockDependencies(const BlockDependenciesType& dependencies);
-    void                         setBlockDependencies(BlockDependenciesType&& dependencies);
-    void                         rebuildLinearBlockDependencies();
-    void                         ensureLinearBlockDependencies();
 
     // Return rank-local cache keys: every cp_size-th key starting from cp_rank.
     // localCacheKeys(r, s)[i] == cacheKeys()[i * s + r]
@@ -148,14 +135,20 @@ public:
         return local;
     }
 
+    // Reuse counters are always measured in global cache-key blocks, where one
+    // block is `CacheConfig::seq_size_per_block` tokens. CP projection does not
+    // change this unit.
     size_t reuseBlockNum() const;
 
+    // Getter result and setter argument are global cache-key blocks.
     size_t deviceReuseBlockNum() const;
     void   setDeviceReuseBlockNum(size_t device_reuse_blocks_num);
 
+    // Getter result and setter argument are global cache-key blocks.
     size_t memoryReuseBlockNum() const;
     void   setMemoryReuseBlockNum(size_t memory_reuse_blocks_num);
 
+    // Getter result and setter argument are global cache-key blocks.
     size_t remoteReuseBlockNum() const;
     void   setRemoteReuseBlockNum(size_t remote_reuse_blocks_num);
 
@@ -165,24 +158,18 @@ public:
     size_t remoteReuseBlocksNum() const;
     void   setRemoteReuseBlocksNum(size_t remote_reuse_blocks_num);
 
-    void swapBlocks(size_t group_id, size_t rhs, size_t lhs);
+    void swapBlocks(std::string_view tag, size_t rhs, size_t lhs);
 
     std::string debugString() const;
 
 private:
-    int  groupIdForTag(std::string_view tag) const;
-    int  groupIdForLayerTag(int layer_id, std::string_view tag) const;
-    bool hasOneGroupPerLayer() const;
+    bool layerContainsTag(int layer_id, std::string_view tag) const;
 
-    std::unordered_map<std::string, int>  tag_to_group_id_;
     std::vector<std::vector<std::string>> layer_group_tags_;
-    // layer_id -> group_id -> block_indices
-    LayerAttnBlockIds layer_group_block_ids;
-    // group_id -> block_indices
-    GroupBlockIds         group_block_ids;
-    CacheKeysType         cache_keys;
-    BlockDependenciesType block_dependencies;
-    bool                  cache_keys_are_cp_canonical_{false};
+    std::map<std::string, BlockIds>       blocks_by_group_;
+    CacheKeysType                         cache_keys;
+    BlockDependenciesType                 block_dependencies;
+    bool                                  cache_keys_are_cp_canonical_{false};
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};

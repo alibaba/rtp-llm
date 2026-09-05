@@ -4,7 +4,12 @@ from pathlib import Path
 
 import torch
 
-from rtp_llm.models_py.model_desc.block_map import select_attention_inputs_for_layer
+from rtp_llm.models_py.model_desc.block_map import (
+    get_layer_cache_for_tag,
+    get_layer_caches_for_tags,
+    select_attention_inputs_for_layer,
+    select_fmha_impl_for_tag,
+)
 from rtp_llm.models_py.utils.kvcache import SingleGroupKVCacheAdapter
 from rtp_llm.ops import HybridAttentionConfig, HybridAttentionType
 from rtp_llm.ops.compute_ops import (
@@ -23,26 +28,114 @@ class _RoutingCache:
 
     def get_layer_cache_groups(self, layer_id: int) -> list[LayerKVCache]:
         return [
-            LayerKVCache(torch.ones(1), 1, layer_id, group_id, tag)
-            for group_id, tag in enumerate(self._layer_tags[layer_id])
+            LayerKVCache(torch.ones(1), 1, layer_id, tag)
+            for tag in self._layer_tags[layer_id]
         ]
+
+
+class _ConcreteRoutingCache:
+    def __init__(self, caches: list[LayerKVCache]) -> None:
+        self._caches = caches
+
+    def get_layer_cache_groups(self, layer_id: int) -> list[LayerKVCache]:
+        if layer_id != 0:
+            raise RuntimeError(f"invalid layer {layer_id}")
+        return self._caches
 
 
 class PyModelInputsCompatTest(unittest.TestCase):
     def test_hybrid_attention_config_has_explicit_constructors(self) -> None:
         default_config = HybridAttentionConfig()
         self.assertFalse(default_config.enable_hybrid_attention)
-        self.assertFalse(default_config.enable_independent_kv_cache_pools)
         self.assertEqual(default_config.hybrid_attention_types, [])
 
         attention_types = [HybridAttentionType.NONE, HybridAttentionType.LINEAR]
-        config = HybridAttentionConfig(True, True, attention_types)
+        config = HybridAttentionConfig(True, attention_types)
         self.assertTrue(config.enable_hybrid_attention)
-        self.assertTrue(config.enable_independent_kv_cache_pools)
         self.assertEqual(config.hybrid_attention_types, attention_types)
 
         with self.assertRaises(TypeError):
-            HybridAttentionConfig(True, True)
+            HybridAttentionConfig(True)
+
+    def test_hybrid_attention_config_stub_matches_runtime_api(self) -> None:
+        stub_path = (
+            Path(__file__).resolve().parents[2] / "ops" / "libth_transformer_config.pyi"
+        )
+        stub_text = stub_path.read_text()
+        class_source = (
+            "class HybridAttentionConfig:"
+            + stub_text.split("class HybridAttentionConfig:", 1)[1].split(
+                "\nclass ", 1
+            )[0]
+        )
+        config_class = ast.parse(class_source).body[0]
+        self.assertIsInstance(config_class, ast.ClassDef)
+
+        public_members = {
+            node.target.id
+            for node in config_class.body
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+        }
+        public_members.update(
+            node.name
+            for node in config_class.body
+            if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")
+        )
+        self.assertEqual(
+            public_members,
+            {"enable_hybrid_attention", "hybrid_attention_types", "to_string"},
+        )
+
+        constructor_args = [
+            [arg.arg for arg in node.args.args]
+            for node in config_class.body
+            if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+        ]
+        self.assertEqual(
+            constructor_args,
+            [
+                ["self"],
+                ["self", "enable_hybrid_attention", "hybrid_attention_types"],
+            ],
+        )
+
+    def test_sparse_routes_select_exact_tags_independent_of_topology_order(
+        self,
+    ) -> None:
+        default_cache = LayerKVCache(torch.ones(1), 64, layer_id=0, tag="default")
+        indexer_cache = LayerKVCache(
+            torch.ones(1) * 2, 64, layer_id=0, tag="indexer_kv"
+        )
+        cache = _ConcreteRoutingCache([indexer_cache, default_cache])
+
+        self.assertIs(get_layer_cache_for_tag(cache, 0, "default"), default_cache)
+        self.assertIs(get_layer_cache_for_tag(cache, 0, "indexer_kv"), indexer_cache)
+        self.assertEqual(
+            get_layer_caches_for_tags(cache, 0, ("default", "indexer_kv")),
+            {"default": default_cache, "indexer_kv": indexer_cache},
+        )
+        routes = {"indexer_kv": object(), "default": object()}
+        self.assertIs(select_fmha_impl_for_tag(routes, "default"), routes["default"])
+        self.assertIs(
+            select_fmha_impl_for_tag(routes, "indexer_kv"), routes["indexer_kv"]
+        )
+
+    def test_sparse_routes_reject_absent_duplicate_and_wrong_tags(self) -> None:
+        absent = _ConcreteRoutingCache([LayerKVCache(torch.ones(1), 64, 0, "default")])
+        with self.assertRaisesRegex(RuntimeError, "indexer_kv"):
+            get_layer_cache_for_tag(absent, 0, "indexer_kv")
+
+        duplicate = _ConcreteRoutingCache(
+            [
+                LayerKVCache(torch.ones(1), 64, 0, "indexer_kv"),
+                LayerKVCache(torch.ones(1), 64, 0, "indexer_kv"),
+            ]
+        )
+        with self.assertRaisesRegex(RuntimeError, "duplicate KV cache tag"):
+            get_layer_cache_for_tag(duplicate, 0, "indexer_kv")
+
+        with self.assertRaisesRegex(RuntimeError, "indexer_kv"):
+            select_fmha_impl_for_tag({"wrong": object()}, "indexer_kv")
 
     def test_cache_binding_stubs_match_runtime_members(self) -> None:
         stub_path = (
@@ -156,7 +249,6 @@ class PyModelInputsCompatTest(unittest.TestCase):
             base,
             16,
             layer_id=3,
-            group_id=2,
             tag="full",
             kv_scale_base=scale,
         )
@@ -165,8 +257,18 @@ class PyModelInputsCompatTest(unittest.TestCase):
         self.assertEqual(scale.data_ptr(), layer.kv_scale_base.data_ptr())
         self.assertEqual(16, layer.seq_size_per_block)
         self.assertEqual(3, layer.layer_id)
-        self.assertEqual(2, layer.group_id)
         self.assertEqual("full", layer.tag)
+
+    def test_layer_kv_cache_exposes_no_cache_group_ordinal(self) -> None:
+        # The semantic tag is the only cache-group identity crossing to Python:
+        # neither a positional field nor a keyword default may survive.
+        self.assertFalse(hasattr(LayerKVCache, "group_id"))
+        layer = LayerKVCache(torch.ones(1), 8, layer_id=0, tag="full")
+        self.assertFalse(hasattr(layer, "group_id"))
+        with self.assertRaises(TypeError):
+            LayerKVCache(torch.ones(1), 8, layer_id=0, group_id=0, tag="full")
+        # The 4th positional argument is the tag, not an ordinal.
+        self.assertEqual("linear", LayerKVCache(torch.ones(1), 8, 0, "linear").tag)
 
     def test_attention_inputs_mapping_is_selected_by_layer_tag(self) -> None:
         full = self._attn_inputs(is_prefill=False, input_length=1)

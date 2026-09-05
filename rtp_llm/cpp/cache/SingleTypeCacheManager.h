@@ -1,0 +1,112 @@
+#pragma once
+
+#include <memory>
+#include <vector>
+#include <cstdint>
+#include <unordered_map>
+#include <utility>
+
+#include <torch/torch.h>
+
+#include "kmonitor/client/MetricsReporter.h"
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/BufferTypes.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/BlockPool.h"
+#include "rtp_llm/cpp/cache/SharedBlockCache.h"
+
+namespace rtp_llm {
+
+struct NeedBlocksInfo {
+    int common_blocks = 0;  // shared blocks across batches
+    int extra_blocks  = 0;  // extra blocks per batch
+};
+
+class SingleTypeCacheManager {
+public:
+    SingleTypeCacheManager(const CacheGroup&                   cache_group,
+                           std::vector<int>                    layer_ids,
+                           BlockPoolPtr                        block_pool,
+                           SharedBlockCache*                   shared_cache     = nullptr,
+                           const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
+        cache_group_(cache_group),
+        layer_ids_(std::move(layer_ids)),
+        block_pool_(std::move(block_pool)),
+        shared_cache_(shared_cache),
+        metrics_reporter_(metrics_reporter) {}
+
+    virtual ~SingleTypeCacheManager() = default;
+
+    bool                init();
+    virtual bool        malloc(BlockIds&            block_ids,
+                               int                  seq_len,
+                               bool                 enable_reuse_cache   = false,
+                               int                  reserve_step         = 0,
+                               std::vector<size_t>* backfilled_positions = nullptr) = 0;
+    virtual MatchResult match(const CacheKeysType& cache_keys);
+    virtual MatchResult matchPrefix(const CacheKeysType& cache_keys) const;
+    virtual MatchResult matchSingleKey(CacheKeyType cache_key) const;
+    virtual void
+    insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident);
+    virtual void free(const BlockIndicesType& block_indices)                                                     = 0;
+    virtual void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
+    virtual int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const                      = 0;
+    // Estimate peak additional blocks needed when generating remaining_tokens more tokens.
+    virtual int estimatePeakNeedBlocks(int                     seq_len,
+                                       const BlockIndicesType& current_block_indices,
+                                       int                     remaining_tokens,
+                                       int                     reserve_step,
+                                       bool                    enable_reuse_cache) const = 0;
+    // Estimate the physical-block peak of a fresh batch by following initMalloc's real order:
+    // allocate the common prefix once, reference it from every sequence, then allocate each private suffix.
+    virtual int            estimateInitialBatchPeakNeedBlocks(int  seq_len,
+                                                              int  common_seq_len,
+                                                              int  remaining_tokens,
+                                                              int  reserve_step,
+                                                              bool enable_reuse_cache,
+                                                              int  target_batch_size) const = 0;
+    virtual NeedBlocksInfo getNeedBlocks(
+        int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled = false) const = 0;
+    virtual void reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices)                         = 0;
+
+    void                                   reference(const BlockIndicesType& new_block_indices);
+    std::unordered_map<int, torch::Tensor> allLayerCacheBase() const;
+    std::unordered_map<int, torch::Tensor> allLayerScaleCacheBase() const;
+    BlockAddrInfo                          convertIndexToAddr(int layer_id, int block_id) const;
+    std::vector<BlockInfo>                 convertIndexToBuffer(int layer_id, int block_id) const;
+    std::vector<BlockInfo>
+    convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
+
+    size_t                  freeBlocksNum() const;
+    bool                    ensureFreeBlocks(int need_blocks);
+    int                     seqSizePerBlock() const;
+    const std::string&      tag() const;
+    const CacheGroup&       config() const;
+    const CacheGroupPolicy& policy() const;
+    bool                    prefixReuseEnabled() const;
+    CacheEvictPolicy        evictPolicy() const;
+    uint32_t                explicitBlockNum() const;
+    size_t                  activeTailBlocks() const;
+
+    virtual bool prefixReusable() const;
+    virtual bool hasSparseSlots() const;
+    virtual bool hasKernelBlockSubdiv() const;
+    virtual bool transferTailBlocks() const;
+    virtual bool isReservable() const;
+
+protected:
+    const CacheGroup             cache_group_;
+    const std::vector<int>       layer_ids_;
+    BlockPoolPtr                 block_pool_;
+    SharedBlockCache*            shared_cache_     = nullptr;
+    kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
+
+    std::unordered_map<int, torch::Tensor> global_layer_to_kv_tensors;
+    std::unordered_map<int, torch::Tensor> global_layer_to_kv_scale_tensors;
+    std::unordered_map<int, int>           global_layer_to_local_layer;
+};
+
+using SingleTypeCacheManagerPtr = std::shared_ptr<SingleTypeCacheManager>;
+
+}  // namespace rtp_llm

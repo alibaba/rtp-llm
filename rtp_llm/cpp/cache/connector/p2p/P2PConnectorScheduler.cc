@@ -5,8 +5,9 @@
 namespace rtp_llm {
 
 P2PConnectorScheduler::P2PConnectorScheduler(P2PConnectorSchedulerConfig         config,
+                                             const CacheConfig&                  cache_config,
                                              const kmonitor::MetricsReporterPtr& metrics_reporter):
-    config_(std::move(config)), metrics_reporter_(metrics_reporter) {}
+    config_(std::move(config)), cache_config_(cache_config), metrics_reporter_(metrics_reporter) {}
 
 P2PConnectorScheduler::~P2PConnectorScheduler() = default;
 
@@ -25,9 +26,11 @@ bool P2PConnectorScheduler::init(const std::string& process_id) {
         return false;
     }
 
-    prefill_ = std::make_unique<P2PConnectorSchedulerPrefill>(config_, metrics_reporter_, tp_broadcast_client_);
+    prefill_ =
+        std::make_unique<P2PConnectorSchedulerPrefill>(config_, cache_config_, metrics_reporter_, tp_broadcast_client_);
 
-    decode_ = std::make_unique<P2PConnectorSchedulerDecode>(config_, metrics_reporter_, tp_broadcast_client_);
+    decode_ =
+        std::make_unique<P2PConnectorSchedulerDecode>(config_, cache_config_, metrics_reporter_, tp_broadcast_client_);
     if (!decode_->init(process_id)) {
         RTP_LLM_LOG_ERROR("init failed: decode scheduler init failed");
         return false;
