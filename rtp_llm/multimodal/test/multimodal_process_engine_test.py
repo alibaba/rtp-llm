@@ -40,6 +40,7 @@ from rtp_llm.multimodal.mm_error_messages import MMErr
 from rtp_llm.multimodal.mm_process_engine import (
     MMEmbeddingAsyncCache,
     MMEmbeddingCacheEntry,
+    MMHashKeyCache,
     MMProcessEngine,
     MMWorkItem,
 )
@@ -609,28 +610,69 @@ class MMEmbeddingCacheEntryTest(TestCase):
 class MMEmbeddingAsyncCacheTest(TestCase):
     def test_metadata_is_read_only_and_tracks_eviction(self):
         cache = MMEmbeddingAsyncCache(max_size=2)
+        hash_cache = MMHashKeyCache(max_size=2)
         _, first = cache.try_acquire("a")
         _, second = cache.try_acquire("b")
-        self.assertEqual(cache.metadata_keys(), [])
-        self.assertFalse(cache.metadata(["a", "absent"])["entries"][0]["hit"])
         hashes = [torch.tensor([-1, 2147483647], dtype=torch.int32)]
-        first.complete((torch.ones(2, 4), None), hashes)
-        second.complete(
-            (torch.ones(1, 4), None), [torch.tensor([7], dtype=torch.int32)]
-        )
+        first.complete((torch.ones(2, 4), None))
+        second_hashes = [torch.tensor([7], dtype=torch.int32)]
+        second.complete((torch.ones(1, 4), None))
+        hash_cache.put("a", hashes, first.generation)
+        hash_cache.put("b", second_hashes, second.generation)
         before = cache.stats()
-        metadata = cache.metadata(["a", "a", "absent"])
+        metadata = hash_cache.metadata(["a", "a", "absent"], cache)
         self.assertEqual(metadata["entries"][0]["feature_hashes"], [-1, 2147483647])
         self.assertEqual(metadata["entries"][0]["split_size"], [2])
         self.assertEqual(metadata["entries"][0], metadata["entries"][1])
         self.assertFalse(metadata["entries"][2]["hit"])
         self.assertEqual(before, cache.stats())
-        self.assertEqual(before["resident_bytes"], 2 * 4 * 4 + 8 + 1 * 4 * 4 + 4)
+        # Feature hashes live in the routing-key sidecar and are not charged
+        # to the embedding tensor budget.
+        self.assertEqual(before["resident_bytes"], 2 * 4 * 4 + 1 * 4 * 4)
         cache.try_acquire("c")
         self.assertIsNone(cache.peek("a"))
-        self.assertEqual(cache.metadata_keys(), ["b"])
+        self.assertEqual(hash_cache.keys(), ["a", "b"])
+        self.assertFalse(hash_cache.metadata(["a"], cache)["entries"][0]["hit"])
         cache.clear()
-        self.assertEqual(cache.metadata_keys(), [])
+        self.assertEqual(hash_cache.keys(), ["a", "b"])
+
+    def test_hash_key_cache_is_generation_aware(self):
+        cache = MMHashKeyCache(max_size=2)
+        hashes = [torch.tensor([-1, 2147483647], dtype=torch.int32)]
+        cache.put("key", hashes, "generation-1")
+        self.assertTrue(cache.contains("key"))
+        self.assertTrue(torch.equal(cache.get("key", "generation-1")[0], hashes[0]))
+        self.assertIsNone(cache.get("key", "generation-2"))
+        cache.put("key", [torch.tensor([7], dtype=torch.int32)], "generation-2")
+        self.assertTrue(
+            torch.equal(
+                cache.get("key", "generation-2")[0],
+                torch.tensor([7], dtype=torch.int32),
+            )
+        )
+
+    def test_embedding_eviction_keeps_hash_key(self):
+        hash_keys = MMHashKeyCache(max_size=10)
+        cache = MMEmbeddingAsyncCache(max_size=1)
+        _, first = cache.try_acquire("first")
+        first.complete((torch.ones(1, 4), None), [torch.tensor([1])])
+        hash_keys.put("first", [torch.tensor([1], dtype=torch.int32)], first.generation)
+
+        _, second = cache.try_acquire("second")
+        self.assertTrue(hash_keys.contains("first"))
+        self.assertTrue(
+            torch.equal(
+                hash_keys.get("first", first.generation)[0],
+                torch.tensor([1], dtype=torch.int32),
+            )
+        )
+        second.complete((torch.ones(1, 4), None), [torch.tensor([2])])
+        hash_keys.put(
+            "second", [torch.tensor([2], dtype=torch.int32)], second.generation
+        )
+        self.assertEqual(hash_keys.keys(), ["first", "second"])
+        metadata = hash_keys.metadata(["first"], cache)
+        self.assertFalse(metadata["entries"][0]["hit"])
 
     def test_failed_and_legacy_results_have_no_metadata(self):
         cache = MMEmbeddingAsyncCache(max_size=4)
@@ -1574,7 +1616,7 @@ class MMProcessEngineGpuBatchTest(TestCase):
         self.assertEqual(r1.embeddings[0].item(), 7)
         self.assertEqual(r2.embeddings[0].item(), 7)
         self.assertEqual(part.embedding_calls, 1)
-        self.assertIs(r1.feature_hashes[0], r2.feature_hashes[0])
+        self.assertTrue(torch.equal(r1.feature_hashes[0], r2.feature_hashes[0]))
         from rtp_llm.ops import get_multimodal_feature_hash
 
         self.assertTrue(
@@ -1582,13 +1624,14 @@ class MMProcessEngineGpuBatchTest(TestCase):
                 r1.feature_hashes[0], get_multimodal_feature_hash(r1.embeddings[0])
             )
         )
-        metadata = engine._embedding_cache.metadata(
-            engine._embedding_cache.metadata_keys()
+        metadata = engine._hash_key_cache.metadata(
+            engine._hash_key_cache.metadata_keys(), engine._embedding_cache
         )
         self.assertEqual(len(metadata["entries"]), 1)
         self.assertEqual(
             metadata["entries"][0]["feature_hashes"], r1.feature_hashes[0].tolist()
         )
+        self.assertEqual(len(engine._hash_key_cache.keys()), 1)
 
     def test_cached_hashes_survive_async_and_rpc_serialization(self):
         from rtp_llm.server.vit_rpc_server import merge_embedding_results, trans_output

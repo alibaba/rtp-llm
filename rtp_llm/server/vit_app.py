@@ -33,18 +33,30 @@ class MMCacheMetadataRequest(BaseModel):
     keys: List[str] = Field(max_length=256)
 
 
+def _get_hash_key_cache(engine: MMProcessEngine):
+    """Return the routing-key index, with compatibility for lightweight fakes."""
+    return getattr(engine, "_hash_key_cache", None)
+
+
 def register_mm_cache_routes(app: FastAPI, engine: MMProcessEngine) -> None:
     @app.get("/mm_cache/keys")
     @app.post("/mm_cache/keys")
     def cache_keys():
         if engine is None or engine.is_proxy_mode:
             raise HTTPException(status_code=501, detail="worker-local cache required")
-        cache = engine._embedding_cache
-        keys = cache.metadata_keys()
+        hash_key_cache = _get_hash_key_cache(engine)
+        if hash_key_cache is None:
+            # Keep older test doubles and mixed-version workers functional.
+            cache = engine._embedding_cache
+            keys = cache.metadata_keys()
+            worker_instance = cache.instance_id
+        else:
+            keys = hash_key_cache.keys()
+            worker_instance = hash_key_cache.instance_id
         if len(keys) > 100000:
             raise HTTPException(status_code=413, detail="cache key snapshot too large")
         return {
-            "worker_instance": cache.instance_id,
+            "worker_instance": worker_instance,
             "feature_hash_version": 1,
             "keys": keys,
         }
@@ -56,7 +68,10 @@ def register_mm_cache_routes(app: FastAPI, engine: MMProcessEngine) -> None:
         if any(not key or len(key) > 4096 for key in request.keys):
             raise HTTPException(status_code=400, detail="invalid multimodal cache key")
         try:
-            return engine._embedding_cache.metadata(request.keys)
+            hash_key_cache = _get_hash_key_cache(engine)
+            if hash_key_cache is None:
+                return engine._embedding_cache.metadata(request.keys)
+            return hash_key_cache.metadata(request.keys, engine._embedding_cache)
         except ValueError as error:
             raise HTTPException(status_code=413, detail=str(error)) from error
 

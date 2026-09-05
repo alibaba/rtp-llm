@@ -26,6 +26,7 @@ from rtp_llm.multimodal.mm_embedding_cache import (
     MMEmbeddingAsyncCache,
     MMEmbeddingCache,
     MMEmbeddingCacheEntry,
+    MMHashKeyCache,
 )
 from rtp_llm.multimodal.mm_profiler import MMProfiler
 from rtp_llm.multimodal.mm_scheduler import MMScheduler
@@ -79,6 +80,19 @@ def _embedding_token_length(embeddings: List[Any]) -> int:
                 "Cannot derive embedding length from %s", type(embedding).__name__
             )
     return total
+
+
+def _feature_hashes_from_result(result: Any) -> List[torch.Tensor]:
+    """Build sidecar hashes while tolerating empty test/compatibility results."""
+    embeddings = maybe_tensor_to_list(result[0], ndim_threshold=2)
+    return [
+        get_multimodal_feature_hash(embedding)
+        for embedding in embeddings
+        if not (
+            isinstance(embedding, torch.Tensor)
+            and (embedding.numel() == 0 or embedding.ndim == 0)
+        )
+    ]
 
 
 def _worker_initializer(
@@ -521,6 +535,7 @@ class MMWorkItem:
         embedding_cache: Optional[MMEmbeddingCache] = None,
         cache_claim: Optional[Tuple[str, MMEmbeddingCacheEntry, str]] = None,
         defer_cache_complete: bool = False,
+        hash_key_cache: Optional[MMHashKeyCache] = None,
     ):
         if not mm_inputs:
             raise ValueError("No mm_input for work item")
@@ -542,6 +557,7 @@ class MMWorkItem:
 
         self.need_check_cache = len(mm_inputs) == 1 and mm_inputs[0].url != ""
         self.embedding_cache = embedding_cache
+        self.hash_key_cache = hash_key_cache
         self.cache_key: Optional[str] = None
         self.cache_entry: Optional[MMEmbeddingCacheEntry] = None
         self.cache_state: Optional[str] = None
@@ -553,6 +569,14 @@ class MMWorkItem:
             self.cache_key, self.cache_entry, self.cache_state = cache_claim
             if self.cache_state == "complete":
                 self.embedding_result = self.cache_entry.wait()
+                if (
+                    self.hash_key_cache is not None
+                    and self.embedding_cache is not None
+                    and self.embedding_cache.peek(self.cache_key) is self.cache_entry
+                ):
+                    self.feature_hashes = self.hash_key_cache.get(
+                        self.cache_key, self.cache_entry.generation
+                    )
         elif self.need_check_cache and self.embedding_cache is not None:
             self.cache_key = self.mm_inputs[0].cache_key()
             self.cache_state, self.cache_entry = self.embedding_cache.try_acquire(
@@ -560,6 +584,13 @@ class MMWorkItem:
             )
             if self.cache_state == "complete":
                 self.embedding_result = self.cache_entry.wait()
+                if (
+                    self.hash_key_cache is not None
+                    and self.embedding_cache.peek(self.cache_key) is self.cache_entry
+                ):
+                    self.feature_hashes = self.hash_key_cache.get(
+                        self.cache_key, self.cache_entry.generation
+                    )
 
         # future 可以是 ApplyResult (multiprocess) 或 _LocalResult (local)
         self.future: Optional[Any] = None
@@ -574,10 +605,7 @@ class MMWorkItem:
 
     def complete_cache(self, result: Any, force: bool = False) -> None:
         if self.feature_hashes is None:
-            self.feature_hashes = [
-                get_multimodal_feature_hash(emb)
-                for emb in maybe_tensor_to_list(result[0], ndim_threshold=2)
-            ]
+            self.feature_hashes = _feature_hashes_from_result(result)
         if (
             (self.defer_cache_complete and not force)
             or self.embedding_cache is None
@@ -588,6 +616,13 @@ class MMWorkItem:
         self.embedding_cache.complete(
             self.cache_key, self.cache_entry, result, self.feature_hashes
         )
+        if (
+            self.hash_key_cache is not None
+            and self.embedding_cache.peek(self.cache_key) is self.cache_entry
+        ):
+            self.hash_key_cache.put(
+                self.cache_key, self.feature_hashes or [], self.cache_entry.generation
+            )
 
     def fail_cache(self, error: Exception) -> None:
         if (
@@ -714,6 +749,14 @@ class MMProcessEngine:
             model_config,
             self.vit_config.mm_cache_item_num,
         )
+        hash_key_cache_size = int(
+            getattr(self.vit_config, "mm_hash_key_cache_item_num", 100000)
+        )
+        # Keep the routing-key index independent from the tensor cache. It stores
+        # only cache keys and feature-hash token ids, so embedding eviction does
+        # not discard affinity history; the metadata endpoint still verifies
+        # that the corresponding embedding is resident before reporting a hit.
+        self._hash_key_cache = MMHashKeyCache(max_size=hash_key_cache_size)
         self._embedding_cache = MMEmbeddingCache(
             max_size=self.vit_config.mm_cache_item_num,
             max_bytes=cache_max_bytes,
@@ -723,9 +766,11 @@ class MMProcessEngine:
         # async submission state. Both paths now use the same cache instance.
         self._async_cache = self._embedding_cache
         logging.info(
-            "MMProcessEngine: unified embedding cache max_items=%d max_bytes=%s",
+            "MMProcessEngine: embedding cache max_items=%d max_bytes=%s; "
+            "hash-key cache max_items=%d",
             self.vit_config.mm_cache_item_num,
             cache_max_bytes if cache_max_bytes is not None else "count-fallback",
+            hash_key_cache_size,
         )
 
         # GreenNet (content safety) integration. The provider is a no-op when
@@ -1218,6 +1263,7 @@ class MMProcessEngine:
                 batch,
                 mm_timeout_ms=self.vit_config.mm_timeout_ms,
                 embedding_cache=self._embedding_cache,
+                hash_key_cache=self._hash_key_cache,
                 cache_claim=cache_claim if index == 0 else None,
                 defer_cache_complete=defer_cache_complete,
             )
@@ -1271,7 +1317,9 @@ class MMProcessEngine:
             if result is None:
                 raise RuntimeError(f"embedding_result not set for work item {wi}")
             if wi.feature_hashes is None and wi.cache_entry is not None:
-                wi.feature_hashes = wi.cache_entry.feature_hashes
+                wi.feature_hashes = self._hash_key_cache.get(
+                    wi.cache_key, wi.cache_entry.generation
+                )
             if wi.feature_hashes is None:
                 wi.complete_cache(result)
             emb_res.extend(maybe_tensor_to_list(result[0], ndim_threshold=2))
@@ -1334,12 +1382,18 @@ class MMProcessEngine:
             )
             deadline = time.monotonic() + timeout_ms / 1000.0
             results = []
-            for _, entry in claims:
+            for cache_key, entry in claims:
                 current_entry = entry
                 remaining = max(0.0, deadline - time.monotonic())
                 raw_result = entry.wait(timeout=remaining)
+                feature_hashes = self._hash_key_cache.get(cache_key, entry.generation)
+                if feature_hashes is None:
+                    feature_hashes = _feature_hashes_from_result(raw_result)
+                    self._hash_key_cache.put(
+                        cache_key, feature_hashes, entry.generation
+                    )
                 results.append(
-                    self._work_item_result_to_response(raw_result, entry.feature_hashes)
+                    self._work_item_result_to_response(raw_result, feature_hashes)
                 )
 
             kmonitor.report(
@@ -1370,6 +1424,11 @@ class MMProcessEngine:
             with self._async_task_lock:
                 state, entry = self._async_cache.try_acquire(cache_key)
                 claims.append((cache_key, entry))
+                if (
+                    state == "complete"
+                    and self._embedding_cache.peek(cache_key) is entry
+                ):
+                    self._hash_key_cache.get(cache_key, entry.generation)
                 if state == "miss":
                     self._async_tasks[entry] = _AsyncComputeTask(cache_key, entry)
                     pending.append((mm_input, cache_key, entry))
@@ -1707,3 +1766,4 @@ class MMProcessEngine:
         self._scheduler.close()
         self._shutdown_greennet_loop()
         self._embedding_cache.clear(RuntimeError("MMProcessEngine stopped"))
+        self._hash_key_cache.clear()

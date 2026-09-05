@@ -304,7 +304,10 @@ class MMCacheApiTest(unittest.TestCase):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
 
-        from rtp_llm.multimodal.mm_embedding_cache import MMEmbeddingCache
+        from rtp_llm.multimodal.mm_embedding_cache import (
+            MMEmbeddingCache,
+            MMHashKeyCache,
+        )
         from rtp_llm.server.vit_app import register_mm_cache_routes
 
         cache = MMEmbeddingCache(max_size=4)
@@ -313,9 +316,18 @@ class MMCacheApiTest(unittest.TestCase):
         ready.complete(
             (torch.ones(2, 4), None), [torch.tensor([-11, 12], dtype=torch.int32)]
         )
+        hash_keys = MMHashKeyCache(max_size=4)
+        hash_keys.put(
+            "ready", [torch.tensor([-11, 12], dtype=torch.int32)], ready.generation
+        )
         app = FastAPI()
         register_mm_cache_routes(
-            app, SimpleNamespace(_embedding_cache=cache, is_proxy_mode=False)
+            app,
+            SimpleNamespace(
+                _embedding_cache=cache,
+                _hash_key_cache=hash_keys,
+                is_proxy_mode=False,
+            ),
         )
         with TestClient(app) as client:
             snapshot = client.get("/mm_cache/keys").json()

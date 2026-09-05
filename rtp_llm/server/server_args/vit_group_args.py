@@ -121,6 +121,14 @@ def init_vit_group_args(parser, vit_config):
         help="多模态开启的Cache的大小",
     )
     vit_group.add_argument(
+        "--mm_hash_key_cache_item_num",
+        env_name="MM_HASH_KEY_CACHE_ITEM_NUM",
+        bind_to=(vit_config, "mm_hash_key_cache_item_num"),
+        type=int,
+        default=VitConfig.DEFAULT_MM_HASH_KEY_CACHE_ITEM_NUM,
+        help="ViT cache-affinity hash key索引的最大条目数（仅保存轻量级key）",
+    )
+    vit_group.add_argument(
         "--url_cache_item_num",
         env_name="URL_CACHE_ITEM_NUM",
         bind_to=(vit_config, "url_cache_item_num"),

@@ -69,7 +69,6 @@ class MMEmbeddingCacheEntry:
         self._on_fail = on_fail
         self.result: Optional[Any] = None
         self.error: Optional[Exception] = None
-        self.feature_hashes: Optional[List[torch.Tensor]] = None
         self.generation = uuid.uuid4().hex
         # Error telemetry may be observed from several places (the producer
         # callback, a cache waiter, and an RPC handler). Keep one atomic claim
@@ -103,7 +102,6 @@ class MMEmbeddingCacheEntry:
                 return False
             self._terminal = True
             self.result = result
-            self.feature_hashes = feature_hashes
         try:
             if self._on_complete is not None:
                 self._on_complete(self, result)
@@ -129,10 +127,10 @@ class MMEmbeddingCacheEntry:
         return self._terminal
 
     def ready_metadata(self) -> Optional[List[torch.Tensor]]:
-        with self._state_lock:
-            if not self._event.is_set() or self.error is not None:
-                return None
-            return self.feature_hashes
+        # Feature hashes are owned by MMHashKeyCache. Keep this compatibility
+        # method so older internal callers treat an embedding entry as having
+        # no inline metadata.
+        return None
 
     def set_greennet_verdict(self, verdict: GreenNetVerdict) -> None:
         self._greennet_verdict = verdict
@@ -146,6 +144,113 @@ class MMEmbeddingCacheEntry:
     @property
     def is_greennet_decided(self) -> bool:
         return self._greennet_event.is_set()
+
+
+class MMHashKeyCache:
+    """Bounded sidecar cache for multimodal keys and feature-hash token ids."""
+
+    def __init__(self, max_size: int = 100000):
+        self._lock = threading.Lock()
+        self._entries: "OrderedDict[str, Tuple[List[torch.Tensor], str]]" = (
+            OrderedDict()
+        )
+        self._max_size = max_size
+        self.instance_id = uuid.uuid4().hex
+
+    @property
+    def enabled(self) -> bool:
+        return self._max_size > 0
+
+    def put(
+        self,
+        cache_key: str,
+        feature_hashes: List[torch.Tensor],
+        generation: Optional[str] = None,
+    ) -> None:
+        if not cache_key or not self.enabled:
+            return
+        # Hashes are small CPU int32 token-id tensors. Store an owned CPU copy
+        # so the sidecar does not retain embedding storage or a GPU tensor.
+        hashes = [
+            hash_tensor.detach().to(device="cpu", dtype=torch.int32).clone()
+            for hash_tensor in feature_hashes
+        ]
+        with self._lock:
+            self._entries[cache_key] = (hashes, generation or "")
+            self._entries.move_to_end(cache_key)
+            while len(self._entries) > self._max_size:
+                self._entries.popitem(last=False)
+
+    def get(
+        self, cache_key: str, generation: Optional[str] = None
+    ) -> Optional[List[torch.Tensor]]:
+        with self._lock:
+            value = self._entries.get(cache_key)
+            if value is None or (generation is not None and value[1] != generation):
+                return None
+            return value[0]
+
+    def contains(self, cache_key: str) -> bool:
+        with self._lock:
+            return cache_key in self._entries
+
+    def keys(self) -> List[str]:
+        with self._lock:
+            return list(self._entries.keys())
+
+    def metadata_keys(self) -> List[str]:
+        """Compatibility name used by the ViT cache HTTP endpoint."""
+        return self.keys()
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+
+    def stats(self) -> Dict[str, int]:
+        with self._lock:
+            return {"resident_entries": len(self._entries)}
+
+    def metadata(
+        self, keys: List[str], embedding_cache: "MMEmbeddingCache"
+    ) -> Dict[str, Any]:
+        results = []
+        total_rows = 0
+        for key in keys:
+            entry = embedding_cache.peek(key)
+            with self._lock:
+                value = self._entries.get(key)
+            if (
+                entry is None
+                or not entry.is_done
+                or entry.error is not None
+                or value is None
+                or value[1] != entry.generation
+            ):
+                results.append({"key": key, "hit": False})
+                continue
+            hashes = value[0]
+            split_size = [hash_tensor.numel() for hash_tensor in hashes]
+            total_rows += sum(split_size)
+            if total_rows > 1048576:
+                raise ValueError("multimodal metadata response exceeds row limit")
+            results.append(
+                {
+                    "key": key,
+                    "hit": True,
+                    "split_size": split_size,
+                    "feature_hashes": [
+                        value
+                        for hash_tensor in hashes
+                        for value in hash_tensor.tolist()
+                    ],
+                    "entry_generation": entry.generation,
+                }
+            )
+        return {
+            "worker_instance": self.instance_id,
+            "feature_hash_version": 1,
+            "entries": results,
+        }
 
 
 class MMEmbeddingCache:
@@ -210,7 +315,8 @@ class MMEmbeddingCache:
                 entry = self._new_entry(cache_key)
                 self._entries[cache_key] = entry
                 self._stats["miss"] += 1
-                if self._evict_locked():
+                evicted = self._evict_locked()
+                if evicted:
                     resident_metrics = (self._resident_tokens, self._resident_bytes)
                 state = "miss"
         if resident_metrics is not None:
@@ -224,9 +330,8 @@ class MMEmbeddingCache:
         self, cache_key: str, entry: MMEmbeddingCacheEntry, result: Any
     ) -> None:
         charge_tokens, charge_bytes = _embedding_result_cost(result)
-        charge_bytes += sum(
-            t.numel() * t.element_size() for t in entry.feature_hashes or []
-        )
+        # Feature hashes are routing metadata and are maintained by the
+        # separate hash-key index; they must not consume the embedding budget.
         with self._lock:
             if self._entries.get(cache_key) is not entry:
                 return
