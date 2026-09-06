@@ -293,7 +293,11 @@ class V4Transformer(nn.Module):
                     layer.enable_mega_hca(self._mega_csa_runtime, mw.weights[layer_id])
                     # EP sharding requires the same MegaMoE-SE backend as the
                     # ordinary path; Mega only replaces its decode front-end.
-                    layer.enable_mega_front(required=int(args.ep_size) > 1)
+                    # Auto mode keeps the ordinary FFN when a caller selected
+                    # a non-Mega-SE strategy. Explicit Mega remains strict.
+                    layer.enable_mega_front(
+                        required=mega_request is True and int(args.ep_size) > 1
+                    )
 
             # LM head — plain weight matrix [vocab_size, dim].  Accept either
             # BF16 (ckpt-native) or FP32 (legacy path).

@@ -280,6 +280,21 @@ class Block(nn.Module):
                     f"got {strategy_name or 'unknown'!r}"
                 )
             return
+        score_func = getattr(
+            getattr(self.ffn, "gate", None), "score_func", "sqrtsoftplus"
+        )
+        if score_func != "sqrtsoftplus":
+            if required:
+                raise RuntimeError(
+                    "DSV4 Mega MoE front requires score_func='sqrtsoftplus', "
+                    f"got {score_func!r}"
+                )
+            logging.info(
+                "DSV4 Mega MoE front disabled for unsupported score_func=%r; "
+                "using the ordinary MoE front",
+                score_func,
+            )
+            return
         from rtp_llm.models_py.modules.dsv4.moe.mega_front import MegaMoeFrontAdapter
 
         self._mega_front_adapter = MegaMoeFrontAdapter(

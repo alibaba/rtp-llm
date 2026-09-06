@@ -133,7 +133,38 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "requires the mega_se MoE strategy"):
             Block.enable_mega_front(block, required=True)
 
-    def test_capture_tokens_are_sorted_and_bounded(self) -> None:
+    def test_front_is_not_attached_for_unsupported_score_func(self) -> None:
+        block = SimpleNamespace(
+            ffn=SimpleNamespace(
+                _strategy=SimpleNamespace(name="mega_se"),
+                gate=SimpleNamespace(score_func="softmax"),
+            ),
+            ffn_hc="hc",
+            ffn_norm="norm",
+            _mega_front_adapter=None,
+        )
+        with mock.patch(
+            "rtp_llm.models_py.modules.dsv4.moe.mega_front.MegaMoeFrontAdapter"
+        ) as adapter_cls:
+            Block.enable_mega_front(block)
+
+        self.assertIsNone(block._mega_front_adapter)
+        adapter_cls.assert_not_called()
+
+    def test_required_front_rejects_unsupported_score_func(self) -> None:
+        block = SimpleNamespace(
+            ffn=SimpleNamespace(
+                _strategy=SimpleNamespace(name="mega_se"),
+                gate=SimpleNamespace(score_func="sigmoid"),
+            ),
+            ffn_hc="hc",
+            ffn_norm="norm",
+            _mega_front_adapter=None,
+        )
+        with self.assertRaisesRegex(RuntimeError, "score_func='sqrtsoftplus'"):
+            Block.enable_mega_front(block, required=True)
+
+    def test_capture_tokens_are_sorted_and_filter_unsupported_sizes(self) -> None:
         with mock.patch.dict(
             os.environ,
             {"DECODE_CAPTURE_CONFIG": "8, 1,8,32", "GEN_NUM_PER_CIRCLE": "0"},
@@ -143,8 +174,13 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
             os.environ,
             {"DECODE_CAPTURE_CONFIG": "8,256", "GEN_NUM_PER_CIRCLE": "0"},
         ):
-            with self.assertRaisesRegex(RuntimeError, "supports capture token counts"):
-                _decode_capture_tokens()
+            self.assertEqual(_decode_capture_tokens(), (8,))
+
+        with mock.patch.dict(
+            os.environ,
+            {"DECODE_CAPTURE_CONFIG": "32,64", "GEN_NUM_PER_CIRCLE": "3"},
+        ):
+            self.assertEqual(_decode_capture_tokens(), (32, 64, 96, 128))
 
     def test_capture_tokens_include_dspark_and_target_verify(self) -> None:
         with mock.patch.dict(

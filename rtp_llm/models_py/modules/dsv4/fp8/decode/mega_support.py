@@ -124,6 +124,7 @@ def _model_geometry_reason(args: Any) -> Optional[str]:
         ("o_lora_rank", args.o_lora_rank, O_LORA_RANK),
         ("index_n_heads", args.index_n_heads, INDEX_HEADS),
         ("index_head_dim", args.index_head_dim, INDEX_HEAD_DIM),
+        ("hc_mult", args.hc_mult, 4),
     )
     mismatches = [
         f"{name}={actual} (expected {wanted})"

@@ -117,6 +117,12 @@ class MegaSupportTest(unittest.TestCase):
 
         self.assertIn("unsupported hidden size 3072", reason or "")
 
+    def test_mhc_geometry_requires_four_lanes(self) -> None:
+        reason = mega_decode_unavailable_reason(V4Args(hc_mult=2), torch.device("cpu"))
+
+        self.assertIn("hc_mult=2", reason or "")
+        self.assertIn("expected 4", reason or "")
+
     def test_incompatible_attention_signature_is_reported_at_startup(self) -> None:
         extension = _supported_extension()
         extension.hc_reduce_fuse_out = lambda: None

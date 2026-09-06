@@ -62,14 +62,10 @@ def _decode_capture_tokens() -> tuple[int, ...]:
     values = {
         batch * multiplier for batch in capture_batches for multiplier in multipliers
     }
-    invalid = sorted(value for value in values if value > _CAPACITY_M)
-    if invalid:
-        raise RuntimeError(
-            "DSV4 MoE front supports capture token counts in "
-            f"[1,{_CAPACITY_M}], got {invalid} from batches="
-            f"{sorted(capture_batches)} gamma={gamma}"
-        )
-    return tuple(sorted(values))
+    # A capture bucket above the front ABI limit is still a valid ordinary
+    # decode shape.  Leave it to Block.supports() to select the generic path;
+    # only create native plans for token counts the front can actually run.
+    return tuple(sorted(value for value in values if value <= _CAPACITY_M))
 
 
 class MegaMoeFrontAdapter:

@@ -119,6 +119,26 @@ class MegaCSARoutingTest(unittest.TestCase):
             layer.enable_mega_hca.assert_called_once()
             layer.enable_mega_front.assert_called_once_with(required=False)
 
+    def test_auto_mega_keeps_non_se_front_optional_for_ep(self) -> None:
+        layer = torch.nn.Module()
+        layer.enable_mega_csa = MagicMock()
+        layer.enable_mega_hca = MagicMock()
+        layer.enable_mega_front = MagicMock()
+        args = V4Args(
+            n_layers=1,
+            n_mtp_layers=0,
+            compress_ratios=[4],
+            fp8_kv_cache=True,
+            tp_size=1,
+            ep_size=8,
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            transformer = self._make_transformer(args, [layer])
+
+        self.assertTrue(transformer._mega_decode_enabled)
+        layer.enable_mega_front.assert_called_once_with(required=False)
+
     def test_explicit_zero_disables_default_mega_path(self) -> None:
         layer = torch.nn.Module()
         layer.enable_mega_csa = MagicMock()
