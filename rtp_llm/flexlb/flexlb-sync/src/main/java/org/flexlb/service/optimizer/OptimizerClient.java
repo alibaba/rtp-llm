@@ -2,7 +2,9 @@ package org.flexlb.service.optimizer;
 
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
+import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.config.OptimizerRuntimeConfig;
 import org.flexlb.constant.MetricConstant;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -46,23 +48,35 @@ public class OptimizerClient {
     public OptimizerClient(GeneralHttpNettyService httpService,
                            ServiceDiscovery serviceDiscovery,
                            ModelMetaConfig modelMetaConfig,
+                           ConfigService configService,
                            KvcmWorkerMetadataResolver workerMetadataResolver,
                            FlexMonitor monitor) {
         this.httpService = httpService;
         this.workerMetadataResolver = workerMetadataResolver;
         this.monitor = monitor;
 
+        OptimizerRuntimeConfig runtimeConfig =
+                configService.loadBalanceConfig().getOptimizer();
         OptimizerConfig optimizerConfig = resolveOptimizerConfig(modelMetaConfig);
-        this.enabled = optimizerConfig != null;
+        this.enabled = runtimeConfig.isEnabled();
         if (!enabled) {
             this.addressResolver = null;
             this.basePath = "";
             return;
         }
+        if (optimizerConfig == null) {
+            throw new IllegalStateException(
+                    "FLEXLB_CONFIG optimizer.enabled=true requires "
+                            + "MODEL_SERVICE_CONFIG optimizer topology");
+        }
 
         Endpoint endpoint = optimizerConfig.toEndpoint();
         this.addressResolver =
-                new OptimizerAddressResolver(serviceDiscovery, endpoint, optimizerConfig.getPort());
+                new OptimizerAddressResolver(
+                        serviceDiscovery,
+                        endpoint,
+                        optimizerConfig.getPort(),
+                        runtimeConfig.getDiscoveryPollIntervalMs());
         this.basePath = stripTrailingSlash(optimizerConfig.getPath());
         log.info("Optimizer trace query enabled: address={}", endpoint.getAddress());
     }
@@ -185,7 +199,7 @@ public class OptimizerClient {
 
     private static OptimizerConfig resolveOptimizerConfig(ModelMetaConfig modelMetaConfig) {
         for (ServiceRoute route : modelMetaConfig.getServiceRoutes()) {
-            if (route != null && route.isOptimizerEnabled()) {
+            if (route != null && route.getOptimizer() != null) {
                 return route.getOptimizer();
             }
         }

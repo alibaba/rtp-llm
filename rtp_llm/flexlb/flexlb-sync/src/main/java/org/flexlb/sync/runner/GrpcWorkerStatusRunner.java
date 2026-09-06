@@ -2,7 +2,7 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.BalanceStatusEnum;
@@ -37,7 +37,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
     private final String ip;
-    private final int grpcPort;
+    private final int workerStatusPort;
     private final long createTimeUs = System.nanoTime() / 1000;
     private final String id = IdUtils.fastUuid();
     private final long syncRequestTimeoutMs;
@@ -45,7 +45,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final CacheAwareService cacheAwareService;
     private final Executor callbackExecutor;
 
-    public GrpcWorkerStatusRunner(String modelName, String ipPort, String site,
+    public GrpcWorkerStatusRunner(String modelName, String ipPort,
+                                  int workerStatusPort, String site,
                                   RoleType roleType, String ignoredGroup,
                                   WorkerStatus workerStatus,
                                   WorkerStatus.PollLease pollLease,
@@ -58,7 +59,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.ipPort = ipPort;
         String[] split = ipPort.split(":");
         this.ip = split[0];
-        this.grpcPort = CommonUtils.toGrpcPort(Integer.parseInt(split[1]));
+        this.workerStatusPort = workerStatusPort;
         this.modelName = modelName;
         this.workerStatus = workerStatus;
         this.pollLease = Objects.requireNonNull(pollLease, "pollLease");
@@ -75,6 +76,27 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.callbackExecutor = callbackExecutor;
     }
 
+    public GrpcWorkerStatusRunner(String modelName, String ipPort, String site,
+                                  RoleType roleType, String ignoredGroup,
+                                  WorkerStatus workerStatus,
+                                  WorkerStatus.PollLease pollLease,
+                                  WorkerDirectory workerDirectory,
+                                  EngineHealthReporter engineHealthReporter,
+                                  EngineGrpcService engineGrpcService,
+                                  long syncRequestTimeoutMs,
+                                  CacheAwareService cacheAwareService,
+                                  Executor callbackExecutor) {
+        this(modelName, ipPort, defaultWorkerStatusPort(ipPort), site, roleType,
+                ignoredGroup, workerStatus, pollLease, workerDirectory,
+                engineHealthReporter, engineGrpcService, syncRequestTimeoutMs,
+                cacheAwareService, callbackExecutor);
+    }
+
+    private static int defaultWorkerStatusPort(String ipPort) {
+        String[] split = ipPort.split(":");
+        return CommonUtils.toGrpcPort(Integer.parseInt(split[1]));
+    }
+
     @Override
     public void run() {
         boolean asyncInitiated = false;
@@ -86,7 +108,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     .latestFinishedTaskVersion();
 
             engineGrpcService.getWorkerStatusAsync(
-                            ip, grpcPort, latestFinishedTaskVersion,
+                            ip, workerStatusPort, latestFinishedTaskVersion,
                             syncRequestTimeoutMs, roleType)
                     .thenApply(response -> EngineStatusConverter
                             .convertToStatusObservation(workerStatus, response))

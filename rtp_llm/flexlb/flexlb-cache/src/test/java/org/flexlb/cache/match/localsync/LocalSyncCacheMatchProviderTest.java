@@ -9,9 +9,9 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Set;
 
+import static org.flexlb.cache.WorkerStatusTestSupport.workerStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.flexlb.cache.WorkerStatusTestSupport.workerStatus;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;

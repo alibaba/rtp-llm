@@ -9,6 +9,7 @@ import org.flexlb.cache.domain.CacheMatchStatus;
 import org.flexlb.cache.match.kvcm.KvcmCacheMatchProvider;
 import org.flexlb.cache.match.localstandby.LocalStandbyCacheManager;
 import org.flexlb.cache.match.localstandby.LocalStandbyCacheMatchProvider;
+import org.flexlb.cache.match.localstandby.LocalStandbyComparisonService;
 import org.flexlb.cache.match.localsync.LocalSyncCacheMatchProvider;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
@@ -30,6 +31,7 @@ public class CacheMatchQueryOrchestrator {
     private final LocalStandbyCacheMatchProvider localStandbyProvider;
     private final LocalStandbyCacheManager localStandbyCacheManager;
     private final CacheMatchFailoverManager failoverManager;
+    private final LocalStandbyComparisonService comparisonService;
     private final CacheMetricsReporter cacheMetricsReporter;
     private final CacheMatchConfiguration configuration;
 
@@ -40,6 +42,7 @@ public class CacheMatchQueryOrchestrator {
             LocalStandbyCacheMatchProvider localStandbyProvider,
             LocalStandbyCacheManager localStandbyCacheManager,
             CacheMatchFailoverManager failoverManager,
+            LocalStandbyComparisonService comparisonService,
             CacheMetricsReporter cacheMetricsReporter,
             CacheMatchConfiguration configuration) {
         this.localSyncProvider = localSyncProvider;
@@ -47,6 +50,7 @@ public class CacheMatchQueryOrchestrator {
         this.localStandbyProvider = localStandbyProvider;
         this.localStandbyCacheManager = localStandbyCacheManager;
         this.failoverManager = failoverManager;
+        this.comparisonService = comparisonService;
         this.cacheMetricsReporter = cacheMetricsReporter;
         this.configuration = configuration;
         log.info("Cache match query orchestrator initialized: source={}", effectiveSource());
@@ -60,7 +64,7 @@ public class CacheMatchQueryOrchestrator {
         CacheMatchSource source = failoverManager.activeSource();
         if (source == CacheMatchSource.LOCAL_STANDBY) {
             cacheMetricsReporter.reportStandbyFallback("active_source");
-            return queryLocalStandby(query, startTimeNs);
+            return queryAndTrackLocalStandby(query, startTimeNs);
         }
         if (query.blockCacheKeys() == null || query.blockCacheKeys().isEmpty()) {
             return emptyResult(CacheMatchSource.KVCM, startTimeNs);
@@ -70,13 +74,15 @@ public class CacheMatchQueryOrchestrator {
             Map<String, HostCacheMatch> matches = kvcmProvider.findMatchingEngines(
                     query.requestId(), query.blockCacheKeys(), query.blockSize(),
                     query.roleType(), query.group());
+            trackComparisonBestEffort(
+                    query, () -> comparisonService.trackLocalStandbyPrediction(query));
             return new CacheMatchResult(
                     matches, CacheMatchSource.KVCM, elapsedUs(startTimeNs), query.blockSize());
         } catch (RuntimeException error) {
             log.warn("KVCM cache query failed; requestId={}, action=LOCAL_STANDBY",
                     query.requestId(), error);
             cacheMetricsReporter.reportStandbyFallback("kvcm_query_failure");
-            return queryLocalStandby(query, startTimeNs);
+            return queryAndTrackLocalStandby(query, startTimeNs);
         }
     }
 
@@ -137,6 +143,24 @@ public class CacheMatchQueryOrchestrator {
         } catch (RuntimeException error) {
             log.warn("Local Standby cache query failed; requestId={}", query.requestId(), error);
             return CacheMatchResult.failed(CacheMatchSource.LOCAL_STANDBY, elapsedUs(startTimeNs));
+        }
+    }
+
+    private CacheMatchResult queryAndTrackLocalStandby(
+            CacheMatchQuery query, long startTimeNs) {
+        CacheMatchResult result = queryLocalStandby(query, startTimeNs);
+        trackComparisonBestEffort(
+                query,
+                () -> comparisonService.trackResolvedLocalStandbyPrediction(query, result));
+        return result;
+    }
+
+    private void trackComparisonBestEffort(CacheMatchQuery query, Runnable tracker) {
+        try {
+            tracker.run();
+        } catch (RuntimeException error) {
+            log.warn("Local Standby comparison setup failed; requestId={}",
+                    query.requestId(), error);
         }
     }
 

@@ -4,19 +4,22 @@ import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
+import org.flexlb.cache.hash.RequestBlockHashService;
 import org.flexlb.cache.match.localstandby.LocalStandbyComparisonService;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.Map;
 
+import static org.flexlb.cache.WorkerStatusTestSupport.workerStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.flexlb.cache.WorkerStatusTestSupport.workerStatus;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -28,11 +31,14 @@ class CacheAwareServiceTest {
             mock(CacheMatchQueryOrchestrator.class);
     private final CacheMetadataUpdateOrchestrator updateOrchestrator =
             mock(CacheMetadataUpdateOrchestrator.class);
+    private final RequestBlockHashService requestBlockHashService =
+            mock(RequestBlockHashService.class);
     private final CacheAwareService service = new CacheAwareService(
             metricsReporter,
             queryOrchestrator,
             mock(LocalStandbyComparisonService.class),
-            updateOrchestrator);
+            updateOrchestrator,
+            requestBlockHashService);
 
     @Test
     void delegatesCacheQueriesToOrchestrator() {
@@ -64,6 +70,17 @@ class CacheAwareServiceTest {
 
         assertSame(expected, service.updateFromWorkerStatus(workerStatus));
         verify(updateOrchestrator).updateFromWorkerStatus(workerStatus);
+    }
+
+    @Test
+    void delegatesRequestBlockHashPreparation() {
+        BalanceContext context = new BalanceContext();
+        when(requestBlockHashService.prepareBlockCacheKeys(context))
+                .thenReturn(Mono.empty());
+
+        service.prepareBlockCacheKeys(context).join();
+
+        verify(requestBlockHashService).prepareBlockCacheKeys(context);
     }
 
     @Test

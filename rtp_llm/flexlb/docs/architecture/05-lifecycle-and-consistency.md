@@ -62,12 +62,24 @@ warmup 未完成 → 404 "warm not finish"；否则 200 "success"。
 
 ### 配置
 
-`FLEXLB_SYNC_CONSISTENCY_CONFIG` 是独立的环境配置文档，不属于
-`FlexlbConfig` 动态快照。它包含 `needConsistency`
-（默认 false，缺省时一切成为 no-op、`isMaster()` 恒 false）、`masterElectType`（仅
-`ZOOKEEPER`）、`zookeeperConfig{zkHost, zkTimeoutMs}`。选举路径优先使用 Spectrum workspace、
-application、deployment 三元组组成的部署标识，旧环境回退 `HIPPO_ROLE`；端口取
-`-Dserver.port`（默认 7001，假定所有副本同端口）。
+一致性行为已收拢到 `FLEXLB_CONFIG.consistency` tagged union。默认
+`{"type":"NONE"}`，相关 start/offline/destroy 都是 no-op、`isMaster()` 恒 false；启用时使用：
+
+```json
+{
+  "consistency": {
+    "type": "ZOOKEEPER",
+    "connectString": "zk-1:2181,zk-2:2181",
+    "sessionTimeoutMs": 30000,
+    "connectionTimeoutMs": 30000,
+    "masterRefreshIntervalMs": 5000
+  }
+}
+```
+
+一致性组件在 Bean 初始化时取得配置，因此 Nacos 可以保存和替换这部分字段，但当前进程
+是否启用一致性及 ZooKeeper 客户端参数在重启后生效。选举路径使用 `HIPPO_ROLE`；端口取
+Spring `server.port`，再回退 JVM `-Dserver.port` 和默认 7001（假定所有副本同端口）。
 
 ### ZookeeperMasterElectService
 
