@@ -48,7 +48,7 @@ public class Request {
     private long cacheKeyBlockSize;
 
     @JsonProperty("request_id")
-    private long requestId;
+    private String requestId;
 
     /** Upstream generation timeout retained for transport compatibility. */
     @JsonProperty("generate_timeout")

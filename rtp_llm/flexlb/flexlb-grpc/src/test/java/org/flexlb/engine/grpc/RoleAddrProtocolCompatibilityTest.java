@@ -8,6 +8,8 @@ import com.google.protobuf.WrappersProto;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -80,7 +82,7 @@ class RoleAddrProtocolCompatibilityTest {
     void dualWorkerStatusPayloadIsReadableByDsv4Descriptor() throws Exception {
         Descriptors.Descriptor legacy = legacyWorkerStatusDescriptor();
         EngineRpcService.TaskInfoPB running = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(42L)
+                .setRequestId("42")
                 .setIsWaiting(false)
                 .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
                 .build();
@@ -92,7 +94,7 @@ class RoleAddrProtocolCompatibilityTest {
 
         DynamicMessage oldReader = DynamicMessage.parseFrom(legacy, payload.toByteArray());
         assertEquals("RoleType.PREFILL", oldReader.getField(legacy.findFieldByNumber(1)));
-        DynamicMessage oldTask = (DynamicMessage) ((java.util.List<?>) oldReader.getField(
+        DynamicMessage oldTask = (DynamicMessage) ((List<?>) oldReader.getField(
                 legacy.findFieldByNumber(3))).get(0);
         assertFalse((Boolean) oldTask.getField(
                 oldTask.getDescriptorForType().findFieldByNumber(9)));

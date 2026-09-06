@@ -41,7 +41,7 @@ final class RequestLifecycleTestSupport {
 
     static BalanceContext context(FlexlbConfig config, long requestId) {
         Request request = new Request();
-        request.setRequestId(requestId);
+        request.setRequestId(Long.toString(requestId));
         request.setSeqLen(16L);
         BalanceContext context = new BalanceContext(config);
         context.setRequest(request);

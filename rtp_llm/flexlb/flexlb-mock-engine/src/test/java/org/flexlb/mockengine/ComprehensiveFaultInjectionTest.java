@@ -134,7 +134,7 @@ class ComprehensiveFaultInjectionTest {
             // Enqueue 5 requests — all should get errors
             for (int i = 1; i <= 5; i++) {
                 EngineRpcService.EnqueueBatchResponsePB response =
-                        enqueue(prefill, batch(1000 + i, slot(0, input(i, 10))));
+                        enqueue(prefill, batch(1000 + i, slot(0, input(String.valueOf(i), 10))));
                 assertEquals(0, response.getSuccessesCount(),
                         "request " + i + " should have 0 successes under enqueue_error");
                 assertEquals(1, response.getErrorsCount(),
@@ -149,7 +149,7 @@ class ComprehensiveFaultInjectionTest {
             // Enqueue 5 more — all should succeed
             for (int i = 6; i <= 10; i++) {
                 EngineRpcService.EnqueueBatchResponsePB response =
-                        enqueue(prefill, batch(1000 + i, slot(0, input(i, 10))));
+                        enqueue(prefill, batch(1000 + i, slot(0, input(String.valueOf(i), 10))));
                 assertEquals(1, response.getSuccessesCount(),
                         "request " + i + " should succeed after clearing enqueue_error");
                 assertEquals(0, response.getErrorsCount(),
@@ -344,7 +344,7 @@ class ComprehensiveFaultInjectionTest {
             int rejected = 0;
             for (int i = 1; i <= 5; i++) {
                 EngineRpcService.EnqueueBatchResponsePB response =
-                        enqueue(prefill, batch(2000 + i, slot(0, input(i, 10))));
+                        enqueue(prefill, batch(2000 + i, slot(0, input(String.valueOf(i), 10))));
                 if (response.getSuccessesCount() > 0) {
                     accepted++;
                 } else if (response.getErrorsCount() > 0) {
@@ -368,7 +368,7 @@ class ComprehensiveFaultInjectionTest {
 
             // Enqueue after clearing — should succeed
             EngineRpcService.EnqueueBatchResponsePB response =
-                    enqueue(prefill, batch(2999, slot(0, input(99, 10))));
+                    enqueue(prefill, batch(2999, slot(0, input("99", 10))));
             assertEquals(1, response.getSuccessesCount(),
                     "enqueue should succeed after clearing queue depth limit");
 
@@ -405,7 +405,7 @@ class ComprehensiveFaultInjectionTest {
             int emptyAfter = 0;
             for (int i = 1; i <= 10; i++) {
                 EngineRpcService.EnqueueBatchResponsePB response =
-                        enqueue(prefill, batch(3000 + i, slot(0, input(i, 10))));
+                        enqueue(prefill, batch(3000 + i, slot(0, input(String.valueOf(i), 10))));
                 if (response.getSuccessesCount() > 0) {
                     succeeded++;
                 } else {
@@ -435,7 +435,7 @@ class ComprehensiveFaultInjectionTest {
 
             // Verify recovery — enqueue should succeed
             EngineRpcService.EnqueueBatchResponsePB response =
-                    enqueue(prefill, batch(3999, slot(0, input(99, 10))));
+                    enqueue(prefill, batch(3999, slot(0, input("99", 10))));
             assertEquals(1, response.getSuccessesCount(),
                     "enqueue should succeed after engine restart");
 
@@ -472,7 +472,7 @@ class ComprehensiveFaultInjectionTest {
             for (int i = 1; i <= 5; i++) {
                 long start = System.nanoTime();
                 EngineRpcService.EnqueueBatchResponsePB response =
-                        enqueue(prefill, batch(4000 + i, slot(0, input(i, 10))));
+                        enqueue(prefill, batch(4000 + i, slot(0, input(String.valueOf(i), 10))));
                 long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
                 assertEquals(1, response.getSuccessesCount(),
                         "request " + i + " should succeed despite delay");
@@ -489,7 +489,7 @@ class ComprehensiveFaultInjectionTest {
             for (int i = 6; i <= 10; i++) {
                 long start = System.nanoTime();
                 EngineRpcService.EnqueueBatchResponsePB response =
-                        enqueue(prefill, batch(4000 + i, slot(0, input(i, 10))));
+                        enqueue(prefill, batch(4000 + i, slot(0, input(String.valueOf(i), 10))));
                 long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
                 assertEquals(1, response.getSuccessesCount(),
                         "request " + i + " should succeed after clearing delay");

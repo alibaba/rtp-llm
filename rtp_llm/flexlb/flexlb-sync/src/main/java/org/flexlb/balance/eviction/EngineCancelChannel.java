@@ -30,8 +30,15 @@ public interface EngineCancelChannel {
      * the WorkerStatus report).
      */
     CompletableFuture<CancelAck> cancel(CancelTarget target,
-                                        long requestId,
+                                        String requestId,
                                         long timeoutMs);
+
+    /** Compatibility entry point for numeric Java callers; IDs remain decimal strings internally. */
+    default CompletableFuture<CancelAck> cancel(CancelTarget target,
+                                                long requestId,
+                                                long timeoutMs) {
+        return cancel(target, Long.toString(requestId), timeoutMs);
+    }
 
     /**
      * Local delivery outcome. ACCEPTED and NOT_FOUND come from the engine

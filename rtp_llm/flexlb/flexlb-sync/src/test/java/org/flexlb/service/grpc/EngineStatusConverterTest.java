@@ -1,15 +1,34 @@
 package org.flexlb.service.grpc;
 
+import com.google.protobuf.CodedOutputStream;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.KvCacheGroupMode;
 import org.junit.jupiter.api.Test;
+
+import java.io.ByteArrayOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EngineStatusConverterTest {
+
+    @Test
+    void convertsOldIntegerAndNewStringTaskIdsWithoutChangingOtherFields() throws Exception {
+        var bytes = new ByteArrayOutputStream();
+        var wire = CodedOutputStream.newInstance(bytes);
+        wire.writeInt64(1, 123);
+        wire.flush();
+        var oldTask = EngineRpcService.TaskInfoPB.parseFrom(bytes.toByteArray()).toBuilder()
+                .setBatchId(42).setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).build();
+        var newTask = EngineRpcService.TaskInfoPB.newBuilder().setRequestId("req-abc-001").build();
+        var response = EngineStatusConverter.convertToWorkerStatusResponse(EngineRpcService.WorkerStatusPB.newBuilder()
+                .addRunningTaskInfo(oldTask).addFinishedTaskList(newTask).build());
+        assertEquals("123", response.getRunningTaskInfo().get("123").getRequestId());
+        assertEquals(42, response.getRunningTaskInfo().get("123").getBatchId());
+        assertEquals("req-abc-001", response.getFinishedTaskInfo().get("req-abc-001").getRequestId());
+    }
 
     @Test
     void convertsKvCacheGroupMode() {
@@ -39,7 +58,7 @@ class EngineStatusConverterTest {
     void preservesRequestIdFromWorkerStatus() {
         long requestId = 123L;
         EngineRpcService.TaskInfoPB finishedTask = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(requestId)
+                .setRequestId(String.valueOf(requestId))
                 .build();
         EngineRpcService.WorkerStatusPB workerStatus = EngineRpcService.WorkerStatusPB.newBuilder()
                 .addFinishedTaskList(finishedTask)
@@ -48,14 +67,14 @@ class EngineStatusConverterTest {
         WorkerStatusResponse response =
                 EngineStatusConverter.convertToWorkerStatusResponse(workerStatus);
 
-        assertEquals(requestId,
+        assertEquals(String.valueOf(requestId),
                 response.getFinishedTaskInfo().get(String.valueOf(requestId)).getRequestId());
     }
 
     @Test
     void preservesPrefixLengthValidityFromWorkerStatus() {
         EngineRpcService.TaskInfoPB runningTask = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(1L)
+                .setRequestId(String.valueOf(1L))
                 .setPrefixLength(128)
                 .setPrefixLengthValid(true)
                 .build();
@@ -73,7 +92,7 @@ class EngineStatusConverterTest {
     @Test
     void preservesPrefillTimingAndCacheBreakdownFromWorkerStatus() {
         EngineRpcService.TaskInfoPB finishedTask = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(1L)
+                .setRequestId(String.valueOf(1L))
                 .setInputQueueEnqueueTimeMs(1000)
                 .setInputQueueDrainTimeMs(1100)
                 .setRemoteKvWaitMs(200)
@@ -110,7 +129,7 @@ class EngineStatusConverterTest {
     @Test
     void preservesPostForwardPrefillProgressWithPresence() {
         EngineRpcService.TaskInfoPB runningTask = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(1L)
+                .setRequestId(String.valueOf(1L))
                 .setCompletedPrefillTokens(0)
                 .setRemainingPrefillTokens(48_000)
                 .setLastCompletedPrefillStepId(0)
@@ -130,7 +149,7 @@ class EngineStatusConverterTest {
     @Test
     void keepsMissingRemainingPrefillTokensAsNegativeOne() {
         EngineRpcService.TaskInfoPB runningTask = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(2L)
+                .setRequestId(String.valueOf(2L))
                 .build();
         EngineRpcService.WorkerStatusPB workerStatus = EngineRpcService.WorkerStatusPB.newBuilder()
                 .addRunningTaskInfo(runningTask)
@@ -145,7 +164,7 @@ class EngineStatusConverterTest {
     @Test
     void preservesExplicitZeroRemainingPrefillTokens() {
         EngineRpcService.TaskInfoPB runningTask = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(3L)
+                .setRequestId(String.valueOf(3L))
                 .setRemainingPrefillTokens(0)
                 .build();
         EngineRpcService.WorkerStatusPB workerStatus = EngineRpcService.WorkerStatusPB.newBuilder()

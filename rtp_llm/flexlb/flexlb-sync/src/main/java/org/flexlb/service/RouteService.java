@@ -102,7 +102,7 @@ public class RouteService {
         return generateInput != null && !generateInput.isEmpty();
     }
 
-    public RequestState getRequestState(long requestId,
+    public RequestState getRequestState(String requestId,
                                                     long expectedBatchId) {
         return requestScheduler == null ? null
                 : requestScheduler.getRequestState(requestId, expectedBatchId);
@@ -115,7 +115,7 @@ public class RouteService {
      * reducer there gives BATCH enqueue and QUEUE route-decision delivery the
      * same idempotency and generation-fencing semantics.</p>
      */
-    public RequestState cancelRequest(long requestId,
+    public RequestState cancelRequest(String requestId,
                                                    long expectedBatchId,
                                                    CancelReason reason) {
         return requestScheduler == null ? null

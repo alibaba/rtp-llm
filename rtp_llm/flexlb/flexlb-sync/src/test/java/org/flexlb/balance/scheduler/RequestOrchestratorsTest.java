@@ -94,14 +94,14 @@ class RequestOrchestratorsTest {
         EndpointRegistry registry = mock(EndpointRegistry.class);
         AtomicBoolean exactOwnershipPredicateObserved = new AtomicBoolean();
         doAnswer(invocation -> {
-            java.util.function.LongPredicate owns = invocation.getArgument(1);
-            exactOwnershipPredicateObserved.set(owns.test(91L));
+            java.util.function.Predicate<String> owns = invocation.getArgument(1);
+            exactOwnershipPredicateObserved.set(owns.test("91"));
             return null;
         }).when(registry).evictExpiredOrphans(anyLong(), any());
         doAnswer(invocation -> {
-            java.util.function.BiConsumer<Long, java.util.function.LongPredicate>
+            java.util.function.BiConsumer<Long, java.util.function.Predicate<String>>
                     sweeper = invocation.getArgument(0);
-            sweeper.accept(123L, requestId -> requestId == 91L);
+            sweeper.accept(123L, requestId -> requestId.equals("91"));
             return null;
         }).when(lifecycle).maintainExpiration(any());
 
