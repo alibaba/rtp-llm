@@ -116,7 +116,7 @@ public class EvictionManager {
 
     /** Eviction metrics are observers; they never own a committed transaction. */
     private void reportEvictionCommit(int priority,
-                                      long requestId,
+                                      String requestId,
                                       String evictionCase,
                                       String outcome) {
         try {
@@ -131,7 +131,7 @@ public class EvictionManager {
     }
 
     private void reportEvictionPlan(int priority,
-                                    long requestId,
+                                    String requestId,
                                     String evictionCase,
                                     String outcome) {
         try {

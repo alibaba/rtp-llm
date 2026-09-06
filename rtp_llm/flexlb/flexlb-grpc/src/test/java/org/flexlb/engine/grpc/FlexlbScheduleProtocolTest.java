@@ -64,7 +64,7 @@ class FlexlbScheduleProtocolTest {
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB parsed =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(output.toByteArray());
 
-        assertEquals(123L, parsed.getRequestId());
+        assertEquals("123", RequestId.parse(parsed));
         assertArrayEquals(input.toByteArray(), parsed.getGenerateInput().toByteArray());
     }
 

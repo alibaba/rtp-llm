@@ -5,7 +5,7 @@ package org.flexlb.dao.pv;
  */
 public record TaskConfirmationTimeoutPvLog(
         String eventType,
-        long requestId,
+        String requestId,
         String role,
         String workerIp,
         int workerPort,

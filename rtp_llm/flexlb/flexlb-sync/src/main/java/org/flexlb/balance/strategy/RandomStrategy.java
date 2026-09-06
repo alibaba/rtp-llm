@@ -78,7 +78,7 @@ public final class RandomStrategy {
             WorkerEndpoint.GenerationPin pin,
             WorkerStatus.TopologySnapshot topology,
             WorkerStatus.EngineObservation engine,
-            long requestId) {
+            String requestId) {
         try {
             ServerStatus result = new ServerStatus();
             result.setSuccess(true);
