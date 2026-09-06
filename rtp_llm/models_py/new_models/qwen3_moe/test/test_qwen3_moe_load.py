@@ -592,6 +592,88 @@ class MoEWeightDispatchTest(unittest.TestCase):
 
 
 class MoEQuantizedDispatchTest(unittest.TestCase):
+    def test_per_tensor_scale_fusion_uses_float32_rescaling(self):
+        layer = torch.nn.Module()
+        layer.moe_inter_tp = 1
+        layer.num_local_experts = 1
+        layer.w13 = torch.nn.Parameter(
+            torch.tensor([[[1.0], [1.125]]], dtype=torch.float8_e4m3fn),
+            requires_grad=False,
+        )
+        layer.w2 = torch.nn.Parameter(
+            torch.ones(1, 1, 1, dtype=torch.float8_e4m3fn),
+            requires_grad=False,
+        )
+        gate_ratio = 1.06251 / 1.125
+        layer.register_buffer("_up_scales", torch.tensor([1.0]))
+        layer.register_buffer("_gate_scales", torch.tensor([gate_ratio]))
+        layer.register_buffer("_down_scales", torch.tensor([1.0]))
+        layer.register_buffer("w13_scale", torch.zeros(1))
+        layer.register_buffer("w2_scale", torch.zeros(1))
+
+        from rtp_llm.models_py.quant_methods.fp8_moe import Fp8MoEMethod
+
+        method = Fp8MoEMethod.__new__(Fp8MoEMethod)
+        with mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8_moe._runtime_fp8_dtype",
+            return_value=torch.float8_e4m3fn,
+        ):
+            method._fuse_per_tensor(layer)
+
+        self.assertEqual(layer.w13[0, 1, 0].float().item(), 1.125)
+        torch.testing.assert_close(layer.w13_scale, torch.ones(1))
+
+    @unittest.skipUnless(hasattr(torch, "float8_e4m3fnuz"), "FNUZ unavailable")
+    def test_online_block_quantization_preserves_values_for_fnuz_runtime(self):
+        layer = torch.nn.Module()
+        layer._FP8_BLOCK_SIZE = 128
+        layer._quant_family = "fp8_per_block_online"
+        layer._quant_config = types.SimpleNamespace(weight_block_size=[128, 128])
+        layer.num_local_experts = 1
+        layer.w13 = torch.nn.Parameter(
+            torch.ones(1, 256, 128, dtype=torch.bfloat16),
+            requires_grad=False,
+        )
+        layer.w2 = torch.nn.Parameter(
+            torch.ones(1, 128, 256, dtype=torch.bfloat16),
+            requires_grad=False,
+        )
+        layer.register_buffer("w13_scale", torch.empty(1, 2, 1))
+        layer.register_buffer("w2_scale", torch.empty(1, 1, 2))
+
+        from rtp_llm.models_py.quant_methods.fp8_moe import Fp8MoEMethod
+
+        method = Fp8MoEMethod.__new__(Fp8MoEMethod)
+        with mock.patch(
+            "rtp_llm.models_py.quant_methods.fp8_moe._runtime_fp8_dtype",
+            return_value=torch.float8_e4m3fnuz,
+        ):
+            method.process_weights_after_loading(layer)
+
+        self.assertEqual(layer.w13.dtype, torch.float8_e4m3fnuz)
+        self.assertEqual(layer.w2.dtype, torch.float8_e4m3fnuz)
+        self.assertTrue(bool(torch.isfinite(layer.w13.float()).all()))
+        self.assertTrue(bool(torch.isfinite(layer.w2.float()).all()))
+        expected_scale = 2.0 / torch.finfo(torch.float8_e4m3fn).max
+        torch.testing.assert_close(
+            layer.w13_scale, torch.full_like(layer.w13_scale, expected_scale)
+        )
+        torch.testing.assert_close(
+            layer.w2_scale, torch.full_like(layer.w2_scale, expected_scale)
+        )
+        w13_scale = layer.w13_scale.repeat_interleave(128, dim=1).repeat_interleave(
+            128, dim=2
+        )
+        w2_scale = layer.w2_scale.repeat_interleave(128, dim=1).repeat_interleave(
+            128, dim=2
+        )
+        torch.testing.assert_close(
+            layer.w13.float() * w13_scale, torch.ones_like(w13_scale)
+        )
+        torch.testing.assert_close(
+            layer.w2.float() * w2_scale, torch.ones_like(w2_scale)
+        )
+
     def test_fp8_block_families_reject_non_aligned_fused_boundary(self):
         for quant_type in ("fp8_block", "fp8_block_online"):
             with self.subTest(quant_type=quant_type), self.assertRaisesRegex(
