@@ -2166,7 +2166,7 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesPostAllocationContextLengthAndSto
     EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
 }
 
-TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesSharedZigzagPaddingAndStopsTail) {
+TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesAlignedZigzagPaddingAndStopsTail) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
     auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
@@ -2180,7 +2180,7 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesSharedZigzagPaddingAndStopsTail) 
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                              = 100;
     runtime_config.fifo_scheduler_config.max_batch_tokens_size          = 100;
-    runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache = 10;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache = 300;
     // This case is about the shared zigzag padding quota, so CP prefill batching must stay on.
     runtime_config.fifo_scheduler_config.cp_force_single_prefill = false;
     PDSepConfig         pd_sep_config;
@@ -2188,6 +2188,7 @@ TEST_F(FIFOSchedulerTest, withoutCacheQuotaUsesSharedZigzagPaddingAndStopsTail) 
     ModelSpecificConfig model_specific_config;
     parallelism_config.tp_size                  = 2;
     parallelism_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+    parallelism_config.prefill_cp_config.segment_size_alignment = 73;
     FIFOScheduler scheduler(
         runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 

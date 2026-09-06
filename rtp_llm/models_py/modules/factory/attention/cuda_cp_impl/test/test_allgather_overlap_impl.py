@@ -10,6 +10,8 @@ import contextlib
 import unittest
 from unittest.mock import patch
 
+import torch
+
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.allgather_overlap_impl import (
     PCPAllGatherOverlapAttnOp,
 )
@@ -36,6 +38,63 @@ class TestPCPAllGatherOverlapAttnOp(CPAttnTestBase):
                 return_value=None,
             )
         )
+
+    def test_user_buffer_accept_path_for_mha_kv_gather(self):
+        op = object.__new__(PCPAllGatherOverlapAttnOp)
+        op.prefill_cp_size = 2
+        op.num_kv_heads = 2
+        op.head_dim = 4
+        op.use_ub = True
+
+        class FakeUserBuffer:
+            def __init__(self):
+                self.calls = []
+
+            def can_handle_tensor(self, tensor):
+                return True
+
+            def all_gather(self, tensor):
+                self.calls.append(tensor)
+                return torch.cat((tensor, tensor + 1), dim=0)
+
+        op.ub_communicator = FakeUserBuffer()
+        k = torch.zeros(3, 2, 4, device=self.device)
+        v = torch.ones_like(k)
+        with patch(f"{_AG_MODULE}.all_gather") as fallback:
+            all_keys, all_values = op._all_gather_kv(k, v)
+
+        self.assertEqual(len(op.ub_communicator.calls), 2)
+        fallback.assert_not_called()
+        self.assertTrue(torch.equal(all_keys[:3], k))
+        self.assertTrue(torch.equal(all_values[:3], v))
+
+    def test_user_buffer_reject_path_falls_back_to_collective(self):
+        op = object.__new__(PCPAllGatherOverlapAttnOp)
+        op.prefill_cp_size = 2
+        op.num_kv_heads = 2
+        op.head_dim = 4
+        op.use_ub = True
+
+        class RejectingUserBuffer:
+            def can_handle_tensor(self, tensor):
+                return False
+
+            def all_gather(self, tensor):
+                raise AssertionError("rejected UserBuffer must not be called")
+
+        op.ub_communicator = RejectingUserBuffer()
+        k = torch.zeros(3, 2, 4, device=self.device)
+        v = torch.ones_like(k)
+
+        def fallback_gather(tensor, group=None):
+            return torch.cat((tensor, tensor + 2), dim=0)
+
+        with patch(f"{_AG_MODULE}.all_gather", side_effect=fallback_gather) as fallback:
+            all_keys, all_values = op._all_gather_kv(k, v)
+
+        self.assertEqual(fallback.call_count, 2)
+        self.assertTrue(torch.equal(all_keys[3:], k + 2))
+        self.assertTrue(torch.equal(all_values[3:], v + 2))
 
     # ==================================================================
     # Case 1: Normal CP attention (no prefix cache)
@@ -178,6 +237,43 @@ class TestPCPAllGatherOverlapAttnOp(CPAttnTestBase):
             cp_size=2,
             cp_rank=0,
             tokens_per_block=16,
+        )
+
+    def test_no_prefix_production_alignment_padding(self):
+        self.run_no_prefix(
+            batch_size=1,
+            sequence_lengths=[257],
+            cp_size=2,
+            cp_rank=1,
+            tokens_per_block=64,
+            segment_size_alignment=64,
+        )
+
+    def test_prefix_production_alignment_padding(self):
+        self.run_with_prefix(
+            batch_size=2,
+            new_lengths=[257, 129],
+            prefix_lengths=[64, 64],
+            cp_size=2,
+            cp_rank=0,
+            tokens_per_block=64,
+            segment_size_alignment=64,
+        )
+
+    def test_warmup_without_kv_cache(self):
+        self.run_no_prefix(
+            batch_size=1, sequence_lengths=[32], cp_size=2, cp_rank=0, warmup=True
+        )
+
+    def test_warmup_production_alignment_all_padding_rank(self):
+        self.run_no_prefix(
+            batch_size=1,
+            sequence_lengths=[65],
+            cp_size=4,
+            cp_rank=3,
+            tokens_per_block=64,
+            warmup=True,
+            segment_size_alignment=64,
         )
 
 

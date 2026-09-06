@@ -25,6 +25,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
     generate_full_causal_kv_indices,
     generate_q_indices,
     plan_prefix_paged_attention,
+    resolve_kv_cache_block_id,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     get_py_flashinfer_workspace_buffer,
@@ -122,7 +123,7 @@ class PCPAllGatherAttnOp:
             self.attn_inputs.prefix_lengths,
             self.attn_inputs.sequence_lengths,
             self.cp_info.prefill_actual_input_lengths_cpu,
-            self.attn_inputs.kv_cache_kernel_block_id,
+            resolve_kv_cache_block_id(self.attn_inputs),
             self.attn_configs.kernel_tokens_per_block,
         )
 
@@ -194,20 +195,24 @@ class PCPAllGatherAttnOp:
         # TODO: make write local kvcache async
         restore_k = all_keys[self.kv_restore_unpad_indices]
         restore_v = all_values[self.kv_restore_unpad_indices]
-        kv_cache_tensor = kv_cache.kv_cache_base.view(
-            -1, 2, self.num_kv_heads, self.seq_size_per_block, self.head_dim
-        )
-        append_paged_kv_cache(
-            append_key=restore_k,
-            append_value=restore_v,
-            batch_indices=params.batch_indice_d,
-            positions=params.positions_d,
-            paged_kv_cache=kv_cache_tensor,
-            kv_indices=params.page_indice_d,
-            kv_indptr=params.decode_page_indptr_d,
-            kv_last_page_len=params.paged_kv_last_page_len_d,
-            kv_layout="HND",
-        )
+        # Warm-up runs before any KV cache is allocated. There is nothing to write
+        # to, and prefix attention cannot be active without a cache either.
+        kv_cache_tensor = None
+        if kv_cache is not None:
+            kv_cache_tensor = kv_cache.kv_cache_base.view(
+                -1, 2, self.num_kv_heads, self.seq_size_per_block, self.head_dim
+            )
+            append_paged_kv_cache(
+                append_key=restore_k,
+                append_value=restore_v,
+                batch_indices=params.batch_indice_d,
+                positions=params.positions_d,
+                paged_kv_cache=kv_cache_tensor,
+                kv_indices=params.page_indice_d,
+                kv_indptr=params.decode_page_indptr_d,
+                kv_last_page_len=params.paged_kv_last_page_len_d,
+                kv_layout="HND",
+            )
 
         q0 = torch.index_select(q_reshaped, 0, self.q0_idx).contiguous()
         q1 = torch.index_select(q_reshaped, 0, self.q1_idx).contiguous()

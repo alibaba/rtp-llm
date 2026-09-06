@@ -203,6 +203,11 @@ class BaseModel(object):
     def support_cuda_graph(self) -> bool:
         return False
 
+    @classmethod
+    def prefill_cp_alignment(cls) -> int:
+        """Token granularity a CP zigzag segment and KV cache block must respect."""
+        return 1
+
     def _load(self, device: str):
         # set empty weights for attention service
         # record device string for later use (e.g., WeightManager, python model init)

@@ -10,11 +10,16 @@ import contextlib
 import logging
 import math
 import unittest
+from types import SimpleNamespace
 from typing import List
 from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.linear_attn_utils import (
+    ZigzagCPPlan,
+    get_segment_valid_lengths,
+)
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.test.cp_test_utils import (
     build_cp_attn_inputs,
     build_padding_mask,
@@ -57,6 +62,22 @@ def _add_device_tensors(inputs, device: torch.device):
             "prefix_lengths_device": inputs.prefix_lengths.to(device),
             "input_lengths_device": inputs.input_lengths.to(device),
         },
+    )
+
+
+def _build_production_cp_metadata(
+    attention_inputs, cp_size: int, cp_rank: int, device: torch.device
+):
+    from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextModel
+
+    model = SimpleNamespace(
+        parallelism_config=SimpleNamespace(tp_size=cp_size, tp_rank=cp_rank),
+        config=SimpleNamespace(
+            linear_attention_config=SimpleNamespace(linear_conv_kernel_dim=4)
+        ),
+    )
+    return Qwen3NextModel._build_cp_linear_attn_metadata(
+        model, attention_inputs, device
     )
 
 
@@ -141,6 +162,59 @@ class TestCPLinearAttnIndexMath(unittest.TestCase):
         total = sum(seq_lengths)
         self.assertEqual(sorted(all_indices), list(range(total)))
 
+    def test_production_metadata_filters_padding_for_cp2_and_cp4(self):
+        for cp_size, actual_length, padded_length in (
+            (2, 257, 512),
+            (4, 513, 1024),
+        ):
+            with self.subTest(cp_size=cp_size):
+                attention_inputs = build_cp_attn_inputs(
+                    sequence_lengths=[actual_length],
+                    cp_chunk_lengths=[padded_length // cp_size],
+                    cp_size=cp_size,
+                    tokens_per_block=64,
+                    device=torch.device("cpu"),
+                )
+                all_indices = []
+                for rank in range(cp_size):
+                    metadata = _build_production_cp_metadata(
+                        attention_inputs, cp_size, rank, torch.device("cpu")
+                    )
+                    expected = [
+                        position
+                        for position in zigzag_positions_for_rank(
+                            padded_length, cp_size, rank
+                        )
+                        if position < actual_length
+                    ]
+                    self.assertTrue(metadata.is_cp_linear_attn)
+                    self.assertIsNotNone(metadata.cp_local_conv1d_meta)
+                    self.assertIsNone(metadata.cp_local_extract_indices)
+                    metadata.prepare_cp_fallback_metadata(
+                        attention_inputs, torch.device("cpu")
+                    )
+                    self.assertEqual(
+                        metadata.cp_local_extract_indices.tolist(), expected
+                    )
+                    self.assertEqual(
+                        int(metadata.cp_local_valid_mask.sum().item()), len(expected)
+                    )
+                    all_indices.extend(expected)
+                self.assertEqual(sorted(all_indices), list(range(actual_length)))
+
+    def test_sharded_cache_uses_full_gather_fallback(self):
+        from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextGatedDeltaNet
+
+        harness = SimpleNamespace(
+            parallelism_config=SimpleNamespace(
+                prefill_cp_config=SimpleNamespace(kv_cache_sharded=True)
+            )
+        )
+        reason = Qwen3NextGatedDeltaNet._get_linear_cp_relay_fallback_reason(
+            harness, None, None, 64, None
+        )
+        self.assertEqual(reason, "kv_cache_sharded")
+
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class TestCPLinearAttnForward(unittest.TestCase):
@@ -150,6 +224,104 @@ class TestCPLinearAttnForward(unittest.TestCase):
         self.device = torch.device("cuda")
         torch.manual_seed(42)
         torch.cuda.manual_seed(42)
+
+    def _run_cp2_relay_oracle(self, actual_tokens: int, segment_tokens: int) -> None:
+        from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextGatedDeltaNet
+
+        head_dim = 64
+        mixed_qkv = torch.randn(
+            actual_tokens,
+            3 * head_dim,
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        g = -torch.rand(1, actual_tokens, 1, dtype=torch.float32, device=self.device)
+        beta = torch.rand(1, actual_tokens, 1, dtype=torch.bfloat16, device=self.device)
+        initial_state = torch.randn(
+            1,
+            1,
+            head_dim,
+            head_dim,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        harness = SimpleNamespace(
+            prefill_gdn=SimpleNamespace(
+                local_num_k_heads=1,
+                local_num_v_heads=1,
+                head_k_dim=head_dim,
+                head_v_dim=head_dim,
+            )
+        )
+
+        with torch.no_grad():
+            expected, _, expected_state = (
+                Qwen3NextGatedDeltaNet._run_linear_cp_gdn_segment(
+                    harness, mixed_qkv, g, beta, initial_state.clone()
+                )
+            )
+            state = initial_state.clone()
+            outputs = []
+            valid_lengths = get_segment_valid_lengths(
+                actual_tokens, segment_tokens, cp_size=2
+            )
+            for step in ZigzagCPPlan(2, 0).relay_steps:
+                valid_tokens = step.valid_token_count(valid_lengths)
+                if valid_tokens == 0:
+                    continue
+                start = step.first_global_segment * segment_tokens
+                end = start + valid_tokens
+                output, _, state = Qwen3NextGatedDeltaNet._run_linear_cp_gdn_segment(
+                    harness,
+                    mixed_qkv[start:end],
+                    g[:, start:end].contiguous(),
+                    beta[:, start:end].contiguous(),
+                    state,
+                )
+                outputs.append(output)
+
+        torch.testing.assert_close(torch.cat(outputs), expected, rtol=1e-2, atol=1e-2)
+        torch.testing.assert_close(state, expected_state, rtol=1e-3, atol=1e-3)
+
+    def test_cp2_relay_matches_full_sequence_when_aligned_or_padded(self):
+        for actual_tokens, segment_tokens in ((256, 64), (257, 128)):
+            with self.subTest(actual_tokens=actual_tokens):
+                self._run_cp2_relay_oracle(actual_tokens, segment_tokens)
+
+    def test_prefix_cache_boundaries_and_relay_state_are_isolated(self):
+        from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextGatedDeltaNet
+
+        attention_inputs = build_cp_attn_inputs(
+            sequence_lengths=[321],
+            cp_chunk_lengths=[256],
+            cp_size=2,
+            tokens_per_block=64,
+            prefix_lengths=[64],
+            device=self.device,
+        )
+        block_ids = torch.tensor(
+            [[11, 12, 13, 14, 15, 16]], dtype=torch.int32, device=self.device
+        )
+        attention_inputs = _AttnInputsWrapper(
+            attention_inputs,
+            {"kv_cache_kernel_block_id_device": block_ids},
+        )
+        block_ends, selected_ids = Qwen3NextGatedDeltaNet._get_linear_cp_cache_blocks(
+            attention_inputs, seq_size_per_block=64
+        )
+        self.assertEqual(block_ends.tolist(), [64, 128, 192, 256, 257])
+        self.assertEqual(selected_ids.tolist(), [12, 13, 14, 15, 16])
+
+        cached_states = torch.randn(
+            17, 1, 4, 4, dtype=torch.bfloat16, device=self.device
+        )
+        original_cache = cached_states.clone()
+        relay_state = Qwen3NextGatedDeltaNet._copy_linear_cp_prefix_ssm_state(
+            cached_states, prefix_block_id=11
+        )
+        self.assertEqual(relay_state.dtype, torch.float32)
+        relay_state.zero_()
+        torch.testing.assert_close(cached_states, original_cache)
 
     def _run_cp_vs_nocp(
         self,
@@ -293,43 +465,8 @@ class TestCPLinearAttnForward(unittest.TestCase):
                 )
                 all_rank_packed.append(torch.cat([r_mixed_qkv, r_b, r_a], dim=-1))
 
-        cp_info = cp_attn_inputs.context_parallel_info
-        restore_indices = cp_info.prefill_qkv_restore_indice
-        padding_mask = cp_info.prefill_qkv_padding_mask
-        unpad_restore = restore_indices[padding_mask == 1]
-
-        total_ag = padding_mask.shape[0]
-        local_chunk_total = total_ag // cp_size
-        local_start = cp_rank * local_chunk_total
-        local_end = local_start + local_chunk_total
-
-        inv_restore = torch.empty(total_ag, dtype=torch.long, device=self.device)
-        inv_restore.fill_(-1)
-        inv_restore[unpad_restore.long()] = torch.arange(
-            unpad_restore.shape[0], device=self.device
-        )
-        local_inv = inv_restore[local_start:local_end]
-        cp_local_valid_mask = local_inv >= 0
-        cp_local_extract_idx = local_inv[cp_local_valid_mask]
-
-        actual_lengths = torch.tensor(sequence_lengths, dtype=torch.int32)
-        full_cu_from_actual = torch.zeros(
-            batch_size + 1, dtype=torch.int32, device=self.device
-        )
-        full_cu_from_actual[1:] = torch.tensor(
-            sequence_lengths, device=self.device
-        ).cumsum(0)
-
-        full_conv_meta = prepare_causal_conv1d_metadata(
-            query_start_loc=full_cu_from_actual, device=self.device
-        )
-
         cp_meta = Qwen3NextMetadata(
-            full_prefill_conv1d_meta=full_conv_meta,
-            full_prefill_cu_seqlens=full_cu_from_actual,
-            cp_restore_indices=restore_indices,
-            cp_local_extract_indices=cp_local_extract_idx,
-            cp_local_valid_mask=cp_local_valid_mask,
+            cp_plan=ZigzagCPPlan(cp_size=cp_size, cp_rank=cp_rank)
         )
 
         def mock_ag(tensor, group=None):

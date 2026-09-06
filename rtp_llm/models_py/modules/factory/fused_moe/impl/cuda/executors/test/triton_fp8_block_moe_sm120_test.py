@@ -28,6 +28,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hy
     _get_sm120_triton_max_tokens,
     get_sm120_triton_fp8_config,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors import (
+    deepgemm_hybrid_executor as deepgemm_hybrid_executor_module,
+)
 from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
     invoke_fused_moe_kernel,
     moe_align_block_size_torch,
@@ -279,6 +282,31 @@ class TritonFp8BlockMoeSm120Test(unittest.TestCase):
                 actual = self._triton(payload)
                 expected = self._deepgemm(payload)
                 self._assert_matches_deepgemm(actual, expected)
+
+    def test_contiguous_gemm_receives_clamped_padding_indices(self) -> None:
+        payload = self._make_payload(offset=0, num_tokens=1)
+        observed_indices = []
+        original_gemm = (
+            deepgemm_hybrid_executor_module.m_grouped_fp8_gemm_nt_contiguous
+        )
+
+        def checked_gemm(*args, **kwargs):
+            indices = args[3]
+            observed_indices.append(indices.clone())
+            self.assertGreaterEqual(int(indices.min().item()), 0)
+            self.assertLess(
+                int(indices.max().item()), self.executor.num_experts_per_partition
+            )
+            return original_gemm(*args, **kwargs)
+
+        with patch.object(
+            deepgemm_hybrid_executor_module,
+            "m_grouped_fp8_gemm_nt_contiguous",
+            side_effect=checked_gemm,
+        ):
+            self._deepgemm(payload)
+
+        self.assertEqual(len(observed_indices), 2)
 
     def test_tuned_configs_match_deepgemm(self) -> None:
         payload = self._make_payload(offset=0)

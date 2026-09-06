@@ -1,4 +1,4 @@
-from rtp_llm.ops import CPRotateMethod
+from rtp_llm.ops import CPRotateMethod, PREFILL_CP_CONFIG_CAPABILITIES
 from rtp_llm.server.server_args.util import str2_cp_rotate_method, str2bool
 
 
@@ -102,7 +102,7 @@ def init_parallel_group_args(
     )
     prefill_cp_size_bind_to = (
         (prefill_cp_config, "prefill_cp_size")
-        if hasattr(prefill_cp_config, "prefill_cp_size")
+        if "prefill_cp_size" in PREFILL_CP_CONFIG_CAPABILITIES
         else None
     )
     parallel_group.add_argument(

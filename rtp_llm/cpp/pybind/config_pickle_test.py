@@ -1,7 +1,7 @@
 import pickle
 import unittest
 
-from rtp_llm.ops import GrammarConfig
+from rtp_llm.ops import CPRotateMethod, GrammarConfig, PrefillCPConfig
 
 
 def _new_grammar_config():
@@ -24,6 +24,25 @@ class _PreviousSixTupleGrammarConfig:
     def __reduce__(self):
         previous_state = (True, 6, "six-tokenizer-info", [13, 17], 4096, True)
         return _new_grammar_config, (), previous_state
+
+
+def _new_prefill_cp_config():
+    return PrefillCPConfig.__new__(PrefillCPConfig)
+
+
+class _LegacyPrefillCPConfig:
+    def __reduce__(self):
+        return _new_prefill_cp_config, (), (CPRotateMethod.ALL_GATHER, 1024)
+
+
+class _PreviousPrefillCPConfig:
+    def __reduce__(self):
+        return _new_prefill_cp_config, (), (
+            CPRotateMethod.ALL_GATHER_WITH_OVERLAP,
+            2048,
+            True,
+            4,
+        )
 
 
 class GrammarConfigPickleTest(unittest.TestCase):
@@ -81,6 +100,51 @@ class GrammarConfigPickleTest(unittest.TestCase):
                 self.assertRaisesRegex(RuntimeError, "Invalid state"),
             ):
                 config = _new_grammar_config()
+                config.__setstate__(state)
+
+
+class PrefillCPConfigPickleTest(unittest.TestCase):
+    def test_current_format_round_trip(self):
+        config = PrefillCPConfig()
+        config.method = CPRotateMethod.ALLTOALL
+        config.comm_buffer_size = 4096
+        config.kv_cache_sharded = True
+        config.prefill_cp_size = 8
+        config.segment_size_alignment = 64
+
+        restored = pickle.loads(pickle.dumps(config))
+
+        self.assertEqual(restored.method, CPRotateMethod.ALLTOALL)
+        self.assertEqual(restored.comm_buffer_size, 4096)
+        self.assertTrue(restored.kv_cache_sharded)
+        self.assertEqual(restored.prefill_cp_size, 8)
+        self.assertEqual(restored.segment_size_alignment, 64)
+
+    def test_legacy_two_tuple_uses_new_defaults(self):
+        restored = pickle.loads(pickle.dumps(_LegacyPrefillCPConfig()))
+
+        self.assertEqual(restored.method, CPRotateMethod.ALL_GATHER)
+        self.assertEqual(restored.comm_buffer_size, 1024)
+        self.assertFalse(restored.kv_cache_sharded)
+        self.assertEqual(restored.prefill_cp_size, 0)
+        self.assertEqual(restored.segment_size_alignment, 1)
+
+    def test_previous_four_tuple_is_loaded(self):
+        restored = pickle.loads(pickle.dumps(_PreviousPrefillCPConfig()))
+
+        self.assertEqual(restored.method, CPRotateMethod.ALL_GATHER_WITH_OVERLAP)
+        self.assertEqual(restored.comm_buffer_size, 2048)
+        self.assertTrue(restored.kv_cache_sharded)
+        self.assertEqual(restored.prefill_cp_size, 4)
+        self.assertEqual(restored.segment_size_alignment, 1)
+
+    def test_invalid_layouts_are_rejected(self):
+        for state in ((CPRotateMethod.ALL_GATHER,), (CPRotateMethod.ALL_GATHER, 1, False)):
+            with (
+                self.subTest(state=state),
+                self.assertRaisesRegex(RuntimeError, "Invalid state"),
+            ):
+                config = _new_prefill_cp_config()
                 config.__setstate__(state)
 
 

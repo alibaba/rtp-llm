@@ -532,18 +532,14 @@ def init_user_buffers_environment(parallelism_config: ParallelismConfig):
             init_user_buffers_communicator,
         )
 
-        local_rank = parallelism_config.local_rank
-        world_size = parallelism_config.world_size
-
+        device_index = parallelism_config.local_rank
         buffer_size = parallelism_config.prefill_cp_config.comm_buffer_size
 
         logging.info(
             f"[rank: {parallelism_config.world_rank}] Initializing user buffers communicator "
-            f"with buffer_size: {buffer_size}, local_rank: {local_rank}, world_size: {world_size}"
+            f"with buffer_size: {buffer_size}, device_index: {device_index}"
         )
-        init_user_buffers_communicator(
-            _get_group(Group.TP), local_rank, world_size, buffer_size
-        )
+        init_user_buffers_communicator(_get_group(Group.TP), device_index, buffer_size)
 
 
 def destroy_distributed_environment():
@@ -663,6 +659,13 @@ def send(tensor: torch.Tensor, dst: int, group: Group) -> None:
     torch.distributed.send(tensor, dst, group=process_group)
 
 
+def send_to_group_rank(tensor: torch.Tensor, dst: int, group: Group) -> None:
+    """Send to a destination rank relative to the selected process group."""
+    process_group = _get_group(group)
+    global_dst = torch.distributed.get_global_rank(process_group, dst)
+    torch.distributed.send(tensor, global_dst, group=process_group)
+
+
 def recv(tensor: torch.Tensor, src: int, group: Group) -> torch.Tensor:
     """Receive a tensor from a source rank.
 
@@ -679,6 +682,14 @@ def recv(tensor: torch.Tensor, src: int, group: Group) -> torch.Tensor:
     return tensor
 
 
+def recv_from_group_rank(tensor: torch.Tensor, src: int, group: Group) -> torch.Tensor:
+    """Receive from a source rank relative to the selected process group."""
+    process_group = _get_group(group)
+    global_src = torch.distributed.get_global_rank(process_group, src)
+    torch.distributed.recv(tensor, global_src, group=process_group)
+    return tensor
+
+
 def broadcast(tensor: torch.Tensor, src: int, group: Group) -> None:
     """Broadcast a tensor from source rank to all ranks in the group.
 
@@ -691,29 +702,30 @@ def broadcast(tensor: torch.Tensor, src: int, group: Group) -> None:
     torch.distributed.broadcast(tensor, src, group=process_group)
 
 
-def all_reduce(tensor: torch.Tensor, group: Group, *, inplace: bool = False) -> torch.Tensor:
-    """All-reduce a tensor across all ranks in the group.
+def broadcast_from_group_rank(tensor: torch.Tensor, src: int, group: Group) -> None:
+    """Broadcast from a source rank relative to the selected process group."""
+    process_group = _get_group(group)
+    global_src = torch.distributed.get_global_rank(process_group, src)
+    torch.distributed.broadcast(tensor, global_src, group=process_group)
 
-    Args:
-        tensor: Tensor to all-reduce.
-        group: Process group to use
-        inplace: If true, write the symmetric-memory fast-path result back to ``tensor``.
 
-    Returns:
-        All-reduced tensor.
-    """
+def all_reduce(tensor: torch.Tensor, group: Group) -> torch.Tensor:
+    """All-reduce a tensor in place across all ranks in the group."""
     rocm_rccl = _get_rocm_rccl()
     if rocm_rccl is not None:
         rocm_rccl.ensure_capture_comm_ready(group == Group.TP)
         if rocm_rccl.should_use_capture_collectives(group == Group.TP):
-            return rocm_rccl.capture_all_reduce(tensor, _get_group(group))
+            result = rocm_rccl.capture_all_reduce(tensor, _get_group(group))
+            if result is not tensor:
+                tensor.copy_(result)
+            return tensor
 
     if group == Group.TP:
         symm_mem_comm = _get_symm_mem().get_symm_mem_communicator()
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allreduce(
             tensor
         ):
-            return symm_mem_comm.all_reduce(tensor, out=tensor if inplace else None)
+            return symm_mem_comm.all_reduce(tensor, out=tensor)
 
     process_group = _get_group(group)
     torch.distributed.all_reduce(
@@ -797,7 +809,10 @@ def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
         dtype=input_tensor.dtype,
     )
     torch.distributed.reduce_scatter_tensor(
-        output_tensor, input_tensor, op=torch.distributed.ReduceOp.SUM, group=process_group
+        output_tensor,
+        input_tensor,
+        op=torch.distributed.ReduceOp.SUM,
+        group=process_group,
     )
     return output_tensor
 
@@ -819,8 +834,11 @@ __all__ = [
     "distributed_environment_initialized",
     "destroy_distributed_environment",
     "send",
+    "send_to_group_rank",
     "recv",
+    "recv_from_group_rank",
     "broadcast",
+    "broadcast_from_group_rank",
     "all_reduce",
     "all_gather",
     "reduce_scatter",

@@ -1304,6 +1304,7 @@ class PrefillCPConfig:
     kv_cache_sharded: bool
     method: CPRotateMethod
     prefill_cp_size: int
+    segment_size_alignment: int
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:

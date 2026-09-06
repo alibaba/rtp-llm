@@ -21,59 +21,51 @@ class UserBufferCommunicator:
     def __init__(
         self,
         group: ProcessGroup,
-        local_rank: int,
-        world_size: int,
+        device_index: int,
+        group_rank: int,
+        group_size: int,
         buffer_size: int = 1024 * 1024,
     ):
-        """
-        Initialize UserBufferCommunicator.
-            group: ProcessGroup
-            local_rank: The local rank (GPU index) for this process
-            world_size: Total number of GPUs in the communication group
-            buffer_size: Size of communication buffers in bytes (default: 1MB)
-
-        Raises:
-            RuntimeError: If CUDA is not available or P2P access cannot be enabled
-        """
+        """Initialize a communicator for one process group on one CUDA device."""
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is not available")
 
-        if local_rank >= torch.cuda.device_count():
+        if device_index >= torch.cuda.device_count():
             raise RuntimeError(
-                f"local_rank {local_rank} exceeds available GPU count {torch.cuda.device_count()}"
+                f"device_index {device_index} exceeds available GPU count {torch.cuda.device_count()}"
             )
-        self.local_rank = local_rank
-        self.world_size = world_size
-        self.device = torch.device(f"cuda:{local_rank}")
+        self.device_index = device_index
+        self.group_rank = group_rank
+        self.group_size = group_size
+        self.device = torch.device(f"cuda:{device_index}")
         self.buffer_size = buffer_size
-        self.per_rank_buffer_size = buffer_size // world_size
+        self.per_rank_buffer_size = buffer_size // group_size
         self.group = group
         torch.cuda.set_device(self.device)
-        # check p2p access between all pairs of GPUs
+
+        self._group_device_indices: List[Optional[int]] = [None] * group_size
+        torch.distributed.all_gather_object(
+            self._group_device_indices, device_index, group=group
+        )
         self._enable_p2p_access()
 
-        # Create CUDA streams for async operations
         self._send_streams: Dict[int, torch.cuda.Stream] = {}
         self._send_stream_ids: list[int] = []
         self._rank_offsets: Dict[int, int] = {}
         self._rank_offset_lists: list[int] = []
-        for rank in range(world_size):
+        for rank in range(group_size):
             self._send_streams[rank] = torch.cuda.Stream(device=self.device)
             self._send_stream_ids.append(self._send_streams[rank].cuda_stream)
-            self._rank_offsets[rank] = rank * (buffer_size // world_size)
-            self._rank_offset_lists.append(rank * (buffer_size // world_size))
+            self._rank_offsets[rank] = rank * (buffer_size // group_size)
+            self._rank_offset_lists.append(rank * (buffer_size // group_size))
 
         self._recv_stream = torch.cuda.Stream(device=self.device)
         self._current_stream = torch.cuda.current_stream(self.device)
 
-        # Signals for buffer synchronization, buffer size is equal to world_size * sizeof(int)
-        self._gpu_ptrs, self._gpu_ptr_handles = self._create_buffers(
-            32 * 4, group
-        )  # ub_handle_0
-        # Create communication buffer
+        self._gpu_ptrs, self._gpu_ptr_handles = self._create_buffers(32 * 4, group)
         self._buffer_ptrs, self._ipc_handles = self._create_buffers(buffer_size, group)
 
-        self._communicator_ptr = init_communicator(local_rank, world_size)
+        self._communicator_ptr = init_communicator(group_rank, group_size)
 
         self._gpu_ptr_handle = register_buffer_to_communicator(
             self._communicator_ptr, self._gpu_ptrs
@@ -83,8 +75,8 @@ class UserBufferCommunicator:
         )
 
         logging.info(
-            f"[Rank {local_rank}] Initialized UserBufferCommunicator with world_size={world_size}, "
-            f"buffer_size={buffer_size} bytes"
+            f"[Group rank {group_rank}] Initialized UserBufferCommunicator on device "
+            f"{device_index} with group_size={group_size}, buffer_size={buffer_size} bytes"
         )
 
     def _create_buffers(
@@ -103,40 +95,39 @@ class UserBufferCommunicator:
                 - ipc_handles: IPC memory handle tensor (64 bytes, uint8)
         """
         buffer_addr, ipc_handle = allocate_shared_buffer(size_in_bytes)
-        handles = [None] * self.world_size
-        # TODO: Serialize object needed?
+        handles = [None] * self.group_size
         torch.distributed.all_gather_object(handles, ipc_handle, group=group)
 
         buffer_ptrs: list[int] = []
-        for i, h in enumerate(handles):
-            if i == self.local_rank:
+        for rank, handle in enumerate(handles):
+            if rank == self.group_rank:
                 buffer_ptrs.append(buffer_addr)
             else:
-                buffer_ptrs.append(open_ipc_handle(h))
+                buffer_ptrs.append(open_ipc_handle(handle))
         return buffer_ptrs, handles
 
     def _enable_p2p_access(self):
-        """Check if enable P2P access between all GPU pairs."""
-        current_device = self.local_rank
-
-        for other_rank in range(self.world_size):
-            if other_rank == current_device:
+        """Check P2P access between this device and its group peers."""
+        for peer_device in self._group_device_indices:
+            assert peer_device is not None
+            if peer_device == self.device_index:
                 continue
             try:
                 can_access = torch.cuda.can_device_access_peer(
-                    current_device, other_rank
+                    self.device_index, peer_device
                 )
                 if can_access:
                     logging.info(
-                        f"[Rank {current_device}] P2P access available to rank {other_rank}"
+                        f"[Device {self.device_index}] P2P access available to device {peer_device}"
                     )
                 else:
                     logging.warning(
-                        f"[Rank {current_device}] P2P access NOT available to rank {other_rank}"
+                        f"[Device {self.device_index}] P2P access NOT available to device {peer_device}"
                     )
             except Exception as e:
                 logging.warning(
-                    f"[Rank {current_device}] Error checking P2P access to rank {other_rank}: {e}"
+                    f"[Device {self.device_index}] Error checking P2P access to device "
+                    f"{peer_device}: {e}"
                 )
 
     def can_handle_tensor(self, tensor: torch.Tensor) -> bool:
@@ -178,19 +169,28 @@ class UserBufferCommunicator:
         if not self.can_handle_tensor(tensor):
             return False
 
+        current_stream = torch.cuda.current_stream()
+        send_stream = self._enqueue_send(tensor, dst, current_stream)
+        current_stream.wait_stream(send_stream)
+        return True
+
+    def _enqueue_send(
+        self, tensor: torch.Tensor, dst: int, source_stream: torch.cuda.Stream
+    ) -> torch.cuda.Stream:
         data_bytes = tensor.numel() * tensor.element_size()
+        send_stream = self._send_streams[dst]
+        send_stream.wait_stream(source_stream)
         userbuffers_send(
             tensor,
             self._ub_handle,
-            self._rank_offsets[self.local_rank],
-            self._rank_offsets[self.local_rank],
+            self._rank_offsets[self.group_rank],
+            self._rank_offsets[self.group_rank],
             data_bytes,
             self._communicator_ptr,
             dst,
-            self._send_streams[dst].cuda_stream,
+            send_stream.cuda_stream,
         )
-        torch.cuda.current_stream().wait_stream(self._send_streams[dst])
-        return True
+        return send_stream
 
     def recv(
         self,
@@ -213,6 +213,15 @@ class UserBufferCommunicator:
         if not self.can_handle_tensor(tensor):
             return False
 
+        current_stream = torch.cuda.current_stream()
+        recv_stream = self._enqueue_recv(tensor, src, current_stream)
+        current_stream.wait_stream(recv_stream)
+        return True
+
+    def _enqueue_recv(
+        self, tensor: torch.Tensor, src: int, target_stream: torch.cuda.Stream
+    ) -> torch.cuda.Stream:
+        self._recv_stream.wait_stream(target_stream)
         userbuffers_recv(
             tensor,
             self._ub_handle,
@@ -222,7 +231,26 @@ class UserBufferCommunicator:
             src,
             self._recv_stream.cuda_stream,
         )
-        torch.cuda.current_stream().wait_stream(self._recv_stream)
+        return self._recv_stream
+
+    def send_recv(
+        self,
+        send_tensor: torch.Tensor,
+        dst: int,
+        recv_tensor: torch.Tensor,
+        src: int,
+    ) -> bool:
+        """Enqueue a full-duplex exchange without serializing receive after send."""
+        if not self.can_handle_tensor(send_tensor) or not self.can_handle_tensor(
+            recv_tensor
+        ):
+            return False
+
+        current_stream = torch.cuda.current_stream()
+        send_stream = self._enqueue_send(send_tensor, dst, current_stream)
+        recv_stream = self._enqueue_recv(recv_tensor, src, current_stream)
+        current_stream.wait_stream(send_stream)
+        current_stream.wait_stream(recv_stream)
         return True
 
     def all_gather(
@@ -244,7 +272,7 @@ class UserBufferCommunicator:
 
         if output_tensor is None:
             output_tensor = torch.empty(
-                [self.world_size * tensor.shape[0]] + list(tensor.shape)[1:],
+                [self.group_size * tensor.shape[0]] + list(tensor.shape)[1:],
                 device=tensor.device,
                 dtype=tensor.dtype,
             )
@@ -271,9 +299,13 @@ class UserBufferCommunicator:
         self._recv_stream.synchronize()
 
     def cleanup(self):
-        """Clean up resources."""
+        """Clean up resources once."""
+        if self._communicator_ptr is None:
+            return
         self.synchronize()
-        dispose_communicator(self._communicator_ptr)
+        communicator_ptr = self._communicator_ptr
+        self._communicator_ptr = None
+        dispose_communicator(communicator_ptr)
         self._send_streams.clear()
 
     def __del__(self):
@@ -282,8 +314,8 @@ class UserBufferCommunicator:
             self.cleanup()
         except Exception as e:
             logging.warning(
-                f"Error happend during destructing UbCommunicator, may causing resource leak."
-                f"Error: {type(e).__name__}: {str(e)}"
+                f"Error happened while destroying UserBufferCommunicator: "
+                f"{type(e).__name__}: {str(e)}"
             )
 
 
@@ -293,28 +325,20 @@ _global_communicator: Optional[UserBufferCommunicator] = None
 
 def init_user_buffers_communicator(
     group: ProcessGroup,
-    world_rank: int,
-    world_size: int,
+    device_index: int,
     buffer_size: int,
 ) -> UserBufferCommunicator:
-    """
-    Initialize the global CUDA P2P communicator.
-
-    Args:
-        world_rank: World rank of this process
-        world_size: Total number of processes
-
-    Returns:
-        Initialized communicator instance
-    """
+    """Initialize the global CUDA P2P communicator for a process group."""
     global _global_communicator
 
     if _global_communicator is not None:
         logging.warning("CUDA P2P communicator already initialized")
         return _global_communicator
 
+    group_rank = torch.distributed.get_rank(group)
+    group_size = torch.distributed.get_world_size(group)
     _global_communicator = UserBufferCommunicator(
-        group, world_rank, world_size, buffer_size
+        group, device_index, group_rank, group_size, buffer_size
     )
     return _global_communicator
 
@@ -331,8 +355,10 @@ def get_user_buffers_communicator() -> Optional[UserBufferCommunicator]:
 
 def destroy_user_buffers_communicator() -> None:
     global _global_communicator
-    if _global_communicator is not None:
-        del _global_communicator
+    communicator = _global_communicator
+    _global_communicator = None
+    if communicator is not None:
+        communicator.cleanup()
 
 
 __all__ = [

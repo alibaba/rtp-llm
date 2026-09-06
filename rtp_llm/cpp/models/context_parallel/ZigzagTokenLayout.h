@@ -11,7 +11,8 @@ struct ZigzagTokenLayout {
 };
 
 // Zigzag context parallelism pads every sequence independently to a multiple
-// of 2 * cp_size so each rank receives two equally sized chunks.
-ZigzagTokenLayout makeZigzagTokenLayout(size_t token_count, size_t cp_size);
+// of 2 * cp_size * segment_size_alignment so each rank receives two equally
+// sized, segment-aligned chunks.
+ZigzagTokenLayout makeZigzagTokenLayout(size_t token_count, size_t cp_size, size_t segment_size_alignment = 1);
 
 }  // namespace rtp_llm

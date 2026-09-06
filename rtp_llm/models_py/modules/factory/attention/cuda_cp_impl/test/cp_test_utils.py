@@ -68,8 +68,28 @@ def build_restore_indices(cp_chunk_lengths: List[int], cp_size: int) -> torch.Te
     return torch.tensor(restore, dtype=torch.int32)
 
 
-def build_padding_mask(cp_chunk_lengths: List[int], cp_size: int) -> torch.Tensor:
-    return torch.ones(sum(cp_chunk_lengths) * cp_size, dtype=torch.int32)
+def build_padding_mask(
+    cp_chunk_lengths: List[int],
+    cp_size: int,
+    padding_lengths: List[int] | None = None,
+) -> torch.Tensor:
+    if padding_lengths is None:
+        padding_lengths = [0] * len(cp_chunk_lengths)
+    masks = []
+    for chunk_length, padding_length in zip(cp_chunk_lengths, padding_lengths):
+        padded_length = chunk_length * cp_size
+        valid_length = padded_length - padding_length
+        if valid_length < 0:
+            raise ValueError("padding length exceeds padded sequence length")
+        masks.append(
+            torch.cat(
+                [
+                    torch.ones(valid_length, dtype=torch.int32),
+                    torch.zeros(padding_length, dtype=torch.int32),
+                ]
+            )
+        )
+    return torch.cat(masks)
 
 
 # ---------------------------------------------------------------------------
@@ -164,10 +184,13 @@ def build_cp_attn_inputs(
     tokens_per_block: int,
     prefix_lengths: List[int] | None = None,
     device: torch.device = torch.device("cuda"),
+    warmup: bool = False,
 ) -> PyAttentionInputs:
     """Build ``PyAttentionInputs`` with properly populated CP info.
 
     ``prefix_lengths``: per-batch prefix cache lengths (default all-zero).
+    ``warmup``: reproduce prefill warm-up, which runs before any KV cache exists
+    and therefore leaves the block-table fields unset.
     """
     batch_size = len(cp_chunk_lengths)
     if prefix_lengths is None:
@@ -189,27 +212,36 @@ def build_cp_attn_inputs(
         cu.append(cu[-1] + cl)
     inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32, device=device)
 
-    max_blocks = max(math.ceil(sl / tokens_per_block) for sl in sequence_lengths)
-    block_ids = torch.zeros(batch_size, max_blocks, dtype=torch.int32)
-    offset = 0
-    for i, sl in enumerate(sequence_lengths):
-        nb = math.ceil(sl / tokens_per_block)
-        block_ids[i, :nb] = torch.arange(offset, offset + nb, dtype=torch.int32)
-        offset += nb
-    inp.kv_cache_block_id = block_ids
-    inp.kv_cache_kernel_block_id = block_ids
-    inp.kv_cache_block_id_device = block_ids.to(device)
+    if not warmup:
+        max_blocks = max(math.ceil(sl / tokens_per_block) for sl in sequence_lengths)
+        block_ids = torch.zeros(batch_size, max_blocks, dtype=torch.int32)
+        offset = 0
+        for i, sl in enumerate(sequence_lengths):
+            nb = math.ceil(sl / tokens_per_block)
+            block_ids[i, :nb] = torch.arange(offset, offset + nb, dtype=torch.int32)
+            offset += nb
+        inp.kv_cache_block_id = block_ids
+        inp.kv_cache_kernel_block_id = block_ids
+        inp.kv_cache_block_id_device = block_ids.to(device)
     inp.dtype = get_typemeta(torch.zeros(1, dtype=torch.bfloat16))
 
     # new_lengths = sequence_lengths - prefix_lengths (total new tokens per batch)
     new_lengths = [sl - pl for sl, pl in zip(sequence_lengths, prefix_lengths)]
+    padded_new_lengths = [cl * cp_size for cl in cp_chunk_lengths]
+    padding_lengths = [
+        padded - actual for padded, actual in zip(padded_new_lengths, new_lengths)
+    ]
+    if any(padding < 0 for padding in padding_lengths):
+        raise ValueError("CP chunk length is smaller than the real input length")
 
     cp_info = PyContextParallelParams()
     cp_info.prefill_cp_chunk_lengths = torch.tensor(cp_chunk_lengths, dtype=torch.int32)
-    cp_info.prefill_cp_padding_lengths = torch.zeros(batch_size, dtype=torch.int32)
-    cp_info.prefill_qkv_padding_mask = build_padding_mask(cp_chunk_lengths, cp_size).to(
-        device
+    cp_info.prefill_cp_padding_lengths = torch.tensor(
+        padding_lengths, dtype=torch.int32
     )
+    cp_info.prefill_qkv_padding_mask = build_padding_mask(
+        cp_chunk_lengths, cp_size, padding_lengths
+    ).to(device)
     cp_info.prefill_qkv_restore_indice = build_restore_indices(
         cp_chunk_lengths, cp_size
     ).to(device)
@@ -313,6 +345,37 @@ def compute_rank_positions(lengths: List[int], cp_size: int) -> List[List[int]]:
     return all_rank_positions
 
 
+def pad_ragged_tensor(
+    tensor: torch.Tensor, lengths: List[int], padded_lengths: List[int]
+) -> torch.Tensor:
+    pieces = []
+    offset = 0
+    for length, padded_length in zip(lengths, padded_lengths):
+        pieces.append(tensor[offset : offset + length])
+        pieces.append(tensor.new_zeros((padded_length - length, *tensor.shape[1:])))
+        offset += length
+    return torch.cat(pieces, dim=0)
+
+
+def compute_rank_valid_layout(
+    lengths: List[int], padded_lengths: List[int], cp_size: int, rank: int
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    valid_mask: List[bool] = []
+    reference_positions: List[int] = []
+    reference_offset = 0
+    for length, padded_length in zip(lengths, padded_lengths):
+        positions = zigzag_positions_for_rank(padded_length, cp_size, rank)
+        valid_mask.extend(position < length for position in positions)
+        reference_positions.extend(
+            reference_offset + position for position in positions if position < length
+        )
+        reference_offset += length
+    return (
+        torch.tensor(valid_mask, dtype=torch.bool),
+        torch.tensor(reference_positions, dtype=torch.long),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Generic correctness driver
 # ---------------------------------------------------------------------------
@@ -345,6 +408,9 @@ class CPAttnTestBase(unittest.TestCase):
         atol: float = 1e-2,
     ):
         af, ef = actual.float(), expected.float()
+        if af.numel() == 0:
+            self.assertEqual(af.shape, ef.shape)
+            return
         diff = (af - ef).abs()
         max_diff, mean_diff = diff.max().item(), diff.mean().item()
         logging.info(
@@ -370,11 +436,21 @@ class CPAttnTestBase(unittest.TestCase):
         tokens_per_block: int = 16,
         rtol: float = 1e-2,
         atol: float = 1e-2,
+        warmup: bool = False,
+        segment_size_alignment: int = 1,
     ):
-        """Test CP attention **without** prefix cache."""
-        assert all(sl % cp_size == 0 for sl in sequence_lengths)
-        cp_chunk_lengths = [sl // cp_size for sl in sequence_lengths]
-        assert all(cl % 2 == 0 for cl in cp_chunk_lengths)
+        """Test CP attention **without** prefix cache.
+
+        ``warmup``: run as prefill warm-up, which happens before any KV cache is
+        allocated.  Attention output must still be correct; there is no cache to
+        verify.
+        """
+        padding_granularity = 2 * cp_size * segment_size_alignment
+        padded_lengths = [
+            math.ceil(length / padding_granularity) * padding_granularity
+            for length in sequence_lengths
+        ]
+        cp_chunk_lengths = [length // cp_size for length in padded_lengths]
 
         attn_cfg, par_cfg = make_configs(
             head_num=head_num,
@@ -409,15 +485,18 @@ class CPAttnTestBase(unittest.TestCase):
             cu_full.append(cu_full[-1] + sl)
         ref_output = reference_causal_attention(q_full, k_full, v_full, cu_full)
 
-        all_rank_pos = compute_rank_positions(sequence_lengths, cp_size)
+        padded_q = pad_ragged_tensor(q_full, sequence_lengths, padded_lengths)
+        padded_k = pad_ragged_tensor(k_full, sequence_lengths, padded_lengths)
+        padded_v = pad_ragged_tensor(v_full, sequence_lengths, padded_lengths)
+        all_rank_pos = compute_rank_positions(padded_lengths, cp_size)
         all_local_k = [
-            k_full[torch.tensor(p, device=self.device)].reshape(
+            padded_k[torch.tensor(p, device=self.device)].reshape(
                 -1, kv_head_num * head_dim
             )
             for p in all_rank_pos
         ]
         all_local_v = [
-            v_full[torch.tensor(p, device=self.device)].reshape(
+            padded_v[torch.tensor(p, device=self.device)].reshape(
                 -1, kv_head_num * head_dim
             )
             for p in all_rank_pos
@@ -426,9 +505,9 @@ class CPAttnTestBase(unittest.TestCase):
         rank_idx = torch.tensor(all_rank_pos[cp_rank], device=self.device)
         qkv = torch.cat(
             [
-                q_full[rank_idx].reshape(-1, head_num * head_dim),
-                k_full[rank_idx].reshape(-1, kv_head_num * head_dim),
-                v_full[rank_idx].reshape(-1, kv_head_num * head_dim),
+                padded_q[rank_idx].reshape(-1, head_num * head_dim),
+                padded_k[rank_idx].reshape(-1, kv_head_num * head_dim),
+                padded_v[rank_idx].reshape(-1, kv_head_num * head_dim),
             ],
             dim=-1,
         )
@@ -439,11 +518,20 @@ class CPAttnTestBase(unittest.TestCase):
             cp_size,
             tokens_per_block,
             device=self.device,
+            warmup=warmup,
         )
-        total_blocks = sum(math.ceil(s / tokens_per_block) for s in sequence_lengths)
-        kv_cache = make_kv_cache(
-            total_blocks, kv_head_num, tokens_per_block, head_dim, device=self.device
-        )
+        kv_cache = None
+        if not warmup:
+            total_blocks = sum(
+                math.ceil(s / tokens_per_block) for s in sequence_lengths
+            )
+            kv_cache = make_kv_cache(
+                total_blocks,
+                kv_head_num,
+                tokens_per_block,
+                head_dim,
+                device=self.device,
+            )
 
         call_idx = [0]
 
@@ -462,7 +550,18 @@ class CPAttnTestBase(unittest.TestCase):
             params = op.prepare(attn_inputs)
             output = op.forward(qkv, kv_cache, params)
 
-        self._assert_close(output, ref_output[rank_idx], rtol=rtol, atol=atol)
+        valid_mask, reference_idx = compute_rank_valid_layout(
+            sequence_lengths, padded_lengths, cp_size, cp_rank
+        )
+        self._assert_close(
+            output[valid_mask.to(self.device)],
+            ref_output[reference_idx.to(self.device)],
+            rtol=rtol,
+            atol=atol,
+        )
+
+        if warmup:
+            return
 
         cache_k, cache_v = extract_kv_from_paged_cache(
             kv_cache, sequence_lengths, tokens_per_block
@@ -493,17 +592,16 @@ class CPAttnTestBase(unittest.TestCase):
         tokens_per_block: int = 16,
         rtol: float = 1e-2,
         atol: float = 1e-2,
+        segment_size_alignment: int = 1,
     ):
-        """Test CP attention **with** prefix cache.
-
-        Constraints:
-          - ``new_lengths[i] % cp_size == 0``
-          - ``(new_lengths[i] // cp_size) % 2 == 0``
-          - ``prefix_lengths[i] % tokens_per_block == 0``
-        """
+        """Test CP attention **with** prefix cache."""
         sequence_lengths = [p + n for p, n in zip(prefix_lengths, new_lengths)]
-        cp_chunk_lengths = [n // cp_size for n in new_lengths]
-        assert all(cl % 2 == 0 for cl in cp_chunk_lengths)
+        padding_granularity = 2 * cp_size * segment_size_alignment
+        padded_new_lengths = [
+            math.ceil(length / padding_granularity) * padding_granularity
+            for length in new_lengths
+        ]
+        cp_chunk_lengths = [length // cp_size for length in padded_new_lengths]
         assert all(pl % tokens_per_block == 0 for pl in prefix_lengths)
 
         attn_cfg, par_cfg = make_configs(
@@ -552,16 +650,18 @@ class CPAttnTestBase(unittest.TestCase):
             prefix_lengths,
         )
 
-        # Zigzag split on NEW tokens only
-        all_rank_pos = compute_rank_positions(new_lengths, cp_size)
+        padded_q = pad_ragged_tensor(new_q, new_lengths, padded_new_lengths)
+        padded_k = pad_ragged_tensor(new_k, new_lengths, padded_new_lengths)
+        padded_v = pad_ragged_tensor(new_v, new_lengths, padded_new_lengths)
+        all_rank_pos = compute_rank_positions(padded_new_lengths, cp_size)
         all_local_k = [
-            new_k[torch.tensor(p, device=self.device)].reshape(
+            padded_k[torch.tensor(p, device=self.device)].reshape(
                 -1, kv_head_num * head_dim
             )
             for p in all_rank_pos
         ]
         all_local_v = [
-            new_v[torch.tensor(p, device=self.device)].reshape(
+            padded_v[torch.tensor(p, device=self.device)].reshape(
                 -1, kv_head_num * head_dim
             )
             for p in all_rank_pos
@@ -570,9 +670,9 @@ class CPAttnTestBase(unittest.TestCase):
         rank_idx = torch.tensor(all_rank_pos[cp_rank], device=self.device)
         qkv = torch.cat(
             [
-                new_q[rank_idx].reshape(-1, head_num * head_dim),
-                new_k[rank_idx].reshape(-1, kv_head_num * head_dim),
-                new_v[rank_idx].reshape(-1, kv_head_num * head_dim),
+                padded_q[rank_idx].reshape(-1, head_num * head_dim),
+                padded_k[rank_idx].reshape(-1, kv_head_num * head_dim),
+                padded_v[rank_idx].reshape(-1, kv_head_num * head_dim),
             ],
             dim=-1,
         )
@@ -615,7 +715,15 @@ class CPAttnTestBase(unittest.TestCase):
             params = op.prepare(attn_inputs)
             output = op.forward(qkv, kv_cache, params)
 
-        self._assert_close(output, ref_output[rank_idx], rtol=rtol, atol=atol)
+        valid_mask, reference_idx = compute_rank_valid_layout(
+            new_lengths, padded_new_lengths, cp_size, cp_rank
+        )
+        self._assert_close(
+            output[valid_mask.to(self.device)],
+            ref_output[reference_idx.to(self.device)],
+            rtol=rtol,
+            atol=atol,
+        )
 
         cache_k, cache_v = extract_kv_from_paged_cache(
             kv_cache, sequence_lengths, tokens_per_block

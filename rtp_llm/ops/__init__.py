@@ -189,6 +189,15 @@ try:
     )
     from libth_transformer_config import MultimodalInput, MMPreprocessConfig
 
+    # Keep optional PrefillCPConfig fields explicit.  Some deployed ops
+    # libraries predate these fields, so callers must branch on this contract
+    # instead of probing individual config instances with hasattr().
+    PREFILL_CP_CONFIG_CAPABILITIES = frozenset(
+        name
+        for name in ("prefill_cp_size", "segment_size_alignment")
+        if name in dir(PrefillCPConfig)
+    )
+
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
     raise e

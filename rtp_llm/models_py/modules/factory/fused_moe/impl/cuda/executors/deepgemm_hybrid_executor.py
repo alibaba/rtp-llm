@@ -777,6 +777,10 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             align_m=scatter_alignment,
             derive_counts_from_topk=self.is_sm120 and self.enable_cuda_graph,
         )
+        # ep_scatter leaves expert ids at -1 for alignment-only rows.  The
+        # contiguous DeepGEMM kernels require every id to be in range; keep
+        # the sentinel in the scatter metadata but clamp the consumer view.
+        m_indices.clamp_(min=0, max=self.num_experts_per_partition - 1)
         gateup_output = torch.empty(
             (all_tokens, N),
             device=hidden_states_fp8_device,
