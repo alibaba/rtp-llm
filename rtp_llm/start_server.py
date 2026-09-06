@@ -2,6 +2,7 @@ import logging
 import multiprocessing
 import os
 import sys
+import threading
 import time
 import traceback
 
@@ -14,7 +15,7 @@ sys.path.append(os.path.join(str(CUR_PATH), ".."))
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_and_configure_server
-from rtp_llm.ops import RoleType, SpeculativeType
+from rtp_llm.ops import RoleType, SpeculativeType, VitSeparation
 from rtp_llm.server.server_args.server_args import setup_args
 from rtp_llm.utils.concurrency_controller import init_controller
 from rtp_llm.utils.process_manager import (
@@ -23,7 +24,13 @@ from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_VALUE,
     ProcessManager,
 )
-from rtp_llm.utils.scr_template_utils import configure_scr_environment
+from rtp_llm.utils.scr_template_utils import (
+    ScrParticipantManifest,
+    build_scr_participant_manifest,
+    configure_scr_environment,
+    is_scr_enabled,
+    start_scr_checkpoint_arrival_thread,
+)
 from rtp_llm.utils.warmup import configure_warmup
 
 setup_logging()
@@ -44,6 +51,85 @@ STARTUP_REAL_WARMUP_MIN_TOKEN_LEN = 2
 STARTUP_REAL_WARMUP_TIMEOUT_S = 600.0
 STARTUP_REAL_WARMUP_MAX_NEW_TOKENS = 1
 STARTUP_REAL_WARMUP_TOKEN_ID = 100
+
+
+def _scr_local_world_size(py_env_configs: PyEnvConfigs) -> int:
+    """Resolve the process count used by both SCR manifest and backend launch.
+
+    The manifest is consumed by the controller-side quorum, so predicting
+    ``world_size`` when this host only launches a subset of ranks would leave
+    phantom participants (or a missing manager).  Keep this resolver aligned
+    with ``start_backend_server._get_local_world_size``: an explicit launcher
+    value wins, otherwise use visible CUDA devices, with one CPU process when
+    CUDA is unavailable.  This is only evaluated while SCR is enabled.
+    """
+    raw = os.environ.get("LOCAL_WORLD_SIZE", "")
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value > 0:
+        return value
+    world_size = int(getattr(py_env_configs.parallelism_config, "world_size", 1) or 1)
+    try:
+        import torch
+
+        device_count = int(torch.cuda.device_count())
+    except Exception:
+        device_count = 0
+    if device_count <= 0:
+        return 1
+    return max(1, min(device_count, world_size))
+
+
+def _build_scr_participant_manifest(
+    py_env_configs: PyEnvConfigs,
+) -> ScrParticipantManifest | None:
+    """Freeze every process in this container into one passive quorum.
+
+    This only assigns Epsilon arrival IDs.  The controller remains entirely
+    outside RTP-LLM and owns check/block/dump/restore.
+    """
+
+    if not is_scr_enabled():
+        return None
+    participants: list[tuple[str, object]] = [("start_server", "0")]
+    backend_enabled = py_env_configs.role_config.role_type != RoleType.FRONTEND
+    backend_is_vit = (
+        py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE
+    )
+    if backend_is_vit:
+        # The VIT RPC server is a long-lived CPU-side process too.  Keep it in
+        # the same passive Epsilon quorum so a CRIU template cannot restore a
+        # partially initialized multimodal worker unnoticed.
+        participants.append(("backend_vit", "0"))
+    local_world_size = _scr_local_world_size(py_env_configs)
+    manager_separate = backend_enabled and not backend_is_vit and local_world_size > 1
+    if manager_separate:
+        participants.append(("backend_manager", "0"))
+    if backend_enabled and not backend_is_vit:
+        rank_count = local_world_size if manager_separate else 1
+        world_rank_start = int(py_env_configs.parallelism_config.world_rank) if manager_separate else 0
+        for world_rank in range(world_rank_start, world_rank_start + rank_count):
+            participants.append(("backend_rank", str(world_rank)))
+    frontend_specs = [
+        (rank, server_id)
+        for rank in _iter_serving_ranks(py_env_configs)
+        for server_id in range(py_env_configs.server_config.frontend_server_count)
+    ]
+    for rank, server_id in frontend_specs:
+        participants.append(("frontend", f"{rank}:{server_id}"))
+    if py_env_configs.role_config.role_type != RoleType.VIT:
+        for rank, server_id in frontend_specs:
+            participants.append(("dash_sc", f"{rank}:{server_id}"))
+    manifest = build_scr_participant_manifest(participants)
+    logging.info(
+        "sCR full-process manifest frozen generation=%s worker_num=%d participants=%s",
+        manifest.generation or "<unset>",
+        manifest.worker_num,
+        dict(manifest.participant_ids),
+    )
+    return manifest
 
 
 class StartupRealWarmupAddressResolutionError(RuntimeError):
@@ -96,12 +182,13 @@ def start_backend_server_impl(
     global_controller,
     py_env_configs: PyEnvConfigs,
     process_manager: ProcessManager = None,
+    scr_manifest: ScrParticipantManifest | None = None,
 ):
     from rtp_llm.start_backend_server import start_backend_server
 
     # only for debug
     if py_env_configs.profiling_debug_logging_config.debug_load_server:
-        start_backend_server(global_controller, py_env_configs, None)
+        start_backend_server(global_controller, py_env_configs, None, scr_manifest)
         os._exit(-1)
 
     # Create pipe for subprocess startup status communication
@@ -118,7 +205,7 @@ def start_backend_server_impl(
     try:
         backend_process = multiprocessing.Process(
             target=start_backend_server,
-            args=(global_controller, py_env_configs, pipe_writer),
+            args=(global_controller, py_env_configs, pipe_writer, scr_manifest),
             name="backend_manager",
         )
         backend_process.start()
@@ -194,16 +281,20 @@ def _iter_serving_ranks(py_env_configs: PyEnvConfigs):
     any tp_rank==0 rank.
     """
     pc = py_env_configs.parallelism_config
-    local_world_size = pc.world_size
-    if "LOCAL_WORLD_SIZE" in os.environ:
-        logging.info(
-            f"multi rank starts with local world size specified in env: {os.environ['LOCAL_WORLD_SIZE']}"
-        )
-        local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
+    # Use the same hardware-aware value as the SCR participant manifest.  The
+    # historical world-size fallback could advertise frontend/Dash participants
+    # that are never spawned on a partially visible host.
+    if is_scr_enabled():
+        local_world_size = _scr_local_world_size(py_env_configs)
     else:
-        logging.info(
-            f"multi rank starts with default local world size: {local_world_size}, world size = {pc.world_size}"
-        )
+        local_world_size = pc.world_size
+        if "LOCAL_WORLD_SIZE" in os.environ:
+            local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
+    logging.info(
+        "serving process local world size=%s world size=%s",
+        local_world_size,
+        pc.world_size,
+    )
     for rank in range(local_world_size):
         if rank == 0 or (pc.world_rank + rank) % pc.tp_size == 0:
             yield rank
@@ -218,6 +309,7 @@ def start_dash_sc_server_impl(
     global_controller,
     py_env_configs: PyEnvConfigs,
     process_manager=None,
+    scr_manifest: ScrParticipantManifest | None = None,
 ):
     from rtp_llm.start_dash_sc_server import start_dash_sc_server
 
@@ -249,6 +341,7 @@ def start_dash_sc_server_impl(
                 py_env_configs,
                 pipe_writer,
                 bind_barrier,
+                scr_manifest,
             ),
             name=f"dash_sc_server_{rank}_{server_id}",
         )
@@ -316,6 +409,7 @@ def start_frontend_server_impl(
     global_controller,
     py_env_configs: PyEnvConfigs,
     process_manager=None,
+    scr_manifest: ScrParticipantManifest | None = None,
 ):
     from rtp_llm.start_frontend_server import start_frontend_server
 
@@ -328,16 +422,17 @@ def start_frontend_server_impl(
     frontend_processes = []
 
     pc = py_env_configs.parallelism_config
-    local_world_size = pc.world_size
-    if "LOCAL_WORLD_SIZE" in os.environ:
-        logging.info(
-            f"multi rank starts with local world size specified in env: {os.environ['LOCAL_WORLD_SIZE']}"
-        )
-        local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
+    if is_scr_enabled():
+        local_world_size = _scr_local_world_size(py_env_configs)
     else:
-        logging.info(
-            f"multi rank starts with default local world size: {local_world_size}, world size = {pc.world_size}"
-        )
+        local_world_size = pc.world_size
+        if "LOCAL_WORLD_SIZE" in os.environ:
+            local_world_size = int(os.environ["LOCAL_WORLD_SIZE"])
+    logging.info(
+        "frontend process local world size=%s world size=%s",
+        local_world_size,
+        pc.world_size,
+    )
 
     # To reduce the number of frontend servers, we only start those with tp_rank=0;
     # however, since k8s needs to check machine heartbeat, rank 0 on each machine also needs to be started.
@@ -354,6 +449,7 @@ def start_frontend_server_impl(
                         i,
                         global_controller,
                         py_env_configs,
+                        scr_manifest,
                     ),
                     name=f"frontend_server_{i}",
                 )
@@ -381,6 +477,25 @@ def start_frontend_server_impl(
 
 def _role_is_prefill(py_env_configs: PyEnvConfigs) -> bool:
     return py_env_configs.role_config.role_type == RoleType.PREFILL
+
+
+def _start_parent_scr_arrival(
+    scr_manifest: ScrParticipantManifest | None,
+) -> threading.Thread | None:
+    if scr_manifest is None:
+        return None
+    waiter = start_scr_checkpoint_arrival_thread(
+        worker_id=scr_manifest.worker_id("start_server", "0"),
+        worker_num=scr_manifest.worker_num,
+        generation=scr_manifest.generation or None,
+        name="scr-checkpoint-arrival-start-server",
+    )
+    logging.info(
+        "sCR parent arrival started worker_id=%d worker_num=%d",
+        scr_manifest.worker_id("start_server", "0"),
+        scr_manifest.worker_num,
+    )
+    return waiter
 
 
 def _is_startup_real_warmup_entry_rank(py_env_configs: PyEnvConfigs) -> bool:
@@ -494,30 +609,36 @@ def start_server(py_env_configs: PyEnvConfigs):
     backend_process = None
     dash_sc_processes = []
     startup_warmup_gate_file = _setup_startup_warmup_health_gate(py_env_configs)
+    scr_manifest = _build_scr_participant_manifest(py_env_configs)
 
     try:
         if py_env_configs.role_config.role_type != RoleType.FRONTEND:
             logging.info("start backend server")
             backend_process = start_backend_server_impl(
-                global_controller, py_env_configs, process_manager
+                global_controller, py_env_configs, process_manager, scr_manifest
             )
             process_manager.add_process(backend_process, shutdown_group="backend")
 
         logging.info("start frontend server")
         frontend_process = start_frontend_server_impl(
-            global_controller, py_env_configs, process_manager
+            global_controller, py_env_configs, process_manager, scr_manifest
         )
         process_manager.add_processes(frontend_process, shutdown_group="frontend")
 
         if py_env_configs.role_config.role_type != RoleType.VIT:
             logging.info("start dash_sc server")
             dash_sc_processes = start_dash_sc_server_impl(
-                global_controller, py_env_configs, process_manager
+                global_controller, py_env_configs, process_manager, scr_manifest
             )
             if dash_sc_processes:
                 process_manager.add_processes(
                     dash_sc_processes, shutdown_group="frontend"
                 )
+
+        # The parent is also part of the CRIU template.  It participates in
+        # the same passive Epsilon quorum; the control plane still owns all
+        # check/dump/restore operations.
+        _start_parent_scr_arrival(scr_manifest)
 
         # Start parallel health checks and wait for completion
         if not process_manager.run_health_checks():

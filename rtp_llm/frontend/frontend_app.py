@@ -6,7 +6,7 @@ import signal
 import socket
 import threading
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from anyio import CapacityLimiter
 from anyio.lowlevel import RunVar
@@ -342,7 +342,16 @@ class FrontendApp(object):
             "Backend health_check did not become ready within %ds" % timeout_s
         )
 
-    def start(self):
+    def start(self, on_ready: Optional[Callable[[], None]] = None):
+        """Start the HTTP server and block on its main-thread service loop.
+
+        ``on_ready`` is invoked by the ASGI startup hook, after the socket has
+        been bound and (for a colocated backend) the backend health check has
+        completed.  It must be installed before ``server.run``: this method
+        intentionally blocks and therefore callers cannot reliably run a
+        readiness callback after it returns.
+        """
+        self._on_ready = on_ready
         self.frontend_server.start()
         app = self.create_app()
 
@@ -414,6 +423,9 @@ class FrontendApp(object):
                     self.frontend_server._global_controller.max_concurrency * 2
                 )
             )
+            on_ready = getattr(self, "_on_ready", None)
+            if on_ready is not None:
+                on_ready()
 
         def draining_response():
             reason = (

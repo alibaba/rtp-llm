@@ -17,6 +17,11 @@ from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
+from rtp_llm.utils.scr_template_utils import (
+    ScrParticipantManifest,
+    is_scr_enabled,
+    start_scr_checkpoint_arrival_thread,
+)
 
 setup_logging()
 
@@ -38,6 +43,7 @@ def start_dash_sc_server(
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
     bind_barrier=None,
+    scr_manifest: ScrParticipantManifest | None = None,
 ):
     _install_hot_hook_runtime(f"dash_sc_rank_{rank_id}_server_{server_id}")
     logging.info(
@@ -67,9 +73,23 @@ def start_dash_sc_server(
     try:
         set_global_controller(global_controller)
         app = DashScApp(py_env_configs)
+
+        def on_ready() -> None:
+            if scr_manifest is None or not is_scr_enabled():
+                return
+            worker_id = scr_manifest.worker_id("dash_sc", f"{rank_id}:{server_id}")
+            waiter = start_scr_checkpoint_arrival_thread(
+                worker_id=worker_id,
+                worker_num=scr_manifest.worker_num,
+                generation=scr_manifest.generation or None,
+                name=f"scr-checkpoint-arrival-dash-sc-{rank_id}-{server_id}",
+            )
+            setattr(app, "_scr_checkpoint_arrival", waiter)
+
         app.start(
             ready_pipe_writer=pipe_writer,
             bind_barrier=bind_barrier,
+            on_ready=on_ready,
         )
     except BaseException as e:
         logging.error(

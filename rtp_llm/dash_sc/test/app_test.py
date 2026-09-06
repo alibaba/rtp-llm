@@ -104,6 +104,7 @@ class BindBarrierTest(TestCase):
             events.append("start_on_loop")
         )
         servicer = Mock()
+        on_ready = Mock(side_effect=lambda: events.append("ready"))
 
         def submit(coroutine, _loop):
             coroutine.close()
@@ -117,9 +118,10 @@ class BindBarrierTest(TestCase):
         ), patch("rtp_llm.dash_sc.app.kmonitor.init"), patch(
             "rtp_llm.dash_sc.app.get_log_path", return_value="/tmp"
         ):
-            app.start(bind_barrier=barrier)
+            app.start(bind_barrier=barrier, on_ready=on_ready)
 
-        self.assertEqual(events, ["barrier", "start_on_loop"])
+        self.assertEqual(events, ["barrier", "start_on_loop", "ready"])
+        on_ready.assert_called_once_with()
         app._grpc_server.start_on_loop.assert_called_once()
 
 

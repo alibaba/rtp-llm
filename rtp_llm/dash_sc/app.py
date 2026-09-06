@@ -15,7 +15,7 @@ import signal
 import threading
 import time
 import traceback
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 from rtp_llm.config.engine_config import derive_grammar_compile_threads
 from rtp_llm.config.grammar_tokenizer_info import (
@@ -556,7 +556,19 @@ class DashScApp:
         except Exception as e:
             logging.warning("[DashScApp] servicer cleanup failed: %s", e, exc_info=True)
 
-    def start(self, ready_pipe_writer=None, bind_barrier=None) -> None:
+    def start(
+        self,
+        ready_pipe_writer=None,
+        bind_barrier=None,
+        on_ready: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """Start the gRPC server and block on the process service loop.
+
+        ``on_ready`` runs after ``start_on_loop`` has successfully bound the
+        gRPC endpoint, but before this method enters its shutdown wait.  The
+        callback is deliberately here (rather than in the launcher after
+        ``start``) because ``start`` is a blocking, main-thread lifecycle.
+        """
         servicer: Any = None
         try:
             port = self.server_config.dash_sc_grpc_server_port
@@ -689,6 +701,8 @@ class DashScApp:
                 rank_id=self.server_config.rank_id,
             )
             logging.info("[DashScApp] gRPC server bound on port %s", port)
+            if on_ready is not None:
+                on_ready()
         except BaseException as e:
             _abort_bind_barrier(bind_barrier)
             error_trace = traceback.format_exc()

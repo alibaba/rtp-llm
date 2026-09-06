@@ -1,6 +1,21 @@
 py_test(
     name = "start_backend_scr_integration_test",
     srcs = ["start_backend_scr_integration_test.py"],
+    data = [
+        "//:th_transformer_config",
+    ],
+    deps = ["//rtp_llm:sdk"],
+)
+
+py_test(
+    name = "scr_template_utils_test",
+    srcs = ["scr_template_utils_test.py"],
+    deps = ["//rtp_llm:sdk"],
+)
+
+py_test(
+    name = "scr_scheduler_e2e_test",
+    srcs = ["scr_scheduler_e2e_test.py"],
     deps = ["//rtp_llm:sdk"],
 )
 

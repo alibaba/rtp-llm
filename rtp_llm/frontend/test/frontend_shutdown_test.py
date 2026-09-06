@@ -115,6 +115,20 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         self.assertEqual(embedding_response.status_code, 503)
         self.assertEqual(embedding_response.headers.get("retry-after"), "1")
 
+    def test_ready_callback_runs_from_asgi_startup(self):
+        """Readiness callbacks must not be placed after blocking server.run."""
+        ready = []
+        app_owner = FrontendApp.__new__(FrontendApp)
+        app_owner.frontend_server = FakeFrontendServer()
+        app_owner.shutdown_manager = FrontendShutdownManager()
+        app_owner.separated_frontend = True
+        app_owner.server_config = SimpleNamespace(http_port=0)
+        app_owner.grpc_client = None
+        app_owner._on_ready = lambda: ready.append("ready")
+
+        with TestClient(app_owner.create_app()):
+            self.assertEqual(ready, ["ready"])
+
     def test_pre_stop_unavailable_rejects_new_business(self):
         app_owner = FrontendApp.__new__(FrontendApp)
         app_owner.frontend_server = FakeFrontendServer()

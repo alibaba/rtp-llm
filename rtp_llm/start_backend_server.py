@@ -36,10 +36,14 @@ from rtp_llm.utils.process_manager import (
     ProcessManager,
 )
 from rtp_llm.utils.scr_template_utils import (
+    ScrParticipantManifest,
     configure_scr_environment,
     is_scr_enabled,
     register_for_scr,
     resolve_scr_worker_mapping,
+    SCR_GENERATION_ENV,
+    SCR_TIMEOUT_ENV,
+    SCR_INACTIVITY_TIMEOUT_ENV,
     SCR_WORKER_NUM_ENV,
     start_scr_checkpoint_arrival_thread,
 )
@@ -204,30 +208,46 @@ def _scr_worker_num(py_env_configs: PyEnvConfigs) -> int:
     return value if value > 0 else 1
 
 
-def _start_scr_rank_arrival(backend_manager, py_env_configs):
+def _start_scr_rank_arrival(backend_manager, py_env_configs, scr_manifest=None, world_rank=None):
     """Start this CUDA rank's passive Epsilon snapshot-barrier arrival."""
 
     if not is_scr_enabled() or backend_manager is None:
         return None
     try:
         pc = py_env_configs.parallelism_config
-        worker_id, worker_num = resolve_scr_worker_mapping(
-            local_rank=int(getattr(pc, "local_rank", 0)),
-            worker_num=_scr_worker_num(py_env_configs),
-        )
+        if scr_manifest is not None:
+            rank_key = str(getattr(pc, "world_rank", world_rank if world_rank is not None else 0))
+            # A one-rank-per-container scheduler scope uses local rank 0 even
+            # when the distributed world rank is non-zero.  Multi-rank local
+            # scopes use the launcher world-rank keys frozen by the parent.
+            if f"backend_rank:{rank_key}" not in scr_manifest.participant_ids:
+                rank_key = str(getattr(pc, "local_rank", 0))
+            worker_id = scr_manifest.worker_id("backend_rank", rank_key)
+            worker_num = scr_manifest.worker_num
+        else:
+            worker_id, worker_num = resolve_scr_worker_mapping(
+                local_rank=int(getattr(pc, "local_rank", 0)),
+                worker_num=_scr_worker_num(py_env_configs),
+            )
         logging.info(
             "sCR rank arrival mapping resolved: local_rank=%s worker_id=%s "
-            "worker_num=%s phase=%s",
+            "worker_num=%s phase=%s generation=%s timeout=%s inactivity_timeout=%s",
             getattr(pc, "local_rank", 0),
             worker_id,
             worker_num,
             os.environ.get("SCR_PHASE", ""),
+            os.environ.get(SCR_GENERATION_ENV, "<unset>"),
+            os.environ.get(SCR_TIMEOUT_ENV, "<default>"),
+            os.environ.get(SCR_INACTIVITY_TIMEOUT_ENV, "<default>"),
         )
-        thread = start_scr_checkpoint_arrival_thread(
-            worker_id=worker_id,
-            worker_num=worker_num,
-            name=f"scr-checkpoint-arrival-rank-{worker_id}",
-        )
+        arrival_kwargs = {
+            "worker_id": worker_id,
+            "worker_num": worker_num,
+            "name": f"scr-checkpoint-arrival-rank-{worker_id}",
+        }
+        if scr_manifest is not None and scr_manifest.generation:
+            arrival_kwargs["generation"] = scr_manifest.generation
+        thread = start_scr_checkpoint_arrival_thread(**arrival_kwargs)
         if thread is not None:
             # Keep a reference for diagnostics and make the lifecycle explicit;
             # the daemon itself is deliberately not joined on shutdown.
@@ -240,12 +260,29 @@ def _start_scr_rank_arrival(backend_manager, py_env_configs):
         return None
 
 
+def _start_scr_manager_arrival(manager, scr_manifest):
+    """Start the manager participant after rank startup has succeeded."""
+
+    if scr_manifest is None or not is_scr_enabled():
+        return None
+    worker_id = scr_manifest.worker_id("backend_manager", "0")
+    waiter = start_scr_checkpoint_arrival_thread(
+        worker_id=worker_id,
+        worker_num=scr_manifest.worker_num,
+        generation=scr_manifest.generation or None,
+        name="scr-checkpoint-arrival-backend-manager",
+    )
+    setattr(manager, "_scr_checkpoint_arrival", waiter)
+    return waiter
+
+
 def local_rank_start(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     world_rank: int = 0,
     pipe_writer=None,
     jit_cache_ready=None,
+    scr_manifest: ScrParticipantManifest | None = None,
 ):
     """Start local rank with proper signal handling for graceful shutdown"""
     _install_hot_hook_runtime(f"backend_rank_{world_rank}")
@@ -396,7 +433,9 @@ def local_rank_start(
         # Each CUDA rank announces its safe point independently. The daemon
         # thread may block in Epsilon until the sidecar/controller progresses,
         # while the rank remains available to serve traffic.
-        _start_scr_rank_arrival(backend_manager, py_env_configs)
+        _start_scr_rank_arrival(
+            backend_manager, py_env_configs, scr_manifest=scr_manifest, world_rank=world_rank
+        )
         # Enter service loop to keep the process alive
         logging.info("Entering service loop to keep backend_manager alive")
         backend_manager.serve_forever()
@@ -471,6 +510,7 @@ def _create_rank_processes(
     py_env_configs: PyEnvConfigs,
     ctx,
     jit_cache_ready,
+    scr_manifest: ScrParticipantManifest | None = None,
 ):
     """Create and start rank processes."""
     pc = py_env_configs.parallelism_config
@@ -491,6 +531,7 @@ def _create_rank_processes(
                 world_rank,
                 writer,
                 jit_cache_ready,
+                scr_manifest,
             ),
             name=f"rank-{world_rank}",
         )
@@ -606,6 +647,7 @@ def multi_rank_start(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
+    scr_manifest: ScrParticipantManifest | None = None,
 ):
     """Start multi-rank backend server with proper process management"""
     try:
@@ -622,12 +664,13 @@ def multi_rank_start(
     ctx = multiprocessing.get_context("spawn")
     jit_cache_ready = ctx.Event()
     processes, rank_pipe_readers = _create_rank_processes(
-        global_controller, py_env_configs, ctx, jit_cache_ready
+        global_controller, py_env_configs, ctx, jit_cache_ready, scr_manifest
     )
     manager.set_processes(processes, shutdown_group="backend")
     local_world_size = len(processes)
 
     if py_env_configs.distribute_config.fake_gang_env:
+        _start_scr_manager_arrival(manager, scr_manifest)
         return processes
 
     # Wait for all ranks to report startup status
@@ -636,7 +679,9 @@ def multi_rank_start(
             processes, rank_pipe_readers, local_world_size, manager
         )
 
-        # Report success via external pipe
+        # Validate/start the manager participant before reporting readiness;
+        # a malformed manifest must not produce a false startup ACK.
+        _start_scr_manager_arrival(manager, scr_manifest)
         _send_pipe_status(
             pipe_writer,
             "success",
@@ -739,6 +784,7 @@ def start_backend_server(
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
     pipe_writer=None,
+    scr_manifest: ScrParticipantManifest | None = None,
 ):
     # Normalize the unified switch before hot hooks or model code can import
     # Epsilon and select the wrong native/shim implementation.
@@ -752,7 +798,22 @@ def start_backend_server(
     if py_env_configs.vit_config.vit_separation == VitSeparation.VIT_SEPARATION_ROLE:
         from rtp_llm.server.vit_rpc_server import vit_start_server
 
-        return vit_start_server()
+        def _on_vit_ready():
+            if scr_manifest is None or not is_scr_enabled():
+                return
+            waiter = start_scr_checkpoint_arrival_thread(
+                worker_id=scr_manifest.worker_id("backend_vit", "0"),
+                worker_num=scr_manifest.worker_num,
+                generation=scr_manifest.generation or None,
+                name="scr-checkpoint-arrival-backend-vit",
+            )
+            logging.info(
+                "sCR VIT backend arrival started worker_id=%d worker_num=%d",
+                scr_manifest.worker_id("backend_vit", "0"),
+                scr_manifest.worker_num,
+            )
+
+        return vit_start_server(on_ready=_on_vit_ready)
 
     py_env_configs.server_config.shutdown_timeout = (
         ProcessManager.sync_shutdown_timeout_env(
@@ -767,6 +828,7 @@ def start_backend_server(
             0,
             pipe_writer,
             None,
+            scr_manifest,
         )
 
     pc = py_env_configs.parallelism_config
@@ -780,7 +842,7 @@ def start_backend_server(
         )
 
     if torch.cuda.device_count() > 1 and pc.world_size > 1:
-        return multi_rank_start(global_controller, py_env_configs, pipe_writer)
+        return multi_rank_start(global_controller, py_env_configs, pipe_writer, scr_manifest)
     else:
         return local_rank_start(
             global_controller,
@@ -788,6 +850,7 @@ def start_backend_server(
             0,
             pipe_writer,
             None,
+            scr_manifest,
         )
 
 

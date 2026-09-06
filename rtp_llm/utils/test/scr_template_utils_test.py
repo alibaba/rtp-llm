@@ -58,32 +58,68 @@ class ScrTemplateUtilsTest(unittest.TestCase):
     def tearDown(self) -> None:
         scr._reset_for_test()
 
-    def test_feature_gate_defaults_and_alias(self) -> None:
+    def test_feature_gate_has_one_public_switch(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertFalse(scr.is_scr_enabled())
 
-        with mock.patch.dict(
-            os.environ, {scr.SCR_ENABLE_ALIAS_ENV: "yes"}, clear=True
-        ):
+        with mock.patch.dict(os.environ, {"RTP_LLM_ENABLE_SCR": "yes"}, clear=True):
+            self.assertFalse(scr.is_scr_enabled())
+
+        with mock.patch.dict(os.environ, {scr.SCR_SHIM_ENABLE_ENV: "yes"}, clear=True):
+            self.assertFalse(scr.is_scr_enabled())
+
+        with mock.patch.dict(os.environ, {scr.RTPLLM_ENABLE_SCR_ENV: "yes"}, clear=True):
             self.assertTrue(scr.is_scr_enabled())
-            self.assertEqual(os.environ[scr.SCR_SHIM_ENABLE_ENV], "1")
+            self.assertNotIn(scr.SCR_SHIM_ENABLE_ENV, os.environ)
 
     def test_unified_switch_does_not_choose_controller_phase(self) -> None:
         with mock.patch.dict(
             os.environ,
-            {scr.SCR_ENABLE_ENV: "1", scr.SCR_PHASE_ENV: scr.SCR_PHASE_RESTORE},
+            {
+                scr.RTPLLM_ENABLE_SCR_ENV: "1",
+                scr.SCR_SHIM_ENABLE_ENV: "1",
+                scr.SCR_PHASE_ENV: scr.SCR_PHASE_RESTORE,
+            },
             clear=True,
         ):
             self.assertTrue(scr.is_scr_enabled())
             self.assertEqual(os.environ[scr.SCR_SHIM_ENABLE_ENV], "1")
             self.assertEqual(os.environ[scr.SCR_PHASE_ENV], scr.SCR_PHASE_RESTORE)
 
+    def test_external_shim_normal_phase_is_not_imported(self) -> None:
+        env = {
+            scr.RTPLLM_ENABLE_SCR_ENV: "1",
+            scr.SCR_SHIM_ENABLE_ENV: "1",
+            scr.SCR_PHASE_ENV: scr.SCR_PHASE_NORMAL,
+        }
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
+            scr.os.path, "isdir", return_value=True
+        ), mock.patch.object(scr.importlib, "import_module") as import_module:
+            self.assertIsNone(scr._load_epsilon())
+            import_module.assert_not_called()
+
     def test_control_plane_operations_are_not_exposed_by_rtp_llm(self) -> None:
         self.assertFalse(hasattr(scr, "start_scr_checkpoint"))
         self.assertFalse(hasattr(scr, "start_scr_checkpoint_thread"))
-        self.assertFalse(hasattr(scr, "ScrParticipantManifest"))
+        self.assertTrue(hasattr(scr, "ScrParticipantManifest"))
+        self.assertTrue(hasattr(scr, "build_scr_participant_manifest"))
         self.assertTrue(hasattr(scr, "arrive_scr_checkpoint_barrier"))
         self.assertTrue(hasattr(scr, "start_scr_checkpoint_arrival_thread"))
+
+    def test_full_process_manifest_is_stable_and_contiguous(self) -> None:
+        manifest = scr.build_scr_participant_manifest(
+            [("start_server", "0"), ("backend_manager", "0"),
+             ("backend_rank", "0"), ("frontend", "0:0")]
+        )
+        self.assertEqual(manifest.worker_num, 4)
+        self.assertEqual(manifest.worker_id("backend_rank", "0"), 2)
+        manifest.validate()
+
+    def test_manifest_rejects_duplicate_participant(self) -> None:
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            scr.build_scr_participant_manifest(
+                [("backend_rank", "0"), ("backend_rank", "0")]
+            )
 
     def test_rank_arrives_at_epsilon_barrier_with_explicit_mapping(self) -> None:
         epsilon = _FakeEpsilon()
@@ -99,7 +135,18 @@ class ScrTemplateUtilsTest(unittest.TestCase):
 
         self.assertEqual(
             epsilon.calls,
-            [("checkpoint", {"wait_mode": 1, "worker_id": 1, "worker_num": 2})],
+            [
+                (
+                    "checkpoint",
+                    {
+                        "wait_mode": 1,
+                        "worker_id": 1,
+                        "worker_num": 2,
+                        "timeout": 900,
+                        "inactivity_timeout": 10,
+                    },
+                )
+            ],
         )
 
     def test_rank_barrier_rejects_out_of_range_mapping(self) -> None:
@@ -113,6 +160,41 @@ class ScrTemplateUtilsTest(unittest.TestCase):
                 scr.arrive_scr_checkpoint_barrier(worker_id=2, worker_num=2)
             )
         self.assertEqual(epsilon.calls, [])
+
+    def test_rank_barrier_legacy_epsilon_is_called_once_without_probe_retry(self) -> None:
+        epsilon = _FakeEpsilon()
+        calls = []
+
+        def legacy_checkpoint(wait_mode, worker_id, worker_num):
+            calls.append((wait_mode, worker_id, worker_num))
+            return 0
+
+        epsilon.snapstart_checkpoint = legacy_checkpoint
+        with mock.patch.dict(os.environ, {scr.SCR_ENABLE_ENV: "1"}, clear=True), mock.patch.object(
+            scr.importlib, "import_module", return_value=epsilon
+        ):
+            self.assertEqual(
+                scr.arrive_scr_checkpoint_barrier(worker_id=0, worker_num=1), 0
+            )
+        self.assertEqual(calls, [(1, 0, 1)])
+
+    def test_internal_type_error_is_not_retried(self) -> None:
+        epsilon = _FakeEpsilon()
+        calls = []
+
+        def broken_checkpoint(**kwargs):
+            calls.append(kwargs)
+            raise TypeError("native implementation failed")
+
+        epsilon.snapstart_checkpoint = broken_checkpoint
+        with mock.patch.dict(os.environ, {scr.SCR_ENABLE_ENV: "1"}, clear=True), mock.patch.object(
+            scr.importlib, "import_module", return_value=epsilon
+        ), mock.patch.object(scr.LOGGER, "exception") as log_exception:
+            self.assertIsNone(
+                scr.arrive_scr_checkpoint_barrier(worker_id=0, worker_num=1)
+            )
+        self.assertEqual(len(calls), 1)
+        log_exception.assert_called_once()
 
     def test_resolve_worker_mapping_supports_shared_scheduler_scope(self) -> None:
         with mock.patch.dict(
@@ -217,6 +299,24 @@ class ScrTemplateUtilsTest(unittest.TestCase):
 
         self.assertEqual(epsilon.calls[0][1], [target, draft])
 
+    def test_registration_rejects_cpu_cache_pointer(self) -> None:
+        cpu_tensor = _FakeTensor(123)
+        cpu_tensor.device = "cpu"
+        model = SimpleNamespace(
+            kv_cache=SimpleNamespace(kv_cache_base_by_layer=[[cpu_tensor]])
+        )
+        engine = SimpleNamespace(model=SimpleNamespace(py_model=model))
+        epsilon = _FakeEpsilon()
+        with mock.patch.dict(
+            os.environ, {scr.SCR_ENABLE_ENV: "1"}, clear=True
+        ), mock.patch.object(
+            scr.importlib, "import_module", return_value=epsilon
+        ), mock.patch.object(
+            scr, "_is_tensor", side_effect=lambda value: isinstance(value, _FakeTensor)
+        ):
+            self.assertFalse(scr.register_for_scr(engine))
+        self.assertFalse(any(call[0] == "cache" for call in epsilon.calls))
+
     def test_registration_is_inert_when_epsilon_is_not_active(self) -> None:
         model = SimpleNamespace(kv_cache=SimpleNamespace())
         engine = SimpleNamespace(model=SimpleNamespace(py_model=model))
@@ -241,7 +341,7 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             self.assertFalse(scr.register_for_scr(engine))
             model.kv_cache.kv_cache_base_by_layer = [[_FakeTensor(123)]]
             self.assertTrue(scr.register_for_scr(engine))
-        self.assertEqual([call[0] for call in epsilon.calls], ["before", "cache", "before"])
+        self.assertEqual([call[0] for call in epsilon.calls], ["before", "cache"])
 
     def test_before_callback_uses_captured_device(self) -> None:
         epsilon = _FakeEpsilon()
@@ -255,7 +355,9 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             scr, "_is_tensor", side_effect=lambda value: isinstance(value, _FakeTensor)
         ), mock.patch.object(scr, "_capture_cuda_device", return_value=5), mock.patch(
             "torch.cuda.is_available", return_value=True
-        ), mock.patch("torch.cuda.synchronize") as synchronize:
+        ), mock.patch("torch.cuda._initialized", True), mock.patch(
+            "torch.cuda.synchronize"
+        ) as synchronize:
             self.assertTrue(scr.register_for_scr(engine))
             epsilon.before_callback()
         synchronize.assert_called_once_with(device=5)
@@ -292,7 +394,7 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             self.assertFalse(scr.register_for_scr(engine, after_restore=callback))
 
         registration = scr._registrations[id(engine)]
-        self.assertEqual(registration.after_restore_result, 0)
+        self.assertIsNone(registration.after_restore_result)
         callback.assert_not_called()
 
 

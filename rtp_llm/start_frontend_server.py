@@ -18,6 +18,11 @@ from rtp_llm.utils.concurrency_controller import (
     ConcurrencyController,
     set_global_controller,
 )
+from rtp_llm.utils.scr_template_utils import (
+    ScrParticipantManifest,
+    is_scr_enabled,
+    start_scr_checkpoint_arrival_thread,
+)
 
 setup_logging()
 
@@ -37,6 +42,7 @@ def start_frontend_server(
     server_id: int,
     global_controller: ConcurrencyController,
     py_env_configs: PyEnvConfigs,
+    scr_manifest: ScrParticipantManifest | None = None,
 ):
     _install_hot_hook_runtime(f"frontend_rank_{rank_id}_server_{server_id}")
     # Set rank_id and server_id on the passed config so port properties match this rank
@@ -69,7 +75,20 @@ def start_frontend_server(
         set_global_controller(global_controller)
         separated_frontend = py_env_configs.role_config.role_type == RoleType.FRONTEND
         app = FrontendApp(py_env_configs, separated_frontend)
-        app.start()
+
+        def on_ready() -> None:
+            if scr_manifest is None or not is_scr_enabled():
+                return
+            worker_id = scr_manifest.worker_id("frontend", f"{rank_id}:{server_id}")
+            waiter = start_scr_checkpoint_arrival_thread(
+                worker_id=worker_id,
+                worker_num=scr_manifest.worker_num,
+                generation=scr_manifest.generation or None,
+                name=f"scr-checkpoint-arrival-frontend-{rank_id}-{server_id}",
+            )
+            setattr(app, "_scr_checkpoint_arrival", waiter)
+
+        app.start(on_ready=on_ready)
     except BaseException as e:
         logging.error(
             f"start frontend server error: {e}, trace: {traceback.format_exc()}"
