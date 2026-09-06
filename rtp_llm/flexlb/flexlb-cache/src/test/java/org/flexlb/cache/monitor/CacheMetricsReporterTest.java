@@ -1,5 +1,6 @@
-package org.flexlb.cache.monitor;
+package org.flexlb.cache.telemetry;
 
+import org.flexlb.cache.monitor.CacheHitTheoryStats;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.metric.FlexMetricTags;
@@ -91,8 +92,8 @@ class CacheMetricsReporterTest {
 
     @Test
     void should_report_theory_cache_hit_metrics() {
-        CacheHitTheoryStats stats = new CacheHitTheoryStats(() -> 0L);
-        CacheHitTheoryStats.Snapshot snapshot = stats.record(2L, 4L, 0L);
+        CacheHitTheoryStats stats = new CacheHitTheoryStats();
+        CacheHitTheoryStats.Snapshot snapshot = stats.record(2L, 4L);
 
         reporter.reportTheoryCacheHitMetrics(snapshot);
 

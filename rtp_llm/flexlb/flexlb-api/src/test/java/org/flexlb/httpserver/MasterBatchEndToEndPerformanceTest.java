@@ -21,8 +21,9 @@ import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
@@ -425,11 +426,14 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private EngineHealthReporter createNoOpEngineHealthReporter() {
         CacheMetricsReporter constructorOnlyCacheMetricsReporter =
                 mock(CacheMetricsReporter.class, withSettings().stubOnly());
+        CacheMatchConfiguration constructorOnlyCacheMatchConfiguration =
+                mock(CacheMatchConfiguration.class, withSettings().stubOnly());
         LoopResources constructorOnlyLoopResources =
                 useNative -> grpcClientEventLoopGroup();
         return new EngineHealthReporter(
                 new NoOpFlexMonitor(),
                 constructorOnlyCacheMetricsReporter,
+                constructorOnlyCacheMatchConfiguration,
                 grpcClient,
                 constructorOnlyLoopResources,
                 engineWorkerStatus);

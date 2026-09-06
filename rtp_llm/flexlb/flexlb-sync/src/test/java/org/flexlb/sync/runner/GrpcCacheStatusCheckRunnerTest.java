@@ -1,8 +1,8 @@
 package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -30,7 +30,7 @@ class GrpcCacheStatusCheckRunnerTest {
 
     private final EngineHealthReporter engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
 
-    private final CacheAwareService localKvCacheAwareManager = Mockito.mock(CacheAwareService.class);
+    private final CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
 
     private final DynamicCacheIntervalService cacheIntervalService =
             Mockito.mock(DynamicCacheIntervalService.class);
@@ -59,7 +59,7 @@ class GrpcCacheStatusCheckRunnerTest {
                 workerStatus.tryBeginCachePoll(),
                 directory,
                 engineHealthReporter, engineGrpcService,
-                localKvCacheAwareManager, cacheIntervalService,
+                cacheAwareService, cacheIntervalService,
                 20, new LongAdder(), 50L, true, Runnable::run);
         runner.run();
 
@@ -91,7 +91,7 @@ class GrpcCacheStatusCheckRunnerTest {
                 "test-model", ipPort, "test-site", RoleType.PREFILL,
                 oldStatus, oldStatus.tryBeginCachePoll(), directory,
                 engineHealthReporter, engineGrpcService,
-                localKvCacheAwareManager, cacheIntervalService,
+                cacheAwareService, cacheIntervalService,
                 20, new LongAdder(), 50L, true, Runnable::run);
         runner.run();
 
@@ -102,7 +102,7 @@ class GrpcCacheStatusCheckRunnerTest {
                 .setBlockSize(128)
                 .build());
 
-        verify(localKvCacheAwareManager, never())
+        verify(cacheAwareService, never())
                 .updateEngineBlockCache(oldStatus);
     }
 
