@@ -47,7 +47,7 @@ class RequestStateTest {
             DeliveryClaimKind claim,
             long batchId) {
         return new RequestState(
-                1L, phase, claim, batchId,
+                "1", phase, claim, batchId,
                 10L, 11L, "test");
     }
 }

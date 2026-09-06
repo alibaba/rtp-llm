@@ -286,7 +286,7 @@ class EngineCrashRecoveryTest {
         EngineRpcService.GenerateInputPB[] inputs = new EngineRpcService.GenerateInputPB[count];
         for (int i = 0; i < count; i++) {
             int decodePort = decodeEngines.get(i % decodeEngines.size()).getGrpcPort();
-            inputs[i] = inputWithDecode(startRequestId + i, 10, decodePort);
+            inputs[i] = inputWithDecode(String.valueOf(startRequestId + i), 10, decodePort);
         }
         enqueue(prefill, batch(batchId, slot(0, inputs)));
     }

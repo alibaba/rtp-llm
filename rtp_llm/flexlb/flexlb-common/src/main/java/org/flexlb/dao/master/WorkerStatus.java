@@ -66,7 +66,7 @@ public class WorkerStatus {
 
     /** Deeply immutable copy of the task fields reported by one status RPC. */
     public record TaskObservation(
-            long requestId,
+            String requestId,
             long prefixLength,
             long prefillTime,
             long inputLength,

@@ -27,7 +27,7 @@ class LocalStandbyHashServiceTest {
                         mock(FlexMonitor.class),
                         new VllmBlockHashStrategy());
         Request request = new Request();
-        request.setRequestId(1L);
+        request.setRequestId("1");
         request.setLocalStandbyBlockSize(4);
 
         try {
@@ -52,7 +52,7 @@ class LocalStandbyHashServiceTest {
                         mock(FlexMonitor.class),
                         new SglangBlockHashStrategy());
         Request request = new Request();
-        request.setRequestId(2L);
+        request.setRequestId("2");
 
         try {
             LocalStandbyHashResult result =
@@ -78,7 +78,7 @@ class LocalStandbyHashServiceTest {
                         mock(FlexMonitor.class),
                         new SglangBlockHashStrategy());
         Request request = new Request();
-        request.setRequestId(3L);
+        request.setRequestId("3");
 
         try {
             LocalStandbyHashResult result =

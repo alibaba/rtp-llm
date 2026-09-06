@@ -85,7 +85,7 @@ class WorkerStatusTest {
         response.setStatusVersion(marker);
         response.setLatestFinishedVersion(marker);
         TaskInfo task = new TaskInfo();
-        task.setRequestId(marker);
+        task.setRequestId(Long.toString(marker));
         response.setRunningTaskInfo(Map.of(Long.toString(marker), task));
         return response;
     }
@@ -106,7 +106,7 @@ class WorkerStatusTest {
         assertEquals(30L + marker, fields.dpRank());
         assertEquals(40L + marker, fields.maxSeqLen());
         assertEquals(50L + marker, fields.maxBatchTokensSize());
-        assertEquals(marker,
+        assertEquals(Long.toString(marker),
                 fields.runningTaskList().get(Long.toString(marker)).requestId());
     }
 
@@ -166,7 +166,7 @@ class WorkerStatusTest {
             WorkerStatus status = discovered();
             Map<String, TaskInfo> tasks = new HashMap<>();
             TaskInfo task = new TaskInfo();
-            task.setRequestId(7L);
+            task.setRequestId("7");
             tasks.put("7", task);
             WorkerStatusResponse response = responseWithMarker(7L);
             response.setRunningTaskInfo(tasks);
@@ -177,7 +177,7 @@ class WorkerStatusTest {
             Map<String, WorkerStatus.TaskObservation> published =
                     status.committedEngineObservation().runningTaskList();
             assertEquals(1, published.size());
-            assertEquals(7L, published.get("7").requestId());
+            assertEquals("7", published.get("7").requestId());
             assertThrows(UnsupportedOperationException.class,
                     () -> published.remove("7"));
         }

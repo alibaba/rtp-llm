@@ -178,7 +178,7 @@ class CodeReviewFixTest {
         int decodePort = decode.getGrpcPort();
 
         // Enqueue a single request with decode routing.
-        EngineRpcService.GenerateInputPB input = inputWithDecode(requestId, 10, decodePort);
+        EngineRpcService.GenerateInputPB input = inputWithDecode(String.valueOf(requestId), 10, decodePort);
         EngineRpcService.EnqueueBatchResponsePB response =
                 enqueue(prefill, batch(9000, slot(0, input)));
         assertEquals(0, response.getErrorsCount(), "enqueue should have 0 errors");
