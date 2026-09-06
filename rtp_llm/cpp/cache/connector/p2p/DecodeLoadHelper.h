@@ -5,7 +5,6 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
-#include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <grpc++/grpc++.h>
@@ -26,6 +25,7 @@ struct P2PSideChannelPayload {
     int32_t              local_reuse_len  = 0;
     int32_t              remote_reuse_len = 0;
     int32_t              memory_reuse_len = 0;
+    int32_t              disk_reuse_len   = 0;
     std::vector<int>     propose_tokens;
     TensorPB             propose_probs;
     TensorPB             propose_hidden;
@@ -33,12 +33,12 @@ struct P2PSideChannelPayload {
     bool                 has_data = false;
 };
 
-class PrefillLoadCaller {
+class DecodeLoadHelper {
 public:
     /// @param worker_addrs Decode worker 地址列表，每项格式为 host:cache_store_port:grpc_port
     /// 或 [IPv6]:cache_store_port:grpc_port
-    PrefillLoadCaller(const std::vector<std::string>& worker_addrs);
-    ~PrefillLoadCaller() = default;
+    DecodeLoadHelper(const std::vector<std::string>& worker_addrs);
+    ~DecodeLoadHelper() = default;
 
 public:
     struct Result: public std::enable_shared_from_this<Result> {

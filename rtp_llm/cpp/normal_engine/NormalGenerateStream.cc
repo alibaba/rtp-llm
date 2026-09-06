@@ -206,6 +206,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
                 side_data.local_reuse_len  = localReuseLength();
                 side_data.remote_reuse_len = remoteReuseLength();
                 side_data.memory_reuse_len = memoryReuseLength();
+                side_data.disk_reuse_len   = diskReuseLength();
                 if (getContainProposeToken()) {
                     side_data.propose_tokens = getProposeToken();
                 }

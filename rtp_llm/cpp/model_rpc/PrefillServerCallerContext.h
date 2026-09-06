@@ -31,6 +31,7 @@ public:
         int32_t local  = 0;
         int32_t remote = 0;
         int32_t memory = 0;
+        int32_t disk   = 0;
     };
 
     ~PrefillServerCallerContext();

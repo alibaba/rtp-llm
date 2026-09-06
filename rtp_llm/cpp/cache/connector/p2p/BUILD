@@ -70,14 +70,14 @@ cc_library(
     name = "components",
     srcs = [
         "P2PBroadcastClient.cc",
-        "PrefillLoadCaller.cc",
+        "DecodeLoadHelper.cc",
         "ComputedLayerCacheBuffer.cc",
         "P2PConnectorResourceStore.cc",
         "StoreWaitContext.cc",
     ],
     hdrs = [
         "P2PBroadcastClient.h",
-        "PrefillLoadCaller.h",
+        "DecodeLoadHelper.h",
         "ComputedLayerCacheBuffer.h",
         "P2PConnectorResourceStore.h",
         "StoreWaitContext.h",

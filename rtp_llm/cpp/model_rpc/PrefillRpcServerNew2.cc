@@ -230,7 +230,7 @@ grpc::Status PrefillRpcServerNew2::init(const EngineInitParams&                 
 grpc::Status PrefillRpcServerNew2::GenerateStreamCall(grpc::ServerContext*                   server_context,
                                                       const GenerateInputPB*                 request,
                                                       grpc::ServerWriter<GenerateOutputsPB>* response_writer) {
-    const bool pd_separation = decodeEntranceRequiresPrefill(*request);
+    const bool pd_separation = shouldUsePDSeparation(*request);
     if (!pd_separation) {
         RTP_LLM_LOG_INFO("pd separation is disabled, call local rpc server");
         return LocalRpcServer::GenerateStreamCall(server_context, request, response_writer);

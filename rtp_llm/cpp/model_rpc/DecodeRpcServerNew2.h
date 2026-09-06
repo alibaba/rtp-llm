@@ -8,7 +8,7 @@
 
 namespace rtp_llm {
 
-bool decodeEntranceRequiresPrefill(const GenerateInputPB& request);
+bool shouldUsePDSeparation(const GenerateInputPB& request);
 
 struct DecodeEntranceKeys {
     std::string business_unique_key;

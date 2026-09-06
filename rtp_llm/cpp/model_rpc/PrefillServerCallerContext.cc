@@ -68,8 +68,9 @@ bool PrefillServerCallerContext::getPrefillReuseLensSnapshot(ReuseLensSnapshot& 
     snapshot.local       = aux_info.prefill_local_reuse_len();
     snapshot.remote      = aux_info.prefill_remote_reuse_len();
     snapshot.memory      = aux_info.prefill_memory_reuse_len();
+    snapshot.disk        = aux_info.prefill_disk_reuse_len();
 
-    if (snapshot.total > 0 || snapshot.local > 0 || snapshot.remote > 0 || snapshot.memory > 0) {
+    if (snapshot.total > 0 || snapshot.local > 0 || snapshot.remote > 0 || snapshot.memory > 0 || snapshot.disk > 0) {
         return true;
     }
 
@@ -77,7 +78,8 @@ bool PrefillServerCallerContext::getPrefillReuseLensSnapshot(ReuseLensSnapshot& 
     snapshot.local  = aux_info.local_reuse_len();
     snapshot.remote = aux_info.remote_reuse_len();
     snapshot.memory = aux_info.memory_reuse_len();
-    return snapshot.total > 0 || snapshot.local > 0 || snapshot.remote > 0 || snapshot.memory > 0;
+    snapshot.disk   = aux_info.disk_reuse_len();
+    return snapshot.total > 0 || snapshot.local > 0 || snapshot.remote > 0 || snapshot.memory > 0 || snapshot.disk > 0;
 }
 
 void PrefillServerCallerContext::setPrefillReuseLensSnapshotForTest(const ReuseLensSnapshot& snapshot) {
@@ -97,15 +99,19 @@ bool PrefillServerCallerContext::updateReuseLensSnapshotLocked(const GenerateOut
     snapshot.local             = aux_info.prefill_local_reuse_len();
     snapshot.remote            = aux_info.prefill_remote_reuse_len();
     snapshot.memory            = aux_info.prefill_memory_reuse_len();
+    snapshot.disk              = aux_info.prefill_disk_reuse_len();
 
-    if (snapshot.total <= 0 && snapshot.local <= 0 && snapshot.remote <= 0 && snapshot.memory <= 0) {
+    if (snapshot.total <= 0 && snapshot.local <= 0 && snapshot.remote <= 0 && snapshot.memory <= 0
+        && snapshot.disk <= 0) {
         snapshot.total  = aux_info.total_reuse_len();
         snapshot.local  = aux_info.local_reuse_len();
         snapshot.remote = aux_info.remote_reuse_len();
         snapshot.memory = aux_info.memory_reuse_len();
+        snapshot.disk   = aux_info.disk_reuse_len();
     }
 
-    if (snapshot.total <= 0 && snapshot.local <= 0 && snapshot.remote <= 0 && snapshot.memory <= 0) {
+    if (snapshot.total <= 0 && snapshot.local <= 0 && snapshot.remote <= 0 && snapshot.memory <= 0
+        && snapshot.disk <= 0) {
         return false;
     }
 

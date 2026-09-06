@@ -6,7 +6,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/plan/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
-#include "rtp_llm/cpp/cache/connector/p2p/PrefillLoadCaller.h"
+#include "rtp_llm/cpp/cache/connector/p2p/DecodeLoadHelper.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <map>
@@ -52,7 +52,7 @@ public:
 
 private:
     struct AsyncReadCallResults {
-        std::shared_ptr<PrefillLoadCaller::Result>  server_call_result;
+        std::shared_ptr<DecodeLoadHelper::Result>  server_call_result;
         std::shared_ptr<P2PBroadcastClient::Result> tp_sync_result;
     };
 
@@ -100,7 +100,7 @@ private:
     std::map<std::pair<int, int>, std::shared_ptr<const PlanResult>>         plan_cache_;
     kmonitor::MetricsReporterPtr                         metrics_reporter_;
     std::shared_ptr<P2PBroadcastClient>                  tp_broadcast_client_;
-    std::shared_ptr<PrefillLoadCaller>                   server_caller_;
+    std::shared_ptr<DecodeLoadHelper>                   server_caller_;
     std::shared_ptr<P2PConnectorAsyncReadContextChecker> checker_;
     std::shared_ptr<autil::LockFreeThreadPool>           async_read_pool_;
 };

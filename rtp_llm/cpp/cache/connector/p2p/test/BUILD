@@ -37,7 +37,7 @@ cc_test(
     srcs = [
         "main.cc",
         "P2PBroadcastClientTest.cc",
-        "PrefillLoadCallerTest.cc",
+        "DecodeLoadHelperTest.cc",
         "ComputedLayerCacheBufferTest.cc",
         "LayerCacheBufferUtilFilterTest.cc",
         "StoreWaitContextTest.cc",

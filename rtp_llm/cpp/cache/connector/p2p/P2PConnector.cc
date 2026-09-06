@@ -65,43 +65,27 @@ bool P2PConnector::init() {
     return true;
 }
 
-std::shared_ptr<AsyncMatchContext> P2PConnector::asyncMatch(const KVCacheResourcePtr&    resource,
-                                                            const std::shared_ptr<Meta>& meta) {
+std::shared_ptr<AsyncContext> P2PConnector::asyncRead(const KVCacheResourcePtr&    resource,
+                                                      const std::shared_ptr<Meta>& meta,
+                                                      int                          start_read_block_index,
+                                                      int                          read_block_num) {
     if (!meta || !resource || !meta->generateStream()) {
-        RTP_LLM_LOG_WARNING("asyncMatch failed, meta is null or resource is null or generate_stream is null");
+        RTP_LLM_LOG_WARNING("asyncRead failed, meta, resource, or generate_stream is null");
         return nullptr;
     }
 
     if (config_.role_type == RoleType::PREFILL) {
         if (!stream_store_->addResource(meta, resource)) {
-            RTP_LLM_LOG_WARNING("asyncMatch failed, stream_store add resource failed");
+            RTP_LLM_LOG_WARNING("asyncRead failed, stream_store add resource failed");
             return nullptr;
         }
-        return std::make_shared<P2PConnectorAsyncMatchContext>(resource);
+        return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
     }
 
     if (config_.role_type == RoleType::DECODE) {
-        return std::make_shared<P2PConnectorAsyncMatchContext>(resource);
-    }
-    RTP_LLM_LOG_WARNING("asyncMatch failed, unsupported role type %d", config_.role_type);
-    return nullptr;
-}
-
-std::shared_ptr<AsyncContext> P2PConnector::asyncRead(const KVCacheResourcePtr&                 resource,
-                                                      const std::shared_ptr<Meta>&              meta,
-                                                      const std::shared_ptr<AsyncMatchContext>& match_context,
-                                                      int                                       start_read_block_index,
-                                                      int                                       read_block_num) {
-    if (!meta || !resource || !meta->generateStream()) {
-        RTP_LLM_LOG_WARNING("asyncRead failed, meta is null");
-        return nullptr;
-    }
-
-    std::pair<int, int> block_range{start_read_block_index, read_block_num};
-    const bool          no_transfer = read_block_num == 0;
-
-    if (config_.role_type == RoleType::DECODE) {
-        const auto make_failed_context = [&](const ErrorInfo& error_info) {
+        std::pair<int, int> block_range{start_read_block_index, read_block_num};
+        const bool          no_transfer = read_block_num == 0;
+        const auto          make_failed_context = [&](const ErrorInfo& error_info) {
             auto failed_context = std::make_shared<P2PConnectorAsyncReadContext>(
                 resource,
                 meta->p2pRouting().value_or(Meta::P2PRoutingContext{}).unique_key,
@@ -136,12 +120,6 @@ void P2PConnector::cancelRead(const std::shared_ptr<AsyncContext>& context) {
     scheduler_->cancel(std::dynamic_pointer_cast<P2PConnectorAsyncReadContext>(context));
 }
 
-std::shared_ptr<AsyncContext> P2PConnector::asyncWrite(const KVCacheResourcePtr&    resource,
-                                                       const std::shared_ptr<Meta>& meta) {
-    // p2p connector not support async write
-    return nullptr;
-}
-
 std::shared_ptr<AsyncContext>
 P2PConnector::asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) {
     if (!worker_ || !layer_context) {
@@ -165,7 +143,7 @@ P2PConnector::asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConne
                             layer_context->requestId());
         return nullptr;
     }
-    return std::make_shared<P2PConnectorAsyncWriteByLayerContext>(resource);
+    return std::make_shared<P2PConnectorAcceptedWriteContext>(resource);
 }
 
 bool P2PConnector::writeByLayerTag(int                                   layer_id,
@@ -711,6 +689,7 @@ grpc::Status P2PConnector::fillResponseWithStreamInfo(const std::shared_ptr<P2PC
     payload->set_local_reuse_len(data.local_reuse_len);
     payload->set_remote_reuse_len(data.remote_reuse_len);
     payload->set_memory_reuse_len(data.memory_reuse_len);
+    payload->set_disk_reuse_len(data.disk_reuse_len);
 
     if (!data.propose_tokens.empty()) {
         auto& propose_tensor = (*payload->mutable_tensors())["propose_tokens"];
@@ -742,12 +721,14 @@ grpc::Status P2PConnector::fillResponseWithStreamInfo(const std::shared_ptr<P2PC
         pos_pb->set_int32_data(data.position_ids.data(), data.position_ids.size() * sizeof(int32_t));
     }
 
-    RTP_LLM_LOG_DEBUG("fill response from entry: first_token: %ld, total_reuse: %d, local: %d, remote: %d, memory: %d",
+    RTP_LLM_LOG_DEBUG("fill response from entry: first_token: %ld, total_reuse: %d, local: %d, remote: %d, "
+                      "memory: %d, disk: %d",
                       data.first_token_id,
                       data.total_reuse_len,
                       data.local_reuse_len,
                       data.remote_reuse_len,
-                      data.memory_reuse_len);
+                      data.memory_reuse_len,
+                      data.disk_reuse_len);
 
     return grpc::Status::OK;
 }

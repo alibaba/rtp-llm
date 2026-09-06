@@ -121,10 +121,6 @@ public:
     std::shared_ptr<AsyncContext>
     asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context);
 
-    // async store cache from gpu to connector, for all rank
-    std::shared_ptr<AsyncContext>
-    asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context);
-
     // for every single rank
     // Returns whether a trustworthy mem_response was formed, not whether the transfer
     // succeeded; the transfer outcome is reported through mem_response.code.

@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/connector/p2p/PrefillLoadCaller.h"
+#include "rtp_llm/cpp/cache/connector/p2p/DecodeLoadHelper.h"
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/DeferredCompletionQueueDrainer.h"
@@ -182,21 +182,21 @@ bool extractLegacyStartLoadPayload(const P2PConnectorStartLoadResponsePB& respon
     return found_legacy_field;
 }
 
-struct PrefillLoadCallerResultDrainTraits {
+struct DecodeLoadHelperResultDrainTraits {
     static std::shared_ptr<grpc::CompletionQueue>
-    completionQueue(const std::shared_ptr<PrefillLoadCaller::Result>& result) {
+    completionQueue(const std::shared_ptr<DecodeLoadHelper::Result>& result) {
         return result ? result->completion_queue : nullptr;
     }
 
-    static void markDrained(const std::shared_ptr<PrefillLoadCaller::Result>& result) {
+    static void markDrained(const std::shared_ptr<DecodeLoadHelper::Result>& result) {
         if (result) {
             result->markCompletionQueueDrained();
         }
     }
 };
 
-using PrefillLoadCallerCqDrainer =
-    DeferredCompletionQueueDrainer<PrefillLoadCaller::Result, PrefillLoadCallerResultDrainTraits>;
+using DecodeLoadHelperCqDrainer =
+    DeferredCompletionQueueDrainer<DecodeLoadHelper::Result, DecodeLoadHelperResultDrainTraits>;
 
 void drainCompletionQueueInlineUntilShutdown(const std::shared_ptr<grpc::CompletionQueue>& completion_queue,
                                              const std::string&                            server_addr,
@@ -217,7 +217,7 @@ void drainCompletionQueueInlineUntilShutdown(const std::shared_ptr<grpc::Complet
         if (status == grpc::CompletionQueue::NextStatus::TIMEOUT) {
             const auto now_us = currentTimeUs();
             if (now_us - last_log_us >= 10000000) {
-                RTP_LLM_LOG_WARNING("[PD-DIAG] PrefillLoadCaller inline CQ drain still waiting; "
+                RTP_LLM_LOG_WARNING("[PD-DIAG] DecodeLoadHelper inline CQ drain still waiting; "
                                     "server_addr=%s, unique_key=%s",
                                     server_addr.c_str(),
                                     unique_key.c_str());
@@ -229,14 +229,14 @@ void drainCompletionQueueInlineUntilShutdown(const std::shared_ptr<grpc::Complet
 
 }  // namespace
 
-PrefillLoadCaller::PrefillLoadCaller(const std::vector<std::string>& worker_addrs): worker_addrs_(worker_addrs) {
+DecodeLoadHelper::DecodeLoadHelper(const std::vector<std::string>& worker_addrs): worker_addrs_(worker_addrs) {
     rpc_pool_ = std::make_shared<RPCPool>();
 
     // worker_addrs entries are host:cache_store_port:grpc_port or [IPv6]:cache_store_port:grpc_port.
     for (const auto& worker_addr : worker_addrs_) {
         WorkerAddrParts parts;
         if (!parseWorkerAddr(worker_addr, &parts)) {
-            RTP_LLM_FAIL("PrefillLoadCaller: invalid worker addr format [%s], expected "
+            RTP_LLM_FAIL("DecodeLoadHelper: invalid worker addr format [%s], expected "
                          "host:cache_store_port:grpc_port or [IPv6]:cache_store_port:grpc_port",
                          worker_addr.c_str());
             continue;
@@ -248,7 +248,7 @@ PrefillLoadCaller::PrefillLoadCaller(const std::vector<std::string>& worker_addr
     }
 }
 
-std::shared_ptr<PrefillLoadCaller::Result> PrefillLoadCaller::load(int64_t            request_id,
+std::shared_ptr<DecodeLoadHelper::Result> DecodeLoadHelper::load(int64_t            request_id,
                                                                    const std::string& prefill_ip,
                                                                    uint32_t           prefill_port,
                                                                    const std::string& unique_key,
@@ -256,14 +256,14 @@ std::shared_ptr<PrefillLoadCaller::Result> PrefillLoadCaller::load(int64_t      
                                                                    int64_t            transfer_deadline_ms,
                                                                    bool               no_transfer) {
     if (!rpc_pool_) {
-        RTP_LLM_LOG_WARNING("PrefillLoadCaller load failed: rpc_pool is null");
+        RTP_LLM_LOG_WARNING("DecodeLoadHelper load failed: rpc_pool is null");
         return nullptr;
     }
 
     auto result         = std::make_shared<Result>();
     result->server_addr = formatGrpcHostPort(prefill_ip, prefill_port);
     if (result->server_addr.empty()) {
-        RTP_LLM_LOG_WARNING("PrefillLoadCaller load failed: invalid server addr, ip: %s, port: %u",
+        RTP_LLM_LOG_WARNING("DecodeLoadHelper load failed: invalid server addr, ip: %s, port: %u",
                             prefill_ip.c_str(),
                             prefill_port);
         return nullptr;
@@ -278,20 +278,20 @@ std::shared_ptr<PrefillLoadCaller::Result> PrefillLoadCaller::load(int64_t      
     const int64_t get_conn_cost_us  = currentTimeUs() - get_conn_start_us;
     if (get_conn_cost_us >= 100000) {
         RTP_LLM_LOG_WARNING(
-            "[PD-DIAG] PrefillLoadCaller::load slow getConnection, addr: %s, cost_us=%ld, unique_key: %s",
+            "[PD-DIAG] DecodeLoadHelper::load slow getConnection, addr: %s, cost_us=%ld, unique_key: %s",
             result->server_addr.c_str(),
             get_conn_cost_us,
             unique_key.c_str());
     }
     if (!conn_status.ok()) {
-        RTP_LLM_LOG_WARNING("PrefillLoadCaller load failed: getConnection failed, addr: %s",
+        RTP_LLM_LOG_WARNING("DecodeLoadHelper load failed: getConnection failed, addr: %s",
                             result->server_addr.c_str());
         return nullptr;
     }
 
     result->stub = conn_status.value().stub;
     if (!result->stub) {
-        RTP_LLM_LOG_WARNING("PrefillLoadCaller load failed: stub is null, addr: %s", result->server_addr.c_str());
+        RTP_LLM_LOG_WARNING("DecodeLoadHelper load failed: stub is null, addr: %s", result->server_addr.c_str());
         return nullptr;
     }
 
@@ -307,13 +307,13 @@ std::shared_ptr<PrefillLoadCaller::Result> PrefillLoadCaller::load(int64_t      
     const int64_t build_rpc_cost_us = currentTimeUs() - build_rpc_start_us;
     if (build_rpc_cost_us >= 100000) {
         RTP_LLM_LOG_WARNING(
-            "[PD-DIAG] PrefillLoadCaller::load slow buildAndStartAsyncRpc, addr: %s, cost_us=%ld, unique_key: %s",
+            "[PD-DIAG] DecodeLoadHelper::load slow buildAndStartAsyncRpc, addr: %s, cost_us=%ld, unique_key: %s",
             result->server_addr.c_str(),
             build_rpc_cost_us,
             unique_key.c_str());
     }
 
-    RTP_LLM_LOG_DEBUG("PrefillLoadCaller load started, unique_key: %s, addr: %s, request_deadline_ms: %lld, "
+    RTP_LLM_LOG_DEBUG("DecodeLoadHelper load started, unique_key: %s, addr: %s, request_deadline_ms: %lld, "
                       "transfer_deadline_ms: %lld, timeout ms: %d",
                       unique_key.c_str(),
                       result->server_addr.c_str(),
@@ -323,7 +323,7 @@ std::shared_ptr<PrefillLoadCaller::Result> PrefillLoadCaller::load(int64_t      
     return result;
 }
 
-bool PrefillLoadCaller::buildAndStartAsyncRpc(const std::shared_ptr<Result>& result,
+bool DecodeLoadHelper::buildAndStartAsyncRpc(const std::shared_ptr<Result>& result,
                                               const std::string&             unique_key,
                                               int64_t                        request_deadline_ms,
                                               int64_t                        transfer_deadline_ms,
@@ -359,7 +359,7 @@ bool PrefillLoadCaller::buildAndStartAsyncRpc(const std::shared_ptr<Result>& res
     result->reader = result->stub->PrepareAsyncStartLoad(
         result->client_context.get(), result->request, result->completion_queue.get());
     if (!result->reader) {
-        RTP_LLM_LOG_WARNING("PrefillLoadCaller: PrepareAsyncStartLoad failed, addr: %s", result->server_addr.c_str());
+        RTP_LLM_LOG_WARNING("DecodeLoadHelper: PrepareAsyncStartLoad failed, addr: %s", result->server_addr.c_str());
         return false;
     }
 
@@ -369,14 +369,14 @@ bool PrefillLoadCaller::buildAndStartAsyncRpc(const std::shared_ptr<Result>& res
     return true;
 }
 
-void PrefillLoadCaller::Result::shutdownAndDrainCompletionQueue() {
+void DecodeLoadHelper::Result::shutdownAndDrainCompletionQueue() {
     if (!completion_queue || completion_queue_shutdown_drained_) {
         return;
     }
     completion_queue->Shutdown();
 
     // Bounded drain. If we exceed kDrainBudgetMs without SHUTDOWN, hand the CQ + reader
-    // + context off to PrefillLoadCallerCqDrainer (a background thread that keeps
+    // + context off to DecodeLoadHelperCqDrainer (a background thread that keeps
     // shared_ptr<Result> alive until SHUTDOWN). This unblocks the caller (typically the
     // checker thread holding async_contexts_mutex_) — see DingTalk doc §7 for the
     // production 8-min stall we are fixing.
@@ -393,7 +393,7 @@ void PrefillLoadCaller::Result::shutdownAndDrainCompletionQueue() {
         }
         if (next_status == grpc::CompletionQueue::NextStatus::TIMEOUT) {
             RTP_LLM_LOG_WARNING(
-                "[PD-DIAG] PrefillLoadCaller drain abandoned to deferred drainer; "
+                "[PD-DIAG] DecodeLoadHelper drain abandoned to deferred drainer; "
                 "server_addr=%s, unique_key=%s, budget_ms=%ld",
                 server_addr.c_str(),
                 unique_key.c_str(),
@@ -401,11 +401,11 @@ void PrefillLoadCaller::Result::shutdownAndDrainCompletionQueue() {
             // Mark drained BEFORE handing off so ~Result is a no-op when the drainer drops its ref.
             completion_queue_shutdown_drained_ = true;
             try {
-                PrefillLoadCallerCqDrainer::instance().enqueue(shared_from_this());
+                DecodeLoadHelperCqDrainer::instance().enqueue(shared_from_this());
             } catch (const std::bad_weak_ptr&) {
                 // Called outside a shared_ptr (e.g. from ~Result when count is already 0).
                 RTP_LLM_LOG_WARNING(
-                    "[PD-DIAG] PrefillLoadCaller drain abandoned but cannot hand off "
+                    "[PD-DIAG] DecodeLoadHelper drain abandoned but cannot hand off "
                     "(shared_from_this failed); draining inline for server_addr=%s",
                     server_addr.c_str());
                 drainCompletionQueueInlineUntilShutdown(completion_queue, server_addr, unique_key);
@@ -416,13 +416,13 @@ void PrefillLoadCaller::Result::shutdownAndDrainCompletionQueue() {
     }
 }
 
-void PrefillLoadCaller::Result::cancelLocked() {
+void DecodeLoadHelper::Result::cancelLocked() {
     if (done_) {
         return;
     }
     if (client_context) {
         client_context->TryCancel();
-        RTP_LLM_LOG_DEBUG("PrefillLoadCaller::Result::cancel: cancelled grpc request, server_addr: %s",
+        RTP_LLM_LOG_DEBUG("DecodeLoadHelper::Result::cancel: cancelled grpc request, server_addr: %s",
                           server_addr.c_str());
     }
     shutdownAndDrainCompletionQueue();
@@ -431,7 +431,7 @@ void PrefillLoadCaller::Result::cancelLocked() {
     total_cost_time_us = currentTimeUs() - start_time_us;
 }
 
-void PrefillLoadCaller::Result::cancel() {
+void DecodeLoadHelper::Result::cancel() {
     // Publish the cancellation intent before contending with the CQ poller. Otherwise a
     // tight polling loop can repeatedly reacquire state_mutex_ until the RPC succeeds,
     // causing cancel() to observe an already-successful result.
@@ -440,14 +440,14 @@ void PrefillLoadCaller::Result::cancel() {
     cancelLocked();
 }
 
-void PrefillLoadCaller::Result::markCompletionQueueDrained() {
+void DecodeLoadHelper::Result::markCompletionQueueDrained() {
     std::lock_guard<std::mutex> lock(state_mutex_);
     completion_queue_shutdown_drained_ = true;
 }
 
-bool PrefillLoadCaller::Result::pollCompletionQueue() {
+bool DecodeLoadHelper::Result::pollCompletionQueue() {
     if (!completion_queue) {
-        RTP_LLM_LOG_WARNING("PrefillLoadCaller::Result::pollCompletionQueue: completion_queue is null");
+        RTP_LLM_LOG_WARNING("DecodeLoadHelper::Result::pollCompletionQueue: completion_queue is null");
         error_code    = ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED;
         error_message = "completion_queue is null";
         return false;
@@ -466,14 +466,14 @@ bool PrefillLoadCaller::Result::pollCompletionQueue() {
     total_cost_time_us = currentTimeUs() - start_time_us;
 
     if (!ok) {
-        RTP_LLM_LOG_WARNING("PrefillLoadCaller::Result::pollCompletionQueue: async next failed, server_addr: %s",
+        RTP_LLM_LOG_WARNING("DecodeLoadHelper::Result::pollCompletionQueue: async next failed, server_addr: %s",
                             server_addr.c_str());
         error_code    = ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED;
         error_message = "async next failed: " + status.error_message();
         return false;
     }
     if (!status.ok()) {
-        RTP_LLM_LOG_WARNING("PrefillLoadCaller::Result::pollCompletionQueue: rpc error: %s, server_addr: %s",
+        RTP_LLM_LOG_WARNING("DecodeLoadHelper::Result::pollCompletionQueue: rpc error: %s, server_addr: %s",
                             status.error_message().c_str(),
                             server_addr.c_str());
         error_code    = ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED;
@@ -482,7 +482,7 @@ bool PrefillLoadCaller::Result::pollCompletionQueue() {
     }
     if (response.error_code() != ErrorCodePB::NONE_ERROR) {
         RTP_LLM_LOG_WARNING(
-            "PrefillLoadCaller::Result::pollCompletionQueue: response error_code is not NONE_ERROR, server_addr: %s",
+            "DecodeLoadHelper::Result::pollCompletionQueue: response error_code is not NONE_ERROR, server_addr: %s",
             server_addr.c_str());
         error_code    = transRPCErrorCode(response.error_code());
         error_message = response.error_message();
@@ -491,7 +491,7 @@ bool PrefillLoadCaller::Result::pollCompletionQueue() {
     return true;  // RPC succeeded
 }
 
-void PrefillLoadCaller::Result::updateStreamFromResponse() {
+void DecodeLoadHelper::Result::updateStreamFromResponse() {
     if (response.has_payload()) {
         const auto& payload = response.payload();
         side_channel_payload.has_first_token =
@@ -501,6 +501,7 @@ void PrefillLoadCaller::Result::updateStreamFromResponse() {
         side_channel_payload.local_reuse_len  = payload.local_reuse_len();
         side_channel_payload.remote_reuse_len = payload.remote_reuse_len();
         side_channel_payload.memory_reuse_len = payload.memory_reuse_len();
+        side_channel_payload.disk_reuse_len   = payload.disk_reuse_len();
         side_channel_payload.has_data         = true;
 
         // Extract tensors from the payload map
@@ -537,12 +538,12 @@ void PrefillLoadCaller::Result::updateStreamFromResponse() {
         extractLegacyStartLoadPayload(response, side_channel_payload);
     }
 
-    RTP_LLM_LOG_DEBUG("PrefillLoadCaller::Result: parsed side-channel payload, first_token: %ld, total_reuse: %d",
+    RTP_LLM_LOG_DEBUG("DecodeLoadHelper::Result: parsed side-channel payload, first_token: %ld, total_reuse: %d",
                       side_channel_payload.first_token_id,
                       side_channel_payload.total_reuse_len);
 }
 
-void PrefillLoadCaller::Result::checkDone() {
+void DecodeLoadHelper::Result::checkDone() {
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (done_) {
         return;

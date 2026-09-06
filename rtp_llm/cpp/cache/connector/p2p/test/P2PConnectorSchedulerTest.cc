@@ -31,7 +31,7 @@ protected:
             tp_broadcast_addrs_.push_back("127.0.0.1:" + std::to_string(tp_broadcast_servers_.back()->listenPort()));
         }
 
-        // 创建测试用的 RPC 服务器（用于 PrefillLoadCaller）
+        // 创建测试用的 RPC 服务器（用于 DecodeLoadHelper）
         auto prefill_service = std::make_unique<TestRpcService>();
         prefill_server_      = std::make_unique<TestRpcServer>(std::move(prefill_service));
         ASSERT_TRUE(prefill_server_->start());
@@ -373,7 +373,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_HoldsCancelledOutcomeUntilLeaseWindo
 
     auto broadcast_result = std::make_shared<P2PBroadcastClient::Result>("cancel-hold", tp_result);
 
-    auto server_result          = std::make_shared<PrefillLoadCaller::Result>();
+    auto server_result          = std::make_shared<DecodeLoadHelper::Result>();
     server_result->done_        = true;
     server_result->success_     = true;
     server_result->error_code   = ErrorCode::NONE_ERROR;

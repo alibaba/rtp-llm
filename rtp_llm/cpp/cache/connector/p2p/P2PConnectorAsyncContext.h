@@ -1,10 +1,9 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
-#include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
-#include "rtp_llm/cpp/cache/connector/p2p/PrefillLoadCaller.h"
+#include "rtp_llm/cpp/cache/connector/p2p/DecodeLoadHelper.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -18,22 +17,6 @@
 #include <vector>
 
 namespace rtp_llm {
-
-/// @brief PD 分离场景下的匹配上下文，始终全量匹配
-class P2PConnectorAsyncMatchContext: public AsyncMatchContext {
-public:
-    P2PConnectorAsyncMatchContext(const KVCacheResourcePtr& resource): resource_(resource) {}
-    virtual ~P2PConnectorAsyncMatchContext() {}
-
-public:
-    size_t matchedBlockCount() const override;
-    bool   done() const override;
-    bool   success() const override;
-    void   waitDone() override {}
-
-private:
-    const KVCacheResourcePtr resource_;
-};
 
 class P2PConnectorAsyncReadContext: public AsyncContext {
 public:
@@ -55,7 +38,7 @@ public:
 
     P2PConnectorAsyncReadContext(const KVCacheResourcePtr&                               resource,
                                  const std::shared_ptr<P2PBroadcastClient::Result>&      tp_sync_result,
-                                 const std::shared_ptr<PrefillLoadCaller::Result>&       server_call_result,
+                                 const std::shared_ptr<DecodeLoadHelper::Result>&       server_call_result,
                                  const std::shared_ptr<DecodeSchedulerMetricsCollector>& collector,
                                  int64_t                                                 transfer_not_done_hold_ms,
                                  bool                                                    no_transfer = false,
@@ -91,7 +74,7 @@ public:
     /// Returns true when cancellation was requested before/during kickoff and
     /// the newly-created calls should be cancelled immediately.
     bool setCallResults(const std::shared_ptr<P2PBroadcastClient::Result>& tp_sync_result,
-                        const std::shared_ptr<PrefillLoadCaller::Result>&  server_call_result);
+                        const std::shared_ptr<DecodeLoadHelper::Result>&  server_call_result);
     void markStartFailed(const ErrorInfo& error_info);
     bool cancelRequested() const {
         return cancel_requested_.load(std::memory_order_acquire);
@@ -163,7 +146,7 @@ private:
     const KVCacheResourcePtr                               resource_;
     const std::string                                      unique_key_;
     std::shared_ptr<P2PBroadcastClient::Result>            tp_sync_result_;
-    std::shared_ptr<PrefillLoadCaller::Result>             server_call_result_;
+    std::shared_ptr<DecodeLoadHelper::Result>             server_call_result_;
     const std::shared_ptr<DecodeSchedulerMetricsCollector> collector_;
 
     const int64_t transfer_not_done_hold_ms_;
@@ -190,13 +173,13 @@ private:
     KickoffState         kickoff_state_{KickoffState::QUEUED};  // guarded by state_mutex_
 };
 
-/// @brief P2P 按层写入的异步上下文。
-/// Write-by-layer is fire-and-forget; actual transfer status is tracked separately.
-/// @note done()/success() 恒为 true，仅满足 AsyncContext 接口形态，不得据此推断真实传输结果。
-class P2PConnectorAsyncWriteByLayerContext: public AsyncContext {
+/// @brief P2P 按层写入已被 worker 接收的上下文。
+/// Write-by-layer is fire-and-forget; this context only reports that scheduling was accepted.
+/// It does not represent the final transfer result.
+class P2PConnectorAcceptedWriteContext: public AsyncContext {
 public:
-    P2PConnectorAsyncWriteByLayerContext(const KVCacheResourcePtr& resource): resource_(resource) {}
-    virtual ~P2PConnectorAsyncWriteByLayerContext() {}
+    P2PConnectorAcceptedWriteContext(const KVCacheResourcePtr& resource): resource_(resource) {}
+    ~P2PConnectorAcceptedWriteContext() override = default;
 
 public:
     void waitDone() override;  // done() always true, no blocking

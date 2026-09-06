@@ -686,25 +686,17 @@ KVCacheManager::asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteCo
             ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "P2P failed to hold Decode target blocks"));
     }
 
-    auto match_context = p2p_connector_->asyncMatch(resource, connector_context->meta());
     if (pd_sep_config_.role_type == RoleType::PREFILL) {
-        if (!match_context) {
+        auto context = p2p_connector_->asyncRead(resource, connector_context->meta(), 0, 0);
+        if (!context) {
             return std::make_shared<CompletedAsyncContext>(ErrorInfo(
                 ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "P2P Prefill resource registration failed"));
         }
-        // asyncMatch() has transferred the same connector-ref guard into the
-        // Prefill resource store. The completed context only represents that
-        // request registration has been dispatched.
-        return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
-    }
-    if (!match_context) {
-        RTP_LLM_LOG_WARNING("P2P async load failed, match context is null");
-        return std::make_shared<CompletedAsyncContext>(ErrorInfo(
-            ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "P2P Decode match context is unavailable"));
+        return context;
     }
 
     const size_t tree_covered_block_num = connector_context->treeCoveredBlockNum();
-    const int    matched_blocks         = static_cast<int>(match_context->matchedBlockCount());
+    const int    matched_blocks         = static_cast<int>(resource->cacheKeys().size());
     const int    p2p_start_block        = static_cast<int>(
         std::min(tree_covered_block_num, static_cast<size_t>(std::max(matched_blocks, 0))));
     if (matched_blocks <= p2p_start_block) {
@@ -713,19 +705,12 @@ KVCacheManager::asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteCo
         // release the request-scoped KV resource. A zero-sized range is an
         // explicit P2P no-transfer request; Decode will not register buffers
         // or issue RDMA READs.
-        return p2p_connector_->asyncRead(resource, connector_context->meta(), match_context, matched_blocks, 0);
+        return p2p_connector_->asyncRead(resource, connector_context->meta(), matched_blocks, 0);
     }
     return p2p_connector_->asyncRead(resource,
                                      connector_context->meta(),
-                                     match_context,
                                      p2p_start_block,
                                      matched_blocks - p2p_start_block);
-}
-
-std::shared_ptr<AsyncContext>
-KVCacheManager::asyncStoreCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
-    (void)connector_context;
-    return nullptr;
 }
 
 bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {

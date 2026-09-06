@@ -26,22 +26,6 @@ const char* readOutcomeHoldReason(ErrorCode error_code) {
 }
 }  // namespace
 
-/*----------------------------------------------- P2PConnectorAsyncMatchContext
- * -------------------------------------------------*/
-size_t P2PConnectorAsyncMatchContext::matchedBlockCount() const {
-    // P2P match is expressed in the canonical logical-key namespace. Physical
-    // block vectors can be compacted differently for FULL/SWA/LINEAR and CP.
-    return resource_ ? resource_->cacheKeys().size() : 0;
-}
-
-bool P2PConnectorAsyncMatchContext::done() const {
-    return true;
-}
-
-bool P2PConnectorAsyncMatchContext::success() const {
-    return true;
-}
-
 /*----------------------------------------------- P2PConnectorAsyncReadContext
  * -------------------------------------------------*/
 bool P2PConnectorAsyncReadContext::done() const {
@@ -61,7 +45,7 @@ void P2PConnectorAsyncReadContext::waitDone() {
 
 bool P2PConnectorAsyncReadContext::setCallResults(
     const std::shared_ptr<P2PBroadcastClient::Result>& tp_sync_result,
-    const std::shared_ptr<PrefillLoadCaller::Result>&  server_call_result) {
+    const std::shared_ptr<DecodeLoadHelper::Result>&  server_call_result) {
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         tp_sync_result_     = tp_sync_result;
@@ -364,17 +348,17 @@ void P2PConnectorAsyncReadContext::pollLeaseIfNeeded(const std::shared_ptr<P2PBr
     lease_poll_next_ms_.store(std::min(after_poll_ms + interval, hold_until_ms), std::memory_order_relaxed);
 }
 
-/*----------------------------------------------- P2PConnectorAsyncWriteByLayerContext
+/*----------------------------------------------- P2PConnectorAcceptedWriteContext
  * -------------------------------------------------*/
-void P2PConnectorAsyncWriteByLayerContext::waitDone() {
+void P2PConnectorAcceptedWriteContext::waitDone() {
     // done() is always true, no blocking
 }
 
-bool P2PConnectorAsyncWriteByLayerContext::done() const {
+bool P2PConnectorAcceptedWriteContext::done() const {
     return true;
 }
 
-bool P2PConnectorAsyncWriteByLayerContext::success() const {
+bool P2PConnectorAcceptedWriteContext::success() const {
     return true;
 }
 

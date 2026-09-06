@@ -30,7 +30,7 @@ std::shared_ptr<GenerateStream> makeStream(const std::vector<int>& input_ids) {
     return std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
 }
 
-GenerateOutputsPB makeOutputsWithDecodeReuse(int total, int local, int remote, int memory) {
+GenerateOutputsPB makeOutputsWithDecodeReuse(int total, int local, int remote, int memory, int disk = 0) {
     GenerateOutputsPB outputs_pb;
     outputs_pb.mutable_flatten_output()->add_finished(false);
     auto* aux_info = outputs_pb.mutable_flatten_output()->add_aux_info();
@@ -38,13 +38,14 @@ GenerateOutputsPB makeOutputsWithDecodeReuse(int total, int local, int remote, i
     aux_info->set_local_reuse_len(local);
     aux_info->set_remote_reuse_len(remote);
     aux_info->set_memory_reuse_len(memory);
+    aux_info->set_disk_reuse_len(disk);
     aux_info->set_step_output_len(1);
     return outputs_pb;
 }
 
 }  // namespace
 
-TEST(DecodeRpcServerNew2Test, DecodeEntranceRequiresPrefillIgnoresUniqueKeyPresence) {
+TEST(DecodeRpcServerNew2Test, ShouldUsePDSeparationIgnoresUniqueKeyPresence) {
     GenerateInputPB request;
     auto*           config = request.mutable_generate_config();
     config->set_max_new_tokens(8);
@@ -52,10 +53,10 @@ TEST(DecodeRpcServerNew2Test, DecodeEntranceRequiresPrefillIgnoresUniqueKeyPrese
     config->set_num_return_sequences(1);
     config->set_can_use_pd_separation(true);
 
-    EXPECT_TRUE(decodeEntranceRequiresPrefill(request));
+    EXPECT_TRUE(shouldUsePDSeparation(request));
 
     config->set_unique_key("user-cache-key");
-    EXPECT_TRUE(decodeEntranceRequiresPrefill(request));
+    EXPECT_TRUE(shouldUsePDSeparation(request));
 }
 
 TEST(DecodeRpcServerNew2Test, DecodeEntranceHandoffUsesInternalKeyAndPreservesBusinessKey) {
@@ -123,7 +124,7 @@ TEST(DecodeRpcServerNew2Test, ParsePrefillDpAddrRejectsMalformedAddressOrPort) {
     EXPECT_FALSE(DecodeRpcServerNew2::parsePrefillDpAddr("127.0.0.1:not-a-port", &ip, &port).ok());
 }
 
-TEST(DecodeRpcServerNew2Test, DecodeEntranceRequiresPrefillRejectsNonPdRequests) {
+TEST(DecodeRpcServerNew2Test, ShouldUsePDSeparationRejectsNonPdRequests) {
     GenerateInputPB request;
     auto*           config = request.mutable_generate_config();
     config->set_max_new_tokens(1);
@@ -131,19 +132,20 @@ TEST(DecodeRpcServerNew2Test, DecodeEntranceRequiresPrefillRejectsNonPdRequests)
     config->set_num_return_sequences(1);
     config->set_can_use_pd_separation(true);
 
-    EXPECT_FALSE(decodeEntranceRequiresPrefill(request));
+    EXPECT_FALSE(shouldUsePDSeparation(request));
 
     config->set_max_new_tokens(8);
     config->set_num_beams(2);
-    EXPECT_FALSE(decodeEntranceRequiresPrefill(request));
+    EXPECT_FALSE(shouldUsePDSeparation(request));
 }
 
 TEST(DecodeRpcServerNew2Test, UpdateAuxInfoUsesPrefillReuseAsTopLevelAndPreservesDecodeReuse) {
     DecodeRpcServerNew2 server;
     auto stream     = makeStream({11, 12, 13});
-    auto outputs_pb = makeOutputsWithDecodeReuse(/*total=*/7, /*local=*/3, /*remote=*/4, /*memory=*/1);
+    auto outputs_pb =
+        makeOutputsWithDecodeReuse(/*total=*/7, /*local=*/3, /*remote=*/4, /*memory=*/1, /*disk=*/2);
 
-    stream->setPrefillReuseLength(/*total=*/128, /*local=*/32, /*remote=*/96, /*memory=*/8);
+    stream->setPrefillReuseLength(/*total=*/128, /*local=*/32, /*remote=*/96, /*memory=*/8, /*disk=*/4);
 
     server.updateAuxInfo(outputs_pb, stream);
 
@@ -155,16 +157,19 @@ TEST(DecodeRpcServerNew2Test, UpdateAuxInfoUsesPrefillReuseAsTopLevelAndPreserve
     EXPECT_EQ(aux_info.local_reuse_len(), 32);
     EXPECT_EQ(aux_info.remote_reuse_len(), 96);
     EXPECT_EQ(aux_info.memory_reuse_len(), 8);
+    EXPECT_EQ(aux_info.disk_reuse_len(), 4);
 
     EXPECT_EQ(aux_info.prefill_total_reuse_len(), 128);
     EXPECT_EQ(aux_info.prefill_local_reuse_len(), 32);
     EXPECT_EQ(aux_info.prefill_remote_reuse_len(), 96);
     EXPECT_EQ(aux_info.prefill_memory_reuse_len(), 8);
+    EXPECT_EQ(aux_info.prefill_disk_reuse_len(), 4);
 
     EXPECT_EQ(aux_info.decode_total_reuse_len(), 7);
     EXPECT_EQ(aux_info.decode_local_reuse_len(), 3);
     EXPECT_EQ(aux_info.decode_remote_reuse_len(), 4);
     EXPECT_EQ(aux_info.decode_memory_reuse_len(), 1);
+    EXPECT_EQ(aux_info.decode_disk_reuse_len(), 2);
 }
 
 }  // namespace rtp_llm::test

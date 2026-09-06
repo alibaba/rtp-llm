@@ -20,6 +20,7 @@ struct ReuseLens {
     int64_t local  = 0;
     int64_t remote = 0;
     int64_t memory = 0;
+    int64_t disk   = 0;
 };
 
 ReuseLens getPrefillReuseLens(std::shared_ptr<GenerateStream>& stream) {
@@ -28,6 +29,7 @@ ReuseLens getPrefillReuseLens(std::shared_ptr<GenerateStream>& stream) {
     reuse_lens.local  = stream->prefillLocalReuseLen();
     reuse_lens.remote = stream->prefillRemoteReuseLen();
     reuse_lens.memory = stream->prefillMemoryReuseLen();
+    reuse_lens.disk   = stream->prefillDiskReuseLen();
     return reuse_lens;
 }
 
@@ -48,7 +50,7 @@ bool parseGrpcPort(const std::string& port_text, uint32_t* port) {
 
 }  // namespace
 
-bool decodeEntranceRequiresPrefill(const GenerateInputPB& request) {
+bool shouldUsePDSeparation(const GenerateInputPB& request) {
     return request.generate_config().max_new_tokens() > 1 && request.generate_config().num_beams() <= 1
            && request.generate_config().variable_num_beams().size() == 0
            && request.generate_config().num_return_sequences() <= 1
@@ -178,7 +180,7 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
     int64_t         handoff_id        = 0;
 
     // Check if pd separation should be used
-    auto pd_separation = decodeEntranceRequiresPrefill(*request);
+    auto pd_separation = shouldUsePDSeparation(*request);
     if (pd_separation) {
         handoff_id                = unique_key_id_.fetch_add(1);
         auto decode_entrance_keys =
@@ -341,6 +343,7 @@ void DecodeRpcServerNew2::updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shar
         const auto decode_local_reuse_len  = aux_info->local_reuse_len();
         const auto decode_remote_reuse_len = aux_info->remote_reuse_len();
         const auto decode_memory_reuse_len = aux_info->memory_reuse_len();
+        const auto decode_disk_reuse_len   = aux_info->disk_reuse_len();
         aux_info->set_first_token_cost_time_us(first_token_rt_us);
         aux_info->set_cost_time_us(cost_time_us);
         aux_info->set_pd_sep(true);
@@ -350,16 +353,19 @@ void DecodeRpcServerNew2::updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shar
         aux_info->set_local_reuse_len(reuse_lens.local);
         aux_info->set_remote_reuse_len(reuse_lens.remote);
         aux_info->set_memory_reuse_len(static_cast<int32_t>(reuse_lens.memory));
+        aux_info->set_disk_reuse_len(static_cast<int32_t>(reuse_lens.disk));
 
         aux_info->set_prefill_total_reuse_len(reuse_lens.total);
         aux_info->set_prefill_local_reuse_len(reuse_lens.local);
         aux_info->set_prefill_remote_reuse_len(reuse_lens.remote);
         aux_info->set_prefill_memory_reuse_len(static_cast<int32_t>(reuse_lens.memory));
+        aux_info->set_prefill_disk_reuse_len(static_cast<int32_t>(reuse_lens.disk));
 
         aux_info->set_decode_total_reuse_len(decode_total_reuse_len);
         aux_info->set_decode_local_reuse_len(decode_local_reuse_len);
         aux_info->set_decode_remote_reuse_len(decode_remote_reuse_len);
         aux_info->set_decode_memory_reuse_len(decode_memory_reuse_len);
+        aux_info->set_decode_disk_reuse_len(decode_disk_reuse_len);
     }
 }
 

@@ -5,14 +5,14 @@
 #include "grpc++/grpc++.h"
 
 #include "autil/NetUtil.h"
-#include "rtp_llm/cpp/cache/connector/p2p/PrefillLoadCaller.h"
+#include "rtp_llm/cpp/cache/connector/p2p/DecodeLoadHelper.h"
 #include "rtp_llm/cpp/utils/Exception.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/TestRpcServer.h"
 
 namespace rtp_llm {
 
-class PrefillLoadCallerTest: public ::testing::Test {
+class DecodeLoadHelperTest: public ::testing::Test {
 protected:
     void SetUp() override {
         // 创建测试用的 RPC 服务器
@@ -24,8 +24,8 @@ protected:
         // worker_addrs_ 格式: "host:cache_store_port:grpc_port"
         worker_addrs_.push_back("127.0.0.1:12345:" + std::to_string(server_->listenPort()));
 
-        // 创建 PrefillLoadCaller
-        client_ = std::make_unique<PrefillLoadCaller>(worker_addrs_);
+        // 创建 DecodeLoadHelper
+        client_ = std::make_unique<DecodeLoadHelper>(worker_addrs_);
     }
 
     void TearDown() override {
@@ -34,7 +34,7 @@ protected:
     }
 
     // 等待 Result 完成（封装 checkDone 的轮询逻辑）
-    bool waitDone(std::shared_ptr<PrefillLoadCaller::Result>& result, int timeout_ms = 5000) {
+    bool waitDone(std::shared_ptr<DecodeLoadHelper::Result>& result, int timeout_ms = 5000) {
         int waited_ms = 0;
         while (!result->done() && waited_ms < timeout_ms) {
             result->checkDone();
@@ -50,11 +50,11 @@ protected:
     std::unique_ptr<TestRpcServer>     server_;
     std::string                        server_addr_;
     std::vector<std::string>           worker_addrs_;
-    std::unique_ptr<PrefillLoadCaller> client_;
+    std::unique_ptr<DecodeLoadHelper> client_;
 };
 
-TEST(PrefillLoadCallerWorkerAddrTest, ConstructorParsesHostIpv4AndIpv6WorkerAddrs) {
-    PrefillLoadCaller caller({
+TEST(DecodeLoadHelperWorkerAddrTest, ConstructorParsesHostIpv4AndIpv6WorkerAddrs) {
+    DecodeLoadHelper caller({
         "127.0.0.1:12345:23456",
         "prefill-decode.local:12346:23457",
         "[::1]:12347:23458",
@@ -72,17 +72,17 @@ TEST(PrefillLoadCallerWorkerAddrTest, ConstructorParsesHostIpv4AndIpv6WorkerAddr
     EXPECT_EQ(caller.tp_worker_infos_[3].cache_store_port(), 12348);
 }
 
-TEST(PrefillLoadCallerWorkerAddrTest, ConstructorRejectsMalformedWorkerAddrOrInvalidPorts) {
-    EXPECT_THROW(PrefillLoadCaller({"127.0.0.1:0:23456"}), rtp_llm::RTPException);
-    EXPECT_THROW(PrefillLoadCaller({"127.0.0.1:12345:65536"}), rtp_llm::RTPException);
-    EXPECT_THROW(PrefillLoadCaller({"127.0.0.1:12345:not-a-port"}), rtp_llm::RTPException);
-    EXPECT_THROW(PrefillLoadCaller({"[::1]12345:23456"}), rtp_llm::RTPException);
-    EXPECT_THROW(PrefillLoadCaller({"fe80::1"}), rtp_llm::RTPException);
+TEST(DecodeLoadHelperWorkerAddrTest, ConstructorRejectsMalformedWorkerAddrOrInvalidPorts) {
+    EXPECT_THROW(DecodeLoadHelper({"127.0.0.1:0:23456"}), rtp_llm::RTPException);
+    EXPECT_THROW(DecodeLoadHelper({"127.0.0.1:12345:65536"}), rtp_llm::RTPException);
+    EXPECT_THROW(DecodeLoadHelper({"127.0.0.1:12345:not-a-port"}), rtp_llm::RTPException);
+    EXPECT_THROW(DecodeLoadHelper({"[::1]12345:23456"}), rtp_llm::RTPException);
+    EXPECT_THROW(DecodeLoadHelper({"fe80::1"}), rtp_llm::RTPException);
 }
 
 // ---------------------------- load ----------------------------
 
-TEST_F(PrefillLoadCallerTest, Load_ReturnNotNull_RequestSuccess) {
+TEST_F(DecodeLoadHelperTest, Load_ReturnNotNull_RequestSuccess) {
     std::string unique_key   = "test_load_1";
     int64_t     request_id   = 1001;
     int64_t     deadline_ms  = currentTimeMs() + 5000;
@@ -101,12 +101,13 @@ TEST_F(PrefillLoadCallerTest, Load_ReturnNotNull_RequestSuccess) {
     EXPECT_TRUE(result->done());
     EXPECT_TRUE(result->success());
     EXPECT_EQ(result->response.error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_EQ(result->side_channel_payload.disk_reuse_len, 3);
 
     // 验证 StartLoad 被调用
     EXPECT_EQ(server_->service()->getStartLoadCallCount(), 1);
 }
 
-TEST_F(PrefillLoadCallerTest, LoadCarriesRequestDeadlineButUsesTransferTimeout) {
+TEST_F(DecodeLoadHelperTest, LoadCarriesRequestDeadlineButUsesTransferTimeout) {
     const int64_t request_deadline_ms  = currentTimeMs() + 5000;
     const int64_t transfer_deadline_ms = currentTimeMs() + 500;
 
@@ -125,7 +126,7 @@ TEST_F(PrefillLoadCallerTest, LoadCarriesRequestDeadlineButUsesTransferTimeout) 
     EXPECT_TRUE(waitDone(result));
 }
 
-TEST_F(PrefillLoadCallerTest, LoadRejectsSuccessfulResponseWithoutFirstToken) {
+TEST_F(DecodeLoadHelperTest, LoadRejectsSuccessfulResponseWithoutFirstToken) {
     server_->service()->setFirstGenerateTokenId(0);
     const int64_t deadline_ms = currentTimeMs() + 5000;
 
@@ -143,7 +144,7 @@ TEST_F(PrefillLoadCallerTest, LoadRejectsSuccessfulResponseWithoutFirstToken) {
     EXPECT_EQ(result->error_code, ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED);
 }
 
-TEST_F(PrefillLoadCallerTest, Load_ReturnNotNull_RequestFailed) {
+TEST_F(DecodeLoadHelperTest, Load_ReturnNotNull_RequestFailed) {
     // 设置服务器返回失败
     server_->service()->setStartLoadResponseSuccess(false);
 
@@ -168,7 +169,7 @@ TEST_F(PrefillLoadCallerTest, Load_ReturnNotNull_RequestFailed) {
     EXPECT_EQ(server_->service()->getStartLoadCallCount(), 1);
 }
 
-TEST_F(PrefillLoadCallerTest, Load_ReturnNotNull_Timeout) {
+TEST_F(DecodeLoadHelperTest, Load_ReturnNotNull_Timeout) {
     // 设置服务器延迟响应
     server_->service()->setSleepMillis(200);
 
@@ -191,7 +192,7 @@ TEST_F(PrefillLoadCallerTest, Load_ReturnNotNull_Timeout) {
     EXPECT_GE(server_->service()->getStartLoadCallCount(), 1);
 }
 
-TEST_F(PrefillLoadCallerTest, CancelIsSerializedWithCompletionQueuePolling) {
+TEST_F(DecodeLoadHelperTest, CancelIsSerializedWithCompletionQueuePolling) {
     server_->service()->setSleepMillis(200);
     const int64_t deadline_ms = currentTimeMs() + 5000;
     auto result = client_->load(1005,
@@ -217,7 +218,7 @@ TEST_F(PrefillLoadCallerTest, CancelIsSerializedWithCompletionQueuePolling) {
     EXPECT_FALSE(result->success());
 }
 
-TEST_F(PrefillLoadCallerTest, Load_ReturnNull_InvalidServerAddr) {
+TEST_F(DecodeLoadHelperTest, Load_ReturnNull_InvalidServerAddr) {
     std::string unique_key   = "test_load_invalid_addr";
     int64_t     request_id   = 1004;
     int64_t     deadline_ms  = currentTimeMs() + 5000;
@@ -234,7 +235,7 @@ TEST_F(PrefillLoadCallerTest, Load_ReturnNull_InvalidServerAddr) {
     }
 }
 
-TEST_F(PrefillLoadCallerTest, Load_NormalizesRawIpv6ServerAddr) {
+TEST_F(DecodeLoadHelperTest, Load_NormalizesRawIpv6ServerAddr) {
     std::string unique_key   = "test_load_ipv6_addr";
     int64_t     request_id   = 1008;
     int64_t     deadline_ms  = currentTimeMs() + 100;
@@ -247,13 +248,13 @@ TEST_F(PrefillLoadCallerTest, Load_NormalizesRawIpv6ServerAddr) {
     result->cancel();
 }
 
-TEST_F(PrefillLoadCallerTest, Load_ReturnNull_InvalidTargetPort) {
+TEST_F(DecodeLoadHelperTest, Load_ReturnNull_InvalidTargetPort) {
     const int64_t deadline_ms = currentTimeMs() + 100;
     auto result = client_->load(1009, "::1", 0, "test_load_bad_port", deadline_ms, deadline_ms);
     EXPECT_EQ(result, nullptr);
 }
 
-TEST_F(PrefillLoadCallerTest, Load_ParsesLegacyStartLoadResponse) {
+TEST_F(DecodeLoadHelperTest, Load_ParsesLegacyStartLoadResponse) {
     server_->service()->setUseLegacyStartLoadResponse(true);
     server_->service()->setFirstGenerateTokenId(23456);
 
@@ -285,7 +286,7 @@ TEST_F(PrefillLoadCallerTest, Load_ParsesLegacyStartLoadResponse) {
     EXPECT_EQ(result->side_channel_payload.propose_hidden.shape_size(), 2);
 }
 
-TEST_F(PrefillLoadCallerTest, Load_ReturnNotNull_RpcStatusFailed) {
+TEST_F(DecodeLoadHelperTest, Load_ReturnNotNull_RpcStatusFailed) {
     // 设置服务器返回 RPC 错误状态
     server_->service()->setRpcResponseStatus(::grpc::Status(grpc::StatusCode::INTERNAL, "Internal error"));
 
@@ -312,7 +313,7 @@ TEST_F(PrefillLoadCallerTest, Load_ReturnNotNull_RpcStatusFailed) {
 
 // ---------------------------- checkDone ----------------------------
 
-TEST_F(PrefillLoadCallerTest, CheckDone_NotDoneInitially) {
+TEST_F(DecodeLoadHelperTest, CheckDone_NotDoneInitially) {
     // 设置服务器延迟响应
     server_->service()->setSleepMillis(500);
 
@@ -339,7 +340,7 @@ TEST_F(PrefillLoadCallerTest, CheckDone_NotDoneInitially) {
     EXPECT_TRUE(result->done());
 }
 
-TEST_F(PrefillLoadCallerTest, CheckDone_TotalCostTimeUs) {
+TEST_F(DecodeLoadHelperTest, CheckDone_TotalCostTimeUs) {
     std::string unique_key   = "test_cost_time";
     int64_t     request_id   = 2002;
     int64_t     deadline_ms  = currentTimeMs() + 5000;
@@ -364,7 +365,7 @@ TEST_F(PrefillLoadCallerTest, CheckDone_TotalCostTimeUs) {
 // remaining gRPC deadline when the peer channel was unhealthy. With the bounded-drain
 // fix, cancel() must return within ~100ms (drain budget) + slack regardless of how
 // long the server takes to respond.
-TEST_F(PrefillLoadCallerTest, Cancel_BoundedByDrainDeadline_WhenServerSlow) {
+TEST_F(DecodeLoadHelperTest, Cancel_BoundedByDrainDeadline_WhenServerSlow) {
     // Make the server sleep long enough that the drain budget would be exhausted if
     // we waited synchronously for the call to complete.
     server_->service()->setSleepMillis(5000);
@@ -394,7 +395,7 @@ TEST_F(PrefillLoadCallerTest, Cancel_BoundedByDrainDeadline_WhenServerSlow) {
     EXPECT_FALSE(result->success());
 }
 
-TEST_F(PrefillLoadCallerTest, Cancel_Idempotent) {
+TEST_F(DecodeLoadHelperTest, Cancel_Idempotent) {
     server_->service()->setSleepMillis(200);
 
     std::string unique_key   = "test_cancel_idempotent";

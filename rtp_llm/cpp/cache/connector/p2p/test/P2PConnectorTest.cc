@@ -278,7 +278,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenSchedulerHandleReadFailed
     auto        resource    = createValidKVCacheResource(2, 2);
     auto        stream      = createGenerateStream(unique_key, request_id, timeout_ms);
     auto        meta        = createMockMeta(stream.get());
-    connector_->asyncMatch(resource, meta);
+    connector_->asyncRead(resource, meta, 0, 0);
 
     // 3. 设置 TestRpcServer 返回失败（用于 scheduler_->sendKVCache）
     for (auto& server : tp_broadcast_servers_) {
@@ -304,7 +304,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenWaitSideChannelTimeout) {
     auto        resource    = createValidKVCacheResource(2, 2);
     auto        stream      = createGenerateStream(unique_key, request_id, timeout_ms);
     auto        meta        = createMockMeta(stream.get());
-    connector_->asyncMatch(resource, meta);
+    connector_->asyncRead(resource, meta, 0, 0);
 
     // 2. 设置 TestRpcServer 返回成功（用于 scheduler_->sendKVCache）
     for (auto& server : tp_broadcast_servers_) {
@@ -469,7 +469,7 @@ TEST_F(P2PConnectorTest, ExecuteNoTransferReleasesLocalPrefillResource) {
     std::weak_ptr<KVCacheResource> weak_resource = resource;
     auto stream = createGenerateStream(unique_key, request_id, timeout_ms);
     auto meta   = createMockMeta(stream.get());
-    ASSERT_NE(rank1_connector->asyncMatch(resource, meta), nullptr);
+    ASSERT_NE(rank1_connector->asyncRead(resource, meta, 0, 0), nullptr);
     resource.reset();
     EXPECT_FALSE(weak_resource.expired());
 
@@ -502,7 +502,7 @@ TEST_F(P2PConnectorTest, ExecuteHandleReadFailureStillReleasesLocalPrefillResour
     std::weak_ptr<KVCacheResource> weak_resource = resource;
     auto stream = createGenerateStream(unique_key, request_id, timeout_ms);
     auto meta   = createMockMeta(stream.get());
-    ASSERT_NE(rank1_connector->asyncMatch(resource, meta), nullptr);
+    ASSERT_NE(rank1_connector->asyncRead(resource, meta, 0, 0), nullptr);
     resource.reset();
     EXPECT_FALSE(weak_resource.expired());
 
@@ -521,7 +521,7 @@ TEST_F(P2PConnectorTest, ExecuteHandleReadFailureStillReleasesLocalPrefillResour
 
 // 测试: 成功场景，使用 notifySideChannelReady 机制，返回 OK, 验证 response 中包含了所有字段
 // 注意：这个测试验证了 side-channel 机制的基本流程
-// 1. asyncMatch 添加 entry 到 stream_store
+// 1. asyncRead 注册 entry 到 stream_store
 // 2. notifySideChannelReady 设置 side-channel data
 // 3. handleRead -> waitAndStealResource -> waitAndFillResponse
 // 4. waitAndFillResponse 检查 side_channel_ready，发现已经是 true，立即返回
@@ -534,7 +534,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
     auto        resource    = createValidKVCacheResource(2, 2);
     auto        stream      = createGenerateStream(unique_key, request_id, timeout_ms);
     auto        meta        = createMockMeta(stream.get());
-    connector_->asyncMatch(resource, meta);
+    connector_->asyncRead(resource, meta, 0, 0);
 
     // 2. 设置 TestRpcServer 返回成功（用于 scheduler_->sendKVCache）
     for (auto& server : tp_broadcast_servers_) {
@@ -552,6 +552,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
     data.local_reuse_len  = 5;
     data.remote_reuse_len = 5;
     data.memory_reuse_len = 0;
+    data.disk_reuse_len   = 3;
     data.propose_tokens   = {1001, 1002, 1003};
     data.position_ids     = {1, 2, 3, 4};
     data.propose_probs.set_data_type(TensorPB::FP32);
@@ -573,6 +574,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
     EXPECT_TRUE(response.payload().has_first_generate_token());
     EXPECT_EQ(response.payload().first_generate_token_id(), 12345);
     EXPECT_EQ(response.payload().total_reuse_len(), 10);
+    EXPECT_EQ(response.payload().disk_reuse_len(), 3);
 
     // 6. 验证 scheduler_->sendKVCache 被调用
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
@@ -588,7 +590,7 @@ TEST_F(P2PConnectorTest, HandleRead_NoTransferSkipsDataTransferAndReturnsSideCha
     auto        resource    = createValidKVCacheResource(2, 2);
     auto        stream      = createGenerateStream(unique_key, request_id, timeout_ms);
     auto        meta        = createMockMeta(stream.get());
-    connector_->asyncMatch(resource, meta);
+    connector_->asyncRead(resource, meta, 0, 0);
 
     P2PConnectorResourceEntry::SideChannelData data;
     data.has_first_token = true;
@@ -623,7 +625,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WhenNotifySideChannelAfterSteal) {
     auto        resource    = createValidKVCacheResource(2, 2);
     auto        stream      = createGenerateStream(unique_key, request_id, timeout_ms);
     auto        meta        = createMockMeta(stream.get());
-    connector_->asyncMatch(resource, meta);
+    connector_->asyncRead(resource, meta, 0, 0);
 
     for (auto& server : tp_broadcast_servers_) {
         server->service()->setP2PResponseSuccess(true);
@@ -674,7 +676,7 @@ TEST_F(P2PConnectorTest, HandleRead_PreservesZeroFirstToken) {
     auto        resource    = createValidKVCacheResource(2, 2);
     auto        stream      = createGenerateStream(unique_key, request_id, timeout_ms);
     auto        meta        = createMockMeta(stream.get());
-    connector_->asyncMatch(resource, meta);
+    connector_->asyncRead(resource, meta, 0, 0);
 
     for (auto& server : tp_broadcast_servers_) {
         server->service()->setP2PResponseSuccess(true);

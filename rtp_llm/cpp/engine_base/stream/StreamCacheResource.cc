@@ -161,7 +161,11 @@ void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* s
 
     if (payload.total_reuse_len > 0) {
         stream->setPrefillReuseLength(
-            payload.total_reuse_len, payload.local_reuse_len, payload.remote_reuse_len, payload.memory_reuse_len);
+            payload.total_reuse_len,
+            payload.local_reuse_len,
+            payload.remote_reuse_len,
+            payload.memory_reuse_len,
+            payload.disk_reuse_len);
     }
 
     const bool has_probs = payload.propose_probs.shape_size() > 0 || !payload.propose_probs.fp16_data().empty()

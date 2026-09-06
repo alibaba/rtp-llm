@@ -388,11 +388,16 @@ void GenerateStream::setInitialReuseLength(int initial_reuse_length) {
     initial_reuse_length_ = initial_reuse_length;
 }
 
-void GenerateStream::setPrefillReuseLength(int64_t total, int64_t local, int64_t remote, int64_t memory) {
+void GenerateStream::setPrefillReuseLength(int64_t total,
+                                           int64_t local,
+                                           int64_t remote,
+                                           int64_t memory,
+                                           int64_t disk) {
     prefill_total_reuse_len_  = total;
     prefill_local_reuse_len_  = local;
     prefill_remote_reuse_len_ = remote;
     prefill_memory_reuse_len_ = memory;
+    prefill_disk_reuse_len_   = disk;
 }
 
 int64_t GenerateStream::prefillTotalReuseLen() const {
@@ -409,6 +414,10 @@ int64_t GenerateStream::prefillRemoteReuseLen() const {
 
 int64_t GenerateStream::prefillMemoryReuseLen() const {
     return prefill_memory_reuse_len_;
+}
+
+int64_t GenerateStream::prefillDiskReuseLen() const {
+    return prefill_disk_reuse_len_;
 }
 
 void GenerateStream::incLastOutputPos() {

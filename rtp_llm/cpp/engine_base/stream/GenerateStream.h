@@ -208,11 +208,12 @@ public:
     int     diskReuseLength() const;
     void    setInitialReuseLength(int initial_reuse_length);
     void    incLastOutputPos();
-    void    setPrefillReuseLength(int64_t total, int64_t local, int64_t remote, int64_t memory);
+    void    setPrefillReuseLength(int64_t total, int64_t local, int64_t remote, int64_t memory, int64_t disk);
     int64_t prefillTotalReuseLen() const;
     int64_t prefillLocalReuseLen() const;
     int64_t prefillRemoteReuseLen() const;
     int64_t prefillMemoryReuseLen() const;
+    int64_t prefillDiskReuseLen() const;
 
     bool                 isContextStream() const;
     const torch::Tensor& cumLogProbs() const;
@@ -593,6 +594,7 @@ protected:
     int64_t prefill_local_reuse_len_  = 0;
     int64_t prefill_remote_reuse_len_ = 0;
     int64_t prefill_memory_reuse_len_ = 0;
+    int64_t prefill_disk_reuse_len_   = 0;
     // TOOD(xinfei.sxf) fix state
     bool done_                  = false;
     bool released_              = false;

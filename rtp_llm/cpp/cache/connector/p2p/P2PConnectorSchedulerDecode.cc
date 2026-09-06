@@ -37,7 +37,7 @@ P2PConnectorSchedulerDecode::~P2PConnectorSchedulerDecode() {
 }
 
 bool P2PConnectorSchedulerDecode::init(const std::string& process_id) {
-    server_caller_ = std::make_shared<PrefillLoadCaller>(config_.worker_addrs);
+    server_caller_ = std::make_shared<DecodeLoadHelper>(config_.worker_addrs);
 
     auto async_read_pool = std::make_shared<autil::LockFreeThreadPool>(
         kAsyncReadThreadCount, kAsyncReadQueueSize, nullptr, "P2PAsyncReadKickoff");

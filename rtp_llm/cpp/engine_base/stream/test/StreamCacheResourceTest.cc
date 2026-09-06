@@ -1096,7 +1096,7 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenEnqueuesDecodeDuplicateForSuppr
     auto matched_resource = std::make_shared<KVCacheResource>();
     matched_resource->cacheKeys().push_back(1);
     auto broadcast_result = std::make_shared<P2PBroadcastClient::Result>("first-token");
-    auto server_result     = std::make_shared<PrefillLoadCaller::Result>();
+    auto server_result     = std::make_shared<DecodeLoadHelper::Result>();
     server_result->done_                                = true;
     server_result->success_                             = true;
     server_result->side_channel_payload.has_data        = true;
@@ -1131,7 +1131,7 @@ TEST_F(StreamCacheResourceTest, testP2PFirstTokenFinishesSingleTokenRequestAfter
     auto matched_resource = std::make_shared<KVCacheResource>();
     matched_resource->cacheKeys().push_back(1);
     auto broadcast_result = std::make_shared<P2PBroadcastClient::Result>("single-token");
-    auto server_result     = std::make_shared<PrefillLoadCaller::Result>();
+    auto server_result     = std::make_shared<DecodeLoadHelper::Result>();
     server_result->done_                                = true;
     server_result->success_                             = true;
     server_result->side_channel_payload.has_data        = true;

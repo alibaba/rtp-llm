@@ -125,6 +125,11 @@ std::string encodeFp32TensorBytes(std::initializer_list<float> values) {
         } else {
             auto* payload = response->mutable_payload();
             payload->set_first_generate_token_id(first_generate_token_id_);
+            payload->set_total_reuse_len(10);
+            payload->set_local_reuse_len(4);
+            payload->set_remote_reuse_len(6);
+            payload->set_memory_reuse_len(2);
+            payload->set_disk_reuse_len(3);
         }
     } else {
         response->set_error_code(ErrorCodePB::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);

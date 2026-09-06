@@ -11,7 +11,6 @@
 #include <condition_variable>
 #include <functional>
 #include "autil/LoopThread.h"
-#include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
@@ -36,6 +35,7 @@ struct P2PConnectorResourceEntry {
         int32_t              local_reuse_len  = 0;
         int32_t              remote_reuse_len = 0;
         int32_t              memory_reuse_len = 0;
+        int32_t              disk_reuse_len   = 0;
         std::vector<int>     propose_tokens;
         TensorPB             propose_probs;
         TensorPB             propose_hidden;

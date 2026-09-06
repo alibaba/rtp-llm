@@ -1,11 +1,11 @@
 #pragma once
 
 #include <string>
+#include <memory>
 #include <vector>
 #include <optional>
 #include <mutex>
 
-#include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"

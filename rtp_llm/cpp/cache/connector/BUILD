@@ -3,7 +3,6 @@ load("//:def.bzl", "copts")
 cc_library(
     name = "connector_base",
     hdrs = [
-        "KVCacheConnector.h",
         "KVCacheConnectorLayerContext.h",
         "Meta.h",
     ],

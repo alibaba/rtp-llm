@@ -666,6 +666,7 @@ message SideChannelPayloadPB {
     int32  remote_reuse_len        = 5;
     int32  memory_reuse_len        = 6;
     bool   has_first_generate_token = 7;
+    int32  disk_reuse_len          = 8;
 }
 
 message P2PConnectorStartLoadResponsePB {

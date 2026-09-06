@@ -8,7 +8,6 @@ cc_library(
     name = "connector_mock_files_lib",
     hdrs = [
         "MockAsyncContext.h",
-        "MockKVCacheConnector.h",
         "MockKVCacheConnectorReadWriteContext.h",
     ],
     deps = [

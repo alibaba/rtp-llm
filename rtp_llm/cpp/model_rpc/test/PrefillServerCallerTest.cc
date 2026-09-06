@@ -100,6 +100,7 @@ public:
             first_aux_info->set_prefill_local_reuse_len(16);
             first_aux_info->set_prefill_remote_reuse_len(72);
             first_aux_info->set_prefill_memory_reuse_len(4);
+            first_aux_info->set_prefill_disk_reuse_len(3);
             if (!writer->Write(first_response)) {
                 return grpc::Status(grpc::StatusCode::INTERNAL, "failed to write first response");
             }
@@ -174,6 +175,7 @@ public:
             second_aux_info->set_prefill_local_reuse_len(24);
             second_aux_info->set_prefill_remote_reuse_len(72);
             second_aux_info->set_prefill_memory_reuse_len(8);
+            second_aux_info->set_prefill_disk_reuse_len(6);
             if (!writer->Write(second_response)) {
                 return grpc::Status(grpc::StatusCode::INTERNAL, "failed to write second response");
             }
@@ -366,6 +368,7 @@ TEST_F(PrefillServerCallerTest, ErrorChunkMarksContextFailedAndPreservesFirstSna
     EXPECT_EQ(reuse_lens.local, 16);
     EXPECT_EQ(reuse_lens.remote, 72);
     EXPECT_EQ(reuse_lens.memory, 4);
+    EXPECT_EQ(reuse_lens.disk, 3);
 }
 
 TEST_F(PrefillServerCallerTest, ErrorChunkCancelsOutstandingRpcAndWaitsForFinish) {
@@ -405,6 +408,7 @@ TEST_F(PrefillServerCallerTest, LaterChunkReuseLensRefreshSnapshot) {
     EXPECT_EQ(reuse_lens.local, 24);
     EXPECT_EQ(reuse_lens.remote, 72);
     EXPECT_EQ(reuse_lens.memory, 8);
+    EXPECT_EQ(reuse_lens.disk, 6);
 }
 
 TEST_F(PrefillServerCallerTest, CancelMarksContextDoneAndUnsuccessful) {
