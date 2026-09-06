@@ -547,8 +547,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         for e in range(layer.num_local_experts):
             up_ratio = up_scales[e] / fused_scales[e]
             gate_ratio = gate_scales[e] / fused_scales[e]
-            up_half = layer.w13.data[e, :M_tp].to(torch.float16) * up_ratio
-            gate_half = layer.w13.data[e, M_tp:].to(torch.float16) * gate_ratio
+            up_half = layer.w13.data[e, :M_tp].to(torch.float32) * up_ratio
+            gate_half = layer.w13.data[e, M_tp:].to(torch.float32) * gate_ratio
             layer.w13.data[e, :M_tp].copy_(up_half.to(layer.w13.dtype))
             layer.w13.data[e, M_tp:].copy_(gate_half.to(layer.w13.dtype))
 
@@ -645,13 +645,19 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             weight, scale = per_block_quant_like_legacy(
                 layer.w13.data[expert_id].contiguous(), BS
             )
-            new_w13[expert_id].copy_(weight)
-            layer.w13_scale[expert_id].copy_(scale)
+            weight, scale = self._requant_block_to_runtime_fp8(
+                weight.unsqueeze(0), scale.unsqueeze(0), block_size
+            )
+            new_w13[expert_id].copy_(weight[0])
+            layer.w13_scale[expert_id].copy_(scale[0])
             weight, scale = per_block_quant_like_legacy(
                 layer.w2.data[expert_id].contiguous(), BS
             )
-            new_w2[expert_id].copy_(weight)
-            layer.w2_scale[expert_id].copy_(scale)
+            weight, scale = self._requant_block_to_runtime_fp8(
+                weight.unsqueeze(0), scale.unsqueeze(0), block_size
+            )
+            new_w2[expert_id].copy_(weight[0])
+            layer.w2_scale[expert_id].copy_(scale[0])
 
         layer.w13 = nn.Parameter(new_w13.contiguous(), requires_grad=False)
         layer.w2 = nn.Parameter(new_w2.contiguous(), requires_grad=False)
