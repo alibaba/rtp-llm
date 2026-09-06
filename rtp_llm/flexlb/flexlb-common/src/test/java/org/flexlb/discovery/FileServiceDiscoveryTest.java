@@ -1,6 +1,8 @@
 package org.flexlb.discovery;
 
 import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.dao.route.DiscoveryConfig;
+import org.flexlb.dao.route.Endpoint;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -39,12 +41,12 @@ class FileServiceDiscoveryTest {
 
         FileServiceDiscovery discovery = new FileServiceDiscovery(file);
 
-        List<WorkerHost> prefill = discovery.getHosts(PREFILL_DOMAIN);
+        List<WorkerHost> prefill = discovery.getHosts(endpoint(PREFILL_DOMAIN));
         assertEquals(2, prefill.size());
         assertEquals("127.0.0.1:55150", prefill.get(0).getIpPort());
         assertEquals("127.0.0.1:55151", prefill.get(1).getIpPort());
 
-        List<WorkerHost> decode = discovery.getHosts(DECODE_DOMAIN);
+        List<WorkerHost> decode = discovery.getHosts(endpoint(DECODE_DOMAIN));
         assertEquals(1, decode.size());
         assertEquals("127.0.0.1:55160", decode.get(0).getIpPort());
 
@@ -59,7 +61,7 @@ class FileServiceDiscoveryTest {
 
         FileServiceDiscovery discovery = new FileServiceDiscovery(file);
 
-        assertTrue(discovery.getHosts("mock.unknown.hosts.address").isEmpty(),
+        assertTrue(discovery.getHosts(endpoint("mock.unknown.hosts.address")).isEmpty(),
                 "a valid file without the requested domain must return an empty list (NoOp parity)");
     }
 
@@ -68,11 +70,11 @@ class FileServiceDiscoveryTest {
         Path file = tempDir.resolve("discovery.json");
         writeAtomically(file, "{\"" + PREFILL_DOMAIN + "\": [\"127.0.0.1:55150\"]}");
         FileServiceDiscovery discovery = new FileServiceDiscovery(file);
-        assertEquals(1, discovery.getHosts(PREFILL_DOMAIN).size());
+        assertEquals(1, discovery.getHosts(endpoint(PREFILL_DOMAIN)).size());
 
         Files.delete(file);
 
-        List<WorkerHost> hosts = discovery.getHosts(PREFILL_DOMAIN);
+        List<WorkerHost> hosts = discovery.getHosts(endpoint(PREFILL_DOMAIN));
         assertEquals(1, hosts.size(), "missing file must serve the last good snapshot, not an empty list");
         assertEquals("127.0.0.1:55150", hosts.get(0).getIpPort());
     }
@@ -82,12 +84,12 @@ class FileServiceDiscoveryTest {
         Path file = tempDir.resolve("discovery.json");
         writeAtomically(file, "{\"" + PREFILL_DOMAIN + "\": [\"127.0.0.1:55150\"]}");
         FileServiceDiscovery discovery = new FileServiceDiscovery(file);
-        assertEquals(1, discovery.getHosts(PREFILL_DOMAIN).size());
+        assertEquals(1, discovery.getHosts(endpoint(PREFILL_DOMAIN)).size());
 
         // A partial write window caught mid-rename: truncated JSON.
         writeAtomically(file, "{\"" + PREFILL_DOMAIN + "\": [\"127.0.0.1:55150\", \"127.0.0.");
 
-        List<WorkerHost> hosts = discovery.getHosts(PREFILL_DOMAIN);
+        List<WorkerHost> hosts = discovery.getHosts(endpoint(PREFILL_DOMAIN));
         assertEquals(1, hosts.size(), "corrupted JSON must fall back to the last good snapshot");
         assertEquals("127.0.0.1:55150", hosts.get(0).getIpPort());
     }
@@ -97,13 +99,13 @@ class FileServiceDiscoveryTest {
         Path file = tempDir.resolve("discovery.json");
         writeAtomically(file, "{\"" + PREFILL_DOMAIN + "\": [\"127.0.0.1:55150\"]}");
         FileServiceDiscovery discovery = new FileServiceDiscovery(file);
-        assertEquals(1, discovery.getHosts(PREFILL_DOMAIN).size());
+        assertEquals(1, discovery.getHosts(endpoint(PREFILL_DOMAIN)).size());
 
         // New file has one valid + one invalid entry — the whole parse must fail
         // so callers never observe a half list.
         writeAtomically(file, "{\"" + PREFILL_DOMAIN + "\": [\"127.0.0.1:55150\", \"not-a-host\"]}");
 
-        List<WorkerHost> hosts = discovery.getHosts(PREFILL_DOMAIN);
+        List<WorkerHost> hosts = discovery.getHosts(endpoint(PREFILL_DOMAIN));
         assertEquals(1, hosts.size(), "a snapshot with any invalid entry must be rejected entirely");
         assertEquals("127.0.0.1:55150", hosts.get(0).getIpPort());
     }
@@ -113,7 +115,7 @@ class FileServiceDiscoveryTest {
         Path file = tempDir.resolve("discovery.json");
         writeAtomically(file, "{\"" + PREFILL_DOMAIN + "\": [\"127.0.0.1:55150\"]}");
         FileServiceDiscovery discovery = new FileServiceDiscovery(file);
-        assertEquals(1, discovery.getHosts(PREFILL_DOMAIN).size());
+        assertEquals(1, discovery.getHosts(endpoint(PREFILL_DOMAIN)).size());
 
         // Atomic-rename style hot update: write a tmp sibling then move over.
         writeAtomically(file, "{"
@@ -121,10 +123,10 @@ class FileServiceDiscoveryTest {
                 + "\"" + DECODE_DOMAIN + "\": [\"127.0.0.1:55160\"]"
                 + "}");
 
-        List<WorkerHost> hosts = discovery.getHosts(PREFILL_DOMAIN);
+        List<WorkerHost> hosts = discovery.getHosts(endpoint(PREFILL_DOMAIN));
         assertEquals(3, hosts.size(), "hot update must be visible on the next getHosts call");
         assertEquals("127.0.0.1:55152", hosts.get(2).getIpPort());
-        assertEquals(1, discovery.getHosts(DECODE_DOMAIN).size());
+        assertEquals(1, discovery.getHosts(endpoint(DECODE_DOMAIN)).size());
     }
 
     @Test
@@ -132,13 +134,13 @@ class FileServiceDiscoveryTest {
         Path file = tempDir.resolve("discovery.json");
         writeAtomically(file, "{\"" + PREFILL_DOMAIN + "\": [\"127.0.0.1:55150\"]}");
         FileServiceDiscovery discovery = new FileServiceDiscovery(file);
-        assertEquals(1, discovery.getHosts(PREFILL_DOMAIN).size());
+        assertEquals(1, discovery.getHosts(endpoint(PREFILL_DOMAIN)).size());
 
         writeAtomically(file, "{corrupt");
-        assertEquals(1, discovery.getHosts(PREFILL_DOMAIN).size(), "fallback during corruption window");
+        assertEquals(1, discovery.getHosts(endpoint(PREFILL_DOMAIN)).size(), "fallback during corruption window");
 
         writeAtomically(file, "{\"" + PREFILL_DOMAIN + "\": [\"127.0.0.1:55200\"]}");
-        assertEquals("127.0.0.1:55200", discovery.getHosts(PREFILL_DOMAIN).get(0).getIpPort(),
+        assertEquals("127.0.0.1:55200", discovery.getHosts(endpoint(PREFILL_DOMAIN)).get(0).getIpPort(),
                 "once the file is valid again the new snapshot must win");
     }
 
@@ -148,7 +150,7 @@ class FileServiceDiscoveryTest {
         FileServiceDiscovery discovery = new FileServiceDiscovery(file);
 
         IllegalStateException e = assertThrows(IllegalStateException.class,
-                () -> discovery.getHosts(PREFILL_DOMAIN),
+                () -> discovery.getHosts(endpoint(PREFILL_DOMAIN)),
                 "first read failure with no fallback must throw (misconfiguration should be loud)");
         assertNotNull(e.getMessage());
         assertTrue(e.getMessage().contains("no previous snapshot"),
@@ -156,13 +158,36 @@ class FileServiceDiscoveryTest {
     }
 
     @Test
-    void blankAddressReturnsEmptyList() throws Exception {
+    void validEmptySnapshotRemainsAvailableDuringReadFailure() throws Exception {
+        Path file = tempDir.resolve("discovery.json");
+        writeAtomically(file, "{}");
+        FileServiceDiscovery discovery = new FileServiceDiscovery(file);
+        Endpoint endpoint = endpoint(PREFILL_DOMAIN);
+
+        assertTrue(discovery.getHosts(endpoint).isEmpty());
+        Files.delete(file);
+
+        assertTrue(discovery.getHosts(endpoint).isEmpty(),
+                "an empty but valid snapshot must still count as a last-good snapshot");
+    }
+
+    @Test
+    void blankAddressIsRejectedByProviderContract() throws Exception {
         Path file = tempDir.resolve("discovery.json");
         writeAtomically(file, "{\"" + PREFILL_DOMAIN + "\": [\"127.0.0.1:55150\"]}");
         FileServiceDiscovery discovery = new FileServiceDiscovery(file);
 
-        assertTrue(discovery.getHosts("  ").isEmpty());
-        assertTrue(discovery.getHosts((String) null).isEmpty());
+        assertThrows(IllegalArgumentException.class, () -> discovery.getHosts(endpoint("  ")));
+        assertThrows(IllegalArgumentException.class, () -> discovery.getHosts(endpoint(null)));
+    }
+
+    private static Endpoint endpoint(String address) {
+        DiscoveryConfig discovery = new DiscoveryConfig();
+        discovery.setType(ServiceDiscoveryType.STATIC_ENV);
+        Endpoint endpoint = new Endpoint();
+        endpoint.setAddress(address);
+        endpoint.setDiscovery(discovery);
+        return endpoint;
     }
 
     /** Write via tmp + atomic move, mirroring the writer-side protocol. */

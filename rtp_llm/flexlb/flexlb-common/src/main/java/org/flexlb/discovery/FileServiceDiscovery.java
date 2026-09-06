@@ -21,10 +21,10 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * FileServiceDiscovery - File-based service discovery with dynamic reload.
  *
- * <p>Replaces env-var-only static discovery for mock/test
- * deployments: the domain to hosts mapping lives in a small JSON file that an
+ * <p>Replaces {@link StaticServiceDiscoveryProvider} for mock/test deployments
+ * when {@code FLEXLB_DISCOVERY_FILE} is configured: the domain to hosts mapping lives in a small JSON file that an
  * external orchestrator (or the mock engine control plane) rewrites atomically
- * (tmp file + rename). Every {@link #getHosts(String)} call re-reads the file
+ * (tmp file + rename). Every {@link #getHosts(Endpoint)} call re-reads the file
  * so changes are picked up by the master's periodic sync loop without restart.
  *
  * <p>File format (compact, aligned with the endpoints.json semantics — entries
@@ -44,7 +44,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * the service has no workers.
  */
 @Slf4j
-public final class FileServiceDiscovery implements ServiceDiscovery {
+public final class FileServiceDiscovery implements ServiceDiscoveryProvider {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     /** Rate limit for the repeated fallback debug log (per instance). */
@@ -52,7 +52,7 @@ public final class FileServiceDiscovery implements ServiceDiscovery {
 
     private final Path file;
     /** Last fully-parsed snapshot; replaced wholesale on every successful read. */
-    private volatile Map<String, List<WorkerHost>> lastGoodSnapshot = Map.of();
+    private volatile Map<String, List<WorkerHost>> lastGoodSnapshot;
     private final AtomicLong lastFallbackLogNanos = new AtomicLong();
 
     public FileServiceDiscovery(String filePath) {
@@ -63,7 +63,24 @@ public final class FileServiceDiscovery implements ServiceDiscovery {
         this.file = file;
     }
 
-    public List<WorkerHost> getHosts(String address) {
+    @Override
+    public ServiceDiscoveryType getType() {
+        return ServiceDiscoveryType.STATIC_ENV;
+    }
+
+    @Override
+    public void validate(Endpoint endpoint) {
+        validateEndpoint(endpoint);
+        hostsForAddress(endpoint.getAddress());
+    }
+
+    @Override
+    public List<WorkerHost> getHosts(Endpoint endpoint) {
+        validateEndpoint(endpoint);
+        return hostsForAddress(endpoint.getAddress());
+    }
+
+    private List<WorkerHost> hostsForAddress(String address) {
         if (StringUtils.isBlank(address)) {
             log.warn("Service address is blank, returning empty host list");
             return Collections.emptyList();
@@ -74,7 +91,7 @@ public final class FileServiceDiscovery implements ServiceDiscovery {
             lastGoodSnapshot = snapshot;
         } catch (Exception e) {
             snapshot = lastGoodSnapshot;
-            if (snapshot.isEmpty()) {
+            if (snapshot == null) {
                 throw new IllegalStateException(String.format(
                         "FileServiceDiscovery failed to read discovery file and no previous snapshot "
                                 + "exists for fallback, address=%s, file=%s, cause=%s",
@@ -90,35 +107,13 @@ public final class FileServiceDiscovery implements ServiceDiscovery {
         return hosts;
     }
 
-    public void listen(String address, ServiceHostListener listener) {
-        log.info("FileServiceDiscovery relies on per-call re-read for address: {} (no push listener)", address);
-        // Same contract as NoOpServiceDiscovery: no dynamic push, but trigger the
-        // listener once with the current view so initial wiring completes.
-        if (listener != null) {
-            listener.onHostsChanged(getHosts(address));
-        }
-    }
-
-    @Override
-    public void validate(Endpoint endpoint) {
-        if (endpoint == null || StringUtils.isBlank(endpoint.getAddress())) {
-            throw new IllegalArgumentException("file discovery address must not be blank");
-        }
-        getHosts(endpoint.getAddress());
-    }
-
-    @Override
-    public List<WorkerHost> getHosts(Endpoint endpoint) {
-        if (endpoint == null) {
-            return Collections.emptyList();
-        }
-        return getHosts(endpoint.getAddress());
-    }
-
     @Override
     public void listen(Endpoint endpoint, ServiceHostListener listener) {
-        String address = endpoint == null ? null : endpoint.getAddress();
-        log.info("FileServiceDiscovery relies on per-call re-read for address: {} (no push listener)", address);
+        validateEndpoint(endpoint);
+        log.info("FileServiceDiscovery relies on per-call re-read for address: {} (no push listener)",
+                endpoint.getAddress());
+        // There is no dynamic push, but trigger the
+        // listener once with the current view so initial wiring completes.
         if (listener != null) {
             listener.onHostsChanged(getHosts(endpoint));
         }
@@ -160,6 +155,16 @@ public final class FileServiceDiscovery implements ServiceDiscovery {
             result.put(entry.getKey(), List.copyOf(hosts));
         }
         return result;
+    }
+
+    private static void validateEndpoint(Endpoint endpoint) {
+        if (endpoint == null || StringUtils.isBlank(endpoint.getAddress())) {
+            throw new IllegalArgumentException("file discovery endpoint address must not be blank");
+        }
+        if (endpoint.getDiscovery() == null || endpoint.getDiscovery().getType() != ServiceDiscoveryType.STATIC_ENV) {
+            throw new IllegalArgumentException(
+                    "file discovery requires static-env discovery for address: " + endpoint.getAddress());
+        }
     }
 
     /** Parse an {@code ip:port} string (HTTP port — grpc port = http + 1). */
