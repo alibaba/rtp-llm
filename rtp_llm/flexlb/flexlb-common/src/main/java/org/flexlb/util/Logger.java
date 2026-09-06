@@ -5,92 +5,445 @@ import org.flexlb.enums.LogLevel;
 import org.slf4j.LoggerFactory;
 
 /**
- * Logging utility wrapping SLF4J with runtime log-level control via logback.
- *
- * <p>All filtering is delegated to logback — there is no custom gating.
- * {@link #setLevel(LogLevel)} directly updates the {@code flexlbLogger} logback logger,
- * so the {@code update_log_level} API and the logback configuration stay in sync.</p>
- *
- * <p>{@code INFO}, {@code WARN} and {@code ERROR} are enabled by default (logback
- * {@code flexlbLogger} starts at {@code INFO}).</p>
+ * Business logger facade. Log filtering is delegated to the configured SLF4J backend.
  */
-public class Logger {
+public final class Logger {
 
     private static final org.slf4j.Logger log = LoggerFactory.getLogger("flexlbLogger");
 
     static {
-        String logLevelStr = System.getenv("LOG_LEVEL");
-        if (logLevelStr != null) {
+        String logLevel = System.getenv("LOG_LEVEL");
+        if (logLevel != null) {
             try {
-                setLevel(LogLevel.valueOf(logLevelStr.toUpperCase().trim()));
-            } catch (IllegalArgumentException e) {
-                log.warn("Invalid LOG_LEVEL value: '{}'. Valid values are: TRACE, DEBUG, INFO, WARN, ERROR.", logLevelStr);
+                setLevel(LogLevel.valueOf(logLevel.toUpperCase().trim()));
+            } catch (IllegalArgumentException error) {
+                log.warn("Invalid LOG_LEVEL value: '{}'. Valid values are: TRACE, DEBUG, INFO, WARN, ERROR.",
+                        logLevel);
             }
         }
     }
 
-    // ---- Logging methods (delegate directly to SLF4J) ----
-
-    public static void trace(String format, Object... args) {
-        log.trace(format, args);
+    private Logger() {
     }
 
-    public static void debug(String format, Object... args) {
-        log.debug(format, args);
-    }
-
-    /**
-     * Returns whether DEBUG logging is enabled for the FlexLB logger.
-     *
-     * <p>Callers that need to build expensive diagnostic arguments can use
-     * this guard to keep the disabled logging path allocation-free.</p>
-     */
     public static boolean isDebugEnabled() {
         return log.isDebugEnabled();
     }
 
-    public static void info(String format, Object... args) {
-        log.info(format, args);
+    public static void trace(String message) {
+        log.trace(message);
     }
 
-    public static void warn(String format, Object... args) {
-        log.warn(format, args);
+    public static void trace(String format, Object argument) {
+        log.trace(format, argument);
     }
 
-    public static void error(String format, Object... args) {
-        log.error(format, args);
+    public static void trace(String format, Object firstArgument, Object secondArgument) {
+        log.trace(format, firstArgument, secondArgument);
     }
 
-    // ---- Runtime level control ----
+    public static void trace(String message, Throwable throwable) {
+        log.trace(message, throwable);
+    }
+
+    public static void debug(String message) {
+        log.debug(message);
+    }
+
+    public static void debug(String format, Object argument) {
+        log.debug(format, argument);
+    }
+
+    public static void debug(String format, Object firstArgument, Object secondArgument) {
+        log.debug(format, firstArgument, secondArgument);
+    }
+
+    public static void debug(String message, Throwable throwable) {
+        log.debug(message, throwable);
+    }
+
+    public static void debug(
+            String format, Object firstArgument, Object secondArgument, Object thirdArgument) {
+        if (log.isDebugEnabled()) {
+            log.debug(format, firstArgument, secondArgument, thirdArgument);
+        }
+    }
+
+    public static void debug(
+            String format,
+            Object firstArgument,
+            Object secondArgument,
+            Object thirdArgument,
+            Object fourthArgument) {
+        if (log.isDebugEnabled()) {
+            log.debug(format, firstArgument, secondArgument, thirdArgument, fourthArgument);
+        }
+    }
+
+    public static void debug(
+            String format,
+            Object firstArgument,
+            Object secondArgument,
+            Object thirdArgument,
+            Object fourthArgument,
+            Object fifthArgument) {
+        if (log.isDebugEnabled()) {
+            log.debug(format, firstArgument, secondArgument, thirdArgument, fourthArgument, fifthArgument);
+        }
+    }
+
+    public static void debug(
+            String format,
+            Object firstArgument,
+            Object secondArgument,
+            Object thirdArgument,
+            Object fourthArgument,
+            Object fifthArgument,
+            Object sixthArgument) {
+        if (log.isDebugEnabled()) {
+            log.debug(format,
+                    firstArgument,
+                    secondArgument,
+                    thirdArgument,
+                    fourthArgument,
+                    fifthArgument,
+                    sixthArgument);
+        }
+    }
+
+    public static void info(String message) {
+        log.info(message);
+    }
+
+    public static void info(String format, Object argument) {
+        log.info(format, argument);
+    }
+
+    public static void info(String format, Object firstArgument, Object secondArgument) {
+        log.info(format, firstArgument, secondArgument);
+    }
+
+    public static void info(String message, Throwable throwable) {
+        log.info(message, throwable);
+    }
+
+    public static void info(
+            String format, Object firstArgument, Object secondArgument, Object thirdArgument) {
+        if (log.isInfoEnabled()) {
+            log.info(format, firstArgument, secondArgument, thirdArgument);
+        }
+    }
+
+    public static void warn(String message) {
+        log.warn(message);
+    }
+
+    public static void warn(String format, Object argument) {
+        log.warn(format, argument);
+    }
+
+    public static void warn(String format, Object firstArgument, Object secondArgument) {
+        log.warn(format, firstArgument, secondArgument);
+    }
+
+    public static void warn(String message, Throwable throwable) {
+        log.warn(message, throwable);
+    }
+
+    public static void warn(
+            String format, Object firstArgument, Object secondArgument, Object thirdArgument) {
+        if (log.isWarnEnabled()) {
+            log.warn(format, firstArgument, secondArgument, thirdArgument);
+        }
+    }
+
+    public static void warn(
+            String format,
+            Object firstArgument,
+            Object secondArgument,
+            Object thirdArgument,
+            Object fourthArgument) {
+        if (log.isWarnEnabled()) {
+            log.warn(format, firstArgument, secondArgument, thirdArgument, fourthArgument);
+        }
+    }
+
+    public static void warn(
+            String format,
+            Object firstArgument,
+            Object secondArgument,
+            Object thirdArgument,
+            Object fourthArgument,
+            Object fifthArgument) {
+        if (log.isWarnEnabled()) {
+            log.warn(format, firstArgument, secondArgument, thirdArgument, fourthArgument, fifthArgument);
+        }
+    }
+
+    public static void error(String message) {
+        log.error(message);
+    }
+
+    public static void error(String format, Object argument) {
+        log.error(format, argument);
+    }
+
+    public static void error(String format, Object firstArgument, Object secondArgument) {
+        log.error(format, firstArgument, secondArgument);
+    }
+
+    public static void error(String message, Throwable throwable) {
+        log.error(message, throwable);
+    }
+
+    public static void error(
+            String format, Object firstArgument, Object secondArgument, Object thirdArgument) {
+        if (log.isErrorEnabled()) {
+            log.error(format, firstArgument, secondArgument, thirdArgument);
+        }
+    }
+
+    public static void error(
+            String format,
+            Object firstArgument,
+            Object secondArgument,
+            Object thirdArgument,
+            Object fourthArgument) {
+        if (log.isErrorEnabled()) {
+            log.error(format, firstArgument, secondArgument, thirdArgument, fourthArgument);
+        }
+    }
+    public static void debug(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7) {
+        if (log.isDebugEnabled()) {
+            log.debug(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7);
+        }
+    }
+
+    public static void debug(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8) {
+        if (log.isDebugEnabled()) {
+            log.debug(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8);
+        }
+    }
+
+    public static void debug(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9) {
+        if (log.isDebugEnabled()) {
+            log.debug(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9);
+        }
+    }
+
+    public static void debug(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10) {
+        if (log.isDebugEnabled()) {
+            log.debug(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10);
+        }
+    }
+
+    public static void debug(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11) {
+        if (log.isDebugEnabled()) {
+            log.debug(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11);
+        }
+    }
+
+    public static void debug(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11, Object argument12) {
+        if (log.isDebugEnabled()) {
+            log.debug(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11, argument12);
+        }
+    }
+
+    public static void debug(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11, Object argument12, Object argument13) {
+        if (log.isDebugEnabled()) {
+            log.debug(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11, argument12, argument13);
+        }
+    }
+
+    public static void info(String format, Object argument1, Object argument2, Object argument3, Object argument4) {
+        if (log.isInfoEnabled()) {
+            log.info(format, argument1, argument2, argument3, argument4);
+        }
+    }
+
+    public static void info(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5) {
+        if (log.isInfoEnabled()) {
+            log.info(format, argument1, argument2, argument3, argument4, argument5);
+        }
+    }
+
+    public static void info(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6) {
+        if (log.isInfoEnabled()) {
+            log.info(format, argument1, argument2, argument3, argument4, argument5, argument6);
+        }
+    }
+
+    public static void info(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7) {
+        if (log.isInfoEnabled()) {
+            log.info(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7);
+        }
+    }
+
+    public static void info(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8) {
+        if (log.isInfoEnabled()) {
+            log.info(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8);
+        }
+    }
+
+    public static void info(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9) {
+        if (log.isInfoEnabled()) {
+            log.info(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9);
+        }
+    }
+
+    public static void info(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10) {
+        if (log.isInfoEnabled()) {
+            log.info(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10);
+        }
+    }
+
+    public static void info(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11) {
+        if (log.isInfoEnabled()) {
+            log.info(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11);
+        }
+    }
+
+    public static void info(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11, Object argument12) {
+        if (log.isInfoEnabled()) {
+            log.info(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11, argument12);
+        }
+    }
+
+    public static void info(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11, Object argument12, Object argument13) {
+        if (log.isInfoEnabled()) {
+            log.info(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11, argument12, argument13);
+        }
+    }
+
+    public static void warn(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6) {
+        if (log.isWarnEnabled()) {
+            log.warn(format, argument1, argument2, argument3, argument4, argument5, argument6);
+        }
+    }
+
+    public static void warn(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7) {
+        if (log.isWarnEnabled()) {
+            log.warn(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7);
+        }
+    }
+
+    public static void warn(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8) {
+        if (log.isWarnEnabled()) {
+            log.warn(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8);
+        }
+    }
+
+    public static void warn(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9) {
+        if (log.isWarnEnabled()) {
+            log.warn(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9);
+        }
+    }
+
+    public static void warn(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10) {
+        if (log.isWarnEnabled()) {
+            log.warn(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10);
+        }
+    }
+
+    public static void warn(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11) {
+        if (log.isWarnEnabled()) {
+            log.warn(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11);
+        }
+    }
+
+    public static void warn(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11, Object argument12) {
+        if (log.isWarnEnabled()) {
+            log.warn(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11, argument12);
+        }
+    }
+
+    public static void warn(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11, Object argument12, Object argument13) {
+        if (log.isWarnEnabled()) {
+            log.warn(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11, argument12, argument13);
+        }
+    }
+
+    public static void error(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5) {
+        if (log.isErrorEnabled()) {
+            log.error(format, argument1, argument2, argument3, argument4, argument5);
+        }
+    }
+
+    public static void error(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6) {
+        if (log.isErrorEnabled()) {
+            log.error(format, argument1, argument2, argument3, argument4, argument5, argument6);
+        }
+    }
+
+    public static void error(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7) {
+        if (log.isErrorEnabled()) {
+            log.error(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7);
+        }
+    }
+
+    public static void error(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8) {
+        if (log.isErrorEnabled()) {
+            log.error(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8);
+        }
+    }
+
+    public static void error(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9) {
+        if (log.isErrorEnabled()) {
+            log.error(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9);
+        }
+    }
+
+    public static void error(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10) {
+        if (log.isErrorEnabled()) {
+            log.error(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10);
+        }
+    }
+
+    public static void error(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11) {
+        if (log.isErrorEnabled()) {
+            log.error(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11);
+        }
+    }
+
+    public static void error(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11, Object argument12) {
+        if (log.isErrorEnabled()) {
+            log.error(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11, argument12);
+        }
+    }
+
+    public static void error(String format, Object argument1, Object argument2, Object argument3, Object argument4, Object argument5, Object argument6, Object argument7, Object argument8, Object argument9, Object argument10, Object argument11, Object argument12, Object argument13) {
+        if (log.isErrorEnabled()) {
+            log.error(format, argument1, argument2, argument3, argument4, argument5, argument6, argument7, argument8, argument9, argument10, argument11, argument12, argument13);
+        }
+    }
 
     /**
-     * Returns the effective log level of the underlying logback logger.
+     * Returns the explicit log level of the underlying FlexLB logger.
      */
     public static LogLevel getLevel() {
-        ch.qos.logback.classic.Logger lbLogger = logbackLogger();
-        Level level = lbLogger.getLevel();
+        Level level = logbackLogger().getLevel();
         if (level == null) {
             return null;
         }
         try {
             return LogLevel.valueOf(level.levelStr.toUpperCase());
-        } catch (IllegalArgumentException e) {
+        } catch (IllegalArgumentException error) {
             return null;
         }
     }
 
     /**
-     * Sets the log level of the underlying {@code flexlbLogger}.
-     * A {@code null} level resets the logger to {@code INFO} (the safe production default).
+     * Updates the runtime FlexLB log level. A null value restores the INFO default.
      */
     public static void setLevel(LogLevel level) {
-        Level lbLevel = level != null
-                ? Level.toLevel(level.name(), Level.INFO)
-                : Level.INFO;
-        logbackLogger().setLevel(lbLevel);
+        Level logbackLevel = level == null
+                ? Level.INFO
+                : Level.toLevel(level.name(), Level.INFO);
+        logbackLogger().setLevel(logbackLevel);
     }
 
     private static ch.qos.logback.classic.Logger logbackLogger() {
         return (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("flexlbLogger");
     }
+
 }

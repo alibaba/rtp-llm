@@ -5,7 +5,7 @@ import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.PriorityScheduler;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.route.Endpoint;
@@ -79,7 +79,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
         }
         ServiceRoute serviceRoute = JsonUtils.toObject(modelConfig, new TypeReference<>() {
         });
-        ModelMetaConfig.putServiceRoute(serviceRoute.getServiceId(), serviceRoute);
+        modelMetaConfig.putServiceRoute(serviceRoute.getServiceId(), serviceRoute);
         modelNames.add(IdUtils.getModelNameByServiceId(serviceRoute.getServiceId()));
     }
 

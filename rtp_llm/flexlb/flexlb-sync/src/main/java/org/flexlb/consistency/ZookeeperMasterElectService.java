@@ -14,8 +14,8 @@ import org.apache.curator.framework.recipes.leader.Participant;
 import org.apache.curator.framework.state.ConnectionState;
 import org.apache.curator.retry.ExponentialBackoffRetry;
 import org.apache.curator.utils.CloseableUtils;
+import org.flexlb.config.LBConsistencyConfig;
 import org.flexlb.constant.ZkMasterEvent;
-import org.flexlb.domain.consistency.LBConsistencyConfig;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -121,7 +121,6 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     private void initializeLBConsistencyConfig() {
         String configStr = System.getenv("FLEXLB_SYNC_CONSISTENCY_CONFIG");
         LOGGER.warn("FLEXLB_SYNC_CONSISTENCY_CONFIG = {}.", configStr);
-
         lbConsistencyConfig = configStr == null
                 ? new LBConsistencyConfig()
                 : JsonUtils.toObject(configStr, LBConsistencyConfig.class);

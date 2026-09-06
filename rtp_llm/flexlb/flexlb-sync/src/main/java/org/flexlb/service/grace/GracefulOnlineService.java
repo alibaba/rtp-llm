@@ -36,8 +36,7 @@ public class GracefulOnlineService implements EnvironmentAware {
     }
 
     public void online() {
-        boolean isTestEnv = Arrays.stream(environment.getActiveProfiles())
-                .anyMatch(e -> "test".equals(e));
+        boolean isTestEnv = Arrays.asList(environment.getActiveProfiles()).contains("test");
         if (isTestEnv) {
             log.info("test env, skip online service");
             return;

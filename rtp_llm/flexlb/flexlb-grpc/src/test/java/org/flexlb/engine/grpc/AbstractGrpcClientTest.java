@@ -1,8 +1,7 @@
 package org.flexlb.engine.grpc;
 
 import io.grpc.ManagedChannel;
-import org.flexlb.cache.core.EngineLocalView;
-import org.flexlb.cache.core.GlobalCacheIndex;
+import org.flexlb.engine.grpc.cache.EngineCacheInvalidator;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.junit.jupiter.api.Test;
 
@@ -11,12 +10,13 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 class AbstractGrpcClientTest {
 
     @Test
     void address_update_manages_all_rpc_service_types() {
-        TestGrpcClient client = new TestGrpcClient();
+        TestGrpcClient client = new TestGrpcClient(mock(EngineCacheInvalidator.class));
 
         client.onAddressUpdate(List.of("10.0.0.1:8080"));
 
@@ -30,10 +30,21 @@ class AbstractGrpcClientTest {
         assertEquals(AbstractGrpcClient.ServiceType.values().length, client.channelCount());
     }
 
+    @Test
+    void address_update_delegates_offline_cache_cleanup() {
+        EngineCacheInvalidator invalidator = mock(EngineCacheInvalidator.class);
+        TestGrpcClient client = new TestGrpcClient(invalidator);
+        List<String> activeAddresses = List.of("10.0.0.1:8080");
+
+        client.onAddressUpdate(activeAddresses);
+
+        verify(invalidator).removeStaleEngineCaches(activeAddresses);
+    }
+
     private static final class TestGrpcClient extends AbstractGrpcClient<AbstractGrpcClient.GrpcStubWrapper> {
 
-        private TestGrpcClient() {
-            super(mock(EngineLocalView.class), mock(GlobalCacheIndex.class), mock(GrpcReporter.class));
+        private TestGrpcClient(EngineCacheInvalidator engineCacheInvalidator) {
+            super(engineCacheInvalidator, mock(GrpcReporter.class));
         }
 
         @Override

@@ -74,6 +74,17 @@ if [ -z $SETENV_SETTED ]; then
         fi
         export CPU_COUNT
 
+        # Match HotSpot G1 ergonomics to the CPU quota visible to this container.
+        if [ "$CPU_COUNT" -le 8 ]; then
+          parallelGCThreads=$CPU_COUNT
+        else
+          parallelGCThreads=$((8 + (CPU_COUNT - 8) * 5 / 8))
+        fi
+        concGCThreads=$((parallelGCThreads / 4))
+        if [ "$concGCThreads" -lt 1 ]; then
+          concGCThreads=1
+        fi
+
         export SERVICE_PID=$APP_HOME/.default/${APP_NAME}.pid
         export SERVICE_OUT=$APP_HOME/logs/service_stdout.log
         export MIDDLEWARE_LOGS="${HOME}/logs"
@@ -90,13 +101,29 @@ if [ -z $SETENV_SETTED ]; then
 
         let memTotal=`cat /proc/meminfo | grep MemTotal | awk '{printf "%d", $2/1024 }'`
         echo "INFO: OS total memory: "$memTotal"M"
-        # if os memory <= 2G
+        # Keep enough native-memory headroom for direct buffers, metaspace,
+        # code cache, thread stacks, and the container runtime.
         if [ $memTotal -le 2048 ]; then
           DEFAULT_JVM_XMS="1536m"
           DEFAULT_JVM_XMX="1536m"
+          maxDirectMemory=2g
+        elif [ $memTotal -le 16384 ]; then
+          DEFAULT_JVM_XMS="10g"
+          DEFAULT_JVM_XMX="10g"
+          maxDirectMemory=1g
+        elif [ $memTotal -le 24576 ]; then
+          # The 12c24g ASI pool exposes about 19GiB to the container.
+          DEFAULT_JVM_XMS="12g"
+          DEFAULT_JVM_XMX="12g"
+          maxDirectMemory=1g
+        elif [ $memTotal -le 32768 ]; then
+          DEFAULT_JVM_XMS="18g"
+          DEFAULT_JVM_XMX="18g"
+          maxDirectMemory=1g
         else
           DEFAULT_JVM_XMS="32g"
           DEFAULT_JVM_XMX="32g"
+          maxDirectMemory=2g
         fi
 
         FLEXLB_HEAP_SIZE=${FLEXLB_JVM_HEAP_SIZE:-${MASTER_JVM_HEAP_SIZE}}
@@ -106,7 +133,7 @@ if [ -z $SETENV_SETTED ]; then
         SERVICE_OPTS="${SERVICE_OPTS} -Xms${SERVICE_JVM_XMS} -Xmx${SERVICE_JVM_XMX}"
 
         SERVICE_OPTS="${SERVICE_OPTS} -XX:MetaspaceSize=512m -XX:MaxMetaspaceSize=512m"
-        SERVICE_OPTS="${SERVICE_OPTS} -XX:ReservedCodeCacheSize=512m -XX:MaxDirectMemorySize=2g"
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:ReservedCodeCacheSize=512m -XX:MaxDirectMemorySize=${maxDirectMemory}"
         # 使用G1GC
         SERVICE_OPTS="${SERVICE_OPTS} -XX:+UseG1GC"
         SERVICE_OPTS="${SERVICE_OPTS} -XX:+UnlockExperimentalVMOptions"
@@ -117,7 +144,7 @@ if [ -z $SETENV_SETTED ]; then
         SERVICE_OPTS="${SERVICE_OPTS} -XX:+ExplicitGCInvokesConcurrent"
         SERVICE_OPTS="${SERVICE_OPTS} -XX:SurvivorRatio=8"
         SERVICE_OPTS="${SERVICE_OPTS} -Dsun.rmi.dgc.server.gcInterval=2592000000 -Dsun.rmi.dgc.client.gcInterval=2592000000"
-        SERVICE_OPTS="${SERVICE_OPTS} -XX:ParallelGCThreads=24 -XX:ConcGCThreads=8"
+        SERVICE_OPTS="${SERVICE_OPTS} -XX:ParallelGCThreads=${parallelGCThreads} -XX:ConcGCThreads=${concGCThreads}"
         if [[ "$JAVA_VERSION" -lt 9 ]]; then
             SERVICE_OPTS="${SERVICE_OPTS} -Xloggc:${MIDDLEWARE_LOGS}/gc.log -XX:+PrintGCDetails -XX:+PrintGCDateStamps"
         else

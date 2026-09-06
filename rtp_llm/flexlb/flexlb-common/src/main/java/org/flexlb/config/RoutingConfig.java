@@ -163,6 +163,13 @@ public final class RoutingConfig {
     public static final class CacheAffinityConfig {
         private long maxExtraTtftMs;
         private double minPrefixHitPercent = 5;
+        /** Credit applied to P2P-only cache matches when estimating effective hit tokens. */
+        private double p2pHitDiscount = 0.2;
+        /**
+         * Optional guard for local lifecycle work plus this request's uncached tokens.
+         * Zero disables the guard.
+         */
+        private long maxOutstandingUncachedTokens;
     }
 
     @Getter

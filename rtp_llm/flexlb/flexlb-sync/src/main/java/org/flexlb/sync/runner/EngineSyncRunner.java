@@ -3,15 +3,15 @@ package org.flexlb.sync.runner;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.PriorityScheduler;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.BalanceStatusEnum;
-import org.flexlb.util.CommonUtils;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
+import org.flexlb.util.CommonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.util.CollectionUtils;
@@ -140,7 +140,7 @@ public class EngineSyncRunner implements Runnable {
                 String workerIpPort = host.getIpPort();
                 String site = host.getSite();
 
-                WorkerStatus workerStatus = getOrCreateWorkerStatus(cachedWorkerStatuses, workerIpPort);
+                WorkerStatus workerStatus = getOrCreateWorkerStatus(cachedWorkerStatuses, host);
 
                 if (workerStatus.getStatusCheckInProgress().compareAndSet(false, true)) {
                     try {
@@ -148,7 +148,8 @@ public class EngineSyncRunner implements Runnable {
                         GrpcWorkerStatusRunner grpcWorkerStatusRunner
                                 = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
                                 workerStatus, cachedWorkerStatuses, engineHealthReporter, engineGrpcService,
-                                syncRequestTimeoutMs, priorityScheduler, endpointRegistry, statusCheckExecutor);
+                                syncRequestTimeoutMs, priorityScheduler, endpointRegistry,
+                                statusCheckExecutor, localKvCacheAwareManager);
                         statusCheckExecutor.submit(grpcWorkerStatusRunner);
                     } catch (RejectedExecutionException e) {
                         workerStatus.getStatusCheckInProgress().set(false);
@@ -222,18 +223,23 @@ public class EngineSyncRunner implements Runnable {
         }
     }
 
-    private WorkerStatus getOrCreateWorkerStatus(Map<String, WorkerStatus> workerStatuses, String workerIpPort) {
+    private WorkerStatus getOrCreateWorkerStatus(
+            Map<String, WorkerStatus> workerStatuses, WorkerHost host) {
+        String workerIpPort = host.getIpPort();
         WorkerStatus workerStatus = workerStatuses.get(workerIpPort);
         if (workerStatus == null) {
             workerStatus = new WorkerStatus();
-            String[] split = workerIpPort.split(":");
-            workerStatus.setIp(split[0]);
-            workerStatus.setPort(Integer.parseInt(split[1]));
+            workerStatus.setIp(host.getIp());
+            workerStatus.setPort(host.getPort());
+            workerStatus.setGrpcPort(host.getWorkerStatusPort());
             workerStatus.setRole(roleType);
             workerStatus.getStatusLastUpdateTime().set(System.nanoTime() / 1000);
             workerStatuses.put(workerIpPort, workerStatus);
             logger.info("Created new WorkerStatus for worker: {}", workerIpPort);
         }
+        workerStatus.setSite(host.getSite());
+        workerStatus.setGroup(host.getGroup());
+        workerStatus.setDeploymentName(host.getDeploymentName());
         // Cache and worker status checks run independently. Publish the role known
         // from service discovery before either callback can observe this object.
         if (workerStatus.getRole() == null) {

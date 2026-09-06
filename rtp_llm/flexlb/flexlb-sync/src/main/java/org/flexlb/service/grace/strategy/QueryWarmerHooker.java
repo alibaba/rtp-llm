@@ -2,18 +2,21 @@ package org.flexlb.service.grace.strategy;
 
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.listener.AppOnlineHooker;
+import org.flexlb.listener.ApplicationWarmupState;
 import org.flexlb.service.grace.GracefulLifecycleReporter;
 import org.springframework.stereotype.Component;
 
 import java.util.Timer;
 import java.util.TimerTask;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @Component
-public class QueryWarmerHooker implements AppOnlineHooker {
+public class QueryWarmerHooker implements AppOnlineHooker, ApplicationWarmupState {
 
-    public static volatile boolean warmUpFinished;
-    private static final int maxWaitTimeSeconds = 3;
+    private static final int WARMUP_WAIT_SECONDS = 10;
+
+    private volatile boolean warmupFinished;
     private final GracefulLifecycleReporter lifecycleReporter;
 
     public QueryWarmerHooker(GracefulLifecycleReporter lifecycleReporter) {
@@ -22,20 +25,22 @@ public class QueryWarmerHooker implements AppOnlineHooker {
 
     @Override
     public void afterStartUp() {
-
-        // Set maximum warm-up wait time
-        Timer timer = new Timer();
+        warmupFinished = false;
+        Timer timer = new Timer("query-warmup-timeout", true);
         TimerTask task = new TimerTask() {
             @Override
             public void run() {
-                QueryWarmerHooker.warmUpFinished = true;
+                warmupFinished = true;
                 log.info("max wait time before health online finished");
             }
         };
-        log.info("max wait time before health online: {}", maxWaitTimeSeconds);
-        timer.schedule(task, maxWaitTimeSeconds * 1000); // Execute after delayTime seconds
-
-        doWarmUp();
+        log.info("max wait time before health online: {} seconds", WARMUP_WAIT_SECONDS);
+        timer.schedule(task, TimeUnit.SECONDS.toMillis(WARMUP_WAIT_SECONDS));
+        try {
+            doWarmUp();
+        } finally {
+            timer.cancel();
+        }
     }
 
     @Override
@@ -47,10 +52,10 @@ public class QueryWarmerHooker implements AppOnlineHooker {
      * Warm up
      */
     private void doWarmUp() {
-        log.info("do warm up: waiting for 3 seconds for sync engine");
+        log.info("do warm up: waiting for {} seconds for dependencies", WARMUP_WAIT_SECONDS);
         long startTime = System.currentTimeMillis();
         try {
-            Thread.sleep(3000);
+            TimeUnit.SECONDS.sleep(WARMUP_WAIT_SECONDS);
             long duration = System.currentTimeMillis() - startTime;
             lifecycleReporter.reportWarmerComplete(duration);
             log.info("warm up success");
@@ -60,8 +65,12 @@ public class QueryWarmerHooker implements AppOnlineHooker {
         } catch (Exception e) {
             log.error("warm up error", e);
         } finally {
-            warmUpFinished = true;
+            warmupFinished = true;
         }
     }
 
+    @Override
+    public boolean isWarmupFinished() {
+        return warmupFinished;
+    }
 }

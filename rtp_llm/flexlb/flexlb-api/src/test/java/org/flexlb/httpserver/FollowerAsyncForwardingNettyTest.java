@@ -558,7 +558,9 @@ class FollowerAsyncForwardingNettyTest {
                     configService,
                     mock(BatchSchedulerReporter.class),
                     mock(ServerScheduleLatencyRecorder.class),
-                    mock(PrioritySchedulerReporter.class));
+                    mock(PrioritySchedulerReporter.class),
+                    mock(org.flexlb.cache.match.CacheAwareService.class),
+                    mock(org.flexlb.service.optimizer.OptimizerClient.class));
 
             requestExecutor = new ThreadPoolExecutor(
                     EXECUTOR_CORE_SIZE,

@@ -7,7 +7,6 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.mock.FlexLBMockTestBase;
-import org.flexlb.mock.InflightAssertions;
 import org.flexlb.mock.MockWorkerBehavior;
 import org.flexlb.service.grpc.EngineStatusConverter;
 import org.junit.jupiter.api.Test;

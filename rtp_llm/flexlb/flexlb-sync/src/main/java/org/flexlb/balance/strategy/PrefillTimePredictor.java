@@ -1,8 +1,8 @@
 package org.flexlb.balance.strategy;
 
-import java.util.List;
-
 import org.flexlb.balance.scheduler.BatchItem;
+
+import java.util.List;
 
 /**
  * Prefill-time predictor contract.

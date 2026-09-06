@@ -3,10 +3,14 @@ package org.flexlb.sync.schedule;
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.config.ConfigService;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.pv.TaskConfirmationTimeoutPvLog;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.TaskStateEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
+import org.flexlb.util.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -15,6 +19,9 @@ import org.springframework.stereotype.Component;
 
 import java.util.Iterator;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Periodically evicts workers that have stopped sending WorkerStatus reports
@@ -38,13 +45,17 @@ import java.util.Map;
 public class ExpirationCleaner {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
+    private static final Logger pvLogger = LoggerFactory.getLogger("pvLogger");
 
     private final long workerTimeoutUs;
+    private final long taskConfirmationTimeoutUs;
     private final EndpointRegistry endpointRegistry;
 
     @Autowired
     public ExpirationCleaner(EndpointRegistry endpointRegistry, ConfigService configService) {
-        this(endpointRegistry, resolveWorkerTimeoutUs(configService));
+        this(endpointRegistry, resolveWorkerTimeoutUs(configService),
+                TimeUnit.MILLISECONDS.toMicros(configService.loadBalanceConfig()
+                        .getWorkerRegistry().getHealth().getTaskConfirmationTimeoutMs()));
     }
 
     /**
@@ -62,8 +73,14 @@ public class ExpirationCleaner {
     }
 
     ExpirationCleaner(EndpointRegistry endpointRegistry, long workerTimeoutUs) {
+        this(endpointRegistry, workerTimeoutUs, TimeUnit.MILLISECONDS.toMicros(300_000));
+    }
+
+    ExpirationCleaner(EndpointRegistry endpointRegistry, long workerTimeoutUs,
+                      long taskConfirmationTimeoutUs) {
         this.endpointRegistry = endpointRegistry;
         this.workerTimeoutUs = workerTimeoutUs;
+        this.taskConfirmationTimeoutUs = taskConfirmationTimeoutUs;
     }
 
     @Scheduled(fixedRateString = "${WORKER_CLEAN_INTERVAL_MS:3000}")
@@ -94,7 +111,61 @@ public class ExpirationCleaner {
                     logger.warn("Removed expired worker: {}, role: {}, statusRemoved={}, endpointRemoved={}",
                             item.getKey(), role, statusRemoved, endpointRemoved);
                 }
+                continue;
             }
+
+            ConcurrentHashMap<String, TaskInfo> localTasks = workerStatus.getLocalTaskMap();
+            Iterator<Map.Entry<String, TaskInfo>> taskIterator = localTasks.entrySet().iterator();
+            boolean taskSetChanged = false;
+            while (taskIterator.hasNext()) {
+                Map.Entry<String, TaskInfo> taskEntry = taskIterator.next();
+                TaskInfo task = taskEntry.getValue();
+                boolean confirmationTimedOut = task.getTaskState() == TaskStateEnum.IN_TRANSIT
+                        && task.isTimeout(currentTime, taskConfirmationTimeoutUs);
+                if (!task.isLost() && !confirmationTimedOut) {
+                    continue;
+                }
+
+                if (confirmationTimedOut) {
+                    reportTaskConfirmationTimeout(task, workerStatus, role, currentTime);
+                }
+                task.updateTaskState(TaskStateEnum.CLEANED);
+                decrementQueueTime(workerStatus.getRunningQueueTime(), task, workerStatus.getRole());
+                taskIterator.remove();
+                taskSetChanged = true;
+            }
+            if (taskSetChanged) {
+                workerStatus.refreshInTransitAndWaitingStats();
+                workerStatus.refreshRunningRemainingPrefillTokens();
+            }
+        }
+    }
+
+    private void reportTaskConfirmationTimeout(TaskInfo task, WorkerStatus workerStatus,
+                                               RoleType role, long currentTimeUs) {
+        TaskConfirmationTimeoutPvLog event = new TaskConfirmationTimeoutPvLog(
+                TaskConfirmationTimeoutPvLog.EVENT_TYPE,
+                task.getRequestId(),
+                role.getCode(),
+                workerStatus.getIp(),
+                workerStatus.getPort(),
+                task.getTaskState().getValue(),
+                TimeUnit.MICROSECONDS.toMillis(currentTimeUs - task.getLastActiveTimeUs()),
+                TimeUnit.MICROSECONDS.toMillis(taskConfirmationTimeoutUs),
+                task.getInputLength(),
+                task.getPredictedPrefixLength(),
+                task.getCacheMatchSource(),
+                task.estimatePrefillTime());
+        String eventJson = JsonUtils.toStringOrEmpty(event);
+        logger.warn("Task confirmation timed out: {}", eventJson);
+        pvLogger.info(eventJson);
+    }
+
+    private static void decrementQueueTime(
+            AtomicLong runningQueueTime, TaskInfo task, RoleType role) {
+        if (role == RoleType.PREFILL || role == RoleType.PDFUSION) {
+            WorkerStatus.safeDecrementQueueTime(
+                    runningQueueTime, task.estimatePrefillTime());
         }
     }
 }

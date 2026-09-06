@@ -1,7 +1,7 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.resource.ResourceMeasureFactory;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
@@ -15,7 +15,10 @@ class LoadBalanceStrategyWiringTest {
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withBean(EngineWorkerStatus.class, () -> mock(EngineWorkerStatus.class))
-            .withBean(CacheAwareService.class, () -> mock(CacheAwareService.class))
+            .withBean("matchingCacheAwareService", CacheAwareService.class,
+                    () -> mock(CacheAwareService.class))
+            .withBean("legacyCacheAwareService", org.flexlb.cache.service.CacheAwareService.class,
+                    () -> mock(org.flexlb.cache.service.CacheAwareService.class))
             .withBean(ResourceMeasureFactory.class, () -> mock(ResourceMeasureFactory.class))
             .withBean(EngineHealthReporter.class, () -> mock(EngineHealthReporter.class))
             .withBean("shortestTtftStrategy", ShortestTTFTStrategy.class)

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.KvCacheGroupMode;
 
 import java.util.Map;
 
@@ -36,6 +37,9 @@ public class WorkerStatusResponse {
     @JsonProperty("running_task_info")
     private Map<String, TaskInfo> runningTaskInfo;
 
+    @JsonProperty("waiting_task_info")
+    private Map<String, TaskInfo> waitingTaskInfo;
+
     @JsonProperty("finished_task_info")
     private Map<String, TaskInfo> finishedTaskInfo;
 
@@ -62,6 +66,15 @@ public class WorkerStatusResponse {
 
     @JsonProperty("dpRank")
     private long dpRank;
+
+    @JsonProperty("block_hash_lookahead_tokens")
+    private int blockHashLookaheadTokens;
+
+    @JsonProperty("cache_match_rollback_blocks")
+    private int cacheMatchRollbackBlocks;
+
+    @JsonProperty("kv_cache_group_mode")
+    private KvCacheGroupMode kvCacheGroupMode = KvCacheGroupMode.UNSPECIFIED;
 
     @JsonProperty("alive")
     private boolean alive;
