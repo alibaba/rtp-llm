@@ -6,10 +6,12 @@ import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
@@ -41,6 +43,10 @@ public class RouteService {
     public CompletableFuture<Response> route(BalanceContext balanceContext) {
         FlexlbConfig flexlbConfig = configService.loadBalanceConfig();
         balanceContext.setConfig(flexlbConfig);
+        FlexlbTrace.setScheduleAttribute(balanceContext.getTraceContext(),
+                FlexlbTrace.SCHEDULE_MODE, flexlbConfig.isDirect() ? "DIRECT"
+                        : flexlbConfig.getDispatcher().getType() == DispatcherConfig.Type.BATCH
+                                ? "BATCH" : "QUEUE");
 
         CompletableFuture<Response> resultFuture;
         if (flexlbConfig.isDirect()) {

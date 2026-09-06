@@ -100,6 +100,12 @@ RTP_LLM_ROUTE_SOURCE_VALUES = frozenset(
 RTP_LLM_ROUTE_QUEUE_LENGTH = "rtp_llm.route.queue_length"
 RTP_LLM_ROUTE_QUEUE_REJECT_THRESHOLD = "rtp_llm.route.queue_reject_threshold"
 
+# FlexLB business status on the schedule CLIENT span. A non-SUCCESS value is a
+# rejected schedule even when the gRPC transport closed OK, so it is recorded
+# alongside RPC_RESPONSE_STATUS_CODE rather than instead of it. The Java master
+# writes the same key on its SERVER span (FlexlbTrace.SCHEDULE_CODE).
+RTP_LLM_SCHEDULE_CODE = "flexlb.schedule.code"
+
 # --- C++-side span keys (single-source registry; C++ mirror lives in
 # rtp_llm/cpp/telemetry/TraceAttributes.h and must stay in sync with this
 # section). host.ip is a resource attribute set in TelemetryRuntime.cc and is
@@ -124,6 +130,11 @@ RTP_LLM_POLL_LOCAL_OUTPUT_RT_US = "rtp_llm.poll_local_output_rt_us"
 RTP_LLM_POLL_REMOTE_OUTPUT_RT_US = "rtp_llm.poll_remote_output_rt_us"
 # True only when a failed request cuts off a phase before its natural end.
 RTP_LLM_PHASE_TRUNCATED = "rtp_llm.phase.truncated"
+# Frontend-to-prefill handoff delay on the master coalescing path, covering the
+# FlexLB coalescing wait plus both network hops. Written by the C++ prefill node
+# only; it subtracts two machines' wall clocks, so it is an approximation
+# subject to NTP skew rather than a precise latency metric.
+RTP_LLM_PREFILL_HANDOFF_DELAY_US = "rtp_llm.prefill_handoff_delay_us"
 
 # --- HTTP semconv (root SERVER span only). Platform views read the two
 # semconv generations with inconsistent priority, and the HTTP-error counter
