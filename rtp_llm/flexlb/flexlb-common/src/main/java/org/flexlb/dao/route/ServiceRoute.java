@@ -27,14 +27,6 @@ public class ServiceRoute {
     @JsonProperty("optimizer")
     private OptimizerConfig optimizer;
 
-    public boolean isKvcmEnabled() {
-        return kvcm != null && kvcm.isEnabled();
-    }
-
-    public boolean isOptimizerEnabled() {
-        return optimizer != null && optimizer.isEnabled();
-    }
-
     @JsonProperty("role_endpoints")
     public void setRoleEndpoints(List<GroupRoleEndPoint> roleEndpoints) {
         this.roleEndpoints = roleEndpoints == null ? new ArrayList<>() : roleEndpoints;

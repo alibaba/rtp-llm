@@ -1,5 +1,6 @@
 package org.flexlb.discovery;
 
+import org.flexlb.config.ServiceDiscoveryRuntimeConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.DiscoveryConfig;
 import org.flexlb.dao.route.Endpoint;
@@ -7,6 +8,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -64,6 +66,22 @@ class RoutingServiceDiscoveryTest {
         assertEquals(18002, normalizedHost.getWorkerStatusPort());
     }
 
+    @Test
+    void exposesCurrentFlexlbRuntimePolicyToDiscoveryProviders() {
+        AtomicReference<ServiceDiscoveryRuntimeConfig> current =
+                new AtomicReference<>(runtimeConfig(700));
+        RecordingProvider provider = new RecordingProvider();
+        RoutingServiceDiscovery discovery =
+                new RoutingServiceDiscovery(List.of(provider), current::get);
+        Endpoint endpoint = endpoint();
+
+        discovery.validate(endpoint);
+        assertEquals(700, endpoint.getDiscovery().getConnectTimeoutMs());
+
+        current.set(runtimeConfig(900));
+        assertEquals(900, endpoint.getDiscovery().getConnectTimeoutMs());
+    }
+
     private Endpoint endpoint() {
         DiscoveryConfig discovery = new DiscoveryConfig();
         discovery.setType(ServiceDiscoveryType.STATIC_ENV);
@@ -71,6 +89,12 @@ class RoutingServiceDiscoveryTest {
         endpoint.setAddress("static-service");
         endpoint.setDiscovery(discovery);
         return endpoint;
+    }
+
+    private ServiceDiscoveryRuntimeConfig runtimeConfig(int connectTimeoutMs) {
+        ServiceDiscoveryRuntimeConfig config = new ServiceDiscoveryRuntimeConfig();
+        config.setConnectTimeoutMs(connectTimeoutMs);
+        return config;
     }
 
     private static class RecordingProvider implements ServiceDiscoveryProvider {

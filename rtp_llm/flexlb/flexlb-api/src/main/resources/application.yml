@@ -19,6 +19,9 @@ flexlb:
     per-engine-tags: true
     # Set FLEXLB_MONITOR_MODE=all to report all metrics.
     mode: critical-only
+    # flexlb.* exposure is filtered by flexlb.monitor.metric-whitelist
+    # (env FLEXLB_MONITOR_METRIC_WHITELIST); unset uses the built-in
+    # critical preset. Use the bare "flexlb_" prefix to expose all series.
   log:
     path: ${FLEXLB_LOG_PATH:/home/admin/ai-whale/logs}
     # application.log 和 pv.log 的独立路径，默认与 path 一致
@@ -37,7 +40,7 @@ logging:
     flexlb: org.flexlb,flexlbLogger,syncLogger,syncConsistencyLogger
   level:
     root: info
-    flexlb: ${FLEXLB_LOG_LEVEL:INFO}
+    flexlb: INFO
     io.grpc: info
     com.google.protobuf: info
     org.flexlb.utils.LoggingUtils: trace
@@ -76,16 +79,3 @@ otel:
   exporter:
     otlp:
       endpoint: none
-
-flexlb:
-  monitor:
-    # Default on. Set FLEXLB_MONITOR_ENABLED=false env var to disable.
-    # When enabled with 750+ engines, /prometheus returns 23MB (139K series).
-    enabled: true
-    # Set to false to aggregate per-engine metrics (reduces ~139K series to ~250)
-    # Default: per-engine tags retained (high cardinality with many engines)
-    per-engine-tags: true
-    # flexlb.* exposure is filtered by flexlb.monitor.metric-whitelist
-    # (env FLEXLB_MONITOR_METRIC_WHITELIST); unset defaults to the built-in
-    # critical preset (~6 core link latency series). Set the whitelist to
-    # the bare "flexlb_" prefix to expose every flexlb_* series.

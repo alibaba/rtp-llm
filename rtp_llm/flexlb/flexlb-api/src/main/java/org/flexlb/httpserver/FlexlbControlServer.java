@@ -6,6 +6,7 @@ import org.flexlb.cache.domain.CacheMatchStatus;
 import org.flexlb.cache.match.CacheMatchQueryOrchestrator;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
+import org.flexlb.service.monitor.FlexlbLogManager;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.Logger;
 import org.springframework.context.annotation.Bean;
@@ -35,14 +36,17 @@ public class FlexlbControlServer {
     private final GeneralHttpNettyService generalHttpNettyService;
     private final LBStatusConsistencyService lbStatusConsistencyService;
     private final CacheMatchQueryOrchestrator cacheMatchQueryOrchestrator;
+    private final FlexlbLogManager flexlbLogManager;
 
     public FlexlbControlServer(
             GeneralHttpNettyService generalHttpNettyService,
             LBStatusConsistencyService lbStatusConsistencyService,
-            CacheMatchQueryOrchestrator cacheMatchQueryOrchestrator) {
+            CacheMatchQueryOrchestrator cacheMatchQueryOrchestrator,
+            FlexlbLogManager flexlbLogManager) {
         this.generalHttpNettyService = generalHttpNettyService;
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.cacheMatchQueryOrchestrator = cacheMatchQueryOrchestrator;
+        this.flexlbLogManager = flexlbLogManager;
     }
 
     @Bean
@@ -60,11 +64,11 @@ public class FlexlbControlServer {
     private Mono<ServerResponse> updateLogLevel(ServerRequest request) {
         return request.bodyToMono(LogLevelUpdateRequest.class)
                 .flatMap(updateRequest -> {
-                    Logger.setLevel(updateRequest.getLogLevel());
+                    flexlbLogManager.setLogLevel(updateRequest.getLogLevel());
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
                             .body(
-                                    Mono.just("Success! logLevel=" + Logger.getLevel()),
+                                    Mono.just("Success! logLevel=" + updateRequest.getLogLevel()),
                                     String.class);
                 })
                 .onErrorResume(e -> {

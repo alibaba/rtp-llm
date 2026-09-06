@@ -8,10 +8,10 @@ import org.flexlb.cache.domain.LocalStandbyHashResult;
 import org.flexlb.cache.hash.LocalStandbyHashService;
 import org.flexlb.cache.match.CacheMatchProvider;
 import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.config.LocalStandbyConfig;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.stereotype.Component;
 

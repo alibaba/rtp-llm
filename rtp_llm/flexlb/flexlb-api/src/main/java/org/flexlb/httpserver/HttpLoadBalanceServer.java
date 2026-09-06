@@ -6,18 +6,20 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.RequestState;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.TrafficPolicyConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
 import org.flexlb.dao.loadbalance.QueueSnapshotResponse;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.master.MasterInfoResponse;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
+import org.flexlb.service.address.FlexlbInstanceAddressService;
+import org.flexlb.service.monitor.FlexlbLogManager;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.flexlb.util.JsonUtils;
@@ -58,6 +60,8 @@ public class HttpLoadBalanceServer {
     private final WorkerDirectory workerDirectory;
     private final MasterEngineSynchronizer masterEngineSynchronizer;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
+    private final FlexlbInstanceAddressService instanceAddressService;
+    private final FlexlbLogManager flexlbLogManager;
 
     public HttpLoadBalanceServer(LBStatusConsistencyService lbStatusConsistencyService,
                                  ConfigService configService,
@@ -66,7 +70,9 @@ public class HttpLoadBalanceServer {
                                  WorkerDirectory workerDirectory,
                                  @org.springframework.beans.factory.annotation.Autowired(required = false)
                                  MasterEngineSynchronizer masterEngineSynchronizer,
-                                 ServerScheduleLatencyRecorder serverLatencyRecorder) {
+                                 ServerScheduleLatencyRecorder serverLatencyRecorder,
+                                 FlexlbInstanceAddressService instanceAddressService,
+                                 FlexlbLogManager flexlbLogManager) {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.configService = configService;
         this.requestScheduler = requestScheduler;
@@ -74,6 +80,8 @@ public class HttpLoadBalanceServer {
         this.workerDirectory = workerDirectory;
         this.masterEngineSynchronizer = masterEngineSynchronizer;
         this.serverLatencyRecorder = serverLatencyRecorder;
+        this.instanceAddressService = instanceAddressService;
+        this.flexlbLogManager = flexlbLogManager;
     }
 
     @Bean
@@ -87,8 +95,6 @@ public class HttpLoadBalanceServer {
                         this::notifyParticipant)
                 .POST("/rtp_llm/update_log_level", accept(MediaType.APPLICATION_JSON),
                         this::debugMode)
-                .POST("/rtp_llm/update_traffic_policy", accept(MediaType.APPLICATION_JSON),
-                        this::updateTrafficPolicy)
                 .GET("/rtp_llm/queue_snapshot", accept(MediaType.APPLICATION_JSON),
                         this::queueSnapshot)
                 .GET("/rtp_llm/inflight_status", accept(MediaType.APPLICATION_JSON),
@@ -101,27 +107,13 @@ public class HttpLoadBalanceServer {
     private Mono<ServerResponse> debugMode(ServerRequest serverRequest) {
         return serverRequest.bodyToMono(LogLevelUpdateRequest.class)
                 .flatMap(logLevelUpdateRequest -> {
-                    Logger.setLevel(logLevelUpdateRequest.getLogLevel());
+                    flexlbLogManager.setLogLevel(logLevelUpdateRequest.getLogLevel());
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just("Success! logLevel=" + Logger.getLevel()), String.class);
+                            .body(Mono.just("Success! logLevel="
+                                    + logLevelUpdateRequest.getLogLevel()), String.class);
                 }).onErrorResume(e -> {
                     Logger.error("update logLevel error", e);
-                    return ServerResponse.status(500)
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(e.getMessage()), String.class);
-                });
-    }
-
-    private Mono<ServerResponse> updateTrafficPolicy(ServerRequest serverRequest) {
-        return serverRequest.bodyToMono(TrafficPolicyConfig.class)
-                .flatMap(trafficPolicyConfig -> {
-                    configService.updateTrafficPolicy(trafficPolicyConfig);
-                    return ServerResponse.ok()
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(trafficPolicyConfig), TrafficPolicyConfig.class);
-                }).onErrorResume(e -> {
-                    Logger.error("update traffic policy error", e);
                     return ServerResponse.status(500)
                             .contentType(MediaType.APPLICATION_JSON)
                             .body(Mono.just(e.getMessage()), String.class);
@@ -150,8 +142,10 @@ public class HttpLoadBalanceServer {
     private Mono<ServerResponse> responseMasterInfo(ServerRequest request) {
         return request.bodyToMono(Request.class)
                 .flatMap((Function<Request, Mono<ServerResponse>>) req -> {
-                    Response result = new Response();
+                    MasterInfoResponse result = new MasterInfoResponse();
                     result.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
+                    result.setPodIp(instanceAddressService.getPodIp());
+                    result.setInstanceIp(instanceAddressService.getInstanceIp());
                     result.setQueueLength(requestScheduler.getQueuedRequestCount());
                     result.setCode(200);
                     result.setSuccess(true);
@@ -159,7 +153,7 @@ public class HttpLoadBalanceServer {
                     result.setReady(masterEngineSynchronizer == null || masterEngineSynchronizer.isReady());
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(result), Response.class);
+                            .body(Mono.just(result), MasterInfoResponse.class);
                 }).onErrorResume(e -> {
                     Logger.error("responseMasterInfo error", e);
                     Response errorResponse = new Response();

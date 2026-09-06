@@ -113,6 +113,15 @@ worker 选择契约，两者组合完成多角色多阶段路由。
   `CACHE_AFFINITY_FALLBACK` 或 `SHORTEST_TTFT_FALLBACK`。决策快照（debug 级）写入
   `BalanceContext.shortestTtftDecisionByRole`。
 
+### CostBasedPrefillStrategy
+
+按候选的资源、排队和预测执行时间做成本筛选与打分。它与 ShortestTTFT 一样通过统一的
+`CacheAwareService.findMatchingEngines(CacheMatchQuery)` 取得 cache 匹配，因此 PREFILL 和
+PDFUSION 的 cost-based 路径也遵循 [04-worker-sync-and-cache](04-worker-sync-and-cache.md) 的
+源选择：`LOCAL_SYNC`、`KVCM` 或 KVCM 不可用时的 `LOCAL_STANDBY`。本地命中按全量折算；KVCM
+返回的 P2P 增量命中按 `cacheAffinity.p2pHitDiscount` 折算（默认 `0.2`），再进入原有的成本估算。
+这只改变 cache 命中的输入来源，不改变 cost-based 的候选过滤、成本公式和提交/回滚语义。
+
 ### WeightedCacheLoadBalancer（DECODE 默认）
 
 1. 候选过滤：`isAlive()` + `isResourceAvailable()`（DECODE 用 KV 使用率 + 滞回）。

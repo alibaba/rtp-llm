@@ -4,12 +4,10 @@ import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.LocalStandbyHashResult;
 import org.flexlb.cache.hash.LocalStandbyHashService;
-import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.KvcmConfig;
-import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
 import org.junit.jupiter.api.Test;
@@ -19,6 +17,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
+import static org.flexlb.cache.CacheMatchTestConfigurations.kvcm;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -37,7 +36,7 @@ class LocalStandbyCacheMatchProviderTest {
         LocalStandbyCacheManager cacheManager = mock(LocalStandbyCacheManager.class);
         LocalStandbyHashService hashService = mock(LocalStandbyHashService.class);
         LocalStandbyCacheMatchProvider provider = new LocalStandbyCacheMatchProvider(
-                new CacheMatchConfiguration(modelMetaConfig()), cacheManager, hashService);
+                kvcm(modelMetaConfig()), cacheManager, hashService);
         CacheMatchQuery query = new CacheMatchQuery(
                 "request-1", List.of(11L), 2192, null, 4096, RoleType.PREFILL, "default");
         CompletableFuture<LocalStandbyHashResult> pendingHash = new CompletableFuture<>();
@@ -66,7 +65,7 @@ class LocalStandbyCacheMatchProviderTest {
         LocalStandbyHashService hashService = mock(LocalStandbyHashService.class);
         LocalStandbyCacheMatchProvider provider =
                 new LocalStandbyCacheMatchProvider(
-                        new CacheMatchConfiguration(modelMetaConfig()),
+                        kvcm(modelMetaConfig()),
                         cacheManager,
                         hashService);
 
@@ -102,7 +101,7 @@ class LocalStandbyCacheMatchProviderTest {
         LocalStandbyCacheManager cacheManager = mock(LocalStandbyCacheManager.class);
         LocalStandbyHashService hashService = mock(LocalStandbyHashService.class);
         LocalStandbyCacheMatchProvider provider = new LocalStandbyCacheMatchProvider(
-                new CacheMatchConfiguration(modelMetaConfig()), cacheManager, hashService);
+                kvcm(modelMetaConfig()), cacheManager, hashService);
 
         Request request = new Request();
         request.setRequestId(1L);
@@ -127,11 +126,7 @@ class LocalStandbyCacheMatchProviderTest {
     }
 
     private ModelMetaConfig modelMetaConfig() {
-        LocalStandbyConfig standby = new LocalStandbyConfig();
-
         KvcmConfig kvcm = new KvcmConfig();
-        kvcm.setEnabled(true);
-        kvcm.setLocalStandby(standby);
 
         ServiceRoute route = new ServiceRoute();
         route.setServiceId("test-service");

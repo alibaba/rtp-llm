@@ -6,7 +6,6 @@ import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.io.IOException;
 import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;

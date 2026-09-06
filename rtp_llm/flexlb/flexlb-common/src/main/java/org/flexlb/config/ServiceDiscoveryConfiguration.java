@@ -3,6 +3,7 @@ package org.flexlb.config;
 import org.flexlb.discovery.RoutingServiceDiscovery;
 import org.flexlb.discovery.ServiceDiscoveryProvider;
 import org.flexlb.discovery.StaticServiceDiscoveryProvider;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -22,7 +23,15 @@ public class ServiceDiscoveryConfiguration {
     }
 
     @Bean(destroyMethod = "shutdown")
-    public RoutingServiceDiscovery routingServiceDiscovery(List<ServiceDiscoveryProvider> providers) {
-        return new RoutingServiceDiscovery(providers);
+    public RoutingServiceDiscovery routingServiceDiscovery(
+            List<ServiceDiscoveryProvider> providers,
+            ObjectProvider<ConfigService> configServiceProvider) {
+        ServiceDiscoveryRuntimeConfig defaults = new ServiceDiscoveryRuntimeConfig();
+        return new RoutingServiceDiscovery(providers, () -> {
+            ConfigService configService = configServiceProvider.getIfAvailable();
+            return configService == null
+                    ? defaults
+                    : configService.loadBalanceConfig().getServiceDiscovery();
+        });
     }
 }

@@ -121,14 +121,15 @@ class UniqueEngineIpsTest {
         assertEquals("127.1.2.1:64002", engines.get(2).get("grpc_addr").asText());
         assertEquals("127.1.3.1:64003", engines.get(3).get("grpc_addr").asText());
 
-        // DOMAIN_ADDRESS keeps the HTTP-port convention (grpcPort - 1); the
-        // master-side http-protocol conversion and JavaLoadClient add +1 back.
-        String prefillEnv = payload.get("env")
-                .get("DOMAIN_ADDRESS:mock.prefill.hosts.address").asText();
-        assertEquals("127.1.0.1:63999,127.1.1.1:64000", prefillEnv);
-        String decodeEnv = payload.get("env")
-                .get("DOMAIN_ADDRESS:mock.decode.hosts.address").asText();
-        assertEquals("127.1.2.1:64001,127.1.3.1:64002", decodeEnv);
+        JsonNode roleEndpoint = roleEndpoint(payload);
+        JsonNode prefillHosts = roleEndpoint.get("prefill_endpoint")
+                .get("discovery").get("hosts");
+        assertEquals("127.1.0.1:63999", prefillHosts.get(0).asText());
+        assertEquals("127.1.1.1:64000", prefillHosts.get(1).asText());
+        JsonNode decodeHosts = roleEndpoint.get("decode_endpoint")
+                .get("discovery").get("hosts");
+        assertEquals("127.1.2.1:64001", decodeHosts.get(0).asText());
+        assertEquals("127.1.3.1:64002", decodeHosts.get(1).asText());
     }
 
     @Test
@@ -141,9 +142,15 @@ class UniqueEngineIpsTest {
         assertEquals("127.0.0.1", engines.get(0).get("ip").asText());
         assertEquals("127.0.0.1:64000", engines.get(0).get("grpc_addr").asText());
         assertEquals("127.0.0.1:63999", engines.get(0).get("http_addr").asText());
-        String prefillEnv = payload.get("env")
-                .get("DOMAIN_ADDRESS:mock.prefill.hosts.address").asText();
-        assertEquals("127.0.0.1:63999,127.0.0.1:64000", prefillEnv);
+        JsonNode prefillHosts = roleEndpoint(payload).get("prefill_endpoint")
+                .get("discovery").get("hosts");
+        assertEquals("127.0.0.1:63999", prefillHosts.get(0).asText());
+        assertEquals("127.0.0.1:64000", prefillHosts.get(1).asText());
+    }
+
+    private static JsonNode roleEndpoint(JsonNode payload) throws Exception {
+        return MAPPER.readTree(payload.get("env").get("MODEL_SERVICE_CONFIG").asText())
+                .get("role_endpoints").get(0);
     }
 
     private JsonNode writeDiscovery(String... extra) throws Exception {

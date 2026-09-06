@@ -5,6 +5,8 @@ import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
+import org.flexlb.service.address.FlexlbInstanceAddressService;
+import org.flexlb.service.monitor.FlexlbLogManager;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
 import org.junit.jupiter.api.Test;
@@ -24,9 +26,13 @@ class HttpLoadBalanceServerTest {
         RequestScheduler scheduler = mock(RequestScheduler.class);
         EndpointRegistry endpointRegistry = mock(EndpointRegistry.class);
         MasterEngineSynchronizer synchronizer = mock(MasterEngineSynchronizer.class);
+        FlexlbInstanceAddressService instanceAddressService = mock(FlexlbInstanceAddressService.class);
+        FlexlbLogManager flexlbLogManager = mock(FlexlbLogManager.class);
         when(consistency.getMasterHostIpPort()).thenReturn("127.0.0.1:7001");
         when(scheduler.getQueuedRequestCount()).thenReturn(7);
         when(synchronizer.isReady()).thenReturn(true);
+        when(instanceAddressService.getPodIp()).thenReturn("10.0.0.8");
+        when(instanceAddressService.getInstanceIp()).thenReturn("192.168.0.8");
 
         HttpLoadBalanceServer server = new HttpLoadBalanceServer(
                 consistency,
@@ -35,7 +41,9 @@ class HttpLoadBalanceServerTest {
                 endpointRegistry,
                 mock(WorkerDirectory.class),
                 synchronizer,
-                new ServerScheduleLatencyRecorder());
+                new ServerScheduleLatencyRecorder(),
+                instanceAddressService,
+                flexlbLogManager);
         WebTestClient client = WebTestClient
                 .bindToRouterFunction(server.loadBalancePrefill())
                 .build();
@@ -50,6 +58,8 @@ class HttpLoadBalanceServerTest {
                 .expectBody()
                 .jsonPath("$.queue_length").isEqualTo(7)
                 .jsonPath("$.real_master_host").isEqualTo("127.0.0.1:7001")
+                .jsonPath("$.pod_ip").isEqualTo("10.0.0.8")
+                .jsonPath("$.instance_ip").isEqualTo("192.168.0.8")
                 .jsonPath("$.ready").isEqualTo(true);
 
         verify(scheduler).getQueuedRequestCount();
@@ -71,7 +81,9 @@ class HttpLoadBalanceServerTest {
                 mock(EndpointRegistry.class),
                 mock(WorkerDirectory.class),
                 mock(MasterEngineSynchronizer.class),
-                new ServerScheduleLatencyRecorder());
+                new ServerScheduleLatencyRecorder(),
+                mock(FlexlbInstanceAddressService.class),
+                mock(FlexlbLogManager.class));
         WebTestClient client = WebTestClient
                 .bindToRouterFunction(server.loadBalancePrefill())
                 .build();

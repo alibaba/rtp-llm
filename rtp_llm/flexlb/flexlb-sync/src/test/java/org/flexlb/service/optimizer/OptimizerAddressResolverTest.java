@@ -26,6 +26,7 @@ class OptimizerAddressResolverTest {
 
     private static final String DOMAIN = "optimizer.test.domain.com";
     private static final int PORT = 8082;
+    private static final long POLL_INTERVAL_MS = 10L;
 
     @Test
     void vipserver_should_refresh_by_polling_without_installing_private_listener() throws Exception {
@@ -44,7 +45,8 @@ class OptimizerAddressResolverTest {
         when(serviceDiscovery.getHosts(endpoint))
                 .thenReturn(List.of(WorkerHost.of("127.0.0.1", 8080), WorkerHost.of("127.0.0.2", 9000)));
         OptimizerAddressResolver resolver =
-                new OptimizerAddressResolver(serviceDiscovery, endpoint, PORT);
+                new OptimizerAddressResolver(
+                        serviceDiscovery, endpoint, PORT, POLL_INTERVAL_MS);
 
         resolver.start();
         assertEquals(List.of("127.0.0.1:8082", "127.0.0.2:8082"), resolver.getAddresses());
@@ -61,7 +63,8 @@ class OptimizerAddressResolverTest {
             return List.of(WorkerHost.of("1.1.1.1", 8000));
         });
         OptimizerAddressResolver resolver =
-                new OptimizerAddressResolver(serviceDiscovery, endpoint, PORT);
+                new OptimizerAddressResolver(
+                        serviceDiscovery, endpoint, PORT, POLL_INTERVAL_MS);
 
         resolver.start();
 
@@ -77,7 +80,8 @@ class OptimizerAddressResolverTest {
         when(serviceDiscovery.getHosts(endpoint))
                 .thenReturn(List.of(WorkerHost.of("127.0.0.1", 8080)));
         OptimizerAddressResolver resolver =
-                new OptimizerAddressResolver(serviceDiscovery, endpoint, PORT);
+                new OptimizerAddressResolver(
+                        serviceDiscovery, endpoint, PORT, POLL_INTERVAL_MS);
 
         resolver.start();
         assertEquals(List.of("127.0.0.1:8082"), resolver.getAddresses());
@@ -95,7 +99,8 @@ class OptimizerAddressResolverTest {
                 .thenThrow(new RuntimeException("temporary failure"))
                 .thenReturn(List.of(WorkerHost.of("4.4.4.4", 7000)));
         OptimizerAddressResolver resolver =
-                new OptimizerAddressResolver(serviceDiscovery, endpoint, PORT);
+                new OptimizerAddressResolver(
+                        serviceDiscovery, endpoint, PORT, POLL_INTERVAL_MS);
 
         resolver.start();
         assertTrue(resolver.getAddresses().isEmpty());
@@ -108,12 +113,12 @@ class OptimizerAddressResolverTest {
     void successful_empty_refresh_should_clear_cached_addresses() throws Exception {
         ServiceDiscovery serviceDiscovery = mock(ServiceDiscovery.class);
         Endpoint endpoint = endpoint(ServiceDiscoveryType.DASHSCOPE);
-        endpoint.getDiscovery().setPollIntervalMs(100);
         when(serviceDiscovery.getHosts(endpoint))
                 .thenReturn(List.of(WorkerHost.of("1.1.1.1", 8000)))
                 .thenReturn(List.of());
         OptimizerAddressResolver resolver =
-                new OptimizerAddressResolver(serviceDiscovery, endpoint, PORT);
+                new OptimizerAddressResolver(
+                        serviceDiscovery, endpoint, PORT, POLL_INTERVAL_MS);
 
         resolver.start();
         awaitAddresses(resolver, List.of("1.1.1.1:8082"));
@@ -129,7 +134,8 @@ class OptimizerAddressResolverTest {
                 .thenReturn(List.of(WorkerHost.of("1.1.1.1", 8000)))
                 .thenReturn(List.of(WorkerHost.of("", 8000)));
         OptimizerAddressResolver resolver =
-                new OptimizerAddressResolver(serviceDiscovery, endpoint, PORT);
+                new OptimizerAddressResolver(
+                        serviceDiscovery, endpoint, PORT, POLL_INTERVAL_MS);
 
         resolver.start();
         awaitAddresses(resolver, List.of("1.1.1.1:8082"));
@@ -145,7 +151,8 @@ class OptimizerAddressResolverTest {
         when(serviceDiscovery.getHosts(endpoint))
                 .thenReturn(List.of(WorkerHost.of("1.1.1.1", 8000)));
         OptimizerAddressResolver resolver =
-                new OptimizerAddressResolver(serviceDiscovery, endpoint, PORT);
+                new OptimizerAddressResolver(
+                        serviceDiscovery, endpoint, PORT, POLL_INTERVAL_MS);
         resolver.start();
         awaitAddresses(resolver, List.of("1.1.1.1:8082"));
         resolver.shutdown();
@@ -163,7 +170,8 @@ class OptimizerAddressResolverTest {
         Endpoint endpoint = endpoint(ServiceDiscoveryType.STATIC_ENV);
         when(serviceDiscovery.getHosts(endpoint)).thenReturn(List.of());
         OptimizerAddressResolver resolver =
-                new OptimizerAddressResolver(serviceDiscovery, endpoint, PORT);
+                new OptimizerAddressResolver(
+                        serviceDiscovery, endpoint, PORT, POLL_INTERVAL_MS);
 
         resolver.start();
         resolver.start();
@@ -177,7 +185,10 @@ class OptimizerAddressResolverTest {
     @Test
     void should_return_empty_before_start() {
         OptimizerAddressResolver resolver = new OptimizerAddressResolver(
-                mock(ServiceDiscovery.class), endpoint(ServiceDiscoveryType.VIPSERVER), PORT);
+                mock(ServiceDiscovery.class),
+                endpoint(ServiceDiscoveryType.VIPSERVER),
+                PORT,
+                POLL_INTERVAL_MS);
 
         assertTrue(resolver.getAddresses().isEmpty());
         resolver.shutdown();
@@ -190,7 +201,8 @@ class OptimizerAddressResolverTest {
                 .thenReturn(List.of(WorkerHost.of("1.1.1.1", 8000)))
                 .thenReturn(List.of(WorkerHost.of("2.2.2.2", 9000)));
         OptimizerAddressResolver resolver =
-                new OptimizerAddressResolver(serviceDiscovery, endpoint, PORT);
+                new OptimizerAddressResolver(
+                        serviceDiscovery, endpoint, PORT, POLL_INTERVAL_MS);
 
         resolver.start();
         verify(serviceDiscovery, timeout(1000).atLeast(2)).getHosts(endpoint);
@@ -212,7 +224,6 @@ class OptimizerAddressResolverTest {
     private static Endpoint endpoint(ServiceDiscoveryType type) {
         DiscoveryConfig discovery = new DiscoveryConfig();
         discovery.setType(type);
-        discovery.setPollIntervalMs(10);
         if (type == ServiceDiscoveryType.STATIC_ENV) {
             discovery.setHosts(List.of("127.0.0.1:8080"));
         }

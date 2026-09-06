@@ -3,13 +3,16 @@ package org.flexlb.balance.strategy;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -59,7 +62,8 @@ class CostBasedPrefillSelectionMetricTest {
         publish("10.0.0.1", 8080);
 
         cache = mock(CacheAwareService.class);
-        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
+        when(cache.findMatchingEngines(any()))
+                .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
         reporter = mock(EngineHealthReporter.class);
         strategy = new CostBasedPrefillStrategy(
                 new WorkerDirectory(registry), cache, reporter);
@@ -135,6 +139,29 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @Test
+    void p2pOnlyMatchUsesConfiguredDiscountInRoutingProjection() {
+        publish("10.0.0.2", 8080);
+        context.getRequest().setBlockCacheKeys(
+                List.of(1L, 2L, 3L, 4L, 5L));
+        context.getRequest().setCacheKeyBlockSize(100L);
+        RoutingConfig.CacheAffinityConfig affinity =
+                new RoutingConfig.CacheAffinityConfig();
+        affinity.setP2pHitDiscount(0.4);
+        config.getRouter().getRoles().getPrefill().setCacheAffinity(affinity);
+        when(cache.findMatchingEngines(any())).thenReturn(new CacheMatchResult(
+                Map.of("10.0.0.2:8080", new HostCacheMatch(0, 5, 5)),
+                CacheMatchSource.KVCM,
+                0L,
+                100L));
+
+        try (SelectedRole selected = select()) {
+            assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
+            verify(reporter).reportCacheHitMetrics(
+                    RoleType.PREFILL, 200L, 0.2);
+        }
+    }
+
+    @Test
     void cacheLeaderAtEndOfFullFleetRemainsEligible() {
         configureAffinity(600L, 5.0,
                 RoutingConfig.CandidateChoiceType.BEST_ONLY);
@@ -144,8 +171,8 @@ class CostBasedPrefillSelectionMetricTest {
             publish(ip, 8080);
             cacheLeader = ip;
         }
-        when(cache.findMatchingEngines(any(), any(), any()))
-                .thenReturn(Map.of(cacheLeader + ":8080", 5));
+        when(cache.findMatchingEngines(any()))
+                .thenReturn(localCacheMatch(cacheLeader + ":8080", 5));
 
         try (SelectedRole selected = select()) {
             assertEquals(cacheLeader, selected.serverStatus().getServerIp(),
@@ -235,8 +262,17 @@ class CostBasedPrefillSelectionMetricTest {
         context.getRequest().setRequestId(20_001L);
         context.getRequest().setBlockCacheKeys(List.of(1L, 2L, 3L, 4L, 5L));
         context.getRequest().setCacheKeyBlockSize(100L);
-        when(cache.findMatchingEngines(any(), any(), any()))
-                .thenReturn(Map.of("10.0.0.2:8080", 5));
+        when(cache.findMatchingEngines(any()))
+                .thenReturn(localCacheMatch("10.0.0.2:8080", 5));
+    }
+
+    private static CacheMatchResult localCacheMatch(
+            String workerIpPort, long matchedBlocks) {
+        return new CacheMatchResult(
+                Map.of(workerIpPort, HostCacheMatch.local(matchedBlocks)),
+                CacheMatchSource.LOCAL_SYNC,
+                0L,
+                100L);
     }
 
     private void publish(String ip, int port) {

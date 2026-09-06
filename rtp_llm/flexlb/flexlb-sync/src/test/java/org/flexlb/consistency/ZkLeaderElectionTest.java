@@ -6,6 +6,9 @@ import org.apache.curator.framework.recipes.leader.LeaderSelector;
 import org.apache.curator.retry.ExponentialBackoffRetry;
 import org.apache.curator.test.TestingServer;
 import org.apache.curator.utils.CloseableUtils;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.DeploymentIdentity;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.junit.jupiter.api.AfterAll;
@@ -44,9 +47,8 @@ import static org.mockito.Mockito.when;
  * {@link ZookeeperMasterElectService} election code.
  *
  * <p>Construction note: {@code ZookeeperMasterElectService}'s constructor runs
- * {@code init()}, which reads {@code FLEXLB_SYNC_CONSISTENCY_CONFIG} from the
- * environment. In the plain test JVM that variable is unset, so the default
- * {@code LBConsistencyConfig} (needConsistency=false) makes {@code init()}
+ * {@code init()}. The mocked configuration uses the default no-consistency
+ * mode, so {@code init()}
  * return before touching {@code HIPPO_ROLE} or ZooKeeper. The test then uses
  * the production {@code @Setter} hooks (including the package-private
  * {@code setClient}/{@code setLeaderSelector} reachable from this same
@@ -231,9 +233,14 @@ class ZkLeaderElectionTest {
                 .thenReturn(Mono.empty());
         EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
         Environment environment = mock(Environment.class);
+        ConfigService configService = mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        DeploymentIdentity deploymentIdentity = mock(DeploymentIdentity.class);
 
         ZookeeperMasterElectService service =
-                new ZookeeperMasterElectService(httpService, healthReporter, environment);
+                new ZookeeperMasterElectService(
+                        httpService, healthReporter, environment,
+                        configService, deploymentIdentity);
         service.setRoleId(ROLE_ID);
         service.setLocalIp(localIp);
         service.setPort(18_080);
