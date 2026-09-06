@@ -733,7 +733,7 @@ final class MockControlServer {
                     "status", "UNIMPLEMENTED",
                     "error", e.getMessage()));
         } catch (ApiException e) {
-            sendJson(exchange, e.status, Map.of("error", e.getMessage()));
+            sendJson(exchange, e.status, e.response);
         } catch (Exception e) {
             // Guarantee a response for any failure (e.g. malformed/empty JSON
             // body raising MismatchedInputException) instead of leaving the

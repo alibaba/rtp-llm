@@ -17,8 +17,9 @@ flexlb:
     enabled: true
     # Set false to aggregate per-engine metrics and reduce cardinality.
     per-engine-tags: true
-    # Set FLEXLB_MONITOR_MODE=all to report all metrics.
-    mode: critical-only
+    # FLEXLB_MONITOR_METRIC_WHITELIST accepts comma-separated Prometheus-form
+    # names/prefixes. Unset uses the built-in critical metric preset; use the
+    # bare "flexlb_" prefix to expose every FlexLB metric.
   log:
     path: ${FLEXLB_LOG_PATH:/home/admin/ai-whale/logs}
     # application.log 和 pv.log 的独立路径，默认与 path 一致
