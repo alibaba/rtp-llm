@@ -424,7 +424,7 @@ class BackendRPCServerVisitor:
                 specified_roles
             )
             allow_domain_fallback = master_route_result is None or (
-                master_route_result.connection_failed
+                master_route_result.connection_failed or master_route_result.fallback
             )
             if (
                 not input.generate_config.role_addrs or need_domain_routing

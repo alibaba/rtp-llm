@@ -162,7 +162,7 @@ class FileServiceDiscoveryTest {
         FileServiceDiscovery discovery = new FileServiceDiscovery(file);
 
         assertTrue(discovery.getHosts("  ").isEmpty());
-        assertTrue(discovery.getHosts(null).isEmpty());
+        assertTrue(discovery.getHosts((String) null).isEmpty());
     }
 
     /** Write via tmp + atomic move, mirroring the writer-side protocol. */

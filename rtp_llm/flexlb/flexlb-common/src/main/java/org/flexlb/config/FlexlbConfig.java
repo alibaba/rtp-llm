@@ -3,6 +3,7 @@ package org.flexlb.config;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import lombok.Getter;
 import lombok.Setter;
+import org.flexlb.enums.BlockHashStrategyType;
 
 /**
  * Public FLEXLB_CONFIG contract, organized by stable responsibility owner.
@@ -21,6 +22,7 @@ public final class FlexlbConfig {
     private RoutingConfig router = new RoutingConfig();
     private WorkerRegistryConfig workerRegistry = new WorkerRegistryConfig();
     private ObservabilityConfig observability = new ObservabilityConfig();
+    private BlockHashStrategyType blockHashStrategy = BlockHashStrategyType.VLLM;
 
     @JsonIgnore
     private final InternalRuntimeSettings internalRuntime = new InternalRuntimeSettings();

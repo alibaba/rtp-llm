@@ -1,8 +1,8 @@
 package org.flexlb.sync.runner;
 
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
+import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -104,8 +104,9 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             // interval does not require a second scheduler or timer.
             if ((RoleType.PREFILL.equals(roleType) || RoleType.PDFUSION.equals(roleType))
                         && syncCount.longValue() % roundInterval != 0) {
-                logger.debug("Skip prefill cache status check for {} because not in {}ms interval", ipPort, prefillCacheStatusCheckInterval);
-                return; // finally will reset the flag
+                logger.debug("Skip prefill cache status check for {} because not in {}ms interval",
+                        ipPort, prefillCacheStatusCheckInterval);
+                return;
             }
 
             long startTime = System.nanoTime() / 1000;
@@ -232,7 +233,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private void logCacheStatusUpdate(CacheStatus cacheStatus, long startTime) {
 
         logger.debug("gRPC Cache Status - {}, role:{}, block_size:{}, version:{}, cacheKeySize:{},"
-                        + " available_kv_cache:{}, total_kv_cache:{}, cost:{}, syncIntervalMs:{}",
+                        + " available_kv_cache:{}, total_kv_cache:{}, cost_us:{}, syncIntervalMs:{}",
                 ipPort,
                 roleType.name(),
                 cacheStatus.getBlockSize(),

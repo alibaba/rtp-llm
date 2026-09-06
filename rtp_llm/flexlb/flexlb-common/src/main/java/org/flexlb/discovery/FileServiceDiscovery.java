@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.dao.route.Endpoint;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -20,8 +21,8 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * FileServiceDiscovery - File-based service discovery with dynamic reload.
  *
- * <p>Replaces the env-var-only {@link NoOpServiceDiscovery} for mock/test
- * deployments: the domain → hosts mapping lives in a small JSON file that an
+ * <p>Replaces env-var-only static discovery for mock/test
+ * deployments: the domain to hosts mapping lives in a small JSON file that an
  * external orchestrator (or the mock engine control plane) rewrites atomically
  * (tmp file + rename). Every {@link #getHosts(String)} call re-reads the file
  * so changes are picked up by the master's periodic sync loop without restart.
@@ -62,7 +63,6 @@ public final class FileServiceDiscovery implements ServiceDiscovery {
         this.file = file;
     }
 
-    @Override
     public List<WorkerHost> getHosts(String address) {
         if (StringUtils.isBlank(address)) {
             log.warn("Service address is blank, returning empty host list");
@@ -90,13 +90,37 @@ public final class FileServiceDiscovery implements ServiceDiscovery {
         return hosts;
     }
 
-    @Override
     public void listen(String address, ServiceHostListener listener) {
         log.info("FileServiceDiscovery relies on per-call re-read for address: {} (no push listener)", address);
         // Same contract as NoOpServiceDiscovery: no dynamic push, but trigger the
         // listener once with the current view so initial wiring completes.
         if (listener != null) {
             listener.onHostsChanged(getHosts(address));
+        }
+    }
+
+    @Override
+    public void validate(Endpoint endpoint) {
+        if (endpoint == null || StringUtils.isBlank(endpoint.getAddress())) {
+            throw new IllegalArgumentException("file discovery address must not be blank");
+        }
+        getHosts(endpoint.getAddress());
+    }
+
+    @Override
+    public List<WorkerHost> getHosts(Endpoint endpoint) {
+        if (endpoint == null) {
+            return Collections.emptyList();
+        }
+        return getHosts(endpoint.getAddress());
+    }
+
+    @Override
+    public void listen(Endpoint endpoint, ServiceHostListener listener) {
+        String address = endpoint == null ? null : endpoint.getAddress();
+        log.info("FileServiceDiscovery relies on per-call re-read for address: {} (no push listener)", address);
+        if (listener != null) {
+            listener.onHostsChanged(getHosts(endpoint));
         }
     }
 

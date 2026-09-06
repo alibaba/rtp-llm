@@ -5,6 +5,7 @@ import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.RequestState;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.consistency.MasterElectService;
@@ -27,6 +28,7 @@ import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.optimizer.OptimizerClient;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
@@ -54,6 +56,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private final BatchSchedulerReporter batchSchedulerReporter;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
     private final RequestSchedulerReporter requestSchedulerReporter;
+    private final CacheAwareService cacheAwareService;
+    private final OptimizerClient optimizerClient;
 
     @Autowired
     public FlexlbServiceImpl(RouteService routeService,
@@ -64,11 +68,13 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                              ConfigService configService,
                              BatchSchedulerReporter batchSchedulerReporter,
                              ServerScheduleLatencyRecorder serverLatencyRecorder,
-                             RequestSchedulerReporter requestSchedulerReporter) {
+                             RequestSchedulerReporter requestSchedulerReporter,
+                             CacheAwareService cacheAwareService,
+                             OptimizerClient optimizerClient) {
         this(routeService, (MasterElectService) lbStatusConsistencyService,
                 engineHealthReporter, activeRequestCounter, grpcForwarder,
                 configService, batchSchedulerReporter, serverLatencyRecorder,
-                requestSchedulerReporter);
+                requestSchedulerReporter, cacheAwareService, optimizerClient);
     }
 
     FlexlbServiceImpl(RouteService routeService,
@@ -80,6 +86,23 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                       BatchSchedulerReporter batchSchedulerReporter,
                       ServerScheduleLatencyRecorder serverLatencyRecorder,
                       RequestSchedulerReporter requestSchedulerReporter) {
+        this(routeService, masterElectService, engineHealthReporter,
+                activeRequestCounter, grpcForwarder, configService,
+                batchSchedulerReporter, serverLatencyRecorder,
+                requestSchedulerReporter, null, null);
+    }
+
+    FlexlbServiceImpl(RouteService routeService,
+                      MasterElectService masterElectService,
+                      EngineHealthReporter engineHealthReporter,
+                      ActiveRequestCounter activeRequestCounter,
+                      FlexlbGrpcForwarder grpcForwarder,
+                      ConfigService configService,
+                      BatchSchedulerReporter batchSchedulerReporter,
+                      ServerScheduleLatencyRecorder serverLatencyRecorder,
+                      RequestSchedulerReporter requestSchedulerReporter,
+                      CacheAwareService cacheAwareService,
+                      OptimizerClient optimizerClient) {
         this.routeService = routeService;
         this.masterElectService = masterElectService;
         this.engineHealthReporter = engineHealthReporter;
@@ -89,6 +112,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         this.batchSchedulerReporter = batchSchedulerReporter;
         this.serverLatencyRecorder = serverLatencyRecorder;
         this.requestSchedulerReporter = requestSchedulerReporter;
+        this.cacheAwareService = cacheAwareService;
+        this.optimizerClient = optimizerClient;
     }
 
     @Override
@@ -625,6 +650,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             if (!response.getSuccess()) {
                 ctx.setErrorMessage(response.getErrorMessage());
             }
+            if (isLocalSuccessfulDecision(ctx, response, origin)) {
+                updateRequestCacheMetadata(ctx);
+                fireOptimizerTraceQuery(ctx);
+            }
         }
         try {
             observer.onNext(response);
@@ -662,6 +691,48 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         return origin == ScheduleOrigin.LOCAL_MASTER
                 || origin == ScheduleOrigin.LOCAL_FALLBACK
                 || origin == ScheduleOrigin.LOCAL_STANDALONE;
+    }
+
+    private boolean isLocalSuccessfulDecision(
+            BalanceContext ctx,
+            FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
+            ScheduleOrigin origin) {
+        return ownsLocalRoute(origin)
+                && response.getSuccess()
+                && ctx.getResponse() != null
+                && ctx.getResponse().isSuccess();
+    }
+
+    private void updateRequestCacheMetadata(BalanceContext ctx) {
+        try {
+            if (cacheAwareService == null
+                    || ctx.getResponse().getServerStatus() == null
+                    || ctx.getResponse().getServerStatus().isEmpty()) {
+                return;
+            }
+            cacheAwareService.updateFromRoutedRequest(
+                    ctx.getRequest(), ctx.getResponse().getServerStatus());
+        } catch (RuntimeException error) {
+            Logger.warn("Failed to update request cache metadata, request_id={}",
+                    ctx.getRequestId(), error);
+        }
+    }
+
+    private void fireOptimizerTraceQuery(BalanceContext ctx) {
+        try {
+            if (optimizerClient == null) {
+                return;
+            }
+            ServerStatus selectedWorker =
+                    ctx.getResponse().getServerStatus() == null
+                            || ctx.getResponse().getServerStatus().isEmpty()
+                            ? null
+                            : ctx.getResponse().getServerStatus().get(0);
+            optimizerClient.traceQuery(ctx.getRequest(), selectedWorker);
+        } catch (RuntimeException error) {
+            Logger.warn("Failed to dispatch optimizer trace query, request_id={}",
+                    ctx.getRequestId(), error);
+        }
     }
 
     /** Write one PV record on the node that made the scheduling decision. */
@@ -729,15 +800,17 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             String logFormat = "[request-scheduler] request_id={} priority={} seq_len={} max_new_tokens={} "
                     + "request_expires_at_ms={} plan_type={} plan_cost={} "
                     + "victim_count={} selected_prefill={} selected_decode={} failure_reason={} commit_result={}";
-            Object[] logArgs = {
-                    ctx.getRequestId(), ctx.getPriority(), ctx.getRequest().getSeqLen(),
+            Logger.debug(
+                    logFormat,
+                    ctx.getRequestId(),
+                    ctx.getPriority(),
+                    ctx.getRequest().getSeqLen(),
                     ctx.getRequest().getMaxNewTokens(),
                     ctx.getRequestExpiresAtMs(),
                     ctx.getPlanType(), ctx.getPlanCost(), ctx.getVictimCount(),
                     selectedPrefill, selectedDecode,
                     success ? "" : response.getErrorMessage(),
-                    result};
-            Logger.debug(logFormat, logArgs);
+                    result);
         } catch (Exception e) {
             Logger.debug("[request-scheduler] schedule observability report failed, request_id={}",
                     ctx.getRequestId(), e);
@@ -802,6 +875,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setModel(pb.getModel());
         request.setApiKey(pb.getApiKey());
         request.setCacheKeyBlockSize(pb.getCacheKeyBlockSize());
+        // KVCM matching uses the generic block-size field. The dsv4 wire
+        // protocol still names the same value cache_key_block_size.
+        request.setBlockSize(pb.getCacheKeyBlockSize());
 
         var config = configService.loadBalanceConfig();
         // QUEUE owns one absolute scheduling deadline, measured from FlexLB
