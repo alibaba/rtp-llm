@@ -500,9 +500,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight, BaseMultiModalWeightInfo):
                 data_type=torch.float32,
             ),
         ]
-        return self._get_vit_info(
-            ModelWeightInfo(layer_weights=layer_weights, weights=weights)
-        )
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
 
 
 class DeepSeekV4(DeepSeekV2, MultiModalMixin):
