@@ -4,10 +4,8 @@
 #include "rtp_llm/cpp/engine_base/Host.h"
 #include "autil/NetUtil.h"
 #include <cerrno>
-#include <chrono>
 #include <cstring>
 #include <cstdlib>
-#include <thread>
 #include <utility>
 
 namespace rtp_llm {
@@ -22,33 +20,14 @@ struct ReuseLens {
     int64_t local  = 0;
     int64_t remote = 0;
     int64_t memory = 0;
-
-    bool hasValue() const {
-        return total > 0 || local > 0 || remote > 0 || memory > 0;
-    }
 };
 
-ReuseLens getPrefillReuseLens(std::shared_ptr<GenerateStream>&                   stream,
-                              const std::shared_ptr<PrefillServerCallerContext>& prefill_ctx) {
+ReuseLens getPrefillReuseLens(std::shared_ptr<GenerateStream>& stream) {
     ReuseLens reuse_lens;
     reuse_lens.total  = stream->prefillTotalReuseLen();
     reuse_lens.local  = stream->prefillLocalReuseLen();
     reuse_lens.remote = stream->prefillRemoteReuseLen();
     reuse_lens.memory = stream->prefillMemoryReuseLen();
-    if (reuse_lens.hasValue() || !prefill_ctx) {
-        return reuse_lens;
-    }
-
-    PrefillServerCallerContext::ReuseLensSnapshot snapshot;
-    if (!prefill_ctx->getPrefillReuseLensSnapshot(snapshot)) {
-        return reuse_lens;
-    }
-
-    reuse_lens.total  = snapshot.total;
-    reuse_lens.local  = snapshot.local;
-    reuse_lens.remote = snapshot.remote;
-    reuse_lens.memory = snapshot.memory;
-    stream->setPrefillReuseLength(reuse_lens.total, reuse_lens.local, reuse_lens.remote, reuse_lens.memory);
     return reuse_lens;
 }
 
@@ -142,272 +121,6 @@ grpc::Status DecodeRpcServerNew2::parsePrefillDpAddr(const std::string& addr, st
         return grpc::Status(grpc::StatusCode::INTERNAL, "invalid port in prefill dp_addr: " + addr);
     }
     *ip = std::move(host);
-    return grpc::Status::OK;
-}
-
-bool DecodeRpcServerNew2::outputContainsFinished(const GenerateOutputsPB& output) {
-    if (!output.has_flatten_output()) {
-        return false;
-    }
-    for (int i = 0; i < output.flatten_output().finished_size(); ++i) {
-        if (output.flatten_output().finished(i)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool DecodeRpcServerNew2::refreshIdleStreamState(std::shared_ptr<GenerateStream>& stream) {
-    if (!stream) {
-        return false;
-    }
-    stream->checkTimeout();
-    return stream->hasError();
-}
-
-bool DecodeRpcServerNew2::consumePrefillFirstResponse(
-    const std::shared_ptr<PrefillServerCallerContext>& prefill_ctx,
-    std::shared_ptr<GenerateStream>&                   stream,
-    bool                                               client_first_chunk_sent,
-    bool*                                              prefill_finished,
-    int*                                               prefill_finished_size,
-    bool*                                              skip_next_decode_output,
-    GenerateOutputsPB*                                client_output) {
-    if (!prefill_ctx) {
-        return false;
-    }
-
-    GenerateOutputsPB prefill_output;
-    if (!prefill_ctx->takeFirstResponse(prefill_output)) {
-        return false;
-    }
-
-    const int finished_size = prefill_output.has_flatten_output() ? prefill_output.flatten_output().finished_size() : 0;
-    bool      finished      = false;
-    for (int i = 0; i < finished_size; ++i) {
-        if (prefill_output.flatten_output().finished(i)) {
-            finished = true;
-            break;
-        }
-    }
-
-    if (prefill_finished) {
-        *prefill_finished = finished;
-    }
-    if (prefill_finished_size) {
-        *prefill_finished_size = finished_size;
-    }
-    if (skip_next_decode_output) {
-        // Once the client has consumed prefill's first token, the next decode
-        // chunk is the same first token and must be suppressed even when that
-        // token also terminates the stream. A terminal frame is emitted later
-        // if decode does not deliver one itself.
-        *skip_next_decode_output = !client_first_chunk_sent;
-    }
-
-    if (client_first_chunk_sent) {
-        RTP_LLM_LOG_DEBUG("decode_entrance observed late prefill first response, finished=%d, unique_key=%s",
-                          finished,
-                          stream ? stream->uniqueKey().c_str() : "");
-        return false;
-    }
-
-    for (int i = 0; i < finished_size; ++i) {
-        prefill_output.mutable_flatten_output()->set_finished(i, false);
-    }
-    updateDecodeAuxInfo(prefill_output, stream, prefill_ctx);
-    if (client_output) {
-        client_output->Swap(&prefill_output);
-    }
-    return true;
-}
-
-grpc::Status
-DecodeRpcServerNew2::pollStreamOutputWithPrefill(grpc::ServerContext*                               context,
-                                                 const std::string&                                 request_key,
-                                                 WriterInterface*                                   writer,
-                                                 std::shared_ptr<GenerateStream>&                   stream,
-                                                 const std::shared_ptr<PrefillServerCallerContext>& prefill_ctx) {
-    auto propagate_prefill_error = [&]() -> grpc::Status {
-        if (!prefill_ctx || !prefill_ctx->failed()) {
-            return grpc::Status::OK;
-        }
-        auto error_info = prefill_ctx->errorInfo();
-        if (error_info.hasError() && !stream->hasError()) {
-            stream->reportError(error_info.code(), error_info.ToString());
-        }
-        return serializeErrorMsg(request_key, error_info);
-    };
-
-    bool first_token_sent        = false;
-    bool skip_next_decode_output = false;
-    bool prefill_finished        = false;  // Track if prefill first response indicates termination
-    bool client_finished_sent    = false;  // Track whether client has seen a terminal frame
-    int  prefill_finished_size   = 0;      // batch/beam count from prefill first response (for termination frame)
-
-    auto mark_client_finished = [&](const GenerateOutputsPB& output) {
-        client_finished_sent = client_finished_sent || outputContainsFinished(output);
-    };
-
-    auto try_write_prefill_first_token = [&](bool* wrote) -> grpc::Status {
-        if (wrote) {
-            *wrote = false;
-        }
-        if (first_token_sent || !prefill_ctx) {
-            return grpc::Status::OK;
-        }
-
-        GenerateOutputsPB prefill_output;
-        if (!consumePrefillFirstResponse(prefill_ctx,
-                                         stream,
-                                         /*client_first_chunk_sent=*/false,
-                                         &prefill_finished,
-                                         &prefill_finished_size,
-                                         &skip_next_decode_output,
-                                         &prefill_output)) {
-            return grpc::Status::OK;
-        }
-
-        first_token_sent = true;
-        if (!writer->Write(prefill_output)) {
-            stream->reportError(ErrorCode::CANCELLED, "write prefill first token failed");
-            RTP_LLM_LOG_WARNING("request [%s] write prefill first token failed", request_key.c_str());
-            return grpc::Status(grpc::StatusCode::INTERNAL, "write prefill first token failed");
-        }
-        mark_client_finished(prefill_output);
-        if (wrote) {
-            *wrote = true;
-        }
-        return grpc::Status::OK;
-    };
-
-    auto observe_prefill_first_token_as_late = [&]() {
-        if (!prefill_ctx || prefill_finished) {
-            return;
-        }
-        (void)consumePrefillFirstResponse(prefill_ctx,
-                                          stream,
-                                          /*client_first_chunk_sent=*/true,
-                                          &prefill_finished,
-                                          &prefill_finished_size,
-                                          &skip_next_decode_output,
-                                          /*client_output=*/nullptr);
-    };
-
-    auto drop_current_decode_output_if_duplicate = [&]() {
-        if (!first_token_sent) {
-            first_token_sent = true;
-            return false;
-        }
-        if (skip_next_decode_output) {
-            skip_next_decode_output = false;
-            return true;
-        }
-        return false;
-    };
-
-    while (stream->isActive() || stream->hasOutput()) {
-        auto prefill_status = propagate_prefill_error();
-        if (!prefill_status.ok()) {
-            return prefill_status;
-        }
-        if (context->IsCancelled()) {
-            stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
-            RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
-            return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
-        }
-
-        bool wrote_prefill_first = false;
-        auto prefill_write_status = try_write_prefill_first_token(&wrote_prefill_first);
-        if (!prefill_write_status.ok()) {
-            return prefill_write_status;
-        }
-        if (wrote_prefill_first) {
-            continue;
-        }
-
-        if (!stream->hasOutput()) {
-            if (refreshIdleStreamState(stream)) {
-                return serializeErrorMsg(request_key, stream->statusInfo());
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
-
-        const auto result = stream->nextOutput();
-        if (!result.ok()) {
-            if (result.status().code() != ErrorCode::FINISHED) {
-                return serializeErrorMsg(request_key, result.status());
-            } else {
-                break;
-            }
-        }
-
-        wrote_prefill_first = false;
-        prefill_write_status = try_write_prefill_first_token(&wrote_prefill_first);
-        if (!prefill_write_status.ok()) {
-            return prefill_write_status;
-        }
-        if (!wrote_prefill_first && first_token_sent) {
-            observe_prefill_first_token_as_late();
-        }
-
-        if (drop_current_decode_output_if_duplicate()) {
-            continue;
-        }
-
-        RTP_LLM_LOG_DEBUG("request [%s] generate next output success", request_key.c_str());
-        GenerateOutputsPB outputs_pb;
-
-        QueryConverter::transResponse(&outputs_pb,
-                                      &(result.value()),
-                                      stream->generateConfig()->aux_info,
-                                      maga_init_params_.misc_config.aux_string,
-                                      stream->specialTokens().eos_token_id);
-        updateDecodeAuxInfo(outputs_pb, stream, prefill_ctx);
-        if (!writer->Write(outputs_pb)) {
-            stream->reportError(ErrorCode::CANCELLED, "write outputs pb failed");
-            RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
-            return grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
-        }
-        mark_client_finished(outputs_pb);
-        if (stream->hasEvent(StreamEvents::NeedRemoteGenerate)) {
-            break;
-        }
-    }
-
-    observe_prefill_first_token_as_late();
-
-    auto prefill_status = propagate_prefill_error();
-    if (!prefill_status.ok()) {
-        return prefill_status;
-    }
-    if (stream->hasError()) {
-        return serializeErrorMsg(request_key, stream->statusInfo());
-    }
-
-    // If prefill first response indicated termination (e.g., max_new_tokens=1 or first token is EOS)
-    // but the client has not yet seen a terminal frame, we must send one so it knows the request is complete.
-    if (prefill_finished && !client_finished_sent && first_token_sent && stream->isFinished()) {
-        GenerateOutputsPB term_output;
-        auto*             flatten = term_output.mutable_flatten_output();
-        // Set finished=true for all sequences using the saved batch/beam count from
-        // the preserved prefill first response, even if later decode chunks arrived first.
-        for (int i = 0; i < prefill_finished_size; ++i) {
-            flatten->add_finished(true);
-            flatten->add_aux_info();
-        }
-        updateDecodeAuxInfo(term_output, stream, prefill_ctx);
-        if (!writer->Write(term_output)) {
-            stream->reportError(ErrorCode::CANCELLED, "write termination frame failed");
-            RTP_LLM_LOG_WARNING("request [%s] write termination frame failed", request_key.c_str());
-            return grpc::Status(grpc::StatusCode::INTERNAL, "write termination frame failed");
-        }
-        client_finished_sent = true;
-        RTP_LLM_LOG_DEBUG("request [%s] sent termination frame for first-token-EOS", request_key.c_str());
-    }
-
-    RTP_LLM_LOG_DEBUG("request [%s] decode generate done", request_key.c_str());
     return grpc::Status::OK;
 }
 
@@ -602,11 +315,10 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
 
     engine_->enqueue(stream);
 
-    generate_context.error_status = pollStreamOutputWithPrefill(server_context,
-                                                                generate_context.request_key,
-                                                                response_writer,
-                                                                generate_context.getStream(),
-                                                                prefill_caller_ctx);
+    // Keep the async prefill RPC alive for the handoff lifecycle only. StartLoad applies the first token to the
+    // decode stream, so client output must come exclusively from pollStreamOutput().
+    generate_context.error_status =
+        pollStreamOutput(server_context, generate_context.request_key, response_writer, generate_context.getStream());
     meta_->dequeue(generate_context.request_id, generate_context.getStream());
 
     if (prefill_caller_ctx && prefill_caller_ctx->failed()) {
@@ -618,12 +330,10 @@ grpc::Status DecodeRpcServerNew2::GenerateStreamCall(grpc::ServerContext*       
     return generate_context.error_status;
 }
 
-void updateDecodeAuxInfo(GenerateOutputsPB&                                 outputs_pb,
-                         std::shared_ptr<GenerateStream>&                   stream,
-                         const std::shared_ptr<PrefillServerCallerContext>& prefill_ctx) {
+void DecodeRpcServerNew2::updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream) {
     auto       first_token_rt_us = stream->getTimeInfo().first_token_rt_us;
     auto       cost_time_us      = autil::TimeUtility::currentTimeInMicroSeconds() - stream->beginTimeUs();
-    const auto reuse_lens        = getPrefillReuseLens(stream, prefill_ctx);
+    const auto reuse_lens        = getPrefillReuseLens(stream);
 
     for (size_t i = 0; i < outputs_pb.flatten_output().aux_info_size(); i++) {
         auto       aux_info                = outputs_pb.mutable_flatten_output()->mutable_aux_info(i);

@@ -147,10 +147,6 @@ void PrefillServerCallerContext::startPolling() {
 
 void PrefillServerCallerContext::handleReadChunkLocked(const GenerateOutputsPB& response) {
     auto async_state = async_state_;
-    if (!first_response_received_) {
-        first_response_.CopyFrom(response);
-        first_response_received_ = true;
-    }
     response_.CopyFrom(response);
     response_received_ = true;
     updateReuseLensSnapshotLocked(response);

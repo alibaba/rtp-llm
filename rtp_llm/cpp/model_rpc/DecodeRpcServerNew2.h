@@ -24,10 +24,6 @@ GenerateInputPB makeDecodeEntranceHandoffRequest(const GenerateInputPB& request,
 
 size_t selectDecodeEntranceDpIndex(size_t dp_count, int64_t handoff_id);
 
-void updateDecodeAuxInfo(GenerateOutputsPB&                                 outputs_pb,
-                         std::shared_ptr<GenerateStream>&                   stream,
-                         const std::shared_ptr<PrefillServerCallerContext>& prefill_ctx);
-
 class DecodeRpcServerNew2: public RemoteRpcServer {
 public:
     DecodeRpcServerNew2()  = default;
@@ -44,20 +40,7 @@ public:
 
 private:
     static grpc::Status parsePrefillDpAddr(const std::string& addr, std::string* ip, uint32_t* port);
-    static bool outputContainsFinished(const GenerateOutputsPB& output);
-    static bool refreshIdleStreamState(std::shared_ptr<GenerateStream>& stream);
-    static bool consumePrefillFirstResponse(const std::shared_ptr<PrefillServerCallerContext>& prefill_ctx,
-                                            std::shared_ptr<GenerateStream>&                   stream,
-                                            bool                                               client_first_chunk_sent,
-                                            bool*                                              prefill_finished,
-                                            int*                                               prefill_finished_size,
-                                            bool*                                              skip_next_decode_output,
-                                            GenerateOutputsPB*                                client_output);
-    grpc::Status pollStreamOutputWithPrefill(grpc::ServerContext*                               context,
-                                             const std::string&                                 request_key,
-                                             WriterInterface*                                   writer,
-                                             std::shared_ptr<GenerateStream>&                   stream,
-                                             const std::shared_ptr<PrefillServerCallerContext>& prefill_ctx);
+    void updateAuxInfo(GenerateOutputsPB& outputs_pb, std::shared_ptr<GenerateStream>& stream) override;
 
 private:
     std::atomic<int64_t>                 unique_key_id_{0};

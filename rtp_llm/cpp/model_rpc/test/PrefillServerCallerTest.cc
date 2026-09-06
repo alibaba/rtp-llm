@@ -394,12 +394,6 @@ TEST_F(PrefillServerCallerTest, LaterChunkReuseLensRefreshSnapshot) {
     EXPECT_TRUE(context->success());
     EXPECT_FALSE(context->failed());
 
-    GenerateOutputsPB first_response;
-    ASSERT_TRUE(context->takeFirstResponse(first_response));
-    ASSERT_TRUE(first_response.has_flatten_output());
-    ASSERT_EQ(first_response.flatten_output().aux_info_size(), 1);
-    EXPECT_EQ(first_response.flatten_output().aux_info(0).step_output_len(), 1);
-
     const auto& response = context->response();
     ASSERT_TRUE(response.has_flatten_output());
     ASSERT_EQ(response.flatten_output().aux_info_size(), 1);
