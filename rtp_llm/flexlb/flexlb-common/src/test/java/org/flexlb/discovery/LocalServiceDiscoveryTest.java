@@ -206,7 +206,7 @@ class LocalServiceDiscoveryTest {
         LocalServiceDiscovery discovery = new LocalServiceDiscovery(file);
 
         assertTrue(discovery.getHosts("  ").isEmpty());
-        assertTrue(discovery.getHosts(null).isEmpty());
+        assertTrue(discovery.getHosts((String) null).isEmpty());
     }
 
     /** Write via tmp + atomic move, mirroring the writer-side protocol. */

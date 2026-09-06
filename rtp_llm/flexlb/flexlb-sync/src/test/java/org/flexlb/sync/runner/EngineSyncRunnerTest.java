@@ -2,8 +2,8 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
@@ -62,7 +62,7 @@ class EngineSyncRunnerTest {
     private final RoleType roleType = RoleType.PREFILL;
 
     @Mock
-    private CacheAwareService localKvCacheAwareManager;
+    private CacheAwareService cacheAwareService;
 
     @Mock
     private DynamicCacheIntervalService cacheIntervalService;
@@ -88,7 +88,7 @@ class EngineSyncRunnerTest {
                 engineHealthReporter,
                 engineGrpcService,
                 roleType,
-                localKvCacheAwareManager,
+                cacheAwareService,
                 cacheIntervalService,
                 syncRequestTimeoutMs,
                 syncCount,
@@ -117,7 +117,7 @@ class EngineSyncRunnerTest {
                 engineHealthReporter,
                 engineGrpcService,
                 roleType,
-                localKvCacheAwareManager,
+                cacheAwareService,
                 cacheIntervalService,
                 syncRequestTimeoutMs,
                 syncCount,
@@ -141,7 +141,7 @@ class EngineSyncRunnerTest {
         EngineSyncRunner runner = new EngineSyncRunner(
                 modelName, workerDirectory, workerAddressService, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.VIT,
-                localKvCacheAwareManager,
+                cacheAwareService,
                 cacheIntervalService,
                 syncRequestTimeoutMs, syncCount,
                 syncEngineStatusInterval, false, STATUS_STALE_AFTER_US);
@@ -163,7 +163,7 @@ class EngineSyncRunnerTest {
         EngineSyncRunner runner = new EngineSyncRunner(
                 modelName, workerDirectory, workerAddressService,
                 statusCheckExecutor, engineHealthReporter, engineGrpcService,
-                RoleType.PREFILL, localKvCacheAwareManager,
+                RoleType.PREFILL, cacheAwareService,
                 cacheIntervalService, syncRequestTimeoutMs, syncCount,
                 syncEngineStatusInterval, false, STATUS_STALE_AFTER_US);
 
@@ -201,7 +201,7 @@ class EngineSyncRunnerTest {
         EngineSyncRunner runner = new EngineSyncRunner(
                 modelName, directory, workerAddressService, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.PREFILL,
-                localKvCacheAwareManager,
+                cacheAwareService,
                 cacheIntervalService,
                 syncRequestTimeoutMs, syncCount,
                 syncEngineStatusInterval, false,
@@ -233,7 +233,7 @@ class EngineSyncRunnerTest {
                 engineHealthReporter,
                 engineGrpcService,
                 RoleType.PREFILL,
-                localKvCacheAwareManager,
+                cacheAwareService,
                 cacheIntervalService,
                 syncRequestTimeoutMs,
                 syncCount,
@@ -334,7 +334,7 @@ class EngineSyncRunnerTest {
         return new EngineSyncRunner(
                 modelName, directory, workerAddressService,
                 statusCheckExecutor, engineHealthReporter, engineGrpcService,
-                RoleType.PREFILL, localKvCacheAwareManager,
+                RoleType.PREFILL, cacheAwareService,
                 cacheIntervalService,
                 syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
                 false, STATUS_STALE_AFTER_US);
@@ -374,7 +374,7 @@ class EngineSyncRunnerTest {
                 engineHealthReporter,
                 engineGrpcService,
                 RoleType.PREFILL,
-                localKvCacheAwareManager,
+                cacheAwareService,
                 cacheIntervalService,
                 syncRequestTimeoutMs,
                 syncCount,
