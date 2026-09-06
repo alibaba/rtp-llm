@@ -8,9 +8,8 @@ load client implementations have been removed. The smoke client family
 as well: its coverage now lives in the `flexlb_ft/` functional-test
 framework. The retained Python tools (the online_eval aggregation / report /
 consolidation scripts and the `flexlb_ft/` framework itself) run on the
-system `python3` and are intended
-for the `luoli_gpu` container, where `grpcio`, `grpcio-tools`, and
-`protobuf` are available.
+system `python3` and need `grpcio`, `grpcio-tools`, and `protobuf`
+installed on it.
 
 The legacy standalone smoke/chaos scripts (`cancel_smoke.py`,
 `scheduling_smoke.py`, `anomaly_smoke.py`, `flexlb_behavior_test.sh`,
@@ -22,10 +21,26 @@ coverage now lives in the `flexlb_ft/` functional-test framework
 
 ## One-command run
 
-Run inside `luoli_gpu`:
+Resource requirements (stated structurally — any machine meeting them works):
+
+- JDK 21+ (the script starts three JVMs side by side: the mock cluster,
+  the `flexlb-api` master, and the load client).
+- A Linux host or container whose system `python3` provides `grpcio`,
+  `grpcio-tools`, and `protobuf` (the aggregation / consolidation / report
+  layer and the `flexlb_ft/` framework are Python).
+- Memory at the order of the standard 12P/40D profile: the mock-cluster JVM
+  defaults to a 32g heap (`JAVA_MOCK_ENGINE_HEAP_SIZE`), the load client to
+  16g (`JAVA_LOAD_CLIENT_JVM_XMX`), plus the master on the default Spring
+  Boot heap — plan ~60g+ of available memory on one machine. Every JVM runs
+  with `-XX:+ExitOnOutOfMemoryError`, so an undersized host fails loudly
+  instead of limping; scale the topology down (`N_PREFILL` / `N_DECODE`)
+  on smaller hosts.
+
+Build the two jars before the first run — the exact commands live in
+`flexlb_ft/README.md` (Quick start); the script only self-builds the
+master jar when it is missing.
 
 ```bash
-docker exec -it luoli_gpu bash
 cd <repo-root>
 
 rtp_llm/flexlb/tools/online_eval/run_online_eval.sh
@@ -136,6 +151,83 @@ rtp_llm/flexlb/tools/online_eval/run_online_eval.sh
 If the default jar is not built, the script runs `./mvnw -pl flexlb-api -am package -DskipTests`.
 The script auto-selects Java 21 from system alternatives when available; otherwise set `JAVA21_HOME` or `JAVA_HOME`.
 It also defaults to `MAVEN_PROFILES=opensource,!internal` so an adjacent `internal_source` directory does not accidentally activate internal-only dependencies.
+
+## Standard run: one valid 12P/40D replay pass
+
+The standard load profile is 12 prefill + 40 decode mock engines, replay
+send mode, one full pass:
+
+```bash
+cd rtp_llm/flexlb/tools/online_eval
+
+JAVA_HOME=<JDK21> \
+N_PREFILL=12 N_DECODE=40 \
+SEND_MODE=replay LOOP=1 DURATION_S=120 FLEXLB_WARMUP_SECONDS=10 \
+REPLAY_SPEED=82 \
+MOCK_BASE_GRPC_PORT=61000 FLEXLB_HTTP_ADDR=127.0.0.1:7001 \
+bash run_online_eval.sh
+```
+
+The script is a single orchestrator — it starts the mock-cluster JVM, the
+master, and the load client itself and consolidates the run directory on
+exit; no manual service bring-up. What decides whether the pass is valid:
+
+**Ports.** 12P/40D holds 53 consecutive ports: `MOCK_BASE_GRPC_PORT-1`
+(cluster control-plane HTTP) through `MOCK_BASE_GRPC_PORT+51` (52 engine
+ports); default base 61000. The master takes `FLEXLB_HTTP_ADDR` (default
+`127.0.0.1:7001`) plus the management port 7002. Verify the whole span is
+free before starting; if it is not, move `MOCK_BASE_GRPC_PORT` and
+`FLEXLB_HTTP_ADDR` / `FLEXLB_MANAGEMENT_PORT` to a free span together.
+
+**REPLAY_SPEED is caller-supplied.** The script is a pure pass-through and
+never invents a speed: the bare fallback (10) is the JavaLoadClient
+built-in default and is NOT calibrated — running without an explicit
+`REPLAY_SPEED` applies a load far below the target QPS. Calibrate from the
+trace:
+
+```
+SPEED = max(1, round(target_qps × valid_span_s ÷ valid_requests))
+```
+
+valid requests = trace rows with output length > 0 (zero-output rows are
+skipped client-side). For the shipped `data/online_logs/trace_30min.jsonl`
+(6042 valid requests over a 758.2s span) the 650 nominal-QPS target
+calibrates to 82. Recompute whenever the trace or the target QPS changes.
+
+**Send modes.** `SEND_MODE=replay` (default) paces requests by trace
+timestamps — the real arrival shape; this is the standard profile.
+`SEND_MODE=uniform` is the explicit opt-in for the strictest scheduling
+regime, pressure-boundary and capacity-critical scans: constant
+`SEND_MODE_QPS` with a linear `RAMP_UP_SECONDS` climb. The two arrival
+shapes differ, so throughput/latency numbers from replay and uniform runs
+are not comparable — never mix them in one series.
+
+**Verdict.** A run is valid only when `run/<RUN_ID>/aggregate.json` has
+`summary.test_valid` = true, i.e. all six `summary.validity_checks` pass
+(`zero_errors`, `all_scheduled_tasks_started`, `all_started_rpcs_recorded`,
+`master_arrival_matches_success`, `master_completion_matches_success`,
+`client_pacing_p99_within_limit`); a check that lacks data stays null,
+which does not count as passing — conservatively invalid.
+
+```bash
+python3 -c "
+import json
+s = json.load(open('run/<RUN_ID>/aggregate.json'))['summary']
+print('test_valid =', s['test_valid'])
+for k, v in (s['validity_checks'] or {}).items():
+    print(f'  {k}: {v}')
+"
+```
+
+Exit codes cut both ways:
+
+- **rc=1 is not automatically a failure** — `test_valid=false` trips the
+  validity gate and exits 1 while the artifacts stay complete; look up
+  which check failed before drawing conclusions.
+- **rc=0 is not automatically a success** — a missing or unparsable
+  `aggregate.json` is a WARNING only and never changes the exit code.
+
+The on-disk artifacts are always the source of truth.
 
 ## Data layout
 

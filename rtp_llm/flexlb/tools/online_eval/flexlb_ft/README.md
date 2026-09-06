@@ -4,7 +4,15 @@ FlexLB 调度器的场景测试套件：每个用例启动一小片 mock 引擎�
 
 ## 快速开始
 
-前置：先用 maven 构建两个 jar（缺失时启动会直接报错指路）——`flexlb-mock-engine` 的 all-in-one jar 与 `flexlb-api` jar（路径见 `harness.MOCK_JAR` / `harness.API_JAR`）。
+前置：JDK 21+（`JAVA_HOME` 指向它，下文命令写作 `<JDK21>`）。先用 maven 构建两个 jar（缺失时启动会直接报错指路）：
+
+```bash
+cd rtp_llm/flexlb
+JAVA_HOME=<JDK21> ./mvnw -P"opensource,!internal" -pl flexlb-mock-engine -am package -DskipTests
+JAVA_HOME=<JDK21> ./mvnw -P"opensource,!internal" -pl flexlb-api -am package -DskipTests
+```
+
+产物：`flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar`（mock 引擎与 load client 共用的 all-in-one jar）与 `flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar`（master），即 `harness.MOCK_JAR` / `harness.API_JAR`。profile 组合的含义：`opensource` 是默认激活的 profile；`internal` 只在仓内存在 `internal_source` 目录时自动激活，`!internal` 显式关掉它，防止旁边的内网仓把依赖解析到 internal-only 构件。改动代码后可先做编译验证：`JAVA_HOME=<JDK21> ./mvnw -pl flexlb-mock-engine -am clean test-compile -P '!internal'`。
 
 ```bash
 cd rtp_llm/flexlb/tools/online_eval
@@ -70,6 +78,8 @@ python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbat
 聚合 `--json` 保持单 runner schema（summary + cases[]），另加：`cases[].lane`、`lanes[]`（各路 category 集合 / exit_codes / wall_s）、`summary.parallel / wall_time_s / serial_case_time_s`（最后一项为逐例耗时之和，是串行 wall 的下界，报告加速比时对标实测串行 35–55 分钟而非它）；case 级分片另记 `summary.shard`（category|case）与 `lanes[].case_names`（各路精确 case 名单，分片矩阵是 run 记录的一部分）。退出码 = 任一 lane runner 非零或存在 FAIL。`--parallel 1` 单 lane 跑全量（case 模式为一次 `--cases` 全列表调用，category 模式走 `--category all` 单进程路径），与直接串行等价，可作编排无回归的冒烟基线。
 
 实测参考（110 开发机容器，batch-window profile，共享负载）：串行单进程 wall 4918s（98 例快照）；category 级 4 路 wall 2444s（2.01x）——wall 被最重家族钳制（status 24 例实测 2104s，占串行 43%）；case 级 6 路 wall 941s（5.22x，15.7 分钟，最重路 16 例），8 路（`--mock-stride 500`，mock base 平移避开他人占用段）wall 703s（6.99x，11.7 分钟）——逐例摊平后钳制消除。等价性口径：并行 run 对串行基线逐例对照 + FINDING 集一致；实测 6 路 89/98 一致、9 例翻转全部单向好转（对翻转例同 jar 同 env 定向复跑两轮结果稳定，属快照漂移而非编排回归）；8 路对 6 路 FINDING 集完全相等。
+
+**proto 缓存隔离（同机多线并行必读）**：harness 首次用到 proto 时会把 `rtp_llm/cpp/model_rpc/proto` 下的 `.proto` 编译到共享缓存目录（默认 `$TMPDIR/flexlb_eval_proto`，env `FLEXLB_EVAL_PROTO_OUT` 改址）。同一台机上另一条测试线（另一份仓或另一会话）几乎同时启动时，两条线会互相覆盖对方的编译产物，典型症状是大面积 `AttributeError: module 'model_rpc_service_pb2' has no attribute 'GenerateConfigPB'` 连坐——这不是套件坏了，是缓存目录撞了。解法：每条线各自设独立的 `FLEXLB_EVAL_PROTO_OUT` 目录。
 
 ## 测试分类（123 例）
 
