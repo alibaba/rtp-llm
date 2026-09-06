@@ -51,7 +51,17 @@ public class WorkerStatus {
             String ip,
             int port,
             int grpcPort,
-            String site) {
+            String site,
+            String deploymentName) {
+
+        public TopologySnapshot(
+                String group,
+                String ip,
+                int port,
+                int grpcPort,
+                String site) {
+            this(group, ip, port, grpcPort, site, null);
+        }
     }
 
     /** Deeply immutable copy of the task fields reported by one status RPC. */
@@ -361,6 +371,18 @@ public class WorkerStatus {
             int port,
             int grpcPort,
             String site) {
+        return createDiscovered(
+                role, group, ip, port, grpcPort, site, null);
+    }
+
+    public static WorkerStatus createDiscovered(
+            RoleType role,
+            String group,
+            String ip,
+            int port,
+            int grpcPort,
+            String site,
+            String deploymentName) {
         Objects.requireNonNull(role, "role");
         Objects.requireNonNull(ip, "ip");
         if (port <= 0 || grpcPort <= 0) {
@@ -368,7 +390,8 @@ public class WorkerStatus {
                     "worker ports must be positive");
         }
         return new WorkerStatus(
-                new TopologySnapshot(group, ip, port, grpcPort, site),
+                new TopologySnapshot(
+                        group, ip, port, grpcPort, site, deploymentName),
                 new EngineObservation(
                         role,
                         null,
@@ -598,10 +621,20 @@ public class WorkerStatus {
 
     /** Atomically refresh discovery-owned placement labels for this generation. */
     public void updateDiscoveryLabels(String site, String group) {
+        updateDiscoveryLabels(site, group, topology.get().deploymentName());
+    }
+
+    public void updateDiscoveryLabels(
+            String site, String group, String deploymentName) {
         requireGenerationLock();
         requireActiveGeneration();
         topology.updateAndGet(current -> new TopologySnapshot(
-                group, current.ip(), current.port(), current.grpcPort(), site));
+                group,
+                current.ip(),
+                current.port(),
+                current.grpcPort(),
+                site,
+                deploymentName));
     }
 
     public RoleType getRole() {
@@ -622,6 +655,10 @@ public class WorkerStatus {
 
     public int getGrpcPort() {
         return topology.get().grpcPort();
+    }
+
+    public String getDeploymentName() {
+        return topology.get().deploymentName();
     }
 
     public String getSite() {

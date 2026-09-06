@@ -3,10 +3,10 @@ package org.flexlb.service.grpc;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.master.WorkerStatus.EngineObservation;
 import org.flexlb.dao.master.WorkerStatus.StatusObservation;
 import org.flexlb.dao.master.WorkerStatus.TaskObservation;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.enums.KvCacheGroupMode;
@@ -30,9 +30,8 @@ public class EngineStatusConverter {
         WorkerStatusResponse response = new WorkerStatusResponse();
 
         response.setRole(RoleTypeProtoConverter.fromWorkerStatus(workerStatusPB));
-        // Compatibility only: LocalRpcServer::GetWorkerStatus does not currently
-        // populate this field. Preserve it for protocol compatibility/telemetry,
-        // but do not use it as a scheduling or batching limit.
+        // LocalRpcServer::GetWorkerStatus does not currently populate this field.
+        // Preserve it for telemetry, but do not use it as a scheduling or batching limit.
         response.setAvailableConcurrency(workerStatusPB.getAvailableConcurrency());
         response.setRunningQueryLen(workerStatusPB.getRunningQueryLen());
         response.setWaitingQueryLen(workerStatusPB.getWaitingQueryLen());

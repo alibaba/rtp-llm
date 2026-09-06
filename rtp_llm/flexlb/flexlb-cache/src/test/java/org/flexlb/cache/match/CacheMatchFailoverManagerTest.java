@@ -7,7 +7,6 @@ import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.kvcm.KvcmHealthSnapshot;
 import org.flexlb.dao.kvcm.KvcmHealthState;
 import org.flexlb.dao.route.KvcmConfig;
-import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.engine.grpc.client.KvcmGrpcClient;
 import org.junit.jupiter.api.Test;
@@ -16,6 +15,7 @@ import org.mockito.ArgumentCaptor;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
+import static org.flexlb.cache.CacheMatchTestConfigurations.kvcm;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
@@ -139,19 +139,15 @@ class CacheMatchFailoverManagerTest {
     }
 
     private CacheMatchConfiguration configuration(boolean autoSwitch) {
-        LocalStandbyConfig standby = new LocalStandbyConfig();
-        standby.setAutoSwitch(autoSwitch);
-
-        KvcmConfig kvcm = new KvcmConfig();
-        kvcm.setEnabled(true);
-        kvcm.setLocalStandby(standby);
+        KvcmConfig kvcmTopology = new KvcmConfig();
 
         ServiceRoute route = new ServiceRoute();
         route.setServiceId("test-service");
-        route.setKvcm(kvcm);
+        route.setKvcm(kvcmTopology);
 
         ModelMetaConfig config = new ModelMetaConfig();
         config.putServiceRoute(route.getServiceId(), route);
-        return new CacheMatchConfiguration(config);
+        return kvcm(config,
+                runtime -> runtime.getLocalStandby().setAutoSwitch(autoSwitch));
     }
 }

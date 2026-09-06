@@ -4,6 +4,7 @@ import io.grpc.StatusRuntimeException;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.config.KvcmCacheMatchingConfig;
 import org.flexlb.dao.kvcm.KvcmHealthSnapshot;
 import org.flexlb.dao.kvcm.KvcmHealthState;
 import org.flexlb.dao.route.KvcmConfig;
@@ -45,7 +46,8 @@ public class KvcmGrpcClient {
     private static final String INITIAL_HEALTH_REASON = "initial";
 
     private final boolean enabled;
-    private final KvcmConfig config;
+    private final KvcmConfig topologyConfig;
+    private final KvcmCacheMatchingConfig config;
     private final KvcmMetaServiceClient metaServiceClient;
     private final KvcmLeaderResolver leaderResolver;
     private final KvcmWorkerMetadataResolver workerMetadataResolver;
@@ -95,14 +97,18 @@ public class KvcmGrpcClient {
         this.applicationWarmupState = applicationWarmupState;
         this.grpcReporter = grpcReporter;
         this.metricsReporter = metricsReporter;
-        this.config = configuration.getKvcmConfig();
+        this.topologyConfig = configuration.getKvcmConfig();
+        this.config = configuration.getKvcmRuntimeConfig();
         this.enabled = configuration.isKvcmEnabled();
 
         if (!enabled) {
-            this.heartbeatFailureThreshold = KvcmConfig.DEFAULT_HEARTBEAT_FAILURE_THRESHOLD;
-            this.queryFailureThreshold = KvcmConfig.DEFAULT_QUERY_FAILURE_THRESHOLD;
+            this.heartbeatFailureThreshold =
+                    KvcmCacheMatchingConfig.DEFAULT_HEARTBEAT_FAILURE_THRESHOLD;
+            this.queryFailureThreshold =
+                    KvcmCacheMatchingConfig.DEFAULT_QUERY_FAILURE_THRESHOLD;
             this.maxQueryRetryCount = 0;
-            this.recoverySuccessThreshold = KvcmConfig.DEFAULT_RECOVERY_SUCCESS_THRESHOLD;
+            this.recoverySuccessThreshold =
+                    KvcmCacheMatchingConfig.DEFAULT_RECOVERY_SUCCESS_THRESHOLD;
             this.refreshExecutor = null;
             return;
         }
@@ -123,7 +129,8 @@ public class KvcmGrpcClient {
                 TimeUnit.MILLISECONDS);
         log.info("Started KVCM client, address={}, bootstrapPort={}, "
                         + "leaderRefreshIntervalMs={}, maxQueryRetryCount={}, namespaceSource={}",
-                config.getAddress(), config.getPort(), config.getLeaderRefreshIntervalMs(),
+                topologyConfig.getAddress(), topologyConfig.getPort(),
+                config.getLeaderRefreshIntervalMs(),
                 maxQueryRetryCount,
                 workerMetadataResolver.usesConfiguredNamespace()
                         ? "configuration"

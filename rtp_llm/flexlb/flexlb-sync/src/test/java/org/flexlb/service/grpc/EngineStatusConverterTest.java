@@ -171,4 +171,34 @@ class EngineStatusConverterTest {
         assertEquals(1, response.getBlockHashLookaheadTokens());
         assertEquals(1, response.getCacheMatchRollbackBlocks());
     }
+
+    @Test
+    void preservesCanonicalWorkerResourceFields() {
+        EngineRpcService.WorkerStatusPB workerStatus = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setDpSize(2)
+                .setDpRank(1)
+                .setAvailableKvCache(2_000_000)
+                .setTotalKvCache(2_100_000)
+                .setMaxSeqLen(131_072)
+                .setMaxBatchTokensSize(262_144)
+                .setBlockSize(1152)
+                .setBlockHashLookaheadTokens(1)
+                .setKvCacheGroupMode(
+                        EngineRpcService.KvCacheGroupModePB.KV_CACHE_GROUP_MODE_WITH_MAMBA)
+                .setCacheMatchRollbackBlocks(1)
+                .build();
+
+        WorkerStatusResponse response =
+                EngineStatusConverter.convertToWorkerStatusResponse(workerStatus);
+
+        assertEquals(1, response.getDpRank());
+        assertEquals(2_000_000, response.getAvailableKvCacheTokens());
+        assertEquals(2_100_000, response.getTotalKvCacheTokens());
+        assertEquals(131_072, response.getMaxSeqLen());
+        assertEquals(262_144, response.getMaxBatchTokensSize());
+        assertEquals(1152, response.getCacheStatus().getBlockSize());
+        assertEquals(1, response.getBlockHashLookaheadTokens());
+        assertEquals(KvCacheGroupMode.WITH_MAMBA, response.getKvCacheGroupMode());
+        assertEquals(1, response.getCacheMatchRollbackBlocks());
+    }
 }

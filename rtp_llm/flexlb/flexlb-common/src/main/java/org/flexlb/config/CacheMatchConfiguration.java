@@ -3,8 +3,8 @@ package org.flexlb.config;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.dao.route.KvcmConfig;
-import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.ServiceRoute;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -20,6 +20,7 @@ public class CacheMatchConfiguration {
     private final List<ServiceRoute> serviceRoutes;
     private final ServiceRoute kvcmServiceRoute;
     private final KvcmConfig kvcmConfig;
+    private final KvcmCacheMatchingConfig kvcmRuntimeConfig;
     private final LocalStandbyConfig localStandbyConfig;
     private final boolean kvcmEnabled;
     private final boolean localSyncEnabled;
@@ -27,34 +28,45 @@ public class CacheMatchConfiguration {
     private final boolean autoSwitchEnabled;
     private final CacheMatchMode configuredMode;
 
-    public CacheMatchConfiguration(ModelMetaConfig modelMetaConfig) {
+    @Autowired
+    public CacheMatchConfiguration(
+            ModelMetaConfig modelMetaConfig,
+            ConfigService configService) {
+        this(modelMetaConfig, configService.loadBalanceConfig());
+    }
+
+    public CacheMatchConfiguration(
+            ModelMetaConfig modelMetaConfig,
+            FlexlbConfig flexlbConfig) {
         this.serviceRoutes = List.copyOf(modelMetaConfig.getServiceRoutes());
         this.kvcmServiceRoute = resolveKvcmServiceRoute(serviceRoutes);
         this.kvcmConfig = kvcmServiceRoute == null ? null : kvcmServiceRoute.getKvcm();
-        this.kvcmEnabled = kvcmConfig != null && kvcmConfig.isEnabled();
+        this.kvcmEnabled = flexlbConfig.isKvcmCacheMatching();
+        if (kvcmEnabled && kvcmConfig == null) {
+            throw new IllegalStateException(
+                    "FLEXLB_CONFIG cacheMatching.type=KVCM requires MODEL_SERVICE_CONFIG kvcm topology");
+        }
+        this.kvcmRuntimeConfig = kvcmEnabled
+                ? flexlbConfig.kvcmCacheMatching()
+                : null;
         this.localSyncEnabled = !kvcmEnabled;
         this.localStandbyEnabled = kvcmEnabled;
-        this.localStandbyConfig = resolveLocalStandbyConfig();
-        this.autoSwitchEnabled = localStandbyEnabled && (localStandbyConfig != null && localStandbyConfig.isAutoSwitch());
+        this.localStandbyConfig = kvcmEnabled
+                ? kvcmRuntimeConfig.getLocalStandby()
+                : null;
+        this.autoSwitchEnabled = localStandbyEnabled
+                && localStandbyConfig.isAutoSwitch();
         this.configuredMode = kvcmEnabled ? CacheMatchMode.KVCM : CacheMatchMode.LOCAL_SYNC;
         logInitialization();
     }
 
     private ServiceRoute resolveKvcmServiceRoute(List<ServiceRoute> routes) {
         for (ServiceRoute route : routes) {
-            if (route != null && route.isKvcmEnabled()) {
+            if (route != null && route.getKvcm() != null) {
                 return route;
             }
         }
         return null;
-    }
-
-    private LocalStandbyConfig resolveLocalStandbyConfig() {
-        if (!kvcmEnabled) {
-            return null;
-        }
-        LocalStandbyConfig configured = kvcmConfig.getLocalStandby();
-        return configured == null ? new LocalStandbyConfig() : configured;
     }
 
     private void logInitialization() {
@@ -73,13 +85,13 @@ public class CacheMatchConfiguration {
                     kvcmServiceRoute.getServiceId(),
                     kvcmConfig.getAddress(),
                     kvcmConfig.getNamespace(),
-                    kvcmConfig.getRequestTimeoutMs(),
-                    kvcmConfig.getLeaderRefreshIntervalMs(),
-                    kvcmConfig.getHeartbeatFailureThreshold(),
-                    kvcmConfig.getQueryFailureThreshold(),
-                    kvcmConfig.getMaxQueryRetryCount(),
-                    kvcmConfig.getRecoverySuccessThreshold(),
-                    kvcmConfig.getP2pHostCount());
+                    kvcmRuntimeConfig.getRequestTimeoutMs(),
+                    kvcmRuntimeConfig.getLeaderRefreshIntervalMs(),
+                    kvcmRuntimeConfig.getHeartbeatFailureThreshold(),
+                    kvcmRuntimeConfig.getQueryFailureThreshold(),
+                    kvcmRuntimeConfig.getMaxQueryRetryCount(),
+                    kvcmRuntimeConfig.getRecoverySuccessThreshold(),
+                    kvcmRuntimeConfig.getP2pHostCount());
         }
         if (localStandbyEnabled) {
             log.info("Local standby cache configuration: autoSwitch={}, blockSize={}, "

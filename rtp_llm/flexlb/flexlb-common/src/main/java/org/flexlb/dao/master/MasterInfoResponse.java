@@ -2,6 +2,9 @@ package org.flexlb.dao.master;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
+import org.flexlb.dao.loadbalance.Response;
+
+import java.util.Map;
 
 /**
  * Master topology returned to FlexLB clients.
@@ -26,4 +29,10 @@ public class MasterInfoResponse {
 
     @JsonProperty("queue_length")
     private int queueLength;
+
+    @JsonProperty("worker_summary")
+    private Map<String, Response.WorkerRoleSummary> workerSummary;
+
+    @JsonProperty("ready")
+    private boolean ready = true;
 }

@@ -39,7 +39,7 @@ class EngineAddressResolverTest {
 
         ServiceDiscovery serviceDiscovery = mock(ServiceDiscovery.class);
         when(serviceDiscovery.getHosts(endpoint))
-                .thenReturn(List.of(WorkerHost.of("10.0.0.1", 8081)));
+                .thenReturn(List.of(workerHost("10.0.0.1", 8080)));
 
         EngineAddressResolver resolver =
                 new EngineAddressResolver(serviceDiscovery, modelMetaConfig);
@@ -58,10 +58,15 @@ class EngineAddressResolverTest {
         verify(cacheListener).onAddressUpdate(initialHosts);
 
         discoveryListener.getValue().onHostsChanged(
-                List.of(WorkerHost.of("10.0.0.2", 8081)));
+                List.of(workerHost("10.0.0.2", 8080)));
 
         List<String> updatedHosts = List.of("10.0.0.2:8080");
         verify(grpcListener).onAddressUpdate(updatedHosts);
         verify(cacheListener).onAddressUpdate(updatedHosts);
+    }
+
+    private WorkerHost workerHost(String ip, int httpPort) {
+        return new WorkerHost(ip, httpPort, httpPort + 1, httpPort + 5,
+                httpPort + 1, "", "", "");
     }
 }

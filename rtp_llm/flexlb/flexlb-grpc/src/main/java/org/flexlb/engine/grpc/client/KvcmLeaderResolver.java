@@ -3,6 +3,7 @@ package org.flexlb.engine.grpc.client;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.config.KvcmCacheMatchingConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.KvcmConfig;
@@ -29,16 +30,18 @@ import java.util.concurrent.atomic.AtomicReference;
 public class KvcmLeaderResolver {
 
     private final boolean enabled;
-    private final KvcmConfig config;
+    private final KvcmConfig topologyConfig;
+    private final KvcmCacheMatchingConfig runtimeConfig;
     private final Endpoint kvcmEndpoint;
     private final RoutingServiceDiscovery serviceDiscovery;
     private final KvcmMetaServiceClient metaServiceClient;
     private final AtomicReference<GrpcTarget> leader = new AtomicReference<>();
 
     public KvcmLeaderResolver(CacheMatchConfiguration configuration, RoutingServiceDiscovery serviceDiscovery, KvcmMetaServiceClient metaServiceClient) {
-        this.config = configuration.getKvcmConfig();
+        this.topologyConfig = configuration.getKvcmConfig();
+        this.runtimeConfig = configuration.getKvcmRuntimeConfig();
         this.enabled = configuration.isKvcmEnabled();
-        this.kvcmEndpoint = enabled ? config.toEndpoint() : null;
+        this.kvcmEndpoint = enabled ? topologyConfig.toEndpoint() : null;
         this.serviceDiscovery = serviceDiscovery;
         this.metaServiceClient = metaServiceClient;
     }
@@ -56,7 +59,8 @@ public class KvcmLeaderResolver {
         Set<GrpcTarget> bootstrapTargets = new LinkedHashSet<>();
         for (WorkerHost discoveredHost : discoveredHosts) {
             // Discovery supplies candidate IPs; the configured port is used only for GetClusterInfo.
-            bootstrapTargets.add(new GrpcTarget(discoveredHost.getIp(), config.getPort()));
+            bootstrapTargets.add(new GrpcTarget(
+                    discoveredHost.getIp(), topologyConfig.getPort()));
         }
         for (GrpcTarget bootstrapTarget : bootstrapTargets) {
             try {
@@ -65,7 +69,7 @@ public class KvcmLeaderResolver {
                         GetClusterInfoRequest.newBuilder()
                                 .setTraceId(IdUtils.fastUuid())
                                 .build(),
-                        config.getRequestTimeoutMs());
+                        runtimeConfig.getRequestTimeoutMs());
                 ErrorCode code = response.getHeader().getStatus().getCode();
                 if (code != ErrorCode.OK || !response.hasLeaderEndpoint()) {
                     log.warn("KVCM bootstrap target {} did not return a leader, code={}",

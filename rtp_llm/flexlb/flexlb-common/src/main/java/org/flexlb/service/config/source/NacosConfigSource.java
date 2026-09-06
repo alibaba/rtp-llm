@@ -1,4 +1,4 @@
-package org.flexlb.service.config;
+package org.flexlb.service.config.source;
 
 import com.alibaba.nacos.api.NacosFactory;
 import com.alibaba.nacos.api.PropertyKeyConst;
@@ -8,6 +8,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DeploymentIdentity;
 import org.flexlb.dao.nacos.NacosConfig;
+import org.flexlb.service.config.ConfigSource;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
@@ -44,11 +45,9 @@ final class NacosConfigSource implements ConfigSource {
         if (dataId == null) {
             dataId = deploymentIdentity.getDeploymentId();
         }
-        this.config = new NacosConfig(
-                serverAddr,
-                dataId,
-                StringUtils.trimToNull(System.getenv(NACOS_GROUP)),
-                StringUtils.trimToNull(System.getenv(NACOS_NAMESPACE)));
+        String group = StringUtils.trimToNull(System.getenv(NACOS_GROUP));
+        String namespace = StringUtils.trimToNull(System.getenv(NACOS_NAMESPACE));
+        this.config = new NacosConfig(serverAddr, dataId, group, namespace);
     }
 
     @Override
@@ -134,4 +133,5 @@ final class NacosConfigSource implements ConfigSource {
             }
         };
     }
+
 }

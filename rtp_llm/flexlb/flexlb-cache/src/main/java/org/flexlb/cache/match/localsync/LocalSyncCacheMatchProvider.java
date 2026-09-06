@@ -79,6 +79,10 @@ public class LocalSyncCacheMatchProvider implements CacheMatchProvider {
         }
     }
 
+    public void removeEngineBlockCache(String engineIpPort) {
+        kvCacheManager.removeEngineCache(engineIpPort);
+    }
+
     private WorkerCacheUpdateResult buildSuccessResult(WorkerStatus workerStatus, CacheStatus cacheStatus) {
         return WorkerCacheUpdateResult.builder()
                 .success(true)
