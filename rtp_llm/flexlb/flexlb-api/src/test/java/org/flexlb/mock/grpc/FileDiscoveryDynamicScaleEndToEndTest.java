@@ -10,9 +10,13 @@ import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.route.DiscoveryConfig;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.discovery.FileServiceDiscovery;
+import org.flexlb.discovery.RoutingServiceDiscovery;
+import org.flexlb.discovery.ServiceDiscovery;
+import org.flexlb.discovery.ServiceDiscoveryType;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.mock.MockPrefillWorker;
 import org.flexlb.mock.MockWorkerBehavior;
@@ -106,7 +110,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     private MockPrefillWorker workerB;
     private MockPrefillWorker workerC;
     private Path discoveryFile;
-    private FileServiceDiscovery fileServiceDiscovery;
+    private ServiceDiscovery fileServiceDiscovery;
     private WorkerAddressService workerAddressService;
     private EngineGrpcService engineGrpcService;
     private EngineHealthReporter healthReporter;
@@ -125,7 +129,8 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         writeDiscoveryFileAtomic(List.of(prefillIpPort, workerIpPort(workerB)));
 
         // Real file-backed ServiceDiscovery — re-reads the file on every poll.
-        fileServiceDiscovery = new FileServiceDiscovery(discoveryFile.toString());
+        fileServiceDiscovery = new RoutingServiceDiscovery(
+                List.of(new FileServiceDiscovery(discoveryFile.toString())));
 
         // Model topology: upstream builds ModelMetaConfig from the
         // MODEL_SERVICE_CONFIG env; mocking it keeps this test hermetic while
@@ -133,9 +138,11 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         Endpoint prefillEndpoint = new Endpoint();
         prefillEndpoint.setAddress(PREFILL_DOMAIN);
         prefillEndpoint.setProtocol("http");
+        prefillEndpoint.setDiscovery(staticDiscovery());
         Endpoint decodeEndpoint = new Endpoint();
         decodeEndpoint.setAddress(DECODE_DOMAIN);
         decodeEndpoint.setProtocol("http");
+        decodeEndpoint.setDiscovery(staticDiscovery());
         ModelMetaConfig modelMetaConfig = mock(ModelMetaConfig.class);
         when(modelMetaConfig.endpointsWithGroup(MODEL_NAME, RoleType.PREFILL))
                 .thenReturn(List.of(Pair.of("mock", prefillEndpoint)));
@@ -376,6 +383,12 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     // ════════════════════════════════════════════════════════════════
     //  Helpers
     // ════════════════════════════════════════════════════════════════
+
+    private static DiscoveryConfig staticDiscovery() {
+        DiscoveryConfig discovery = new DiscoveryConfig();
+        discovery.setType(ServiceDiscoveryType.STATIC_ENV);
+        return discovery;
+    }
 
     /** Submit {@code count} requests and wait for every ACK to complete successfully. */
     private void drainRequests(int count) throws Exception {
