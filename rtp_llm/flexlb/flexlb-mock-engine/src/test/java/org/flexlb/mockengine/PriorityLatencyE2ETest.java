@@ -37,10 +37,17 @@ class PriorityLatencyE2ETest {
     @Timeout(90)
     void b_high_priority_dispatches_earlier_under_saturation() throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 1, 1, "5", 1.0, false)) {
-            // hold：批次上限大于总量 + 长 fixedWait → 零派发，队列稳定吸收提交
+            // hold：批次上限大于总量 + 长 fixedWait → 零派发，队列稳定吸收提交。
+            // dsv4 (v1) 适配：fixed_window 旋钮在 batchDispatcher()（DefaultBatchDispatcher
+            // 每次调度从 configService 现读，运行时翻转同样即时生效）。
             h.config.batchDispatcher().setMaxRequests(200);
             h.config.batchDispatcher().setMaxCollectionWaitMs(10_000);
             h.config.batchDispatcher().setMaxWaitingRequestsPerPrefillWorker(1024);
+            // This case measures Prefill priority ordering, not Decode KV
+            // admission. Keep the independent Decode expected-KV gate out of
+            // the fixture so every request reaches the queue under test.
+            h.config.getRouter().getRoles().getDecode().getAvailability()
+                    .setMaxKvUsagePercent(0);
 
             Map<Long, Long> submitNanos = new HashMap<>();
             Map<Long, Integer> priorityByRid = new HashMap<>();

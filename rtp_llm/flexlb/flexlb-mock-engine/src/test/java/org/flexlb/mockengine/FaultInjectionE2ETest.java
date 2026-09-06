@@ -2,6 +2,7 @@ package org.flexlb.mockengine;
 
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.config.BatchDispatcherConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -12,6 +13,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -34,15 +36,28 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>已知缺陷（只报不修，见任务报告）：{@code enqueueErrorCode} 字段从未被
  * {@link JavaMockEngineCluster} 读取 —— 错误响应只携带 message 不携带自定义
  * 错误码，c01 用断言固化该现状。
+ *
+ * <p>dsv4 (v1) 适配：SINGLE decision 折叠为 batchDispatcher 单批旋钮（见
+ * {@link #SINGLE_BATCH}）；DecodeEndpoint KV 视图经 {@code realKvAvailable()}；
+ * PrefillEndpoint 账目用 v1 命名（getInflightRequestCount /
+ * getInflightRouteRequestCount）。
  */
 class FaultInjectionE2ETest {
 
     private static final int BASE_PORT = 62900;
 
+    /**
+     * dsv4 (v1) 适配：intake3 的 {@code DecisionPolicyConfig.single()}（每请求
+     * 独立成批、立即派发）折叠为 BATCH dispatcher 的 maxRequests=1 +
+     * maxCollectionWaitMs=0 —— 批满即单请求批，零等待立即派发。
+     */
+    private static final Consumer<BatchDispatcherConfig> SINGLE_BATCH = dispatcher -> {
+        dispatcher.setMaxRequests(1);
+        dispatcher.setMaxCollectionWaitMs(0);
+    };
+
     /** 通用布防：单请求批次 + 快派发，每个请求恰好一次 enqueueBatch。 */
     private static void arm(AutoTpmE2EHarness h) {
-        h.config.batchDispatcher().setMaxRequests(1);
-        h.config.batchDispatcher().setMaxCollectionWaitMs(5);
         h.startAutoPump(10);
     }
 
@@ -58,7 +73,8 @@ class FaultInjectionE2ETest {
     @Test
     @Timeout(30)
     void c01_fail_on_enqueue_propagates_8510_message_and_isolates_healthy_engine() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 2, 1, "5", 1.0, false)) {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
+                BASE_PORT, 2, 1, "5", 1.0, false, true, SINGLE_BATCH)) {
             arm(h);
             h.prefillEngines.get(0).setFaultConfig(FaultInjectionConfig.builder()
                     .failOnEnqueue(true)
@@ -92,7 +108,8 @@ class FaultInjectionE2ETest {
     @Test
     @Timeout(30)
     void c02_enqueue_delay_defers_ack_but_request_succeeds() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 10, 1, 1, "5", 1.0, false)) {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
+                BASE_PORT + 10, 1, 1, "5", 1.0, false, true, SINGLE_BATCH)) {
             arm(h);
             h.prefillEngines.get(0).setFaultConfig(FaultInjectionConfig.builder()
                     .enqueueDelayMs(300)
@@ -115,7 +132,8 @@ class FaultInjectionE2ETest {
     @Test
     @Timeout(30)
     void c03_generate_delay_slows_prefill_execution_without_breaking_completion() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 20, 1, 1, "5", 1.0, false)) {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
+                BASE_PORT + 20, 1, 1, "5", 1.0, false, true, SINGLE_BATCH)) {
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
             prefill.setFaultConfig(FaultInjectionConfig.builder()
@@ -142,7 +160,8 @@ class FaultInjectionE2ETest {
     @Test
     @Timeout(30)
     void c04_generate_error_fails_direct_stream_and_scheduler_path_unaffected() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 30, 2, 1, "5", 1.0, false)) {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
+                BASE_PORT + 30, 2, 1, "5", 1.0, false, true, SINGLE_BATCH)) {
             arm(h);
             h.prefillEngines.get(0).setFaultConfig(FaultInjectionConfig.builder()
                     .generateError(true)
@@ -164,7 +183,8 @@ class FaultInjectionE2ETest {
     @Test
     @Timeout(30)
     void c05_fetch_error_fails_fetch_response_and_scheduler_path_unaffected() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 40, 2, 1, "5", 1.0, false)) {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
+                BASE_PORT + 40, 2, 1, "5", 1.0, false, true, SINGLE_BATCH)) {
             arm(h);
             h.prefillEngines.get(0).setFaultConfig(FaultInjectionConfig.builder()
                     .fetchError(true)
@@ -186,7 +206,8 @@ class FaultInjectionE2ETest {
     @Test
     @Timeout(30)
     void c06_no_respond_hangs_stream_but_dispatch_ack_succeeds_and_engine_drains() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 50, 1, 1, "5", 1.0, false)) {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
+                BASE_PORT + 50, 1, 1, "5", 1.0, false, true, SINGLE_BATCH)) {
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
             prefill.setFaultConfig(FaultInjectionConfig.builder()
@@ -217,20 +238,30 @@ class FaultInjectionE2ETest {
     @Test
     @Timeout(30)
     void c07_kv_pressure_propagates_through_worker_status_and_clears() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 60, 1, 1, "5", 1.0, false)) {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
+                BASE_PORT + 60, 1, 1, "5", 1.0, false, true, SINGLE_BATCH)) {
             JavaMockEngineCluster.FastRpcService decode = h.decodeEngines.get(0);
             long totalKv = decode.getTotalKvTokens();
+            // The scheduler fixture is already published at status version 1.
+            // Consume the engine's matching baseline before asserting a newer snapshot.
+            h.pumpOnce();
+            // dsv4 (v1) + KV v2 口径：空闲上报 = min(totalKvTokens, 块池 tokens)
+            // （本 fixture 为 min(6291456, 100×1024) = 102400，非 totalKvTokens）。
+            // 以压力前的真实空闲视图为恢复基线，语义不变：squeeze→0、clear→满视图。
+            long idleView = h.decodeEndpoint(0).realKvAvailable();
             decode.setFaultConfig(FaultInjectionConfig.builder()
                     .kvPressureTokens(totalKv)
                     .build());
 
             h.pumpOnce();
-            assertEquals(0L, h.decodeEndpoint(0).getStatus().getAvailableKvCacheTokens().get(),
+            // dsv4 (v1)：DecodeEndpoint 无 getStatus() 访问器；realKvAvailable()
+            // 读 calibrate 同步的 reportedKvAvailable（本场景无 inflight 预留，两值相等）。
+            assertEquals(0L, h.decodeEndpoint(0).realKvAvailable(),
                     "full KV pressure must surface as zero available tokens in WorkerStatus");
 
             decode.clearFaultConfig();
             h.pumpOnce();
-            assertEquals(totalKv, h.decodeEndpoint(0).getStatus().getAvailableKvCacheTokens().get(),
+            assertEquals(idleView, h.decodeEndpoint(0).realKvAvailable(),
                     "clearing the pressure must restore the full capacity view");
         }
     }
@@ -241,7 +272,8 @@ class FaultInjectionE2ETest {
     @Timeout(30)
     void c08_queue_depth_limit_rejects_overflow_and_isolates_healthy_engine() throws Exception {
         // 长 prefill（800ms）让第一个请求稳定占住 pending 名额
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 70, 2, 1, "800", 1.0, false)) {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
+                BASE_PORT + 70, 2, 1, "800", 1.0, false, true, SINGLE_BATCH)) {
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
 
@@ -268,7 +300,8 @@ class FaultInjectionE2ETest {
     @Test
     @Timeout(30)
     void c09_crash_after_n_requests_fences_missing_ack_and_isolates_healthy_engine() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 80, 2, 1, "5", 1.0, false)) {
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
+                BASE_PORT + 80, 2, 1, "5", 1.0, false, true, SINGLE_BATCH)) {
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
             PrefillEndpoint prefillEndpoint = h.prefillEndpoint(0);
@@ -290,6 +323,7 @@ class FaultInjectionE2ETest {
                             && prefillEndpoint.getInflightRequestCount() == 1,
                     2_000, "missing ACK must retain scheduler and Prefill accounting");
 
+            // dsv4 (v1)：getInflightRouteRequestCount == intake3 individuallyTracked
             assertEquals(0, prefillEndpoint.getInflightRouteRequestCount(),
                     "batch delivery must not consume the route-request ledger");
             assertFalse(crashedTerminal.await(250, TimeUnit.MILLISECONDS),
