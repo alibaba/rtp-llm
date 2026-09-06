@@ -161,18 +161,6 @@ class MegaMoeFrontAdapter:
             device=device,
         )
 
-        buf = strategy._mega_buf
-        if int(buf.num_max_tokens_per_rank) < _CAPACITY_M:
-            raise RuntimeError(
-                "MegaMoE-SE aligned input capacity is smaller than the MoE-front "
-                f"ABI: {buf.num_max_tokens_per_rank} < {_CAPACITY_M}"
-            )
-        self.x_fp8 = buf.x[:_CAPACITY_M]
-        self.x_sf = buf.x_sf[:_CAPACITY_M]
-        self.shared_l1_x_sf = buf.shared_l1_acts_sf
-        self.topk_ids = buf.topk_idx[:_CAPACITY_M]
-        self.topk_weights = buf.topk_weights[:_CAPACITY_M]
-
         self.hc_fn = ffn_hc.fn.contiguous()
         self.hc_base = ffn_hc.base.contiguous()
         self.hc_scale = ffn_hc.scale.contiguous()
@@ -232,21 +220,24 @@ class MegaMoeFrontAdapter:
         return plan
 
     def supports(self, residual: torch.Tensor) -> bool:
-        """Return whether this request fits the fused front's physical buffers."""
+        """Return whether ``M*S`` fits both the front ABI and MoE buffer."""
 
         if residual.dim() < 2:
             return False
         tokens = reduce(mul, (int(value) for value in residual.shape[:-2]), 1)
-        return 0 <= tokens <= _CAPACITY_M
+        mega_capacity = int(self.strategy._mega_buf.num_max_tokens_per_rank)
+        return 0 <= tokens <= min(_CAPACITY_M, mega_capacity)
 
     def forward(
         self, residual: torch.Tensor, input_ids: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         leading = tuple(int(value) for value in residual.shape[:-2])
         tokens = reduce(mul, leading, 1)
-        if tokens < 0 or tokens > _CAPACITY_M:
+        buf = self.strategy._mega_buf
+        capacity = min(_CAPACITY_M, int(buf.num_max_tokens_per_rank))
+        if tokens < 0 or tokens > capacity:
             raise RuntimeError(
-                f"DSV4 MoE front supports 0..{_CAPACITY_M} decode tokens, got {tokens}"
+                f"DSV4 MoE front supports 0..{capacity} decode tokens, got {tokens}"
             )
         if tuple(residual.shape[-2:]) != (_HC_MULT, self.dim):
             raise RuntimeError(
@@ -297,12 +288,12 @@ class MegaMoeFrontAdapter:
                     self.collapse_ssq,
                     self.normalized_mix,
                     self.normalized,
-                    self.x_fp8,
-                    self.x_sf,
-                    self.shared_l1_x_sf,
+                    buf.x[:tokens],
+                    buf.x_sf[:tokens],
+                    buf.shared_l1_acts_sf,
                     self.router_logits,
-                    self.topk_ids,
-                    self.topk_weights,
+                    buf.topk_idx[:tokens],
+                    buf.topk_weights[:tokens],
                     self.post,
                     self.comb,
                     block_m,
@@ -323,11 +314,11 @@ class MegaMoeFrontAdapter:
                     self.collapse_ssq,
                     self.normalized_mix,
                     self.normalized,
-                    self.x_fp8,
-                    self.x_sf,
-                    self.shared_l1_x_sf,
-                    self.topk_ids,
-                    self.topk_weights,
+                    buf.x[:tokens],
+                    buf.x_sf[:tokens],
+                    buf.shared_l1_acts_sf,
+                    buf.topk_idx[:tokens],
+                    buf.topk_weights[:tokens],
                     self.post,
                     self.comb,
                     block_m,

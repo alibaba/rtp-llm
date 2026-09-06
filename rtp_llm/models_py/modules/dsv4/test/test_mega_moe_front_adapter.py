@@ -30,6 +30,14 @@ class _FakeStrategy:
     def __init__(self, dim: int) -> None:
         self.dim = dim
         self.launches = []
+        self._mega_buf = SimpleNamespace(
+            num_max_tokens_per_rank=128,
+            x=torch.empty((128, dim), dtype=torch.float8_e4m3fn),
+            x_sf=torch.empty((128, max(dim // 128, 1)), dtype=torch.int32),
+            shared_l1_acts_sf=torch.empty((1, 128), dtype=torch.int32),
+            topk_idx=torch.empty((128, 6), dtype=torch.int64),
+            topk_weights=torch.empty((128, 6), dtype=torch.float32),
+        )
 
     def _block_m(self, tokens: int) -> int:
         self.launches.append(("block_m", tokens))
@@ -66,12 +74,7 @@ def _fake_adapter(dim: int = 128) -> tuple[MegaMoeFrontAdapter, _FakePlan]:
     adapter.collapse_ssq = torch.empty((128,), dtype=torch.float32)
     adapter.normalized_mix = torch.empty((128, 24), dtype=torch.float32)
     adapter.normalized = torch.empty((128, dim), dtype=torch.bfloat16)
-    adapter.x_fp8 = torch.empty((128, dim), dtype=torch.float8_e4m3fn)
-    adapter.x_sf = torch.empty((128, 1), dtype=torch.int32)
-    adapter.shared_l1_x_sf = torch.empty_strided((128, 1), (1, 128), dtype=torch.int32)
     adapter.router_logits = torch.empty((128, 256), dtype=torch.float32)
-    adapter.topk_ids = torch.empty((128, 6), dtype=torch.int64)
-    adapter.topk_weights = torch.empty((128, 6), dtype=torch.float32)
     adapter.post = torch.empty((128, 4), dtype=torch.float32)
     adapter.comb = torch.empty((128, 4, 4), dtype=torch.float32)
     adapter.hc_base = torch.empty((24,), dtype=torch.float32)
@@ -150,11 +153,15 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
         ):
             self.assertEqual(_decode_capture_tokens(), (8, 16, 24, 32, 48, 64, 96, 128))
 
-    def test_front_support_is_bounded_by_extension_capacity(self) -> None:
+    def test_front_support_is_bounded_by_extension_and_mega_buffer(self) -> None:
         adapter, _ = _fake_adapter()
 
         self.assertTrue(adapter.supports(torch.empty(64, 2, 4, adapter.dim)))
         self.assertFalse(adapter.supports(torch.empty(43, 3, 4, adapter.dim)))
+
+        adapter.strategy._mega_buf.num_max_tokens_per_rank = 32
+        self.assertTrue(adapter.supports(torch.empty(16, 2, 4, adapter.dim)))
+        self.assertFalse(adapter.supports(torch.empty(17, 2, 4, adapter.dim)))
 
     def test_learned_front_stages_and_launches_prepacked_mega(self) -> None:
         adapter, plan = _fake_adapter()
@@ -178,6 +185,10 @@ class MegaMoeFrontAdapterTest(unittest.TestCase):
         self.assertEqual(len(plan.calls), 1)
         args, kwargs = plan.calls[0]
         self.assertEqual(args[16], 16)
+        self.assertEqual(tuple(args[9].shape), (2, adapter.dim))
+        self.assertEqual(tuple(args[10].shape), (2, 1))
+        self.assertEqual(tuple(args[12].shape), (2, 6))
+        self.assertEqual(tuple(args[13].shape), (2, 6))
         self.assertIs(kwargs["router_logits"], adapter.router_logits)
 
     def test_empty_rank_skips_front_and_enters_mega_collective(self) -> None:

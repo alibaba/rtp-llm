@@ -1,4 +1,4 @@
-"""Model-wide graph-stable storage for the TP1 DSV4 Mega CSA/HCA paths."""
+"""Per-forward workspace helpers for the TP1 DSV4 Mega CSA/HCA paths."""
 
 from __future__ import annotations
 
@@ -75,19 +75,12 @@ class MegaHCASlotMappings:
 
 
 class MegaCSARuntime:
-    """Storage shared by all Mega CSA/HCA layers in one transformer instance."""
+    """Runtime metadata shared by Mega CSA/HCA layers in one transformer."""
 
     def __init__(self) -> None:
         self._step = 0
         self._metadata_id: Optional[int] = None
         self._active_is_cuda_graph = False
-        self._layer_workspaces: Dict[
-            Tuple[str, int, int, int], MegaCSALayerWorkspace
-        ] = {}
-        self._hca_layer_workspaces: Dict[
-            Tuple[str, int, int, int], MegaHCALayerWorkspace
-        ] = {}
-        self._logits: Dict[Tuple[str, int, int], torch.Tensor] = {}
         self._schedule_step = -1
         self._schedule_key: Optional[Tuple[str, int, int, int]] = None
         self._schedule: Optional[torch.Tensor] = None
@@ -117,83 +110,69 @@ class MegaCSARuntime:
         geometry: CSAGeometry = PRO_GEOMETRY,
     ) -> MegaCSALayerWorkspace:
         g = geometry
-        key = (str(device), m, num_split, g.dim)
-        workspace = self._layer_workspaces.get(key)
-        if workspace is None:
-            o_heads_per_group = g.main_heads // g.o_groups
-            o_aligned_m = ((m + 3) // 4) * 4
-            o_proj_fp8 = torch.empty(
-                g.o_groups,
+        o_heads_per_group = g.main_heads // g.o_groups
+        o_aligned_m = ((m + 3) // 4) * 4
+        o_proj_fp8 = torch.empty(
+            g.o_groups,
+            m,
+            o_heads_per_group * HEAD_DIM,
+            dtype=torch.float8_e4m3fn,
+            device=device,
+        ).transpose(0, 1)
+        o_proj_scale = (
+            torch.empty(
+                g.o_groups * o_heads_per_group * o_aligned_m,
+                dtype=torch.int32,
+                device=device,
+            )
+            .as_strided(
+                (g.o_groups, m, o_heads_per_group),
+                (o_heads_per_group * o_aligned_m, 1, o_aligned_m),
+            )
+            .transpose(0, 1)
+        )
+        return MegaCSALayerWorkspace(
+            hc_partial=torch.empty(
+                num_split, m, HC_MIX, dtype=torch.float32, device=device
+            ),
+            hc_sum_sq=torch.empty(num_split, m, dtype=torch.float32, device=device),
+            collapsed=torch.empty(m, g.dim, dtype=torch.bfloat16, device=device),
+            pre=torch.empty(m, HC, dtype=torch.float32, device=device),
+            post=torch.empty(m, HC, dtype=torch.float32, device=device),
+            comb=torch.empty(m, HC, HC, dtype=torch.float32, device=device),
+            mix=torch.empty(m, HC_MIX, dtype=torch.float32, device=device),
+            hidden_fp8=torch.empty(m, g.dim, dtype=torch.float8_e4m3fn, device=device),
+            hidden_sf=torch.empty(m, g.dim // 128, dtype=torch.uint8, device=device),
+            front_out=torch.empty(
+                m, g.front_out_dim, dtype=torch.bfloat16, device=device
+            ),
+            window_y=torch.empty(m, HEAD_DIM, dtype=torch.float32, device=device),
+            indexer_weights=torch.empty(
+                m, INDEX_HEADS, dtype=torch.float32, device=device
+            ),
+            q_lora_fp8=torch.empty(
+                m, g.q_lora_rank, dtype=torch.float8_e4m3fn, device=device
+            ),
+            q_lora_sf=torch.empty(
+                m, g.q_lora_rank // 128, dtype=torch.uint8, device=device
+            ),
+            indexer_q=torch.empty(
                 m,
-                o_heads_per_group * HEAD_DIM,
+                INDEX_HEADS,
+                128,
                 dtype=torch.float8_e4m3fn,
                 device=device,
-            ).transpose(0, 1)
-            o_proj_scale = (
-                torch.empty(
-                    g.o_groups * o_heads_per_group * o_aligned_m,
-                    dtype=torch.int32,
-                    device=device,
-                )
-                .as_strided(
-                    (g.o_groups, m, o_heads_per_group),
-                    (o_heads_per_group * o_aligned_m, 1, o_aligned_m),
-                )
-                .transpose(0, 1)
-            )
-            workspace = MegaCSALayerWorkspace(
-                hc_partial=torch.empty(
-                    num_split, m, HC_MIX, dtype=torch.float32, device=device
-                ),
-                hc_sum_sq=torch.empty(num_split, m, dtype=torch.float32, device=device),
-                collapsed=torch.empty(m, g.dim, dtype=torch.bfloat16, device=device),
-                pre=torch.empty(m, HC, dtype=torch.float32, device=device),
-                post=torch.empty(m, HC, dtype=torch.float32, device=device),
-                comb=torch.empty(m, HC, HC, dtype=torch.float32, device=device),
-                mix=torch.empty(m, HC_MIX, dtype=torch.float32, device=device),
-                hidden_fp8=torch.empty(
-                    m, g.dim, dtype=torch.float8_e4m3fn, device=device
-                ),
-                hidden_sf=torch.empty(
-                    m, g.dim // 128, dtype=torch.uint8, device=device
-                ),
-                front_out=torch.empty(
-                    m, g.front_out_dim, dtype=torch.bfloat16, device=device
-                ),
-                window_y=torch.empty(m, HEAD_DIM, dtype=torch.float32, device=device),
-                indexer_weights=torch.empty(
-                    m, INDEX_HEADS, dtype=torch.float32, device=device
-                ),
-                q_lora_fp8=torch.empty(
-                    m, g.q_lora_rank, dtype=torch.float8_e4m3fn, device=device
-                ),
-                q_lora_sf=torch.empty(
-                    m, g.q_lora_rank // 128, dtype=torch.uint8, device=device
-                ),
-                indexer_q=torch.empty(
-                    m,
-                    INDEX_HEADS,
-                    128,
-                    dtype=torch.float8_e4m3fn,
-                    device=device,
-                ),
-                indexer_folded_weights=torch.empty(
-                    m, INDEX_HEADS, dtype=torch.float32, device=device
-                ),
-                o_proj_fp8=o_proj_fp8,
-                o_proj_scale=o_proj_scale,
-            )
-            self._layer_workspaces[key] = workspace
-        return workspace
+            ),
+            indexer_folded_weights=torch.empty(
+                m, INDEX_HEADS, dtype=torch.float32, device=device
+            ),
+            o_proj_fp8=o_proj_fp8,
+            o_proj_scale=o_proj_scale,
+        )
 
     def logits(self, m: int, score_capacity: int, device: torch.device) -> torch.Tensor:
         width = ((score_capacity + MQA_SPLIT_KV - 1) // MQA_SPLIT_KV) * MQA_SPLIT_KV
-        key = (str(device), m, width)
-        logits = self._logits.get(key)
-        if logits is None:
-            logits = torch.empty(m, width, dtype=torch.float32, device=device)
-            self._logits[key] = logits
-        return logits
+        return torch.empty(m, width, dtype=torch.float32, device=device)
 
     def slot_mappings(self, metadata: Any, m: int) -> MegaCSASlotMappings:
         from rtp_llm.models_py.modules.dsv4.attn_type import (
@@ -294,61 +273,56 @@ class MegaCSARuntime:
         activation buffers it reads are allocated at the padded row count.
         """
         g = geometry
-        key = (str(device), m, num_split, g.dim)
-        workspace = self._hca_layer_workspaces.get(key)
-        if workspace is None:
-            physical_m = max(m, 16)
-            o_heads_per_group = g.main_heads // g.o_groups
-            o_aligned_m = ((m + 3) // 4) * 4
-            o_proj_fp8 = torch.empty(
-                g.o_groups,
-                m,
-                o_heads_per_group * HEAD_DIM,
-                dtype=torch.float8_e4m3fn,
+        physical_m = max(m, 16)
+        o_heads_per_group = g.main_heads // g.o_groups
+        o_aligned_m = ((m + 3) // 4) * 4
+        o_proj_fp8 = torch.empty(
+            g.o_groups,
+            m,
+            o_heads_per_group * HEAD_DIM,
+            dtype=torch.float8_e4m3fn,
+            device=device,
+        ).transpose(0, 1)
+        o_proj_scale = (
+            torch.empty(
+                g.o_groups * o_heads_per_group * o_aligned_m,
+                dtype=torch.int32,
                 device=device,
-            ).transpose(0, 1)
-            o_proj_scale = (
-                torch.empty(
-                    g.o_groups * o_heads_per_group * o_aligned_m,
-                    dtype=torch.int32,
-                    device=device,
-                )
-                .as_strided(
-                    (g.o_groups, m, o_heads_per_group),
-                    (o_heads_per_group * o_aligned_m, 1, o_aligned_m),
-                )
-                .transpose(0, 1)
             )
-            workspace = MegaHCALayerWorkspace(
-                hc_partial=torch.empty(
-                    num_split, m, HC_MIX, dtype=torch.float32, device=device
-                ),
-                hc_sum_sq=torch.empty(num_split, m, dtype=torch.float32, device=device),
-                collapsed=torch.empty(
-                    physical_m, g.dim, dtype=torch.bfloat16, device=device
-                ),
-                pre=torch.empty(m, HC, dtype=torch.float32, device=device),
-                post=torch.empty(m, HC, dtype=torch.float32, device=device),
-                comb=torch.empty(m, HC, HC, dtype=torch.float32, device=device),
-                mix=torch.empty(m, HC_MIX, dtype=torch.float32, device=device),
-                hidden_fp8=torch.empty(
-                    physical_m, g.dim, dtype=torch.float8_e4m3fn, device=device
-                ),
-                hidden_sf=torch.empty(
-                    physical_m, g.dim // 128, dtype=torch.uint8, device=device
-                ),
-                front_out=torch.empty(
-                    physical_m,
-                    g.front_fp8_rows,
-                    dtype=torch.bfloat16,
-                    device=device,
-                ),
-                q_raw=torch.empty(m, g.n_main, dtype=torch.bfloat16, device=device),
-                o_proj_fp8=o_proj_fp8,
-                o_proj_scale=o_proj_scale,
+            .as_strided(
+                (g.o_groups, m, o_heads_per_group),
+                (o_heads_per_group * o_aligned_m, 1, o_aligned_m),
             )
-            self._hca_layer_workspaces[key] = workspace
-        return workspace
+            .transpose(0, 1)
+        )
+        return MegaHCALayerWorkspace(
+            hc_partial=torch.empty(
+                num_split, m, HC_MIX, dtype=torch.float32, device=device
+            ),
+            hc_sum_sq=torch.empty(num_split, m, dtype=torch.float32, device=device),
+            collapsed=torch.empty(
+                physical_m, g.dim, dtype=torch.bfloat16, device=device
+            ),
+            pre=torch.empty(m, HC, dtype=torch.float32, device=device),
+            post=torch.empty(m, HC, dtype=torch.float32, device=device),
+            comb=torch.empty(m, HC, HC, dtype=torch.float32, device=device),
+            mix=torch.empty(m, HC_MIX, dtype=torch.float32, device=device),
+            hidden_fp8=torch.empty(
+                physical_m, g.dim, dtype=torch.float8_e4m3fn, device=device
+            ),
+            hidden_sf=torch.empty(
+                physical_m, g.dim // 128, dtype=torch.uint8, device=device
+            ),
+            front_out=torch.empty(
+                physical_m,
+                g.front_fp8_rows,
+                dtype=torch.bfloat16,
+                device=device,
+            ),
+            q_raw=torch.empty(m, g.n_main, dtype=torch.bfloat16, device=device),
+            o_proj_fp8=o_proj_fp8,
+            o_proj_scale=o_proj_scale,
+        )
 
     def hca_slot_mappings(self, metadata: Any, m: int) -> MegaHCASlotMappings:
         from rtp_llm.models_py.modules.dsv4.attn_type import HCA_KV, HCA_STATE, SWA_KV

@@ -262,7 +262,7 @@ def _compiled_geometry_reason(
         front_geometry,
         {
             "abi_version": 1,
-            "kernel_contract_version": 2,
+            "kernel_contract_version": 3,
             "hidden": int(args.dim),
             "hc_mult": int(args.hc_mult),
             "experts": int(args.n_routed_experts),

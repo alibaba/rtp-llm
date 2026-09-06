@@ -64,7 +64,7 @@ def _supported_extension():
     }
     extension.geometry_moe_front = lambda hidden: {
         "abi_version": 1,
-        "kernel_contract_version": 2,
+        "kernel_contract_version": 3,
         "hidden": hidden,
         "hc_mult": 4,
         "experts": 384 if hidden == 7168 else 256,

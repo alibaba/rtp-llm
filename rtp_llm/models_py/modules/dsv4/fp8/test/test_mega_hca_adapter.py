@@ -337,6 +337,18 @@ class MegaHCARuntimeTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "begin_decode"):
             runtime.hca_slot_mappings(metadata, 2)
 
+    def test_workspace_is_a_per_call_allocation(self) -> None:
+        runtime = MegaCSARuntime()
+        device = torch.device("cpu")
+
+        first = runtime.hca_layer_workspace(1, 1, device)
+        second = runtime.hca_layer_workspace(8, 1, device)
+
+        self.assertIsNot(first, second)
+        self.assertNotEqual(first.collapsed.data_ptr(), second.collapsed.data_ptr())
+        self.assertEqual(tuple(first.collapsed.shape), (16, 7168))
+        self.assertEqual(tuple(second.collapsed.shape), (16, 7168))
+
     def test_slots_reuse_framework_tensors_without_allocation(self) -> None:
         runtime = MegaCSARuntime()
         metadata = self._metadata(100)
