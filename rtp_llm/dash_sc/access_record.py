@@ -315,6 +315,7 @@ def _parse_ds_header_attributes_for_log(request) -> dict[str, Any]:
 
 def _sampling_to_dict(sampling) -> dict[str, Any]:
     d = dataclasses.asdict(sampling)
+    d.pop("specified_fields", None)
     # stop_words_list is tuple[tuple[int,...],...]; convert for stable JSON.
     swl = d.get("stop_words_list")
     if swl is not None:

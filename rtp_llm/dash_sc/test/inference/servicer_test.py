@@ -2168,6 +2168,119 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(responses), 1)
         _assert_parameter_error_response(self, responses[0], "bad parameter")
 
+    async def test_kimi_k3_applies_shared_sampling_defaults(self) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            model_type="kimi_k3",
+        )
+
+        await _drain(
+            servicer.ModelStreamInfer(
+                _areq_iter([self._valid_infer_request()]), MagicMock()
+            )
+        )
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        config = visitor.last_generate_input.generate_config
+        self.assertEqual(config.temperature, 0.6)
+        self.assertEqual(config.top_p, 0.95)
+        self.assertEqual(config.num_return_sequences, 0)
+        self.assertFalse(config.in_think_mode)
+        self.assertEqual(config.max_thinking_tokens, 0)
+
+    async def test_kimi_k3_rejects_n_two_before_enqueue(self) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            model_type="kimi_k3",
+        )
+        req = self._valid_infer_request()
+        _add_input_tensor(req, "n", "INT32", [1], struct.pack("<i", 2))
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_parameter_error_response(self, responses[0], "n")
+
+    async def test_kimi_k3_rejects_invalid_tool_history_before_enqueue(self) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            model_type="kimi_k3",
+        )
+        req = self._valid_infer_request()
+        req.parameters["payload"].string_param = json.dumps(
+            {
+                "input": {
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": None,
+                                        "arguments": '{"city":"杭州"}',
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": "call_1",
+                            "content": "sunny",
+                        },
+                    ]
+                }
+            }
+        )
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_parameter_error_response(self, responses[0], "function.name")
+
+    async def test_kimi_k3_rejects_invalid_top_p_before_enqueue(self) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            model_type="kimi_k3",
+        )
+        req = self._valid_infer_request()
+        _add_input_tensor(req, "top_p", "FP32", [1], struct.pack("<f", 0.8))
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        _assert_parameter_error_response(self, responses[0], "top_p")
+
+    async def test_kimi_k3_accepts_and_canonicalizes_fp32_top_p(self) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            model_type="kimi_k3",
+        )
+        req = self._valid_infer_request()
+        _add_input_tensor(req, "top_p", "FP32", [1], struct.pack("<f", 0.95))
+
+        await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(visitor.last_generate_input.generate_config.top_p, 0.95)
+
     async def test_openai_compat_max_new_tokens_negative_uses_default(
         self,
     ) -> None:

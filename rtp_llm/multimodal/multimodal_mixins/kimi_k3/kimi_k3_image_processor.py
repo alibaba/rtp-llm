@@ -36,7 +36,6 @@ _TRANSPARENT_BG_FILL_STAGES = ("before_resize", "after_resize")
 # Per-image compressed byte limit, in KB.  Lives here so the renderer preflight
 # and the vit url fallback, K3's two byte entry points, cannot disagree.
 K3_MAX_IMAGE_FILE_SIZE_KB = 32 * 1024
-K3_MAX_IMAGES_PER_REQUEST = 16
 K3_MAX_TOTAL_IMAGE_BYTES = 128 * 1024 * 1024
 
 _K3_MEDIA_PREFLIGHT_CONCURRENCY = 4
@@ -78,14 +77,6 @@ def _preflight_kimi_k3_image(
     return torch.frombuffer(raw, dtype=torch.uint8), size
 
 
-def _validate_kimi_k3_image_count(urls: Sequence[str]) -> None:
-    if len(urls) > K3_MAX_IMAGES_PER_REQUEST:
-        raise ValueError(
-            "Kimi K3 image count exceeds the per-request limit: "
-            f"{len(urls)} > {K3_MAX_IMAGES_PER_REQUEST}"
-        )
-
-
 def _append_kimi_k3_preflight_batch(
     results: Sequence[tuple[torch.Tensor, tuple[int, int]]],
     tensors: List[torch.Tensor],
@@ -108,7 +99,6 @@ def preflight_kimi_k3_images(
     urls: Sequence[str], download_headers: str = ""
 ) -> tuple[List[torch.Tensor], List[tuple[int, int]]]:
     """Download K3 images once, validate request limits, and report dimensions."""
-    _validate_kimi_k3_image_count(urls)
     tensors: List[torch.Tensor] = []
     sizes: List[tuple[int, int]] = []
     total_bytes = 0
@@ -131,7 +121,6 @@ async def preflight_kimi_k3_images_async(
     urls: Sequence[str], download_headers: str = ""
 ) -> tuple[List[torch.Tensor], List[tuple[int, int]]]:
     """Async counterpart that keeps image I/O off the event loop."""
-    _validate_kimi_k3_image_count(urls)
     loop = asyncio.get_running_loop()
     tensors: List[torch.Tensor] = []
     sizes: List[tuple[int, int]] = []

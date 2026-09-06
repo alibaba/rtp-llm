@@ -9,6 +9,10 @@ from typing_extensions import override
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.kimi_k3_request_contract import (
+    apply_kimi_k3_request_contract,
+    validate_kimi_k3_tool_history,
+)
 from rtp_llm.multimodal.multimodal_mixins.kimi_k3.kimi_k3_image_processor import (
     KimiK3VisionProcessor,
     preflight_kimi_k3_images,
@@ -136,51 +140,6 @@ class KimiK3Renderer(CustomChatRenderer):
         r"(?P<body>.*?)<\|close\|>argument<\|sep\|>",
         re.S,
     )
-
-    @staticmethod
-    def _reject_sampling_param(name: str, value: Any, expected: str) -> None:
-        raise FtRuntimeException(
-            ExceptionType.INVALID_PARAMS,
-            f"Kimi K3 requires {name} {expected}, got {value!r}",
-        )
-
-    @classmethod
-    def _apply_sampling_contract(
-        cls,
-        request: ChatCompletionRequest,
-        generate_config: GenerateConfig,
-        thinking: bool,
-    ) -> None:
-        fields_set = request.model_fields_set
-
-        if "temperature" not in fields_set or request.temperature is None:
-            generate_config.temperature = 1.0 if thinking else 0.6
-        elif not 0.0 <= request.temperature <= 1.0:
-            cls._reject_sampling_param("temperature", request.temperature, "in [0, 1]")
-        else:
-            generate_config.temperature = request.temperature
-
-        if "top_p" not in fields_set or request.top_p is None:
-            generate_config.top_p = 0.95
-        else:
-            if request.top_p not in (0.95, 1.0):
-                cls._reject_sampling_param(
-                    "top_p",
-                    request.top_p,
-                    "to be 0.95 or 1.0",
-                )
-            generate_config.top_p = request.top_p
-
-        for name in ("presence_penalty", "frequency_penalty"):
-            value = getattr(request, name)
-            if name in fields_set and value not in (None, 0, 0.0):
-                cls._reject_sampling_param(name, value, "to be 0")
-            setattr(generate_config, name, 0.0)
-
-        if "n" in fields_set and request.n not in (None, 1):
-            cls._reject_sampling_param("n", request.n, "to be 1")
-        if "n" in fields_set and request.n == 1:
-            generate_config.num_return_sequences = 1
 
     @staticmethod
     def _pending_prompt_token_count(tokenizer, thinking: bool) -> int:
@@ -749,6 +708,7 @@ class KimiK3Renderer(CustomChatRenderer):
 
     @override
     def render_chat(self, request: ChatCompletionRequest) -> RenderedInputs:
+        validate_kimi_k3_tool_history(request.messages)
         request_dict = self._request_dict(request)
         messages, mm_input = self._collect_and_rewrite(request_dict["messages"])
         tensors, metadata = preflight_kimi_k3_images(
@@ -767,6 +727,7 @@ class KimiK3Renderer(CustomChatRenderer):
     async def render_chat_async(
         self, request: ChatCompletionRequest
     ) -> RenderedInputs:
+        validate_kimi_k3_tool_history(request.messages)
         request_dict = self._request_dict(request)
         messages, mm_input = self._collect_and_rewrite(request_dict["messages"])
         tensors, metadata = await preflight_kimi_k3_images_async(
@@ -786,10 +747,26 @@ class KimiK3Renderer(CustomChatRenderer):
         self, request: ChatCompletionRequest, generate_config: GenerateConfig
     ) -> None:
         thinking = _thinking_enabled(request)
-        self._apply_sampling_contract(request, generate_config, thinking)
-        generate_config.in_think_mode = thinking
-        if not thinking:
-            generate_config.max_thinking_tokens = 0
+        specified_fields = {
+            name
+            for name in request.model_fields_set
+            if getattr(request, name, None) is not None
+        }
+        for name in (
+            "temperature",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty",
+        ):
+            if name in specified_fields:
+                setattr(generate_config, name, getattr(request, name))
+        if "n" in specified_fields:
+            generate_config.num_return_sequences = request.n
+        apply_kimi_k3_request_contract(
+            generate_config,
+            specified_fields=specified_fields,
+            thinking=thinking,
+        )
 
         structural_tag = self._build_tool_call_structural_tag(request)
         if structural_tag is not None:

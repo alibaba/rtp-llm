@@ -160,6 +160,7 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(sp.top_k, 0)
         self.assertEqual(sp.top_p, 1.0)
         self.assertEqual(sp.stop_words_list, ())
+        self.assertEqual(sp.specified_fields, frozenset())
 
     def test_parse_sampling_scalars(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
@@ -184,6 +185,18 @@ class DashScGrpcRequestTest(TestCase):
         self.assertAlmostEqual(sp.repetition_penalty, 1.1)
         self.assertAlmostEqual(sp.frequency_penalty, 0.2)
         self.assertAlmostEqual(sp.presence_penalty, 0.3)
+        self.assertEqual(
+            sp.specified_fields,
+            frozenset(
+                {
+                    "n",
+                    "top_p",
+                    "temperature",
+                    "frequency_penalty",
+                    "presence_penalty",
+                }
+            ),
+        )
 
     def test_parse_sampling_dashscope_aliases(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
@@ -192,6 +205,18 @@ class DashScGrpcRequestTest(TestCase):
         sp = parse_sampling_params(req)
         self.assertEqual(sp.num_return_sequences, 1)
         self.assertEqual(sp.min_new_tokens, 2)
+        self.assertEqual(sp.specified_fields, frozenset({"n"}))
+
+    def test_parse_sampling_zero_return_count_is_unspecified_sentinel(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(
+            req, "num_return_sequences", "INT32", [1], struct.pack("<i", 0)
+        )
+
+        sp = parse_sampling_params(req)
+
+        self.assertEqual(sp.num_return_sequences, 0)
+        self.assertNotIn("n", sp.specified_fields)
 
     def test_parse_sampling_response_format_parameters(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
@@ -1331,6 +1356,54 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             4,
         )
         self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 10)
+
+    def test_multimodal_usage_parameters_from_aux_info(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([7], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(
+                input_len=100,
+                multimodal_lengths={
+                    MMUrlType.IMAGE: 60,
+                    MMUrlType.VIDEO: 30,
+                    MMUrlType.AUDIO: 10,
+                },
+            ),
+        )
+
+        resp = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="req-mm-usage",
+            model_name="multimodal-model",
+            go=GenerateOutputs(generate_outputs=[out]),
+            request_log_tag=stream_log_tag(
+                request_id_numeric=100, trace_id="req-mm-usage"
+            ),
+        )
+
+        parameters = resp.infer_response.parameters
+        self.assertEqual(parameters["image_tokens"].int64_param, 60)
+        self.assertEqual(parameters["video_tokens"].int64_param, 30)
+        self.assertEqual(parameters["audio_tokens"].int64_param, 10)
+
+    def test_empty_multimodal_usage_parameters_are_omitted(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([7], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=10),
+        )
+
+        resp = build_stream_response_from_generate_outputs(
+            dash_sc_request_id="req-text-usage",
+            model_name="text-model",
+            go=GenerateOutputs(generate_outputs=[out]),
+            request_log_tag=stream_log_tag(
+                request_id_numeric=101, trace_id="req-text-usage"
+            ),
+        )
+
+        parameters = resp.infer_response.parameters
+        for parameter_name in ("image_tokens", "video_tokens", "audio_tokens"):
+            self.assertNotIn(parameter_name, parameters)
 
     def test_dash_error_response_uses_inner_error_fields(self) -> None:
         resp = build_dash_error_response(

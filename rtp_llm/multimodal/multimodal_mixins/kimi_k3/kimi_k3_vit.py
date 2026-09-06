@@ -203,6 +203,8 @@ class KimiK3ImageEmbedding(ImageEmbeddingInterface):
                     "Kimi K3 image pixel count exceeds the per-image limit: "
                     f"{width}x{height} > {K3_MAX_IMAGE_PIXELS}"
                 )
+            if image.format in ("HEIF", "HEIC"):
+                return Image.frombytes(image.mode, image.size, image.tobytes())
             return image.copy()
 
     @torch.inference_mode()

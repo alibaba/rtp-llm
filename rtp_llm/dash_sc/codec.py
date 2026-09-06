@@ -25,7 +25,7 @@ from rtp_llm.dash_sc.structural_tag import (
     structural_tag_from_response_format,
     validate_structural_tag_shape,
 )
-from rtp_llm.utils.base_model_datatypes import GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import GenerateOutputs, MMUrlType
 
 _INT32_MAX = 2_147_483_647
 _DEFAULT_MAX_NEW_TOKENS = 32000
@@ -677,6 +677,7 @@ class SamplingParams:
     response_format: str | None = None
     json_format: bool = False
     structural_tag: str | None = None
+    specified_fields: frozenset[str] = field(default_factory=frozenset)
 
     @property
     def n(self) -> int:
@@ -772,6 +773,7 @@ def parse_sampling_params(
     repetition_penalty = 1.0
     frequency_penalty = 0.0
     presence_penalty = 0.0
+    specified_fields: set[str] = set()
     max_new_think_tokens: int | None = None
     stop_words_list: tuple[tuple[int, ...], ...] = tuple()
     ds_attrs = ds_attrs if ds_attrs is not None else parse_ds_header_attributes(request)
@@ -786,10 +788,13 @@ def parse_sampling_params(
         v = _parse_optional_scalar_int(request, "n")
     if v is not None:
         num_return_sequences = max(0, v)
+        if v != 0:
+            specified_fields.add("n")
 
     vf = _parse_optional_scalar_float(request, "top_p")
     if vf is not None:
         top_p = vf
+        specified_fields.add("top_p")
 
     v = _parse_optional_scalar_int(request, "top_k")
     if v is not None:
@@ -802,6 +807,7 @@ def parse_sampling_params(
     vf = _parse_optional_scalar_float(request, "temperature")
     if vf is not None:
         temperature = vf
+        specified_fields.add("temperature")
 
     v = _parse_optional_scalar_int(request, "min_new_tokens")
     if v is None:
@@ -820,10 +826,12 @@ def parse_sampling_params(
     vf = _parse_optional_scalar_float(request, "frequency_penalty")
     if vf is not None:
         frequency_penalty = vf
+        specified_fields.add("frequency_penalty")
 
     vf = _parse_optional_scalar_float(request, "presence_penalty")
     if vf is not None:
         presence_penalty = vf
+        specified_fields.add("presence_penalty")
 
     for tensor_name in ("max_think_length", "max_new_think_tokens"):
         v = _parse_optional_scalar_int(request, tensor_name)
@@ -857,6 +865,7 @@ def parse_sampling_params(
         response_format=response_format,
         json_format=json_format,
         structural_tag=structural_tag,
+        specified_fields=frozenset(specified_fields),
     )
 
 
@@ -1182,6 +1191,21 @@ def _load_multimodal_payload(request) -> Any:
     return None
 
 
+def parse_messages_from_request(request) -> list[Any] | None:
+    """Return original messages when a DashSc request carries its JSON payload.
+
+    Text-only callers are allowed to omit the payload because ``input_ids`` are
+    authoritative on this wire.  When the payload is present, model-specific
+    request contracts can validate the original structured conversation before
+    the engine is enqueued.
+    """
+
+    obj = _load_multimodal_payload(request)
+    if obj is None:
+        return None
+    return list(_iter_messages_from_payload(obj))
+
+
 def parse_multimodal_parts_from_request(request) -> list[MultimodalPart]:
     """Extract ``MultimodalPart`` records from a dash_sc gRPC request.
 
@@ -1413,6 +1437,24 @@ def _append_prompt_cache_usage_parameters(
     infer.parameters["prompt_cached_token_num"].int64_param = cached_tokens
 
 
+def _append_multimodal_usage_parameters(
+    infer: predict_v2_pb2.ModelInferResponse,
+    multimodal_lengths: dict[int, int] | None,
+) -> None:
+    """Expose engine multimodal token counts to dashscope-serving."""
+    if not multimodal_lengths:
+        return
+
+    for mm_type, parameter_name in (
+        (MMUrlType.IMAGE, "image_tokens"),
+        (MMUrlType.VIDEO, "video_tokens"),
+        (MMUrlType.AUDIO, "audio_tokens"),
+    ):
+        token_count = int(multimodal_lengths.get(mm_type, 0))
+        if token_count > 0:
+            infer.parameters[parameter_name].int64_param = token_count
+
+
 def _append_aux_info_metrics_outputs(
     infer: predict_v2_pb2.ModelInferResponse,
     out_py: Any,
@@ -1425,6 +1467,9 @@ def _append_aux_info_metrics_outputs(
     _append_int32_scalar_output(infer, "prompt_token_num", input_len)
     _append_int32_scalar_output(infer, "prompt_cached_token_num", reuse_len)
     _append_prompt_cache_usage_parameters(infer, input_len, reuse_len)
+    _append_multimodal_usage_parameters(
+        infer, ax.multimodal_lengths if ax is not None else None
+    )
 
 
 def build_stream_response_from_generate_outputs(

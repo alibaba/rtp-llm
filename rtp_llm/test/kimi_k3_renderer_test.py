@@ -6,6 +6,9 @@ from unittest.mock import Mock
 
 from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.kimi_k3_request_contract import (
+    validate_kimi_k3_tool_history,
+)
 from rtp_llm.openai.api_datatype import ChatCompletionRequest, ChatMessage, UsageInfo
 from rtp_llm.openai.renderers.custom_renderer import StreamResponseObject
 from rtp_llm.openai.renderers.kimi_k3_renderer import (
@@ -21,6 +24,108 @@ class KimiK3RendererTest(unittest.TestCase):
             messages=[ChatMessage(role="user", content="question")],
             enable_thinking=enable_thinking,
         )
+
+    @staticmethod
+    def _history_call(call_id: str, name="lookup", arguments='{"q":"x"}'):
+        return {
+            "id": call_id,
+            "type": "function",
+            "function": {"name": name, "arguments": arguments},
+        }
+
+    def test_tool_history_accepts_parallel_results_in_any_order(self) -> None:
+        validate_kimi_k3_tool_history(
+            [
+                {"role": "user", "content": "question"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        self._history_call("call_a"),
+                        self._history_call("call_b"),
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_b", "content": "b"},
+                {"role": "tool", "tool_call_id": "call_a", "content": "a"},
+                {"role": "user", "content": "continue"},
+            ]
+        )
+
+    def test_tool_history_rejects_malformed_calls_and_results(self) -> None:
+        cases = {
+            "missing id": [
+                {"role": "assistant", "tool_calls": [self._history_call("")]}
+            ],
+            "missing name": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [self._history_call("call_a", name=None)],
+                }
+            ],
+            "missing arguments": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [self._history_call("call_a", arguments=None)],
+                }
+            ],
+            "invalid arguments": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [self._history_call("call_a", arguments="{")],
+                }
+            ],
+            "non-object arguments": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [self._history_call("call_a", arguments="[]")],
+                }
+            ],
+            "unexpected result": [
+                {"role": "tool", "tool_call_id": "call_a", "content": "a"}
+            ],
+        }
+        for name, messages in cases.items():
+            with self.subTest(name=name), self.assertRaises(FtRuntimeException):
+                validate_kimi_k3_tool_history(messages)
+
+    def test_tool_history_requires_all_results_before_next_turn(self) -> None:
+        with self.assertRaisesRegex(FtRuntimeException, "advances the conversation"):
+            validate_kimi_k3_tool_history(
+                [
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            self._history_call("call_a"),
+                            self._history_call("call_b"),
+                        ],
+                    },
+                    {"role": "tool", "tool_call_id": "call_a", "content": "a"},
+                    {"role": "user", "content": "continue"},
+                ]
+            )
+
+    def test_tool_history_rejects_duplicate_call_ids_and_results(self) -> None:
+        duplicate_calls = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    self._history_call("call_a"),
+                    self._history_call("call_a"),
+                ],
+            }
+        ]
+        with self.assertRaisesRegex(FtRuntimeException, "duplicates"):
+            validate_kimi_k3_tool_history(duplicate_calls)
+
+        duplicate_results = [
+            {
+                "role": "assistant",
+                "tool_calls": [self._history_call("call_a")],
+            },
+            {"role": "tool", "tool_call_id": "call_a", "content": "a"},
+            {"role": "tool", "tool_call_id": "call_a", "content": "again"},
+        ]
+        with self.assertRaisesRegex(FtRuntimeException, "does not match"):
+            validate_kimi_k3_tool_history(duplicate_results)
 
     def test_thinking_xtml_is_split_across_stream_chunks(self) -> None:
         status = _KimiK3StreamStatus(self.request(enable_thinking=True))

@@ -666,17 +666,33 @@ class KimiK3RendererTest(TestCase):
         self.assertEqual(len(worker_threads), 2)
         self.assertTrue(all(thread != main_thread for thread in worker_threads))
 
-    def test_preflight_rejects_image_count_before_download(self):
+    def test_sync_preflight_does_not_impose_image_count_limit(self):
+        urls = [f"image-{index}" for index in range(48)]
         with patch.object(
-            kimi_k3_image_processor, "K3_MAX_IMAGES_PER_REQUEST", 1
-        ), patch.object(
             kimi_k3_image_processor, "_preflight_kimi_k3_image"
         ) as preflight:
-            with self.assertRaisesRegex(ValueError, "image count"):
-                kimi_k3_image_processor.preflight_kimi_k3_images(
-                    ["first", "second"]
-                )
-        preflight.assert_not_called()
+            preflight.return_value = (torch.zeros(1, dtype=torch.uint8), (8, 6))
+            tensors, sizes = kimi_k3_image_processor.preflight_kimi_k3_images(
+                urls
+            )
+
+        self.assertEqual(len(tensors), len(urls))
+        self.assertEqual(len(sizes), len(urls))
+        self.assertEqual(preflight.call_count, len(urls))
+
+    def test_async_preflight_does_not_impose_image_count_limit(self):
+        urls = [f"image-{index}" for index in range(48)]
+        with patch.object(
+            kimi_k3_image_processor, "_preflight_kimi_k3_image"
+        ) as preflight:
+            preflight.return_value = (torch.zeros(1, dtype=torch.uint8), (8, 6))
+            tensors, sizes = asyncio.run(
+                kimi_k3_image_processor.preflight_kimi_k3_images_async(urls)
+            )
+
+        self.assertEqual(len(tensors), len(urls))
+        self.assertEqual(len(sizes), len(urls))
+        self.assertEqual(preflight.call_count, len(urls))
 
     def test_preflight_rejects_total_image_bytes(self):
         with patch.object(

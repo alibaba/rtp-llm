@@ -6,6 +6,12 @@ py_test(
 )
 
 py_test(
+    name = "kimi_k3_request_contract_test",
+    srcs = ["kimi_k3_request_contract_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "server_config_setup_test",
     srcs = [
         "server_config_setup_test.py",
