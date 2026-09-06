@@ -233,7 +233,8 @@ The on-disk artifacts are always the source of truth.
 
 - `data/online_logs/trace_30min.jsonl`: sanitized replay shape derived from online logs.
 - `data/online_logs/sample_access.json`: sanitized request-shape fixture with pseudonymous token IDs.
-- `data/performance/dsv4_flash_performance.sample.json`: mock latency model.
+- `data/performance/dsv4_flash_performance.fast_ab.json`: default mock latency model.
+- `data/performance/dsv4_flash_performance.sm100_dev.json`: SM100 development latency model.
 - `data/config/master_fixed_window.json`: master process env config for the fixed-window baseline.
 
 ## Run output layout
