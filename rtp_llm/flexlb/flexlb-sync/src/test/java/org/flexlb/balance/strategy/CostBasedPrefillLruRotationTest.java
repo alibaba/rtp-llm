@@ -93,7 +93,7 @@ class CostBasedPrefillLruRotationTest {
     void lruSpreadsConsecutiveSelectionsOverEveryPoolMember() {
         List<String> picks = new ArrayList<>();
         for (int i = 0; i < 6; i++) {
-            context.getRequest().setRequestId(30_001L + i);
+            context.getRequest().setRequestId(Long.toString(30_001L + i));
             try (SelectedRole selected = select()) {
                 picks.add(selected.serverStatus().getServerIp());
             }
@@ -117,7 +117,7 @@ class CostBasedPrefillLruRotationTest {
 
         List<String> picks = new ArrayList<>();
         for (int index = 0; index < 4; index++) {
-            context.getRequest().setRequestId(31_001L + index);
+            context.getRequest().setRequestId(Long.toString(31_001L + index));
             try (SelectedRole selected = select()) {
                 picks.add(selected.serverStatus().getServerIp());
             }

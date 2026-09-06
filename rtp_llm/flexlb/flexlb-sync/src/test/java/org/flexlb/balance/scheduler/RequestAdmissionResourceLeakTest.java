@@ -106,7 +106,7 @@ class RequestAdmissionResourceLeakTest {
         Registered registered = registerItem(61L);
 
         try (AdmissionMutation admission =
-                     lifecycle.claimAdmissionMutation(61L, registered.future())) {
+                     lifecycle.claimAdmissionMutation("61", registered.future())) {
             assertNotNull(admission);
             assertEquals(PlacementResult.Status.SUCCESS,
                     lifecycle.commitRoute(
@@ -117,7 +117,7 @@ class RequestAdmissionResourceLeakTest {
         assertEquals(0, lifecycle.decodeAcceptanceCount());
         RequestLifecycleTestSupport.prepareAcceptance(lifecycle, registered);
         assertEquals(1, lifecycle.decodeAcceptanceCount());
-        lifecycle.cancelRequest(61L, 0L, CancelReason.CLIENT_CANCELLED);
+        lifecycle.cancelRequest("61", 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(0, lifecycle.decodeAcceptanceCount());
     }
 
@@ -126,7 +126,7 @@ class RequestAdmissionResourceLeakTest {
         Registered registered = registerItem(62L);
 
         try (AdmissionMutation admission =
-                     lifecycle.claimAdmissionMutation(62L, registered.future())) {
+                     lifecycle.claimAdmissionMutation("62", registered.future())) {
             assertNotNull(admission);
             assertEquals(
                     PlacementResult.Status.BLOCKED,
@@ -135,7 +135,7 @@ class RequestAdmissionResourceLeakTest {
                             () -> false));
             assertEquals(0, lifecycle.decodeAcceptanceCount());
             assertTrue(lifecycle.isAdmissionOpen(
-                    62L, registered.future()));
+                    "62", registered.future()));
             assertNull(activeItem(62L));
         }
     }
@@ -145,7 +145,7 @@ class RequestAdmissionResourceLeakTest {
         Registered registered = registerItem(63L);
 
         try (AdmissionMutation admission =
-                     lifecycle.claimAdmissionMutation(63L, registered.future())) {
+                     lifecycle.claimAdmissionMutation("63", registered.future())) {
             assertNotNull(admission);
             assertThrows(IllegalStateException.class,
                     () -> lifecycle.commitRoute(
@@ -155,7 +155,7 @@ class RequestAdmissionResourceLeakTest {
                             }));
             assertEquals(0, lifecycle.decodeAcceptanceCount());
             assertTrue(lifecycle.isAdmissionOpen(
-                    63L, registered.future()));
+                    "63", registered.future()));
             assertNull(activeItem(63L));
         }
     }
@@ -172,7 +172,7 @@ class RequestAdmissionResourceLeakTest {
         assertEquals(1, lifecycle.decodeAcceptanceCount(),
                 "a duplicate commit may release only its own permit");
 
-        lifecycle.cancelRequest(101L, 0L, CancelReason.CLIENT_CANCELLED);
+        lifecycle.cancelRequest("101", 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(0, lifecycle.decodeAcceptanceCount());
     }
 
@@ -181,7 +181,7 @@ class RequestAdmissionResourceLeakTest {
         Registered registered = registerItem(201L);
         CompletableFuture<Response> future = registered.future();
         AdmissionMutation admission =
-                lifecycle.claimAdmissionMutation(201L, future);
+                lifecycle.claimAdmissionMutation("201", future);
         assertNotNull(admission);
         assertEquals(PlacementResult.Status.SUCCESS,
                 lifecycle.commitRoute(
@@ -191,7 +191,7 @@ class RequestAdmissionResourceLeakTest {
         assertEquals(0, lifecycle.decodeAcceptanceCount());
         RequestLifecycleTestSupport.prepareAcceptance(lifecycle, registered);
         RequestState requested = lifecycle.cancelRequest(
-                201L, 0L, CancelReason.CLIENT_CANCELLED);
+                "201", 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(RequestState.Phase.CANCEL_REQUESTED,
                 requested.state());
         assertEquals(1, lifecycle.decodeAcceptanceCount(),
@@ -231,7 +231,7 @@ class RequestAdmissionResourceLeakTest {
         assertDecodeOwned(registered.item().requestId());
         awaitCondition(() -> lifecycle.decodeAcceptanceCount() == 0);
         assertEquals(RequestState.Phase.ACKNOWLEDGED,
-                lifecycle.getRequestState(401L, 0L).state());
+                lifecycle.getRequestState("401", 0L).state());
     }
 
     @Test
@@ -270,7 +270,8 @@ class RequestAdmissionResourceLeakTest {
                 Future<?> cancellation = contenders.submit(() -> {
                     await(start);
                     lifecycle.cancelRequest(
-                            requestId, 0L, CancelReason.CLIENT_CANCELLED);
+                            Long.toString(requestId), 0L,
+                            CancelReason.CLIENT_CANCELLED);
                 });
                 start.countDown();
                 externalCompletion.get(5, TimeUnit.SECONDS);
@@ -302,7 +303,7 @@ class RequestAdmissionResourceLeakTest {
     }
 
     private AtomicInteger bindCountingResource(
-            long requestId, long acceptanceTimeoutMs) {
+            String requestId, long acceptanceTimeoutMs) {
         RequestSlot slot = lifecycle.requestSlot(requestId);
         assertNotNull(slot);
         AtomicInteger releases = new AtomicInteger();
@@ -313,8 +314,14 @@ class RequestAdmissionResourceLeakTest {
         return releases;
     }
 
+    private AtomicInteger bindCountingResource(
+            long requestId, long acceptanceTimeoutMs) {
+        return bindCountingResource(
+                Long.toString(requestId), acceptanceTimeoutMs);
+    }
+
     private ScheduledRequest activeItem(long requestId) {
-        RequestSlot slot = lifecycle.requestSlot(requestId);
+        RequestSlot slot = lifecycle.requestSlot(Long.toString(requestId));
         assertNotNull(slot);
         synchronized (slot) {
             return slot.activeItem();
@@ -343,7 +350,7 @@ class RequestAdmissionResourceLeakTest {
                         registered.item().decodeReservation())));
     }
 
-    private void assertDecodeOwned(long requestId) {
+    private void assertDecodeOwned(String requestId) {
         RequestSlot slot = lifecycle.requestSlot(requestId);
         assertNotNull(slot);
         synchronized (slot) {
@@ -356,7 +363,8 @@ class RequestAdmissionResourceLeakTest {
         CompletableFuture<Response> future = lifecycle.register(context, 4);
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         DecodeEndpoint.ReservationHandle reservation =
-                new DecodeEndpoint.ReservationHandle(1L, requestId, 1L);
+                new DecodeEndpoint.ReservationHandle(
+                        1L, Long.toString(requestId), 1L);
         ScheduledRequest item = new ScheduledRequest(
                 context,
                 future,

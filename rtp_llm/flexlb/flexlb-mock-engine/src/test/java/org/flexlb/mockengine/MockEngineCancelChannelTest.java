@@ -86,7 +86,7 @@ class MockEngineCancelChannelTest {
         int n = 4;
         EngineRpcService.GenerateInputPB[] inputs = new EngineRpcService.GenerateInputPB[n];
         for (int i = 0; i < n; i++) {
-            inputs[i] = inputWithDecode(i + 1, 10, decodeServices.get(0).getGrpcPort());
+            inputs[i] = inputWithDecode(String.valueOf(i + 1), 10, decodeServices.get(0).getGrpcPort());
         }
         EngineRpcService.EnqueueBatchResponsePB response =
                 enqueue(prefill, batch(9000, slot(0, inputs)));
@@ -102,7 +102,7 @@ class MockEngineCancelChannelTest {
         // The addressed Prefill is the authoritative typed CANCELED producer.
         EngineRpcService.WorkerStatusPB status = workerStatus(prefill, 0);
         boolean cancelledReported = status.getFinishedTaskListList().stream()
-                .anyMatch(task -> task.getRequestId() == 1L
+                .anyMatch(task -> task.getRequestId().equals("1")
                         && task.getErrorInfo().getErrorCode() == 8429L
                         && task.getPriorityPreemptionProgress()
                         == EngineRpcService.PriorityPreemptionProgressPB
@@ -125,7 +125,7 @@ class MockEngineCancelChannelTest {
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
 
         enqueue(prefill, batch(9050, slot(0,
-                inputWithDecode(51, 10, decode.getGrpcPort()))));
+                inputWithDecode("51", 10, decode.getGrpcPort()))));
         awaitInflight(decode, 1, 1_000);
         awaitNoInflight(prefill, 1_000);
         assertEquals(0, prefill.getInflightCount(),
@@ -140,13 +140,13 @@ class MockEngineCancelChannelTest {
         assertFalse(prefill.hasDownstreamOwnership(51L));
         assertFalse(decode.hasUpstreamOwnership(51L));
         boolean cancelledReported = workerStatus(decode, 0).getFinishedTaskListList().stream()
-                .anyMatch(task -> task.getRequestId() == 51L
+                .anyMatch(task -> task.getRequestId().equals("51")
                         && task.getErrorInfo().getErrorCode()
                         == EngineRpcService.ErrorCodePB.CANCELLED.getNumber());
         assertTrue(cancelledReported,
                 "Decode must retain its ordinary CANCELLED terminal");
         boolean typedCanceledReported = workerStatus(prefill, 0).getFinishedTaskListList().stream()
-                .anyMatch(task -> task.getRequestId() == 51L
+                .anyMatch(task -> task.getRequestId().equals("51")
                         && task.getErrorInfo().getErrorCode() == 8429L
                         && task.getPriorityPreemptionProgress()
                         == EngineRpcService.PriorityPreemptionProgressPB
@@ -164,7 +164,7 @@ class MockEngineCancelChannelTest {
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
 
         enqueue(prefill, batch(9100, slot(0,
-                inputWithDecode(11, 10, decodeServices.get(0).getGrpcPort()))));
+                inputWithDecode("11", 10, decodeServices.get(0).getGrpcPort()))));
         awaitAllInflightZero(5_000);
 
         CancelAck outcome = channel
@@ -188,7 +188,7 @@ class MockEngineCancelChannelTest {
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
 
         enqueue(prefill, batch(9200, slot(0,
-                inputWithDecode(21, 10, decodeServices.get(0).getGrpcPort()))));
+                inputWithDecode("21", 10, decodeServices.get(0).getGrpcPort()))));
         awaitInflight(prefill, 1, 1_000);
 
         CancelAck first = channel
@@ -202,7 +202,7 @@ class MockEngineCancelChannelTest {
         assertEquals(CancelAck.ACCEPTED, second,
                 "accepted priority-cancel tombstones are idempotent");
         long terminalCount = workerStatus(prefill, -1).getFinishedTaskListList().stream()
-                .filter(task -> task.getRequestId() == 21L
+                .filter(task -> task.getRequestId().equals("21")
                         && task.getErrorInfo().getErrorCode() == 8429L
                         && task.getPriorityPreemptionProgress()
                         == EngineRpcService.PriorityPreemptionProgressPB
@@ -259,7 +259,7 @@ class MockEngineCancelChannelTest {
         EngineCancelChannel channel = new MockEngineCancelChannel(services);
 
         enqueue(prefill, batch(9300, slot(0,
-                inputWithDecode(31, 10, decodeServices.get(0).getGrpcPort()))));
+                inputWithDecode("31", 10, decodeServices.get(0).getGrpcPort()))));
         awaitInflight(prefill, 1, 1_000);
 
         CancelAck outcome = channel

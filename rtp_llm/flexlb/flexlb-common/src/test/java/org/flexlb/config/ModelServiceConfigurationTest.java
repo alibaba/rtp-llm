@@ -18,7 +18,8 @@ class ModelServiceConfigurationTest {
                     ServiceDiscoveryConfiguration.class,
                     ModelServiceConfiguration.class)
             .withBean("environmentConfigSource", Object.class, Object::new)
-            .withBean("nacosConfigSource", Object.class, Object::new);
+            .withBean("nacosConfigSource", Object.class, Object::new)
+            .withBean("uniConfigConfigSource", Object.class, Object::new);
 
     @Test
     void failsWhenModelServiceConfigIsMissing() {

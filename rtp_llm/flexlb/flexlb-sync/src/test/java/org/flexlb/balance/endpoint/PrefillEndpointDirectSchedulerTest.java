@@ -38,7 +38,7 @@ class PrefillEndpointDirectSchedulerTest {
             List<Future<PrefillState.ReservationResult<PrefillState.DirectRegistration>>> futures =
                     new ArrayList<>();
             for (long id = 1; id <= 64; id++) {
-                long requestId = id;
+                String requestId = Long.toString(id);
                 futures.add(executor.submit(() -> {
                     try (var pin = endpoint.tryPinGeneration()) {
                         return endpoint.registerDirectRequest(pin, requestId, 10L);
@@ -59,7 +59,7 @@ class PrefillEndpointDirectSchedulerTest {
             owned.forEach(PrefillState.DirectRegistration::close);
             assertEquals(0, endpoint.admissionPendingRequestCount());
             try (var pin = endpoint.tryPinGeneration()) {
-                var result = endpoint.registerDirectRequest(pin, 65L, 10L);
+                var result = endpoint.registerDirectRequest(pin, "65", 10L);
                 assertEquals(PrefillState.CapacityStatus.ACQUIRED, result.status());
                 result.reservation().close();
                 result.reservation().close();

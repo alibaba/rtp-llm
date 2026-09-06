@@ -8,6 +8,7 @@ import org.flexlb.dao.master.WorkerStatus.StatusObservation;
 import org.flexlb.dao.master.WorkerStatus.TaskObservation;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.enums.KvCacheGroupMode;
 import org.flexlb.enums.PriorityPreemptionProgress;
@@ -150,7 +151,7 @@ public class EngineStatusConverter {
 
         for (EngineRpcService.TaskInfoPB taskInfoPB : taskInfoPBList) {
             TaskInfo taskInfo = new TaskInfo();
-            long requestId = taskInfoPB.getRequestId();
+            String requestId = RequestId.parse(taskInfoPB);
             taskInfo.setRequestId(requestId);
             taskInfo.setPrefixLength(taskInfoPB.getPrefixLength());
             taskInfo.setPrefixLengthValid(taskInfoPB.getPrefixLengthValid());

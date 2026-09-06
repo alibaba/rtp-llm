@@ -165,7 +165,7 @@ public final class WorkerBatcher {
                     right.priority(), right.enqueueSeq(), right.requestId());
     private static final Comparator<GroupPlanner.Item> FIFO_PROJECTION_ORDER =
             Comparator.comparingLong(GroupPlanner.Item::enqueueSeq)
-                    .thenComparingLong(GroupPlanner.Item::requestId);
+                    .thenComparing(GroupPlanner.Item::requestId);
     private static final GroupPlanner.ItemAccess<ScheduledRequest>
             PLANNER_ITEM_ACCESS = new GroupPlanner.ItemAccess<>() {
                 @Override

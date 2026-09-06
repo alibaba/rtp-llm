@@ -19,6 +19,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -550,16 +551,16 @@ public class DefaultBatchDispatcher {
             markUncertain(items, batchId, mismatch, observer);
             return;
         }
-        Set<Long> expectedIds = new HashSet<>();
+        Set<String> expectedIds = new HashSet<>();
         List<String> protocolViolations = new ArrayList<>();
         for (ScheduledRequest item : items) {
             expectedIds.add(item.requestId());
         }
 
-        Map<Long, EngineRpcService.EnqueueBatchErrorPB> errorByRequestId =
+        Map<String, EngineRpcService.EnqueueBatchErrorPB> errorByRequestId =
                 new HashMap<>();
         for (EngineRpcService.EnqueueBatchErrorPB error : response.getErrorsList()) {
-            long requestId = error.getRequestId();
+            String requestId = RequestId.parse(error);
             if (!expectedIds.contains(requestId)) {
                 protocolViolations.add(
                         "error references unknown request_id=" + requestId);
@@ -569,9 +570,9 @@ public class DefaultBatchDispatcher {
                         "duplicate error for request_id=" + requestId);
             }
         }
-        Set<Long> successIds = new HashSet<>();
+        Set<String> successIds = new HashSet<>();
         for (EngineRpcService.EnqueueBatchSuccessPB success : response.getSuccessesList()) {
-            long requestId = success.getRequestId();
+            String requestId = RequestId.parse(success);
             if (!expectedIds.contains(requestId)) {
                 protocolViolations.add(
                         "success references unknown request_id=" + requestId);
@@ -581,14 +582,14 @@ public class DefaultBatchDispatcher {
                         "duplicate success for request_id=" + requestId);
             }
         }
-        for (Long requestId : successIds) {
+        for (String requestId : successIds) {
             if (errorByRequestId.containsKey(requestId)) {
                 protocolViolations.add(
                         "request_id appears in both success and error: "
                                 + requestId);
             }
         }
-        for (Long requestId : expectedIds) {
+        for (String requestId : expectedIds) {
             if (!successIds.contains(requestId)
                     && !errorByRequestId.containsKey(requestId)) {
                 protocolViolations.add(
@@ -709,7 +710,7 @@ public class DefaultBatchDispatcher {
         EngineRpcService.GenerateInputPB.Builder input =
                 EngineRpcService.GenerateInputPB.newBuilder();
         input.mergeFrom(generateInput);
-        if (input.getRequestId() != item.requestId()) {
+        if (!Objects.equals(RequestId.parse(input), item.requestId())) {
             throw new IllegalArgumentException("request_id mismatch between schedule request and GenerateInputPB");
         }
         EngineRpcService.GenerateConfigPB.Builder config = input.getGenerateConfigBuilder();

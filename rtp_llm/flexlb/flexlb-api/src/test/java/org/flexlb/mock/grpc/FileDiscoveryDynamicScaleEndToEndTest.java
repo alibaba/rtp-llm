@@ -349,7 +349,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         return roundRobin;
     }
 
-    private Response routeResponse(long requestId, String prefillIpAddr, int prefillHttpPort,
+    private Response routeResponse(String requestId, String prefillIpAddr, int prefillHttpPort,
                                     int prefillGrpcPort) {
         Response response = new Response();
         response.setSuccess(true);
@@ -360,7 +360,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     }
 
     private static ServerStatus serverStatus(RoleType role, String ip, int httpPort, int grpcPort,
-                                              long requestId) {
+                                              String requestId) {
         ServerStatus status = new ServerStatus();
         status.setSuccess(true);
         status.setRole(role);
@@ -382,7 +382,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         List<CompletableFuture<Response>> futures = new ArrayList<>(count);
         long firstId = requestIdCounter.getAndAdd(count);
         for (int i = 0; i < count; i++) {
-            futures.add(submitRequest(firstId + i));
+            futures.add(submitRequest(Long.toString(firstId + i)));
         }
         for (int i = 0; i < count; i++) {
             Response response = futures.get(i).get(5, TimeUnit.SECONDS);

@@ -240,7 +240,7 @@ public final class EndpointEventProjector {
 
     private void releaseDecodeAcceptance(
             DecodeAcceptance acceptance,
-            long requestId) {
+            String requestId) {
         Throwable failure = null;
         if (acceptance.releasableFence() != null) {
             try {

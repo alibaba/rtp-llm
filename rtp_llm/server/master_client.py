@@ -321,7 +321,7 @@ class MasterClient:
     async def _best_effort_cancel(stub, request_id: int, reason: int) -> None:
         try:
             await stub.Cancel(
-                FlexlbCancelRequestPB(request_id=request_id, reason=reason),
+                FlexlbCancelRequestPB(request_id=str(request_id), reason=reason),
                 timeout=1.0,
             )
         except Exception:
@@ -366,7 +366,7 @@ class MasterClient:
         api_key = self._extract_api_key(input)
         priority = self._extract_priority(input)
         request_pb = FlexlbScheduleRequestPB(
-            request_id=request_id,
+            request_id=str(request_id),
             block_cache_keys=block_cache_keys,
             seq_len=input.prompt_length,
             generate_timeout=ttft_timeout_ms,

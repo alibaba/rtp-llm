@@ -77,7 +77,7 @@ class PrefillWaitingQueueCapTest {
 
         for (int i = 1; i <= 5; i++) {
             EngineRpcService.EnqueueBatchResponsePB response =
-                    enqueue(prefill, batch(1000 + i, slot(0, input(i, 10))));
+                    enqueue(prefill, batch(1000 + i, slot(0, input(String.valueOf(i), 10))));
             assertEquals(1, response.getSuccessesCount(), "batch " + i + " should be accepted");
             assertEquals(0, response.getErrorsCount(), "batch " + i + " should have no errors");
         }
@@ -86,7 +86,7 @@ class PrefillWaitingQueueCapTest {
                 "snapshot should report 4 queued batches");
 
         EngineRpcService.EnqueueBatchResponsePB rejected =
-                enqueue(prefill, batch(1006, slot(0, input(6, 10))));
+                enqueue(prefill, batch(1006, slot(0, input("6", 10))));
         assertEquals(0, rejected.getSuccessesCount(), "6th batch should not be accepted");
         assertEquals(1, rejected.getErrorsCount(), "6th batch should be rejected");
         String message = rejected.getErrors(0).getErrorInfo().getErrorMessage();
@@ -117,11 +117,11 @@ class PrefillWaitingQueueCapTest {
 
         // Fill: 1 running + 2 waiting (cap 2), 4th rejected.
         for (int i = 1; i <= 3; i++) {
-            assertEquals(1, enqueue(prefill, batch(2000 + i, slot(0, input(i, 10))))
+            assertEquals(1, enqueue(prefill, batch(2000 + i, slot(0, input(String.valueOf(i), 10))))
                     .getSuccessesCount());
         }
         EngineRpcService.EnqueueBatchResponsePB rejected =
-                enqueue(prefill, batch(2004, slot(0, input(4, 10))));
+                enqueue(prefill, batch(2004, slot(0, input("4", 10))));
         assertEquals(1, rejected.getErrorsCount(), "4th batch should hit the cap");
 
         awaitInflightZero(prefill, 5_000);
@@ -129,7 +129,7 @@ class PrefillWaitingQueueCapTest {
         // After the drain the queue is empty again: new enqueues are accepted
         // and complete normally (a rejection must not poison the queue).
         EngineRpcService.EnqueueBatchResponsePB retry =
-                enqueue(prefill, batch(2005, slot(0, input(5, 10))));
+                enqueue(prefill, batch(2005, slot(0, input("5", 10))));
         assertEquals(1, retry.getSuccessesCount(), "post-drain enqueue should be accepted");
         assertEquals(0, retry.getErrorsCount());
 
@@ -147,7 +147,7 @@ class PrefillWaitingQueueCapTest {
 
         for (int i = 1; i <= 10; i++) {
             EngineRpcService.EnqueueBatchResponsePB response =
-                    enqueue(prefill, batch(3000 + i, slot(0, input(i, 10))));
+                    enqueue(prefill, batch(3000 + i, slot(0, input(String.valueOf(i), 10))));
             assertEquals(1, response.getSuccessesCount(), "batch " + i + " should be accepted");
             assertEquals(0, response.getErrorsCount());
         }

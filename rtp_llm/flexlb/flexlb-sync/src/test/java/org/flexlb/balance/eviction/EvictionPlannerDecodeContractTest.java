@@ -50,7 +50,7 @@ class EvictionPlannerDecodeContractTest {
 
                 @Override
                 public CompletableFuture<CancelAck> cancel(
-                        CancelTarget target, long a, long b) {
+                        CancelTarget target, String requestId, long timeoutMs) {
                     return CompletableFuture.completedFuture(CancelAck.ACCEPTED);
                 }
             };
@@ -62,7 +62,7 @@ class EvictionPlannerDecodeContractTest {
     }
 
     private static PriorityRequestEnvelope envelope(int priority, long hardKvTokens) {
-        return new PriorityRequestEnvelope(999L, priority, hardKvTokens);
+        return new PriorityRequestEnvelope("999", priority, hardKvTokens);
     }
 
     private static DecodeRequestView accepted(long id, int priority, long kvTokens) {
@@ -90,7 +90,9 @@ class EvictionPlannerDecodeContractTest {
     }
 
     private static List<Long> victimIds(DecodeEvictionProposal p) {
-        return p.victims().stream().map(DecodeRequestView::requestId).toList();
+        return p.victims().stream()
+                .map(victim -> Long.parseLong(victim.requestId()))
+                .toList();
     }
 
     // ─── No deficit ─────────────────────────────────────────────────────

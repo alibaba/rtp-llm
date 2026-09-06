@@ -53,8 +53,8 @@ class DecodeEndpointLayeredViewTest {
         reserve(1L, 500, 508, 30);
         reserve(2L, 500, 508, 40);
 
-        TaskInfo accepted = runningTask(1L, TaskPhase.KV_ALLOCATED, 256);
-        TaskInfo running = runningTask(2L, TaskPhase.RUNNING, 512);
+        TaskInfo accepted = runningTask("1", TaskPhase.KV_ALLOCATED, 256);
+        TaskInfo running = runningTask("2", TaskPhase.RUNNING, 512);
         updateStatus(Map.of("1", accepted, "2", running), null, 10_000);
 
         assertEquals(1, endpoint.layeredAdmissionView().acceptedCount());
@@ -82,7 +82,7 @@ class DecodeEndpointLayeredViewTest {
         // Report precedes any reserve: no shadow entry to inherit from.
         // Task40: the fallback is the no-priority sentinel (0), which keeps
         // untracked engine tasks out of every eviction candidate set.
-        updateStatus(Map.of("9", runningTask(9L, TaskPhase.KV_ALLOCATED, 64)), null, 10_000);
+        updateStatus(Map.of("9", runningTask("9", TaskPhase.KV_ALLOCATED, 64)), null, 10_000);
 
         DecodeEndpoint.DecodeRequestView view = confirmedView(9L);
         assertEquals(0, view.priority());
@@ -96,12 +96,12 @@ class DecodeEndpointLayeredViewTest {
         updateStatus(Map.of("1", runningTask(1L, TaskPhase.KV_ALLOCATED, 256)), null, 10_000);
         assertEquals(1, endpoint.layeredAdmissionView().acceptedCount());
 
-        updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)), null, 10_000);
+        updateStatus(Map.of("1", runningTask("1", TaskPhase.RUNNING, 256)), null, 10_000);
 
         assertEquals(0, endpoint.layeredAdmissionView().acceptedCount());
         assertEquals(1, endpoint.layeredAdmissionView().runningCount());
         // Identity fields stay from first sight.
-        assertEquals(30, confirmedView(1L).priority());
+        assertEquals(30, confirmedView("1").priority());
     }
 
     @Test
@@ -154,9 +154,9 @@ class DecodeEndpointLayeredViewTest {
         assertTrue(isConfirmed(1L));
 
         // Same round lists it both running and finished: finished wins.
-        TaskInfo finished = runningTask(1L, TaskPhase.RUNNING, 256);
+        TaskInfo finished = runningTask("1", TaskPhase.RUNNING, 256);
         finished.setErrorCode(0);
-        updateStatus(Map.of("1", runningTask(1L, TaskPhase.RUNNING, 256)),
+        updateStatus(Map.of("1", runningTask("1", TaskPhase.RUNNING, 256)),
                 Map.of("1", finished), 10_000);
 
         assertFalse(isConfirmed(1L));
@@ -220,7 +220,7 @@ class DecodeEndpointLayeredViewTest {
         assertTrue(endpoint.commitPriorityPreemption(102L));
 
         assertFalse(isConfirmed(1L));
-        assertTrue(endpoint.layeredAdmissionView().reserved().containsKey(9L));
+        assertTrue(endpoint.layeredAdmissionView().reserved().containsKey("9"));
         assertEquals(1, endpoint.routingView().totalLoad());
         // The same late Decode sample rejected by typed-CANCELED fencing must
         // also be rejected after the stronger absent+tombstone proof.
@@ -287,7 +287,7 @@ class DecodeEndpointLayeredViewTest {
         // reservation is provisional until typed Prefill CANCELED settles it.
         assertTrue(isConfirmed(2L));
         assertTrue(confirmedView(2L).claimedForPreemption());
-        assertTrue(endpoint.layeredAdmissionView().reserved().containsKey(9L));
+        assertTrue(endpoint.layeredAdmissionView().reserved().containsKey("9"));
         assertEquals(700, endpoint.routingView().inflightHardKv());
         assertTrue(endpoint.markPriorityCancelInFlight(101L));
         assertTrue(endpoint.recordPriorityCancelPhase(
@@ -319,7 +319,7 @@ class DecodeEndpointLayeredViewTest {
 
         assertEquals(DecodeEndpoint.PreemptionBeginResult.VICTIM_GONE, result);
         assertFalse(confirmedView(1L).claimedForPreemption());
-        assertFalse(endpoint.layeredAdmissionView().reserved().containsKey(9L));
+        assertFalse(endpoint.layeredAdmissionView().reserved().containsKey("9"));
     }
 
     @Test
@@ -332,7 +332,7 @@ class DecodeEndpointLayeredViewTest {
                 beginPreemption(101L, List.of(2L, 999L),
                         9L, 700, 708, 70));
         assertFalse(confirmedView(2L).claimedForPreemption());
-        assertFalse(endpoint.layeredAdmissionView().reserved().containsKey(9L));
+        assertFalse(endpoint.layeredAdmissionView().reserved().containsKey("9"));
         assertEquals(version, endpoint.routingView().admissionVersion());
     }
 
@@ -369,7 +369,7 @@ class DecodeEndpointLayeredViewTest {
 
         assertEquals(0, endpoint.evictExpiredRequests(
                 100, requestId -> false));
-        assertTrue(endpoint.layeredAdmissionView().reserved().containsKey(1L),
+        assertTrue(endpoint.layeredAdmissionView().reserved().containsKey("1"),
                 "generic TTL cleanup must not deduct a claimed victim");
         assertEquals(1_200, endpoint.routingView().inflightHardKv(),
                 "victim and provisional incoming remain fully charged");
@@ -377,7 +377,7 @@ class DecodeEndpointLayeredViewTest {
         endpoint.abortPriorityPreemption(101L);
         assertEquals(1, endpoint.evictExpiredRequests(
                 100, requestId -> false));
-        assertFalse(endpoint.layeredAdmissionView().reserved().containsKey(1L));
+        assertFalse(endpoint.layeredAdmissionView().reserved().containsKey("1"));
         assertEquals(0, endpoint.routingView().inflightHardKv());
     }
 
@@ -402,7 +402,7 @@ class DecodeEndpointLayeredViewTest {
                 101L, reservations.get(1L)));
         assertEquals(10_000, endpoint.realKvAvailable(),
                 "active reconciliation must release held KV before dropping the claim");
-        assertFalse(confirmedView(1L).claimedForPreemption());
+        assertFalse(confirmedView("1").claimedForPreemption());
     }
 
     @Test
@@ -485,12 +485,18 @@ class DecodeEndpointLayeredViewTest {
     // ==================== helpers ====================
 
     private static List<Long> ids(List<DecodeRequestView> entries) {
-        return entries.stream().map(DecodeRequestView::requestId).toList();
+        return entries.stream()
+                .map(view -> Long.parseLong(view.requestId()))
+                .toList();
     }
 
     private DecodeEndpoint.DecodeRequestView confirmedView(long requestId) {
+        return confirmedView(Long.toString(requestId));
+    }
+
+    private DecodeEndpoint.DecodeRequestView confirmedView(String requestId) {
         return endpoint.layeredAdmissionView().confirmed().stream()
-                .filter(view -> view.requestId() == requestId)
+                .filter(view -> view.requestId().equals(requestId))
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("request " + requestId + " not tracked"));
     }
@@ -522,7 +528,7 @@ class DecodeEndpointLayeredViewTest {
 
     private boolean isConfirmed(long requestId) {
         return endpoint.layeredAdmissionView().confirmed().stream()
-                .anyMatch(view -> view.requestId() == requestId);
+                .anyMatch(view -> view.requestId().equals(Long.toString(requestId)));
     }
 
     private DecodeEndpoint.PreemptionBeginResult beginPreemption(
@@ -546,11 +552,16 @@ class DecodeEndpointLayeredViewTest {
                         Math.max(1, endpoint.routingView().totalLoad()), 100));
     }
 
-    private static TaskInfo runningTask(long requestId, TaskPhase phase, long inputLength) {
+    private static TaskInfo runningTask(String requestId, TaskPhase phase, long inputLength) {
         TaskInfo task = new TaskInfo();
         task.setRequestId(requestId);
         task.setPhase(phase);
         task.setInputLength(inputLength);
         return task;
+    }
+
+    private static TaskInfo runningTask(
+            long requestId, TaskPhase phase, long inputLength) {
+        return runningTask(Long.toString(requestId), phase, inputLength);
     }
 }

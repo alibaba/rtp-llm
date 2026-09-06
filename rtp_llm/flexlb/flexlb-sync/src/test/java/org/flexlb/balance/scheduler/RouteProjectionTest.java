@@ -36,7 +36,7 @@ class RouteProjectionTest {
     void committedWorkOverlapsCollectionWindow() {
         WorkSnapshot committed = work(
                 List.of(new WorkSnapshot.RequestWork(
-                        1L, WorkSnapshot.Phase.ENGINE_RUNNING, 100L)),
+                        "1", WorkSnapshot.Phase.ENGINE_RUNNING, 100L)),
                 List.of(), 0L);
 
         RouteProjection.Candidate result = project(
@@ -86,13 +86,13 @@ class RouteProjectionTest {
         WorkSnapshot committed = work(
                 List.of(
                         new WorkSnapshot.RequestWork(
-                                1L, WorkSnapshot.Phase.COMMITTED, 10L),
+                                "1", WorkSnapshot.Phase.COMMITTED, 10L),
                         new WorkSnapshot.RequestWork(
-                                2L, WorkSnapshot.Phase.ENGINE_QUEUED, 20L),
+                                "2", WorkSnapshot.Phase.ENGINE_QUEUED, 20L),
                         new WorkSnapshot.RequestWork(
-                                3L, WorkSnapshot.Phase.ENGINE_RUNNING, 30L)),
+                                "3", WorkSnapshot.Phase.ENGINE_RUNNING, 30L)),
                 List.of(new WorkSnapshot.BatchWork(
-                        7L, List.of(4L, 5L),
+                        7L, List.of("4", "5"),
                         WorkSnapshot.Phase.ENGINE_RUNNING, 40L)),
                 0L);
 
@@ -177,11 +177,11 @@ class RouteProjectionTest {
     @Test
     void endpointCacheHitChangesServiceAndCandidateMetadata() {
         RouteProjection.Probe coldProbe = new RouteProjection.Probe(
-                99L, 50, NOW_MS, Long.MAX_VALUE,
+                "99", 50, NOW_MS, Long.MAX_VALUE,
                 1_000L, 0L, 123L,
                 RouteProjection.Demand.TTFT_AND_DRAIN);
         RouteProjection.Probe warmProbe = new RouteProjection.Probe(
-                100L, 50, NOW_MS, Long.MAX_VALUE,
+                "100", 50, NOW_MS, Long.MAX_VALUE,
                 1_000L, 800L, 900L,
                 RouteProjection.Demand.TTFT_AND_DRAIN);
 
@@ -292,7 +292,7 @@ class RouteProjectionTest {
                 List.of(),
                 List.of(new WorkSnapshot.BatchWork(
                         7L,
-                        List.of(1L),
+                        List.of("1"),
                         WorkSnapshot.Phase.ENGINE_RUNNING,
                         OptionalLong.empty())),
                 0L);
@@ -505,7 +505,7 @@ class RouteProjectionTest {
         RouteProjection.Candidate committed = project(
                 queue(false, constraints(1, 0L), List.of()),
                 work(List.of(new WorkSnapshot.RequestWork(
-                                99L,
+                                "99",
                                 WorkSnapshot.Phase.ENGINE_RUNNING,
                                 20L)),
                         List.of(), 0L),

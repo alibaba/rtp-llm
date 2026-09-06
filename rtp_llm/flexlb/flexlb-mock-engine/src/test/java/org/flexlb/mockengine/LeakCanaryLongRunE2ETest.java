@@ -52,7 +52,7 @@ class LeakCanaryLongRunE2ETest {
             // whole tail as 8431 before the injected 8510 path is exercised.
             h.config.queueScheduler().getLifecycle()
                     .setMaxDeliveredNotAcceptedRequestsGlobal(0);
-            h.prefillSelector = ctx -> (int) (ctx.getRequestId() % 2);
+            h.prefillSelector = ctx -> (int) (Long.parseLong(ctx.getRequestId()) % 2);
             h.startAutoPump(10);
 
             JavaMockEngineCluster.FastRpcService faultTarget = h.prefillEngines.get(0);
@@ -81,7 +81,7 @@ class LeakCanaryLongRunE2ETest {
                 }
 
                 int priority = PRIORITIES[(int) (rid % PRIORITIES.length)];
-                futures.add(h.scheduler.submit(h.context(rid++, priority)));
+                futures.add(h.scheduler.submit(h.context(String.valueOf(rid++), priority)));
                 Thread.sleep(SUBMIT_INTERVAL_MS);
             }
             long trafficElapsed = System.currentTimeMillis() - start;

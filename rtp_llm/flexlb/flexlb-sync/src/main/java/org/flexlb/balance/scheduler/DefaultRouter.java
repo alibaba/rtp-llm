@@ -210,7 +210,8 @@ public class DefaultRouter {
         Response response;
         try {
             for (SelectedRole selected : selections) {
-                if (selected.serverStatus().getRequestId() != context.getRequestId()) {
+                if (!Objects.equals(
+                        selected.serverStatus().getRequestId(), context.getRequestId())) {
                     throw new IllegalStateException(
                             "selected role belongs to another DIRECT request");
                 }

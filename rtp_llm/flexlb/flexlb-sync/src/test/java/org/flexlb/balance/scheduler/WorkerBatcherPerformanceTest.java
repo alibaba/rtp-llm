@@ -175,7 +175,7 @@ class WorkerBatcherPerformanceTest {
             long enqueuedAtMs,
             long seqLen) {
         Request request = new Request();
-        request.setRequestId(requestId);
+        request.setRequestId(Long.toString(requestId));
         request.setSeqLen(seqLen);
         request.setPriority(priority);
         BalanceContext context = new BalanceContext();

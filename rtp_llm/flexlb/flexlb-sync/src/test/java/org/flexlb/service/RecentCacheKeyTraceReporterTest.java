@@ -9,8 +9,10 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
+import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.lang.reflect.Field;
@@ -36,6 +38,7 @@ class RecentCacheKeyTraceReporterTest {
         inject(reporter, "cacheMetricsReporter", cacheMetricsReporter);
 
         BalanceContext firstContext = mock(BalanceContext.class);
+        when(firstContext.getRequestId()).thenReturn("Aa");
         Request firstRequest = mock(Request.class);
         when(firstContext.getRequest()).thenReturn(firstRequest);
         when(firstRequest.getBlockCacheKeys()).thenReturn(List.of(1L, 2L, 3L));
@@ -43,6 +46,7 @@ class RecentCacheKeyTraceReporterTest {
         when(firstRequest.getCacheKeyBlockSize()).thenReturn(100L);
 
         BalanceContext secondContext = mock(BalanceContext.class);
+        when(secondContext.getRequestId()).thenReturn("BB");
         Request secondRequest = mock(Request.class);
         when(secondContext.getRequest()).thenReturn(secondRequest);
         when(secondRequest.getBlockCacheKeys()).thenReturn(List.of(2L, 3L, 4L));
@@ -90,9 +94,9 @@ class RecentCacheKeyTraceReporterTest {
         BalanceContext firstContext = context(metricOffConfig, List.of(1L, 2L));
         reporter.report(firstContext);
         verify(cacheMetricsReporter, never()).reportRecentCacheKeyHitMetrics(
-                org.mockito.Mockito.anyLong(),
-                org.mockito.Mockito.anyLong(),
-                org.mockito.Mockito.anyLong());
+                Mockito.anyLong(),
+                Mockito.anyLong(),
+                Mockito.anyLong());
 
         FlexlbConfig enabledConfig = new FlexlbConfig();
         BalanceContext secondContext = context(enabledConfig, List.of(2L, 3L));
@@ -112,10 +116,10 @@ class RecentCacheKeyTraceReporterTest {
         reporter.report(context(config, List.of(), 128L, 64L));
         reporter.report(context(config, List.of(1L), 128L, 64L));
 
-        verify(cacheMetricsReporter, org.mockito.Mockito.times(2)).reportRecentCacheKeyHitMetrics(
+        verify(cacheMetricsReporter, Mockito.times(2)).reportRecentCacheKeyHitMetrics(
                 60_000L, 0L, 128L);
-        verify(cacheMetricsReporter, org.mockito.Mockito.times(2)).reportTheoryCacheHitMetrics(
-                org.mockito.Mockito.any(CacheHitTheoryStats.Snapshot.class));
+        verify(cacheMetricsReporter, Mockito.times(2)).reportTheoryCacheHitMetrics(
+                Mockito.any(CacheHitTheoryStats.Snapshot.class));
     }
 
     @Test
@@ -128,9 +132,9 @@ class RecentCacheKeyTraceReporterTest {
         reporter.report(context(config, List.of(1L, 2L, 3L), 1024L, 256L));
         reporter.report(context(config, List.of(2L, 3L, 4L), 1024L, 256L));
 
-        org.mockito.ArgumentCaptor<CacheHitTheoryStats.Snapshot> captor =
-                org.mockito.ArgumentCaptor.forClass(CacheHitTheoryStats.Snapshot.class);
-        verify(cacheMetricsReporter, org.mockito.Mockito.times(2)).reportTheoryCacheHitMetrics(captor.capture());
+        ArgumentCaptor<CacheHitTheoryStats.Snapshot> captor =
+                ArgumentCaptor.forClass(CacheHitTheoryStats.Snapshot.class);
+        verify(cacheMetricsReporter, Mockito.times(2)).reportTheoryCacheHitMetrics(captor.capture());
         CacheHitTheoryStats.Snapshot second = captor.getAllValues().get(1);
         assertEquals(512L, second.getRequestHitCount());
         assertEquals(1024L, second.getRequestTotalCount());
@@ -185,6 +189,7 @@ class RecentCacheKeyTraceReporterTest {
     private static BalanceContext context(FlexlbConfig config, List<Long> cacheKeys, long seqLen, long cacheKeyBlockSize) {
         BalanceContext balanceContext = mock(BalanceContext.class);
         Request request = mock(Request.class);
+        Mockito.lenient().when(balanceContext.getRequestId()).thenReturn("trace-request");
         when(balanceContext.getConfig()).thenReturn(config);
         when(balanceContext.getRequest()).thenReturn(request);
         when(request.getBlockCacheKeys()).thenReturn(cacheKeys);

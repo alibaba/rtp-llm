@@ -132,7 +132,7 @@ public class BalanceContext {
 
     //===================== Method ===================//
 
-    public long getRequestId() {
+    public String getRequestId() {
         return request.getRequestId();
     }
 

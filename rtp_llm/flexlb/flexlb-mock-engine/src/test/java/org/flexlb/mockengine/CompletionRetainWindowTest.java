@@ -274,6 +274,7 @@ class CompletionRetainWindowTest {
     private static List<Long> finishedRids(EngineRpcService.WorkerStatusPB status) {
         return status.getFinishedTaskListList().stream()
                 .map(EngineRpcService.TaskInfoPB::getRequestId)
+                .map(Long::parseLong)
                 .collect(Collectors.toList());
     }
 }

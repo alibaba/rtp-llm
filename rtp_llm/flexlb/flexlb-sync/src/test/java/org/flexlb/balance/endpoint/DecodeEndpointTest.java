@@ -8,8 +8,10 @@ import org.flexlb.enums.TaskPhase;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.flexlb.balance.endpoint.DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -69,7 +71,7 @@ class DecodeEndpointTest {
     void calibrate_kvAllocatedReleasesFromInflight() {
         reserve(100L, 500, 500);
 
-        TaskInfo running = task(100L);
+        TaskInfo running = task("100");
         running.setPhase(TaskPhase.KV_ALLOCATED);
         updateStatus(Map.of("100", running), null, 10000);
 
@@ -81,7 +83,7 @@ class DecodeEndpointTest {
     void calibrate_finishedFailureReleasesFromInflight() {
         reserve(100L, 500, 500);
 
-        TaskInfo failed = task(100L);
+        TaskInfo failed = task("100");
         failed.setErrorCode(1);
         failed.setErrorMessage("timeout");
         updateStatus(null, Map.of("100", failed), 10000);
@@ -93,7 +95,7 @@ class DecodeEndpointTest {
     void calibrate_finishedSuccessReleasesIfStillPresent() {
         reserve(100L, 500, 500);
 
-        TaskInfo success = task(100L);
+        TaskInfo success = task("100");
         success.setErrorCode(0);
         updateStatus(null, Map.of("100", success), 10000);
 
@@ -174,7 +176,7 @@ class DecodeEndpointTest {
         assertEquals(0, endpoint.routingView().engineLoad()); // both queued
 
         // calibrate: req 1 confirmed → removed from inflight + queued
-        TaskInfo running = task(1L);
+        TaskInfo running = task("1");
         running.setPhase(TaskPhase.KV_ALLOCATED);
         updateStatus(Map.of("1", running), null, 10000);
 
@@ -251,10 +253,10 @@ class DecodeEndpointTest {
 
     /** Directly mutate the private counter to simulate drift. */
     private void setQueuedPhaseCount(int value) throws Exception {
-        java.lang.reflect.Field f = DecodeEndpoint.class.getDeclaredField("queuedPhaseCount");
+        Field f = DecodeEndpoint.class.getDeclaredField("queuedPhaseCount");
         f.setAccessible(true);
-        java.util.concurrent.atomic.AtomicInteger counter =
-                (java.util.concurrent.atomic.AtomicInteger) f.get(endpoint);
+        AtomicInteger counter =
+                (AtomicInteger) f.get(endpoint);
         counter.set(value);
     }
 
@@ -274,7 +276,7 @@ class DecodeEndpointTest {
             assertNotNull(pin);
             DecodeEndpoint.ReservationHandle reservation =
                     endpoint.reservePinned(
-                            pin, requestId, hardKv, expectedKv, 0);
+                            pin, Long.toString(requestId), hardKv, expectedKv, 0);
             reservations.put(requestId, reservation);
             return reservation;
         }
@@ -295,15 +297,20 @@ class DecodeEndpointTest {
         }
     }
 
-    private TaskInfo task(long requestId) {
+    private TaskInfo task(String requestId) {
         TaskInfo task = new TaskInfo();
         task.setRequestId(requestId);
         return task;
     }
 
+    private TaskInfo task(long requestId) {
+        return task(Long.toString(requestId));
+    }
+
     private DecodeEndpoint.EngineDispatchPermit acquirePermit(long requestId) {
         DecodeEndpoint.EngineDispatchPermitAcquisition acquisition =
-                endpoint.acquireEngineDispatchPermit(requestId, 0, 0L);
+                endpoint.acquireEngineDispatchPermit(
+                        Long.toString(requestId), 0, 0L);
         assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
                 acquisition.status());
         assertNotNull(acquisition.permit());

@@ -4,6 +4,7 @@ import org.flexlb.balance.planner.GroupPlanner;
 
 import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Immutable scheduling inputs captured for a route-time what-if projection.
@@ -28,7 +29,7 @@ public record QueueSnapshot(
                         "admission block requires an ACTIVE head");
             }
             GroupPlanner.Item head = activeItems.getFirst();
-            if (head.requestId() != admissionBlock.requestId()
+            if (!Objects.equals(head.requestId(), admissionBlock.requestId())
                     || head.enqueueSeq() != admissionBlock.enqueueSeq()) {
                 throw new IllegalArgumentException(
                         "admission block must identify the exact ACTIVE head");
@@ -38,7 +39,7 @@ public record QueueSnapshot(
 
     /** Exact ACTIVE head whose current capacity rejection parks the worker. */
     public record AdmissionBlock(
-            long requestId,
+            String requestId,
             long enqueueSeq,
             RouteProjection.AdmissionBlockSemantics semantics) {
     }

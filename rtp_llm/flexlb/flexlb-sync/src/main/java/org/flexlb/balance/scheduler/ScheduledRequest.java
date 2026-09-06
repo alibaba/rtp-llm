@@ -41,7 +41,7 @@ public final class ScheduledRequest implements Prioritized {
     private final DecodeBinding decodeBinding;
     private final long enqueuedAtMs;
     private final long enqueueSequence;
-    private final long requestId;
+    private final String requestId;
     private final int priority;
     private final long expiresAtMs;
     private final long seqLen;
@@ -77,7 +77,7 @@ public final class ScheduledRequest implements Prioritized {
         this.enqueuedAtMs = enqueuedAtMs;
         this.enqueueSequence = ENQUEUE_SEQUENCE.incrementAndGet();
         Request request = ctx.getRequest();
-        this.requestId = request == null ? 0L : request.getRequestId();
+        this.requestId = request == null ? null : request.getRequestId();
         this.priority = request == null && ctx.schedulingMetadata() == null
                 ? 0 : ctx.getPriority();
         this.expiresAtMs = ctx.getRequestExpiresAtMs();
@@ -185,7 +185,7 @@ public final class ScheduledRequest implements Prioritized {
 
     // -- derived accessors --
 
-    public long requestId() {
+    public String requestId() {
         return requestId;
     }
 

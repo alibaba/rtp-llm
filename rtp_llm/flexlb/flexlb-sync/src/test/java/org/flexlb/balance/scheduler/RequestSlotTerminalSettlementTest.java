@@ -13,7 +13,7 @@ import static org.mockito.Mockito.when;
 class RequestSlotTerminalSettlementTest {
 
     private static final DecodeEndpoint.ReservationHandle RESERVATION =
-            new DecodeEndpoint.ReservationHandle(1L, 2L, 3L);
+            new DecodeEndpoint.ReservationHandle(1L, "2", 3L);
 
     @Test
     void decodeTerminalIsAProofOfAlreadyCommittedEndpointSettlement() {

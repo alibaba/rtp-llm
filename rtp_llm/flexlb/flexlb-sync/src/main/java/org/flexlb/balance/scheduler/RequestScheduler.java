@@ -109,7 +109,7 @@ public final class RequestScheduler {
     }
 
     public RequestState cancelRequest(
-            long requestId,
+            String requestId,
             long expectedBatchId,
             CancelReason reason) {
         return lifecycle.cancelRequest(requestId, expectedBatchId, reason);
@@ -135,11 +135,11 @@ public final class RequestScheduler {
         return lifecycle.snapshotActiveRequests();
     }
 
-    public RequestState getRequestState(long requestId, long expectedBatchId) {
+    public RequestState getRequestState(String requestId, long expectedBatchId) {
         return lifecycle.getRequestState(requestId, expectedBatchId);
     }
 
-    public boolean ownsRequestGeneration(long requestId) {
+    public boolean ownsRequestGeneration(String requestId) {
         return lifecycle.ownsRequestGeneration(requestId);
     }
 

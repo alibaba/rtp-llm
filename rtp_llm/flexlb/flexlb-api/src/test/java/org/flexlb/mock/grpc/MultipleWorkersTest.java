@@ -83,7 +83,7 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
         long[] requestIds = {40001, 40002, 40003, 40004};
         CompletableFuture<Response>[] futures = new CompletableFuture[requestIds.length];
         for (int i = 0; i < requestIds.length; i++) {
-            futures[i] = submitRequest(requestIds[i]);
+            futures[i] = submitRequest(String.valueOf(requestIds[i]));
         }
 
         // 4. Wait for all requests to complete (ACK)
@@ -123,7 +123,7 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
      * Build a routing response that points to either worker A or worker B
      * for the prefill role, and always to the shared decode worker.
      */
-    private Response buildRouteResponse(long requestId, boolean useWorkerB) {
+    private Response buildRouteResponse(String requestId, boolean useWorkerB) {
         Response response = new Response();
         response.setSuccess(true);
 

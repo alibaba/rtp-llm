@@ -80,7 +80,7 @@ class RequestRegistryTest {
         assertTrue(duplicate.isDone());
         assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(),
                 duplicate.join().getCode());
-        assertSame(canonical, lifecycle.requestSlot(101L).future());
+        assertSame(canonical, lifecycle.requestSlot("101").future());
         assertEquals(1, lifecycle.liveRequestCount());
     }
 
@@ -100,7 +100,7 @@ class RequestRegistryTest {
     @Test
     void slotLockContractIsEnforcedWithoutJvmAssertions() {
         lifecycle.register(context(102L), 8);
-        RequestSlot slot = lifecycle.requestSlot(102L);
+        RequestSlot slot = lifecycle.requestSlot("102");
 
         IllegalStateException failure = assertThrows(
                 IllegalStateException.class, slot::activeItem);
@@ -118,7 +118,7 @@ class RequestRegistryTest {
                 rejected.join().getCode());
 
         RequestState cancellation = lifecycle.cancelRequest(
-                201L, 0L, CancelReason.CLIENT_CANCELLED);
+                "201", 0L, CancelReason.CLIENT_CANCELLED);
         assertNotNull(cancellation);
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 first.join().getCode());
@@ -149,7 +149,7 @@ class RequestRegistryTest {
         Runnable listener = wakes::incrementAndGet;
         blocked.boundary().availability().addListener(listener);
 
-        lifecycle.cancelRequest(211L, 0L, CancelReason.CLIENT_CANCELLED);
+        lifecycle.cancelRequest("211", 0L, CancelReason.CLIENT_CANCELLED);
 
         assertEquals(0, lifecycle.decodeAcceptanceCount());
         assertEquals(1, wakes.get());
@@ -158,7 +158,7 @@ class RequestRegistryTest {
         RequestLifecycleTestSupport.prepareAcceptance(lifecycle, second);
         assertEquals(1, lifecycle.decodeAcceptanceCount());
 
-        lifecycle.cancelRequest(212L, 0L, CancelReason.CLIENT_CANCELLED);
+        lifecycle.cancelRequest("212", 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(0, lifecycle.decodeAcceptanceCount());
         assertEquals(1, wakes.get(), "detached waiters receive no later capacity callbacks");
     }
@@ -173,7 +173,7 @@ class RequestRegistryTest {
         assertNotNull(duplicate);
         var blocked = lifecycle.prepareDecodeAcceptance(registered.item());
         assertFalse(blocked.accepted());
-        var slot = lifecycle.requestSlot(215L);
+        var slot = lifecycle.requestSlot("215");
         AtomicReference<Boolean> notifiedUnderSlotLock = new AtomicReference<>();
         Runnable listener = () -> notifiedUnderSlotLock.set(Thread.holdsLock(slot));
         blocked.boundary().availability().addListener(listener);
@@ -203,8 +203,8 @@ class RequestRegistryTest {
         RequestLifecycleTestSupport.prepareAcceptance(lifecycle, second);
         assertEquals(2, lifecycle.decodeAcceptanceCount());
 
-        lifecycle.cancelRequest(221L, 0L, CancelReason.CLIENT_CANCELLED);
-        lifecycle.cancelRequest(222L, 0L, CancelReason.CLIENT_CANCELLED);
+        lifecycle.cancelRequest("221", 0L, CancelReason.CLIENT_CANCELLED);
+        lifecycle.cancelRequest("222", 0L, CancelReason.CLIENT_CANCELLED);
         assertEquals(0, lifecycle.decodeAcceptanceCount());
     }
 
@@ -212,11 +212,11 @@ class RequestRegistryTest {
     void admissionMutationDefersCancellationUntilItsExactCapabilityCloses() {
         CompletableFuture<Response> future = lifecycle.register(context(301L), 4);
         AdmissionMutation scope =
-                lifecycle.claimAdmissionMutation(301L, future);
+                lifecycle.claimAdmissionMutation("301", future);
         assertNotNull(scope);
 
         RequestState requested = lifecycle.cancelRequest(
-                301L, 0L, CancelReason.CLIENT_CANCELLED);
+                "301", 0L, CancelReason.CLIENT_CANCELLED);
 
         assertEquals(RequestState.Phase.CANCEL_REQUESTED, requested.state());
         assertFalse(future.isDone(),
@@ -227,7 +227,7 @@ class RequestRegistryTest {
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 future.join().getCode());
         assertEquals(RequestState.Phase.CANCELLED,
-                lifecycle.getRequestState(301L, 0L).state());
+                lifecycle.getRequestState("301", 0L).state());
     }
 
     @Test
@@ -242,7 +242,7 @@ class RequestRegistryTest {
 
         Response rejection = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
         assertTrue(lifecycle.publishQueueDecisionResponseAsync(
-                302L, future, rejection));
+                "302", future, rejection));
         assertTrue(published.await(5, TimeUnit.SECONDS));
         assertNotEquals(Thread.currentThread().getName(), callbackThread.get());
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
@@ -255,7 +255,7 @@ class RequestRegistryTest {
         CompletableFuture<Response> heldFuture =
                 lifecycle.register(context(401L), 4);
         AdmissionMutation held =
-                lifecycle.claimAdmissionMutation(401L, heldFuture);
+                lifecycle.claimAdmissionMutation("401", heldFuture);
         assertNotNull(held);
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
@@ -287,13 +287,13 @@ class RequestRegistryTest {
         CompletableFuture<Response> future = lifecycle.register(context(501L), 4);
 
         assertNull(lifecycle.cancelRequest(
-                999L, 0L, CancelReason.CLIENT_CANCELLED));
+                "999", 0L, CancelReason.CLIENT_CANCELLED));
         assertNull(lifecycle.cancelRequest(
-                501L, 91L, CancelReason.CLIENT_CANCELLED));
+                "501", 91L, CancelReason.CLIENT_CANCELLED));
         assertFalse(future.isDone());
 
         RequestState exact = lifecycle.cancelRequest(
-                501L, 0L, CancelReason.CLIENT_CANCELLED);
+                "501", 0L, CancelReason.CLIENT_CANCELLED);
         assertNotNull(exact);
         assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
                 future.join().getCode());
@@ -303,7 +303,7 @@ class RequestRegistryTest {
     void workerActivityExtendsOnlyTheInactiveMaintenanceTtl() {
         Registered registered = registerItem(601L);
         RequestLifecycleTestSupport.bind(lifecycle, registered);
-        RequestSlot slot = lifecycle.requestSlot(601L);
+        RequestSlot slot = lifecycle.requestSlot("601");
         long ttlMs = 300_000L;
         long heartbeatAtMs = slot.createdAtMs() + ttlMs + 1_000L;
         synchronized (slot) {
@@ -313,15 +313,15 @@ class RequestRegistryTest {
         assertFalse(lifecycle.reduceStale(
                 slot, heartbeatAtMs + ttlMs - 1L, ttlMs));
         assertEquals(RequestState.Phase.QUEUED,
-                lifecycle.getRequestState(601L, 0L).state());
+                lifecycle.getRequestState("601", 0L).state());
 
         assertTrue(lifecycle.reduceStale(
                 slot, heartbeatAtMs + ttlMs + 1L, ttlMs));
         assertEquals(RequestState.Phase.TIMED_OUT,
-                lifecycle.getRequestState(601L, 0L).state());
+                lifecycle.getRequestState("601", 0L).state());
         verify(engineCancelChannel, never()).cancel(
                 org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.anyString(),
                 org.mockito.ArgumentMatchers.anyLong());
     }
 
@@ -330,19 +330,19 @@ class RequestRegistryTest {
         Registered registered = registerItem(602L);
         assertEquals(PlacementResult.Status.SUCCESS,
                 commitRoute(lifecycle, registered, 0, 30_000L));
-        RequestSlot slot = lifecycle.requestSlot(602L);
+        RequestSlot slot = lifecycle.requestSlot("602");
         long ttlMs = 300_000L;
 
         assertTrue(lifecycle.reduceStale(
                 slot, slot.createdAtMs() + ttlMs + 1L, ttlMs));
 
         assertEquals(RequestState.Phase.TIMED_OUT,
-                lifecycle.getRequestState(602L, 0L).state());
+                lifecycle.getRequestState("602", 0L).state());
         verify(registered.item().decodeEp()).releaseReservationExact(
                 registered.item().decodeReservation());
         verify(engineCancelChannel, never()).cancel(
                 org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.anyString(),
                 org.mockito.ArgumentMatchers.anyLong());
     }
 
@@ -355,7 +355,8 @@ class RequestRegistryTest {
         CompletableFuture<Response> future = lifecycle.register(context, 4);
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         DecodeEndpoint.ReservationHandle reservation =
-                new DecodeEndpoint.ReservationHandle(1L, requestId, 1L);
+                new DecodeEndpoint.ReservationHandle(
+                        1L, Long.toString(requestId), 1L);
         return new Registered(
                 new ScheduledRequest(
                         context,

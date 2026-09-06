@@ -21,6 +21,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -36,14 +37,14 @@ class DecodePreemptionCoordinatorTest {
         when(endpoint.getStatus()).thenReturn(status);
         when(status.getGenerationId()).thenReturn(9L);
         when(endpoint.beginPriorityPreemption(
-                anyLong(), anyList(), anyLong(), anyLong(), anyLong(),
+                anyLong(), anyList(), anyString(), anyLong(), anyLong(),
                 anyInt(), any(DecodeEndpoint.AdmissionCapacity.class)))
                 .thenReturn(DecodeEndpoint.PreemptionBeginResult.SUCCESS);
         when(endpoint.markPriorityCancelInFlight(anyLong())).thenReturn(true);
-        when(endpoint.recordPriorityCancelPhase(anyLong(), anyLong(), any()))
+        when(endpoint.recordPriorityCancelPhase(anyLong(), anyString(), any()))
                 .thenReturn(true);
         when(endpoint.commitPriorityPreemption(anyLong())).thenReturn(true);
-        when(requests.findCancelTarget(anyLong(), anyLong())).thenReturn(
+        when(requests.findCancelTarget(anyString(), anyLong())).thenReturn(
                 Optional.of(new CancelTarget("10.0.0.1", 9090)));
         when(requests.tryApplyPreemptionPhase(any(), any())).thenReturn(true);
 
@@ -51,19 +52,19 @@ class DecodePreemptionCoordinatorTest {
         CompletableFuture<VictimTerminal> secondTerminal = new CompletableFuture<>();
         PreemptionRegistration first = claim(11L, firstTerminal);
         PreemptionRegistration second = claim(12L, secondTerminal);
-        when(requests.tryClaim(anyLong(), anyLong(), anyLong(), any()))
+        when(requests.tryClaim(anyString(), anyLong(), anyLong(), any()))
                 .thenAnswer(invocation -> Optional.of(
-                        invocation.<Long>getArgument(0) == 11L ? first : second));
+                        invocation.<String>getArgument(0).equals("11") ? first : second));
 
         EngineCancelChannel cancelChannel = mock(EngineCancelChannel.class);
-        when(cancelChannel.cancel(any(), anyLong(), anyLong())).thenReturn(
+        when(cancelChannel.cancel(any(), anyString(), anyLong())).thenReturn(
                 CompletableFuture.completedFuture(
                         EngineCancelChannel.CancelAck.ACCEPTED));
         DecodePreemptionCoordinator coordinator =
                 new DecodePreemptionCoordinator(cancelChannel, requests);
         CompletableFuture<DecodePreemptionCoordinator.PreemptionResult> result =
                 coordinator.preempt(new DecodePreemptionCoordinator.PreemptionCommand(
-                        endpoint, 20L, 64L, 64L, 70,
+                        endpoint, "20", 64L, 64L, 70,
                         new DecodeEndpoint.AdmissionCapacity(2L, 100L),
                         List.of(victim(11L, 101L), victim(12L, 102L)),
                         1_000L, 1_000L, () -> true, "test"));
@@ -82,7 +83,7 @@ class DecodePreemptionCoordinatorTest {
             long requestId,
             CompletableFuture<VictimTerminal> terminal) {
         PreemptionRegistration claim = mock(PreemptionRegistration.class);
-        when(claim.requestId()).thenReturn(requestId);
+        when(claim.requestId()).thenReturn(Long.toString(requestId));
         when(claim.attemptToken()).thenReturn(1L);
         when(claim.terminalObservation()).thenReturn(terminal);
         return claim;

@@ -45,7 +45,7 @@ public final class DecodePreemptionCoordinator {
 
     record PreemptionCommand(
             DecodeEndpoint endpoint,
-            long incomingRequestId,
+            String incomingRequestId,
             long incomingKvTokens,
             long incomingExpectedKvTokens,
             int incomingPriority,
@@ -60,19 +60,19 @@ public final class DecodePreemptionCoordinator {
                 throw new IllegalArgumentException("endpoint and victims are required");
             }
             victims = List.copyOf(victims);
-            if (incomingRequestId <= 0L) {
+            if (incomingRequestId == null || incomingRequestId.isBlank()) {
                 throw new IllegalArgumentException(
-                        "incoming request id must be positive");
+                        "incoming request id must not be blank");
             }
             if (capacity == null) {
                 throw new IllegalArgumentException("capacity policy is required");
             }
-            Set<Long> victimIds = new LinkedHashSet<>();
+            Set<String> victimIds = new LinkedHashSet<>();
             for (DecodeRequestView victim : victims) {
-                if (victim.requestId() <= 0L
+                if (victim.requestId() == null || victim.requestId().isBlank()
                         || victim.reservationToken() <= 0L) {
                     throw new IllegalArgumentException(
-                            "victim requestId and reservation token must be positive");
+                            "victim requestId must not be blank and reservation token must be positive");
                 }
                 if (victim.phase() == null
                         || !victim.phase().requiresEngineCancel()) {
@@ -141,7 +141,7 @@ public final class DecodePreemptionCoordinator {
                 PreemptionRegistration claim = claimAttempt.get();
                 ClaimedVictim owned = capability.add(
                         victim, targets.get(index), claim);
-                if (claim.requestId() != victim.requestId()
+                if (!Objects.equals(claim.requestId(), victim.requestId())
                         || claim.attemptToken() != token) {
                     return CompletableFuture.completedFuture(capability.abort(
                             true,
@@ -436,7 +436,7 @@ public final class DecodePreemptionCoordinator {
             return claim;
         }
 
-        private long requestId() {
+        private String requestId() {
             return victim.requestId();
         }
     }
@@ -510,7 +510,7 @@ public final class DecodePreemptionCoordinator {
                 ClaimedVictim owned,
                 VictimTerminal terminal) {
             if (terminal == null
-                    || terminal.requestId() != owned.requestId()) {
+                    || !Objects.equals(terminal.requestId(), owned.requestId())) {
                 return false;
             }
             return recordTerminal(owned);
