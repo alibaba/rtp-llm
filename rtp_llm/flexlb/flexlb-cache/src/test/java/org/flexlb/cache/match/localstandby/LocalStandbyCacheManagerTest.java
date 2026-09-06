@@ -2,6 +2,7 @@ package org.flexlb.cache.match.localstandby;
 
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.config.LocalStandbyConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
@@ -9,7 +10,6 @@ import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.GroupRoleEndPoint;
 import org.flexlb.dao.route.KvcmConfig;
-import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
 import org.junit.jupiter.api.Test;
@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 
+import static org.flexlb.cache.CacheMatchTestConfigurations.kvcm;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
@@ -33,7 +34,7 @@ class LocalStandbyCacheManagerTest {
         when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "default"))
                 .thenReturn(List.of(worker1, worker2));
         LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
-                new CacheMatchConfiguration(modelMetaConfig(300_000)),
+                configuration(300_000),
                 workerStatusProvider,
                 mock(CacheMetricsReporter.class));
 
@@ -59,7 +60,7 @@ class LocalStandbyCacheManagerTest {
         when(workerStatusProvider.getWorkerStatuses(RoleType.PDFUSION, "default"))
                 .thenReturn(List.of(worker));
         LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
-                new CacheMatchConfiguration(modelMetaConfig(300_000)),
+                configuration(300_000),
                 workerStatusProvider,
                 mock(CacheMetricsReporter.class));
 
@@ -85,7 +86,7 @@ class LocalStandbyCacheManagerTest {
         when(workerStatusProvider.getWorkerStatuses(RoleType.PDFUSION, "default"))
                 .thenReturn(List.of(worker));
         LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
-                new CacheMatchConfiguration(modelMetaConfig(300_000)),
+                configuration(300_000),
                 workerStatusProvider,
                 mock(CacheMetricsReporter.class));
         manager.addRoutedRequestBlocks(worker.getIpPort(), List.of(11L, 22L, 33L));
@@ -105,7 +106,7 @@ class LocalStandbyCacheManagerTest {
         when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "default"))
                 .thenReturn(List.of(worker));
         LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
-                new CacheMatchConfiguration(modelMetaConfig(20)),
+                configuration(20),
                 workerStatusProvider,
                 mock(CacheMetricsReporter.class));
         manager.addRoutedRequestBlocks(worker.getIpPort(), List.of(11L));
@@ -132,8 +133,7 @@ class LocalStandbyCacheManagerTest {
         when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "default"))
                 .thenReturn(List.of(worker));
         LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
-                new CacheMatchConfiguration(
-                        modelMetaConfig(300_000, 2_000, 10.0)),
+                configuration(300_000, 2_000, 10.0),
                 workerStatusProvider,
                 mock(CacheMetricsReporter.class));
 
@@ -156,7 +156,7 @@ class LocalStandbyCacheManagerTest {
         when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "default"))
                 .thenReturn(List.of(worker));
         LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
-                new CacheMatchConfiguration(modelMetaConfig(300_000, 1_000, 10.0, 200)),
+                configuration(300_000, 1_000, 10.0, 200),
                 workerStatusProvider,
                 mock(CacheMetricsReporter.class));
 
@@ -174,7 +174,7 @@ class LocalStandbyCacheManagerTest {
         when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "default"))
                 .thenReturn(List.of(worker1, worker2));
         LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
-                new CacheMatchConfiguration(modelMetaConfig(300_000, 1_000, 10.0)),
+                configuration(300_000, 1_000, 10.0),
                 workerStatusProvider,
                 mock(CacheMetricsReporter.class));
         manager.refreshCapacityLimits();
@@ -191,7 +191,7 @@ class LocalStandbyCacheManagerTest {
         when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "default"))
                 .thenReturn(List.of(worker));
         LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
-                new CacheMatchConfiguration(modelMetaConfig(300_000, 10, 10.0)),
+                configuration(300_000, 10, 10.0),
                 workerStatusProvider,
                 cacheMetricsReporter);
 
@@ -223,33 +223,30 @@ class LocalStandbyCacheManagerTest {
         return workerStatus;
     }
 
-    private ModelMetaConfig modelMetaConfig(long expirationMs) {
-        return modelMetaConfig(
+    private CacheMatchConfiguration configuration(long expirationMs) {
+        return configuration(
                 expirationMs,
                 LocalStandbyConfig.DEFAULT_MAXIMUM_ENTRIES,
                 LocalStandbyConfig.DEFAULT_CAPACITY_MULTIPLIER);
     }
 
-    private ModelMetaConfig modelMetaConfig(long expirationMs, long maximumEntries, double capacityMultiplier) {
-        return modelMetaConfig(expirationMs, maximumEntries, capacityMultiplier, 0);
+    private CacheMatchConfiguration configuration(
+            long expirationMs,
+            long maximumEntries,
+            double capacityMultiplier) {
+        return configuration(expirationMs, maximumEntries, capacityMultiplier, 0);
     }
 
-    private ModelMetaConfig modelMetaConfig(long expirationMs, long maximumEntries, double capacityMultiplier, long blockSize) {
-        LocalStandbyConfig standby = new LocalStandbyConfig();
-        standby.setTtlMs(expirationMs);
-        standby.setMinimumTtlMs(
-                Math.min(expirationMs, LocalStandbyConfig.DEFAULT_MINIMUM_TTL_MS));
-        standby.setMaximumEntries(maximumEntries);
-        standby.setCapacityMultiplier(capacityMultiplier);
-        standby.setBlockSize(blockSize);
-
-        KvcmConfig kvcm = new KvcmConfig();
-        kvcm.setEnabled(true);
-        kvcm.setLocalStandby(standby);
+    private CacheMatchConfiguration configuration(
+            long expirationMs,
+            long maximumEntries,
+            double capacityMultiplier,
+            long blockSize) {
+        KvcmConfig kvcmTopology = new KvcmConfig();
 
         ServiceRoute route = new ServiceRoute();
         route.setServiceId("test-service");
-        route.setKvcm(kvcm);
+        route.setKvcm(kvcmTopology);
         GroupRoleEndPoint roleEndpoint = new GroupRoleEndPoint();
         roleEndpoint.setGroup("default");
         roleEndpoint.setPrefillEndpoint(new Endpoint());
@@ -257,6 +254,14 @@ class LocalStandbyCacheManagerTest {
 
         ModelMetaConfig config = new ModelMetaConfig();
         config.putServiceRoute(route.getServiceId(), route);
-        return config;
+        return kvcm(config, runtime -> {
+            LocalStandbyConfig standby = runtime.getLocalStandby();
+            standby.setTtlMs(expirationMs);
+            standby.setMinimumTtlMs(
+                    Math.min(expirationMs, LocalStandbyConfig.DEFAULT_MINIMUM_TTL_MS));
+            standby.setMaximumEntries(maximumEntries);
+            standby.setCapacityMultiplier(capacityMultiplier);
+            standby.setBlockSize(blockSize);
+        });
     }
 }

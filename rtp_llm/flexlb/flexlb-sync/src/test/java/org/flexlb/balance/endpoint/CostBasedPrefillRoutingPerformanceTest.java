@@ -5,8 +5,10 @@ import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
-import org.flexlb.cache.domain.WorkerCacheUpdateResult;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.domain.CacheMatchQuery;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -30,7 +32,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -231,17 +232,14 @@ class CostBasedPrefillRoutingPerformanceTest {
                                double p50Ms, double p99Ms) {
     }
 
-    private static final class EmptyCacheAwareService implements CacheAwareService {
-        @Override
-        public Map<String, Integer> findMatchingEngines(List<Long> blockCacheKeys,
-                                                        RoleType roleType,
-                                                        String group) {
-            return Map.of();
+    private static final class EmptyCacheAwareService extends CacheAwareService {
+        private EmptyCacheAwareService() {
+            super(null, null, null, null, null);
         }
 
         @Override
-        public WorkerCacheUpdateResult updateEngineBlockCache(WorkerStatus workerStatus) {
-            return null;
+        public CacheMatchResult findMatchingEngines(CacheMatchQuery query) {
+            return CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC);
         }
     }
 }

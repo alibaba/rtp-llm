@@ -1,5 +1,7 @@
 package org.flexlb.service.optimizer;
 
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -122,8 +124,15 @@ class OptimizerClientTest {
 
     @Test
     void skipsTraceQueryWhenOptimizerIsDisabled() {
+        ConfigService configService = mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         OptimizerClient disabledClient = new OptimizerClient(
-                httpService, mock(ServiceDiscovery.class), new ModelMetaConfig(), workerMetadataResolver, monitor);
+                httpService,
+                mock(ServiceDiscovery.class),
+                new ModelMetaConfig(),
+                configService,
+                workerMetadataResolver,
+                monitor);
         disabledClient.shutdown();
 
         disabledClient.traceQuery(traceRequest(List.of(1L)), selectedWorker());

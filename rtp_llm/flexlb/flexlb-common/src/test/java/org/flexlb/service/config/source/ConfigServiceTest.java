@@ -1,10 +1,19 @@
-package org.flexlb.service.config;
+package org.flexlb.service.config.source;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.KvcmCacheMatchingConfig;
+import org.flexlb.config.LocalSyncCacheMatchingConfig;
+import org.flexlb.config.VictimStage;
 import org.flexlb.enums.LogLevel;
+import org.flexlb.service.config.ConfigSource;
+import org.flexlb.service.config.parser.StandardConfigDocumentParser;
+import org.flexlb.service.config.parser.V0ConfigDocumentParser;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 
 import java.util.ArrayList;
@@ -30,13 +39,14 @@ class ConfigServiceTest {
     void loadsEnabledConfigSourcesByPriority() {
         EnvironmentConfigSource environmentSource = environmentSource(Map.of(
                 "FLEXLB_CONFIG", """
-                        {"router":{"availabilityHysteresisPercent":20}}
+                        {"schemaVersion":1,"router":{"availabilityHysteresisPercent":20}}
                         """));
         FakeConfigSource nacosSource = new FakeConfigSource(
                 "Nacos",
                 200,
                 """
                         {
+                          "schemaVersion":1,
                           "scheduler":{"type":"DIRECT"},
                           "dispatcher":{"type":"NON_BATCH"},
                           "router":{"availabilityHysteresisPercent":9}
@@ -56,7 +66,7 @@ class ConfigServiceTest {
                 "unregistered",
                 200,
                 """
-                        {"scheduler":{"type":"DIRECT"},"dispatcher":{"type":"NON_BATCH"}}
+                        {"schemaVersion":1,"scheduler":{"type":"DIRECT"},"dispatcher":{"type":"NON_BATCH"}}
                         """);
 
         ConfigService service = createService(List.of(environmentSource(Map.of())));
@@ -82,20 +92,33 @@ class ConfigServiceTest {
     }
 
     @Test
-    void failsFastForMissingEmptyOrInvalidInitialContent() {
-        assertInvalidInitialContent(null, "must not be blank");
-        assertInvalidInitialContent("  ", "must not be blank");
-        assertInvalidInitialContent("{}", "at least one FlexlbConfig field");
+    void rejectsMissingOrBlankInitialContent() {
+        assertInvalidInitialContent(null, "must not be null or blank");
+        assertInvalidInitialContent("  ", "must not be null or blank");
+    }
+
+    @Test
+    void treatsEmptyV2ObjectAsCompatibilityDefaults() {
+        FakeConfigSource source = new FakeConfigSource("Nacos", 200, "{}");
+
+        ConfigService service = createService(List.of(environmentSource(Map.of()), source));
+
+        assertThat(service.loadBalanceConfig().isDirect()).isTrue();
+        assertThat(service.loadBalanceConfig().isBatchDispatch()).isFalse();
+    }
+
+    @Test
+    void failsFastForInvalidInitialContent() {
         assertInvalidInitialContent("[]", "must be a JSON object");
         assertInvalidInitialContent(
-                "{\"scheduler\":{\"type\":\"INVALID\"}}",
+                "{\"schemaVersion\":1,\"scheduler\":{\"type\":\"INVALID\"}}",
                 "Could not resolve type id 'INVALID'");
     }
 
     @Test
     void rejectsUnknownSourceFields() {
         assertInvalidInitialContent(
-                "{\"unknownField\":1}",
+                "{\"schemaVersion\":1,\"unknownField\":1}",
                 "Unrecognized field");
     }
 
@@ -103,7 +126,7 @@ class ConfigServiceTest {
     void rejectsScalarCoercionInSourceFields() {
         assertInvalidInitialContent(
                 "{\"schemaVersion\":\"1\"}",
-                "Cannot coerce String value");
+                "schemaVersion must be an integer");
     }
 
     @Test
@@ -111,7 +134,7 @@ class ConfigServiceTest {
         FakeConfigSource source = new FakeConfigSource(
                 "Nacos",
                 200,
-                "{\"router\":{\"availabilityHysteresisPercent\":9}}");
+                "{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":9}}");
 
         ConfigService service = createService(List.of(
                 environmentSource(Map.of()),
@@ -128,20 +151,18 @@ class ConfigServiceTest {
                 "MODEL_SERVICE_CONFIG",
                 "{\"service_id\":\"environment-service\",\"role_endpoints\":[]}",
                 "FLEXLB_CONFIG",
-                "{\"router\":{\"availabilityHysteresisPercent\":20}}"))
+                "{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":20}}"))
                 .execute(() -> {
                     EnvironmentConfigSource environmentSource =
                             new EnvironmentConfigSource();
                     environmentSource.initialize();
-                    ConfigService.register(new FakeConfigSource(
-                            "Nacos",
-                            200,
-                            "{\"router\":{\"availabilityHysteresisPercent\":9}}"));
-                    return new ConfigService();
+                    ConfigService.register(new FakeConfigSource("Nacos", 200,
+                            "{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":9}}"));
+                    return new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
                 });
         configService = service;
 
-        assertThat(service.loadModelServiceConfig().getServiceId())
+        assertThat(service.modelServiceConfig().getServiceId())
                 .isEqualTo("environment-service");
         assertThat(service.loadBalanceConfig().getRouter()
                 .getAvailabilityHysteresisPercent()).isEqualTo(9);
@@ -154,6 +175,7 @@ class ConfigServiceTest {
                 200,
                 """
                         {
+                          "schemaVersion":1,
                           "router":{"availabilityHysteresisPercent":9},
                           "observability":{"logging":{"level":"warn"}}
                         }
@@ -163,7 +185,7 @@ class ConfigServiceTest {
                 source));
 
         FlexlbConfig initialSnapshot = service.loadBalanceConfig();
-        source.emit("{\"router\":{\"availabilityHysteresisPercent\":10}}");
+        source.emit("{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":10}}");
         FlexlbConfig updatedSnapshot = service.loadBalanceConfig();
 
         assertThat(updatedSnapshot).isNotSameAs(initialSnapshot);
@@ -176,11 +198,123 @@ class ConfigServiceTest {
     }
 
     @Test
+    void runtimeUpdateLogsTheNewSourceSchemaVersion() {
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(ConfigService.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            FakeConfigSource source = new FakeConfigSource("Nacos", 200, "{\"schemaVersion\":0,\"enableQueueing\":true}");
+            createService(List.of(environmentSource(Map.of()), source));
+            assertThat(appender.list)
+                    .extracting(ILoggingEvent::getFormattedMessage)
+                    .anyMatch(message -> message.startsWith("FlexLB config loaded: schemaVersion=0,"));
+
+            appender.list.clear();
+            source.emit("{\"schemaVersion\":1,\"scheduler\":{\"type\":\"QUEUE\"},\"dispatcher\":{\"type\":\"NON_BATCH\"}}");
+
+            assertThat(appender.list)
+                    .extracting(ILoggingEvent::getFormattedMessage)
+                    .anyMatch(message -> message.startsWith("FlexLB config loaded: schemaVersion=1,"));
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+    }
+
+    @Test
+    void taggedUnionTypeChangesReplaceTheWholeBranch() {
+        FakeConfigSource source = new FakeConfigSource(
+                "Nacos",
+                200,
+                """
+                        {
+                          "schemaVersion":1,
+                          "cacheMatching": {
+                            "type": "KVCM",
+                            "requestTimeoutMs": 900,
+                            "leaderRefreshIntervalMs": 20000
+                          }
+                        }
+                        """);
+        ConfigService service = createService(List.of(
+                environmentSource(Map.of()),
+                source));
+
+        source.emit("{\"schemaVersion\":1,\"cacheMatching\":{\"requestTimeoutMs\":750}}");
+        KvcmCacheMatchingConfig patched = (KvcmCacheMatchingConfig)
+                service.loadBalanceConfig().getCacheMatching();
+        assertThat(patched.getRequestTimeoutMs()).isEqualTo(750);
+        assertThat(patched.getLeaderRefreshIntervalMs()).isEqualTo(20_000);
+
+        source.emit("{\"schemaVersion\":1,\"cacheMatching\":{\"type\":\"LOCAL_SYNC\"}}");
+        assertThat(service.loadBalanceConfig().getCacheMatching())
+                .isInstanceOf(LocalSyncCacheMatchingConfig.class);
+
+        source.emit("{\"schemaVersion\":1,\"cacheMatching\":{\"type\":\"KVCM\"}}");
+        KvcmCacheMatchingConfig replaced = (KvcmCacheMatchingConfig)
+                service.loadBalanceConfig().getCacheMatching();
+        assertThat(replaced.getRequestTimeoutMs())
+                .isEqualTo(KvcmCacheMatchingConfig.DEFAULT_REQUEST_TIMEOUT_MS);
+        assertThat(replaced.getLeaderRefreshIntervalMs())
+                .isEqualTo(KvcmCacheMatchingConfig.DEFAULT_LEADER_REFRESH_INTERVAL_MS);
+    }
+
+    @Test
+    void arraysReplaceAsAWholeAndJsonNullIsRejected() {
+        FakeConfigSource source = new FakeConfigSource(
+                "Nacos",
+                200,
+                """
+                        {
+                          "schemaVersion":1,
+                          "scheduler": {
+                            "type": "QUEUE",
+                            "ordering": {
+                              "type": "PRIORITY",
+                              "preemption": {
+                                "allowedVictimStages": [
+                                  "PREFILL_QUEUED",
+                                  "DECODE_RESERVED"
+                                ]
+                              }
+                            }
+                          },
+                          "dispatcher": {"type": "NON_BATCH"}
+                        }
+                        """);
+        ConfigService service = createService(List.of(
+                environmentSource(Map.of()),
+                source));
+
+        source.emit("""
+                {
+                  "schemaVersion":1,
+                  "scheduler": {
+                    "ordering": {
+                      "preemption": {
+                        "allowedVictimStages": ["PREFILL_QUEUED"]
+                      }
+                    }
+                  }
+                }
+                """);
+        assertThat(service.loadBalanceConfig().priorityOrdering()
+                .getPreemption().getAllowedVictimStages())
+                .containsExactly(VictimStage.PREFILL_QUEUED);
+
+        FlexlbConfig lastKnownGood = service.loadBalanceConfig();
+        source.emit("{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":null}}");
+        assertThat(service.loadBalanceConfig()).isSameAs(lastKnownGood);
+    }
+
+    @Test
     void notifiesListenerWithCurrentAndRuntimeConfigurations() {
         FakeConfigSource source = new FakeConfigSource(
                 "Nacos",
                 200,
-                "{\"router\":{\"availabilityHysteresisPercent\":9}}");
+                "{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":9}}");
         ConfigService service = createService(List.of(
                 environmentSource(Map.of()),
                 source));
@@ -188,17 +322,17 @@ class ConfigServiceTest {
 
         service.addUpdateListener(config -> updates.add(
                 config.getRouter().getAvailabilityHysteresisPercent()));
-        source.emit("{\"router\":{\"availabilityHysteresisPercent\":10}}");
+        source.emit("{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":10}}");
 
         assertThat(updates).containsExactly(9L, 10L);
     }
 
     @Test
-    void rejectsInvalidRuntimeUpdatesAndKeepsLastKnownGoodSnapshot() {
+    void rejectsBlankAndInvalidRuntimeUpdates() {
         FakeConfigSource source = new FakeConfigSource(
                 "Nacos",
                 200,
-                "{\"router\":{\"availabilityHysteresisPercent\":9}}");
+                "{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":9}}");
         ConfigService service = createService(List.of(
                 environmentSource(Map.of()),
                 source));
@@ -206,10 +340,26 @@ class ConfigServiceTest {
 
         source.emit("");
         assertThat(service.loadBalanceConfig()).isSameAs(lastKnownGood);
-        source.emit("{}");
+        source.emit("{\"schemaVersion\":1,\"unknownField\":1}");
         assertThat(service.loadBalanceConfig()).isSameAs(lastKnownGood);
-        source.emit("{\"unknownField\":1}");
-        assertThat(service.loadBalanceConfig()).isSameAs(lastKnownGood);
+    }
+
+    @Test
+    void doesNotNotifyListenersForBlankRuntimeUpdates() {
+        FakeConfigSource source = new FakeConfigSource(
+                "Nacos",
+                200,
+                "{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":9}}");
+        ConfigService service = createService(List.of(
+                environmentSource(Map.of()),
+                source));
+        List<Long> updates = new ArrayList<>();
+        service.addUpdateListener(config -> updates.add(
+                config.getRouter().getAvailabilityHysteresisPercent()));
+
+        source.emit("");
+
+        assertThat(updates).containsExactly(9L);
     }
 
     @Test
@@ -217,7 +367,7 @@ class ConfigServiceTest {
         FakeConfigSource source = new FakeConfigSource(
                 "Nacos",
                 200,
-                "{\"router\":{\"availabilityHysteresisPercent\":9}}");
+                "{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":9}}");
         ConfigService service = createService(List.of(
                 environmentSource(Map.of()),
                 source));
@@ -233,7 +383,7 @@ class ConfigServiceTest {
                 ConfigService.register(source);
             }
         }
-        configService = new ConfigService();
+        configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
         return configService;
     }
 

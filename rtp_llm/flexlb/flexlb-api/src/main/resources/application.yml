@@ -37,7 +37,7 @@ logging:
     flexlb: org.flexlb,flexlbLogger,syncLogger,syncConsistencyLogger
   level:
     root: info
-    flexlb: ${FLEXLB_LOG_LEVEL:INFO}
+    flexlb: INFO
     io.grpc: info
     com.google.protobuf: info
     org.flexlb.utils.LoggingUtils: trace

@@ -7,11 +7,15 @@ import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.PriorityScheduler;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.domain.CacheMatchQuery;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
@@ -26,6 +30,7 @@ import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.util.ArrayList;
@@ -40,7 +45,6 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyList;
 
 class CostBasedPrefillStrategyTest {
 
@@ -74,7 +78,8 @@ class CostBasedPrefillStrategyTest {
         prefillResourceMeasure = Mockito.mock(PrefillResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(any())).thenReturn(prefillResourceMeasure);
         Mockito.when(prefillResourceMeasure.isResourceAvailable(any())).thenReturn(true);
-        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any())).thenReturn(new HashMap<>());
+        Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class)))
+                .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
 
         strategy = new CostBasedPrefillStrategy(
                 engineWorkerStatus, cacheAwareService, resourceMeasureFactory,
@@ -188,14 +193,54 @@ class CostBasedPrefillStrategyTest {
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
         prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
 
-        Map<String, Integer> cacheResults = new HashMap<>();
-        cacheResults.put("10.0.0.2:8080", 3); // 3 blocks * 256 = 768 tokens
-        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any())).thenReturn(cacheResults);
+        CacheMatchResult cacheResults = cacheMatchResult("10.0.0.2:8080", 3);
+        Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class))).thenReturn(cacheResults);
 
         ServerStatus result = strategy.select(buildContext(1000, 3L), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
+    }
+
+    @Test
+    void appliesKvcmP2pMatchesThroughUnifiedCacheQuery() {
+        Map<String, WorkerStatus> prefillMap =
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+        prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
+        prefillMap.values().forEach(workerStatus -> workerStatus.setGroup("group-a"));
+        registerPrefillEndpoints(prefillMap);
+
+        FlexlbConfig config = affinityConfig(10_000L, 0.0);
+        config.getRouter().getRoles().getPrefill().getCacheAffinity().setP2pHitDiscount(1.0);
+        CacheMatchResult kvcmResult = new CacheMatchResult(
+                Map.of("10.0.0.2:8080", new HostCacheMatch(0L, 3L, 3L)),
+                CacheMatchSource.KVCM,
+                0L,
+                256L);
+        Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class)))
+                .thenReturn(kvcmResult);
+
+        BalanceContext context = buildContext(1_000L, 30_001L, config);
+        context.getRequest().setCacheKeyBlockSize(256L);
+        context.getRequest().setLocalStandbyBlockCacheKeys(List.of(11L, 12L));
+        context.getRequest().setLocalStandbyBlockSize(128L);
+        ServerStatus result = strategy.select(context, RoleType.PREFILL, "group-a");
+
+        assertTrue(result.isSuccess());
+        assertEquals("10.0.0.2", result.getServerIp());
+        assertEquals(768L, result.getDebugInfo().getHitCacheLen());
+
+        ArgumentCaptor<CacheMatchQuery> queryCaptor = ArgumentCaptor.forClass(CacheMatchQuery.class);
+        Mockito.verify(cacheAwareService).findMatchingEngines(queryCaptor.capture());
+        CacheMatchQuery query = queryCaptor.getValue();
+        assertEquals("30001", query.requestId());
+        assertEquals(List.of(1L, 2L), query.blockCacheKeys());
+        assertEquals(256L, query.blockSize());
+        assertEquals(List.of(11L, 12L), query.localStandbyBlockCacheKeys());
+        assertEquals(128L, query.localStandbyBlockSize());
+        assertEquals(RoleType.PREFILL, query.roleType());
+        assertEquals("group-a", query.group());
     }
 
     @Test
@@ -205,8 +250,8 @@ class CostBasedPrefillStrategyTest {
                 EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
         prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
-        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any()))
-                .thenReturn(Map.of("10.0.0.2:8080", 1));
+        Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class)))
+                .thenReturn(cacheMatchResult("10.0.0.2:8080", 1));
 
         FlexlbConfig config = affinityConfig(10_000, 0);
         config.getRouter().getRoles().getPrefill().setCacheAffinity(null);
@@ -227,10 +272,10 @@ class CostBasedPrefillStrategyTest {
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
         prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
         prefillMap.put("10.0.0.3:8080", createWorker("10.0.0.3", 0));
-        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any()))
-                .thenReturn(Map.of(
-                        "10.0.0.2:8080", 1,
-                        "10.0.0.3:8080", 2));
+        Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class)))
+                .thenReturn(cacheMatchResult(Map.of(
+                        "10.0.0.2:8080", 1L,
+                        "10.0.0.3:8080", 2L)));
 
         ServerStatus result = strategy.select(
                 buildContext(1000, 302L, affinityConfig(300, 5)),
@@ -253,8 +298,8 @@ class CostBasedPrefillStrategyTest {
                 EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
         prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
-        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any()))
-                .thenReturn(Map.of("10.0.0.2:8080", 1));
+        Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class)))
+                .thenReturn(cacheMatchResult("10.0.0.2:8080", 1));
 
         ServerStatus result = strategy.select(
                 buildContext(1000, 303L, affinityConfig(255, 5)),
@@ -274,8 +319,8 @@ class CostBasedPrefillStrategyTest {
                 EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
         prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
-        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any()))
-                .thenReturn(Map.of("10.0.0.2:8080", 1));
+        Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class)))
+                .thenReturn(cacheMatchResult("10.0.0.2:8080", 1, 1_024L));
         BalanceContext context = buildContext(4096, 304L, affinityConfig(1024, 20));
         context.getRequest().setCacheKeyBlockSize(1024L);
 
@@ -295,8 +340,8 @@ class CostBasedPrefillStrategyTest {
         Mockito.when(prefillResourceMeasure.isResourceAvailable(any()))
                 .thenAnswer(invocation -> !"10.0.0.2".equals(
                         ((PrefillEndpoint) invocation.getArgument(0)).getIp()));
-        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any()))
-                .thenReturn(Map.of("10.0.0.2:8080", 3));
+        Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class)))
+                .thenReturn(cacheMatchResult("10.0.0.2:8080", 3));
 
         ServerStatus result = strategy.select(
                 buildContext(1000, 305L, affinityConfig(10_000, 0)),
@@ -314,9 +359,8 @@ class CostBasedPrefillStrategyTest {
         Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
 
-        Map<String, Integer> cacheResults = new HashMap<>();
-        cacheResults.put("10.0.0.1:8080", 4); // 4 blocks * 256 >= seqLen=1000
-        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any())).thenReturn(cacheResults);
+        CacheMatchResult cacheResults = cacheMatchResult("10.0.0.1:8080", 4);
+        Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class))).thenReturn(cacheResults);
 
         ServerStatus result = strategy.select(buildContext(1000, 31L), RoleType.PREFILL, null);
 
@@ -394,9 +438,8 @@ class CostBasedPrefillStrategyTest {
         PrefillResourceMeasure actualMeasure = new PrefillResourceMeasure(resourceConfigService);
         Mockito.when(resourceMeasureFactory.getMeasure(any())).thenReturn(actualMeasure);
 
-        Map<String, Integer> cacheResults = new HashMap<>();
-        cacheResults.put("10.0.0.1:8080", 3);
-        Mockito.when(cacheAwareService.findMatchingEngines(anyList(), any(), any()))
+        CacheMatchResult cacheResults = cacheMatchResult("10.0.0.1:8080", 3);
+        Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class)))
                 .thenReturn(cacheResults);
 
         ServerStatus result = strategy.select(
@@ -607,6 +650,26 @@ class CostBasedPrefillStrategyTest {
                 (RoutingConfig.FormulaEstimatorConfig) config.getRouter().getRoles()
                         .getPrefill().getExecutionTimeEstimator();
         estimator.setExpression(expression);
+    }
+
+    private static CacheMatchResult cacheMatchResult(String workerIpPort, long localMatchBlocks) {
+        return cacheMatchResult(workerIpPort, localMatchBlocks, 256L);
+    }
+
+    private static CacheMatchResult cacheMatchResult(
+            String workerIpPort, long localMatchBlocks, long blockSize) {
+        return new CacheMatchResult(
+                Map.of(workerIpPort, HostCacheMatch.local(localMatchBlocks)),
+                CacheMatchSource.LOCAL_SYNC,
+                0L,
+                blockSize);
+    }
+
+    private static CacheMatchResult cacheMatchResult(Map<String, Long> localMatchBlocks) {
+        Map<String, HostCacheMatch> matches = new HashMap<>();
+        localMatchBlocks.forEach((workerIpPort, blocks) ->
+                matches.put(workerIpPort, HostCacheMatch.local(blocks)));
+        return new CacheMatchResult(matches, CacheMatchSource.LOCAL_SYNC, 0L, 256L);
     }
 
     private BalanceContext buildContext(long seqLen, long requestId, FlexlbConfig config) {

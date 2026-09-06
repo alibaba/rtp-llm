@@ -469,6 +469,29 @@ class PrioritySchedulerTest {
     }
 
     @Test
+    void nonBatchQueueSupportsPdFusionForFifoAndPriority() throws Exception {
+        SchedulingTestConfig.useNonBatchDispatcher(config);
+        WorkerStatus fusionStatus = workerStatus("10.0.0.9", 8090, 8091);
+        fusionStatus.setRole(RoleType.PDFUSION);
+        PrefillEndpoint fusion = (PrefillEndpoint) endpointRegistry.ensureEndpoint(
+                RoleType.PDFUSION, "10.0.0.9:8090", fusionStatus);
+        when(router.route(any(BalanceContext.class))).thenAnswer(invocation -> {
+            long requestId = ((BalanceContext) invocation.getArgument(0)).getRequestId();
+            Response response = new Response();
+            response.setSuccess(true);
+            response.setServerStatus(List.of(server(
+                    RoleType.PDFUSION, "10.0.0.9", 8090, 8091, requestId)));
+            return response;
+        });
+
+        SchedulingTestConfig.useFifoQueue(config);
+        assertPdFusionRouteDecision(4_101L, fusion);
+
+        SchedulingTestConfig.usePriorityQueue(config);
+        assertPdFusionRouteDecision(4_102L, fusion);
+    }
+
+    @Test
     void routeDecisionMode_honorsRequestCap_withoutBatchEnqueue_andReleasesOnTerminal()
             throws Exception {
         SchedulingTestConfig.usePriorityQueue(config);
@@ -2055,6 +2078,18 @@ class PrioritySchedulerTest {
         status.setRole(role);
         status.setFinishedTaskInfo(Map.of(Long.toString(requestId), task));
         return status;
+    }
+
+    private void assertPdFusionRouteDecision(long requestId, PrefillEndpoint fusion) throws Exception {
+        Response decision = scheduler.submit(routeDecisionContext(requestId)).get(2, TimeUnit.SECONDS);
+        assertTrue(decision.isSuccess());
+        assertFalse(decision.isEnqueuedByMaster());
+        assertEquals(RoleType.PDFUSION, decision.getServerStatus().getFirst().getRole());
+        assertEquals(1, fusion.getInflightRouteRequestCount());
+
+        scheduler.onWorkerStatusUpdate(finishedStatus(RoleType.PDFUSION, requestId, -1, 0));
+        awaitCondition(() -> scheduler.getRequestState(requestId, 0).state().isTerminal());
+        assertEquals(0, fusion.getInflightRouteRequestCount());
     }
 
     private static ServerStatus server(RoleType role,

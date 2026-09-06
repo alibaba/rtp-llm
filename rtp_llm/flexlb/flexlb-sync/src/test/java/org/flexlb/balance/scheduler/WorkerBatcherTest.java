@@ -5,6 +5,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -202,6 +203,69 @@ class WorkerBatcherTest {
     }
 
     @Test
+    void nonBatchRouteAppliesWorkerBatchTokenCapacity() {
+        SchedulingTestConfig.useNonBatchDispatcher(config);
+        WorkerStatus status = new WorkerStatus();
+        status.setMaxBatchTokensSize(2);
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.getStatus()).thenReturn(status);
+        when(endpoint.availableRequestSlots(0)).thenReturn(1);
+        PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(
+                11, WorkerBatcher.PRIORITY_QUEUE_ORDER);
+        BatchItem item = routeItem(1, 50, System.currentTimeMillis());
+        queue.add(item);
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        BatcherContext ctx = context(endpoint, queue, new AtomicInteger(1), new DecisionGroupHandler() {
+            @Override
+            public void onExpired(BatchItem head) {
+            }
+
+            @Override
+            public void onDecisionGroupReady(List<BatchItem> items, DecisionGroupMetadata meta) {
+                throw new AssertionError("oversized route must not be delivered");
+            }
+
+            @Override
+            public void onOfferFailure(BatchItem failed, Throwable error) {
+                assertSame(item, failed);
+                failure.set(error);
+            }
+
+            @Override
+            public void onDeliveryFailure(BatchItem failed, Throwable error) {
+                throw new AssertionError("oversized route must fail before delivery", error);
+            }
+        });
+
+        new ImmediateNonBatchAlgorithm().processQueue(ctx);
+
+        assertTrue(failure.get() instanceof BatchTokenCapacityExceededException);
+        assertEquals(0, ctx.size());
+    }
+
+    @Test
+    void batchTokenCapacityUsesWorkerLimitsBeforeConfiguredFallback() {
+        config.setFallbackBatchTokenCapacity(4096);
+        WorkerStatus status = new WorkerStatus();
+        status.setMaxSeqLen(128);
+        status.setMaxBatchTokensSize(0);
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.getStatus()).thenReturn(status);
+        PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(
+                11, WorkerBatcher.PRIORITY_QUEUE_ORDER);
+        BatcherContext ctx = context(endpoint, queue, new AtomicInteger(),
+                mock(DecisionGroupHandler.class));
+
+        assertEquals(128, ctx.batchTokenCapacity());
+
+        status.setMaxSeqLen(0);
+        assertEquals(4096, ctx.batchTokenCapacity());
+
+        status.setMaxBatchTokensSize(8192);
+        assertEquals(8192, ctx.batchTokenCapacity());
+    }
+
+    @Test
     void readyBacklogRemainsVisibleAndRemovableThroughQueueManager() throws Exception {
         SchedulingTestConfig.useNonBatchDispatcher(config).setMaxInflightRequestsPerPrefillWorker(1);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
@@ -332,6 +396,9 @@ class WorkerBatcherTest {
         SchedulingTestConfig.useBatchDispatcher(config).setMaxInflightBatchesPerPrefillWorker(0);
         SchedulingTestConfig.useNonBatchDispatcher(config).setMaxInflightRequestsPerPrefillWorker(1);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        WorkerStatus status = new WorkerStatus();
+        status.setMaxBatchTokensSize(1_048_576);
+        when(endpoint.getStatus()).thenReturn(status);
         when(endpoint.availableRequestSlots(1)).thenReturn(0);
         AtomicInteger routeDeliveries = new AtomicInteger();
         CountDownLatch batchDelivered = new CountDownLatch(1);

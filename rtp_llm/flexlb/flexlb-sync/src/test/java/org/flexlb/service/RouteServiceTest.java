@@ -62,6 +62,15 @@ class RouteServiceTest {
     }
 
     @Test
+    void fallback_switch_follows_the_current_config_snapshot() {
+        assertFalse(routeService.isFallbackEnabled());
+
+        flexlbConfig.setEnableFallback(true);
+
+        assertTrue(routeService.isFallbackEnabled());
+    }
+
+    @Test
     void fifo_queue_with_non_batch_dispatch_should_use_common_scheduler() {
         Response response = successResponse();
         CompletableFuture<Response> schedulerFuture = CompletableFuture.completedFuture(response);

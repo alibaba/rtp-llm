@@ -17,8 +17,6 @@ class LoadBalanceStrategyWiringTest {
             .withBean(EngineWorkerStatus.class, () -> mock(EngineWorkerStatus.class))
             .withBean("matchingCacheAwareService", CacheAwareService.class,
                     () -> mock(CacheAwareService.class))
-            .withBean("legacyCacheAwareService", org.flexlb.cache.service.CacheAwareService.class,
-                    () -> mock(org.flexlb.cache.service.CacheAwareService.class))
             .withBean(ResourceMeasureFactory.class, () -> mock(ResourceMeasureFactory.class))
             .withBean(EngineHealthReporter.class, () -> mock(EngineHealthReporter.class))
             .withBean("shortestTtftStrategy", ShortestTTFTStrategy.class)

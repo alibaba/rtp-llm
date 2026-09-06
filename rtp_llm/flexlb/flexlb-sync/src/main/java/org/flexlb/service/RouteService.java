@@ -33,6 +33,10 @@ public class RouteService {
         this.recentCacheKeyTraceReporter = recentCacheKeyTraceReporter;
     }
 
+    public boolean isFallbackEnabled() {
+        return configService.loadBalanceConfig().isEnableFallback();
+    }
+
     /**
      * Route request to appropriate workers based on the deployment-level schedule mode.
      * @param balanceContext Load balancing context

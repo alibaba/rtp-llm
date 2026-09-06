@@ -36,6 +36,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["WARM_UP"] = "1"
         os.environ["MAX_SEQ_LEN"] = "4096"
         os.environ["REMOTE_JIT_DIR"] = "dfs://bucket/jit/cache"
+        os.environ["MASTER_CONNECT_TIMEOUT_MS"] = "250"
 
         sys.argv = ["prog"]
 
@@ -99,6 +100,7 @@ class ServerArgsSetTest(TestCase):
             py_env_configs.jit_config.remote_jit_dir,
             "dfs://bucket/jit/cache",
         )
+        self.assertEqual(py_env_configs.master_config.master_connect_timeout_ms, 250)
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""
@@ -132,6 +134,8 @@ class ServerArgsSetTest(TestCase):
             "4",
             "--cache_store_rdma_worker_thread_count",
             "2",
+            "--master_connect_timeout_ms",
+            "300",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -186,6 +190,7 @@ class ServerArgsSetTest(TestCase):
         # Verify cache_store_config
         self.assertEqual(py_env_configs.cache_store_config.rdma_io_thread_count, 4)
         self.assertEqual(py_env_configs.cache_store_config.rdma_worker_thread_count, 2)
+        self.assertEqual(py_env_configs.master_config.master_connect_timeout_ms, 300)
 
     def test_model_warm_up_env_and_global_master(self):
         os.environ["WARM_UP"] = "0"

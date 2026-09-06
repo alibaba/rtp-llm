@@ -18,6 +18,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.RouteService;
+import org.flexlb.service.config.merger.FlexlbConfigMerger;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -27,6 +28,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
@@ -58,6 +60,7 @@ class FlexlbServiceImplTest {
     private ConfigService configService;
     private BatchSchedulerReporter batchSchedulerReporter;
     private ServerScheduleLatencyRecorder serverLatencyRecorder;
+    private CacheAwareService cacheAwareService;
     private ActiveRequestCounter.RequestToken requestToken;
     private FlexlbServiceImpl service;
     private ch.qos.logback.classic.Logger pvLogger;
@@ -72,6 +75,9 @@ class FlexlbServiceImplTest {
         grpcForwarder = mock(FlexlbGrpcForwarder.class);
         batchSchedulerReporter = mock(BatchSchedulerReporter.class);
         serverLatencyRecorder = mock(ServerScheduleLatencyRecorder.class);
+        cacheAwareService = mock(CacheAwareService.class);
+        when(cacheAwareService.prepareBlockCacheKeys(any(BalanceContext.class)))
+                .thenReturn(CompletableFuture.completedFuture(null));
 
         configService = mock(ConfigService.class);
         FlexlbConfig flexlbConfig = new FlexlbConfig();
@@ -90,7 +96,7 @@ class FlexlbServiceImplTest {
                 batchSchedulerReporter,
                 serverLatencyRecorder,
                 mock(PrioritySchedulerReporter.class),
-                mock(CacheAwareService.class),
+                cacheAwareService,
                 mock(OptimizerClient.class)
         );
 
@@ -140,6 +146,39 @@ class FlexlbServiceImplTest {
         assertPvContains("\"scheduleOrigin\":\"LOCAL_STANDALONE\"");
         verify(serverLatencyRecorder).recordArrival(anyLong());
         verify(serverLatencyRecorder).recordCompletion(any(BalanceContext.class), anyLong());
+    }
+
+    @Test
+    void testSchedule_configuredFallbackReturns8600BeforeForwardingOrRouting() {
+        when(routeService.isFallbackEnabled()).thenReturn(true);
+        when(lbStatusConsistencyService.getMasterHostIpPort())
+                .thenReturn("10.0.0.1:7001");
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(8600L)
+                        .setSeqLen(4)
+                        .build();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
+                mock(StreamObserver.class);
+
+        service.schedule(request, observer);
+
+        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> response =
+                ArgumentCaptor.forClass(
+                        FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(response.capture());
+        verify(observer).onCompleted();
+        verify(observer, never()).onError(any());
+        assertFalse(response.getValue().getSuccess());
+        assertEquals(8600, response.getValue().getCode());
+        assertEquals("FALLBACK", response.getValue().getErrorMessage());
+        assertEquals("10.0.0.1:7001", response.getValue().getRealMasterHost());
+        verify(routeService, never()).route(any());
+        verifyNoInteractions(grpcForwarder);
+        verify(lbStatusConsistencyService, never()).isNeedConsistency();
+        verify(lbStatusConsistencyService, never()).isMaster();
+        verify(requestToken).close();
+        assertPvContains("\"scheduleOrigin\":\"CONFIGURED_FALLBACK\"");
     }
 
     @Test
@@ -527,11 +566,15 @@ class FlexlbServiceImplTest {
                 capturedRequest.getGenerateTimeout());
         assertEquals(capturedCtx.getStartTime() + 3_600_000L,
                 capturedCtx.getRequestExpiresAtMs());
+        InOrder localRouteOrder = org.mockito.Mockito.inOrder(
+                cacheAwareService, routeService);
+        localRouteOrder.verify(cacheAwareService).prepareBlockCacheKeys(capturedCtx);
+        localRouteOrder.verify(routeService).route(capturedCtx);
     }
 
     @Test
     void queueTimeoutComesFromFlexlbConfigAndOverridesCallerTimeout() {
-        FlexlbConfig queueConfig = ConfigService.parse("""
+        FlexlbConfig queueConfig = FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{"type":"QUEUE","queueTimeoutMs":7777,
                     "ordering":{"type":"FIFO"}},
@@ -559,7 +602,7 @@ class FlexlbServiceImplTest {
 
     @Test
     void directModeHasNoSchedulingTimeout() {
-        FlexlbConfig directConfig = ConfigService.parse("""
+        FlexlbConfig directConfig = FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{"type":"DIRECT"},
                   "dispatcher":{"type":"NON_BATCH"}

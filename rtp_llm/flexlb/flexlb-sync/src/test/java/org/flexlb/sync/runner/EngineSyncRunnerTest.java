@@ -14,6 +14,7 @@ import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -29,6 +30,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.anyInt;
+import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -86,6 +89,7 @@ class EngineSyncRunnerTest {
                 syncCount,
                 syncEngineStatusInterval,
                 false,
+                false,
                 null,
                 null
         );
@@ -116,6 +120,7 @@ class EngineSyncRunnerTest {
                 syncCount,
                 syncEngineStatusInterval,
                 false,
+                false,
                 null,
                 null
         );
@@ -136,7 +141,7 @@ class EngineSyncRunnerTest {
                 modelName, workerStatusMap, workerAddressService, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.VIT,
                 cacheAwareService, syncRequestTimeoutMs, syncCount,
-                syncEngineStatusInterval, false, null, null);
+                syncEngineStatusInterval, false, false, null, null);
 
         runner.run();
 
@@ -167,7 +172,7 @@ class EngineSyncRunnerTest {
                 modelName, statuses, workerAddressService, statusCheckExecutor,
                 engineHealthReporter, engineGrpcService, RoleType.PREFILL,
                 cacheAwareService, syncRequestTimeoutMs, syncCount,
-                syncEngineStatusInterval, false, null, registry);
+                syncEngineStatusInterval, false, false, null, registry);
         runner.run();
 
         assertFalse(status.isAlive());
@@ -191,6 +196,7 @@ class EngineSyncRunnerTest {
                 syncCount,
                 syncEngineStatusInterval,
                 false,
+                false,
                 null,
                 null
         );
@@ -201,5 +207,45 @@ class EngineSyncRunnerTest {
 
         assertEquals(RoleType.PREFILL, workerStatusMap.get("127.0.0.1:61000").getRole());
         verify(statusCheckExecutor, times(2)).submit(any(Runnable.class));
+    }
+
+    @Test
+    void should_forward_discovered_worker_status_port_to_status_runner() {
+        WorkerHost host = new WorkerHost("127.0.0.1", 8080, 8081, 8085,
+                18081, "", "", "");
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
+                .thenReturn(List.of(host));
+        when(engineGrpcService.getWorkerStatusAsync(any(), anyInt(), anyLong(), anyLong(), any()))
+                .thenReturn(new java.util.concurrent.CompletableFuture<>());
+        EngineSyncRunner runner = new EngineSyncRunner(
+                modelName, workerStatusMap, workerAddressService, statusCheckExecutor,
+                engineHealthReporter, engineGrpcService, RoleType.PREFILL,
+                cacheAwareService, syncRequestTimeoutMs, syncCount,
+                syncEngineStatusInterval, false, false, null, null);
+
+        runner.run();
+
+        ArgumentCaptor<Runnable> submittedTasks = ArgumentCaptor.forClass(Runnable.class);
+        verify(statusCheckExecutor, times(2)).submit(submittedTasks.capture());
+        submittedTasks.getAllValues().get(0).run();
+        verify(engineGrpcService).getWorkerStatusAsync(
+                "127.0.0.1", 18081, -1L, syncRequestTimeoutMs, RoleType.PREFILL);
+        assertEquals(8081, workerStatusMap.get("127.0.0.1:8080").getGrpcPort());
+    }
+
+    @Test
+    void should_skip_cache_status_task_when_kvcm_is_enabled() {
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
+                .thenReturn(List.of(new WorkerHost("127.0.0.1", 8080)));
+        EngineSyncRunner runner = new EngineSyncRunner(
+                modelName, workerStatusMap, workerAddressService, statusCheckExecutor,
+                engineHealthReporter, engineGrpcService, RoleType.PREFILL,
+                cacheAwareService, syncRequestTimeoutMs, syncCount,
+                syncEngineStatusInterval, true, false, null, null);
+
+        runner.run();
+
+        verify(statusCheckExecutor).submit(any(GrpcWorkerStatusRunner.class));
+        verify(statusCheckExecutor, never()).submit(any(GrpcCacheStatusCheckRunner.class));
     }
 }

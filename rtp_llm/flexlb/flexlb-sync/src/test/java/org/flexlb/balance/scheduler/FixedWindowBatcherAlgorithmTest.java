@@ -273,6 +273,7 @@ class FixedWindowBatcherAlgorithmTest {
     @Test
     void maxSeqLenIsUsedWhenWorkerDoesNotReportBatchTokenLimit() throws InterruptedException {
         FlexlbConfig config = batchConfig();
+        config.setFallbackBatchTokenCapacity(4096);
         SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(0);
 
         WorkerStatus status = new WorkerStatus();

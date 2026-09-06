@@ -2,6 +2,8 @@ package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.flexlb.dao.route.ServiceRoute;
+import org.flexlb.discovery.StaticServiceDiscoveryProvider;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -9,6 +11,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -135,12 +138,23 @@ class ClusterConfigParamTest {
         assertEquals("prefill-1", engines.get(1).get("name").asText());
         assertEquals(64000, engines.get(0).get("grpc_port").asInt());
 
+        JsonNode env = payload.get("env");
+        assertEquals(1, env.size());
+        JsonNode modelConfig = MAPPER.readTree(env.get("MODEL_SERVICE_CONFIG").asText());
+        JsonNode roleEndpoint = modelConfig.get("role_endpoints").get(0);
+        assertFalse(roleEndpoint.has("decode_endpoint"));
+        JsonNode prefillDiscovery = roleEndpoint.get("prefill_endpoint").get("discovery");
+        assertEquals("static-env", prefillDiscovery.get("type").asText());
+        assertEquals(config.host + ":63999", prefillDiscovery.get("hosts").get(0).asText());
+        assertEquals(config.host + ":64000", prefillDiscovery.get("hosts").get(1).asText());
+        ServiceRoute serviceRoute = MAPPER.readValue(
+                env.get("MODEL_SERVICE_CONFIG").asText(), ServiceRoute.class);
+        StaticServiceDiscoveryProvider provider = new StaticServiceDiscoveryProvider();
+        serviceRoute.getAllEndpoints().forEach(provider::validate);
+
         String envContent = Files.readString(envFile);
-        assertTrue(envContent.contains("DOMAIN_ADDRESS:" + config.prefillDomain),
-                "env file should define the prefill domain");
-        // Decode domain record exists but with an empty address list.
-        assertTrue(envContent.contains("DOMAIN_ADDRESS:" + config.decodeDomain + "='"),
-                "decode domain should be present with empty addresses");
+        assertTrue(envContent.contains("MODEL_SERVICE_CONFIG="));
+        assertFalse(envContent.contains("DOMAIN_ADDRESS:"));
 
         // Mirror check: decode-only cluster lists only decode engines.
         JavaMockEngineCluster.Config decodeOnly = JavaMockEngineCluster.Config.parse(new String[]{
@@ -157,5 +171,15 @@ class ClusterConfigParamTest {
         assertEquals("decode-0", decodePayload.get("engines").get(0).get("name").asText());
         assertEquals(64000, decodePayload.get("engines").get(0).get("grpc_port").asInt(),
                 "decode ports start at base when there are no prefill engines");
+        JsonNode decodeModelConfig = MAPPER.readTree(
+                decodePayload.get("env").get("MODEL_SERVICE_CONFIG").asText());
+        JsonNode decodeRoleEndpoint = decodeModelConfig.get("role_endpoints").get(0);
+        assertFalse(decodeRoleEndpoint.has("prefill_endpoint"));
+        assertEquals(decodeOnly.host + ":63999", decodeRoleEndpoint.get("decode_endpoint")
+                .get("discovery").get("hosts").get(0).asText());
+        ServiceRoute decodeServiceRoute = MAPPER.readValue(
+                decodePayload.get("env").get("MODEL_SERVICE_CONFIG").asText(),
+                ServiceRoute.class);
+        decodeServiceRoute.getAllEndpoints().forEach(provider::validate);
     }
 }

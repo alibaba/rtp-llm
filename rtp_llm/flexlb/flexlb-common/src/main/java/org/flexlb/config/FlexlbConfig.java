@@ -20,7 +20,7 @@ import static org.flexlb.enums.ResourceMeasureIndicatorEnum.WAIT_TIME;
 @Setter
 public final class FlexlbConfig {
 
-    public static final int CURRENT_SCHEMA_VERSION = 1;
+    public static final int CURRENT_SCHEMA_VERSION = ConfigSchemaVersion.STANDARD;
 
     private int schemaVersion = CURRENT_SCHEMA_VERSION;
     private SchedulerConfig scheduler = new QueueSchedulerConfig();
@@ -28,7 +28,13 @@ public final class FlexlbConfig {
     private RoutingConfig router = new RoutingConfig();
     private WorkerRegistryConfig workerRegistry = new WorkerRegistryConfig();
     private ObservabilityConfig observability = new ObservabilityConfig();
+    private ServiceDiscoveryRuntimeConfig serviceDiscovery = new ServiceDiscoveryRuntimeConfig();
+    private CacheMatchingConfig cacheMatching = new LocalSyncCacheMatchingConfig();
+    private OptimizerRuntimeConfig optimizer = new OptimizerRuntimeConfig();
+    private ConsistencyConfig consistency = new NoConsistencyConfig();
     private BlockHashStrategyType blockHashStrategy = BlockHashStrategyType.VLLM;
+    private boolean enableFallback = false;
+    private long fallbackBatchTokenCapacity = 1_048_576L;
 
     @JsonIgnore
     private final InternalRuntimeSettings internalRuntime = new InternalRuntimeSettings();
@@ -47,6 +53,24 @@ public final class FlexlbConfig {
     public boolean isPriorityOrdering() {
         return isQueue()
                 && ((QueueSchedulerConfig) scheduler).getOrdering() instanceof PriorityOrderingConfig;
+    }
+
+    @JsonIgnore
+    public boolean isKvcmCacheMatching() {
+        return cacheMatching instanceof KvcmCacheMatchingConfig;
+    }
+
+    @JsonIgnore
+    public KvcmCacheMatchingConfig kvcmCacheMatching() {
+        if (cacheMatching instanceof KvcmCacheMatchingConfig kvcm) {
+            return kvcm;
+        }
+        throw new IllegalStateException("KVCM cache matching configuration is not active");
+    }
+
+    @JsonIgnore
+    public boolean isConsistencyEnabled() {
+        return consistency instanceof ZookeeperConsistencyConfig;
     }
 
     @JsonIgnore

@@ -94,7 +94,6 @@ class ServiceRouteTest {
                 {
                   "service_id": "test-service",
                   "kvcm": {
-                    "enabled": true,
                     "address": "v-kvcm",
                     "namespace": "vllm-test-0",
                     "discovery": {"type": "dashscope"}
@@ -105,19 +104,13 @@ class ServiceRouteTest {
 
         ServiceRoute serviceRoute = objectMapper.readValue(json, ServiceRoute.class);
 
-        Assertions.assertTrue(serviceRoute.isKvcmEnabled());
+        Assertions.assertNotNull(serviceRoute.getKvcm());
         Assertions.assertEquals("v-kvcm", serviceRoute.getKvcm().getAddress());
         Assertions.assertEquals("vllm-test-0", serviceRoute.getKvcm().getNamespace());
         Assertions.assertEquals("grpc", serviceRoute.getKvcm().toEndpoint().getProtocol());
         Assertions.assertEquals(
                 KvcmConfig.DEFAULT_BOOTSTRAP_PORT,
                 serviceRoute.getKvcm().getPort());
-        Assertions.assertEquals(
-                KvcmConfig.DEFAULT_REQUEST_TIMEOUT_MS,
-                serviceRoute.getKvcm().getRequestTimeoutMs());
-        Assertions.assertEquals(
-                KvcmConfig.DEFAULT_LEADER_REFRESH_INTERVAL_MS,
-                serviceRoute.getKvcm().getLeaderRefreshIntervalMs());
     }
 
     private void assertServiceRoute(ServiceRoute serviceRoute) {

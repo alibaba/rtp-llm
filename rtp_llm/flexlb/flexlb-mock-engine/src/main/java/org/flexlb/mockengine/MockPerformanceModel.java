@@ -3,10 +3,10 @@ package org.flexlb.mockengine;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.balance.strategy.PrefillTimeFormula;
-import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig.FormulaEstimatorConfig;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.service.config.merger.FlexlbConfigMerger;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -155,7 +155,7 @@ final class MockPerformanceModel {
         for (JsonNode item : envs) {
             if (item.isArray() && item.size() >= 2
                     && "FLEXLB_CONFIG".equals(item.get(0).asText())) {
-                FlexlbConfig config = ConfigService.parse(item.get(1).asText());
+                FlexlbConfig config = FlexlbConfigMerger.mergeWithDefaults(item.get(1).asText());
                 var estimator = config.getRouter().getRoles().getPrefill()
                         .getExecutionTimeEstimator();
                 return estimator instanceof FormulaEstimatorConfig formula

@@ -2,10 +2,15 @@ package org.flexlb.cache.update;
 
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.match.CacheMetadataUpdateOrchestrator;
+import org.flexlb.cache.match.localstandby.LocalStandbyCacheMatchProvider;
 import org.flexlb.cache.match.localsync.LocalSyncCacheMatchProvider;
 import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -20,6 +25,8 @@ class CacheMetadataUpdateOrchestratorTest {
     private final CacheMatchConfiguration configuration = mock(CacheMatchConfiguration.class);
     private final LocalSyncCacheMatchProvider localSyncProvider =
             mock(LocalSyncCacheMatchProvider.class);
+    private final LocalStandbyCacheMatchProvider localStandbyProvider =
+            mock(LocalStandbyCacheMatchProvider.class);
 
     @Test
     void routesWorkerStatusUpdatesToLocalSync() {
@@ -50,7 +57,29 @@ class CacheMetadataUpdateOrchestratorTest {
         verifyNoInteractions(localSyncProvider);
     }
 
+    @Test
+    void routesSuccessfulRequestMetadataToLocalStandby() {
+        when(configuration.isLocalStandbyEnabled()).thenReturn(true);
+        Request request = new Request();
+        List<ServerStatus> selectedWorkers = List.of(new ServerStatus());
+
+        orchestrator().updateFromRoutedRequest(request, selectedWorkers);
+
+        verify(localStandbyProvider).updateFromRoutedRequest(request, selectedWorkers);
+    }
+
+    @Test
+    void ignoresRequestMetadataWhenLocalStandbyIsDisabled() {
+        when(configuration.isLocalStandbyEnabled()).thenReturn(false);
+
+        orchestrator().updateFromRoutedRequest(
+                new Request(), List.of(new ServerStatus()));
+
+        verifyNoInteractions(localStandbyProvider);
+    }
+
     private CacheMetadataUpdateOrchestrator orchestrator() {
-        return new CacheMetadataUpdateOrchestrator(configuration, localSyncProvider);
+        return new CacheMetadataUpdateOrchestrator(
+                configuration, localSyncProvider, localStandbyProvider);
     }
 }

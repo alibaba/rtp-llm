@@ -1,5 +1,6 @@
 package org.flexlb.config;
 
+import org.flexlb.service.config.merger.FlexlbConfigMerger;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -12,7 +13,7 @@ class FlexlbConfigSchedulingModeTest {
 
     @Test
     void direct_is_explicit_and_only_supports_non_batch_delivery() {
-        FlexlbConfig config = ConfigService.parse("""
+        FlexlbConfig config = FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{"type":"DIRECT"},
                   "dispatcher":{"type":"NON_BATCH"}
@@ -37,7 +38,7 @@ class FlexlbConfigSchedulingModeTest {
         FlexlbConfig fifoNonBatch = parseQueue("FIFO", "NON_BATCH");
         assertFalse(fifoNonBatch.isPriorityOrdering());
         assertFalse(fifoNonBatch.isBatchDispatch());
-        fifoNonBatch = ConfigService.parse("""
+        fifoNonBatch = FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{"type":"QUEUE","ordering":{"type":"FIFO"}},
                   "dispatcher":{"type":"NON_BATCH","maxInflightRequestsPerPrefillWorker":1}
@@ -57,26 +58,26 @@ class FlexlbConfigSchedulingModeTest {
 
     @Test
     void tagged_unions_reject_parameters_from_inactive_variants() {
-        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+        assertThrows(ConfigValidationException.class, () -> FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{"type":"QUEUE","ordering":{"type":"FIFO","defaultPriority":50}},
                   "dispatcher":{"type":"NON_BATCH"}
                 }
                 """));
-        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+        assertThrows(ConfigValidationException.class, () -> FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY"}},
                   "dispatcher":{"type":"BATCH","maxInflightRequestsPerPrefillWorker":1}
                 }
                 """));
-        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+        assertThrows(ConfigValidationException.class, () -> FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{"type":"QUEUE","queueTimeoutMs":0,
                     "ordering":{"type":"FIFO"}},
                   "dispatcher":{"type":"NON_BATCH"}
                 }
                 """));
-        assertThrows(ConfigValidationException.class, () -> ConfigService.parse("""
+        assertThrows(ConfigValidationException.class, () -> FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{"type":"DIRECT","queueTimeoutMs":1000},
                   "dispatcher":{"type":"NON_BATCH"}
@@ -85,7 +86,7 @@ class FlexlbConfigSchedulingModeTest {
     }
 
     private static FlexlbConfig parseQueue(String ordering, String dispatcher) {
-        return ConfigService.parse("""
+        return FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{"type":"QUEUE","ordering":{"type":"%s"}},
                   "dispatcher":{"type":"%s"}

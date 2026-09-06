@@ -4,10 +4,14 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.domain.CacheMatchQuery;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -23,7 +27,6 @@ import org.springframework.stereotype.Component;
 
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -81,9 +84,9 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
         }
 
-        Map<String, Integer> cacheMatchResults = getCacheMatchResults(balanceContext, roleType, group);
+        CacheMatchResult cacheMatchResult = getCacheMatchResult(balanceContext, roleType, group);
 
-        FilterResult hardFilterResult = applyHardFilters(eligible, balanceContext, config, cacheMatchResults);
+        FilterResult hardFilterResult = applyHardFilters(eligible, balanceContext, config, cacheMatchResult);
         CandidateSet survivors = hardFilterResult.candidates();
 
         // First pass: find the exact minimum score.
@@ -318,7 +321,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     private record FilterResult(CandidateSet candidates, Map<String, Integer> rejections) {}
 
     private FilterResult applyHardFilters(CandidateSet eligible, BalanceContext balanceContext,
-                                          FlexlbConfig config, Map<String, Integer> cacheMatchResults) {
+                                          FlexlbConfig config, CacheMatchResult cacheMatchResult) {
         Request request = balanceContext.getRequest();
         long seqLen = request.getSeqLen();
         RoutingConfig.EstimatedTtftSelectorConfig selector =
@@ -354,7 +357,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
                 continue;
             }
 
-            long cacheHit = calculateCacheHit(ep, cacheMatchResults, request);
+            long cacheHit = calculateCacheHit(ep, cacheMatchResult, request, config);
             // Cache 收益已折进 estimate(predictor, cacheHit)（hitTokens 参与公式求值），不再单列扣减
             long singlePrefillMs = Math.max(0L, formulaEstimateMemo.estimate(predictor, cacheHit));
 
@@ -536,38 +539,66 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         }
     }
 
-    private Map<String, Integer> getCacheMatchResults(BalanceContext balanceContext, RoleType roleType, String group) {
-        List<Long> blockCacheKeys = balanceContext.getRequest().getBlockCacheKeys();
-        return cacheAwareService.findMatchingEngines(blockCacheKeys, roleType, group);
+    private CacheMatchResult getCacheMatchResult(
+            BalanceContext balanceContext, RoleType roleType, String group) {
+        Request request = balanceContext.getRequest();
+        long blockSize = request.getBlockSize() > 0L
+                ? request.getBlockSize()
+                : request.getCacheKeyBlockSize();
+        CacheMatchResult result = cacheAwareService.findMatchingEngines(new CacheMatchQuery(
+                String.valueOf(balanceContext.getRequestId()),
+                request.getBlockCacheKeys(),
+                blockSize,
+                request.getLocalStandbyBlockCacheKeys(),
+                request.getLocalStandbyBlockSize(),
+                roleType,
+                group));
+        return result == null ? CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC) : result;
     }
 
     private long calculateCacheHit(PrefillEndpoint ep,
-                                   Map<String, Integer> cacheMatchResults,
-                                   Request request) {
-        if (cacheMatchResults == null || request == null) {
+                                   CacheMatchResult cacheMatchResult,
+                                   Request request,
+                                   FlexlbConfig config) {
+        if (cacheMatchResult == null || request == null) {
             return 0L;
         }
         long seqLen = request.getSeqLen();
         if (seqLen <= 0L) {
             return 0L;
         }
-        Integer prefixMatchLength = cacheMatchResults.get(ep.ipPort());
-        if (prefixMatchLength == null || prefixMatchLength <= 0) {
+        HostCacheMatch match = cacheMatchResult.hostMatch(ep.ipPort());
+        if (match == null) {
             return 0L;
         }
-        long blockSize = request.getCacheKeyBlockSize();
+        long localMatchBlocks = Math.max(0L, match.localMatchBlocks());
+        long p2pAddedMatchBlocks = Math.max(0L,
+                match.p2pTotalMatchBlocks() - localMatchBlocks);
+        RoutingConfig.CacheAffinityConfig affinity = config.getRouter().getRoles()
+                .getPrefill().getCacheAffinity();
+        double p2pHitDiscount = affinity == null
+                ? 0.2
+                : Math.max(0.0, affinity.getP2pHitDiscount());
+        double effectiveMatchBlocks = localMatchBlocks + p2pAddedMatchBlocks * p2pHitDiscount;
+        if (effectiveMatchBlocks <= 0.0) {
+            return 0L;
+        }
+        long blockSize = cacheMatchResult.blockSize();
+        if (blockSize <= 0L) {
+            blockSize = request.getBlockSize() > 0L
+                    ? request.getBlockSize()
+                    : request.getCacheKeyBlockSize();
+        }
         if (blockSize <= 0L && ep.getStatus().getCacheStatus() != null) {
             blockSize = ep.getStatus().getCacheStatus().getBlockSize();
         }
         if (blockSize <= 0L) {
             return 0L;
         }
-        long rawHit;
-        try {
-            rawHit = Math.multiplyExact(blockSize, prefixMatchLength.longValue());
-        } catch (ArithmeticException overflow) {
-            rawHit = seqLen;
-        }
+        double rawMatchTokens = blockSize * effectiveMatchBlocks;
+        long rawHit = rawMatchTokens >= Long.MAX_VALUE
+                ? Long.MAX_VALUE
+                : Math.max(0L, Math.round(rawMatchTokens));
         if (rawHit >= seqLen) {
             return Math.max(0L, seqLen - blockSize);
         }

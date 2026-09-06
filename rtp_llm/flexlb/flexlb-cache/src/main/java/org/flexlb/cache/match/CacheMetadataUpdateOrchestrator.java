@@ -2,6 +2,7 @@ package org.flexlb.cache.match;
 
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
+import org.flexlb.cache.match.localstandby.LocalStandbyCacheMatchProvider;
 import org.flexlb.cache.match.localsync.LocalSyncCacheMatchProvider;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.loadbalance.Request;
@@ -17,15 +18,20 @@ import java.util.List;
 public class CacheMetadataUpdateOrchestrator {
 
     private final LocalSyncCacheMatchProvider localSyncProvider;
+    private final LocalStandbyCacheMatchProvider localStandbyProvider;
     private final CacheMatchConfiguration configuration;
 
     public CacheMetadataUpdateOrchestrator(
             CacheMatchConfiguration configuration,
-            LocalSyncCacheMatchProvider localSyncProvider) {
+            LocalSyncCacheMatchProvider localSyncProvider,
+            LocalStandbyCacheMatchProvider localStandbyProvider) {
         this.configuration = configuration;
         this.localSyncProvider = localSyncProvider;
-        log.info("Cache metadata update orchestrator initialized: localSyncEnabled={}",
-                configuration.isLocalSyncEnabled());
+        this.localStandbyProvider = localStandbyProvider;
+        log.info("Cache metadata update orchestrator initialized: "
+                        + "localSyncEnabled={}, localStandbyEnabled={}",
+                configuration.isLocalSyncEnabled(),
+                configuration.isLocalStandbyEnabled());
     }
 
     public WorkerCacheUpdateResult updateFromWorkerStatus(WorkerStatus workerStatus) {
@@ -41,9 +47,10 @@ public class CacheMetadataUpdateOrchestrator {
                 .build();
     }
 
-    /** KVCM owns its metadata; request-side standby updates are added with standby support. */
     public void updateFromRoutedRequest(
             Request request, List<ServerStatus> selectedWorkers) {
-        // No local metadata update is required in this feature stage.
+        if (configuration.isLocalStandbyEnabled()) {
+            localStandbyProvider.updateFromRoutedRequest(request, selectedWorkers);
+        }
     }
 }

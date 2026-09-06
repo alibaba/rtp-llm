@@ -337,24 +337,23 @@ public class BatcherContext {
      *
      * <p>The Engine's FIFO scheduler rejects a group when its padded context
      * shape ({@code maxSeqLen * batchSize}) is greater than or equal to
-     * {@code max_batch_tokens_size}. Prefer
-     * that exact worker-reported limit; {@code max_seq_len} is a conservative
-     * fallback for workers that have not populated the newer field yet. An
-     * internal safety ceiling covers the interval before either value arrives.
+     * {@code max_batch_tokens_size}. A positive worker-reported value is
+     * authoritative. When the Engine does not declare this limit, FlexLB
+     * falls back to {@code max_seq_len}, then to
+     * {@code fallbackBatchTokenCapacity} from FLEXLB_CONFIG.
      */
     long batchTokenCapacity() {
-        long capacity = positiveOrUnlimited(
-                cfg.getInternalRuntime().getFallbackBatchTokenCapacity());
+        long fallbackCapacity = cfg.getFallbackBatchTokenCapacity();
         WorkerStatus status = prefillEp != null ? prefillEp.getStatus() : null;
         if (status == null) {
-            return capacity;
+            return fallbackCapacity;
         }
 
         long engineCapacity = status.getMaxBatchTokensSize();
         if (engineCapacity <= 0) {
             engineCapacity = status.getMaxSeqLen();
         }
-        return Math.min(capacity, positiveOrUnlimited(engineCapacity));
+        return engineCapacity > 0 ? engineCapacity : fallbackCapacity;
     }
 
     /**
@@ -403,10 +402,6 @@ public class BatcherContext {
                     "request seq_len=" + item.seqLen()
                             + " cannot fit strict padded batch token capacity=" + capacity));
         }
-    }
-
-    private static long positiveOrUnlimited(long value) {
-        return value > 0 ? value : Long.MAX_VALUE;
     }
 
     // ---- delivery staging (shared infrastructure) ----
