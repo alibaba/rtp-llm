@@ -1,4 +1,4 @@
-load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "DSV4_CUDA13_ONLY", "dsv4_py_test")
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "DSV4_CUDA13_ONLY", "dsv4_py_test", "dsv4_sm100_py_test")
 load("@arch_config//:arch_select.bzl", "cuda13_test_exec_properties")
 load("@rules_python//python:defs.bzl", "py_test")
 
@@ -64,8 +64,6 @@ _CONTRACT_TESTS = [
     "test_output_projection_all_reduce",
     "test_decode_topk_length",
     "test_indexer_forward_with_pending_nested",
-    "test_mega_csa_adapter",
-    "test_mega_hca_adapter",
     "test_mega_support",
     "test_prefill_mixed_layer_cache_store",
     "test_fp8_sparse_attn_decode_op",
@@ -185,3 +183,11 @@ py_test(
     exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
     timeout = "long",
 )
+
+[
+    dsv4_sm100_py_test(
+        name = name,
+        deps = _DSV4_FP8_TEST_DEPS,
+    )
+    for name in ["test_mega_csa_adapter", "test_mega_hca_adapter"]
+]

@@ -142,4 +142,5 @@ test_suite(
 
 dsv4_py_test(
     name = "test_mega_moe_front_adapter",
+    deps = _DSV4_TEST_DEPS,
 )
