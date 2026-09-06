@@ -316,6 +316,98 @@ class FlexlbServiceImplTest {
     }
 
     @Test
+    void testSchedule_entryErrorMarksServerSpanFromInterceptorContext() {
+        // buildContext() throws before ctx is assigned, so completeSchedule() gets
+        // a null BalanceContext. The SERVER span must still carry the business
+        // error, recovered from the interceptor's gRPC-scoped context.
+        io.opentelemetry.api.GlobalOpenTelemetry.resetForTest();
+        RecordingExporter exporter = new RecordingExporter();
+        io.opentelemetry.sdk.trace.SdkTracerProvider provider =
+                io.opentelemetry.sdk.trace.SdkTracerProvider.builder()
+                        .setSampler(io.opentelemetry.sdk.trace.samplers.Sampler.alwaysOn())
+                        .addSpanProcessor(
+                                io.opentelemetry.sdk.trace.export.SimpleSpanProcessor.create(exporter))
+                        .build();
+        io.opentelemetry.sdk.OpenTelemetrySdk sdk =
+                io.opentelemetry.sdk.OpenTelemetrySdk.builder().setTracerProvider(provider).build();
+        io.opentelemetry.api.GlobalOpenTelemetry.set(sdk);
+        try {
+            io.opentelemetry.api.trace.Span serverSpan =
+                    org.flexlb.telemetry.FlexlbTrace.startServer(
+                            "rtp_llm.flexlb.schedule", io.opentelemetry.context.Context.root());
+
+            // buildContext() reads loadBalanceConfig(); make it throw.
+            when(configService.loadBalanceConfig())
+                    .thenThrow(new IllegalStateException("config unavailable"));
+
+            FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                    FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                            .setRequestId(778899L)
+                            .build();
+            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
+                    mock(StreamObserver.class);
+
+            // Publish the SERVER span the way GrpcTraceInterceptor does, then run
+            // schedule() inside that gRPC context.
+            io.grpc.Context.current()
+                    .withValue(org.flexlb.interceptor.GrpcTraceInterceptor.OTEL_CONTEXT_KEY,
+                            org.flexlb.telemetry.FlexlbTrace.withSpan(
+                                    serverSpan, io.opentelemetry.context.Context.root()))
+                    .run(() -> service.schedule(request, observer));
+
+            ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
+                    ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+            verify(observer).onNext(captor.capture());
+            verify(observer).onCompleted();
+            FlexlbScheduleProtocol.FlexlbScheduleResponsePB resp = captor.getValue();
+            assertFalse(resp.getSuccess());
+            assertEquals(500, resp.getCode());
+
+            // The interceptor owns the span lifecycle; nothing is exported yet.
+            assertEquals(0, exporter.spans.size());
+            org.flexlb.telemetry.FlexlbTrace.finish(serverSpan, null);
+
+            assertEquals(1, exporter.spans.size());
+            io.opentelemetry.sdk.trace.data.SpanData span = exporter.spans.get(0);
+            assertEquals(io.opentelemetry.api.trace.StatusCode.ERROR,
+                    span.getStatus().getStatusCode());
+            assertEquals("FLEXLB_BUSINESS_REJECTED",
+                    span.getAttributes().get(
+                            io.opentelemetry.api.common.AttributeKey.stringKey("error.type")));
+            assertEquals(500L,
+                    span.getAttributes().get(
+                            io.opentelemetry.api.common.AttributeKey.longKey("flexlb.schedule.code")));
+            assertTrue(span.getEvents().isEmpty());
+        } finally {
+            sdk.close();
+            io.opentelemetry.api.GlobalOpenTelemetry.resetForTest();
+        }
+    }
+
+    private static final class RecordingExporter
+            implements io.opentelemetry.sdk.trace.export.SpanExporter {
+        private final java.util.List<io.opentelemetry.sdk.trace.data.SpanData> spans =
+                new java.util.ArrayList<>();
+
+        @Override
+        public io.opentelemetry.sdk.common.CompletableResultCode export(
+                java.util.Collection<io.opentelemetry.sdk.trace.data.SpanData> batch) {
+            spans.addAll(batch);
+            return io.opentelemetry.sdk.common.CompletableResultCode.ofSuccess();
+        }
+
+        @Override
+        public io.opentelemetry.sdk.common.CompletableResultCode flush() {
+            return io.opentelemetry.sdk.common.CompletableResultCode.ofSuccess();
+        }
+
+        @Override
+        public io.opentelemetry.sdk.common.CompletableResultCode shutdown() {
+            return io.opentelemetry.sdk.common.CompletableResultCode.ofSuccess();
+        }
+    }
+
+    @Test
     void testSchedule_observerFailureStillWritesPvRecord() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
         Response response = new Response();

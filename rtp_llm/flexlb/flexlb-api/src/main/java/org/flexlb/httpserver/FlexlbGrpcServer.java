@@ -14,6 +14,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.constant.MetricConstant;
 import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
+import org.flexlb.interceptor.GrpcTraceInterceptor;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -130,7 +131,7 @@ public class FlexlbGrpcServer {
                 .workerEventLoopGroup(grpcServerEventLoopGroup)
                 .executor(grpcExecutor)
                 .addService(ServerInterceptors.intercept(flexlbServiceImpl,
-                        grpcServerTimingInterceptor, grpcQosHeaderInterceptor))
+                        new GrpcTraceInterceptor(), grpcServerTimingInterceptor, grpcQosHeaderInterceptor))
                 .maxInboundMessageSize(16 * 1024 * 1024)
                 .flowControlWindow(4 * 1024 * 1024)
                 .build()

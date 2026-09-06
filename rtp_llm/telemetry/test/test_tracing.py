@@ -191,8 +191,11 @@ class TestConfig(TracingTestCase):
         os.environ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = (
             "http://127.0.0.1:4318/v1/traces"
         )
-        with mock.patch.object(tracing, "OTEL_AVAILABLE", False), mock.patch.object(
-            tracing, "_OTEL_IMPORT_ERROR", ImportError("simulated"), create=True
+        with (
+            mock.patch.object(tracing, "OTEL_AVAILABLE", False),
+            mock.patch.object(
+                tracing, "_OTEL_IMPORT_ERROR", ImportError("simulated"), create=True
+            ),
         ):
             assert not tracing.init_telemetry("frontend", 0)
             assert tracing.telemetry_state() == tracing.TelemetryState.DISABLED
@@ -476,11 +479,12 @@ class TestResource(TracingTestCase):
         assert os.environ["POD_IP"] == "10.7.8.9"
 
     def test_resolve_region_env_uses_hostname_ip(self):
-        with mock.patch.object(
-            socket, "gethostname", return_value="test-host"
-        ), mock.patch.object(
-            socket, "gethostbyname", return_value="10.7.8.9"
-        ) as gethostbyname:
+        with (
+            mock.patch.object(socket, "gethostname", return_value="test-host"),
+            mock.patch.object(
+                socket, "gethostbyname", return_value="10.7.8.9"
+            ) as gethostbyname,
+        ):
             tracing.resolve_region_env()
         assert os.environ["POD_IP"] == "10.7.8.9"
         gethostbyname.assert_called_once_with("test-host")
@@ -859,6 +863,25 @@ class TestActiveRuntime(TracingTestCase):
         spans = {s.name: s for s in exporter.get_finished_spans()}
         assert spans["client"].parent.span_id == spans["server"].context.span_id
         assert spans["client"].context.trace_id == spans["server"].context.trace_id
+
+    def test_internal_span_parents_schedule_client_and_resets_context(self):
+        exporter = _start_in_memory_runtime()
+        state = tracing.start_server_span("server", {})
+        internal = tracing.start_internal_span("batch_wait")
+        assert internal is not None
+        client, metadata = tracing.start_client_span("schedule", "master:7003")
+        assert client is not None
+        assert dict(metadata)["traceparent"]
+        client.finish()
+        internal.finish()
+        assert tracing.CURRENT_INTERNAL_CONTEXT.get() is None
+        state.finish()
+        tracing.shutdown_telemetry()
+
+        spans = {span.name: span for span in exporter.get_finished_spans()}
+        assert spans["batch_wait"].parent.span_id == spans["server"].context.span_id
+        assert spans["schedule"].parent.span_id == spans["batch_wait"].context.span_id
+        assert spans["schedule"].context.trace_id == spans["server"].context.trace_id
 
     def test_shutdown_idempotent(self):
         _start_in_memory_runtime()

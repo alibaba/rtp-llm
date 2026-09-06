@@ -16,6 +16,10 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 public class Application {
 
     public static void main(String[] args) {
+        // Configure the provider before Spring or any request handler first
+        // accesses GlobalOpenTelemetry. When tracing is disabled this is a no-op.
+        OpenTelemetryBootstrap.configureFromEnvironment();
+
         // Print startup parameters
         log.info("Application start with args: {}", (Object[]) args);
         ConfigurableApplicationContext context = SpringApplication.run(Application.class, args);

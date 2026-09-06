@@ -204,8 +204,9 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
                         // failure through the Engine-side request-id fence.
                         markUncertain(items, batchId, cause, callback);
                     } else if (response == null) {
-                        markUncertain(items, batchId, new RuntimeException(
-                                "EnqueueBatch returned null response"), callback);
+                        RuntimeException missingResponse = new RuntimeException(
+                                "EnqueueBatch returned null response");
+                        markUncertain(items, batchId, missingResponse, callback);
                     } else {
                         handleResponse(batchId, items, response, callback);
                     }
@@ -223,7 +224,8 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
             // execution, which is also post-invocation and therefore
             // ambiguous.
             completionObserver.exceptionally(observerFailure -> {
-                markUncertain(items, batchId, unwrapCompletionFailure(observerFailure), callback);
+                Throwable cause = unwrapCompletionFailure(observerFailure);
+                markUncertain(items, batchId, cause, callback);
                 return null;
             });
         } catch (Throwable registrationFailure) {

@@ -30,7 +30,7 @@ from rtp_llm.server.request_headers import (
 )
 from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.telemetry import attributes as trace_attrs
-from rtp_llm.telemetry import start_client_span
+from rtp_llm.telemetry import inject_context_to_metadata, start_client_span
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateConfig,
@@ -464,6 +464,17 @@ def trans_input(input_py: GenerateInput):
         input_pb.request_info.request_id = extract_correlation_request_id(
             getattr(input_py, "headers", None)
         ) or str(input_pb.request_info.trace_id or input_py.request_id)
+
+    trace_state = CURRENT_TRACE_STATE.get()
+    server_context = trace_state.server_context if trace_state is not None else None
+    if server_context is not None:
+        carrier = dict(inject_context_to_metadata(server_context))
+        traceparent = carrier.get("traceparent", "")
+        if traceparent:
+            input_pb.request_info.trace_context.traceparent = traceparent
+            tracestate = carrier.get("tracestate", "")
+            if tracestate:
+                input_pb.request_info.trace_context.tracestate = tracestate
 
     trans_multimodal_input(input_py, input_pb, input_py.generate_config)
     # Preserve main's regular GenerateConfig validation at the RPC boundary,
@@ -1018,8 +1029,13 @@ class ModelRpcClient(object):
         # gRPC CLIENT span: child of the HTTP SERVER span
         # published via CURRENT_TRACE_STATE; W3C traceparent goes into gRPC
         # metadata. Both are no-ops when telemetry is disabled.
+        client_span_name = (
+            "rtp_llm.fetch_response"
+            if use_fetch_response
+            else "rtp_llm.generate_stream_call"
+        )
         client_span, trace_metadata = start_client_span(
-            "rtp_llm.generate_stream_call", target_address
+            client_span_name, target_address
         )
         if client_span is not None:
             client_settlement_abandoned = asyncio.Event()

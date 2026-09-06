@@ -155,7 +155,9 @@ cc_test(
         "PrefillBatchRpcServerTest.cc",
     ],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + [
+        "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
+    ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

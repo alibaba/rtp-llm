@@ -1,5 +1,7 @@
 package org.flexlb.httpserver;
 
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.context.Context;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
@@ -17,12 +19,14 @@ import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
+import org.flexlb.interceptor.GrpcTraceInterceptor;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
 import org.flexlb.config.ConfigService;
+import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
@@ -179,6 +183,13 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     @Override
     public void getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB request,
                                 StreamObserver<FlexlbScheduleProtocol.GetRequestStateResponsePB> responseObserver) {
+        // The interceptor already published a SERVER span for this call; without
+        // the request id on it the span is unsearchable on the platform. No new
+        // span is created here -- the forwarding path tags its own CLIENT span.
+        Context traceContext = GrpcTraceInterceptor.getOtelContext();
+        FlexlbTrace.setRequestAttributes(
+                Span.fromContext(traceContext != null ? traceContext : Context.current()),
+                request.getRequestId());
         if (shouldForwardToMaster()) {
             FlexlbScheduleProtocol.GetRequestStateResponsePB forwarded =
                     grpcForwarder.forwardGetRequestStateToMaster(request);
@@ -215,6 +226,40 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                                   FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
                                   StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer,
                                   ScheduleOrigin origin) {
+        // buildContext() runs inside schedule()'s try block while ctx is still
+        // null, so the entry-error path reaches this method with no
+        // BalanceContext at all. Passing that null through would make
+        // spanFromContext() return an invalid span and silently drop both the
+        // schedule code and the business error, leaving the SERVER span to be
+        // closed as OK by FinishingListener even though an error response was
+        // sent. Prefer the context captured on the BalanceContext -- the async
+        // route callback runs on a dispatch thread where the gRPC context is not
+        // current -- and only fall back to the interceptor's context, which is
+        // readable on this handler thread.
+        Context traceContext = ctx != null ? ctx.getTraceContext() : null;
+        if (traceContext == null) {
+            traceContext = GrpcTraceInterceptor.getOtelContext();
+        }
+        if (traceContext == null) {
+            traceContext = Context.current();
+        }
+        if (response != null) {
+            FlexlbTrace.setScheduleAttribute(traceContext,
+                    FlexlbTrace.SCHEDULE_CODE, response.getCode());
+            FlexlbTrace.setScheduleAttribute(traceContext,
+                    FlexlbTrace.ENQUEUED_BY_MASTER, response.getEnqueuedByMaster());
+        }
+        if (ctx != null && ctx.getAckAtNanos() > 0) {
+            FlexlbTrace.setScheduleDuration(traceContext,
+                    FlexlbTrace.ACK_TO_RESPONSE_MS, ctx.getAckAtNanos(), System.nanoTime());
+        }
+        if (response != null && !response.getSuccess()) {
+            // This is an expected business response, not a transport or Java
+            // exception, so markBusinessError records it as ERROR without an
+            // exception event. Whoever owns the span still finishes it.
+            FlexlbTrace.markBusinessError(
+                    traceContext, response.getCode(), "FLEXLB_BUSINESS_REJECTED");
+        }
         // Report ACK-to-response time for BATCH path (only when engine ACK was received)
         if (ctx != null && ctx.getAckAtMs() > 0) {
             long ackToResponseMs = System.currentTimeMillis() - ctx.getAckAtMs();
@@ -379,6 +424,11 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
     private BalanceContext buildContext(FlexlbScheduleProtocol.FlexlbScheduleRequestPB pb) {
         BalanceContext ctx = new BalanceContext();
+        Context traceContext = GrpcTraceInterceptor.getOtelContext();
+        ctx.setTraceContext(traceContext != null ? traceContext : Context.current());
+        Span scheduleSpan = Span.fromContext(ctx.getTraceContext());
+        FlexlbTrace.setRequestAttributes(scheduleSpan, pb.getRequestId());
+        FlexlbTrace.setAttribute(scheduleSpan, "flexlb.schedule.priority", pb.getPriority());
 
         Request request = new Request();
         request.setRequestId(pb.getRequestId());

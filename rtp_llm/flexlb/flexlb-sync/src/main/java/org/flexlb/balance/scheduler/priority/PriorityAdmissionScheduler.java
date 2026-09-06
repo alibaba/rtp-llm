@@ -21,6 +21,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
+import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
 import org.flexlb.util.PriorityNormalizer;
@@ -1049,6 +1050,10 @@ public class PriorityAdmissionScheduler {
 
         ServerStatus prefill = FlexlbBatchScheduler.findServer(routeResponse, RoleType.PREFILL);
         ServerStatus decode = FlexlbBatchScheduler.findServer(routeResponse, RoleType.DECODE);
+        // Endpoint attributes are written in onCommitted() from the plan that
+        // actually committed, not here: this candidate is still discarded by the
+        // two infeasible exits below (and by a failed commit), and recording it
+        // now would name a node the request never used.
         if (prefill == null) {
             rollbackRoute(routeResponse);
             return PlacementOutcome.infeasible(null);
@@ -1178,6 +1183,16 @@ public class PriorityAdmissionScheduler {
         }
         ServerStatus prefill = plan.item().prefill();
         ctx.setScheduledPrefillEndpoint(prefill.getServerIp() + ":" + prefill.getHttpPort());
+        // Written here rather than at routing time so the attributes always name
+        // the committed placement. Covers the eviction paths too, since they
+        // reach this method as well.
+        FlexlbTrace.setScheduleAttribute(ctx.getTraceContext(), FlexlbTrace.PREFILL_ADDRESS,
+                prefill.getServerIp() + ":" + prefill.getHttpPort());
+        ServerStatus committedDecode = plan.item().decode();
+        if (committedDecode != null) {
+            FlexlbTrace.setScheduleAttribute(ctx.getTraceContext(), FlexlbTrace.DECODE_ADDRESS,
+                    committedDecode.getServerIp() + ":" + committedDecode.getHttpPort());
+        }
         priorityReporter.reportNormalPlacement(plan.envelope().priority());
         // Parity with the legacy path's route+submit latency metric.
         batchReporter.reportRouteSubmitTimeMs(

@@ -49,6 +49,16 @@ inline constexpr const char* kAttrRtpLlmAllocateRtUs         = "rtp_llm.allocate
 inline constexpr const char* kAttrRtpLlmPollLocalOutputRtUs  = "rtp_llm.poll_local_output_rt_us";
 inline constexpr const char* kAttrRtpLlmPollRemoteOutputRtUs = "rtp_llm.poll_remote_output_rt_us";
 inline constexpr const char* kAttrRtpLlmPhaseTruncated       = "rtp_llm.phase.truncated";
+// Frontend-to-prefill handoff delay on the master coalescing path: from the
+// frontend wall clock stamped into GenerateInputPB.start_time by trans_input()
+// to the moment the prefill node creates the logical span in buildSlotContexts.
+// It therefore covers the FlexLB coalescing wait plus both network hops.
+// Nothing else isolates that window -- rtp_llm.master_route's duration contains
+// it but mixes in the whole EnqueueGroup handling (allocate + P->D round trip),
+// and rtp_llm.prefill_batch_request itself only starts at the far end of it.
+// This subtracts two different machines' wall clocks, so it is an approximation
+// subject to NTP skew and must not be read as a precise latency metric.
+inline constexpr const char* kAttrRtpLlmPrefillHandoffDelayUs = "rtp_llm.prefill_handoff_delay_us";
 
 }  // namespace telemetry
 }  // namespace rtp_llm
