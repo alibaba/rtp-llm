@@ -5,7 +5,12 @@ Uses flash_mla_sparse_fwd kernel with triton-based index conversion.
 
 from typing import Any, Dict, List, Optional
 
+import os
+
 import torch
+
+# P2 shape probe (Sep 4): cap so logs stay small; module-global, per-process.
+_P2_SEEN = set()
 
 # Check CUDA version for flash_mla compatibility
 _FLASH_MLA_AVAILABLE = False
@@ -266,6 +271,24 @@ class SparseMlaFp8Op(SparseMlaOp):
 
         # Add batch dimension to q: (T, H, D) -> (1, T, H, D)
         q_batched = q.unsqueeze(0)
+
+        # P2 shape probe (Sep 4): env-gated, first-3-uniques only, inert otherwise.
+        if os.environ.get("DSV4_P2_SHAPE_PROBE"):
+            _key = (
+                tuple(q_batched.shape),
+                tuple(kv.shape),
+                tuple(global_topk_indices.shape),
+                int(self.kv_lora_rank),
+            )
+            if len(_P2_SEEN) < 3 and _key not in _P2_SEEN:
+                _P2_SEEN.add(_key)
+                import sys as _sys
+                print(
+                    f"[P2-SHAPE] mla q={_key[0]} kv={_key[1]} indices={_key[2]} "
+                    f"head_dim_v={_key[3]} fp8=1",
+                    file=_sys.stderr,
+                    flush=True,
+                )
 
         # Prepare KV cache for kernel
         # Convert to uint8 view and add head dimension if needed

@@ -4,6 +4,7 @@ Uses flash_mla_sparse_fwd kernel with triton-based index conversion.
 """
 
 import copy
+import os
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -289,6 +290,27 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             if global_topk.dim() == 3 and global_topk.shape[1] == 1:
                 global_topk = global_topk.squeeze(1)
             indices_batched = global_topk.unsqueeze(0)
+            # P2 shape probe (Sep 4): env-gated, first-3-uniques only, inert otherwise.
+            if os.environ.get("DSV4_P2_SHAPE_PROBE"):
+                key = (
+                    tuple(q_batched.shape),
+                    tuple(kv_cache_flat.shape),
+                    tuple(self.block_table.shape),
+                    tuple(indices_batched.shape),
+                    int(self.kv_lora_rank),
+                )
+                _seen = getattr(run_part, "_p2_seen", None)
+                if _seen is None:
+                    _seen = run_part._p2_seen = set()
+                if len(_seen) < 3 and key not in _seen:
+                    _seen.add(key)
+                    import sys as _sys
+                    print(
+                        f"[P2-SHAPE] mla q={key[0]} kvcache={key[1]} block_table={key[2]} "
+                        f"indices={key[3]} head_dim_v={key[4]} fp8=1",
+                        file=_sys.stderr,
+                        flush=True,
+                    )
             part_out, _ = flash_mla_with_kvcache(
                 q=q_batched,
                 k_cache=kv_cache_flat,

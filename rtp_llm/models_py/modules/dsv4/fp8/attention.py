@@ -3974,6 +3974,24 @@ class AttentionFP8(nn.Module):
         )
         combined_indices, combined_lens = self._compact_indices([local_topk, local_swa])
 
+        # P2 shape probe (Sep 4): env-gated, first-3-uniques per process, inert otherwise.
+        if os.environ.get("DSV4_P2_SHAPE_PROBE"):
+            _p2_key = (
+                tuple(q_full.shape),
+                int(B),
+                int(local_M),
+                int(D),
+                tuple(combined_indices.shape),
+            )
+            _p2_seen = globals().setdefault("_P2_MLA_SEEN", set())
+            if len(_p2_seen) < 3 and _p2_key not in _p2_seen:
+                _p2_seen.add(_p2_key)
+                print(
+                    f"[P2-SHAPE] mla_fwd q={_p2_key[0]} B={_p2_key[1]} local_M={_p2_key[2]} "
+                    f"D={_p2_key[3]} indices={_p2_key[4]} n_heads={self.n_heads} ",
+                    flush=True,
+                )
+
         local_o, _, local_lse = flash_mla_sparse_fwd(
             q=q_full,
             kv=workspace.view(B * local_M, 1, D),

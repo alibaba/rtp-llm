@@ -93,6 +93,23 @@ def run(
         kernel_sinks = torch.cat((kernel_sinks, torch.zeros_like(kernel_sinks)), dim=-1)
         kernel_out = torch.empty_like(kernel_query)
     import os as _os, sys as _sys
+    if _os.environ.get("DSV4_P2_SHAPE_PROBE"):
+        _p2 = (
+            tuple(kernel_query.shape), tuple(swa_cache.shape), tuple(swa_indices.shape),
+            tuple(swa_lens.shape),
+            tuple(extra_cache.shape) if extra_cache is not None else None,
+            tuple(extra_indices.shape) if extra_indices is not None else None,
+            int(original_heads),
+        )
+        _p2_seen = globals().setdefault("_P2_SM120_SEEN", set())
+        if len(_p2_seen) < 3 and _p2 not in _p2_seen:
+            _p2_seen.add(_p2)
+            print(
+                f"[P2-SHAPE] sm120_mla q={_p2[0]} cache={_p2[1]} idx={_p2[2]} "
+                f"lens={_p2[3]} extra_cache={_p2[4]} extra_idx={_p2[5]} heads={_p2[6]}",
+                file=_sys.stderr,
+                flush=True,
+            )
     if _os.environ.get("DSV4_DIAG") and int(query.shape[0]) > 2048:
         print("[ATTN-K] go q=%s topk=%d extra=%s" % (
             tuple(kernel_query.shape), int(swa_indices.shape[-1]),
