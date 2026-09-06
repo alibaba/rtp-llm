@@ -19,13 +19,13 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.LongPredicate;
 import java.util.function.Predicate;
 
 /**
@@ -45,12 +45,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
     private static final Comparator<ReservationHandle> RETIREMENT_ORDER =
             Comparator.comparingLong(ReservationHandle::endpointGenerationId)
-                    .thenComparingLong(ReservationHandle::requestId)
+                    .thenComparing(ReservationHandle::requestId)
                     .thenComparingLong(ReservationHandle::reservationToken);
 
     private final EndpointEventProjector endpointEvents;
     private final PlacementAvailability placementAvailability;
-    private final ConcurrentHashMap<Long, DecodeRequestState> decodeRequests = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, DecodeRequestState> decodeRequests =
+            new ConcurrentHashMap<>();
     private final AtomicLong inflightKvReservedTotal = new AtomicLong(0);
     private final AtomicLong inflightExpectedKvReservedTotal = new AtomicLong(0);
     /**
@@ -268,22 +269,22 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    private DecodeRequestState requestState(long requestId) {
+    private DecodeRequestState requestState(String requestId) {
         return decodeRequests.get(requestId);
     }
 
-    private DecodeRequestState ownedRequest(long requestId) {
+    private DecodeRequestState ownedRequest(String requestId) {
         DecodeRequestState state = requestState(requestId);
         return state != null && state.ownsRequest() ? state : null;
     }
 
-    private PreemptionClaim preemptionClaim(long requestId) {
+    private PreemptionClaim preemptionClaim(String requestId) {
         DecodeRequestState state = requestState(requestId);
         return state == null ? null : state.preemptionClaim;
     }
 
     private boolean removePreemptionClaimLocked(
-            long requestId, PreemptionClaim expected) {
+            String requestId, PreemptionClaim expected) {
         DecodeRequestState state = requestState(requestId);
         if (state == null || state.preemptionClaim != expected) {
             return false;
@@ -294,7 +295,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     private boolean removeEngineFenceProtectionLocked(
-            long requestId, EngineFenceProtection expected) {
+            String requestId, EngineFenceProtection expected) {
         DecodeRequestState state = requestState(requestId);
         if (state == null || state.engineFenceProtection != expected) {
             return false;
@@ -305,28 +306,28 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /** Drop a protocol-only shell after its last exact owner is gone. */
-    private void pruneRequestStateLocked(long requestId, DecodeRequestState state) {
+    private void pruneRequestStateLocked(String requestId, DecodeRequestState state) {
         if (state != null && !state.ownsRequest()
                 && !state.hasProtocolOwner() && state.settledAtMs == 0L) {
             decodeRequests.remove(requestId, state);
         }
     }
 
-    private DecodeRequestState shadowReservation(long requestId) {
+    private DecodeRequestState shadowReservation(String requestId) {
         DecodeRequestState state = requestState(requestId);
         return state != null
                 && state.phase() == DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN
                 ? state : null;
     }
 
-    private DecodeRequestState confirmedRequest(long requestId) {
+    private DecodeRequestState confirmedRequest(String requestId) {
         DecodeRequestState state = requestState(requestId);
         return state != null && state.confirmed() ? state : null;
     }
 
     /** Caller holds {@link #admissionLock}. */
     private boolean removeShadowExactLocked(
-            long requestId, DecodeRequestState expected) {
+            String requestId, DecodeRequestState expected) {
         if (expected == null || expected.confirmed()
                 || requestState(requestId) != expected
                 || !expected.ownsRequest()) {
@@ -341,7 +342,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /** Remove the counters/capabilities owned by one reservation-phase entry. */
     private void clearShadowAccountingLocked(
-            long requestId, DecodeRequestState reservation) {
+            String requestId, DecodeRequestState reservation) {
         removeEngineDispatchPermitLocked(reservation);
         removeEngineLifecycleReservationLocked(reservation);
         removeQueuedPhaseLocked(requestId, reservation);
@@ -352,7 +353,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /** Caller holds {@link #admissionLock}. */
     private boolean removeConfirmedExactLocked(
-            long requestId, DecodeRequestState expected) {
+            String requestId, DecodeRequestState expected) {
         if (expected == null || !expected.confirmed()
                 || requestState(requestId) != expected) {
             return false;
@@ -388,7 +389,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     public record ReservationHandle(
             long endpointGenerationId,
-            long requestId,
+            String requestId,
             long reservationToken) {
 
         public ReservationHandle {
@@ -396,6 +397,17 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 throw new IllegalArgumentException(
                         "Decode reservation identity must be positive");
             }
+            if (requestId == null || requestId.isBlank()) {
+                throw new IllegalArgumentException(
+                        "Decode request identity must not be blank");
+            }
+        }
+
+        public ReservationHandle(
+                long endpointGenerationId,
+                long requestId,
+                long reservationToken) {
+            this(endpointGenerationId, Long.toString(requestId), reservationToken);
         }
     }
 
@@ -609,7 +621,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private static void addRetiredOwner(
             Set<ReservationHandle> owners,
             long generationId,
-            long requestId,
+            String requestId,
             long reservationToken) {
         if (reservationToken > 0L) {
             owners.add(new ReservationHandle(
@@ -625,7 +637,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     /** Reserve through the exact route pin captured before endpoint detach. */
     public ReservationHandle reservePinned(
             GenerationPin pin,
-            long requestId,
+            String requestId,
             long kvTokens,
             long expectedKvTokens,
             int priority) {
@@ -639,8 +651,18 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
+    public ReservationHandle reservePinned(
+            GenerationPin pin,
+            long requestId,
+            long kvTokens,
+            long expectedKvTokens,
+            int priority) {
+        return reservePinned(pin, Long.toString(requestId), kvTokens,
+                expectedKvTokens, priority);
+    }
+
     /** Caller holds admissionLock. */
-    private ReservationHandle reserveLocked(long requestId,
+    private ReservationHandle reserveLocked(String requestId,
                                             long kvTokens,
                                             long expectedKvTokens,
                                             int priority) {
@@ -675,7 +697,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     public ReservationHandle tryReserveQueuedPinned(
             GenerationPin pin,
-            long requestId,
+            String requestId,
             long kvTokens,
             long expectedKvTokens,
             int priority) {
@@ -694,13 +716,23 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
+    public ReservationHandle tryReserveQueuedPinned(
+            GenerationPin pin,
+            long requestId,
+            long kvTokens,
+            long expectedKvTokens,
+            int priority) {
+        return tryReserveQueuedPinned(pin, Long.toString(requestId), kvTokens,
+                expectedKvTokens, priority);
+    }
+
     /**
      * Acquire queued ownership only if this exact generation can still accept
      * the request. A null result mutates nothing.
      */
     public ReservationHandle tryReserveQueuedPinned(
             GenerationPin pin,
-            long requestId,
+            String requestId,
             long kvTokens,
             long expectedKvTokens,
             int priority,
@@ -726,7 +758,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /** Remove every local owner for one request. Caller holds admissionLock. */
-    private boolean releaseLocked(long requestId) {
+    private boolean releaseLocked(String requestId) {
         boolean changed = clearEngineFenceProtectionLocked(requestId);
         DecodeRequestState removed = shadowReservation(requestId);
         changed = removeShadowExactLocked(requestId, removed) || changed;
@@ -791,7 +823,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         boolean capacityChanged = false;
         admissionLock.lock();
         try {
-            long requestId = reservation.requestId();
+            String requestId = reservation.requestId();
             DecodeRequestState state = requestState(requestId);
             DecodeRequestState current = state != null && state.ownsRequest()
                     ? state : null;
@@ -862,7 +894,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         boolean released = false;
         admissionLock.lock();
         try {
-            long requestId = reservation.requestId();
+            String requestId = reservation.requestId();
             DecodeRequestState shadow = shadowReservation(requestId);
             if (!isExactReservation(shadow, reservation)
                     || hasEngineLifecycleReservationExactLocked(reservation)) {
@@ -900,7 +932,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     private boolean hasExactIncomingAttemptLocked(
             ReservationHandle reservation) {
         for (EndpointPreemptionAttempt attempt : preemptionAttempts.values()) {
-            if (attempt.incomingRequestId == reservation.requestId()
+            if (Objects.equals(attempt.incomingRequestId, reservation.requestId())
                     && attempt.incomingReservationToken
                             == reservation.reservationToken()) {
                 return true;
@@ -938,7 +970,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /** Snapshot the exact current identity for an internally created owner. */
-    public ReservationHandle reservationHandle(long requestId) {
+    public ReservationHandle reservationHandle(String requestId) {
         admissionLock.lock();
         try {
             if (isGenerationRetiringOrRetired()) {
@@ -955,6 +987,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
         } finally {
             admissionLock.unlock();
         }
+    }
+
+    public ReservationHandle reservationHandle(long requestId) {
+        return reservationHandle(Long.toString(requestId));
     }
 
     /**
@@ -985,7 +1021,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (generationPin == null) {
             return null;
         }
-        long requestId = reservation.requestId();
+        String requestId = reservation.requestId();
         try (generationPin) {
             admissionLock.lock();
             try {
@@ -1116,7 +1152,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         DispatchRejectionSettlement result;
         admissionLock.lock();
         try {
-            long requestId = reservation.requestId();
+            String requestId = reservation.requestId();
             DecodeRequestState state = requestState(requestId);
             boolean exactState = isExactReservation(state, reservation);
             DecodeRequestState confirmed = confirmedRequest(requestId);
@@ -1190,7 +1226,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             AuthoritativeTerminalProof proof,
             long settledAtMs) {
         ReservationHandle reservation = proof.reservation;
-        long requestId = reservation.requestId();
+        String requestId = reservation.requestId();
         DecodeRequestState state = requestState(requestId);
         boolean exactState = isExactReservation(state, reservation);
 
@@ -1264,7 +1300,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /** Caller holds {@link #admissionLock} after validating a finished status. */
     private AuthoritativeTerminalProof workerStatusTerminalProofLocked(
-            long requestId) {
+            String requestId) {
         DecodeRequestState request = ownedRequest(requestId);
         long reservationToken = request == null
                 ? 0L : request.reservationToken();
@@ -1285,7 +1321,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * A same-id shadow/fence necessarily belongs to another generation and is
      * deliberately preserved.
      */
-    private boolean settleUntrackedWorkerTerminalLocked(long requestId) {
+    private boolean settleUntrackedWorkerTerminalLocked(String requestId) {
         DecodeRequestState confirmed = confirmedRequest(requestId);
         if (confirmed == null || confirmed.reservationToken() > 0L
                 || !removeConfirmedExactLocked(requestId, confirmed)) {
@@ -1310,12 +1346,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * forbidden while this endpoint generation still owns that id or retains
      * an ambiguity tombstone for it.
      */
-    private boolean requestIdAvailableForReservationLocked(long requestId) {
+    private boolean requestIdAvailableForReservationLocked(String requestId) {
         if (decodeRequests.containsKey(requestId)) {
             return false;
         }
         for (EndpointPreemptionAttempt attempt : preemptionAttempts.values()) {
-            if (attempt.incomingRequestId == requestId) {
+            if (Objects.equals(attempt.incomingRequestId, requestId)) {
                 return false;
             }
         }
@@ -1324,7 +1360,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /** Caller holds {@link #admissionLock}. */
     private boolean hasExactOwnerLocked(ReservationHandle reservation) {
-        long requestId = reservation.requestId();
+        String requestId = reservation.requestId();
         DecodeRequestState state = requestState(requestId);
         return isExactReservation(state, reservation)
                 || hasExactIncomingAttemptLocked(reservation);
@@ -1348,7 +1384,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     public boolean tryEvictLocalReservationsAndReserveIncoming(
             List<ReservationHandle> victims,
-            long incomingRequestId, long kvTokens, long expectedKvTokens,
+            String incomingRequestId, long kvTokens, long expectedKvTokens,
             int priority,
             AdmissionCapacity capacity) {
         GenerationPin generationPin = tryPinGeneration();
@@ -1366,10 +1402,20 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
+    public boolean tryEvictLocalReservationsAndReserveIncoming(
+            List<ReservationHandle> victims,
+            long incomingRequestId, long kvTokens, long expectedKvTokens,
+            int priority,
+            AdmissionCapacity capacity) {
+        return tryEvictLocalReservationsAndReserveIncoming(
+                victims, Long.toString(incomingRequestId), kvTokens,
+                expectedKvTokens, priority, capacity);
+    }
+
     private boolean
             evictLocalReservationsAndReserveIncomingPinned(
             List<ReservationHandle> victims,
-            long incomingRequestId, long kvTokens, long expectedKvTokens,
+            String incomingRequestId, long kvTokens, long expectedKvTokens,
             int priority,
             AdmissionCapacity capacity) {
         boolean committed = false;
@@ -1380,14 +1426,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
                             incomingRequestId)) {
                 return false;
             }
-            Set<Long> uniqueVictims = new HashSet<>(victims.size());
+            Set<String> uniqueVictims = new HashSet<>(victims.size());
             long freedHardKv = 0L;
             long freedExpectedUsage = 0L;
             for (ReservationHandle victim : victims) {
                 if (victim == null
                         || victim.endpointGenerationId()
                                 != getStatus().getGenerationId()
-                        || victim.requestId() == incomingRequestId
+                        || Objects.equals(victim.requestId(), incomingRequestId)
                         || !uniqueVictims.add(victim.requestId())) {
                     return false;
                 }
@@ -1445,7 +1491,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public LayeredAdmissionView layeredAdmissionView() {
         admissionLock.lock();
         try {
-            Map<Long, DecodeRequestView> reserved = new HashMap<>(
+            Map<String, DecodeRequestView> reserved = new HashMap<>(
                     reservedRequestCount.get());
             List<DecodeRequestView> confirmed = new java.util.ArrayList<>(
                     Math.max(0, confirmedEngineOwnedCount));
@@ -1486,7 +1532,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /** Atomic reserved/confirmed/queued ownership tuple. */
     public record LayeredAdmissionView(DecodeRoutingView routing,
-                                       Map<Long, DecodeRequestView> reserved,
+                                       Map<String, DecodeRequestView> reserved,
                                        List<DecodeRequestView> confirmed,
                                        int queuedCount,
                                        int activeDispatchPermits) {
@@ -1507,9 +1553,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
             return routing.engineCapacityUsed();
         }
 
-        public boolean isQueued(long requestId) {
+        public boolean isQueued(String requestId) {
             DecodeRequestView request = reserved.get(requestId);
             return request != null && request.queued();
+        }
+
+        public boolean isQueued(long requestId) {
+            return isQueued(Long.toString(requestId));
         }
 
         private int phaseCount(DecodeTaskPhase phase) {
@@ -1698,7 +1748,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /** Immutable point-in-time view shared by shadow and confirmed ownership. */
-    public record DecodeRequestView(long requestId,
+    public record DecodeRequestView(String requestId,
                                     int priority,
                                     long kvTokens,
                                     long expectedKvTokens,
@@ -1707,6 +1757,20 @@ public class DecodeEndpoint extends WorkerEndpoint {
                                     long reservationToken,
                                     boolean queued,
                                     boolean claimedForPreemption) {
+        public DecodeRequestView(
+                long requestId,
+                int priority,
+                long kvTokens,
+                long expectedKvTokens,
+                DecodeTaskPhase phase,
+                boolean priorityKnown,
+                long reservationToken,
+                boolean queued,
+                boolean claimedForPreemption) {
+            this(Long.toString(requestId), priority, kvTokens,
+                    expectedKvTokens, phase, priorityKnown, reservationToken,
+                    queued, claimedForPreemption);
+        }
     }
 
     // ==================== Priority-preemption transaction ====================
@@ -1730,7 +1794,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     public PreemptionBeginResult beginPriorityPreemption(
             long attemptToken,
             List<ReservationHandle> victims,
-            long incomingRequestId,
+            String incomingRequestId,
             long incomingKvTokens,
             long incomingExpectedKvTokens,
             int incomingPriority,
@@ -1754,10 +1818,24 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    private PreemptionBeginResult beginPriorityPreemptionPinned(
+    public PreemptionBeginResult beginPriorityPreemption(
             long attemptToken,
             List<ReservationHandle> victims,
             long incomingRequestId,
+            long incomingKvTokens,
+            long incomingExpectedKvTokens,
+            int incomingPriority,
+            AdmissionCapacity capacity) {
+        return beginPriorityPreemption(
+                attemptToken, victims, Long.toString(incomingRequestId),
+                incomingKvTokens, incomingExpectedKvTokens,
+                incomingPriority, capacity);
+    }
+
+    private PreemptionBeginResult beginPriorityPreemptionPinned(
+            long attemptToken,
+            List<ReservationHandle> victims,
+            String incomingRequestId,
             long incomingKvTokens,
             long incomingExpectedKvTokens,
             int incomingPriority,
@@ -1771,8 +1849,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 return PreemptionBeginResult.INCOMING_ALREADY_RESERVED;
             }
 
-            Map<Long, ClaimOwner> owners = new HashMap<>();
-            Map<Long, ReservationHandle> exactVictims = new HashMap<>();
+            Map<String, ClaimOwner> owners = new HashMap<>();
+            Map<String, ReservationHandle> exactVictims = new HashMap<>();
             long freedSlots = 0L;
             long freedHardKv = 0L;
             long freedExpectedUsage = 0L;
@@ -1780,11 +1858,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 if (victim == null
                         || victim.endpointGenerationId()
                                 != getStatus().getGenerationId()
-                        || victim.requestId() == incomingRequestId
+                        || Objects.equals(victim.requestId(), incomingRequestId)
                         || owners.containsKey(victim.requestId())) {
                     return PreemptionBeginResult.VICTIM_GONE;
                 }
-                long victimId = victim.requestId();
+                String victimId = victim.requestId();
                 DecodeRequestState victimState = requestState(victimId);
                 if (victimState != null && victimState.hasProtocolOwner()
                         || hasExactIncomingAttemptLocked(victim)) {
@@ -1842,9 +1920,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
             // Allocate every victim claim before installing any incoming or
             // protocol ownership. The endpoint lock keeps these exact states
             // stable through the subsequent allocation-free installation.
-            Map<Long, PreemptionClaim> preparedClaims = new HashMap<>();
+            Map<String, PreemptionClaim> preparedClaims = new HashMap<>();
             for (ReservationHandle victim : victims) {
-                long victimId = victim.requestId();
+                String victimId = victim.requestId();
                 DecodeRequestState request = ownedRequest(victimId);
                 long hardKv = request.kvTokens();
                 long expectedKv = request.confirmed()
@@ -1875,7 +1953,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     throw new IllegalStateException(
                             "priority attempt appeared while admissionLock was held");
                 }
-                for (Map.Entry<Long, PreemptionClaim> claim
+                for (Map.Entry<String, PreemptionClaim> claim
                         : preparedClaims.entrySet()) {
                     DecodeRequestState request = ownedRequest(claim.getKey());
                     if (request == null || request.preemptionClaim != null) {
@@ -1888,7 +1966,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 if (preparedAttempt != null) {
                     preemptionAttempts.remove(attemptToken, preparedAttempt);
                 }
-                for (Map.Entry<Long, PreemptionClaim> claim
+                for (Map.Entry<String, PreemptionClaim> claim
                         : preparedClaims.entrySet()) {
                     removePreemptionClaimLocked(claim.getKey(), claim.getValue());
                 }
@@ -1916,7 +1994,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             }
             for (ReservationHandle victim
                     : attempt.remainingVictims.values()) {
-                long victimId = victim.requestId();
+                String victimId = victim.requestId();
                 PreemptionClaim claim = exactPreemptionClaimLocked(
                         attemptToken, victim);
                 if (claim == null
@@ -1947,7 +2025,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     public boolean recordPriorityCancelPhase(
             long attemptToken,
-            long requestId,
+            String requestId,
             PreemptionCancelPhase next) {
         if (next != PreemptionCancelPhase.CANCEL_REQUESTED
                 && next != PreemptionCancelPhase.NOT_FOUND_STALE
@@ -1968,6 +2046,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
         } finally {
             admissionLock.unlock();
         }
+    }
+
+    public boolean recordPriorityCancelPhase(
+            long attemptToken,
+            long requestId,
+            PreemptionCancelPhase next) {
+        return recordPriorityCancelPhase(
+                attemptToken, Long.toString(requestId), next);
     }
 
     /**
@@ -2014,7 +2100,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      */
     public boolean transferPriorityNotFoundClaimToEngineFence(
             long attemptToken,
-            long requestId) {
+            String requestId) {
         admissionLock.lock();
         try {
             PreemptionClaim claim = preemptionClaim(requestId);
@@ -2029,6 +2115,13 @@ public class DecodeEndpoint extends WorkerEndpoint {
         } finally {
             admissionLock.unlock();
         }
+    }
+
+    public boolean transferPriorityNotFoundClaimToEngineFence(
+            long attemptToken,
+            long requestId) {
+        return transferPriorityNotFoundClaimToEngineFence(
+                attemptToken, Long.toString(requestId));
     }
 
     /** Authoritative terminal settlement for an exact transferred fence generation. */
@@ -2076,7 +2169,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             long attemptToken,
             ReservationHandle reservation,
             PreemptionClaim claim) {
-        long requestId = reservation.requestId();
+        String requestId = reservation.requestId();
         DecodeRequestState state = requestState(requestId);
         if (exactPreemptionClaimLocked(attemptToken, reservation) != claim) {
             return false;
@@ -2170,7 +2263,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             releaseLocked(attempt.incomingRequestId);
             for (ReservationHandle victim
                     : attempt.remainingVictims.values()) {
-                long victimId = victim.requestId();
+                String victimId = victim.requestId();
                 PreemptionClaim claim = exactPreemptionClaimLocked(
                         attemptToken, victim);
                 if (claim == null) {
@@ -2200,7 +2293,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                         != getStatus().getGenerationId()) {
             return false;
         }
-        long requestId = reservation.requestId();
+        String requestId = reservation.requestId();
         boolean reconciled = false;
         admissionLock.lock();
         try {
@@ -2237,7 +2330,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                         != getStatus().getGenerationId()) {
             return false;
         }
-        long requestId = reservation.requestId();
+        String requestId = reservation.requestId();
         boolean reconciled = false;
         boolean capacityChanged = false;
         admissionLock.lock();
@@ -2390,8 +2483,8 @@ public class DecodeEndpoint extends WorkerEndpoint {
         // disappear are held synthetically. An explicit Decode finished task
         // is a separate authoritative terminal outcome: it settles the exact
         // claim without reclassifying that outcome as priority CANCELED.
-        Set<Long> confirmedNow = new HashSet<>();
-        Set<Long> terminalNow = new HashSet<>();
+        Set<String> confirmedNow = new HashSet<>();
+        Set<String> terminalNow = new HashSet<>();
         for (WorkerStatus.TaskObservation task : finishedTasks.values()) {
             terminalNow.add(task.requestId());
         }
@@ -2400,7 +2493,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         for (WorkerStatus.TaskObservation task
                 : engine.runningTaskList().values()) {
             TaskPhase phase = task.phase();
-            long requestId = task.requestId();
+            String requestId = task.requestId();
             DecodeRequestState current = requestState(requestId);
             if (terminalNow.contains(requestId)
                     || current != null && current.settledAtMs != 0L) {
@@ -2446,7 +2539,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         // the downstream scheduler receives only the immutable result.
         for (WorkerStatus.TaskObservation task
                 : finishedTasks.values()) {
-            long requestId = task.requestId();
+            String requestId = task.requestId();
             DecodeRequestState current = requestState(requestId);
             if (current != null && current.settledAtMs != 0L) {
                 continue;
@@ -2487,7 +2580,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
 
         int syntheticallyHeldSlots = 0;
-        for (Map.Entry<Long, DecodeRequestState> entry : decodeRequests.entrySet()) {
+        for (Map.Entry<String, DecodeRequestState> entry : decodeRequests.entrySet()) {
             PreemptionClaim claim = entry.getValue().preemptionClaim;
             if (claim == null) {
                 continue;
@@ -2504,15 +2597,15 @@ public class DecodeEndpoint extends WorkerEndpoint {
         // the generic fence takes over only when no priority owner exists.
         // This replaces the prior removeIf traversal, so the generic protection
         // adds no extra per-status collection or wrapper allocation.
-        java.util.Iterator<Map.Entry<Long, DecodeRequestState>> confirmedIt =
+        java.util.Iterator<Map.Entry<String, DecodeRequestState>> confirmedIt =
                 decodeRequests.entrySet().iterator();
         while (confirmedIt.hasNext()) {
-            Map.Entry<Long, DecodeRequestState> entry = confirmedIt.next();
+            Map.Entry<String, DecodeRequestState> entry = confirmedIt.next();
             if (!entry.getValue().ownsRequest()
                     || !entry.getValue().confirmed()) {
                 continue;
             }
-            long requestId = entry.getKey();
+            String requestId = entry.getKey();
             if (confirmedNow.contains(requestId)) {
                 continue;
             }
@@ -2542,7 +2635,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /** Caller holds {@link #admissionLock}; request-id-only facts are forbidden. */
-    private ReservationHandle workerStatusHandleLocked(long requestId) {
+    private ReservationHandle workerStatusHandleLocked(String requestId) {
         DecodeRequestState state = requestState(requestId);
         long reservationToken = state == null ? 0L : state.reservationToken();
         if (reservationToken <= 0L) {
@@ -2585,7 +2678,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /** Publish one non-refreshing terminal fence while admissionLock is held. */
-    private boolean rememberSettledLocked(long requestId, long settledAtMs) {
+    private boolean rememberSettledLocked(String requestId, long settledAtMs) {
         DecodeRequestState state = requestState(requestId);
         if (state == null) {
             state = new DecodeRequestState(
@@ -2601,7 +2694,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /** Called with {@link #admissionLock} held after a fresh active observation. */
-    private void observeEngineFenceConfirmedLocked(long requestId) {
+    private void observeEngineFenceConfirmedLocked(String requestId) {
         DecodeRequestState confirmed = confirmedRequest(requestId);
         if (confirmed == null || confirmed.engineFenceProtection == null) {
             return;
@@ -2680,7 +2773,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     /** Called with {@link #admissionLock} held. */
-    private boolean clearEngineFenceProtectionLocked(long requestId) {
+    private boolean clearEngineFenceProtectionLocked(String requestId) {
         DecodeRequestState state = requestState(requestId);
         EngineFenceProtection protection = state == null
                 ? null : state.engineFenceProtection;
@@ -2876,7 +2969,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /** Evict only endpoint orphans which have no live scheduler generation. */
     public int evictExpiredRequests(long ttlMs,
-                                    LongPredicate schedulerOwnsRequest) {
+                                    Predicate<String> schedulerOwnsRequest) {
         int evicted;
         boolean capacityChanged;
         admissionLock.lock();
@@ -2888,10 +2981,10 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     ttlMs, schedulerOwnsRequest);
             long cutoff = System.currentTimeMillis() - ttlMs;
             int trackedPurged = 0;
-            java.util.Iterator<Map.Entry<Long, DecodeRequestState>> trackedEvictIt =
+            java.util.Iterator<Map.Entry<String, DecodeRequestState>> trackedEvictIt =
                     decodeRequests.entrySet().iterator();
             while (trackedEvictIt.hasNext()) {
-                Map.Entry<Long, DecodeRequestState> entry = trackedEvictIt.next();
+                Map.Entry<String, DecodeRequestState> entry = trackedEvictIt.next();
                 if (entry.getValue().confirmed()
                         && entry.getValue().lastSeenMs() < cutoff
                         && !schedulerOwnsRequest.test(entry.getKey())
@@ -2926,12 +3019,12 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /** Caller holds {@link #admissionLock}. */
     private int evictExpiredInflightLocked(
-            long ttlMs, LongPredicate schedulerOwnsRequest) {
+            long ttlMs, Predicate<String> schedulerOwnsRequest) {
         long nowMs = System.currentTimeMillis();
         int evicted = 0;
-        for (Map.Entry<Long, DecodeRequestState> entry
+        for (Map.Entry<String, DecodeRequestState> entry
                 : decodeRequests.entrySet()) {
-            long requestId = entry.getKey();
+            String requestId = entry.getKey();
             DecodeRequestState request = entry.getValue();
             if (!request.ownsRequest()
                     || nowMs - request.createdAtMs() <= ttlMs
@@ -3009,7 +3102,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     != getStatus().getGenerationId()) {
                 return false;
             }
-            long requestId = reservation.requestId();
+            String requestId = reservation.requestId();
             DecodeRequestState current = shadowReservation(requestId);
             if (!isExactReservation(current, reservation)) {
                 return false;
@@ -3032,7 +3125,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return true;
     }
 
-    private boolean addQueuedPhaseLocked(long requestId, DecodeRequestState reservation) {
+    private boolean addQueuedPhaseLocked(String requestId, DecodeRequestState reservation) {
         if (reservation == null || !reservation.markQueued()) {
             return false;
         }
@@ -3042,7 +3135,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         return true;
     }
 
-    private boolean removeQueuedPhaseLocked(long requestId, DecodeRequestState reservation) {
+    private boolean removeQueuedPhaseLocked(String requestId, DecodeRequestState reservation) {
         if (reservation == null) {
             throw new IllegalStateException(
                     "queued Decode reservation missing for request " + requestId);
@@ -3116,21 +3209,21 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
 
         private final DecodeEndpoint endpoint;
-        private final long requestId;
+        private final String requestId;
         private final DecodeRequestState reservation;
         /** Guarded by the endpoint admission lock. */
         private boolean retiredByEndpoint;
         private Resolution resolution = Resolution.ACQUIRED;
 
         private EngineDispatchPermit(DecodeEndpoint endpoint,
-                                     long requestId,
+                                     String requestId,
                                      DecodeRequestState reservation) {
             this.endpoint = endpoint;
             this.requestId = requestId;
             this.reservation = reservation;
         }
 
-        public long requestId() {
+        public String requestId() {
             return requestId;
         }
 
@@ -3189,7 +3282,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * admission lock, so concurrent acquisitions cannot oversell either gate.
      */
     public EngineDispatchPermitAcquisition acquireEngineDispatchPermit(
-            long requestId,
+            String requestId,
             long concurrencyLimit,
             long maxKvUsagePercent) {
         if (maxKvUsagePercent < 0L) {
@@ -3207,8 +3300,16 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
-    private EngineDispatchPermitAcquisition acquireEngineDispatchPermitPinned(
+    public EngineDispatchPermitAcquisition acquireEngineDispatchPermit(
             long requestId,
+            long concurrencyLimit,
+            long maxKvUsagePercent) {
+        return acquireEngineDispatchPermit(
+                Long.toString(requestId), concurrencyLimit, maxKvUsagePercent);
+    }
+
+    private EngineDispatchPermitAcquisition acquireEngineDispatchPermitPinned(
+            String requestId,
             long concurrencyLimit,
             long maxKvUsagePercent) {
         admissionLock.lock();
@@ -3248,7 +3349,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /** Caller holds admissionLock and has validated exact queued ownership. */
     private EngineDispatchPermit installEngineDispatchPermitLocked(
-            long requestId,
+            String requestId,
             DecodeRequestState reservation) {
         EngineDispatchPermit permit = new EngineDispatchPermit(
                 this, requestId, reservation);
@@ -3338,7 +3439,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 && shadowReservation(permit.requestId) == permit.reservation;
     }
 
-    private boolean removeEngineDispatchPermitLocked(long requestId) {
+    private boolean removeEngineDispatchPermitLocked(String requestId) {
         DecodeRequestState reservation = shadowReservation(requestId);
         return reservation != null
                 && removeEngineDispatchPermitLocked(reservation);
@@ -3587,7 +3688,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * loss lets the worker resume and obtain the exact typed acquisition result.
      */
     public boolean isEngineDispatchPermitAvailable(
-            long requestId,
+            String requestId,
             long concurrencyLimit,
             long maxKvUsagePercent) {
         if (isGenerationRetiringOrRetired()) {
@@ -3640,6 +3741,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
         }
     }
 
+    public boolean isEngineDispatchPermitAvailable(
+            long requestId,
+            long concurrencyLimit,
+            long maxKvUsagePercent) {
+        return isEngineDispatchPermitAvailable(
+                Long.toString(requestId), concurrencyLimit, maxKvUsagePercent);
+    }
+
     private enum ClaimOwner {
         SHADOW_IN_FLIGHT,
         ENGINE_CONFIRMED
@@ -3669,14 +3778,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
     }
 
     private static final class EndpointPreemptionAttempt {
-        private final long incomingRequestId;
+        private final String incomingRequestId;
         private final long incomingReservationToken;
-        private final Map<Long, ReservationHandle> remainingVictims;
+        private final Map<String, ReservationHandle> remainingVictims;
 
         private EndpointPreemptionAttempt(
-                long incomingRequestId,
+                String incomingRequestId,
                 long incomingReservationToken,
-                Map<Long, ReservationHandle> victims) {
+                Map<String, ReservationHandle> victims) {
             this.incomingRequestId = incomingRequestId;
             this.incomingReservationToken = incomingReservationToken;
             this.remainingVictims = new HashMap<>(victims);

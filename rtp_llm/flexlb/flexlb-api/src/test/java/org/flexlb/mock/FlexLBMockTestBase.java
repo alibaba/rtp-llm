@@ -1,6 +1,7 @@
 package org.flexlb.mock;
 
 import com.google.protobuf.ByteString;
+import com.google.protobuf.Int32Value;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
@@ -60,7 +61,7 @@ import static org.mockito.Mockito.when;
  * mock workers.  No Spring Boot context, no model loading, no GPU.
  *
  * <p>Subclasses call {@link #setupWorkers} in {@code @BeforeEach} (or
- * rely on the default), then use {@link #submitRequest(long)} and
+ * rely on the default), then use {@link #submitRequest(String)} and
  *
  * <p>Architecture:
  * <pre>
@@ -334,14 +335,14 @@ public abstract class FlexLBMockTestBase {
     /**
      * Submit a request with the given ID and default seq_len=128.
      */
-    protected CompletableFuture<Response> submitRequest(long requestId) {
+    protected CompletableFuture<Response> submitRequest(String requestId) {
         return scheduler.submit(createBalanceContext(requestId));
     }
 
     /**
      * Submit a request with the given ID and seq_len.
      */
-    protected CompletableFuture<Response> submitRequest(long requestId, long seqLen) {
+    protected CompletableFuture<Response> submitRequest(String requestId, long seqLen) {
         return scheduler.submit(createBalanceContext(requestId, seqLen));
     }
 
@@ -483,11 +484,11 @@ public abstract class FlexLBMockTestBase {
 
     // ==================== Internal: BalanceContext construction ====================
 
-    protected BalanceContext createBalanceContext(long requestId) {
+    protected BalanceContext createBalanceContext(String requestId) {
         return createBalanceContext(requestId, 128);
     }
 
-    protected BalanceContext createBalanceContext(long requestId, long seqLen) {
+    protected BalanceContext createBalanceContext(String requestId, long seqLen) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
@@ -502,14 +503,13 @@ public abstract class FlexLBMockTestBase {
         return ctx;
     }
 
-    private static byte[] generateInputBytes(long requestId) {
-        EngineRpcService.GenerateInputPB input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+    private static byte[] generateInputBytes(String requestId) {
+        EngineRpcService.GenerateInputPB input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .addTokenIds(101)
                 .addTokenIds(102)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(8)
-                        .setGroupTimeout(com.google.protobuf.Int32Value.of(77))
+                        .setGroupTimeout(Int32Value.of(77))
                         .build())
                 .build();
         return input.toByteArray();
@@ -595,13 +595,13 @@ public abstract class FlexLBMockTestBase {
 
         @Override
         public CompletableFuture<CancelAck> cancel(
-                CancelTarget target, long requestId, long timeoutMs) {
+                CancelTarget target, String requestId, long timeoutMs) {
             return CompletableFuture.completedFuture(
                     CancelAck.UNSUPPORTED);
         }
     }
 
-    private Response successRoute(long requestId) {
+    private Response successRoute(String requestId) {
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(List.of(
@@ -611,7 +611,7 @@ public abstract class FlexLBMockTestBase {
         return response;
     }
 
-    private static ServerStatus serverStatus(RoleType role, String ip, int httpPort, int grpcPort, long requestId) {
+    private static ServerStatus serverStatus(RoleType role, String ip, int httpPort, int grpcPort, String requestId) {
         ServerStatus status = new ServerStatus();
         status.setSuccess(true);
         status.setRole(role);

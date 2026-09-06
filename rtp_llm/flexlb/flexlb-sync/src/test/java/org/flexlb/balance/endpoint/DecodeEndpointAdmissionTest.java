@@ -716,7 +716,7 @@ class DecodeEndpointAdmissionTest {
         DecodeEndpoint.EngineDispatchPermit stale = acquirePermit(1L, 2);
 
         TaskInfo running = new TaskInfo();
-        running.setRequestId(1L);
+        running.setRequestId("1");
         running.setPhase(TaskPhase.RUNNING);
         updateStatus(Map.of("1", running), null, 10_000);
 
@@ -751,7 +751,7 @@ class DecodeEndpointAdmissionTest {
         reserve(1L, 500, 508, 30);
 
         TaskInfo running = new TaskInfo();
-        running.setRequestId(1L);
+        running.setRequestId("1");
         running.setPhase(TaskPhase.KV_ALLOCATED);
         updateStatus(Map.of("1", running), null, 10_000);
 
@@ -770,7 +770,7 @@ class DecodeEndpointAdmissionTest {
         DecodeEndpoint.ReservationHandle reservation =
                 reserve(1L, 500, 508, 30);
         TaskInfo received = new TaskInfo();
-        received.setRequestId(1L);
+        received.setRequestId("1");
         received.setPhase(TaskPhase.RECEIVED);
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRunningTaskInfo(Map.of("1", received));
@@ -928,7 +928,10 @@ class DecodeEndpointAdmissionTest {
     }
 
     private Map<Long, DecodeEndpoint.DecodeRequestView> reserved() {
-        return endpoint.layeredAdmissionView().reserved();
+        Map<Long, DecodeEndpoint.DecodeRequestView> numeric = new HashMap<>();
+        endpoint.layeredAdmissionView().reserved().forEach(
+                (requestId, view) -> numeric.put(Long.parseLong(requestId), view));
+        return numeric;
     }
 
     private static void assertReservationIdentity(
@@ -960,7 +963,7 @@ class DecodeEndpointAdmissionTest {
         return endpoint.beginPriorityPreemption(
                 attemptToken,
                 victimIds.stream().map(reservations::get).toList(),
-                incomingRequestId,
+                Long.toString(incomingRequestId),
                 hardKv,
                 expectedKv,
                 priority,
@@ -970,7 +973,7 @@ class DecodeEndpointAdmissionTest {
 
     private void settleFromWorkerStatus(long requestId) {
         TaskInfo finished = new TaskInfo();
-        finished.setRequestId(requestId);
+        finished.setRequestId(Long.toString(requestId));
         finished.setErrorCode(0);
         updateStatus(Map.of(), Map.of(Long.toString(requestId), finished),
                 Math.max(10_000L,

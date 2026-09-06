@@ -196,7 +196,7 @@ class ScheduleForwardMatrixTest {
 
         // Ambiguity reconciliation: ownership handed to the cancel reducer.
         FlexlbScheduleProtocol.FlexlbCancelRequestPB cancel = capturedCancel();
-        assertEquals(90_002L, cancel.getRequestId());
+        assertEquals("90002", cancel.getRequestId());
         assertEquals(FlexlbScheduleProtocol.CancelReasonPB.CANCEL_REASON_CLIENT_CANCELLED,
                 cancel.getReason());
 
@@ -359,7 +359,7 @@ class ScheduleForwardMatrixTest {
         try (RealForwarderFixture fixture = newRealForwarderFixture(LIVE_MASTER)) {
             FlexlbScheduleProtocol.FlexlbScheduleRequestPB alreadyForwardedOnce =
                     FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                            .setRequestId(90_103L)
+                            .setRequestId("90103")
                             .setForwardHop(1)
                             .build();
 
@@ -439,7 +439,7 @@ class ScheduleForwardMatrixTest {
 
     private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(long requestId) {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(requestId)
+                .setRequestId(Long.toString(requestId))
                 .setSeqLen(1024)
                 .build();
     }

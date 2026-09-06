@@ -61,7 +61,7 @@ public class CostBasedPrefillStrategy {
             BalanceContext balanceContext,
             RoleType roleType,
             String group) {
-        long requestId = balanceContext.getRequestId();
+        String requestId = balanceContext.getRequestId();
         long seqLen = balanceContext.getRequest().getSeqLen();
         FlexlbConfig config = balanceContext.getConfig();
 
@@ -926,7 +926,7 @@ public class CostBasedPrefillStrategy {
     private SelectedRole buildSelectedRole(
             PrefillEndpoint ep,
             RoleType roleType,
-            long requestId,
+            String requestId,
             OptionalLong projectedTtftMs,
             long selectedPrefillMs,
             long bestCacheHit,

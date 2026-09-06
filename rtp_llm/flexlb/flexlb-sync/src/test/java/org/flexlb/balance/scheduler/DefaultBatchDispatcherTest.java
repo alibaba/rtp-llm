@@ -203,7 +203,7 @@ class DefaultBatchDispatcherTest {
                 if (completion.status() == DeliveryResult.Status.FAILED) {
                     failures.incrementAndGet();
                     attempted.countDown();
-                    if (item.requestId() == 1L) {
+                    if (item.requestId().equals("1")) {
                         throw new IllegalStateException("first callback failed");
                     }
                 } else if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
@@ -238,7 +238,7 @@ class DefaultBatchDispatcherTest {
                 } else if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
                     uncertain.incrementAndGet();
                     attempted.countDown();
-                    if (item.requestId() == 1L) {
+                    if (item.requestId().equals("1")) {
                         throw new IllegalStateException("first callback failed");
                     }
                 }
@@ -687,7 +687,7 @@ class DefaultBatchDispatcherTest {
 
     private ScheduledRequest createScheduledRequest(long requestId, long seqLen, long hitCacheLen, PrefillEndpoint prefillEp) {
         Request request = new Request();
-        request.setRequestId(requestId);
+        request.setRequestId(Long.toString(requestId));
         request.setSeqLen(seqLen);
 
         BalanceContext ctx = new BalanceContext();
@@ -695,8 +695,9 @@ class DefaultBatchDispatcherTest {
         ctx.setRequest(request);
 
         // Provide a valid GenerateInputPB bytes (minimum: requestId + empty config)
-        EngineRpcService.GenerateInputPB input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+        EngineRpcService.GenerateInputPB input = RequestIdFixtures.write(
+                        EngineRpcService.GenerateInputPB.newBuilder(),
+                        Long.toString(requestId))
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().build())
                 .build();
         ctx.setGenerateInputPb(input.toByteString());

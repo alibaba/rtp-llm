@@ -286,7 +286,7 @@ class EndpointRegistryRoleTest {
                      oldEndpoint.tryPinGeneration()) {
             assertTrue(pin != null);
             oldReservation = oldEndpoint.tryReserveQueuedPinned(
-                    pin, 41L, 100L, 110L, 50);
+                    pin, "41", 100L, 110L, 50);
         }
 
         retire(RoleType.DECODE, ipPort, oldEndpoint.getStatus());

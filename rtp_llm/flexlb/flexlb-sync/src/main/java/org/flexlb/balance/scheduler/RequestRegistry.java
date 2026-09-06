@@ -42,7 +42,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 /**
@@ -96,7 +96,7 @@ public class RequestRegistry {
     private final Set<RequestSlot> outstandingCandidates = new ConcurrentSkipListSet<>(
             Comparator.comparingInt(RequestSlot::admissionPriority)
                     .thenComparing(Comparator.comparingLong(RequestSlot::createdAtMs).reversed())
-                    .thenComparingLong(RequestSlot::requestId));
+                    .thenComparing(RequestSlot::requestId));
     /** QUEUE requests whose Decode-acceptance guard remains active. */
     private final AtomicInteger decodeAcceptanceCount = new AtomicInteger();
     private final Set<Runnable> decodeAcceptanceListeners = ConcurrentHashMap.newKeySet();
@@ -107,7 +107,7 @@ public class RequestRegistry {
     private final BatchSchedulerReporter reporter;
     private final RequestSchedulerReporter requestReporter;
     /** The sole canonical owner for admission, delivery, fence and terminal state. */
-    private final ConcurrentMap<Long, RequestSlot> requestSlots =
+    private final ConcurrentMap<String, RequestSlot> requestSlots =
             new ConcurrentHashMap<>();
     @Autowired
     public RequestRegistry(ConfigService configService,
@@ -156,7 +156,7 @@ public class RequestRegistry {
         return slot != null && requestSlots.get(slot.requestId()) == slot;
     }
 
-    RequestSlot requestSlot(long requestId) {
+    RequestSlot requestSlot(String requestId) {
         return requestSlots.get(requestId);
     }
 
@@ -491,7 +491,7 @@ public class RequestRegistry {
         }
     }
 
-    public boolean isAdmissionOpen(long requestId, CompletableFuture<?> future) {
+    public boolean isAdmissionOpen(String requestId, CompletableFuture<?> future) {
         if (shuttingDown.get()) {
             return false;
         }
@@ -505,7 +505,7 @@ public class RequestRegistry {
     }
 
     public AdmissionMutation claimAdmissionMutation(
-            long requestId, CompletableFuture<?> future) {
+            String requestId, CompletableFuture<?> future) {
         if (!enterAdmissionMutationGate()) {
             return null;
         }
@@ -794,7 +794,7 @@ public class RequestRegistry {
     }
 
     public void finishYieldedReservation(
-            long requestId, long reservationToken, String detail) {
+            String requestId, long reservationToken, String detail) {
         if (reservationToken <= 0L) {
             throw new IllegalArgumentException("reservationToken must be positive");
         }
@@ -837,7 +837,7 @@ public class RequestRegistry {
     }
 
     public Optional<PreemptionRegistration> tryClaim(
-            long requestId, long reservationToken, long attemptToken, String detail) {
+            String requestId, long reservationToken, long attemptToken, String detail) {
         RequestSlot entry = requestSlots.get(requestId);
         if (entry == null) {
             return Optional.empty();
@@ -1010,7 +1010,7 @@ public class RequestRegistry {
     }
 
     public Optional<CancelTarget> findCancelTarget(
-            long requestId, long reservationToken) {
+            String requestId, long reservationToken) {
         RequestSlot entry = requestSlots.get(requestId);
         if (entry == null) {
             return Optional.empty();
@@ -1039,7 +1039,7 @@ public class RequestRegistry {
      *         {@code null} when the request is unknown or {@code batchId}
      *         addresses a different generation
      */
-    public RequestState cancelRequest(long requestId,
+    public RequestState cancelRequest(String requestId,
                                                    long expectedBatchId,
                                                    CancelReason reason) {
         Objects.requireNonNull(reason, "reason");
@@ -1107,7 +1107,7 @@ public class RequestRegistry {
         return result;
     }
 
-    private RequestState matchingTerminalState(long requestId,
+    private RequestState matchingTerminalState(String requestId,
                                                             long expectedBatchId) {
         RequestSlot slot = requestSlots.get(requestId);
         RequestState terminal = slot == null
@@ -1544,7 +1544,7 @@ public class RequestRegistry {
 
     public int liveRequestCount() {
         int live = 0;
-        for (Map.Entry<Long, RequestSlot> candidate : requestSlots.entrySet()) {
+        for (Map.Entry<String, RequestSlot> candidate : requestSlots.entrySet()) {
             RequestSlot slot = candidate.getValue();
             synchronized (slot) {
                 if (requestSlots.get(candidate.getKey()) == slot
@@ -1568,7 +1568,7 @@ public class RequestRegistry {
     public long oldestLiveSlotAgeMs() {
         long oldest = Long.MAX_VALUE;
         long now = System.currentTimeMillis();
-        for (Map.Entry<Long, RequestSlot> candidate : requestSlots.entrySet()) {
+        for (Map.Entry<String, RequestSlot> candidate : requestSlots.entrySet()) {
             RequestSlot slot = candidate.getValue();
             synchronized (slot) {
                 if (requestSlots.get(candidate.getKey()) == slot
@@ -1588,7 +1588,7 @@ public class RequestRegistry {
      */
     public List<RequestState> snapshotActiveRequests() {
         List<RequestState> snapshots = new ArrayList<>(requestSlots.size());
-        for (Map.Entry<Long, RequestSlot> candidate : requestSlots.entrySet()) {
+        for (Map.Entry<String, RequestSlot> candidate : requestSlots.entrySet()) {
             RequestSlot entry = candidate.getValue();
             synchronized (entry) {
                 if (requestSlots.get(candidate.getKey()) == entry
@@ -1600,12 +1600,12 @@ public class RequestRegistry {
         snapshots.sort((left, right) -> {
             int createdOrder = Long.compare(left.createdAtMs(), right.createdAtMs());
             return createdOrder != 0
-                    ? createdOrder : Long.compare(left.requestId(), right.requestId());
+                    ? createdOrder : left.requestId().compareTo(right.requestId());
         });
         return List.copyOf(snapshots);
     }
 
-    public RequestState getRequestState(long requestId,
+    public RequestState getRequestState(String requestId,
                                         long expectedBatchId) {
         RequestSlot entry = requestSlots.get(requestId);
         if (entry == null) {
@@ -1618,7 +1618,7 @@ public class RequestRegistry {
     }
 
     /** Whether scheduler lifecycle still owns endpoint accounting for this id. */
-    public boolean ownsRequestGeneration(long requestId) {
+    public boolean ownsRequestGeneration(String requestId) {
         RequestSlot slot = requestSlots.get(requestId);
         if (slot == null) {
             return false;
@@ -2340,7 +2340,7 @@ public class RequestRegistry {
      * protobuf encoding, gRPC completion, or arbitrary caller continuations.</p>
      */
     boolean publishQueueDecisionResponseAsync(
-            long requestId,
+            String requestId,
             CompletableFuture<Response> future,
             Response response) {
         RequestSlot slot = requestSlots.get(requestId);
@@ -2501,7 +2501,7 @@ public class RequestRegistry {
     }
 
     public void maintainExpiration(
-            BiConsumer<Long, LongPredicate> exactSweeper) {
+            BiConsumer<Long, Predicate<String>> exactSweeper) {
         expirationTimer.maintain(exactSweeper);
     }
 

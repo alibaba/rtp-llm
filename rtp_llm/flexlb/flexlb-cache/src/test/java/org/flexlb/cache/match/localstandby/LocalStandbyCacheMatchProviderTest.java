@@ -70,7 +70,7 @@ class LocalStandbyCacheMatchProviderTest {
                         hashService);
 
         Request request = new Request();
-        request.setRequestId(1L);
+        request.setRequestId("1");
         request.setLocalStandbyBlockSize(4096);
         request.setLocalStandbyCacheableBlockCacheKeys(List.of(11L));
         CompletableFuture<LocalStandbyHashResult> pendingHash = new CompletableFuture<>();
@@ -104,7 +104,7 @@ class LocalStandbyCacheMatchProviderTest {
                 kvcm(modelMetaConfig()), cacheManager, hashService);
 
         Request request = new Request();
-        request.setRequestId(1L);
+        request.setRequestId("1");
         request.setLocalStandbyBlockSize(4096);
         when(hashService.getHashResult("1", null, 4096))
                 .thenReturn(CompletableFuture.completedFuture(

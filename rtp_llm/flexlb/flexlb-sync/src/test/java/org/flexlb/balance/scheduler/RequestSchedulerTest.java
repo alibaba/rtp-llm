@@ -27,7 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -55,8 +55,8 @@ class RequestSchedulerTest {
         int maximum = config.queueScheduler().getCapacity().getMaxOutstandingRequestsGlobal();
         when(lifecycle.register(unavailable, maximum)).thenReturn(first);
         when(lifecycle.register(healthy, maximum)).thenReturn(second);
-        when(lifecycle.claimAdmissionMutation(910001L, first)).thenReturn(mock(AdmissionMutation.class));
-        when(lifecycle.claimAdmissionMutation(910002L, second)).thenReturn(mock(AdmissionMutation.class));
+        when(lifecycle.claimAdmissionMutation("910001", first)).thenReturn(mock(AdmissionMutation.class));
+        when(lifecycle.claimAdmissionMutation("910002", second)).thenReturn(mock(AdmissionMutation.class));
         when(router.resolvePolicyGroup(unavailable)).thenReturn("unavailable-group");
         when(router.resolvePolicyGroup(healthy)).thenReturn("healthy-group");
         when(router.routeForQueue(unavailable, "unavailable-group")).thenReturn(PlacementResult.blocked(new PlacementKey(RoleType.DECODE, "unavailable-group")));
@@ -99,7 +99,7 @@ class RequestSchedulerTest {
         int maximum = config.queueScheduler().getCapacity()
                 .getMaxOutstandingRequestsGlobal();
         when(lifecycle.register(context, maximum)).thenReturn(future);
-        when(lifecycle.claimAdmissionMutation(897L, future)).thenReturn(
+        when(lifecycle.claimAdmissionMutation("897", future)).thenReturn(
                 mock(AdmissionMutation.class));
 
         PrefillEndpoint selectedEndpoint = mock(PrefillEndpoint.class);
@@ -159,7 +159,7 @@ class RequestSchedulerTest {
         int maximum = config.queueScheduler().getCapacity()
                 .getMaxOutstandingRequestsGlobal();
         when(lifecycle.register(context, maximum)).thenReturn(future);
-        when(lifecycle.claimAdmissionMutation(899L, future)).thenReturn(
+        when(lifecycle.claimAdmissionMutation("899", future)).thenReturn(
                 mock(AdmissionMutation.class));
         QueueRouteAdmission route = mock(QueueRouteAdmission.class);
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
@@ -217,7 +217,7 @@ class RequestSchedulerTest {
         int maximum = config.queueScheduler().getCapacity()
                 .getMaxOutstandingRequestsGlobal();
         when(lifecycle.register(context, maximum)).thenReturn(future);
-        when(lifecycle.claimAdmissionMutation(900L, future)).thenReturn(
+        when(lifecycle.claimAdmissionMutation("900", future)).thenReturn(
                 mock(AdmissionMutation.class));
         when(router.routeForQueue(context, null)).thenReturn(
                 PlacementResult.rejected(RequestRegistry.buildErrorResponse(
@@ -263,7 +263,7 @@ class RequestSchedulerTest {
         CountDownLatch gatePlanningStarted = new CountDownLatch(1);
         CountDownLatch releaseGatePlanning = new CountDownLatch(1);
         when(lifecycle.register(gate, maximum)).thenReturn(gateFuture);
-        when(lifecycle.claimAdmissionMutation(900L, gateFuture)).thenReturn(
+        when(lifecycle.claimAdmissionMutation("900", gateFuture)).thenReturn(
                 mock(AdmissionMutation.class));
         when(router.routeForQueue(gate, null)).thenAnswer(invocation -> {
             gatePlanningStarted.countDown();
@@ -280,7 +280,7 @@ class RequestSchedulerTest {
             CompletableFuture<Response> future = new CompletableFuture<>();
             QueueRouteAdmission route = mock(QueueRouteAdmission.class);
             when(lifecycle.register(context, maximum)).thenReturn(future);
-            when(lifecycle.claimAdmissionMutation(requestId, future)).thenReturn(
+            when(lifecycle.claimAdmissionMutation(Long.toString(requestId), future)).thenReturn(
                     mock(AdmissionMutation.class));
             when(router.routeForQueue(context, null)).thenAnswer(invocation -> {
                 aggregatePlansStarted.countDown();
@@ -337,9 +337,9 @@ class RequestSchedulerTest {
                 .getMaxOutstandingRequestsGlobal();
         when(lifecycle.register(lowPriority, maximum)).thenReturn(lowFuture);
         when(lifecycle.register(highPriority, maximum)).thenReturn(highFuture);
-        when(lifecycle.claimAdmissionMutation(910L, lowFuture)).thenReturn(
+        when(lifecycle.claimAdmissionMutation("910", lowFuture)).thenReturn(
                 mock(AdmissionMutation.class));
-        when(lifecycle.claimAdmissionMutation(911L, highFuture)).thenReturn(
+        when(lifecycle.claimAdmissionMutation("911", highFuture)).thenReturn(
                 mock(AdmissionMutation.class));
         when(router.routeForQueue(lowPriority, null)).thenReturn(
                 PlacementResult.blocked(
@@ -393,9 +393,9 @@ class RequestSchedulerTest {
                 .getMaxOutstandingRequestsGlobal();
         when(lifecycle.register(expired, maximum)).thenReturn(expiredFuture);
         when(lifecycle.register(follower, maximum)).thenReturn(followerFuture);
-        when(lifecycle.claimAdmissionMutation(801L, expiredFuture)).thenReturn(
+        when(lifecycle.claimAdmissionMutation("801", expiredFuture)).thenReturn(
                 mock(AdmissionMutation.class));
-        when(lifecycle.claimAdmissionMutation(802L, followerFuture)).thenReturn(
+        when(lifecycle.claimAdmissionMutation("802", followerFuture)).thenReturn(
                 mock(AdmissionMutation.class));
         when(router.routeForQueue(any())).thenReturn(
                 PlacementResult.blocked(blocker));
@@ -449,9 +449,9 @@ class RequestSchedulerTest {
                 .getMaxOutstandingRequestsGlobal();
         when(lifecycle.register(blocked, maximum)).thenReturn(blockedFuture);
         when(lifecycle.register(independent, maximum)).thenReturn(independentFuture);
-        when(lifecycle.claimAdmissionMutation(803L, blockedFuture)).thenReturn(
+        when(lifecycle.claimAdmissionMutation("803", blockedFuture)).thenReturn(
                 mock(AdmissionMutation.class));
-        when(lifecycle.claimAdmissionMutation(804L, independentFuture)).thenReturn(
+        when(lifecycle.claimAdmissionMutation("804", independentFuture)).thenReturn(
                 mock(AdmissionMutation.class));
 
         PrefillEndpoint fullEndpoint = mock(PrefillEndpoint.class);
@@ -532,9 +532,9 @@ class RequestSchedulerTest {
                 .getMaxOutstandingRequestsGlobal();
         when(lifecycle.register(older, maximum)).thenReturn(olderFuture);
         when(lifecycle.register(younger, maximum)).thenReturn(youngerFuture);
-        when(lifecycle.claimAdmissionMutation(805L, olderFuture)).thenReturn(
+        when(lifecycle.claimAdmissionMutation("805", olderFuture)).thenReturn(
                 mock(AdmissionMutation.class));
-        when(lifecycle.claimAdmissionMutation(806L, youngerFuture)).thenReturn(
+        when(lifecycle.claimAdmissionMutation("806", youngerFuture)).thenReturn(
                 mock(AdmissionMutation.class));
 
         PrefillEndpoint fullEndpoint = mock(PrefillEndpoint.class);
@@ -601,7 +601,7 @@ class RequestSchedulerTest {
         int maximum = config.queueScheduler().getCapacity()
                 .getMaxOutstandingRequestsGlobal();
         when(lifecycle.register(context, maximum)).thenReturn(future);
-        when(lifecycle.claimAdmissionMutation(807L, future)).thenReturn(
+        when(lifecycle.claimAdmissionMutation("807", future)).thenReturn(
                 mock(AdmissionMutation.class),
                 mock(AdmissionMutation.class));
 
@@ -719,7 +719,7 @@ class RequestSchedulerTest {
     private static BalanceContext context(long requestId, int priority) {
         BalanceContext context = new BalanceContext();
         Request request = new Request();
-        request.setRequestId(requestId);
+        request.setRequestId(Long.toString(requestId));
         request.setPriority(priority);
         context.setRequest(request);
         context.setSchedulingMetadata(SchedulingMetadata.explicit(
@@ -728,7 +728,7 @@ class RequestSchedulerTest {
     }
 
     private static final class Fixture {
-        private final long requestId = 701L;
+        private final String requestId = "701";
         private final FlexlbConfig config = SchedulingTestConfig.batchConfig();
         private final ConfigService configService = mock(ConfigService.class);
         private final DefaultRouter router = mock(DefaultRouter.class);
@@ -757,7 +757,7 @@ class RequestSchedulerTest {
             when(lifecycle.claimAdmissionMutation(requestId, future)).thenReturn(
                     mock(AdmissionMutation.class));
             when(lifecycle.publishQueueDecisionResponseAsync(
-                    anyLong(), any(), any())).thenAnswer(invocation -> {
+                    anyString(), any(), any())).thenAnswer(invocation -> {
                         @SuppressWarnings("unchecked")
                         CompletableFuture<Response> responseFuture =
                                 (CompletableFuture<Response>) invocation.getArgument(1);

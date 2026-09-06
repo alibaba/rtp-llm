@@ -445,11 +445,11 @@ class RequestLifecycleDeliveryLockContractTest {
 
         assertTrue(registered.future().join().isSuccess());
         assertEquals(RequestState.Phase.ACKNOWLEDGED,
-                lifecycle.getRequestState(205L, 0L).state());
+                lifecycle.getRequestState("205", 0L).state());
         awaitCondition(() -> lifecycle.decodeAcceptanceCount() == 0);
     }
 
-    private void assertQueuedWithoutClaim(long requestId) {
+    private void assertQueuedWithoutClaim(String requestId) {
         RequestState snapshot = lifecycle.getRequestState(
                 requestId, 0L);
         assertEquals(RequestState.Phase.QUEUED, snapshot.state());

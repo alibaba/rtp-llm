@@ -107,7 +107,7 @@ class DecodeEngineFenceProtectionTest {
         for (long requestId = 1; requestId <= requestCount; requestId++) {
             reserve(requestId, 1, 1, 0);
             finished.put(Long.toString(requestId),
-                    task(requestId, TaskPhase.PENDING, 1));
+                    task(String.valueOf(requestId), TaskPhase.PENDING, 1));
         }
 
         updateStatus(Map.of(), finished, 10_000);
@@ -139,7 +139,7 @@ class DecodeEngineFenceProtectionTest {
 
     @Test
     void missingConfirmedRequestTransfersToOneSyntheticSlotAndKvOwner() {
-        moveProtectedRequestToMissingConfirmed(1L, 500, 700);
+        moveProtectedRequestToMissingConfirmed("1", 500, 700);
 
         assertEquals(1, confirmedCount());
         assertEquals(1, endpoint.routingView().totalLoad());
@@ -170,7 +170,7 @@ class DecodeEngineFenceProtectionTest {
 
     @Test
     void freshActiveObservationReturnsSyntheticOwnershipToEngine() {
-        moveProtectedRequestToMissingConfirmed(1L, 500, 700);
+        moveProtectedRequestToMissingConfirmed("1", 500, 700);
 
         updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
         assertEquals(1, confirmedCount());
@@ -189,9 +189,9 @@ class DecodeEngineFenceProtectionTest {
 
     @Test
     void authoritativeTerminalReleasesSyntheticOwnerAndProtection() {
-        moveProtectedRequestToMissingConfirmed(1L, 500, 700);
+        moveProtectedRequestToMissingConfirmed("1", 500, 700);
 
-        updateStatus(Map.of(), Map.of("1", task(1L, TaskPhase.RUNNING, 500)), 10_000);
+        updateStatus(Map.of(), Map.of("1", task("1", TaskPhase.RUNNING, 500)), 10_000);
 
         assertEquals(0, confirmedCount());
         assertEquals(0, endpoint.routingView().totalLoad());
@@ -278,7 +278,7 @@ class DecodeEngineFenceProtectionTest {
                 101L, 1L, PreemptionCancelPhase.NOT_FOUND_STALE));
 
         updateStatus(Map.of(), Map.of(), 10_000);
-        assertTrue(endpoint.transferPriorityNotFoundClaimToEngineFence(101L, 1L));
+        assertTrue(endpoint.transferPriorityNotFoundClaimToEngineFence(101L, "1"));
         endpoint.abortPriorityPreemption(101L);
         assertEquals(1, endpoint.routingView().totalLoad());
         assertEquals(9_500, endpoint.realKvAvailable());
@@ -310,15 +310,22 @@ class DecodeEngineFenceProtectionTest {
                 101L, reservations.get(1L)));
     }
 
-    private void moveProtectedRequestToMissingConfirmed(long requestId,
+    private void moveProtectedRequestToMissingConfirmed(String requestId,
                                                         long hardKvTokens,
                                                         long expectedKvTokens) {
-        reserve(requestId, hardKvTokens, expectedKvTokens, 0);
-        assertTrue(beginFence(requestId));
-        updateStatus(Map.of(Long.toString(requestId),
+        long numericRequestId = Long.parseLong(requestId);
+        reserve(numericRequestId, hardKvTokens, expectedKvTokens, 0);
+        assertTrue(beginFence(numericRequestId));
+        updateStatus(Map.of(requestId,
                 task(requestId, TaskPhase.RUNNING, hardKvTokens)), Map.of(),
                 10_000 - hardKvTokens);
         updateStatus(Map.of(), Map.of(), 10_000);
+    }
+
+    private void moveProtectedRequestToMissingConfirmed(
+            long requestId, long hardKvTokens, long expectedKvTokens) {
+        moveProtectedRequestToMissingConfirmed(
+                Long.toString(requestId), hardKvTokens, expectedKvTokens);
     }
 
     private void updateStatus(Map<String, TaskInfo> running,
@@ -394,7 +401,7 @@ class DecodeEngineFenceProtectionTest {
 
     private boolean isConfirmed(long requestId) {
         return endpoint.layeredAdmissionView().confirmed().stream()
-                .anyMatch(view -> view.requestId() == requestId);
+                .anyMatch(view -> view.requestId().equals(Long.toString(requestId)));
     }
 
     private int confirmedCount() {
@@ -419,12 +426,17 @@ class DecodeEngineFenceProtectionTest {
                         Math.max(1, endpoint.routingView().totalLoad()), 0));
     }
 
-    private static TaskInfo task(long requestId, TaskPhase phase, long inputLength) {
+    private static TaskInfo task(String requestId, TaskPhase phase, long inputLength) {
         TaskInfo task = new TaskInfo();
         task.setRequestId(requestId);
         task.setPhase(phase);
         task.setInputLength(inputLength);
         task.setErrorCode(0);
         return task;
+    }
+
+    private static TaskInfo task(
+            long requestId, TaskPhase phase, long inputLength) {
+        return task(Long.toString(requestId), phase, inputLength);
     }
 }

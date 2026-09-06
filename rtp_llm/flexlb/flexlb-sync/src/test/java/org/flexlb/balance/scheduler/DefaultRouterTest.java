@@ -37,6 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -85,15 +86,16 @@ class DefaultRouterTest {
         SelectionFixture prefill = selection(RoleType.PREFILL, 7L, "p", 8001, "g1");
         SelectionFixture decode = selection(RoleType.DECODE, 7L, "d", 8002, "g1");
         PrefillState.DirectRegistration registration = mock(PrefillState.DirectRegistration.class);
-        DecodeEndpoint.ReservationHandle reservation = new DecodeEndpoint.ReservationHandle(1L, 7L, 2L);
+        DecodeEndpoint.ReservationHandle reservation =
+                new DecodeEndpoint.ReservationHandle(1L, "7", 2L);
         when(prefillSelector.select(context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
         when(decodeSelector.select(context, RoleType.DECODE, "g1"))
                 .thenReturn(PlacementResult.success(decode.selection));
         when(((PrefillEndpoint) prefill.endpoint).registerDirectRequest(
-                prefill.pin, 7L, 0L)).thenReturn(new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.ACQUIRED, registration));
+                prefill.pin, "7", 0L)).thenReturn(new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.ACQUIRED, registration));
         when(((DecodeEndpoint) decode.endpoint).reservePinned(
-                decode.pin, 7L, 32L, 48L, 50))
+                decode.pin, "7", 32L, 48L, 50))
                 .thenReturn(reservation);
 
         Response response = router.routeDirect(context);
@@ -123,9 +125,9 @@ class DefaultRouterTest {
         when(decodeSelector.select(context, RoleType.DECODE, "g1"))
                 .thenReturn(PlacementResult.success(decode.selection));
         when(((PrefillEndpoint) prefill.endpoint).registerDirectRequest(
-                prefill.pin, 8L, 0L)).thenReturn(new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.ACQUIRED, registration));
+                prefill.pin, "8", 0L)).thenReturn(new PrefillState.ReservationResult<>(PrefillState.CapacityStatus.ACQUIRED, registration));
         when(((DecodeEndpoint) decode.endpoint).reservePinned(
-                decode.pin, 8L, 32L, 48L, 50))
+                decode.pin, "8", 32L, 48L, 50))
                 .thenThrow(new IllegalStateException("decode full"));
 
         assertThrows(IllegalStateException.class,
@@ -229,14 +231,14 @@ class DefaultRouterTest {
         SelectionFixture decode = selection(
                 RoleType.DECODE, 22L, "d", 8002, "g1");
         DecodeEndpoint.ReservationHandle reservation =
-                new DecodeEndpoint.ReservationHandle(1L, 22L, 2L);
+                new DecodeEndpoint.ReservationHandle(1L, "22", 2L);
         when(prefillSelector.select(
                 context, RoleType.PREFILL, null))
                 .thenReturn(PlacementResult.success(prefill.selection));
         when(decodeSelector.select(context, RoleType.DECODE, "g1"))
                 .thenReturn(PlacementResult.success(decode.selection));
         when(((DecodeEndpoint) decode.endpoint).tryReserveQueuedPinned(
-                eq(decode.pin), eq(22L), eq(32L), anyLong(), eq(50)))
+                eq(decode.pin), eq("22"), eq(32L), anyLong(), eq(50)))
                 .thenReturn(reservation);
         ScheduledRequest victim = mock(ScheduledRequest.class);
         when(((PrefillEndpoint) prefill.endpoint).replaceQueued(
@@ -255,7 +257,7 @@ class DefaultRouterTest {
         assertEquals(PlacementResult.Status.SUCCESS, routed.status());
         verify((DecodeEndpoint) decode.endpoint, never())
                 .tryReserveQueuedPinned(
-                        eq(decode.pin), eq(22L), eq(32L), anyLong(), eq(50));
+                        eq(decode.pin), eq("22"), eq(32L), anyLong(), eq(50));
 
         QueueRouteAdmission.QueueReplacementCommit committed =
                 routed.value().commitReplacingQueuedVictims(
@@ -267,7 +269,7 @@ class DefaultRouterTest {
         DecodeEndpoint.EngineDispatchPermit permit =
                 mock(DecodeEndpoint.EngineDispatchPermit.class);
         when(((DecodeEndpoint) decode.endpoint).acquireEngineDispatchPermit(
-                anyLong(), anyLong(), anyLong()))
+                anyString(), anyLong(), anyLong()))
                 .thenReturn(new DecodeEndpoint.EngineDispatchPermitAcquisition(
                         DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED,
                         permit));
@@ -451,7 +453,7 @@ class DefaultRouterTest {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         SchedulingTestConfig.usePriorityQueue(config);
         Request request = new Request();
-        request.setRequestId(requestId);
+        request.setRequestId(Long.toString(requestId));
         request.setSeqLen(32L);
         request.setMaxNewTokens(16);
         BalanceContext context = new BalanceContext();
@@ -465,6 +467,15 @@ class DefaultRouterTest {
     private static SelectionFixture selection(
             RoleType role,
             long requestId,
+            String ip,
+            int httpPort,
+            String group) {
+        return selection(role, Long.toString(requestId), ip, httpPort, group);
+    }
+
+    private static SelectionFixture selection(
+            RoleType role,
+            String requestId,
             String ip,
             int httpPort,
             String group) {

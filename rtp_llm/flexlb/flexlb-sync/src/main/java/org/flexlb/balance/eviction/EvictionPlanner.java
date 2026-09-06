@@ -37,7 +37,7 @@ public final class EvictionPlanner {
             .thenComparing(
                     ScheduledRequest::enqueuedAtMs,
                     Comparator.reverseOrder())
-            .thenComparingLong(ScheduledRequest::requestId);
+            .thenComparing(ScheduledRequest::requestId);
 
     private EvictionPlanner() {
     }
@@ -108,13 +108,15 @@ public final class EvictionPlanner {
         // 9.3: retain the scalar cost for diagnostics; structured priority
         // harm is the absolute comparison dimension.
         long rawCost = 0;
-        long tieBreak = Long.MAX_VALUE;
+        String tieBreak = victims.getFirst().requestId();
         PriorityHarmProfile.Builder harmProfile = PriorityHarmProfile.builder();
         for (ScheduledRequest victim : victims) {
             rawCost = PriorityCostFunction.saturatedAdd(
                     rawCost, PriorityCostFunction.f(victim.priority()));
             harmProfile.add(victim.priority(), 1);
-            tieBreak = Math.min(tieBreak, victim.requestId());
+            if (victim.requestId().compareTo(tieBreak) < 0) {
+                tieBreak = victim.requestId();
+            }
         }
         PlanCost cost = new PlanCost(
                 harmProfile.build(), victims.size(), tieBreak);
@@ -132,7 +134,7 @@ public final class EvictionPlanner {
     static final Comparator<DecodeRequestView> DECODE_SLOT_ORDER = Comparator
             .comparingInt(DecodeRequestView::priority)
             .thenComparingInt(v -> v.phase().ordinal())
-            .thenComparingLong(DecodeRequestView::requestId);
+            .thenComparing(DecodeRequestView::requestId);
 
     /**
      * Candidate preference for KV eviction (design doc 12.4): priority asc →
@@ -143,7 +145,7 @@ public final class EvictionPlanner {
             .comparingInt(DecodeRequestView::priority)
             .thenComparingInt(v -> v.phase().ordinal())
             .thenComparing(v -> PriorityCostFunction.kvBucket(v.kvTokens()), Comparator.reverseOrder())
-            .thenComparingLong(DecodeRequestView::requestId);
+            .thenComparing(DecodeRequestView::requestId);
 
     /**
      * Plan the cheapest decode eviction that clears the incoming request's
@@ -369,7 +371,7 @@ public final class EvictionPlanner {
     private static DecodeVictimSet selectSlotVictims(PriorityRequestEnvelope envelope,
                                                      DecodeEndpointSnapshot ep,
                                                      long deficit,
-                                                     Set<Long> excludedVictimIds,
+                                                     Set<String> excludedVictimIds,
                                                      VictimOwnership ownership) {
         List<DecodeRequestView> candidates =
                 lowerPriorityCandidates(envelope, ep, excludedVictimIds, false, ownership, true);
@@ -405,7 +407,7 @@ public final class EvictionPlanner {
     private static DecodeVictimSet selectKvVictims(PriorityRequestEnvelope envelope,
                                                    DecodeEndpointSnapshot ep,
                                                    long kvDeficit,
-                                                   Set<Long> excludedVictimIds,
+                                                   Set<String> excludedVictimIds,
                                                    VictimOwnership ownership) {
         List<DecodeRequestView> candidates =
                 lowerPriorityCandidates(envelope, ep, excludedVictimIds, true, ownership, false);
@@ -454,7 +456,7 @@ public final class EvictionPlanner {
      */
     private static List<DecodeRequestView> lowerPriorityCandidates(PriorityRequestEnvelope envelope,
                                                                        DecodeEndpointSnapshot ep,
-                                                                       Set<Long> excludedVictimIds,
+                                                                       Set<String> excludedVictimIds,
                                                                        boolean releasableKvOnly,
                                                                        VictimOwnership ownership,
                                                                        boolean excludeQueued) {
@@ -485,7 +487,7 @@ public final class EvictionPlanner {
     private static void addConfirmedCandidates(List<DecodeRequestView> candidates,
                                                List<DecodeRequestView> entries,
                                                PriorityRequestEnvelope envelope,
-                                               Set<Long> excludedVictimIds,
+                                               Set<String> excludedVictimIds,
                                                boolean releasableKvOnly) {
         for (DecodeRequestView entry : entries) {
             if (entry.phase().isEngineConfirmed()
@@ -499,8 +501,8 @@ public final class EvictionPlanner {
         }
     }
 
-    private static Set<Long> victimIds(List<DecodeRequestView> victims) {
-        Set<Long> ids = new java.util.HashSet<>(victims.size());
+    private static Set<String> victimIds(List<DecodeRequestView> victims) {
+        Set<String> ids = new java.util.HashSet<>(victims.size());
         for (DecodeRequestView victim : victims) {
             ids.add(victim.requestId());
         }
@@ -524,9 +526,11 @@ public final class EvictionPlanner {
                                                               PriorityHarmProfile harmProfile,
                                                               long totalCost,
                                                               long freedKvTokens) {
-        long tieBreak = Long.MAX_VALUE;
+        String tieBreak = victims.getFirst().requestId();
         for (DecodeRequestView victim : victims) {
-            tieBreak = Math.min(tieBreak, victim.requestId());
+            if (victim.requestId().compareTo(tieBreak) < 0) {
+                tieBreak = victim.requestId();
+            }
         }
         PlanCost cost = new PlanCost(
                 harmProfile, victims.size(), tieBreak);

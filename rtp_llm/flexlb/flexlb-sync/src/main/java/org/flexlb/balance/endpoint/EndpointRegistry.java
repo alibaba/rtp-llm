@@ -21,7 +21,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 
 @Component
 public class EndpointRegistry {
@@ -1004,7 +1004,7 @@ public class EndpointRegistry {
      * @param ttlMs max age before eviction
      */
     public void evictExpiredOrphans(long ttlMs,
-                                    LongPredicate schedulerOwnsRequest) {
+                                    Predicate<String> schedulerOwnsRequest) {
         endpoints(RoleType.PREFILL).forEach((endpoint, worker) -> {
             PrefillEndpoint ep = (PrefillEndpoint) worker;
             logEndpointEviction(RoleType.PREFILL, endpoint,

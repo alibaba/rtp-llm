@@ -23,7 +23,7 @@ import org.slf4j.LoggerFactory;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 
 public class PrefillEndpoint extends WorkerEndpoint {
 
@@ -311,7 +311,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * has registered successfully.
      */
     public PrefillState.ReservationResult<PrefillState.DirectRegistration> registerDirectRequest(
-            GenerationPin pin, long requestId, long predictedMs) {
+            GenerationPin pin, String requestId, long predictedMs) {
         requirePinnedGeneration(pin);
         return prefillState.tryRegisterDirect(requestId, predictedMs, maximumDirectRequests);
     }
@@ -522,7 +522,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /** Evict only batches with no request generation still owned by the scheduler. */
     public int evictExpiredBatches(long ttlMs,
-                                   LongPredicate schedulerOwnsRequest) {
+                                   Predicate<String> schedulerOwnsRequest) {
         return prefillState.evictExpiredBatches(
                 ttlMs, schedulerOwnsRequest);
     }
@@ -537,14 +537,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
      */
     /** Evict route-request entries which have no live scheduler generation. */
     public int evictExpiredRequests(long ttlMs,
-                                    LongPredicate schedulerOwnsRequest) {
+                                    Predicate<String> schedulerOwnsRequest) {
         return prefillState.evictExpiredIndividuals(
                 ttlMs, schedulerOwnsRequest);
     }
 
     /** Evict endpoint orphans without racing scheduler-owned generations. */
     public int evictExpiredInflight(long ttlMs,
-                                    LongPredicate schedulerOwnsRequest) {
+                                    Predicate<String> schedulerOwnsRequest) {
         return evictExpiredBatches(ttlMs, schedulerOwnsRequest)
                 + evictExpiredRequests(ttlMs, schedulerOwnsRequest);
     }

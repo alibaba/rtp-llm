@@ -83,7 +83,7 @@ class WorkerBatcherQueueTest {
 
         WorkerBatcher.QueueSnapshot snapshot =
                 runtime.captureQueueSnapshot();
-        assertEquals(List.of(2L, 1L, 3L, 4L), requestIds(snapshot.items()));
+        assertEquals(List.of("2", "1", "3", "4"), requestIds(snapshot.items()));
         assertEquals(4, snapshot.items().size());
         assertEquals(SchedulingTestConfig.useQueueCapacity(config)
                 .getMaxWaitingRequestsPerPrefillWorker(), snapshot.queueCapacity());
@@ -100,7 +100,7 @@ class WorkerBatcherQueueTest {
         assertTrue(runtime.offer(item(4, 50, now + 9_000, now, 128)));
         assertTrue(runtime.offer(item(3, 50, now + 9_000, now, 128)));
 
-        assertEquals(List.of(1L, 2L, 4L, 3L), requestIds(
+        assertEquals(List.of("1", "2", "4", "3"), requestIds(
                 runtime.captureQueueSnapshot().items()));
     }
 
@@ -114,7 +114,7 @@ class WorkerBatcherQueueTest {
         assertTrue(runtime.offer(item(2, 50, now + 500, now + 100, 128)));
         assertTrue(runtime.offer(item(3, 70, now + 100, now + 200, 128)));
 
-        assertEquals(List.of(1L, 2L, 3L), requestIds(
+        assertEquals(List.of("1", "2", "3"), requestIds(
                 runtime.captureQueueSnapshot().items()));
     }
 
@@ -186,7 +186,7 @@ class WorkerBatcherQueueTest {
     private ScheduledRequest item(long requestId, int priority, long expiresAtMs,
                            long enqueuedAtMs, long seqLen) {
         Request request = new Request();
-        request.setRequestId(requestId);
+        request.setRequestId(Long.toString(requestId));
         request.setSeqLen(seqLen);
         request.setPriority(priority);
         BalanceContext context = new BalanceContext();
@@ -206,7 +206,7 @@ class WorkerBatcherQueueTest {
                 enqueuedAtMs);
     }
 
-    private static List<Long> requestIds(List<ScheduledRequest> items) {
+    private static List<String> requestIds(List<ScheduledRequest> items) {
         return items.stream().map(ScheduledRequest::requestId).toList();
     }
 

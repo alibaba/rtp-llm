@@ -25,8 +25,8 @@ class PrefillStateSnapshotTest {
 
     @Test
     void concurrentReadersShareACompleteImmutableMaterialization() throws Exception {
-        var second = state.tryRegisterDirect(2, 20, 0).reservation();
-        var first = state.tryRegisterDirect(1, 10, 0).reservation();
+        var second = state.tryRegisterDirect("2", 20, 0).reservation();
+        var first = state.tryRegisterDirect("1", 10, 0).reservation();
         var captured = capture();
         try (var executor = Executors.newFixedThreadPool(8)) {
             CountDownLatch start = new CountDownLatch(1);
@@ -42,7 +42,7 @@ class PrefillStateSnapshotTest {
             for (var reader : readers) {
                 assertSame(shared, reader.get(5, TimeUnit.SECONDS));
             }
-            assertEquals(List.of(1L, 2L), shared.requests().stream()
+            assertEquals(List.of("1", "2"), shared.requests().stream()
                     .map(WorkSnapshot.RequestWork::requestId).toList());
             second.close();
             first.close();
@@ -53,7 +53,7 @@ class PrefillStateSnapshotTest {
 
     @Test
     void clockRollbackRecapturesWorkWithoutMutatingEarlierSnapshots() {
-        state.tryRegisterDirect(1, 10, 0);
+        state.tryRegisterDirect("1", 10, 0);
         var original = capture();
         clock.set(101);
         assertSame(original.work(), capture().work());

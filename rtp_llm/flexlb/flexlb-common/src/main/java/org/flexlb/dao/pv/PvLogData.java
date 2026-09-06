@@ -16,7 +16,7 @@ public class PvLogData {
 
     // Keep identifiers numeric on the wire while allowing pre-parse failures to omit them.
     @JsonInclude(JsonInclude.Include.NON_NULL)
-    private Long requestId;
+    private String requestId;
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private Long seqLen;
     @JsonInclude(JsonInclude.Include.NON_NULL)

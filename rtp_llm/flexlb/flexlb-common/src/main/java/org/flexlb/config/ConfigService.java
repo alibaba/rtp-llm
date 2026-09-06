@@ -29,7 +29,7 @@ import java.util.function.Consumer;
  */
 @Slf4j
 @Component
-@DependsOn({"environmentConfigSource", "nacosConfigSource"})
+@DependsOn({"environmentConfigSource", "nacosConfigSource", "uniConfigConfigSource"})
 public class ConfigService {
 
     public static final String FLEXLB_CONFIG_ENV = "FLEXLB_CONFIG";

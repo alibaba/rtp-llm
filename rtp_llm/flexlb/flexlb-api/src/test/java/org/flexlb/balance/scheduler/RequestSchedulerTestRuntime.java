@@ -113,12 +113,20 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
     /** Return the canonical request future retained by the exact test slot. */
     public CompletableFuture<Response> requestFuture(long requestId) {
+        return requestFuture(Long.toString(requestId));
+    }
+
+    public CompletableFuture<Response> requestFuture(String requestId) {
         RequestSlot slot = lifecycle.requestSlot(requestId);
         return slot == null ? null : slot.future();
     }
 
     /** Return the exact item currently owned by a fixture request slot. */
     public ScheduledRequest activeItem(long requestId) {
+        return activeItem(Long.toString(requestId));
+    }
+
+    public ScheduledRequest activeItem(String requestId) {
         RequestSlot slot = lifecycle.requestSlot(requestId);
         if (slot == null) {
             return null;

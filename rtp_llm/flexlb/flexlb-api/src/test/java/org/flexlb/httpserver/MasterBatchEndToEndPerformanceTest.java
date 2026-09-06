@@ -32,12 +32,14 @@ import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.consistency.MasterElectService;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
 import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.mock.MockPrefillWorker;
 import org.flexlb.mock.MockWorkerBehavior;
+import org.flexlb.mock.RequestIdFixtures;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.service.RecentCacheKeyTraceReporter;
@@ -830,7 +832,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         for (int index = 0; index < requestCount; index++) {
             // Keep only the real wire payload once the measured window starts.
             serializedRequests[index] =
-                    scheduleRequest(firstRequestId + index, index).toByteArray();
+                    scheduleRequest(Long.toString(firstRequestId + index), index).toByteArray();
             futures.add(new CompletableFuture<>());
         }
 
@@ -887,7 +889,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 long requestId = firstRequestId + index;
                 System.out.printf(
                         "FlexLB Master exceptional request: request_id=%d state=%s%n",
-                        requestId, scheduler.getRequestState(requestId, 0L));
+                        requestId, scheduler.getRequestState(Long.toString(requestId), 0L));
             }
             throw failure;
         }
@@ -1020,15 +1022,14 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         }
     }
 
-    private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB scheduleRequest(long requestId,
+    private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB scheduleRequest(String requestId,
                                                                                   int requestIndex) {
         RealRequestTemplate template = realRequestTemplates.get(
                 Math.floorMod(requestIndex, realRequestTemplates.size()));
-        EngineRpcService.GenerateInputPB generateInput = template.generateInput().toBuilder()
-                .setRequestId(requestId)
+        EngineRpcService.GenerateInputPB generateInput = RequestIdFixtures.write(template.generateInput().toBuilder(), requestId)
                 .setStartTime(System.currentTimeMillis())
                 .setRequestInfo(template.generateInput().getRequestInfo().toBuilder()
-                        .setRequestId(Long.toString(requestId))
+                        .setRequestId(String.valueOf(requestId))
                         .build())
                 .build();
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
@@ -1122,7 +1123,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
     private BatchSummary summarizeEngineBatches(long firstRequestId,
                                                 List<MockPrefillWorker> workers) {
-        Set<Long> requestIds = new HashSet<>();
+        Set<String> requestIds = new HashSet<>();
         Set<Integer> inputLengths = new HashSet<>();
         int maxBatchSize = 0;
         int totalRequests = 0;
@@ -1143,11 +1144,11 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                             : slot.getRequestsList()) {
                         batchSize++;
                         totalRequests++;
-                        long requestId = request.getInput().getRequestId();
+                        String requestId = RequestId.parse(request.getInput());
                         assertTrue(requestIds.add(requestId),
                                 "mock engine received a duplicate request_id");
                         int inputLength = request.getInput().getTokenIdsCount();
-                        int requestIndex = Math.toIntExact(requestId - firstRequestId);
+                        int requestIndex = Math.toIntExact(Long.parseLong(requestId) - firstRequestId);
                         RealRequestTemplate template = realRequestTemplates.get(
                                 Math.floorMod(requestIndex, realRequestTemplates.size()));
                         assertEquals(template.seqLen(), inputLength,
@@ -1357,10 +1358,10 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         return List.copyOf(templates);
     }
 
-    private static Set<Long> expectedRequestIds(long firstRequestId, int requestCount) {
-        Set<Long> expected = new HashSet<>(requestCount);
+    private static Set<String> expectedRequestIds(long firstRequestId, int requestCount) {
+        Set<String> expected = new HashSet<>(requestCount);
         for (int index = 0; index < requestCount; index++) {
-            expected.add(firstRequestId + index);
+            expected.add(Long.toString(firstRequestId + index));
         }
         return expected;
     }
@@ -1465,7 +1466,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
     private record BatchSummary(int batchCount, int maxBatchSize, double averageBatchSize,
                                 double averageInputTokens, int distinctInputLengths,
-                                int activeWorkerCount, Set<Long> requestIds) {
+                                int activeWorkerCount, Set<String> requestIds) {
     }
 
     private enum DeliveryMode {

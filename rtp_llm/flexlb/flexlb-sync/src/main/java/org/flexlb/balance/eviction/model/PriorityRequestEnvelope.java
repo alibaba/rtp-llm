@@ -11,7 +11,7 @@ package org.flexlb.balance.eviction.model;
  * @param hardKvTokens     minimum KV demand (= seqLen, prompt must fit)
  */
 public record PriorityRequestEnvelope(
-        long requestId,
+        String requestId,
         int priority,
         long hardKvTokens) {
 }

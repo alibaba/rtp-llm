@@ -69,7 +69,7 @@ class CostBasedPrefillSelectionMetricTest {
                 new WorkerDirectory(registry), cache, reporter);
 
         Request request = new Request();
-        request.setRequestId(10_001L);
+        request.setRequestId("10001");
         request.setSeqLen(1_000L);
         request.setPriority(50);
         request.setBlockCacheKeys(List.of());
@@ -187,7 +187,7 @@ class CostBasedPrefillSelectionMetricTest {
 
         Set<String> selectedIps = new HashSet<>();
         for (int index = 0; index < 3; index++) {
-            context.getRequest().setRequestId(30_000L + index);
+            context.getRequest().setRequestId(Long.toString(30_000L + index));
             try (SelectedRole selected = select()) {
                 selectedIps.add(selected.serverStatus().getServerIp());
             }
@@ -221,7 +221,7 @@ class CostBasedPrefillSelectionMetricTest {
         PrefillEndpoint cacheEndpoint = (PrefillEndpoint)
                 registry.get(RoleType.PREFILL, "10.0.0.2:8080");
         cacheEndpoint.getLastSelectedTime().set(Long.MAX_VALUE);
-        context.getRequest().setRequestId(20_002L);
+        context.getRequest().setRequestId("20002");
 
         try (SelectedRole selected = select()) {
             assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
@@ -259,7 +259,7 @@ class CostBasedPrefillSelectionMetricTest {
         config.getRouter().getRoles().getPrefill().setCacheAffinity(affinity);
 
         publish("10.0.0.2", 8080);
-        context.getRequest().setRequestId(20_001L);
+        context.getRequest().setRequestId("20001");
         context.getRequest().setBlockCacheKeys(List.of(1L, 2L, 3L, 4L, 5L));
         context.getRequest().setCacheKeyBlockSize(100L);
         when(cache.findMatchingEngines(any()))

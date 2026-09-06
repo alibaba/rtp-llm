@@ -11,6 +11,7 @@ import java.util.Comparator;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.PriorityQueue;
 
 /** Pure frozen-snapshot TTFT projection shared by endpoint selection policies. */
@@ -19,7 +20,7 @@ final class RouteTimelineProjector {
     private static final String INVALID_PREDICTION_DETAIL =
             "PREDICTOR_RETURNED_INVALID_VALUE";
     private final PredictionBoundary predictions = new PredictionBoundary();
-    private long requestId;
+    private String requestId;
     private int priority;
     private long enqueuedAtMs;
     private long expiresAtMs;
@@ -43,7 +44,7 @@ final class RouteTimelineProjector {
     }
 
     void reset(
-            long requestId,
+            String requestId,
             int priority,
             long enqueuedAtMs,
             long expiresAtMs,
@@ -183,7 +184,7 @@ final class RouteTimelineProjector {
                 }
                 continue;
             }
-            if (item.requestId() == requestId) {
+            if (Objects.equals(item.requestId(), requestId)) {
                 return unavailable("INCOMING_ALREADY_ACTIVE");
             }
             eligibleActive.add(item);
@@ -371,14 +372,14 @@ final class RouteTimelineProjector {
     }
 
     private static boolean containsCommittedRequest(
-            WorkSnapshot committed, long requestId) {
+            WorkSnapshot committed, String requestId) {
         return committed.containsRequest(requestId);
     }
 
     private static boolean containsActiveRequest(
-            QueueSnapshot queue, long requestId) {
+            QueueSnapshot queue, String requestId) {
         for (GroupPlanner.Item item : queue.activeItems()) {
-            if (item.requestId() == requestId) {
+            if (Objects.equals(item.requestId(), requestId)) {
                 return true;
             }
         }

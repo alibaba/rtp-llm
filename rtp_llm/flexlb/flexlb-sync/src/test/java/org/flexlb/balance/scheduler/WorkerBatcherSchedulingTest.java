@@ -191,7 +191,7 @@ class WorkerBatcherSchedulingTest {
             int priority,
             long enqueuedAtMs) {
         Request request = new Request();
-        request.setRequestId(requestId);
+        request.setRequestId(Long.toString(requestId));
         request.setPriority(priority);
         request.setSeqLen(10L);
         BalanceContext context = new BalanceContext();

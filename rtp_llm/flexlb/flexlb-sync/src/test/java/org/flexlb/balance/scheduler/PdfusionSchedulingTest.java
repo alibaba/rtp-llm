@@ -133,10 +133,11 @@ class PdfusionSchedulingTest {
             PrefillEndpoint endpoint = (PrefillEndpoint) endpoints.get(RoleType.PDFUSION, worker.getIpPort());
             assertEquals(1, endpoint.admissionPendingRequestCount());
             var committedWork = endpoint.captureRouteProjectionInputs().work();
-            assertTrue(committedWork.containsRequest(requestId));
+            assertTrue(committedWork.containsRequest(Long.toString(requestId)));
             TaskInfo finished = new TaskInfo();
-            finished.setRequestId(requestId);
-            finished.setBatchId(direct ? 0L : lifecycle.getRequestState(requestId, 0L).batchId());
+            finished.setRequestId(Long.toString(requestId));
+            finished.setBatchId(direct ? 0L : lifecycle.getRequestState(
+                    Long.toString(requestId), 0L).batchId());
             finished.setPhase(TaskPhase.RUNNING);
             finished.setErrorCode(0L);
             status.setStatusVersion(2L);
@@ -153,10 +154,14 @@ class PdfusionSchedulingTest {
             projection.run();
             assertEquals(0, endpoint.admissionPendingRequestCount());
             assertEquals(0, endpoint.getInflightBatchCount());
-            assertTrue(committedWork.containsRequest(requestId), "published snapshots stay immutable");
-            assertTrue(!endpoint.captureRouteProjectionInputs().work().containsRequest(requestId));
+            assertTrue(committedWork.containsRequest(Long.toString(requestId)),
+                    "published snapshots stay immutable");
+            assertTrue(!endpoint.captureRouteProjectionInputs().work()
+                    .containsRequest(Long.toString(requestId)));
             if (!direct) {
-                assertEquals(RequestState.Phase.COMPLETED, lifecycle.getRequestState(requestId, 0L).state());
+                assertEquals(RequestState.Phase.COMPLETED,
+                        lifecycle.getRequestState(
+                                Long.toString(requestId), 0L).state());
                 assertEquals(0, lifecycle.liveRequestCount());
             }
         } finally {

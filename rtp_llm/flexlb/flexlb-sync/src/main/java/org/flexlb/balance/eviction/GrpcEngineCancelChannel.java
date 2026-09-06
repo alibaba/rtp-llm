@@ -47,7 +47,7 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
 
     @Override
     public CompletableFuture<CancelAck> cancel(CancelTarget target,
-                                               long requestId,
+                                               String requestId,
                                                long timeoutMs) {
         if (target == null || !target.isRoutable()) {
             // No routable endpoint — report the transport-failure branch: the
@@ -61,7 +61,7 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
         try {
             EngineRpcService.CancelRequestPB requestPB =
                     EngineRpcService.CancelRequestPB.newBuilder()
-                            .setRequestId(requestId)
+                            .setRequestId(Long.parseLong(requestId))
                             .build();
 
             // Fire-and-forget contract: fork the gRPC Context so that when the

@@ -1,6 +1,7 @@
 package org.flexlb.httpserver;
 
 import io.grpc.ManagedChannel;
+import io.grpc.Metadata;
 import io.grpc.Server;
 import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
@@ -58,7 +59,7 @@ class FlexlbForwardHopGuardNettyTest {
             try (Client client = Client.connect(node.grpcPort())) {
                 long started = System.nanoTime();
                 for (int i = 0; i < 8; i++) {
-                    responses.add(client.stub.schedule(request(71_000L + i)));
+                    responses.add(client.stub.schedule(request(String.valueOf(71_000L + i))));
                 }
                 assertTrue(Duration.ofNanos(System.nanoTime() - started)
                                 .compareTo(Duration.ofSeconds(2)) < 0,
@@ -87,7 +88,7 @@ class FlexlbForwardHopGuardNettyTest {
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB response;
             long started = System.nanoTime();
             try (Client client = Client.connect(first.grpcPort())) {
-                response = client.stub.schedule(request(72_001L));
+                response = client.stub.schedule(request("72001"));
             }
 
             assertTrue(Duration.ofNanos(System.nanoTime() - started)
@@ -108,7 +109,7 @@ class FlexlbForwardHopGuardNettyTest {
         }
     }
 
-    private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(long requestId) {
+    private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(String requestId) {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(requestId)
                 .setSeqLen(1024)
@@ -196,7 +197,7 @@ class FlexlbForwardHopGuardNettyTest {
                 @Override
                 public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
                         ServerCall<ReqT, RespT> call,
-                        io.grpc.Metadata headers,
+                        Metadata headers,
                         ServerCallHandler<ReqT, RespT> next) {
                     inboundCalls.incrementAndGet();
                     return next.startCall(call, headers);

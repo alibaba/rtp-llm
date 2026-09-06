@@ -27,7 +27,7 @@ import java.util.function.BooleanSupplier;
  */
 public final class QueueRouteAdmission implements AutoCloseable {
 
-    private final long requestId;
+    private final String requestId;
     private final Response response;
     private final PrefillEndpoint selectedPrefillEndpoint;
     private final DecodeEndpoint selectedDecodeEndpoint;
@@ -36,7 +36,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
     private WorkerEndpoint blockedEndpoint;
 
     private QueueRouteAdmission(
-            long requestId,
+            String requestId,
             Response response,
             OwnedRoute ownedRoute) {
         this.requestId = requestId;
@@ -50,7 +50,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
             BalanceContext context,
             List<SelectedRole> selectedRoles,
             Response response) {
-        long requestId = context.getRequestId();
+        String requestId = context.getRequestId();
 
         PrefillEndpoint prefillEndpoint = null;
         WorkerEndpoint.GenerationPin prefillPin = null;
@@ -64,7 +64,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
         try {
             for (SelectedRole selected : selectedRoles) {
                 ServerStatus status = selected.serverStatus();
-                if (status.getRequestId() != requestId) {
+                if (!Objects.equals(status.getRequestId(), requestId)) {
                     throw new IllegalStateException(
                             "selected role belongs to another request");
                 }
@@ -181,7 +181,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
         OwnedRoute route = requireOwned();
         if (endpoint == null || reservation == null
                 || endpoint != route.decodeEndpoint()
-                || reservation.requestId() != requestId
+                || !Objects.equals(reservation.requestId(), requestId)
                 || route.decodeReservation() != null) {
             if (endpoint != null && reservation != null) {
                 endpoint.releaseReservationExact(reservation);
@@ -206,7 +206,7 @@ public final class QueueRouteAdmission implements AutoCloseable {
             BalanceContext context,
             CompletableFuture<Response> future,
             long enqueuedAtMs) {
-        if (context.getRequestId() != requestId) {
+        if (!Objects.equals(context.getRequestId(), requestId)) {
             throw new IllegalArgumentException(
                     "queue admission cannot build another request");
         }

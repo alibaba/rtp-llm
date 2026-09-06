@@ -13,7 +13,7 @@ import org.flexlb.enums.TaskStateEnum;
 public class TaskInfo {
 
     @JsonProperty("request_id")
-    private long requestId;
+    private String requestId;
     @JsonProperty("prefix_length")
     private long prefixLength;    // cache hit len
     @JsonProperty("prefix_length_valid")

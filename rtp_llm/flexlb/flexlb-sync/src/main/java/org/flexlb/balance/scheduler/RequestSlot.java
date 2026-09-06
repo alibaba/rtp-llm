@@ -34,7 +34,7 @@ final class RequestSlot {
     private static final int OUTSTANDING_ADMISSION_CLOSED = -1;
 
     private final RequestCompletionPublisher completionPublisher;
-    private final long requestId;
+    private final String requestId;
     private final long createdAtMs;
     private final RequestFuture future;
     private RequestState.Phase state = RequestState.Phase.QUEUED;
@@ -74,7 +74,7 @@ final class RequestSlot {
 
     RequestSlot(
             RequestCompletionPublisher completionPublisher,
-            long requestId,
+            String requestId,
             AtomicInteger outstandingCounter,
             int admissionPriority,
             Consumer<RequestSlot> removeAdmissionCandidate) {
@@ -95,7 +95,7 @@ final class RequestSlot {
         return admissionPriority;
     }
 
-    long requestId() {
+    String requestId() {
         return requestId;
     }
 
@@ -303,7 +303,7 @@ final class RequestSlot {
                 || !isOpen()
                 || item != null
                 || admissionMutation == null
-                || candidate.requestId() != requestId
+                || !Objects.equals(candidate.requestId(), requestId)
                 || candidate.future() != future) {
             return false;
         }
@@ -1399,7 +1399,7 @@ final class RequestSlot {
     private PreemptionRegistration exactPreemption(
             PreemptionRegistration claim) {
         if (!(claim instanceof PreemptionRegistration exact)
-                || exact.requestId() != requestId
+                || !Objects.equals(exact.requestId(), requestId)
                 || preemptionOwner() != exact) {
             return null;
         }

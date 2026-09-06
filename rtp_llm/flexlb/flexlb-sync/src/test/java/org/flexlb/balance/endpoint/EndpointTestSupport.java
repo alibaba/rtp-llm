@@ -224,11 +224,19 @@ public final class EndpointTestSupport {
             PrefillEndpoint endpoint,
             long requestId,
             long predictedMs) {
+        return registerDirect(endpoint, Long.toString(requestId), predictedMs);
+    }
+
+    static PrefillState.DirectRegistration registerDirect(
+            PrefillEndpoint endpoint,
+            String requestId,
+            long predictedMs) {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             if (pin == null) {
                 throw new IllegalStateException("endpoint is retired");
             }
-            return endpoint.registerDirectRequest(pin, requestId, predictedMs).reservation();
+            return endpoint.registerDirectRequest(
+                    pin, requestId, predictedMs).reservation();
         }
     }
 

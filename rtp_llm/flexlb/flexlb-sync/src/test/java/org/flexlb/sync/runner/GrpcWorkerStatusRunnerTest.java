@@ -102,7 +102,7 @@ class GrpcWorkerStatusRunnerTest {
                 .thenReturn(activity);
 
         EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(123L)
+                .setRequestId("123")
                 .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
                 .build();
         EngineRpcService.WorkerStatusPB response =
@@ -130,7 +130,7 @@ class GrpcWorkerStatusRunnerTest {
         verify(endpoint).observeStatusHeartbeat(
                 org.mockito.Mockito.eq(status), observation.capture());
         assertTrue(observation.getValue().runningTasks().values().stream()
-                .anyMatch(active -> active.requestId() == 123L));
+                .anyMatch(active -> active.requestId().equals("123")));
         assertTrue(projected.get());
         WorkerStatus.PollLease nextPoll = status.tryBeginStatusPoll();
         assertNotNull(nextPoll, "the asynchronous owner must close the exact poll lease");

@@ -66,9 +66,9 @@ class OutstandingPriorityAdmissionTest {
         assertFalse(medium.isDone());
         assertFalse(high.isDone());
         assertCode(StrategyErrorType.QUEUE_FULL, registry.register(context(4, 50), 2));
-        assertNull(registry.requestSlot(4));
+        assertNull(registry.requestSlot("4"));
         assertEquals(2, registry.liveRequestCount());
-        registry.cancelRequest(3, 0, CancelReason.CLIENT_CANCELLED);
+        registry.cancelRequest("3", 0, CancelReason.CLIENT_CANCELLED);
         assertCode(StrategyErrorType.REQUEST_CANCELLED, high);
         assertFalse(registry.register(context(5, 10), 2).isDone());
         assertCode(StrategyErrorType.QUEUE_FULL, registry.register(context(6, 10), 2));
@@ -92,7 +92,7 @@ class OutstandingPriorityAdmissionTest {
         expired.setSchedulingMetadata(SchedulingMetadata.explicit(90, System.currentTimeMillis() - 1));
         assertCode(StrategyErrorType.BATCH_SLO_EXPIRED, registry.register(expired, 1));
         assertFalse(low.isDone());
-        assertNull(registry.requestSlot(2));
+        assertNull(registry.requestSlot("2"));
     }
 
     @Test
@@ -131,7 +131,7 @@ class OutstandingPriorityAdmissionTest {
     @Test
     void admissionMutationIsNotLocallyPreemptibleUntilItsOwnerSettles() throws Exception {
         var low = registry.register(context(1, 10), 1);
-        try (var mutation = registry.claimAdmissionMutation(1, low)) {
+        try (var mutation = registry.claimAdmissionMutation("1", low)) {
             assertNotNull(mutation);
             assertCode(StrategyErrorType.QUEUE_FULL, registry.register(context(2, 90), 1));
             assertFalse(low.isDone());
@@ -143,7 +143,7 @@ class OutstandingPriorityAdmissionTest {
     @Test
     void aDeliveryClaimCannotYieldItsOutstandingPermit() throws Exception {
         var low = registry.register(context(1, 10), 1);
-        var slot = registry.requestSlot(1);
+        var slot = registry.requestSlot("1");
         synchronized (slot) {
             slot.startRouteDecisionDelivery();
         }
@@ -157,7 +157,7 @@ class OutstandingPriorityAdmissionTest {
         var lowContext = context(1, 10);
         var low = registry.register(lowContext, 1);
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
-        var reservation = new DecodeEndpoint.ReservationHandle(1, 1, 1);
+        var reservation = new DecodeEndpoint.ReservationHandle(1, "1", 1);
         var item = new ScheduledRequest(lowContext, low, new Response(), null, null, null,
                 decode, reservation, System.currentTimeMillis());
         RequestLifecycleTestSupport.bind(registry, new RequestLifecycleTestSupport.Registered(item, low));

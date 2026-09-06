@@ -248,7 +248,7 @@ class TransientCapacityQueueContractTest {
                     fixture.metrics, attemptsBeforeStatus + 1, 5_000));
             assertTrue(awaitPlacementQuiescence(
                     fixture.metrics, 100L, 5_000L));
-            List<Long> capacityRetryOrder =
+            List<String> capacityRetryOrder =
                     fixture.metrics.requestIdsFrom(attemptsBeforeStatus);
             assertFalse(capacityRetryOrder.isEmpty());
             assertEquals(1, fixture.submission.requestIds().size(),
@@ -358,7 +358,7 @@ class TransientCapacityQueueContractTest {
             fixture.releaseCapacity();
 
             assertTrue(waiting.get(2, TimeUnit.SECONDS).isSuccess());
-            assertEquals(List.of(101L), fixture.submission.requestIds());
+            assertEquals(List.of("101"), fixture.submission.requestIds());
         }
     }
 
@@ -376,7 +376,7 @@ class TransientCapacityQueueContractTest {
             fixture.releaseCapacity();
 
             assertTrue(waiting.get(2, TimeUnit.SECONDS).isSuccess());
-            assertEquals(List.of(201L), fixture.submission.requestIds());
+            assertEquals(List.of("201"), fixture.submission.requestIds());
         }
     }
 
@@ -402,7 +402,7 @@ class TransientCapacityQueueContractTest {
 
             assertTrue(fixture.submission.awaitCommands(
                     1, 2, TimeUnit.SECONDS));
-            assertEquals(List.of(251L), fixture.submission.requestIds());
+            assertEquals(List.of("251"), fixture.submission.requestIds());
             assertFalse(fixture.submission.awaitCommands(
                     1, 200, TimeUnit.MILLISECONDS));
         }
@@ -425,7 +425,7 @@ class TransientCapacityQueueContractTest {
 
             assertTrue(fixture.submission.awaitCommands(
                     1, 2, TimeUnit.SECONDS));
-            assertEquals(List.of(262L), fixture.submission.requestIds());
+            assertEquals(List.of("262"), fixture.submission.requestIds());
             assertFalse(fixture.submission.awaitCommands(
                     1, 200, TimeUnit.MILLISECONDS));
         }
@@ -443,7 +443,7 @@ class TransientCapacityQueueContractTest {
 
             assertTrue(fixture.submission.awaitCommands(
                     1, 2, TimeUnit.SECONDS));
-            assertEquals(List.of(271L), fixture.submission.requestIds());
+            assertEquals(List.of("271"), fixture.submission.requestIds());
             assertFalse(fixture.submission.awaitCommands(
                     1, 200, TimeUnit.MILLISECONDS));
         }
@@ -467,7 +467,7 @@ class TransientCapacityQueueContractTest {
                     1, 2, TimeUnit.SECONDS));
             assertFalse(fixture.submission.awaitCommands(
                     1, 200, TimeUnit.MILLISECONDS));
-            assertEquals(List.of(281L), fixture.submission.requestIds());
+            assertEquals(List.of("281"), fixture.submission.requestIds());
         }
     }
 
@@ -1041,7 +1041,7 @@ class TransientCapacityQueueContractTest {
         private BalanceContext context(
                 long requestId, int priority, long sequenceLength) {
             Request request = new Request();
-            request.setRequestId(requestId);
+            request.setRequestId(Long.toString(requestId));
             request.setSeqLen(sequenceLength);
             request.setMaxNewTokens(8);
             request.setPriority(priority);
@@ -1113,18 +1113,18 @@ class TransientCapacityQueueContractTest {
     private static final class PlacementMetrics {
         private final AtomicInteger totalAttempts = new AtomicInteger();
         private final AtomicLong placementWakeups = new AtomicLong();
-        private final Map<Long, AtomicInteger> attemptsByRequest =
+        private final Map<String, AtomicInteger> attemptsByRequest =
                 new ConcurrentHashMap<>();
-        private final Map<Long, BalanceContext> contexts =
+        private final Map<String, BalanceContext> contexts =
                 new ConcurrentHashMap<>();
-        private final Map<Long, Long> deadlines = new ConcurrentHashMap<>();
+        private final Map<String, Long> deadlines = new ConcurrentHashMap<>();
         private final List<Long> placementLatenciesNanos =
                 new CopyOnWriteArrayList<>();
-        private final List<Long> placementRequestIds =
+        private final List<String> placementRequestIds =
                 new CopyOnWriteArrayList<>();
 
         private long placementStarted(BalanceContext context) {
-            long requestId = context.getRequestId();
+            String requestId = context.getRequestId();
             totalAttempts.incrementAndGet();
             placementRequestIds.add(requestId);
             attemptsByRequest.computeIfAbsent(
@@ -1173,11 +1173,11 @@ class TransientCapacityQueueContractTest {
             placementWakeups.set(0L);
         }
 
-        private BalanceContext context(long requestId) {
+        private BalanceContext context(String requestId) {
             return contexts.get(requestId);
         }
 
-        private long deadline(long requestId) {
+        private long deadline(String requestId) {
             return deadlines.getOrDefault(requestId, -1L);
         }
 
@@ -1188,7 +1188,7 @@ class TransientCapacityQueueContractTest {
                     .orElse(0);
         }
 
-        private List<Long> requestIdsFrom(int attemptIndex) {
+        private List<String> requestIdsFrom(int attemptIndex) {
             return List.copyOf(placementRequestIds.subList(
                     Math.min(attemptIndex, placementRequestIds.size()),
                     placementRequestIds.size()));
@@ -1346,7 +1346,7 @@ class TransientCapacityQueueContractTest {
         response.setMaxBatchTokensSize(1_000_000L);
         if (saturated) {
             TaskInfo task = new TaskInfo();
-            task.setRequestId(Fixture.EXTERNAL_REQUEST_ID);
+            task.setRequestId(Long.toString(Fixture.EXTERNAL_REQUEST_ID));
             task.setPhase(role == RoleType.PREFILL
                     ? TaskPhase.PENDING : TaskPhase.RUNNING);
             task.setInputLength(128L);
@@ -1369,7 +1369,7 @@ class TransientCapacityQueueContractTest {
         for (int index = 0; index < runningCount; index++) {
             long requestId = Fixture.EXTERNAL_REQUEST_ID + index;
             TaskInfo task = new TaskInfo();
-            task.setRequestId(requestId);
+            task.setRequestId(Long.toString(requestId));
             task.setPhase(TaskPhase.RUNNING);
             task.setInputLength(128L);
             running.put(Long.toString(requestId), task);
@@ -1386,7 +1386,7 @@ class TransientCapacityQueueContractTest {
         Map<String, TaskInfo> running = new LinkedHashMap<>();
         for (long requestId : requestIds) {
             TaskInfo task = new TaskInfo();
-            task.setRequestId(requestId);
+            task.setRequestId(Long.toString(requestId));
             task.setPhase(TaskPhase.PENDING);
             task.setInputLength(128_000L);
             running.put(Long.toString(requestId), task);
@@ -1406,7 +1406,7 @@ class TransientCapacityQueueContractTest {
         Map<String, TaskInfo> finished = new LinkedHashMap<>();
         for (long requestId : finishedRequestIds) {
             TaskInfo task = new TaskInfo();
-            task.setRequestId(requestId);
+            task.setRequestId(Long.toString(requestId));
             task.setPhase(TaskPhase.RUNNING);
             task.setInputLength(128_000L);
             finished.put(Long.toString(requestId), task);
@@ -1415,7 +1415,7 @@ class TransientCapacityQueueContractTest {
         for (int index = 0; index < unknownRunningCount; index++) {
             long requestId = Fixture.EXTERNAL_REQUEST_ID + index;
             TaskInfo task = new TaskInfo();
-            task.setRequestId(requestId);
+            task.setRequestId(Long.toString(requestId));
             task.setPhase(TaskPhase.RUNNING);
             task.setInputLength(128_000L);
             running.put(Long.toString(requestId), task);
@@ -1477,7 +1477,7 @@ class TransientCapacityQueueContractTest {
                     });
         }
 
-        private List<Long> requestIds() {
+        private List<String> requestIds() {
             return submittedItems.stream()
                     .flatMap(List::stream)
                     .map(ScheduledRequest::requestId)
@@ -1528,7 +1528,7 @@ class TransientCapacityQueueContractTest {
         @Override
         public CompletableFuture<CancelAck> cancel(
                 org.flexlb.balance.preemption.CancelTarget target,
-                long requestId,
+                String requestId,
                 long timeoutMs) {
             return CompletableFuture.completedFuture(
                     CancelAck.UNSUPPORTED);

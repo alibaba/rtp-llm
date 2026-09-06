@@ -54,6 +54,15 @@ final class DeliveryStrategyTestSupport {
             long enqueuedAtMs,
             long seqLen,
             long hitCache) {
+        return item(Long.toString(requestId), priority, enqueuedAtMs, seqLen, hitCache);
+    }
+
+    static ScheduledRequest item(
+            String requestId,
+            int priority,
+            long enqueuedAtMs,
+            long seqLen,
+            long hitCache) {
         ScheduledRequest item = Mockito.mock(ScheduledRequest.class);
         Mockito.when(item.requestId()).thenReturn(requestId);
         Mockito.when(item.priority()).thenReturn(priority);
@@ -130,7 +139,7 @@ final class DeliveryStrategyTestSupport {
                 routeReservations = new IdentityHashMap<>();
         private final Map<ScheduledRequest, DecodeEndpoint.EngineDispatchPermit>
                 permits = new IdentityHashMap<>();
-        private final Map<Long, ScheduledRequest> itemsByRequestId =
+        private final Map<String, ScheduledRequest> itemsByRequestId =
                 new HashMap<>();
         private final List<PrefillState.CommittedHandoff> handoffs =
                 new ArrayList<>();
@@ -151,7 +160,7 @@ final class DeliveryStrategyTestSupport {
                             Mockito.any(), Mockito.anyLong(), Mockito.anyInt()))
                     .thenAnswer(invocation -> reserveBatch());
             Mockito.when(decode.acquireEngineDispatchPermit(
-                            Mockito.anyLong(), Mockito.anyLong(), Mockito.anyLong()))
+                            Mockito.anyString(), Mockito.anyLong(), Mockito.anyLong()))
                     .thenAnswer(invocation -> acquirePermit(invocation.getArgument(0)));
         }
 
@@ -214,7 +223,7 @@ final class DeliveryStrategyTestSupport {
         }
 
         private DecodeEndpoint.EngineDispatchPermitAcquisition acquirePermit(
-                long requestId) {
+                String requestId) {
             if (permitAttempt++ == rejectPermitAt) {
                 return new DecodeEndpoint.EngineDispatchPermitAcquisition(
                         DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,

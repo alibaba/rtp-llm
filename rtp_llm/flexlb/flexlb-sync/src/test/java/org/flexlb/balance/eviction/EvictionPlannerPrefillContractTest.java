@@ -35,12 +35,12 @@ class EvictionPlannerPrefillContractTest {
     private static final String EP = "prefill-a";
 
     private static PriorityRequestEnvelope incoming(int priority) {
-        return new PriorityRequestEnvelope(9999L, priority, 0L);
+        return new PriorityRequestEnvelope("9999", priority, 0L);
     }
 
     private static ScheduledRequest item(long id, int priority, long enqueuedAtMs) {
         ScheduledRequest item = Mockito.mock(ScheduledRequest.class);
-        Mockito.when(item.requestId()).thenReturn(id);
+        Mockito.when(item.requestId()).thenReturn(Long.toString(id));
         Mockito.when(item.priority()).thenReturn(priority);
         Mockito.when(item.enqueuedAtMs()).thenReturn(enqueuedAtMs);
         Mockito.when(item.seqLen()).thenReturn(128L);
@@ -54,7 +54,7 @@ class EvictionPlannerPrefillContractTest {
         return EvictionPlanner.planPrefillQueue(envelope, List.of(queue), failures);
     }
 
-    private static List<Long> victimIds(PrefillEvictionProposal proposal) {
+    private static List<String> victimIds(PrefillEvictionProposal proposal) {
         return proposal.victims().stream().map(ScheduledRequest::requestId).toList();
     }
 
@@ -157,7 +157,7 @@ class EvictionPlannerPrefillContractTest {
                     incoming(70), 2,
                     List.of(item(1L, 50, 100L), item(2L, 30, 100L), item(3L, 40, 100L)),
                     failures);
-            assertEquals(List.of(2L, 3L), victimIds(p),
+            assertEquals(List.of("2", "3"), victimIds(p),
                     "the lowest priority candidates are evicted first");
         }
 
@@ -170,7 +170,7 @@ class EvictionPlannerPrefillContractTest {
                     incoming(70), 1,
                     List.of(item(1L, 30, 100L), item(2L, 30, 200L), item(3L, 40, 50L)),
                     failures);
-            assertEquals(List.of(2L, 1L, 3L), victimIds(p),
+            assertEquals(List.of("2", "1", "3"), victimIds(p),
                     "protect the older request among equal priority");
         }
     }

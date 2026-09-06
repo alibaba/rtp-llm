@@ -301,6 +301,7 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(input_pb.request_info.dash_ip, "10.0.0.2")
         self.assertEqual(input_pb.request_info.trace_id, "trace-from-info")
         self.assertEqual(input_pb.request_info.request_id, "source-request-id")
+        self.assertEqual(input_pb.request_id, 123)
         self.assertEqual(input_pb.request_info.source_role, "frontend")
 
     def test_trans_input_priority_uses_shared_qos_resolution(self):

@@ -267,7 +267,7 @@ class OptimizerClientTest {
 
     private static Request traceRequest(List<Long> blockCacheKeys) {
         Request request = new Request();
-        request.setRequestId(1L);
+        request.setRequestId("1");
         request.setBlockCacheKeys(blockCacheKeys);
         request.setBlockSize(16L);
         request.setSeqLen(64L);

@@ -78,7 +78,7 @@ class CostBasedDecodeStrategyTest {
     private BalanceContext context(long sequenceLength, long requestId) {
         Request request = new Request();
         request.setSeqLen(sequenceLength);
-        request.setRequestId(requestId);
+        request.setRequestId(Long.toString(requestId));
         BalanceContext context = new BalanceContext();
         context.setRequest(request);
         context.setConfig(configService.loadBalanceConfig());
@@ -186,7 +186,7 @@ class CostBasedDecodeStrategyTest {
         Map<String, Integer> selectionCount = new HashMap<>();
 
         for (int i = 0; i < totalRuns; i++) {
-            balanceContext.getRequest().setRequestId(1000L + i);
+            balanceContext.getRequest().setRequestId(Long.toString(1000L + i));
             ServerStatus status = selectStatus(
                     costBasedDecodeStrategy, balanceContext, RoleType.DECODE, null);
 
@@ -240,7 +240,7 @@ class CostBasedDecodeStrategyTest {
 
         for (int i = 0; i < 100; i++) {
             long requestId = 10_000L + i;
-            req.setRequestId(requestId);
+            req.setRequestId(String.valueOf(requestId));
             ServerStatus status = Assertions.assertDoesNotThrow(
                     () -> selectStatus(
                             costBasedDecodeStrategy, balanceContext,
@@ -343,7 +343,7 @@ class CostBasedDecodeStrategyTest {
         preemptiveOrdering.setPreemption(new PreemptionConfig());
         configService.loadBalanceConfig().queueScheduler()
                 .setOrdering(preemptiveOrdering);
-        request.setRequestId(4L);
+        request.setRequestId("4");
         PlacementResult<SelectedRole, RoleType> priorityPlacement =
                 strategy.select(context, RoleType.DECODE, null);
         Assertions.assertEquals(
@@ -397,7 +397,7 @@ class CostBasedDecodeStrategyTest {
                 registry, "127.0.0.2:8080");
         for (int index = 0; index < 20_000; index++) {
             long requestId = 10_000L + index;
-            request.setRequestId(requestId);
+            request.setRequestId(Long.toString(requestId));
             ServerStatus selected = selectStatus(
                     strategy, context, RoleType.DECODE, null);
             Assertions.assertNotNull(selected);
@@ -428,7 +428,7 @@ class CostBasedDecodeStrategyTest {
         int higherLoadSelections = 0;
 
         for (int index = 0; index < 1_000; index++) {
-            context.getRequest().setRequestId(30_000L + index);
+            context.getRequest().setRequestId(Long.toString(30_000L + index));
             ServerStatus selected = selectStatus(
                     strategy, context, RoleType.DECODE, null);
             if ("127.0.0.1".equals(selected.getServerIp())) {
@@ -467,7 +467,7 @@ class CostBasedDecodeStrategyTest {
 
         Request request = new Request();
         request.setSeqLen(1);
-        request.setRequestId(500L);
+        request.setRequestId("500");
         BalanceContext context = new BalanceContext();
         context.setRequest(request);
         context.setConfig(configService.loadBalanceConfig());

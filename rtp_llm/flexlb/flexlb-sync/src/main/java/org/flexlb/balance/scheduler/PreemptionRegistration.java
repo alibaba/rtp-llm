@@ -16,7 +16,7 @@ import java.util.concurrent.CompletionStage;
  * lifecycle decisions.</p>
  */
 public final class PreemptionRegistration {
-    private final long requestId;
+    private final String requestId;
     private final long attemptToken;
     private final String detail;
     private final CompletableFuture<VictimTerminal> terminal =
@@ -30,7 +30,7 @@ public final class PreemptionRegistration {
     private String postDeliveryFenceDetail;
 
     PreemptionRegistration(
-            long requestId,
+            String requestId,
             long attemptToken,
             String detail) {
         this.requestId = requestId;
@@ -38,7 +38,14 @@ public final class PreemptionRegistration {
         this.detail = detail == null ? "priority preemption" : detail;
     }
 
-    public long requestId() {
+    PreemptionRegistration(
+            long requestId,
+            long attemptToken,
+            String detail) {
+        this(Long.toString(requestId), attemptToken, detail);
+    }
+
+    public String requestId() {
         return requestId;
     }
 

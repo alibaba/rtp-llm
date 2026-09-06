@@ -55,7 +55,7 @@ public class HttpMockEngineCancelChannel implements EngineCancelChannel {
 
     @Override
     public CompletableFuture<CancelAck> cancel(CancelTarget target,
-                                               long requestId,
+                                               String requestId,
                                                long timeoutMs) {
         try {
             // TEST-ONLY routing: the mock control plane resolves the target
@@ -88,7 +88,7 @@ public class HttpMockEngineCancelChannel implements EngineCancelChannel {
      * ACCEPTED, NOT_FOUND (seen but already finished) or TOMBSTONED (never
      * seen; the absent-fence tombstone was installed engine-side).
      */
-    private CancelAck mapResponse(HttpResponse<String> response, long requestId) {
+    private CancelAck mapResponse(HttpResponse<String> response, String requestId) {
         if (response.statusCode() == 404) {
             return CancelAck.UNSUPPORTED;
         }

@@ -213,7 +213,7 @@ class TwinOverloadAdmissionTest {
 
     private static ScheduledRequest item(PrefillEndpoint endpoint, FlexlbConfig config, long id) {
         Request request = new Request();
-        request.setRequestId(id);
+        request.setRequestId(Long.toString(id));
         request.setSeqLen(128L);
         BalanceContext context = new BalanceContext();
         context.setRequest(request);
@@ -231,7 +231,7 @@ class TwinOverloadAdmissionTest {
         Map<String, TaskInfo> result = new LinkedHashMap<>();
         for (long id = firstId; id < firstId + count; id++) {
             TaskInfo task = new TaskInfo();
-            task.setRequestId(id);
+            task.setRequestId(Long.toString(id));
             task.setBatchId(batchId);
             task.setPhase(phase);
             task.setErrorCode(0);
