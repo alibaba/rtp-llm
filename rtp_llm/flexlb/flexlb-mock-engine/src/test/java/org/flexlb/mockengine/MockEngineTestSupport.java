@@ -291,7 +291,8 @@ final class MockEngineTestSupport {
         while (System.nanoTime() < deadline) {
             if (service.getInflightCount() == 0
                     && service.getRunningCount() == 0
-                    && activeDecodeRequests(service) == 0) {
+                    && activeDecodeRequests(service) == 0
+                    && service.getOccupiedKvTokens() == 0) {
                 return;
             }
             Thread.sleep(10);
@@ -300,7 +301,8 @@ final class MockEngineTestSupport {
                 "engine did not quiesce: inflight=" + service.getInflightCount()
                         + " running=" + service.getRunningCount()
                         + " activeDecode=" + activeDecodeRequests(service)
-                        + " kv=" + service.getActiveKvTokens());
+                        + " kv=" + service.getActiveKvTokens()
+                        + " occupiedKv=" + service.getOccupiedKvTokens());
     }
 
     static AtomicInteger activeDecodeRequestsRef(
