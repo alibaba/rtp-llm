@@ -88,9 +88,46 @@ def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
     return get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
 
 
+class _V4Fp8ScaledMMLinear(torch.nn.Module):
+    """Rowwise-FP8 linear via torch._scaled_mm (cuBLASLt) — DSV4_DENSE_SCALEDMM=1.
+
+    Weights are dequantized from the per-128-block UE8M0 checkpoint layout and
+    requantized per-output-row at construction; activations quantize per-row
+    at forward. Numerics differ from the per-128-block DeepGEMM incumbent
+    (rowwise is coarser along K) — gate on the in-engine logit-drift check.
+    Offline race: -26.6% weighted on the dense GEMM pool
+    (results_20260904_p2_shapes/race_dense.json).
+    """
+
+    def __init__(self, w_fp8: torch.Tensor, s_e8m0: torch.Tensor, bias: torch.Tensor | None = None):
+        super().__init__()
+        N, K = w_fp8.shape
+        sf = s_e8m0.float()  # [N/128, K/128], exact powers of two
+        w_deq = w_fp8.float() * sf.repeat_interleave(128, dim=0)[:N,].repeat_interleave(128, dim=1)[:, :K]
+        row_max = w_deq.abs().amax(dim=1).clamp(min=1e-12)
+        w_row = (w_deq * (448.0 / row_max).unsqueeze(1)).clamp(-448, 448).to(torch.float8_e4m3fn)
+        self.register_buffer("_w_t", w_row.t())  # (K, N) column-major for _scaled_mm
+        self.register_buffer("_scale_b", (row_max / 448.0).view(1, N).float())
+        self._bias = bias
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x2 = x.reshape(-1, x.shape[-1])
+        xf = x2.float()
+        amax = xf.abs().amax(dim=1, keepdim=True).clamp(min=1e-12)
+        xq = (xf * (448.0 / amax)).clamp(-448, 448).to(torch.float8_e4m3fn)
+        out = torch._scaled_mm(
+            xq, self._w_t, scale_a=(amax / 448.0).float(), scale_b=self._scale_b,
+            out_dtype=torch.bfloat16,
+        )
+        out = out.reshape(*x.shape[:-1], out.shape[-1])
+        return out + self._bias if self._bias is not None else out
+
+
 def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
     """Build a CudaFp8DeepGEMMLinear from raw V4 FP8 weight + scale tensors."""
     assert s is not None, "expected non-null FP8 scale"
+    if os.environ.get("DSV4_DENSE_SCALEDMM") == "1" and s.dtype == torch.float8_e8m0fnu:
+        return _V4Fp8ScaledMMLinear(w, s).to(w.device)
     if s.dtype == torch.float8_e8m0fnu:
         s = _repack_v4_fp8_scale_to_int32(s)
     local = {"_w": w, "_s": s}
