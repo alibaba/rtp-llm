@@ -235,12 +235,18 @@ message ReleaseLeasePB {
     repeated string lease_id = 1;
 }
 
+message TraceContextPB {
+    string traceparent = 1;
+    string tracestate = 2;
+}
+
 message RequestInfoPB {
     string frontend_ip = 1;
     string dash_ip = 2;
     string trace_id = 3;
     string request_id = 4;
     string source_role = 5;
+    TraceContextPB trace_context = 6;
 }
 
 message GenerateInputPB {

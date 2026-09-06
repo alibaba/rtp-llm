@@ -97,7 +97,8 @@ public:
     bool         isRequestCancelled() const override;
     PriorityPreemptionRequestResult requestPriorityPreempt();
     bool         isPriorityPreempted() const;
-    bool         tryMarkOtherTerminal();
+    // Virtual so lifecycle tests can pause immediately after terminal publication.
+    virtual bool         tryMarkOtherTerminal();
     PrefillTerminalCause terminalCause() const;
     void         tryCancelDownstream();
     bool         finalizePriorityPreemption();

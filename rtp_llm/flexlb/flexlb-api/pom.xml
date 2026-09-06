@@ -22,6 +22,12 @@
             <groupId>org.flexlb</groupId>
             <artifactId>flexlb-sync</artifactId>
         </dependency>
+        <!-- Application bootstraps the manual trace provider when RTP_LLM_OTEL_TRACE_ENABLE=1. -->
+        <dependency>
+            <groupId>io.opentelemetry</groupId>
+            <artifactId>opentelemetry-sdk-extension-autoconfigure</artifactId>
+            <scope>runtime</scope>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webflux</artifactId>
