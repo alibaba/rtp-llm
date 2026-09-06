@@ -1425,7 +1425,6 @@ class EnvManager:
             menv["MODEL_SERVICE_CONFIG"] = json.dumps(
                 {
                     "service_id": "aigc.text-generation.generation.engine_service",
-                    "load_balance": True,
                     "role_endpoints": [
                         {
                             "group": "mock",
