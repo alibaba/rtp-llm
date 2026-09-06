@@ -11,18 +11,6 @@ public final class Logger {
 
     private static final org.slf4j.Logger log = LoggerFactory.getLogger("flexlbLogger");
 
-    static {
-        String logLevel = System.getenv("LOG_LEVEL");
-        if (logLevel != null) {
-            try {
-                setLevel(LogLevel.valueOf(logLevel.toUpperCase().trim()));
-            } catch (IllegalArgumentException error) {
-                log.warn("Invalid LOG_LEVEL value: '{}'. Valid values are: TRACE, DEBUG, INFO, WARN, ERROR.",
-                        logLevel);
-            }
-        }
-    }
-
     private Logger() {
     }
 

@@ -8,6 +8,7 @@ import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DeliveryClaimKind;
 import org.flexlb.balance.scheduler.RequestState;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
@@ -18,14 +19,17 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.RouteService;
+import org.flexlb.service.config.merger.FlexlbConfigMerger;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.service.optimizer.OptimizerClient;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
@@ -58,6 +62,7 @@ class FlexlbServiceImplTest {
     private ConfigService configService;
     private BatchSchedulerReporter batchSchedulerReporter;
     private ServerScheduleLatencyRecorder serverLatencyRecorder;
+    private CacheAwareService cacheAwareService;
     private ActiveRequestCounter.RequestToken requestToken;
     private FlexlbServiceImpl service;
     private ch.qos.logback.classic.Logger pvLogger;
@@ -72,6 +77,9 @@ class FlexlbServiceImplTest {
         grpcForwarder = mock(FlexlbGrpcForwarder.class);
         batchSchedulerReporter = mock(BatchSchedulerReporter.class);
         serverLatencyRecorder = mock(ServerScheduleLatencyRecorder.class);
+        cacheAwareService = mock(CacheAwareService.class);
+        when(cacheAwareService.prepareBlockCacheKeys(any(BalanceContext.class)))
+                .thenReturn(CompletableFuture.completedFuture(null));
 
         configService = mock(ConfigService.class);
         FlexlbConfig flexlbConfig = new FlexlbConfig();
@@ -89,7 +97,9 @@ class FlexlbServiceImplTest {
                 configService,
                 batchSchedulerReporter,
                 serverLatencyRecorder,
-                mock(RequestSchedulerReporter.class)
+                mock(RequestSchedulerReporter.class),
+                cacheAwareService,
+                mock(OptimizerClient.class)
         );
 
         pvLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger");
@@ -618,11 +628,15 @@ class FlexlbServiceImplTest {
                 capturedRequest.getGenerateTimeout());
         assertEquals(capturedCtx.getStartTime() + 3_600_000L,
                 capturedCtx.getRequestExpiresAtMs());
+        InOrder localRouteOrder = org.mockito.Mockito.inOrder(
+                cacheAwareService, routeService);
+        localRouteOrder.verify(cacheAwareService).prepareBlockCacheKeys(capturedCtx);
+        localRouteOrder.verify(routeService).route(capturedCtx);
     }
 
     @Test
     void queueTimeoutComesFromFlexlbConfigAndOverridesCallerTimeout() {
-        FlexlbConfig queueConfig = ConfigService.parse("""
+        FlexlbConfig queueConfig = FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{"type":"QUEUE","queueTimeoutMs":7777,
                     "ordering":{"type":"FIFO"}},
@@ -650,7 +664,7 @@ class FlexlbServiceImplTest {
 
     @Test
     void directModeHasNoSchedulingTimeout() {
-        FlexlbConfig directConfig = ConfigService.parse("""
+        FlexlbConfig directConfig = FlexlbConfigMerger.mergeWithDefaults("""
                 {
                   "scheduler":{"type":"DIRECT"},
                   "dispatcher":{"type":"NON_BATCH"}

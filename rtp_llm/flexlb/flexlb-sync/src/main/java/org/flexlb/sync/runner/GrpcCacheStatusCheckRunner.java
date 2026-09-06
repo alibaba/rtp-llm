@@ -1,8 +1,8 @@
 package org.flexlb.sync.runner;
 
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
-import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -248,7 +248,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private WorkerCacheUpdateResult updateLocalKvCache() {
         try {
             WorkerCacheUpdateResult result =
-                    cacheAwareService.updateEngineBlockCache(workerStatus);
+                cacheAwareService.updateFromWorkerStatus(workerStatus);
             if (result == null) {
                 logger.debug(
                         "Cache service returned no update result for {}#{}",

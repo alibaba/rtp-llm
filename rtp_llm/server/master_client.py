@@ -21,6 +21,7 @@ from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
     CANCEL_REASON_DEADLINE_EXCEEDED,
     FlexlbCancelRequestPB,
     FlexlbScheduleRequestPB,
+    FlexlbScheduleResponsePB,
 )
 from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2_grpc import (
     FlexlbServiceStub,
@@ -35,6 +36,7 @@ route_logger = logging.getLogger("route_logger")
 
 SUCCESS_CODE = 200
 FALLBACK_ERROR_CODE = 8600
+DEFAULT_MASTER_CONNECT_TIMEOUT_MS = 100
 # gRPC = HTTP + 2 for FlexLB's own servers (consistent with FlexlbGrpcServer.FLEXLB_GRPC_PORT_OFFSET).
 # This is NOT the same as the backend engine offset (HTTP+1)—see CommonConstants.GRPC_PORT_OFFSET.
 FLEXLB_GRPC_PORT_OFFSET = 2
@@ -150,6 +152,16 @@ def _admission_reject_reason_from_response(response) -> AdmissionRejectReason:
         return AdmissionRejectReason.INVALID
 
 
+@dataclass(frozen=True)
+class _ScheduleAttemptSucceeded:
+    response: FlexlbScheduleResponsePB
+
+
+@dataclass(frozen=True)
+class _ScheduleAttemptTransportFailure:
+    """The target did not return a usable gRPC response for this attempt."""
+
+
 class MasterClient:
     """Client for FlexLB schedule gRPC API (master and optional slave)."""
 
@@ -157,6 +169,14 @@ class MasterClient:
         self.master_config = (
             master_config if master_config is not None else MasterConfig()
         )
+        connect_timeout_ms = getattr(
+            self.master_config,
+            "master_connect_timeout_ms",
+            DEFAULT_MASTER_CONNECT_TIMEOUT_MS,
+        )
+        if connect_timeout_ms <= 0:
+            raise ValueError("Master gRPC connect timeout must be positive")
+        self._connect_timeout_s = connect_timeout_ms / 1000.0
         self.host_service: Optional[HostService] = host_service
         self._channels: Dict[str, grpc.aio.Channel] = {}
         self.latest_queue_length: int = 0
@@ -186,11 +206,6 @@ class MasterClient:
             )
         return self._channels[target]
 
-    async def _close_channel(self, target: str) -> None:
-        channel = self._channels.pop(target, None)
-        if channel is not None:
-            await channel.close()
-
     async def close(self) -> None:
         for channel in self._channels.values():
             await channel.close()
@@ -205,22 +220,70 @@ class MasterClient:
         request_pb: "FlexlbScheduleRequestPB",
         timeout_s: Optional[float],
         request_id: int,
-    ):
-        """Send gRPC schedule request. Returns proto response on success, None on transport failure."""
+    ) -> _ScheduleAttemptSucceeded | _ScheduleAttemptTransportFailure:
+        """Send one gRPC schedule attempt and return its explicit transport result."""
         target = self._get_grpc_target(addr)
-        start = time.time()
+        attempt_started_at = time.monotonic()
+        channel = self._get_channel(target)
+        connect_timeout_s = self._connect_timeout_s
+        if timeout_s is not None:
+            connect_timeout_s = min(connect_timeout_s, timeout_s)
+
         try:
-            channel = self._get_channel(target)
-            stub = FlexlbServiceStub(channel)
+            await asyncio.wait_for(
+                channel.channel_ready(),
+                timeout=connect_timeout_s,
+            )
+        except asyncio.TimeoutError:
+            elapsed = time.monotonic() - attempt_started_at
+            route_logger.error(
+                "gRPC channel readiness timed out, addr=%s, request_id=%s, "
+                "connect_timeout=%.3fs, elapsed=%.3fs",
+                addr,
+                request_id,
+                connect_timeout_s,
+                elapsed,
+            )
+            return _ScheduleAttemptTransportFailure()
+        except asyncio.CancelledError:
+            # Schedule has not been sent, so there is no server-side work to cancel.
+            raise
+        except Exception:
+            elapsed = time.monotonic() - attempt_started_at
+            route_logger.exception(
+                "gRPC channel readiness failed, addr=%s, request_id=%s, elapsed=%.3fs",
+                addr,
+                request_id,
+                elapsed,
+            )
+            return _ScheduleAttemptTransportFailure()
+
+        schedule_timeout_s = timeout_s
+        if timeout_s is not None:
+            schedule_timeout_s = timeout_s - (time.monotonic() - attempt_started_at)
+            if schedule_timeout_s <= 0:
+                elapsed = time.monotonic() - attempt_started_at
+                route_logger.error(
+                    "gRPC channel readiness exhausted schedule budget, "
+                    "addr=%s, request_id=%s, timeout=%.3fs, elapsed=%.3fs",
+                    addr,
+                    request_id,
+                    timeout_s,
+                    elapsed,
+                )
+                return _ScheduleAttemptTransportFailure()
+
+        stub = FlexlbServiceStub(channel)
+        try:
             route_logger.debug(
                 "gRPC Schedule sending, request_id=%s, proto_priority=%d",
                 request_id,
                 request_pb.priority,
             )
-            response = await stub.Schedule(request_pb, timeout=timeout_s)
-            return response
+            response = await stub.Schedule(request_pb, timeout=schedule_timeout_s)
+            return _ScheduleAttemptSucceeded(response)
         except grpc.aio.AioRpcError as e:
-            elapsed = time.time() - start
+            elapsed = time.monotonic() - attempt_started_at
             route_logger.error(
                 "gRPC schedule failed, addr=%s, request_id=%s, status=%s, detail=%s, elapsed=%.3fs",
                 addr,
@@ -233,29 +296,26 @@ class MasterClient:
                 await self._best_effort_cancel(
                     stub, request_id, CANCEL_REASON_DEADLINE_EXCEEDED
                 )
-                await self._close_channel(target)
                 raise FtRuntimeException(
                     exception_type=ExceptionType.DEADLINE_EXCEEDED,
                     message=f"FlexLB schedule deadline exceeded for request {request_id}",
                 ) from e
-            await self._close_channel(target)
-            return None
+            return _ScheduleAttemptTransportFailure()
         except asyncio.CancelledError:
             if "stub" in locals():
                 await self._best_effort_cancel(
                     stub, request_id, CANCEL_REASON_CLIENT_CANCELLED
                 )
             raise
-        except Exception as e:
-            elapsed = time.time() - start
+        except Exception:
+            elapsed = time.monotonic() - attempt_started_at
             route_logger.exception(
                 "Unexpected gRPC error, addr=%s, request_id=%s, elapsed=%.3fs",
                 addr,
                 request_id,
                 elapsed,
             )
-            await self._close_channel(target)
-            return None
+            return _ScheduleAttemptTransportFailure()
 
     @staticmethod
     async def _best_effort_cancel(stub, request_id: int, reason: int) -> None:
@@ -322,23 +382,24 @@ class MasterClient:
         if input_pb is not None:
             request_pb.generate_input = input_pb.SerializeToString()
 
-        response = await self._send_schedule_request(
+        attempt = await self._send_schedule_request(
             master_addr, request_pb, timeout_s, request_id
         )
 
-        if response is None and slave_addr:
+        if isinstance(attempt, _ScheduleAttemptTransportFailure) and slave_addr:
             route_logger.info(
                 "Master connection failed, retrying slave, slave=%s, request_id=%s",
                 slave_addr,
                 request_id,
             )
-            response = await self._send_schedule_request(
+            attempt = await self._send_schedule_request(
                 slave_addr, request_pb, timeout_s, request_id
             )
 
-        if response is None:
+        if isinstance(attempt, _ScheduleAttemptTransportFailure):
             return FlexlbResponse.connection_failed_response()
 
+        response = attempt.response
         self.latest_queue_length = response.queue_length
 
         if response.code == FALLBACK_ERROR_CODE:

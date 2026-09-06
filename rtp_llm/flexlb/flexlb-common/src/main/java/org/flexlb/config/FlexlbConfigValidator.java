@@ -14,25 +14,36 @@ import org.flexlb.config.RoutingConfig.PrefillConfig;
 import org.flexlb.util.PriorityNormalizer;
 
 /** Cross-field validation for the public configuration contract. */
-final class FlexlbConfigValidator {
+public final class FlexlbConfigValidator {
 
     private static final int MIN_STALE_TIMEOUT_TO_RPC_TIMEOUT_RATIO = 2;
 
-    static void validateDocumentShape(JsonNode document) {
+    public static void validateDocumentShape(JsonNode document) {
+        validateDocumentShape(document, document);
+    }
+
+    public static void validateDocumentShape(
+            JsonNode document, JsonNode effectiveDocument) {
         JsonNode scheduler = document.path("scheduler");
         if (scheduler.isObject()) {
-            String type = scheduler.path("type").asText("QUEUE");
+            JsonNode effectiveScheduler = effectiveDocument.path("scheduler");
+            String type = effectiveScheduler.path("type").asText("QUEUE");
             if ("DIRECT".equals(type)) {
                 rejectFieldsExcept(scheduler, "scheduler", "type");
             } else if ("QUEUE".equals(type)) {
-                validateOrderingShape(scheduler.path("ordering"));
-                validateDecisionShape(scheduler.path("decision"));
+                validateOrderingShape(
+                        scheduler.path("ordering"),
+                        effectiveScheduler.path("ordering"));
+                validateDecisionShape(
+                        scheduler.path("decision"),
+                        effectiveScheduler.path("decision"));
             }
         }
 
         JsonNode dispatcher = document.path("dispatcher");
         if (dispatcher.isObject()) {
-            String type = dispatcher.path("type").asText("BATCH");
+            String type = effectiveDocument.path("dispatcher")
+                    .path("type").asText("BATCH");
             if ("BATCH".equals(type)) {
                 rejectFieldsExcept(dispatcher, "dispatcher", "type",
                         "maxInflightBatchesPerPrefillWorker",
@@ -44,11 +55,12 @@ final class FlexlbConfigValidator {
         }
     }
 
-    private static void validateOrderingShape(JsonNode ordering) {
+    private static void validateOrderingShape(
+            JsonNode ordering, JsonNode effectiveOrdering) {
         if (!ordering.isObject()) {
             return;
         }
-        String type = ordering.path("type").asText("FIFO");
+        String type = effectiveOrdering.path("type").asText("FIFO");
         if ("FIFO".equals(type)) {
             rejectFieldsExcept(ordering, "scheduler.ordering", "type");
         } else if ("PRIORITY".equals(type)) {
@@ -57,11 +69,13 @@ final class FlexlbConfigValidator {
         }
     }
 
-    private static void validateDecisionShape(JsonNode decision) {
+    private static void validateDecisionShape(
+            JsonNode decision, JsonNode effectiveDecision) {
         if (!decision.isObject()) {
             return;
         }
-        String type = decision.path("type").asText("FIXED_WINDOW");
+        String type = effectiveDecision.path("type")
+                .asText("FIXED_WINDOW");
         if ("SINGLE".equals(type)) {
             rejectFieldsExcept(decision, "scheduler.decision", "type");
         } else if ("FIXED_WINDOW".equals(type)) {
@@ -83,7 +97,7 @@ final class FlexlbConfigValidator {
         });
     }
 
-    static void validate(FlexlbConfig config) {
+    public static void validate(FlexlbConfig config) {
         require(config.getSchemaVersion() == FlexlbConfig.CURRENT_SCHEMA_VERSION,
                 "schemaVersion", "must equal " + FlexlbConfig.CURRENT_SCHEMA_VERSION);
         require(config.getScheduler() != null, "scheduler", "is required");
@@ -91,6 +105,13 @@ final class FlexlbConfigValidator {
         require(config.getRouter() != null, "router", "is required");
         require(config.getWorkerRegistry() != null, "workerRegistry", "is required");
         require(config.getObservability() != null, "observability", "is required");
+        require(config.getServiceDiscovery() != null, "serviceDiscovery", "is required");
+        require(config.getCacheMatching() != null, "cacheMatching", "is required");
+        require(config.getOptimizer() != null, "optimizer", "is required");
+        require(config.getConsistency() != null, "consistency", "is required");
+        require(config.getBlockHashStrategy() != null,
+                "blockHashStrategy", "is required");
+        positive(config.getFallbackBatchTokenCapacity(), "fallbackBatchTokenCapacity");
 
         if (!config.isDirect()) {
             validateQueue(config.queueScheduler());
@@ -99,6 +120,10 @@ final class FlexlbConfigValidator {
         validateRouting(config.getRouter());
         validateWorkerRegistry(config.getWorkerRegistry());
         validateObservability(config.getObservability());
+        validateServiceDiscovery(config.getServiceDiscovery());
+        validateCacheMatching(config.getCacheMatching());
+        validateOptimizer(config.getOptimizer());
+        validateConsistency(config.getConsistency());
     }
 
     private static void validateQueue(SchedulerConfig queue) {
@@ -325,6 +350,92 @@ final class FlexlbConfigValidator {
                             && !cacheHit.getTheoryLog().getPath().isBlank(),
                     "observability.cacheHit.theoryLog.path", "must not be blank");
         }
+    }
+
+    private static void validateServiceDiscovery(
+            ServiceDiscoveryRuntimeConfig serviceDiscovery) {
+        positive(serviceDiscovery.getConnectTimeoutMs(),
+                "serviceDiscovery.connectTimeoutMs");
+        positive(serviceDiscovery.getReadTimeoutMs(),
+                "serviceDiscovery.readTimeoutMs");
+        positive(serviceDiscovery.getPollIntervalMs(),
+                "serviceDiscovery.pollIntervalMs");
+        positive(serviceDiscovery.getMaxIdleConnections(),
+                "serviceDiscovery.maxIdleConnections");
+        positive(serviceDiscovery.getKeepAliveDurationMs(),
+                "serviceDiscovery.keepAliveDurationMs");
+    }
+
+    private static void validateCacheMatching(CacheMatchingConfig cacheMatching) {
+        if (!(cacheMatching instanceof KvcmCacheMatchingConfig kvcm)) {
+            return;
+        }
+        positive(kvcm.getRequestTimeoutMs(), "cacheMatching.requestTimeoutMs");
+        positive(kvcm.getLeaderRefreshIntervalMs(),
+                "cacheMatching.leaderRefreshIntervalMs");
+        positive(kvcm.getHeartbeatFailureThreshold(),
+                "cacheMatching.heartbeatFailureThreshold");
+        positive(kvcm.getQueryFailureThreshold(),
+                "cacheMatching.queryFailureThreshold");
+        nonNegative(kvcm.getMaxQueryRetryCount(),
+                "cacheMatching.maxQueryRetryCount");
+        positive(kvcm.getRecoverySuccessThreshold(),
+                "cacheMatching.recoverySuccessThreshold");
+        nonNegative(kvcm.getP2pHostCount(), "cacheMatching.p2pHostCount");
+        require(kvcm.getLocalStandby() != null,
+                "cacheMatching.localStandby", "is required for KVCM");
+        validateLocalStandby(kvcm.getLocalStandby());
+    }
+
+    private static void validateLocalStandby(LocalStandbyConfig localStandby) {
+        require(localStandby.getBlockSize() >= 0
+                        && localStandby.getBlockSize() <= Integer.MAX_VALUE,
+                "cacheMatching.localStandby.blockSize",
+                "must be in [0, " + Integer.MAX_VALUE + "]");
+        positive(localStandby.getTtlMs(),
+                "cacheMatching.localStandby.ttlMs");
+        positive(localStandby.getMinimumTtlMs(),
+                "cacheMatching.localStandby.minimumTtlMs");
+        require(localStandby.getMinimumTtlMs() <= localStandby.getTtlMs(),
+                "cacheMatching.localStandby.minimumTtlMs",
+                "must be less than or equal to ttlMs");
+        require(Double.isFinite(localStandby.getTtlReductionStartRatio())
+                        && localStandby.getTtlReductionStartRatio() > 0
+                        && localStandby.getTtlReductionStartRatio() < 1,
+                "cacheMatching.localStandby.ttlReductionStartRatio",
+                "must be finite and in (0, 1)");
+        positive(localStandby.getMaximumEntries(),
+                "cacheMatching.localStandby.maximumEntries");
+        require(Double.isFinite(localStandby.getCapacityMultiplier())
+                        && localStandby.getCapacityMultiplier() >= 1,
+                "cacheMatching.localStandby.capacityMultiplier",
+                "must be finite and greater than or equal to 1");
+        positive(localStandby.getAsyncQueueCapacity(),
+                "cacheMatching.localStandby.asyncQueueCapacity");
+        positive(localStandby.getHashThreadCount(),
+                "cacheMatching.localStandby.hashThreadCount");
+        positive(localStandby.getHashQueueCapacity(),
+                "cacheMatching.localStandby.hashQueueCapacity");
+    }
+
+    private static void validateOptimizer(OptimizerRuntimeConfig optimizer) {
+        positive(optimizer.getDiscoveryPollIntervalMs(),
+                "optimizer.discoveryPollIntervalMs");
+    }
+
+    private static void validateConsistency(ConsistencyConfig consistency) {
+        if (!(consistency instanceof ZookeeperConsistencyConfig zookeeper)) {
+            return;
+        }
+        require(zookeeper.getConnectString() != null
+                        && !zookeeper.getConnectString().isBlank(),
+                "consistency.connectString", "must not be blank for ZOOKEEPER");
+        positive(zookeeper.getSessionTimeoutMs(),
+                "consistency.sessionTimeoutMs");
+        positive(zookeeper.getConnectionTimeoutMs(),
+                "consistency.connectionTimeoutMs");
+        positive(zookeeper.getMasterRefreshIntervalMs(),
+                "consistency.masterRefreshIntervalMs");
     }
 
     private static void positive(long value, String field) {

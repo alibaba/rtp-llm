@@ -1,8 +1,8 @@
 package org.flexlb.sync.synchronizer;
 
 import io.micrometer.core.instrument.util.NamedThreadFactory;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
-import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
@@ -126,6 +126,7 @@ public final class MasterEngineSynchronizer {
                         engineGrpcService, roleType, cacheAwareService,
                         cacheIntervalService,
                         syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
+                        flexlbConfig.isKvcmCacheMatching(),
                         flexlbConfig.getWorkerRegistry().getCacheStatus()
                                 .isFullSnapshotDebugMode(),
                         statusStaleAfterUs

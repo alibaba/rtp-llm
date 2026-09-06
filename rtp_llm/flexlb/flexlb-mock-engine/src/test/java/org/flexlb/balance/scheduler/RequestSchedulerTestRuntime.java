@@ -213,7 +213,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             // Real constructor dependencies keep Mockito instrumentation out of
             // the selector classes exercised by the bound production router.
             super(new CostBasedPrefillStrategy(workers,
-                            org.mockito.Mockito.mock(org.flexlb.cache.service.CacheAwareService.class),
+                            org.mockito.Mockito.mock(org.flexlb.cache.match.CacheAwareService.class),
                             org.mockito.Mockito.mock(org.flexlb.service.monitor.EngineHealthReporter.class)),
                     new CostBasedDecodeStrategy(workers),
                     new RandomStrategy(workers),

@@ -49,9 +49,10 @@ class RequestTest {
     }
 
     @Test
-    void should_use_default_timeout_when_payload_omits_generate_timeout() throws Exception {
+    void should_use_defaults_when_payload_omits_optional_fields() throws Exception {
         Request request = objectMapper.readValue("{\"request_id\":123}", Request.class);
 
         assertEquals(Request.DEFAULT_GENERATE_TIMEOUT_MS, request.getGenerateTimeout());
+        assertEquals(0, request.getMaxNewTokens());
     }
 }

@@ -4,12 +4,10 @@ import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
-import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.master.CacheHitFeedback;
 import org.flexlb.dao.route.KvcmConfig;
-import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
 import org.junit.jupiter.api.Test;
@@ -19,6 +17,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
+import static org.flexlb.cache.CacheMatchTestConfigurations.kvcm;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.Mockito.mock;
@@ -32,7 +31,7 @@ class LocalStandbyComparisonServiceTest {
     void buildsUnifiedComparisonWithLocalStandbyPrediction() throws Exception {
         LocalStandbyCacheMatchProvider provider = mock(LocalStandbyCacheMatchProvider.class);
         LocalStandbyComparisonService comparisonService = new LocalStandbyComparisonService(
-                new CacheMatchConfiguration(modelMetaConfig()), provider);
+                kvcm(modelMetaConfig()), provider);
         CacheMatchQuery query = new CacheMatchQuery(
                 "request-1",
                 List.of(11L),
@@ -77,7 +76,7 @@ class LocalStandbyComparisonServiceTest {
     void buildsUnifiedComparisonFromResolvedFallbackPrediction() throws Exception {
         LocalStandbyCacheMatchProvider provider = mock(LocalStandbyCacheMatchProvider.class);
         LocalStandbyComparisonService comparisonService = new LocalStandbyComparisonService(
-                new CacheMatchConfiguration(modelMetaConfig()), provider);
+                kvcm(modelMetaConfig()), provider);
         CacheMatchQuery query = new CacheMatchQuery(
                 "request-1",
                 List.of(11L),
@@ -108,11 +107,7 @@ class LocalStandbyComparisonServiceTest {
     }
 
     private ModelMetaConfig modelMetaConfig() {
-        LocalStandbyConfig standby = new LocalStandbyConfig();
-
         KvcmConfig kvcm = new KvcmConfig();
-        kvcm.setEnabled(true);
-        kvcm.setLocalStandby(standby);
 
         ServiceRoute route = new ServiceRoute();
         route.setServiceId("test-service");

@@ -6,10 +6,14 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.domain.CacheMatchQuery;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -22,7 +26,6 @@ import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
-import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.EnumMap;
@@ -68,8 +71,8 @@ public class CostBasedPrefillStrategy {
                     requestId);
             return PlacementResult.blocked(roleType);
         }
-        Map<String, Integer> cacheMatchResults =
-                getCacheMatchResults(balanceContext, roleType, discovery);
+        CacheMatchResult cacheMatchResult =
+                getCacheMatchResult(balanceContext, roleType, group);
         Map<String, Integer> rejections = new java.util.HashMap<>();
         Map<RoleType, Integer> poolWideBlockers =
                 new EnumMap<>(RoleType.class);
@@ -77,7 +80,7 @@ public class CostBasedPrefillStrategy {
                 discovery,
                 balanceContext,
                 config,
-                cacheMatchResults,
+                cacheMatchResult,
                 rejections,
                 poolWideBlockers);
         if (survivors.size() == 0) {
@@ -521,27 +524,13 @@ public class CostBasedPrefillStrategy {
             return candidates.size();
         }
 
-        /** Zero-copy address view over the exact fleet used by this decision. */
-        private List<String> addresses() {
-            return new AbstractList<>() {
-                @Override
-                public String get(int index) {
-                    return candidates.get(index).address();
-                }
-
-                @Override
-                public int size() {
-                    return candidates.size();
-                }
-            };
-        }
     }
 
     private PrefillCandidateSet evaluateCandidates(
             EndpointDiscovery discovery,
             BalanceContext balanceContext,
             FlexlbConfig config,
-            Map<String, Integer> cacheMatchResults,
+            CacheMatchResult cacheMatchResult,
             Map<String, Integer> rejections,
             Map<RoleType, Integer> poolWideBlockers) {
         Request request = balanceContext.getRequest();
@@ -564,7 +553,8 @@ public class CostBasedPrefillStrategy {
             PrefillEndpoint ep = routingEntry.endpoint();
             String endpointAddress = routingEntry.address();
             CacheTokenMatch cacheMatch =
-                    calculateCacheMatch(ep, endpointAddress, cacheMatchResults, request);
+                    calculateCacheMatch(
+                            ep, endpointAddress, cacheMatchResult, request, config);
             long cacheHit = cacheMatch.effectiveHitTokens();
             long routingCacheMatchTokens = cacheMatch.routingHitTokens();
             RouteProjection.Inputs projectionInputs =
@@ -806,13 +796,24 @@ public class CostBasedPrefillStrategy {
         return new EndpointDiscovery(List.copyOf(matching));
     }
 
-    private Map<String, Integer> getCacheMatchResults(
-            BalanceContext balanceContext,
-            RoleType roleType,
-            EndpointDiscovery discovery) {
-        List<Long> blockCacheKeys = balanceContext.getRequest().getBlockCacheKeys();
-        return cacheAwareService.findMatchingEngines(
-                blockCacheKeys, roleType, discovery.addresses());
+    private CacheMatchResult getCacheMatchResult(
+            BalanceContext balanceContext, RoleType roleType, String group) {
+        Request request = balanceContext.getRequest();
+        long blockSize = request.getBlockSize() > 0L
+                ? request.getBlockSize()
+                : request.getCacheKeyBlockSize();
+        CacheMatchResult result = cacheAwareService.findMatchingEngines(
+                new CacheMatchQuery(
+                        String.valueOf(balanceContext.getRequestId()),
+                        request.getBlockCacheKeys(),
+                        blockSize,
+                        request.getLocalStandbyBlockCacheKeys(),
+                        request.getLocalStandbyBlockSize(),
+                        roleType,
+                        group));
+        return result == null
+                ? CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC)
+                : result;
     }
 
     private record CacheTokenMatch(
@@ -825,20 +826,39 @@ public class CostBasedPrefillStrategy {
     private CacheTokenMatch calculateCacheMatch(
             PrefillEndpoint ep,
             String endpointAddress,
-            Map<String, Integer> cacheMatchResults,
-            Request request) {
-        if (cacheMatchResults == null || cacheMatchResults.isEmpty() || request == null) {
+            CacheMatchResult cacheMatchResult,
+            Request request,
+            FlexlbConfig config) {
+        if (cacheMatchResult == null || request == null) {
             return CacheTokenMatch.NONE;
         }
         long seqLen = request.getSeqLen();
         if (seqLen <= 0L) {
             return CacheTokenMatch.NONE;
         }
-        Integer prefixMatchLength = cacheMatchResults.get(endpointAddress);
-        if (prefixMatchLength == null || prefixMatchLength <= 0) {
+        HostCacheMatch match = cacheMatchResult.hostMatch(endpointAddress);
+        if (match == null) {
             return CacheTokenMatch.NONE;
         }
-        long blockSize = request.getCacheKeyBlockSize();
+        long localMatchBlocks = Math.max(0L, match.localMatchBlocks());
+        long p2pAddedMatchBlocks = Math.max(
+                0L, match.p2pTotalMatchBlocks() - localMatchBlocks);
+        RoutingConfig.CacheAffinityConfig affinity = config.getRouter()
+                .getRoles().getPrefill().getCacheAffinity();
+        double p2pHitDiscount = affinity == null
+                ? 0.2
+                : Math.max(0.0, affinity.getP2pHitDiscount());
+        double effectiveMatchBlocks = localMatchBlocks
+                + p2pAddedMatchBlocks * p2pHitDiscount;
+        if (effectiveMatchBlocks <= 0.0) {
+            return CacheTokenMatch.NONE;
+        }
+        long blockSize = cacheMatchResult.blockSize();
+        if (blockSize <= 0L) {
+            blockSize = request.getBlockSize() > 0L
+                    ? request.getBlockSize()
+                    : request.getCacheKeyBlockSize();
+        }
         WorkerStatus status = ep.getStatus();
         CacheStatus cacheStatus = status == null ? null : status.getCacheStatus();
         if (blockSize <= 0L && cacheStatus != null) {
@@ -847,13 +867,10 @@ public class CostBasedPrefillStrategy {
         if (blockSize <= 0L) {
             return CacheTokenMatch.NONE;
         }
-        long rawHit;
-        try {
-            rawHit = Math.multiplyExact(
-                    blockSize, prefixMatchLength.longValue());
-        } catch (ArithmeticException overflow) {
-            rawHit = seqLen;
-        }
+        double rawMatchTokens = blockSize * effectiveMatchBlocks;
+        long rawHit = rawMatchTokens >= Long.MAX_VALUE
+                ? Long.MAX_VALUE
+                : Math.max(0L, Math.round(rawMatchTokens));
         long routingHit = Math.min(seqLen, Math.max(0L, rawHit));
         long effectiveHit = rawHit >= seqLen
                 ? Math.max(0L, seqLen - blockSize)

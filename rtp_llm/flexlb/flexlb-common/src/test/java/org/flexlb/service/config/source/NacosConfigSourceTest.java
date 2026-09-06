@@ -1,14 +1,19 @@
-package org.flexlb.service.config;
+package org.flexlb.service.config.source;
 
 import com.alibaba.nacos.api.config.listener.Listener;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DeploymentIdentity;
 import org.flexlb.dao.nacos.NacosConfig;
 import org.flexlb.enums.LogLevel;
+import org.flexlb.service.config.parser.ConfigDocumentParserResolver;
+import org.flexlb.service.config.parser.StandardConfigDocumentParser;
+import org.flexlb.service.config.parser.V0ConfigDocumentParser;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.test.util.ReflectionTestUtils;
 import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
+
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -16,6 +21,7 @@ import static org.flexlb.constant.DeploymentIdentityConstants.HIPPO_ROLE;
 import static org.flexlb.constant.DeploymentIdentityConstants.SPECTRUM_APPLICATION_NAME;
 import static org.flexlb.constant.DeploymentIdentityConstants.SPECTRUM_DEPLOYMENT_NAME;
 import static org.flexlb.constant.DeploymentIdentityConstants.SPECTRUM_WORKSPACE_ID;
+import static org.flexlb.constant.NacosConfigConstants.DEFAULT_NACOS_GROUP;
 import static org.flexlb.constant.NacosConfigConstants.NACOS_DATA_ID;
 import static org.flexlb.constant.NacosConfigConstants.NACOS_GROUP;
 import static org.flexlb.constant.NacosConfigConstants.NACOS_NAMESPACE;
@@ -27,6 +33,8 @@ import static org.mockito.Mockito.when;
 
 class NacosConfigSourceTest {
 
+    private static final String CONFIG_SCHEMA_VERSION_ENV = "FLEXLB_CONFIG_SCHEMA_VERSION";
+
     @Test
     void isDisabledWhenNacosAddressIsNotConfigured() throws Exception {
         NacosConfigSource source = new EnvironmentVariables(HIPPO_ROLE, "flexlb-test")
@@ -34,7 +42,7 @@ class NacosConfigSourceTest {
                 .execute(() -> new NacosConfigSource(new DeploymentIdentity()));
 
         source.initialize();
-        ConfigService configService = new ConfigService();
+        ConfigService configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
 
         assertThat(source.priority()).isEqualTo(2);
         assertThat(configService.loadBalanceConfig().getObservability()
@@ -97,6 +105,80 @@ class NacosConfigSourceTest {
     }
 
     @Test
+    void loadsV0CompatibilityThroughSchemaVersionZero() throws Exception {
+        com.alibaba.nacos.api.config.ConfigService client =
+                mock(com.alibaba.nacos.api.config.ConfigService.class);
+        when(client.getConfig(
+                org.mockito.ArgumentMatchers.eq("flexlb-test"),
+                org.mockito.ArgumentMatchers.eq(DEFAULT_NACOS_GROUP),
+                org.mockito.ArgumentMatchers.eq(3000L)))
+                .thenReturn("{\"enableQueueing\":true}");
+        new EnvironmentVariables(
+                NACOS_SERVER_ADDR, "127.0.0.1:8848",
+                NACOS_DATA_ID, "flexlb-test",
+                HIPPO_ROLE, "flexlb-test",
+                CONFIG_SCHEMA_VERSION_ENV, "0")
+                .execute(() -> {
+                    NacosConfigSource source = new NacosConfigSource(new DeploymentIdentity());
+                    ReflectionTestUtils.setField(source, "client", client);
+                    source.initialize();
+                    assertThat(source.name()).isEqualTo("Nacos");
+                    assertThat(source.loadConfig().sourceSchemaVersion()).isEqualTo(0);
+                    ConfigService configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
+                    configService.close();
+                });
+    }
+
+    @Test
+    void rejectsUnknownNacosConfigCompatibilityModes() {
+        EnvironmentVariables environment = new EnvironmentVariables(
+                HIPPO_ROLE, "flexlb-test",
+                CONFIG_SCHEMA_VERSION_ENV, "CURRENT");
+
+        assertThatThrownBy(() -> environment.execute(() ->
+                ConfigDocumentParserResolver.resolve("{}")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(CONFIG_SCHEMA_VERSION_ENV);
+    }
+
+    @Test
+    void currentSchemaInNacosOverridesTheV0FallbackMode() throws Exception {
+        com.alibaba.nacos.api.config.ConfigService client =
+                mock(com.alibaba.nacos.api.config.ConfigService.class);
+        ArgumentCaptor<Listener> listenerCaptor = ArgumentCaptor.forClass(Listener.class);
+        when(client.getConfig(
+                org.mockito.ArgumentMatchers.eq("flexlb-test"),
+                org.mockito.ArgumentMatchers.eq("FLEXLB_GROUP"),
+                org.mockito.ArgumentMatchers.eq(3000L)))
+                .thenReturn("{\"enableQueueing\":true}");
+        new EnvironmentVariables(
+                NACOS_SERVER_ADDR, "127.0.0.1:8848",
+                NACOS_DATA_ID, "flexlb-test",
+                NACOS_GROUP, "FLEXLB_GROUP",
+                HIPPO_ROLE, "flexlb-test",
+                CONFIG_SCHEMA_VERSION_ENV, "0")
+                .execute(() -> {
+                    NacosConfigSource source = new NacosConfigSource(new DeploymentIdentity());
+                    ReflectionTestUtils.setField(source, "client", client);
+                    source.initialize();
+                    assertThat(source.name()).isEqualTo("Nacos");
+                    verify(client).addListener(
+                            org.mockito.ArgumentMatchers.eq("flexlb-test"),
+                            org.mockito.ArgumentMatchers.eq("FLEXLB_GROUP"),
+                            listenerCaptor.capture());
+
+                    listenerCaptor.getValue().receiveConfigInfo("""
+                            {"schemaVersion":2,"scheduler":{"type":"QUEUE"},"dispatcher":{"type":"BATCH"}}
+                            """);
+
+                    assertThat(source.name()).isEqualTo("Nacos");
+                    assertThat(source.loadConfig().sourceSchemaVersion()).isEqualTo(2);
+                    ConfigService configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
+                    configService.close();
+                });
+    }
+
+    @Test
     void loadsListensAndClosesNacosConfig() throws Exception {
         com.alibaba.nacos.api.config.ConfigService client =
                 mock(com.alibaba.nacos.api.config.ConfigService.class);
@@ -105,7 +187,7 @@ class NacosConfigSourceTest {
                 org.mockito.ArgumentMatchers.eq("flexlb-test"),
                 org.mockito.ArgumentMatchers.eq("FLEXLB_GROUP"),
                 org.mockito.ArgumentMatchers.eq(3000L)))
-                .thenReturn("{\"observability\":{\"logging\":{\"level\":\"WARN\"}}}");
+                .thenReturn("{\"schemaVersion\":2,\"observability\":{\"logging\":{\"level\":\"warn\"}}}");
         NacosConfigSource source = createSource(client, "test-namespace");
 
         source.initialize();
@@ -113,12 +195,12 @@ class NacosConfigSourceTest {
                 org.mockito.ArgumentMatchers.eq("flexlb-test"),
                 org.mockito.ArgumentMatchers.eq("FLEXLB_GROUP"),
                 listenerCaptor.capture());
-        ConfigService configService = new ConfigService();
+        ConfigService configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
 
         assertThat(configService.loadBalanceConfig().getObservability()
                 .getLogging().getLevel()).isEqualTo(LogLevel.WARN);
         listenerCaptor.getValue().receiveConfigInfo(
-                "{\"observability\":{\"logging\":{\"level\":\"ERROR\"}}}");
+                "{\"schemaVersion\":2,\"observability\":{\"logging\":{\"level\":\"error\"}}}");
         configService.close();
 
         assertThat(configService.loadBalanceConfig().getObservability()
@@ -138,10 +220,10 @@ class NacosConfigSourceTest {
                 org.mockito.ArgumentMatchers.eq("flexlb-test"),
                 org.mockito.ArgumentMatchers.eq("FLEXLB_GROUP"),
                 org.mockito.ArgumentMatchers.eq(3000L)))
-                .thenReturn("{\"observability\":{\"logging\":{\"level\":\"WARN\"}}}");
+                .thenReturn("{\"schemaVersion\":2,\"observability\":{\"logging\":{\"level\":\"warn\"}}}");
         NacosConfigSource source = createSource(client, "");
         source.initialize();
-        ConfigService configService = new ConfigService();
+        ConfigService configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
         doThrow(new RuntimeException("remove failed"))
                 .when(client)
                 .removeListener(
@@ -155,9 +237,7 @@ class NacosConfigSourceTest {
         configService.close();
     }
 
-    private NacosConfigSource createSource(
-            com.alibaba.nacos.api.config.ConfigService client,
-            String namespace) throws Exception {
+    private NacosConfigSource createSource(com.alibaba.nacos.api.config.ConfigService client, String namespace) throws Exception {
         NacosConfigSource source = new EnvironmentVariables(
                 NACOS_SERVER_ADDR, "127.0.0.1:8848",
                 NACOS_DATA_ID, "flexlb-test",
