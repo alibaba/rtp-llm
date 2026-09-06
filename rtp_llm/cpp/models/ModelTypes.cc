@@ -46,6 +46,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
         inputs.kv_cache_group_types.defined() ? inputs.kv_cache_group_types.numel() : 0;
     shape_hints[GptModelInputIndex::kvCacheUpdateCopyNum] =
         inputs.kv_cache_update_mapping.defined() ? inputs.kv_cache_update_mapping.size(0) : 0;
+    shape_hints[GptModelInputIndex::kvCacheZeroBlockNum] =
+        inputs.kv_cache_blocks_to_zero.defined() ? inputs.kv_cache_blocks_to_zero.numel() : 0;
     shape_hints[GptModelInputIndex::lmOutputIndexes] =
         inputs.lm_output_indexes.defined() ? inputs.lm_output_indexes.numel() : 0;
     shape_hints[GptModelInputIndex::comboPositionIds] =
@@ -282,6 +284,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                 allocBuf(rtp_llm::DataType::TYPE_INT32,
                          {checkedHint(GptModelInputIndex::kvCacheUpdateCopyNum, "kvCacheUpdateCopyNum"), 3});
         }
+        inputs.kv_cache_blocks_to_zero = allocBuf(
+            rtp_llm::DataType::TYPE_INT64,
+            {checkedHint(GptModelInputIndex::kvCacheZeroBlockNum, "kvCacheZeroBlockNum")});
         if (max_blocks != 0) {
             inputs.kv_cache_block_id = allocBuf(
                 rtp_llm::DataType::TYPE_INT32,
@@ -368,6 +373,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
         collect(inputs.kv_cache_update_mapping);
     }
+    collect(inputs.kv_cache_blocks_to_zero);
     collect(inputs.request_id);
     collect(inputs.request_pd_separation);
     collect(inputs.lm_output_indexes);

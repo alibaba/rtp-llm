@@ -254,6 +254,10 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
     model_->releaseBuffers();
 
     {
+        // Initialize all TP-local copies before cache copying or the first model write.
+        if (cache_manager_) {
+            cache_manager_->zeroBlocks(model_input.kv_cache_blocks_to_zero);
+        }
         // update kv cache
         if (model_input.kv_cache_update_mapping.defined()) {
             RTP_LLM_PROFILE_SCOPE("executor.kv_cache_update");

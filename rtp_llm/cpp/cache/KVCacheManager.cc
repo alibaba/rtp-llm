@@ -384,6 +384,16 @@ int KVCacheManager::estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_
 
 // 块操作相关
 
+void KVCacheManager::zeroBlocks(const torch::Tensor& block_ids) {
+    if (!block_ids.defined() || block_ids.numel() == 0) {
+        return;
+    }
+    auto pool = allocator_->getBlockPool();
+    RTP_LLM_CHECK_WITH_INFO(pool && !config_.use_independent_block_pools,
+                            "block initialization requires the shared physical pool");
+    pool->zeroBlocks(block_ids);
+}
+
 void KVCacheManager::blockCopy(int src_block_index, int dest_block_index) {
     return allocator_->blockCopy(src_block_index, dest_block_index);
 }

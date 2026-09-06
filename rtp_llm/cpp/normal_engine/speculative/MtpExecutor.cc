@@ -853,6 +853,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     metrics_collector.not_skip = true;
 
+    cache_manager_->zeroBlocks(model_input.kv_cache_blocks_to_zero);
+    model_input.kv_cache_blocks_to_zero = torch::Tensor();
+
     // release model input before forward
     releaseAllModelBuffers();
 
@@ -1268,6 +1271,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         if (propose_input.skip_run) {
             return absl::OkStatus();
         }
+        cache_manager_->zeroBlocks(propose_input.kv_cache_blocks_to_zero);
+        propose_input.kv_cache_blocks_to_zero = torch::Tensor();
+        model_input.kv_cache_blocks_to_zero = torch::Tensor();
         const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);
         propose_input.kv_block_stride_bytes = mtp_cache_cfg.kv_block_stride_bytes;
         propose_input.kv_scale_stride_bytes = mtp_cache_cfg.kv_scale_stride_bytes;
@@ -1304,6 +1310,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         if (model_input.skip_run) {
             return absl::OkStatus();
         }
+        cache_manager_->zeroBlocks(model_input.kv_cache_blocks_to_zero);
+        model_input.kv_cache_blocks_to_zero = torch::Tensor();
         ensureModelInputsOnCuda(model_input, "decode.after_tp_sync");
     }
     size_t batch_size = model_input.input_lengths.size(0);

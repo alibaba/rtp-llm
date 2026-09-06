@@ -68,6 +68,7 @@ public:
                                int                            target_batch_size) const;
 
     // 块操作相关
+    void zeroBlocks(const torch::Tensor& block_ids);
     void blockCopy(int src_block_index, int dest_block_index);
     void blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping);
     void blockBatchCopy(const torch::Tensor& copy_mapping);

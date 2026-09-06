@@ -555,6 +555,37 @@ TEST_F(BlockPoolTest, MixedAllocFreeOperations) {
     EXPECT_EQ(block_pool_->freeBlocksNum(), 9);
 }
 
+
+TEST_F(BlockPoolTest, InitializesSelectedPhysicalBlocksAndPreservesLiveCache) {
+    auto config = createTestConfig(512, 512, 0, 0, DataType::TYPE_BF16, 1, 128);
+    block_pool_ = std::make_shared<BlockPool>(config);
+    ASSERT_TRUE(block_pool_->init());
+    const auto& layout = config.memory_layouts.front();
+    auto bytes = block_pool_->cache_aligned_buffer_
+        .narrow(0, layout.kv_cache_offset_bytes, layout.kv_block_pool_size_bytes)
+        .view({static_cast<int64_t>(layout.layer_num), static_cast<int64_t>(layout.block_num),
+               static_cast<int64_t>(layout.kv_block_stride_bytes)});
+    // A finite FP32 SSM value observed in the service becomes NaN when its low
+    // 16 bits are read as BF16 after the physical block changes ownership.
+    bytes.view(torch::kInt32).fill_(static_cast<int32_t>(0xbc827f88u));
+    ASSERT_TRUE(torch::isfinite(bytes.view(torch::kFloat32)).all().item<bool>());
+    ASSERT_TRUE(torch::isnan(bytes.view(torch::kBFloat16)).any().item<bool>());
+    auto before = bytes.clone();
+    auto ids = torch::tensor({int64_t{2}, int64_t{7}}, torch::TensorOptions(torch::kInt64).pinned_memory(true));
+    block_pool_->zeroBlocks(ids);
+    for (int64_t block = 0; block < layout.block_num; ++block) {
+        if (block == 2 || block == 7) {
+            EXPECT_TRUE((bytes.select(1, block) == 0).all().item<bool>());
+        } else {
+            EXPECT_TRUE(torch::equal(bytes.select(1, block), before.select(1, block)));
+        }
+    }
+    // A later call with no new allocations must preserve the newly written KV.
+    bytes.select(1, 2).fill_(42);
+    block_pool_->zeroBlocks(torch::Tensor());
+    EXPECT_TRUE((bytes.select(1, 2) == 42).all().item<bool>());
+}
+
 }  // namespace test
 }  // namespace rtp_llm
 
