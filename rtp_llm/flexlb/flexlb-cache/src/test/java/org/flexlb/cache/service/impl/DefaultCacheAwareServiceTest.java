@@ -1,7 +1,7 @@
 package org.flexlb.cache.service.impl;
 
-import org.flexlb.cache.core.KvCacheManager;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
+import org.flexlb.cache.match.localsync.KvCacheManager;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
 

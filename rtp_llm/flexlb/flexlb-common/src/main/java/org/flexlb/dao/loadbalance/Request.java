@@ -1,6 +1,7 @@
 package org.flexlb.dao.loadbalance;
 
 import com.fasterxml.jackson.annotation.JsonAlias;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Getter;
@@ -21,6 +22,24 @@ public class Request {
     @ToString.Exclude
     @JsonProperty("block_cache_keys")
     private List<Long> blockCacheKeys;
+
+    @JsonIgnore
+    @ToString.Exclude
+    private List<Long> localStandbyBlockCacheKeys;
+
+    @JsonIgnore
+    @ToString.Exclude
+    private List<Long> localStandbyCacheableBlockCacheKeys;
+
+    @JsonIgnore
+    private long localStandbyBlockSize;
+
+    @ToString.Exclude
+    @JsonProperty("input_ids")
+    private int[] inputIds;
+
+    @JsonProperty("block_size")
+    private long blockSize;
 
     @JsonProperty("seq_len")
     private long seqLen;
