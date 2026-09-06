@@ -1,6 +1,7 @@
 #pragma once
 
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/MMTransportMode.h"
@@ -28,12 +29,32 @@ inline MMControlConfig extractMMControlConfig(const py::object& control_config) 
     return cfg;
 }
 
+inline MMKvcmConfig extractMMKvcmConfig(const py::object& kvcm_config) {
+    MMKvcmConfig cfg;
+    cfg.addresses              = kvcm_config.attr("addresses").cast<std::vector<std::string>>();
+    cfg.instance_id            = kvcm_config.attr("instance_id").cast<std::string>();
+    cfg.instance_group         = kvcm_config.attr("instance_group").cast<std::string>();
+    cfg.user_data              = kvcm_config.attr("user_data").cast<std::string>();
+    cfg.transfer_client_config = kvcm_config.attr("transfer_client_config").cast<std::string>();
+    cfg.call_timeout_ms        = kvcm_config.attr("call_timeout_ms").cast<uint32_t>();
+    cfg.write_timeout_seconds  = kvcm_config.attr("write_timeout_seconds").cast<int32_t>();
+    cfg.object_gc_timeout_ms   = kvcm_config.attr("object_gc_timeout_ms").cast<int64_t>();
+    cfg.max_object_bytes       = kvcm_config.attr("max_object_bytes").cast<int64_t>();
+    cfg.max_receipt_bytes      = kvcm_config.attr("max_receipt_bytes").cast<int64_t>();
+    return cfg;
+}
+
 // Missing Python attributes are configuration errors.
 inline MMTransportConfig extractMMTransportConfig(const py::object& transport_config) {
     MMTransportConfig cfg;
     cfg.mode    = validateMMTransportMode(transport_config.attr("mode").cast<std::string>());
     cfg.control = extractMMControlConfig(transport_config.attr("control"));
     cfg.rdma    = extractRdmaConfig(transport_config.attr("rdma"));
+    // Preserve the legacy grpc/rdma extraction path: KVCM-only attributes are
+    // touched only when the operator explicitly selects the new transport.
+    if (cfg.mode == kMMTransportModeKvcm) {
+        cfg.kvcm = extractMMKvcmConfig(transport_config.attr("kvcm"));
+    }
     return cfg;
 }
 

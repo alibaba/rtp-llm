@@ -173,8 +173,8 @@ public:
     ErrorResult<MultimodalOutput> fetch(const std::string& endpoint, MultimodalInputsPB& request_pb);
 
 private:
-    // nullptr means the receipt is inline.
-    MMReceiptReader* matchReader(const MultimodalOutputPB& receipt) const;
+    // Empty means the receipt is inline. More than one is a protocol violation.
+    std::vector<MMReceiptReader*> matchReaders(const MultimodalOutputPB& receipt) const;
 
     std::vector<std::unique_ptr<MMReceiptReader>> readers_;
     std::unique_ptr<MMTerminalReceiptReader>      terminal_;

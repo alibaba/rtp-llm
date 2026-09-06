@@ -72,9 +72,16 @@ ErrorResult<MultimodalOutput> MMRemoteOutputTransport::fetch(const std::string& 
         return receipt.status();
     }
 
-    auto* matched = matchReader(receipt.value());
-    if (matched != nullptr
-        && std::find(advertised.begin(), advertised.end(), matched) == advertised.end()) {
+    auto matched_readers = matchReaders(receipt.value());
+    if (matched_readers.size() > 1) {
+        for (auto* reader : matched_readers) {
+            reader->discard(receipt.value(), context);
+        }
+        return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
+                         "vit returned a receipt containing multiple external data planes");
+    }
+    auto* matched = matched_readers.empty() ? nullptr : matched_readers.front();
+    if (matched != nullptr && std::find(advertised.begin(), advertised.end(), matched) == advertised.end()) {
         // Reject an unadvertised data plane and release its remote resources.
         matched->discard(receipt.value(), context);
         return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
@@ -91,18 +98,19 @@ ErrorResult<MultimodalOutput> MMRemoteOutputTransport::fetch(const std::string& 
     }
     if (!advertised.empty()) {
         return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
-                         "vit returned an inline receipt while RDMA transport was required");
+                         "vit returned an inline receipt while the configured external transport was required");
     }
     return terminal_->consumeTerminal(receipt.value(), context);
 }
 
-MMReceiptReader* MMRemoteOutputTransport::matchReader(const MultimodalOutputPB& receipt) const {
+std::vector<MMReceiptReader*> MMRemoteOutputTransport::matchReaders(const MultimodalOutputPB& receipt) const {
+    std::vector<MMReceiptReader*> matched;
     for (const auto& reader : readers_) {
         if (reader->matches(receipt)) {
-            return reader.get();
+            matched.push_back(reader.get());
         }
     }
-    return nullptr;
+    return matched;
 }
 
 }  // namespace rtp_llm

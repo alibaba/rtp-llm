@@ -3,6 +3,7 @@ import numbers
 import threading
 import time
 from collections import defaultdict
+from itertools import islice
 from typing import Optional
 
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
@@ -16,6 +17,11 @@ DEFAULT_HANDLE_ROUTE_TTL_SECONDS = 120.0
 HANDLE_ROUTE_CLEANUP_INTERVAL_SECONDS = 10.0
 DEFAULT_RELEASE_TIMEOUT_SECONDS = 1.0
 HANDLE_ROUTE_GC_SAFETY_SECONDS = 5.0
+# Keep routing bounded by both the KVCM receipt contract and the shared gRPC
+# control client's pending-release capacity.
+_MAX_KVCM_OBJECTS_PER_RECEIPT = 1024
+_MAX_KVCM_KEY_BYTES = 512
+_LOGGER = logging.getLogger(__name__)
 
 
 def _context_deadline_seconds(context, max_timeout_seconds: float) -> Optional[float]:
@@ -53,9 +59,11 @@ class MMOutputProxyRouter:
             self._route_ttl_seconds = DEFAULT_HANDLE_ROUTE_TTL_SECONDS
             self._release_timeout_seconds = DEFAULT_RELEASE_TIMEOUT_SECONDS
         else:
-            slot_gc_seconds = max(
-                0.0, transport_config.rdma.slot_gc_timeout_ms / 1000.0
-            )
+            if transport_config.mode == "kvcm":
+                gc_timeout_ms = transport_config.kvcm.object_gc_timeout_ms
+            else:
+                gc_timeout_ms = transport_config.rdma.slot_gc_timeout_ms
+            slot_gc_seconds = max(0.0, gc_timeout_ms / 1000.0)
             self._route_ttl_seconds = max(
                 1.0, slot_gc_seconds + HANDLE_ROUTE_GC_SAFETY_SECONDS
             )
@@ -63,14 +71,48 @@ class MMOutputProxyRouter:
                 0.001, transport_config.control.release_timeout_ms / 1000.0
             )
 
-    def record_receipt(
-        self, worker_address: str, receipt: MultimodalOutputPB
-    ) -> None:
+    def record_receipt(self, worker_address: str, receipt: MultimodalOutputPB) -> None:
+        kvcm_handles = []
+        invalid_kvcm_keys = 0
+        for obj in islice(receipt.output_kvcm_objects, _MAX_KVCM_OBJECTS_PER_RECEIPT):
+            key = obj.key
+            try:
+                valid_key = (
+                    bool(key) and len(key.encode("utf-8")) <= _MAX_KVCM_KEY_BYTES
+                )
+            except UnicodeEncodeError:
+                valid_key = False
+            if valid_key:
+                kvcm_handles.append(key)
+            else:
+                invalid_kvcm_keys += 1
+
+        overflow_count = max(
+            0,
+            len(receipt.output_kvcm_objects) - _MAX_KVCM_OBJECTS_PER_RECEIPT,
+        )
+        if invalid_kvcm_keys:
+            _LOGGER.warning(
+                "Ignoring %d invalid KVCM receipt key(s); worker GC will reclaim them",
+                invalid_kvcm_keys,
+            )
+            self._report_error("kvcm_route_invalid_key", invalid_kvcm_keys)
+        if overflow_count:
+            _LOGGER.warning(
+                "Ignoring %d KVCM receipt object(s) beyond the route limit; "
+                "worker GC will reclaim them",
+                overflow_count,
+            )
+            self._report_error("kvcm_route_object_limit", overflow_count)
+
         handles = list(
             dict.fromkeys(
-                slot.rdma_descriptor.lease_id
-                for slot in receipt.output_rdma_slots
-                if slot.rdma_descriptor.lease_id
+                [
+                    slot.rdma_descriptor.lease_id
+                    for slot in receipt.output_rdma_slots
+                    if slot.rdma_descriptor.lease_id
+                ]
+                + kvcm_handles
             )
         )
         if not handles:
@@ -88,6 +130,11 @@ class MMOutputProxyRouter:
                 if handle in self._handle_collisions:
                     continue
                 existing = self._handle_routes.get(handle)
+                # A receipt can be observed more than once while the request is
+                # retried or forwarded. The same worker is still the only safe
+                # release destination, so refresh that route below. Different
+                # workers claiming one opaque handle is genuinely ambiguous and
+                # must fail closed to avoid freeing the wrong producer's object.
                 if existing is not None and existing[0] != worker_address:
                     self._handle_routes.pop(handle, None)
                     self._handle_collisions[handle] = now
@@ -97,7 +144,7 @@ class MMOutputProxyRouter:
 
         for handle, old_worker, new_worker in collisions:
             logging.warning(
-                "RDMA handle %s was issued by both %s and %s; route poisoned",
+                "Multimodal transport handle %s was issued by both %s and %s; route poisoned",
                 handle,
                 old_worker,
                 new_worker,
@@ -131,7 +178,7 @@ class MMOutputProxyRouter:
 
         for handle, reason in skipped_routes:
             logging.warning(
-                "Cannot route RDMA handle %s (%s); worker GC will reclaim it",
+                "Cannot route multimodal transport handle %s (%s); worker GC will reclaim it",
                 handle,
                 reason,
             )
@@ -141,7 +188,8 @@ class MMOutputProxyRouter:
         if deadline is None and handles_by_worker:
             skipped_count = sum(len(handles) for handles in handles_by_worker.values())
             logging.warning(
-                "RDMA release deadline exhausted; skipping %d handles", skipped_count
+                "Multimodal release deadline exhausted; skipping %d handles",
+                skipped_count,
             )
             self._report_error("release_deadline_exhausted", skipped_count)
             self._restore_claims(selected_routes)
@@ -161,7 +209,7 @@ class MMOutputProxyRouter:
                         for _, group_handles in release_groups[group_index:]
                     )
                     logging.warning(
-                        "RDMA release deadline exhausted; "
+                        "Multimodal release deadline exhausted; "
                         "skipping remaining %d handles",
                         skipped_count,
                     )
@@ -172,17 +220,18 @@ class MMOutputProxyRouter:
                         for handle in group_handles
                     ]
                     self._restore_claims(
-                        {handle: selected_routes[handle] for handle in remaining_handles}
+                        {
+                            handle: selected_routes[handle]
+                            for handle in remaining_handles
+                        }
                     )
                     break
                 stub = self._connection_pool.get_stub(worker_address)
-                stub.ReleaseRdmaLease(
-                    ReleaseLeasePB(lease_id=handles), timeout=timeout
-                )
+                stub.ReleaseRdmaLease(ReleaseLeasePB(lease_id=handles), timeout=timeout)
                 self._complete_claims(handles, selected_routes)
             except Exception:  # noqa: BLE001 - worker GC is the backstop
                 logging.exception(
-                    "Failed to release RDMA handles on VIT worker %s; "
+                    "Failed to release multimodal handles on VIT worker %s; "
                     "worker GC will reclaim them",
                     worker_address,
                 )

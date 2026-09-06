@@ -58,7 +58,18 @@ def _convert_mm_transport_mode(value):
     return value
 
 
-# Reject invalid RDMA limits and timeouts during argument parsing.
+def _kvcm_addresses(value):
+    addresses = [address.strip() for address in str(value).split(",")]
+    if not value or addresses == [""]:
+        return []
+    if any(not address for address in addresses):
+        raise argparse.ArgumentTypeError(
+            "KVCM addresses must be a comma-separated list without empty entries"
+        )
+    return addresses
+
+
+# Reject invalid external-transport limits and timeouts during argument parsing.
 def _positive_int(value):
     try:
         parsed = int(value)
@@ -291,6 +302,7 @@ def init_vit_group_args(parser, vit_config):
     transport_config = vit_config.output_transport
     control_config = transport_config.control
     rdma_config = transport_config.rdma
+    kvcm_config = transport_config.kvcm
     vit_group.add_argument(
         "--mm_transport_mode",
         env_name="MM_TRANSPORT_MODE",
@@ -298,7 +310,7 @@ def init_vit_group_args(parser, vit_config):
         type=_convert_mm_transport_mode,
         choices=list(MM_TRANSPORT_MODES),
         default=MM_TRANSPORT_MODE_GRPC,
-        help="多模态输出传输模式：grpc 使用内联传输，rdma 强制使用 RDMA 且失败时直接报错",
+        help="多模态输出传输模式：grpc 内联；rdma 或 kvcm 为强制外部传输，失败时直接报错",
     )
     vit_group.add_argument(
         "--mm_rdma_bind_ip",
@@ -372,6 +384,86 @@ def init_vit_group_args(parser, vit_config):
         type=_positive_int,
         default=8 * 1024 * 1024 * 1024,
         help="LLM 侧单个 RDMA receipt 的总载荷上限，默认 8GiB，与 RDMA 总显存池大小一致",
+    )
+    vit_group.add_argument(
+        "--mm_kvcm_addresses",
+        env_name="MM_KVCM_ADDRESSES",
+        bind_to=(kvcm_config, "addresses"),
+        type=_kvcm_addresses,
+        default=[],
+        help="独立 KVMeta 服务地址，多个地址用逗号分隔；仅 mm_transport_mode=kvcm 时使用",
+    )
+    vit_group.add_argument(
+        "--mm_kvcm_instance_id",
+        env_name="MM_KVCM_INSTANCE_ID",
+        bind_to=(kvcm_config, "instance_id"),
+        type=str,
+        default="",
+        help="KVMeta instance id；ViT 与 LLM 必须一致",
+    )
+    vit_group.add_argument(
+        "--mm_kvcm_instance_group",
+        env_name="MM_KVCM_INSTANCE_GROUP",
+        bind_to=(kvcm_config, "instance_group"),
+        type=str,
+        default="",
+        help="KVMeta instance group；仅 mm_transport_mode=kvcm 时必填",
+    )
+    vit_group.add_argument(
+        "--mm_kvcm_user_data",
+        env_name="MM_KVCM_USER_DATA",
+        bind_to=(kvcm_config, "user_data"),
+        type=str,
+        default="",
+        help="注册 KVMeta instance 时透传的 user data",
+    )
+    vit_group.add_argument(
+        "--mm_kvcm_transfer_client_config",
+        env_name="MM_KVCM_TRANSFER_CLIENT_CONFIG",
+        bind_to=(kvcm_config, "transfer_client_config"),
+        type=str,
+        default="",
+        help="KVCM transfer client JSON；仅独立 EMB object path 使用",
+    )
+    vit_group.add_argument(
+        "--mm_kvcm_call_timeout_ms",
+        env_name="MM_KVCM_CALL_TIMEOUT_MS",
+        bind_to=(kvcm_config, "call_timeout_ms"),
+        type=_positive_int,
+        default=3000,
+        help="单次 KVMeta RPC 超时（毫秒）",
+    )
+    vit_group.add_argument(
+        "--mm_kvcm_write_timeout_seconds",
+        env_name="MM_KVCM_WRITE_TIMEOUT_SECONDS",
+        bind_to=(kvcm_config, "write_timeout_seconds"),
+        type=_positive_int,
+        default=30,
+        help="KVMeta write session 超时（秒）",
+    )
+    vit_group.add_argument(
+        "--mm_kvcm_object_gc_timeout_ms",
+        env_name="MM_KVCM_OBJECT_GC_TIMEOUT_MS",
+        bind_to=(kvcm_config, "object_gc_timeout_ms"),
+        type=_positive_int,
+        default=VitConfig.DEFAULT_MM_TIMEOUT_MS + 60 * 1000,
+        help="ViT 侧未收到 release 时回收 EMB object metadata 的兜底时间（毫秒）；必须覆盖完整多模态请求和 KVCM load 窗口",
+    )
+    vit_group.add_argument(
+        "--mm_kvcm_max_object_bytes",
+        env_name="MM_KVCM_MAX_OBJECT_BYTES",
+        bind_to=(kvcm_config, "max_object_bytes"),
+        type=_positive_int,
+        default=1024 * 1024 * 1024,
+        help="单个 EMB object 的字节上限，较大 tensor 按第 0 维切分",
+    )
+    vit_group.add_argument(
+        "--mm_kvcm_max_receipt_bytes",
+        env_name="MM_KVCM_MAX_RECEIPT_BYTES",
+        bind_to=(kvcm_config, "max_receipt_bytes"),
+        type=_positive_int,
+        default=8 * 1024 * 1024 * 1024,
+        help="LLM 侧单个 KVCM receipt 的总载荷上限",
     )
     vit_group.add_argument(
         "--gpu_batch_wait_ms",

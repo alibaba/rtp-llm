@@ -4,6 +4,7 @@
 #include <sstream>
 #include <map>
 #include <vector>
+#include "rtp_llm/cpp/config/MMKvcmConfig.h"
 #include "rtp_llm/cpp/config/MMTransportMode.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/config/RdmaConfig.h"
@@ -350,6 +351,7 @@ struct MMTransportConfig {
     std::string     mode = kMMTransportModeGrpc;
     MMControlConfig control;
     RdmaConfig      rdma;
+    MMKvcmConfig    kvcm;
     // LLM-to-ViT RPC budget when no request input sets mm_timeout_ms.
     int64_t default_rpc_timeout_ms = 125 * 1000;
     // Let the ViT worker return its structured timeout before the client deadline.

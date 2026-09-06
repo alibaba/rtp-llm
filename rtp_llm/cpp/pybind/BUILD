@@ -117,6 +117,17 @@ cc_library(
 )
 
 cc_library(
+    name = "mm_kvcm_writer_pybind",
+    srcs = ["MMKvcmWriterInit.cc"],
+    deps = [
+        "//rtp_llm/cpp/multimodal_processor/transport/kvcm:mm_kvcm_writer",
+    ] + torch_deps(),
+    copts = copts(),
+    alwayslink = True,
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "th_transformer_lib",
     srcs = [
         "init.cc",

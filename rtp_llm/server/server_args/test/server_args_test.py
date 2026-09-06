@@ -721,6 +721,97 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(cfg.vit_config.gpu_max_batch_size, 8)
         self.assertEqual(cfg.vit_config.gpu_batch_wait_ms, 500)
 
+    def test_kvcm_transport_vit_args_parse(self):
+        from rtp_llm.config.py_config_modules import (
+            MM_TRANSPORT_MODE_GRPC,
+            MM_TRANSPORT_MODE_KVCM,
+            PyEnvConfigs,
+            VitConfig,
+        )
+        from rtp_llm.server.server_args.server_args import (
+            EnvArgumentParser,
+            init_all_group_args,
+        )
+
+        parser = EnvArgumentParser(description="test")
+        cfg = PyEnvConfigs()
+        parser.set_root_config(cfg)
+        init_all_group_args(parser, cfg)
+
+        transport = cfg.vit_config.output_transport
+        self.assertEqual(transport.mode, MM_TRANSPORT_MODE_GRPC)
+        self.assertEqual(
+            transport.kvcm.object_gc_timeout_ms,
+            VitConfig.DEFAULT_MM_TIMEOUT_MS + 60 * 1000,
+        )
+
+        parser.parse_args(
+            [
+                "--mm_transport_mode",
+                "kvcm",
+                "--mm_kvcm_addresses",
+                "127.0.0.1:19001,127.0.0.2:19001",
+                "--mm_kvcm_instance_id",
+                "model-a",
+                "--mm_kvcm_instance_group",
+                "epd-emb",
+                "--mm_kvcm_user_data",
+                "epd-model-a",
+                "--mm_kvcm_transfer_client_config",
+                '{"type":"local"}',
+                "--mm_kvcm_call_timeout_ms",
+                "5000",
+                "--mm_kvcm_write_timeout_seconds",
+                "45",
+                "--mm_kvcm_object_gc_timeout_ms",
+                "240000",
+                "--mm_kvcm_max_object_bytes",
+                "1048576",
+                "--mm_kvcm_max_receipt_bytes",
+                "8388608",
+            ]
+        )
+
+        self.assertEqual(transport.mode, MM_TRANSPORT_MODE_KVCM)
+        self.assertEqual(
+            transport.kvcm.addresses,
+            ["127.0.0.1:19001", "127.0.0.2:19001"],
+        )
+        self.assertEqual(transport.kvcm.instance_id, "model-a")
+        self.assertEqual(transport.kvcm.instance_group, "epd-emb")
+        self.assertEqual(transport.kvcm.user_data, "epd-model-a")
+        self.assertEqual(transport.kvcm.transfer_client_config, '{"type":"local"}')
+        self.assertEqual(transport.kvcm.call_timeout_ms, 5_000)
+        self.assertEqual(transport.kvcm.write_timeout_seconds, 45)
+        self.assertEqual(transport.kvcm.object_gc_timeout_ms, 240_000)
+        self.assertEqual(transport.kvcm.max_object_bytes, 1_048_576)
+        self.assertEqual(transport.kvcm.max_receipt_bytes, 8_388_608)
+
+    def test_kvcm_transport_vit_args_reject_invalid_values(self):
+        from rtp_llm.config.py_config_modules import PyEnvConfigs
+        from rtp_llm.server.server_args.server_args import (
+            EnvArgumentParser,
+            init_all_group_args,
+        )
+
+        invalid_arguments = (
+            ("--mm_transport_mode", "auto"),
+            ("--mm_kvcm_addresses", "127.0.0.1:19001,"),
+            ("--mm_kvcm_call_timeout_ms", "0"),
+            ("--mm_kvcm_write_timeout_seconds", "-1"),
+            ("--mm_kvcm_object_gc_timeout_ms", "0"),
+            ("--mm_kvcm_max_object_bytes", "0"),
+            ("--mm_kvcm_max_receipt_bytes", "not-an-integer"),
+        )
+        for flag, value in invalid_arguments:
+            with self.subTest(flag=flag, value=value):
+                parser = EnvArgumentParser(description="test")
+                cfg = PyEnvConfigs()
+                parser.set_root_config(cfg)
+                init_all_group_args(parser, cfg)
+                with self.assertRaises(SystemExit):
+                    parser.parse_args([flag, value])
+
     def test_repetition_detection_config(self):
         """Test that repetition detection args bind to PyEnvConfigs."""
         sys.argv = [

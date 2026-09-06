@@ -138,6 +138,12 @@ config_setting(
     define_values = {"use_remote_kv_cache": "true"},
 )
 
+config_setting(
+    name = "using_kvcm_emb_storage",
+    define_values = {"use_kvcm_emb_storage": "true"},
+    visibility = ["//visibility:public"],
+)
+
 cc_binary(
     name = "th_transformer_config",
     copts = copts(),
@@ -194,6 +200,19 @@ cc_binary(
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/pybind:mm_rdma_exporter_pybind",
+    ],
+)
+
+cc_binary(
+    name = "mm_kvcm_writer",
+    copts = copts(),
+    linkopts = [
+        "-Wl,-rpath='$$ORIGIN'",
+    ],
+    linkshared = 1,
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/pybind:mm_kvcm_writer_pybind",
     ],
 )
 

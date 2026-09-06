@@ -1,4 +1,7 @@
+import sys
+import threading
 from contextlib import contextmanager
+from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import MagicMock, patch
 
@@ -6,16 +9,20 @@ import torch
 
 from rtp_llm.config.py_config_modules import (
     MM_TRANSPORT_MODE_GRPC,
+    MM_TRANSPORT_MODE_KVCM,
     MM_TRANSPORT_MODE_RDMA,
     MM_TRANSPORT_MODES,
     MMTransportConfig,
+    VitConfig,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MMRdmaSlotPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
+    TensorDataTypePB,
 )
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
+from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
 from rtp_llm.multimodal.transport.base import (
     MMOutputTransport,
     MMTransportBackend,
@@ -26,11 +33,18 @@ from rtp_llm.multimodal.transport.grpc.backend import (
     TRANSPORT_BYTES,
     GrpcInlineOutputBackend,
 )
-from rtp_llm.multimodal.transport.rdma.backend import (
-    TRANSPORT_RDMA,
-    RdmaOutputBackend,
+from rtp_llm.multimodal.transport.kvcm import backend as kvcm_backend
+from rtp_llm.multimodal.transport.kvcm.backend import (
+    _MAX_KVCM_KEY_BYTES,
+    _MAX_LOGICAL_VALUES_PER_RECEIPT,
+    _MAX_OBJECTS_PER_RECEIPT,
+    TRANSPORT_KVCM,
+    KvcmOutputBackend,
+    _chunk_count,
+    _chunk_tensor,
+    _concatenated_layout,
 )
-from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
+from rtp_llm.multimodal.transport.rdma.backend import TRANSPORT_RDMA, RdmaOutputBackend
 
 
 def _serialized_desc(handle: str, nbytes: int = 16) -> bytes:
@@ -70,9 +84,56 @@ class MMOutputTransportFactoryTest(TestCase):
         config = MMTransportConfig()
 
         self.assertEqual(config.mode, MM_TRANSPORT_MODE_GRPC)
-        self.assertEqual(MM_TRANSPORT_MODES, (MM_TRANSPORT_MODE_GRPC, MM_TRANSPORT_MODE_RDMA))
+        self.assertEqual(
+            MM_TRANSPORT_MODES,
+            (MM_TRANSPORT_MODE_GRPC, MM_TRANSPORT_MODE_RDMA, MM_TRANSPORT_MODE_KVCM),
+        )
         self.assertNotIn("auto", MM_TRANSPORT_MODES)
-        self.assertIsInstance(create_mm_output_transport(config)._backend, GrpcInlineOutputBackend)
+        self.assertIsInstance(
+            create_mm_output_transport(config)._backend, GrpcInlineOutputBackend
+        )
+        self.assertIsInstance(
+            create_mm_output_transport()._backend, GrpcInlineOutputBackend
+        )
+
+    @patch("rtp_llm.multimodal.transport.rdma.backend.RdmaOutputBackend.create")
+    def test_explicit_rdma_mode_selects_only_rdma_backend(self, create):
+        backend = MagicMock(spec=MMTransportBackend)
+        create.return_value = backend
+        config = MMTransportConfig()
+        config.mode = MM_TRANSPORT_MODE_RDMA
+
+        transport = create_mm_output_transport(config, local_device_id=7)
+
+        self.assertIs(transport._backend, backend)
+        create.assert_called_once_with(config.rdma, 7)
+
+    @patch("rtp_llm.multimodal.transport.kvcm.backend.KvcmOutputBackend.create")
+    def test_explicit_kvcm_mode_selects_only_kvcm_backend(self, create):
+        backend = MagicMock(spec=MMTransportBackend)
+        create.return_value = backend
+        config = MMTransportConfig()
+        config.mode = MM_TRANSPORT_MODE_KVCM
+
+        transport = create_mm_output_transport(config, local_device_id=7)
+
+        self.assertIs(transport._backend, backend)
+        create.assert_called_once_with(config.kvcm)
+
+    def test_invalid_runtime_mode_is_rejected(self):
+        config = MMTransportConfig()
+        config.mode = "auto"
+
+        with self.assertRaisesRegex(ValueError, "invalid mm_transport_mode.*auto"):
+            create_mm_output_transport(config)
+
+    def test_kvcm_gc_default_outlives_default_multimodal_request(self):
+        config = MMTransportConfig()
+
+        self.assertEqual(
+            config.kvcm.object_gc_timeout_ms,
+            VitConfig.DEFAULT_MM_TIMEOUT_MS + 60 * 1000,
+        )
 
     @patch(
         "rtp_llm.multimodal.transport.rdma.backend.RdmaOutputBackend.create",
@@ -86,6 +147,19 @@ class MMOutputTransportFactoryTest(TestCase):
             create_mm_output_transport(config)
 
         create.assert_called_once_with(config.rdma, 0)
+
+    @patch(
+        "rtp_llm.multimodal.transport.kvcm.backend.KvcmOutputBackend.create",
+        side_effect=RuntimeError("kvcm init failed"),
+    )
+    def test_kvcm_initialization_failure_is_propagated(self, create):
+        config = MMTransportConfig()
+        config.mode = MM_TRANSPORT_MODE_KVCM
+
+        with self.assertRaisesRegex(RuntimeError, "kvcm init failed"):
+            create_mm_output_transport(config)
+
+        create.assert_called_once_with(config.kvcm)
 
 
 class RdmaOutputBackendTest(TestCase):
@@ -133,7 +207,10 @@ class RdmaOutputBackendTest(TestCase):
 
         # Descriptor order is what lets the LLM re-concat the chunks.
         self.assertEqual(
-            [slot.rdma_descriptor.lease_id for slot in result.receipt.output_rdma_slots],
+            [
+                slot.rdma_descriptor.lease_id
+                for slot in result.receipt.output_rdma_slots
+            ],
             ["one", "two"],
         )
         # split_size must describe the per-image row counts of the un-concatenated inputs.
@@ -156,14 +233,865 @@ class RdmaOutputBackendTest(TestCase):
         cuda_res = MMEmbeddingRes([_rows(1)])
         with _tensors_look_cuda():
             with self.assertRaisesRegex(RuntimeError, "did not advertise RDMA"):
-                self.backend.transfer(
-                    MultimodalInputsPB(support_rdma=False), cuda_res
-                )
+                self.backend.transfer(MultimodalInputsPB(support_rdma=False), cuda_res)
             with self.assertRaisesRegex(RuntimeError, "no multimodal embeddings"):
                 self.backend.transfer(_rdma_request(), MMEmbeddingRes([]))
         with self.assertRaisesRegex(RuntimeError, "requires CUDA"):
             self.backend.transfer(_rdma_request(), cuda_res)
         self.exporter.export_embedding.assert_not_called()
+
+
+class _FakeKvcmWriter:
+    def __init__(self):
+        self.saved = []
+        self.removed = []
+        self.save_error = None
+        self.remove_event = threading.Event()
+
+    def save(self, keys, tensors):
+        self.saved.append((list(keys), list(tensors)))
+        if self.save_error is not None:
+            raise self.save_error
+
+    def remove(self, keys):
+        self.removed.append(list(keys))
+        self.remove_event.set()
+
+
+def _kvcm_config(max_object_bytes=32, max_receipt_bytes=1024):
+    config = MMTransportConfig().kvcm
+    config.max_object_bytes = max_object_bytes
+    config.max_receipt_bytes = max_receipt_bytes
+    config.object_gc_timeout_ms = 60 * 1000
+    return config
+
+
+class KvcmOutputBackendTest(TestCase):
+    def setUp(self):
+        self.writer = _FakeKvcmWriter()
+        self.backend = KvcmOutputBackend(self.writer, _kvcm_config())
+        self.addCleanup(self.backend.close)
+
+    def test_variable_size_objects_are_chunked_and_described_exactly(self):
+        embeddings = [_rows(2), _rows(3, offset=100.0)]
+        positions = [
+            torch.arange(2, dtype=torch.int32),
+            torch.arange(3, dtype=torch.int32),
+        ]
+        extras = [
+            torch.ones(3, dtype=torch.float16),
+            torch.arange(2, dtype=torch.int32),
+        ]
+        result = self.backend.transfer(
+            MultimodalInputsPB(support_kvcm=True),
+            MMEmbeddingRes(
+                embeddings,
+                position_ids=positions,
+                extra_input=extras,
+            ),
+        )
+
+        self.assertEqual(result.transport, TRANSPORT_KVCM)
+        self.assertEqual(list(result.receipt.split_size), [2, 3])
+        objects = list(result.receipt.output_kvcm_objects)
+        self.assertEqual([obj.value_size for obj in objects], [32, 32, 16, 20, 6, 8])
+        self.assertEqual(
+            [obj.role for obj in objects],
+            [
+                MMRdmaSlotPB.EMBEDDING,
+                MMRdmaSlotPB.EMBEDDING,
+                MMRdmaSlotPB.EMBEDDING,
+                MMRdmaSlotPB.POS_ID,
+                MMRdmaSlotPB.EXTRA_INPUT,
+                MMRdmaSlotPB.EXTRA_INPUT,
+            ],
+        )
+        self.assertEqual([obj.logical_index for obj in objects], [0, 0, 0, 0, 0, 1])
+        self.assertEqual(
+            [obj.tensor.nbytes for obj in objects], [obj.value_size for obj in objects]
+        )
+        self.assertEqual(
+            [list(obj.tensor.shape) for obj in objects],
+            [[2, 4], [2, 4], [1, 4], [5], [3], [2]],
+        )
+        self.assertEqual(
+            [obj.tensor.data_type for obj in objects],
+            [
+                TensorDataTypePB.RDMA_TENSOR_FLOAT32,
+                TensorDataTypePB.RDMA_TENSOR_FLOAT32,
+                TensorDataTypePB.RDMA_TENSOR_FLOAT32,
+                TensorDataTypePB.RDMA_TENSOR_INT32,
+                TensorDataTypePB.RDMA_TENSOR_FLOAT16,
+                TensorDataTypePB.RDMA_TENSOR_INT32,
+            ],
+        )
+        self.assertTrue(all(obj.tensor.offset == 0 for obj in objects))
+        self.assertEqual(len({obj.key for obj in objects}), len(objects))
+        self.assertEqual(set(self.backend._pending), {obj.key for obj in objects})
+        saved_keys, saved_tensors = self.writer.saved[0]
+        self.assertEqual(saved_keys, [obj.key for obj in objects])
+        self.assertEqual(
+            [_tensor.numel() * _tensor.element_size() for _tensor in saved_tensors],
+            [obj.value_size for obj in objects],
+        )
+        combined_embeddings = torch.cat(embeddings)
+        expected_tensors = [
+            combined_embeddings[:2],
+            combined_embeddings[2:4],
+            combined_embeddings[4:],
+            torch.cat(positions),
+            *extras,
+        ]
+        self.assertEqual(len(saved_tensors), len(expected_tensors))
+        for actual, expected in zip(saved_tensors, expected_tensors):
+            self.assertTrue(torch.equal(actual, expected))
+        self.assertEqual(result.payload_embedding_bytes, 80)
+        self.assertEqual(result.payload_pos_bytes, 20)
+        self.assertEqual(result.payload_extra_bytes, 14)
+
+    def test_exact_object_and_receipt_boundaries_are_accepted(self):
+        backend = KvcmOutputBackend(
+            self.writer, _kvcm_config(max_object_bytes=32, max_receipt_bytes=32)
+        )
+        try:
+            result = backend.transfer(
+                MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(2)])
+            )
+            objects = list(result.receipt.output_kvcm_objects)
+            self.assertEqual([obj.value_size for obj in objects], [32])
+            self.assertEqual(result.payload_embedding_bytes, 32)
+        finally:
+            backend.close()
+
+    def test_async_release_object_capacity_boundary_is_accepted(self):
+        backend = KvcmOutputBackend(
+            self.writer,
+            _kvcm_config(
+                max_object_bytes=4,
+                max_receipt_bytes=_MAX_OBJECTS_PER_RECEIPT * 4,
+            ),
+        )
+        try:
+            tensor = torch.ones((_MAX_OBJECTS_PER_RECEIPT, 1), dtype=torch.int32)
+            result = backend.transfer(
+                MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([tensor])
+            )
+            keys = [obj.key for obj in result.receipt.output_kvcm_objects]
+
+            self.assertEqual(len(keys), _MAX_OBJECTS_PER_RECEIPT)
+            self.assertEqual(len(self.writer.saved), 1)
+            self.assertEqual(len(self.writer.saved[0][0]), _MAX_OBJECTS_PER_RECEIPT)
+            backend.release(keys)
+            self.assertEqual(self.writer.removed, [keys])
+            self.assertEqual(backend._pending, {})
+        finally:
+            backend.close()
+
+    def test_mixed_supported_dtypes_are_promoted_before_storage(self):
+        first = torch.ones((1, 2), dtype=torch.float16)
+        second = torch.ones((2, 2), dtype=torch.bfloat16)
+
+        result = self.backend.transfer(
+            MultimodalInputsPB(support_kvcm=True),
+            MMEmbeddingRes([first, second]),
+        )
+
+        saved = self.writer.saved[0][1]
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0].dtype, torch.float32)
+        self.assertEqual(
+            result.receipt.output_kvcm_objects[0].tensor.data_type,
+            TensorDataTypePB.RDMA_TENSOR_FLOAT32,
+        )
+        self.assertEqual(result.payload_embedding_bytes, 24)
+
+    def test_chunk_helpers_reject_invalid_layouts_before_iteration(self):
+        for nbytes, rows in ((0, 1), (4, 0), (5, 2)):
+            with self.subTest(nbytes=nbytes, rows=rows):
+                with self.assertRaisesRegex(ValueError, "stable byte width"):
+                    _chunk_count(nbytes, rows, 32)
+
+        cases = [
+            (torch.tensor(1), "between 1 and 16 dimensions"),
+            (torch.empty((1, 0)), "dimensions must all be positive"),
+            (torch.ones((1, 1), dtype=torch.float64), "does not support tensor dtype"),
+        ]
+        for tensor, expected_error in cases:
+            with self.subTest(expected_error=expected_error):
+                with self.assertRaisesRegex(ValueError, expected_error):
+                    list(_chunk_tensor(tensor, 32))
+
+        with patch.object(kvcm_backend, "_tensor_nbytes", return_value=0):
+            with self.assertRaisesRegex(ValueError, "cannot store an empty tensor"):
+                list(_chunk_tensor(torch.ones(1), 32))
+
+        with patch.object(torch, "promote_types", return_value=torch.float64):
+            with self.assertRaisesRegex(ValueError, "concatenated embeddings dtype"):
+                _concatenated_layout([torch.ones((1, 1))], "embeddings")
+
+    def test_transfer_defensive_checks_fail_closed_before_native_storage(self):
+        tensor = _rows(1)
+        prepared = [
+            (tensor, MMRdmaSlotPB.EMBEDDING, 0),
+            (tensor, MMRdmaSlotPB.EMBEDDING, 0),
+        ]
+        with patch.object(
+            self.backend, "_prepare_tensors", return_value=(prepared, [2])
+        ):
+            with patch.object(kvcm_backend, "_MAX_OBJECTS_PER_RECEIPT", 1):
+                with self.assertRaisesRegex(RuntimeError, "receipt object limit 1"):
+                    self.backend.transfer(
+                        MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([])
+                    )
+
+        with patch.object(self.backend, "_prepare_tensors", return_value=([], [])):
+            with self.assertRaisesRegex(RuntimeError, "produced no exact-size objects"):
+                self.backend.transfer(
+                    MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([])
+                )
+
+        original_receipt_limit = self.backend._max_receipt_bytes
+        self.backend._max_receipt_bytes = 8
+        try:
+            with patch.object(
+                self.backend,
+                "_prepare_tensors",
+                return_value=([(tensor, MMRdmaSlotPB.EMBEDDING, 0)], [1]),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "output size 16"):
+                    self.backend.transfer(
+                        MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([])
+                    )
+        finally:
+            self.backend._max_receipt_bytes = original_receipt_limit
+
+        self.assertEqual(self.writer.saved, [])
+
+    def test_post_concat_position_row_check_fails_closed_before_storage(self):
+        embedding = _rows(2)
+        position = torch.arange(2, dtype=torch.int32)
+        real_concat = torch.concat
+        call_count = 0
+
+        def truncate_second_concat(tensors, *args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            combined = real_concat(tensors, *args, **kwargs)
+            return combined if call_count == 1 else combined[:-1]
+
+        with patch.object(torch, "concat", side_effect=truncate_second_concat):
+            with self.assertRaisesRegex(ValueError, "position rows do not match"):
+                self.backend.transfer(
+                    MultimodalInputsPB(support_kvcm=True),
+                    MMEmbeddingRes([embedding], position_ids=[position]),
+                )
+
+        self.assertEqual(call_count, 2)
+        self.assertEqual(self.writer.saved, [])
+
+    def test_constructor_rejects_invalid_limits_before_starting_gc(self):
+        cases = [
+            {"max_object_bytes": 0},
+            {"max_object_bytes": 64, "max_receipt_bytes": 32},
+            {"object_gc_timeout_ms": 0},
+        ]
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                config = _kvcm_config()
+                for name, value in overrides.items():
+                    setattr(config, name, value)
+                with self.assertRaisesRegex(ValueError, "invalid KVCM"):
+                    KvcmOutputBackend(self.writer, config)
+
+    def test_create_checks_native_availability_and_enabled_state(self):
+        config = _kvcm_config()
+
+        def fake_ops(available, enabled):
+            writer = _FakeKvcmWriter()
+            writer.enabled = MagicMock(return_value=enabled)
+            writer_type = MagicMock(return_value=writer)
+            writer_type.available.return_value = available
+            return (
+                SimpleNamespace(
+                    ensure_kvcm_ops_loaded=MagicMock(),
+                    MMKvcmWriter=writer_type,
+                ),
+                writer,
+                writer_type,
+            )
+
+        package = sys.modules["rtp_llm"]
+        ops, _, writer_type = fake_ops(False, True)
+        with patch.dict(sys.modules, {"rtp_llm.ops": ops}), patch.object(
+            package, "ops", ops, create=True
+        ):
+            with self.assertRaisesRegex(RuntimeError, "rebuild with"):
+                KvcmOutputBackend.create(config)
+        ops.ensure_kvcm_ops_loaded.assert_called_once_with()
+        writer_type.assert_not_called()
+
+        ops, writer, writer_type = fake_ops(True, False)
+        with patch.dict(sys.modules, {"rtp_llm.ops": ops}), patch.object(
+            package, "ops", ops, create=True
+        ):
+            with self.assertRaisesRegex(RuntimeError, "writer is disabled"):
+                KvcmOutputBackend.create(config)
+        writer_type.assert_called_once_with(config)
+        writer.enabled.assert_called_once_with()
+
+        ops, writer, writer_type = fake_ops(True, True)
+        with patch.dict(sys.modules, {"rtp_llm.ops": ops}), patch.object(
+            package, "ops", ops, create=True
+        ):
+            created = KvcmOutputBackend.create(config)
+        try:
+            self.assertIs(created._writer, writer)
+            writer_type.assert_called_once_with(config)
+        finally:
+            created.close()
+
+    def test_single_pass_logical_iterables_are_snapshotted_exactly_once(self):
+        embeddings = [_rows(1), _rows(2, offset=20.0)]
+        positions = [
+            torch.arange(1, dtype=torch.int32),
+            torch.arange(10, 12, dtype=torch.int32),
+        ]
+        extras = [
+            torch.arange(2, dtype=torch.float16),
+            torch.arange(3, dtype=torch.int32),
+        ]
+        response = MMEmbeddingRes([])
+        response.embeddings = iter(embeddings)
+        response.position_ids = iter(positions)
+        response.extra_input = iter(extras)
+
+        result = self.backend.transfer(MultimodalInputsPB(support_kvcm=True), response)
+
+        self.assertEqual(list(result.receipt.split_size), [1, 2])
+        saved_tensors = self.writer.saved[0][1]
+        self.assertTrue(
+            torch.equal(torch.cat(saved_tensors[:2]), torch.cat(embeddings))
+        )
+        self.assertTrue(torch.equal(saved_tensors[2], torch.cat(positions)))
+        self.assertTrue(torch.equal(saved_tensors[3], extras[0]))
+        self.assertTrue(torch.equal(saved_tensors[4], extras[1]))
+
+    @patch("rtp_llm.multimodal.transport.kvcm.backend.torch.cuda.synchronize")
+    def test_cuda_producer_work_is_synchronized_before_storage(self, synchronize):
+        with _tensors_look_cuda():
+            self.backend.transfer(
+                MultimodalInputsPB(support_kvcm=True),
+                MMEmbeddingRes([_rows(1)]),
+            )
+
+        synchronize.assert_called_once_with(torch.device("cpu"))
+        self.assertEqual(len(self.writer.saved), 1)
+
+    def test_release_removes_only_owned_keys_once(self):
+        result = self.backend.transfer(
+            MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+        )
+        key = result.receipt.output_kvcm_objects[0].key
+
+        self.backend.release([key, key, "not-owned"])
+        self.backend.release([key])
+
+        self.assertEqual(self.writer.removed, [[key]])
+
+    def test_release_rejects_a_scalar_string(self):
+        result = self.backend.transfer(
+            MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+        )
+        key = result.receipt.output_kvcm_objects[0].key
+
+        self.backend.release(key)
+
+        self.assertEqual(self.writer.removed, [])
+        self.assertIn(key, self.backend._pending)
+
+    def test_release_validation_is_bounded_and_ignores_malformed_handles(self):
+        result = self.backend.transfer(
+            MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+        )
+        key = result.receipt.output_kvcm_objects[0].key
+
+        def oversized_handles():
+            yield key
+            yield None
+            yield []
+            yield "x" * (_MAX_KVCM_KEY_BYTES + 1)
+            for index in range(_MAX_OBJECTS_PER_RECEIPT - 3):
+                yield f"not-owned-{index}"
+            # The bounded snapshot consumes exactly one item past the limit,
+            # but must never advance into this sentinel.
+            yield "first-tail"
+            raise AssertionError("KVCM release validation drained its input")
+
+        self.backend.release(oversized_handles())
+
+        self.assertEqual(self.writer.removed, [[key]])
+
+    def test_release_rejects_noniterable_and_invalid_utf8_handles(self):
+        result = self.backend.transfer(
+            MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+        )
+        key = result.receipt.output_kvcm_objects[0].key
+
+        self.backend.release(None)
+        self.backend.release(["\ud800", b"bytes", "", key])
+
+        self.assertEqual(self.writer.removed, [[key]])
+        self.assertNotIn(key, self.backend._pending)
+
+    def test_closed_backend_rejects_transfer_and_ignores_release(self):
+        self.backend.close()
+        self.backend.close()
+
+        with self.assertRaisesRegex(RuntimeError, "backend is closed"):
+            self.backend.transfer(
+                MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+            )
+        self.backend.release(["not-owned"])
+        self.assertEqual(self.writer.saved, [])
+        self.assertEqual(self.writer.removed, [])
+
+    def test_save_failure_rolls_back_generated_keys(self):
+        self.writer.save_error = RuntimeError("store failed")
+
+        with self.assertRaisesRegex(RuntimeError, "store failed"):
+            self.backend.transfer(
+                MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+            )
+
+        self.assertEqual(len(self.writer.saved), 1)
+        self.assertEqual(self.writer.removed, [self.writer.saved[0][0]])
+
+    @patch(
+        "rtp_llm.multimodal.transport.kvcm.backend.MMOutputResult",
+        side_effect=RuntimeError("result construction failed"),
+    )
+    def test_result_construction_failure_rolls_back_committed_keys(self, _result):
+        with self.assertRaisesRegex(RuntimeError, "result construction failed"):
+            self.backend.transfer(
+                MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+            )
+
+        self.assertEqual(len(self.writer.saved), 1)
+        self.assertEqual(self.writer.removed, [self.writer.saved[0][0]])
+
+    def test_close_waits_for_inflight_transfer_and_rolls_back_its_objects(self):
+        save_entered = threading.Event()
+        allow_save = threading.Event()
+
+        class BlockingWriter(_FakeKvcmWriter):
+            def save(self, keys, tensors):
+                self.saved.append((list(keys), list(tensors)))
+                save_entered.set()
+                allow_save.wait(timeout=5.0)
+
+        writer = BlockingWriter()
+        backend = KvcmOutputBackend(writer, _kvcm_config())
+        transfer_errors = []
+        transfer_thread = threading.Thread(
+            target=lambda: self._record_transfer_error(backend, transfer_errors)
+        )
+        close_thread = threading.Thread(target=backend.close)
+
+        transfer_thread.start()
+        self.assertTrue(save_entered.wait(timeout=1.0))
+        close_thread.start()
+        close_thread.join(timeout=0.05)
+        self.assertTrue(close_thread.is_alive())
+
+        allow_save.set()
+        transfer_thread.join(timeout=1.0)
+        close_thread.join(timeout=1.0)
+
+        self.assertFalse(transfer_thread.is_alive())
+        self.assertFalse(close_thread.is_alive())
+        self.assertEqual(len(transfer_errors), 1)
+        self.assertRegex(str(transfer_errors[0]), "closed")
+        self.assertEqual(writer.removed, [writer.saved[0][0]])
+
+    @staticmethod
+    def _record_transfer_error(backend, errors):
+        try:
+            backend.transfer(
+                MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+            )
+        except Exception as error:  # noqa: BLE001 - asserted by the caller
+            errors.append(error)
+
+    def test_close_waits_for_inflight_release_before_finishing(self):
+        remove_entered = threading.Event()
+        allow_remove = threading.Event()
+
+        class BlockingRemoveWriter(_FakeKvcmWriter):
+            def __init__(self):
+                super().__init__()
+                self.remove_attempts = 0
+
+            def remove(self, keys):
+                self.remove_attempts += 1
+                self.removed.append(list(keys))
+                if self.remove_attempts == 1:
+                    remove_entered.set()
+                    allow_remove.wait(timeout=5.0)
+                    raise RuntimeError("temporary remove failure")
+
+        writer = BlockingRemoveWriter()
+        backend = KvcmOutputBackend(writer, _kvcm_config())
+        result = backend.transfer(
+            MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+        )
+        key = result.receipt.output_kvcm_objects[0].key
+        release_thread = threading.Thread(target=backend.release, args=([key],))
+        close_thread = threading.Thread(target=backend.close)
+
+        release_thread.start()
+        self.assertTrue(remove_entered.wait(timeout=1.0))
+        close_thread.start()
+        close_thread.join(timeout=0.05)
+        self.assertTrue(close_thread.is_alive())
+
+        allow_remove.set()
+        release_thread.join(timeout=1.0)
+        close_thread.join(timeout=1.0)
+
+        self.assertFalse(release_thread.is_alive())
+        self.assertFalse(close_thread.is_alive())
+        # The failed in-flight release is requeued before close takes its
+        # final snapshot, so shutdown cleanup makes a second attempt.
+        self.assertEqual(writer.removed, [[key], [key]])
+
+    def test_concurrent_close_callers_wait_for_one_shutdown_cleanup(self):
+        remove_entered = threading.Event()
+        allow_remove = threading.Event()
+
+        class BlockingShutdownWriter(_FakeKvcmWriter):
+            def remove(self, keys):
+                self.removed.append(list(keys))
+                remove_entered.set()
+                allow_remove.wait(timeout=5.0)
+
+        writer = BlockingShutdownWriter()
+        backend = KvcmOutputBackend(writer, _kvcm_config())
+        result = backend.transfer(
+            MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+        )
+        key = result.receipt.output_kvcm_objects[0].key
+        first = threading.Thread(target=backend.close)
+        second = threading.Thread(target=backend.close)
+
+        first.start()
+        self.assertTrue(remove_entered.wait(timeout=1.0))
+        second.start()
+        second.join(timeout=0.05)
+        self.assertTrue(second.is_alive())
+
+        allow_remove.set()
+        first.join(timeout=1.0)
+        second.join(timeout=1.0)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(writer.removed, [[key]])
+
+    def test_shutdown_cleanup_failure_does_not_resurrect_pending_objects(self):
+        result = self.backend.transfer(
+            MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+        )
+        key = result.receipt.output_kvcm_objects[0].key
+
+        def fail_remove(_keys):
+            raise RuntimeError("storage unavailable")
+
+        self.writer.remove = fail_remove
+        with patch(
+            "rtp_llm.multimodal.transport.kvcm.backend.logging.exception"
+        ) as logged:
+            self.backend.close()
+        logged.assert_called_once()
+        self.assertEqual(self.backend._pending, {})
+
+        with patch(
+            "rtp_llm.multimodal.transport.kvcm.backend.logging.warning"
+        ) as warning:
+            self.backend._remove_or_retry([key], "post-close probe")
+        warning.assert_called_once()
+        self.assertEqual(self.backend._pending, {})
+
+    def test_operation_accounting_detects_underflow_and_notifies_only_at_zero(self):
+        with self.assertRaisesRegex(RuntimeError, "accounting underflow"):
+            self.backend._end_operation()
+
+        self.backend._begin_operation()
+        self.backend._begin_operation()
+        self.assertEqual(self.backend._active_operations, 2)
+        self.backend._end_operation()
+        self.assertEqual(self.backend._active_operations, 1)
+        self.backend._end_operation()
+        self.assertEqual(self.backend._active_operations, 0)
+
+    def test_failed_save_rollback_is_retried_by_background_gc(self):
+        class RetryWriter(_FakeKvcmWriter):
+            def __init__(self):
+                super().__init__()
+                self.save_error = RuntimeError("store failed")
+                self.remove_attempts = 0
+
+            def remove(self, keys):
+                self.remove_attempts += 1
+                self.removed.append(list(keys))
+                if self.remove_attempts == 1:
+                    raise RuntimeError("temporary remove failure")
+                self.remove_event.set()
+
+        writer = RetryWriter()
+        config = _kvcm_config()
+        config.object_gc_timeout_ms = 20
+        backend = KvcmOutputBackend(writer, config)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "store failed"):
+                backend.transfer(
+                    MultimodalInputsPB(support_kvcm=True),
+                    MMEmbeddingRes([_rows(1)]),
+                )
+
+            self.assertTrue(writer.remove_event.wait(timeout=2.0))
+            self.assertEqual(writer.remove_attempts, 2)
+            self.assertEqual(writer.removed[0], writer.saved[0][0])
+            self.assertEqual(writer.removed[1], writer.saved[0][0])
+        finally:
+            backend.close()
+
+    def test_expired_objects_are_removed_by_background_gc(self):
+        config = _kvcm_config()
+        config.object_gc_timeout_ms = 20
+        backend = KvcmOutputBackend(self.writer, config)
+        try:
+            result = backend.transfer(
+                MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+            )
+            key = result.receipt.output_kvcm_objects[0].key
+
+            self.assertTrue(self.writer.remove_event.wait(timeout=1.0))
+            self.assertIn([key], self.writer.removed)
+        finally:
+            backend.close()
+
+    def test_validation_happens_before_storage(self):
+        with self.assertRaisesRegex(RuntimeError, "did not advertise KVCM"):
+            self.backend.transfer(MultimodalInputsPB(), MMEmbeddingRes([_rows(1)]))
+        with self.assertRaisesRegex(ValueError, "one KVCM tensor row"):
+            small_backend = KvcmOutputBackend(
+                self.writer, _kvcm_config(max_object_bytes=8)
+            )
+            try:
+                small_backend.transfer(
+                    MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([_rows(1)])
+                )
+            finally:
+                small_backend.close()
+
+        self.assertEqual(self.writer.saved, [])
+
+    def test_receipt_byte_limit_is_rejected_before_concatenation_or_storage(self):
+        backend = KvcmOutputBackend(
+            self.writer, _kvcm_config(max_object_bytes=16, max_receipt_bytes=32)
+        )
+        try:
+            with patch(
+                "rtp_llm.multimodal.transport.kvcm.backend.torch.concat"
+            ) as concat:
+                with self.assertRaisesRegex(
+                    RuntimeError, "output size 48 exceeds max_receipt_bytes 32"
+                ):
+                    backend.transfer(
+                        MultimodalInputsPB(support_kvcm=True),
+                        MMEmbeddingRes([_rows(3)]),
+                    )
+            concat.assert_not_called()
+            self.assertEqual(self.writer.saved, [])
+        finally:
+            backend.close()
+
+    def test_object_count_limit_is_rejected_before_concatenation_or_storage(self):
+        backend = KvcmOutputBackend(
+            self.writer,
+            _kvcm_config(
+                max_object_bytes=4,
+                max_receipt_bytes=(_MAX_OBJECTS_PER_RECEIPT + 1) * 4,
+            ),
+        )
+        try:
+            tensor = torch.ones((_MAX_OBJECTS_PER_RECEIPT + 1, 1), dtype=torch.int32)
+            with patch(
+                "rtp_llm.multimodal.transport.kvcm.backend.torch.concat"
+            ) as concat:
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    rf"requires {_MAX_OBJECTS_PER_RECEIPT + 1} objects",
+                ):
+                    backend.transfer(
+                        MultimodalInputsPB(support_kvcm=True),
+                        MMEmbeddingRes([tensor]),
+                    )
+            concat.assert_not_called()
+            self.assertEqual(self.writer.saved, [])
+        finally:
+            backend.close()
+
+    def test_logical_value_count_is_bounded_before_concatenation_or_storage(self):
+        tiny = torch.ones((1, 1), dtype=torch.float16)
+
+        def guarded_embeddings():
+            for _ in range(_MAX_LOGICAL_VALUES_PER_RECEIPT + 1):
+                yield tiny
+            raise AssertionError("KVCM validation consumed beyond its bounded sentinel")
+
+        with patch("rtp_llm.multimodal.transport.kvcm.backend.torch.concat") as concat:
+            with self.assertRaisesRegex(RuntimeError, "logical values"):
+                result = MMEmbeddingRes([])
+                result.embeddings = guarded_embeddings()
+                self.backend.transfer(
+                    MultimodalInputsPB(support_kvcm=True),
+                    result,
+                )
+        concat.assert_not_called()
+        self.assertEqual(self.writer.saved, [])
+
+    def test_manifest_incompatibilities_are_rejected_before_storage(self):
+        with self.assertRaisesRegex(RuntimeError, "no multimodal embeddings"):
+            self.backend.transfer(
+                MultimodalInputsPB(support_kvcm=True), MMEmbeddingRes([])
+            )
+
+        cases = [
+            (
+                "embedding must be iterable",
+                MMEmbeddingRes(None),
+            ),
+            (
+                "embeddings must be torch tensors",
+                MMEmbeddingRes(["not-a-tensor"]),
+            ),
+            (
+                "between 1 and 16 dimensions",
+                MMEmbeddingRes([torch.tensor(1.0)]),
+            ),
+            (
+                "between 1 and 16 dimensions",
+                MMEmbeddingRes([torch.ones((1,) * 17)]),
+            ),
+            (
+                "dimensions must all be positive",
+                MMEmbeddingRes([torch.empty((1, 0))]),
+            ),
+            (
+                "position_ids count",
+                MMEmbeddingRes(
+                    [_rows(2), _rows(3)],
+                    position_ids=[torch.arange(5, dtype=torch.int32)],
+                ),
+            ),
+            (
+                r"position_ids\[0\] rows",
+                MMEmbeddingRes(
+                    [_rows(2), _rows(3)],
+                    # The aggregate row count is valid, but the per-image
+                    # boundaries are not. Accepting this would silently attach
+                    # position rows to the wrong image after reconstruction.
+                    position_ids=[
+                        torch.arange(1, dtype=torch.int32),
+                        torch.arange(4, dtype=torch.int32),
+                    ],
+                ),
+            ),
+            (
+                "non-empty flat tensor",
+                MMEmbeddingRes([_rows(1)], extra_input=[torch.ones((1, 1))]),
+            ),
+            (
+                "extra_input values must be torch tensors",
+                MMEmbeddingRes([_rows(1)], extra_input=["not-a-tensor"]),
+            ),
+            (
+                "does not support embedding dtype",
+                MMEmbeddingRes([torch.ones((1, 4), dtype=torch.float64)]),
+            ),
+            (
+                "does not support embedding device meta",
+                MMEmbeddingRes([torch.ones((1, 4), device="meta")]),
+            ),
+            (
+                r"embeddings\[1\] shape is incompatible",
+                MMEmbeddingRes([torch.ones((1, 2)), torch.ones((1, 3))]),
+            ),
+            (
+                "position_ids must be iterable",
+                MMEmbeddingRes([_rows(1)], position_ids=1),
+            ),
+            (
+                "position_ids must be torch tensors",
+                MMEmbeddingRes([_rows(1)], position_ids=["not-a-tensor"]),
+            ),
+            (
+                "position_ids must have between 1 and 16 dimensions",
+                MMEmbeddingRes([_rows(1)], position_ids=[torch.tensor(1)]),
+            ),
+            (
+                "position_ids dimensions must all be positive",
+                MMEmbeddingRes([_rows(1)], position_ids=[torch.empty((1, 0))]),
+            ),
+            (
+                "does not support position_ids dtype",
+                MMEmbeddingRes(
+                    [_rows(1)], position_ids=[torch.ones(1, dtype=torch.float64)]
+                ),
+            ),
+            (
+                "position_ids tensors must be on the same device",
+                MMEmbeddingRes(
+                    [_rows(1), _rows(1)],
+                    position_ids=[
+                        torch.ones(1, dtype=torch.int32),
+                        torch.ones(1, dtype=torch.int32, device="meta"),
+                    ],
+                ),
+            ),
+            (
+                "extra_input must be iterable",
+                MMEmbeddingRes([_rows(1)], extra_input=1),
+            ),
+            (
+                "extra_input count",
+                MMEmbeddingRes([_rows(1), _rows(1)], extra_input=[torch.ones(1)]),
+            ),
+            (
+                "does not support extra_input dtype",
+                MMEmbeddingRes(
+                    [_rows(1)], extra_input=[torch.ones(1, dtype=torch.float64)]
+                ),
+            ),
+        ]
+
+        for expected_error, result in cases:
+            with self.subTest(expected_error=expected_error):
+                with self.assertRaisesRegex(ValueError, expected_error):
+                    self.backend.transfer(MultimodalInputsPB(support_kvcm=True), result)
+
+        self.assertEqual(self.writer.saved, [])
+
+    def test_embedding_row_count_is_checked_against_proto_int32(self):
+        with patch.object(kvcm_backend, "_PROTO_INT32_MAX", 1):
+            with self.assertRaisesRegex(ValueError, "rows exceed int32"):
+                self.backend.transfer(
+                    MultimodalInputsPB(support_kvcm=True),
+                    MMEmbeddingRes([_rows(2)]),
+                )
+        self.assertEqual(self.writer.saved, [])
+
 
 class GrpcInlineOutputBackendTest(TestCase):
     def test_payload_is_encoded_inline(self):
@@ -181,6 +1109,7 @@ class GrpcInlineOutputBackendTest(TestCase):
         self.assertEqual(result.transport, TRANSPORT_BYTES)
         self.assertEqual(list(result.receipt.split_size), [2, 3])
         self.assertEqual(len(result.receipt.output_rdma_slots), 0)
+
 
 class _FakeBackend(MMTransportBackend):
     name = "fake"
@@ -227,7 +1156,10 @@ class MMOutputTransportTest(TestCase):
         self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_POS_BYTES_METRIC], 8)
         self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_DEEPSTACK_BYTES_METRIC], 6)
         self.assertEqual(samples[GaugeMetrics.VIT_OUTPUT_TOKEN_COUNT_METRIC], 2)
-        self.assertEqual(samples[GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC], result.receipt.ByteSize())
+        self.assertEqual(
+            samples[GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC],
+            result.receipt.ByteSize(),
+        )
 
     @patch("rtp_llm.multimodal.transport.base.kmonitor.report")
     def test_rdma_output_metrics_use_descriptor_payload_sizes(self, report):
@@ -246,7 +1178,11 @@ class MMOutputTransportTest(TestCase):
         self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_POS_BYTES_METRIC], 0)
         self.assertEqual(samples[GaugeMetrics.VIT_RESPONSE_DEEPSTACK_BYTES_METRIC], 0)
         self.assertEqual(samples[GaugeMetrics.VIT_OUTPUT_TOKEN_COUNT_METRIC], 2)
-        self.assertEqual(samples[GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC], result.receipt.ByteSize())
+        self.assertEqual(
+            samples[GaugeMetrics.VIT_RPC_RESPONSE_BYTES_METRIC],
+            result.receipt.ByteSize(),
+        )
+
 
 if __name__ == "__main__":
     main()

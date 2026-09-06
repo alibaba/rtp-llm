@@ -38,11 +38,19 @@ cc_library(
         "@havenask//aios/autil:env_util",
         ":role_types",
         ":eplb_config",
+        ":mm_kvcm_config",
         ":mm_transport_mode",
         ":rdma_config",
         "//rtp_llm/models_py/bindings/core:types",
     ],
     copts = copts(),
+)
+
+cc_library(
+    name = "mm_kvcm_config",
+    hdrs = ["MMKvcmConfig.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
 )
 
 cc_library(

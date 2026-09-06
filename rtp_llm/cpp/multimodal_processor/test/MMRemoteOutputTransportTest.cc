@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/multimodal_processor/transport/MMRemoteOutputTransport.h"
 #include "rtp_llm/cpp/multimodal_processor/transport/grpc/MMGrpcTransport.h"
+#include "rtp_llm/cpp/multimodal_processor/transport/kvcm/MMKvcmReader.h"
 #include "rtp_llm/cpp/multimodal_processor/transport/rdma/MMRdmaReader.h"
 
 // Orchestration of the LLM-side output transport: which reader gets a receipt and what happens
@@ -68,12 +69,20 @@ MultimodalOutputPB inlineReceipt(int64_t total_rows) {
     return receipt;
 }
 
+MultimodalOutputPB kvcmReceipt(const std::string& key) {
+    MultimodalOutputPB receipt;
+    receipt.add_output_kvcm_objects()->set_key(key);
+    receipt.add_split_size(1);
+    return receipt;
+}
+
 // Returns a canned receipt per round and records what was advertised each time, so a test can
 // assert both the number of ViT round trips and the capabilities each one carried.
 class FakeControlClient: public MMControlClient {
 public:
     std::vector<MultimodalOutputPB>       responses;
     std::vector<bool>                     advertised_rdma;
+    std::vector<bool>                     advertised_kvcm;
     std::vector<std::vector<std::string>> released;
     std::vector<std::string>*             log      = nullptr;
     size_t                                requests = 0;
@@ -83,6 +92,7 @@ public:
     ErrorResult<MultimodalOutputPB>
     request(const std::string&, MultimodalInputsPB& request_pb, DeadlineBudget&) override {
         advertised_rdma.push_back(request_pb.support_rdma());
+        advertised_kvcm.push_back(request_pb.support_kvcm());
         if (log) {
             log->push_back("request");
         }
@@ -226,6 +236,7 @@ struct Harness {
         } else {
             readers.push_back(std::make_unique<MMRdmaReader>(transport_sp));
         }
+        readers.push_back(createMMKvcmReader(nullptr));
         under_test = std::make_unique<MMRemoteOutputTransport>(
             std::move(readers), std::move(terminal_up), std::move(control_up));
     }
@@ -408,6 +419,36 @@ TEST(MMRemoteOutputTransportTest, receiptForANeverAdvertisedPlaneIsAProtocolErro
     // plane instead of waiting out the encoder's 60s GC.
     ASSERT_EQ(h.control->released.size(), 1u);
     EXPECT_EQ(h.control->released[0], std::vector<std::string>({"h0"}));
+}
+
+TEST(MMRemoteOutputTransportTest, unadvertisedKvcmReceiptIsRejectedAndReleased) {
+    Harness h(/*with_transport=*/false);
+    h.control->responses = {kvcmReceipt("object-0")};
+
+    auto result = h.fetch(uniqueEndpoint("never-advertised-kvcm"));
+
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(h.control->requests, 1u);
+    EXPECT_EQ(h.terminal->consumed, 0u);
+    ASSERT_EQ(h.control->released.size(), 1u);
+    EXPECT_EQ(h.control->released[0], std::vector<std::string>({"object-0"}));
+    ASSERT_EQ(h.control->advertised_kvcm.size(), 1u);
+    EXPECT_FALSE(h.control->advertised_kvcm[0]);
+}
+
+TEST(MMRemoteOutputTransportTest, mixedExternalReceiptReleasesEveryDataPlane) {
+    Harness h;
+    auto    receipt = rdmaReceipt({"rdma-0"}, 1, {1});
+    receipt.add_output_kvcm_objects()->set_key("object-0");
+    h.control->responses = {std::move(receipt)};
+
+    auto result = h.fetch(uniqueEndpoint("mixed-external"));
+
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(h.transport->reads, 0u);
+    ASSERT_EQ(h.control->released.size(), 2u);
+    EXPECT_EQ(h.control->released[0], std::vector<std::string>({"rdma-0"}));
+    EXPECT_EQ(h.control->released[1], std::vector<std::string>({"object-0"}));
 }
 
 // The real terminal, not the fake: a malformed inline response must come back as an error rather

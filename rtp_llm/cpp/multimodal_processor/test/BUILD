@@ -71,6 +71,7 @@ cc_test(
         "@com_google_googletest//:gtest_main",
         "//rtp_llm/cpp/multimodal_processor/transport:mm_remote_output_transport_core",
         "//rtp_llm/cpp/multimodal_processor/transport/grpc:mm_grpc_transport",
+        "//rtp_llm/cpp/multimodal_processor/transport/kvcm:mm_kvcm_reader",
         "//rtp_llm/cpp/multimodal_processor/transport/rdma:mm_rdma_reader",
         "//rtp_llm/cpp/rdma_transport:rdma_transport",
         # Building inline receipts for the real terminal. Lean target, no engine behind it.
@@ -102,5 +103,23 @@ cc_test(
     ],
     # Assertions are CPU-only, but linking torch pulls in libtorch_cuda, which needs
     # libcuda.so.1 just to load the process -- so this still has to land on a GPU node.
+    exec_properties = {'gpu':'A10'},
+)
+
+# KVCM exact-size object receipt validation and reassembly. The object client is
+# injected, so this target has no dependency on a live KVMeta service or KVCM RPM.
+cc_test(
+    name = "mm_kvcm_transport_test",
+    srcs = [
+        "MMKvcmTransportTest.cc",
+    ],
+    copts = test_copts,
+    deps = torch_deps() + cuda13_torch_link_deps + [
+        "//rtp_llm/cpp/multimodal_processor/transport/kvcm:mm_kvcm_client",
+        "//rtp_llm/cpp/multimodal_processor/transport/kvcm:mm_kvcm_reader",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    # Assertions are CPU-only, but torch still requires libcuda.so.1 at load time.
     exec_properties = {'gpu':'A10'},
 )

@@ -4,7 +4,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
@@ -296,7 +296,12 @@ class DistributeConfig:
 # Keep these transport defaults aligned with cpp/config/ConfigModules.h::MMTransportConfig.
 MM_TRANSPORT_MODE_GRPC = "grpc"
 MM_TRANSPORT_MODE_RDMA = "rdma"
-MM_TRANSPORT_MODES = (MM_TRANSPORT_MODE_GRPC, MM_TRANSPORT_MODE_RDMA)
+MM_TRANSPORT_MODE_KVCM = "kvcm"
+MM_TRANSPORT_MODES = (
+    MM_TRANSPORT_MODE_GRPC,
+    MM_TRANSPORT_MODE_RDMA,
+    MM_TRANSPORT_MODE_KVCM,
+)
 DEFAULT_MM_TIMEOUT_MS = 120000
 
 
@@ -312,6 +317,23 @@ class MMRdmaConfig:
         self.max_receipt_bytes: int = 8 * 1024 * 1024 * 1024
 
 
+class MMKvcmConfig:
+    def __init__(self):
+        self.addresses: List[str] = []
+        self.instance_id: str = ""
+        self.instance_group: str = ""
+        self.user_data: str = ""
+        self.transfer_client_config: str = ""
+        self.call_timeout_ms: int = 3000
+        self.write_timeout_seconds: int = 30
+        # Keep the default beyond the 120s multimodal request budget. A lost
+        # release should not let ViT GC delete objects while the LLM may still
+        # be allocating or loading them.
+        self.object_gc_timeout_ms: int = DEFAULT_MM_TIMEOUT_MS + 60 * 1000
+        self.max_object_bytes: int = 1024 * 1024 * 1024
+        self.max_receipt_bytes: int = 8 * 1024 * 1024 * 1024
+
+
 class MMControlConfig:
     def __init__(self):
         self.release_timeout_ms: int = 1000
@@ -322,6 +344,7 @@ class MMTransportConfig:
         self.mode: str = MM_TRANSPORT_MODE_GRPC
         self.control = MMControlConfig()
         self.rdma = MMRdmaConfig()
+        self.kvcm = MMKvcmConfig()
 
 
 class VitConfig:
@@ -409,6 +432,7 @@ class VitConfig:
         transport = self.output_transport
         control = transport.control
         rdma = transport.rdma
+        kvcm = transport.kvcm
         return (
             f"vit_separation: {self.vit_separation}\n"
             f"vit_trt: {self.vit_trt}\n"
@@ -443,6 +467,14 @@ class VitConfig:
             f"mm_rdma_slot_gc_timeout_ms: {rdma.slot_gc_timeout_ms}\n"
             f"mm_rdma_max_slot_bytes: {rdma.max_slot_bytes}\n"
             f"mm_rdma_max_receipt_bytes: {rdma.max_receipt_bytes}\n"
+            f"mm_kvcm_addresses: {','.join(kvcm.addresses)}\n"
+            f"mm_kvcm_instance_id: {kvcm.instance_id}\n"
+            f"mm_kvcm_instance_group: {kvcm.instance_group}\n"
+            f"mm_kvcm_call_timeout_ms: {kvcm.call_timeout_ms}\n"
+            f"mm_kvcm_write_timeout_seconds: {kvcm.write_timeout_seconds}\n"
+            f"mm_kvcm_object_gc_timeout_ms: {kvcm.object_gc_timeout_ms}\n"
+            f"mm_kvcm_max_object_bytes: {kvcm.max_object_bytes}\n"
+            f"mm_kvcm_max_receipt_bytes: {kvcm.max_receipt_bytes}\n"
             f"gpu_batch_wait_ms: {self.gpu_batch_wait_ms}\n"
             f"gpu_max_batch_size: {self.gpu_max_batch_size}\n"
             f"gpu_max_batch_images: {self.gpu_max_batch_images}\n"

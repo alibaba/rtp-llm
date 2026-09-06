@@ -2,6 +2,7 @@ import logging
 
 from rtp_llm.config.py_config_modules import (
     MM_TRANSPORT_MODE_GRPC,
+    MM_TRANSPORT_MODE_KVCM,
     MM_TRANSPORT_MODE_RDMA,
     MM_TRANSPORT_MODES,
 )
@@ -20,6 +21,13 @@ def create_mm_output_transport(
 
         backend = RdmaOutputBackend.create(transport_config.rdma, local_device_id)
         logging.info("[VIT] mm transport mode rdma: output backend enabled")
+    elif transport_config.mode == MM_TRANSPORT_MODE_KVCM:
+        from rtp_llm.multimodal.transport.kvcm.backend import KvcmOutputBackend
+
+        backend = KvcmOutputBackend.create(transport_config.kvcm)
+        logging.info(
+            "[VIT] mm transport mode kvcm: exact-size EMB object backend enabled"
+        )
     else:
         raise ValueError(
             f"invalid mm_transport_mode: {transport_config.mode!r}; "

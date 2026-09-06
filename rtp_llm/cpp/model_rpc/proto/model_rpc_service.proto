@@ -178,6 +178,8 @@ message MultimodalInputsPB {
     repeated MultimodalInputPB multimodal_inputs = 1;
     // LLM can receive the output through GPUDirect RDMA.
     bool support_rdma = 2;
+    // LLM can receive exact-size output objects through the isolated KVCM KVMeta path.
+    bool support_kvcm = 3;
 }
 
 enum TensorDataTypePB {
@@ -222,6 +224,16 @@ message MMRdmaSlotPB {
     repeated Role roles = 2;
 }
 
+message MMKvcmObjectPB {
+    // Exact KVMeta object key. It is also the idempotent release handle.
+    string key = 1;
+    uint64 value_size = 2;
+    TensorMetaPB tensor = 3;
+    MMRdmaSlotPB.Role role = 4;
+    // EMBEDDING/POS_ID use zero. EXTRA_INPUT uses its original per-input index.
+    uint32 logical_index = 5;
+}
+
 message MultimodalOutputPB {
     TensorPB multimodal_embedding = 1;
     TensorPB multimodal_pos_id = 2;
@@ -229,6 +241,9 @@ message MultimodalOutputPB {
     repeated int32 split_size = 4;
     // Non-empty means fields 1/2/3 are stored in these slots; split_size remains inline.
     repeated MMRdmaSlotPB output_rdma_slots = 5;
+    // Non-empty means fields 1/2/3 are stored as exact-size KVMeta objects.
+    // Chunks are concatenated in repeated-field order within (role, logical_index).
+    repeated MMKvcmObjectPB output_kvcm_objects = 6;
 }
 
 message ReleaseLeasePB {

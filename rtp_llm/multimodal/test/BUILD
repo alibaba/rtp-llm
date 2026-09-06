@@ -98,6 +98,21 @@ py_test(
     ],
 )
 
+# Explicit-only cross-repo test: production RTP receipt generation, v6d's native
+# object adapter, and a live KVCM KVMeta service. See kvcm_emb_storage.md for the
+# required source roots and invocation.
+py_test(
+    name = "mm_kvcm_cross_repo_integration_test",
+    timeout = "long",
+    srcs = [
+        "mm_kvcm_cross_repo_integration_test.py",
+    ],
+    tags = ["manual"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
 # This target covers the production shared-library and Python/C++ config boundary.
 # The real Barex multi-GPU export -> read -> release smoke lives in internal_source.
 py_test(

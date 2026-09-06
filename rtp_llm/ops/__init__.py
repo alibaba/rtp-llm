@@ -245,6 +245,7 @@ _ENGINE_SYMBOLS = {
     "RtpLLMOp",
 }
 _RDMA_SYMBOLS = {"MMRdmaExporter"}
+_KVCM_SYMBOLS = {"MMKvcmWriter"}
 _compute_ops_lock = threading.RLock()
 _compute_ops_loaded = False
 _compute_ops_error: Optional[BaseException] = None
@@ -254,6 +255,9 @@ _engine_ops_error: Optional[BaseException] = None
 _rdma_ops_lock = threading.RLock()
 _rdma_ops_loaded = False
 _rdma_ops_error: Optional[BaseException] = None
+_kvcm_ops_lock = threading.RLock()
+_kvcm_ops_loaded = False
+_kvcm_ops_error: Optional[BaseException] = None
 
 
 def _set_compute_fallbacks() -> None:
@@ -315,6 +319,17 @@ class DisabledMMRdmaExporter(EmptyClass):
         return False
 
 
+class DisabledMMKvcmWriter(EmptyClass):
+    """Stand-in for optional KVCM EMB capability probes."""
+
+    @staticmethod
+    def available() -> bool:
+        return False
+
+    def enabled(self) -> bool:
+        return False
+
+
 def _set_engine_fallbacks() -> None:
     globals()["MultimodalInputCpp"] = EmptyClass
     globals()["EmbeddingCppOutput"] = EmptyClass
@@ -341,6 +356,27 @@ def _load_rdma_ops(required: bool = False) -> None:
             if required:
                 _raise_required_load_error("RDMA exporter", e)
         _rdma_ops_loaded = True
+
+
+def _load_kvcm_ops(required: bool = False) -> None:
+    global _kvcm_ops_error, _kvcm_ops_loaded
+    with _kvcm_ops_lock:
+        if _kvcm_ops_loaded:
+            if required and _kvcm_ops_error is not None:
+                _raise_required_load_error("KVCM EMB writer", _kvcm_ops_error)
+            return
+        try:
+            from libmm_kvcm_writer import MMKvcmWriter
+
+            globals()["MMKvcmWriter"] = MMKvcmWriter
+            _kvcm_ops_error = None
+        except BaseException as e:
+            _kvcm_ops_error = e
+            globals()["MMKvcmWriter"] = DisabledMMKvcmWriter
+            logging.warning("libmm_kvcm_writer could not be imported: %s", e)
+            if required:
+                _raise_required_load_error("KVCM EMB writer", e)
+        _kvcm_ops_loaded = True
 
 
 def _load_engine_ops(required: bool = False) -> None:
@@ -391,6 +427,10 @@ def ensure_rdma_ops_loaded() -> None:
     _load_rdma_ops(required=True)
 
 
+def ensure_kvcm_ops_loaded() -> None:
+    _load_kvcm_ops(required=True)
+
+
 def __getattr__(name: str):
     if name in _COMPUTE_SYMBOLS:
         _load_compute_ops()
@@ -402,6 +442,10 @@ def __getattr__(name: str):
             return globals()[name]
     if name in _RDMA_SYMBOLS:
         _load_rdma_ops()
+        if name in globals():
+            return globals()[name]
+    if name in _KVCM_SYMBOLS:
+        _load_kvcm_ops()
         if name in globals():
             return globals()[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

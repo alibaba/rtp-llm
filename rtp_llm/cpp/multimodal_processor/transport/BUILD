@@ -23,6 +23,8 @@ cc_library(
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:mm_transport_mode",
         "//rtp_llm/cpp/multimodal_processor/transport/grpc:mm_grpc_transport",
+        "//rtp_llm/cpp/multimodal_processor/transport/kvcm:mm_kvcm_client",
+        "//rtp_llm/cpp/multimodal_processor/transport/kvcm:mm_kvcm_reader",
         "//rtp_llm/cpp/multimodal_processor/transport/rdma:mm_rdma_reader",
         "//rtp_llm/cpp/utils:core_utils",
         "@havenask//aios/kmonitor:kmonitor_client_cpp",
