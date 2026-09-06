@@ -16,6 +16,10 @@ from rtp_llm.ops import HybridAttentionType, KVCacheSpecType
 
 
 class Qwen3NextBase(BaseModel):
+    @classmethod
+    def prefill_cp_alignment(cls) -> int:
+        return 64
+
     def _create_python_model(self):
         model_config = self.model_config
         parallelism_config = self.parallelism_config

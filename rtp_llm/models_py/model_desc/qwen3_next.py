@@ -8,7 +8,12 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
-from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    all_gather,
+    all_reduce,
+    broadcast_from_group_rank,
+)
 from rtp_llm.models_py.model_desc.block_map import (
     get_group_tags_for_layers,
     get_primary_attention_inputs,
@@ -71,6 +76,18 @@ from rtp_llm.utils.swizzle_utils import (
 from rtp_llm.utils.util import to_torch_dtype
 
 logger = logging.getLogger(__name__)
+GDN_STATE_CHUNK_SIZE = 64
+
+
+def _cp_cache_ends(new_len: int, block_size: int, device: torch.device) -> torch.Tensor:
+    interior = torch.arange(
+        block_size,
+        max(block_size, new_len),
+        block_size,
+        dtype=torch.long,
+        device=device,
+    )
+    return torch.cat([interior, interior.new_tensor([new_len])])
 
 
 @lru_cache(maxsize=None)
@@ -104,6 +121,9 @@ class Qwen3NextMetadata(object):
         self.cp_restore_indices = cp_restore_indices
         self.cp_local_extract_indices = cp_local_extract_indices
         self.cp_local_valid_mask = cp_local_valid_mask
+        self.cp_segment_conv1d_metadata: Dict[
+            int, tuple[torch.Tensor, CausalConv1dMetadata]
+        ] = {}
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
         return self.prefill_conv1d_meta
@@ -761,6 +781,225 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         # b,a should be contiguous for fused_gdn_gating
         return mixed_qkv, z, b, a
 
+    def _forward_cp_relay(
+        self,
+        mixed_qkv: torch.Tensor,
+        z: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        initial_states: Optional[torch.Tensor],
+        conv_states: Optional[torch.Tensor],
+        ssm_states: Optional[torch.Tensor],
+        seq_size_per_block: int,
+        attention_inputs: PyAttentionInputs,
+        attn_meta: Qwen3NextMetadata,
+    ) -> torch.Tensor:
+        """Run each contiguous GDN segment once and relay its recurrent state."""
+        cp_size = self.parallelism_config.tp_size
+        cp_rank = self.parallelism_config.tp_rank
+        local_tokens = z.shape[0]
+        segment_tokens = local_tokens // 2
+        actual_tokens = int(
+            attention_inputs.context_parallel_info.prefill_actual_input_lengths_cpu[
+                0
+            ].item()
+        )
+        valid_lengths = tuple(
+            max(0, min(segment_tokens, actual_tokens - i * segment_tokens))
+            for i in range(2 * cp_size)
+        )
+
+        g, beta = fused_gdn_gating(self.prefill_gdn.alog, a, b, self.prefill_gdn.dt_bias)
+        state = (
+            initial_states.float()
+            if initial_states is not None
+            else torch.zeros(
+                1,
+                self.local_num_v_heads,
+                self.head_v_dim,
+                self.head_k_dim,
+                dtype=torch.float32,
+                device=mixed_qkv.device,
+            )
+        )
+        conv_state_len = self.prefill_gdn.linear_conv_kernel_dim - 1
+        prefix_len = int(attention_inputs.prefix_lengths[0].item())
+        if conv_states is not None and prefix_len:
+            conv_cache_pos = (prefix_len - 1) // seq_size_per_block
+            conv_cache_id = attention_inputs.kv_cache_kernel_block_id_device[
+                0, conv_cache_pos
+            ].long()
+            conv_state = conv_states.index_select(0, conv_cache_id.view(1))[
+                0
+            ].transpose(0, 1).contiguous()
+        else:
+            conv_state = mixed_qkv.new_zeros(conv_state_len, mixed_qkv.shape[1])
+        local_output = mixed_qkv.new_zeros(
+            local_tokens, self.local_num_v_heads, self.head_v_dim
+        )
+
+        cache_ends = cache_ids = local_cache_states = local_conv_cache_states = None
+        if ssm_states is not None:
+            new_len = actual_tokens
+            cache_ends = _cp_cache_ends(
+                new_len, seq_size_per_block, mixed_qkv.device
+            )
+            cache_positions = (prefix_len + cache_ends - 1) // seq_size_per_block
+            cache_ids = attention_inputs.kv_cache_kernel_block_id_device[
+                0, cache_positions
+            ].long()
+            local_cache_states = ssm_states.new_zeros(
+                cache_ends.shape[0], *ssm_states.shape[1:]
+            )
+            local_conv_cache_states = conv_states.new_zeros(
+                cache_ends.shape[0], *conv_states.shape[1:]
+            )
+
+        steps = (
+            [(rank, rank, 0, 1) for rank in range(cp_size - 1)]
+            + [(cp_size - 1, cp_size - 1, 0, 2)]
+            + [
+                (rank, 2 * cp_size - 1 - rank, 1, 1)
+                for rank in range(cp_size - 2, -1, -1)
+            ]
+        )
+        for step_index, (owner, global_segment, local_segment, count) in enumerate(
+            steps
+        ):
+            valid_tokens = sum(valid_lengths[global_segment : global_segment + count])
+            if cp_rank == owner and valid_tokens:
+                local_start = local_segment * segment_tokens
+                local_end = local_start + valid_tokens
+                raw_qkv = mixed_qkv[local_start:local_end]
+                # A width-W causal conv only needs the preceding W-1 raw inputs.
+                conv_input = torch.cat([conv_state, raw_qkv], dim=0)
+                conv_tokens = conv_input.shape[0]
+                conv_entry = attn_meta.cp_segment_conv1d_metadata.get(conv_tokens)
+                if conv_entry is None:
+                    conv_cu = torch.tensor(
+                        [0, conv_tokens],
+                        dtype=torch.int32,
+                        device=conv_input.device,
+                    )
+                    conv_entry = (
+                        conv_cu,
+                        prepare_causal_conv1d_metadata(conv_cu, conv_input.device),
+                    )
+                    attn_meta.cp_segment_conv1d_metadata[conv_tokens] = conv_entry
+                conv_cu, conv_meta = conv_entry
+                qkv = causal_conv1d_fn(
+                    x=conv_input.transpose(0, 1),
+                    weight=self.prefill_gdn.conv_weights,
+                    bias=None,
+                    conv_states=None,
+                    query_start_loc=conv_cu,
+                    block_map=None,
+                    prefix_lengths=attention_inputs.prefix_lengths_device,
+                    seq_size_per_block=1,
+                    metadata=conv_meta,
+                ).transpose(0, 1)[conv_state_len:]
+                conv_state = conv_input[-conv_state_len:].contiguous()
+                if qkv.shape[0] >= 2048:
+                    query, key, value = scatter_qkv(
+                        qkv,
+                        self.local_num_k_heads,
+                        self.local_num_v_heads,
+                        self.head_k_dim,
+                        self.head_v_dim,
+                    )
+                else:
+                    query, key, value = torch.split(
+                        qkv,
+                        [
+                            self.local_num_k_heads * self.head_k_dim,
+                            self.local_num_k_heads * self.head_k_dim,
+                            self.local_num_v_heads * self.head_v_dim,
+                        ],
+                        dim=-1,
+                    )
+                    query = query.view(
+                        1, -1, self.local_num_k_heads, self.head_k_dim
+                    )
+                    key = key.view(1, -1, self.local_num_k_heads, self.head_k_dim)
+                    value = value.view(
+                        1, -1, self.local_num_v_heads, self.head_v_dim
+                    )
+                output, chunk_states, state = chunk_gated_delta_rule(
+                    query,
+                    key,
+                    value,
+                    g[:, local_start:local_end].contiguous(),
+                    beta[:, local_start:local_end].contiguous(),
+                    initial_state=state,
+                    output_final_state=True,
+                    use_qk_l2norm_in_kernel=True,
+                )
+                local_output[local_start:local_end] = output.squeeze_(0)
+
+                if local_cache_states is not None:
+                    global_start = global_segment * segment_tokens
+                    positions = torch.nonzero(
+                        (cache_ends > global_start)
+                        & (cache_ends <= global_start + valid_tokens),
+                        as_tuple=False,
+                    ).flatten()
+                    offsets = cache_ends[positions] - global_start
+                    selected = chunk_states[
+                        0,
+                        (offsets // GDN_STATE_CHUNK_SIZE).clamp_max(
+                            chunk_states.shape[1] - 1
+                        ),
+                    ]
+                    selected = torch.where(
+                        (offsets == valid_tokens)[:, None, None, None],
+                        state[0],
+                        selected,
+                    )
+                    local_cache_states.index_copy_(
+                        0, positions, selected.to(local_cache_states.dtype)
+                    )
+                    conv_offsets = (
+                        offsets[:, None]
+                        + torch.arange(conv_state_len, device=mixed_qkv.device)
+                    ).flatten()
+                    selected_conv_states = (
+                        conv_input.index_select(0, conv_offsets)
+                        .view(-1, conv_state_len, raw_qkv.shape[1])
+                        .transpose(1, 2)
+                        .contiguous()
+                    )
+                    local_conv_cache_states.index_copy_(
+                        0, positions, selected_conv_states
+                    )
+            if step_index + 1 < len(steps):
+                broadcast_from_group_rank(state, src=owner, group=Group.TP)
+                broadcast_from_group_rank(conv_state, src=owner, group=Group.TP)
+
+        if local_cache_states is not None:
+            local_cache_states = all_reduce(local_cache_states, group=Group.TP)
+            local_conv_cache_states = all_reduce(
+                local_conv_cache_states, group=Group.TP
+            )
+            valid_positions = torch.nonzero(cache_ids > 0, as_tuple=False).flatten()
+            ssm_states.index_copy_(
+                0, cache_ids[valid_positions], local_cache_states[valid_positions]
+            )
+            conv_states.index_copy_(
+                0,
+                cache_ids[valid_positions],
+                local_conv_cache_states[valid_positions],
+            )
+
+        local_output = self.norm(
+            local_output.reshape(-1, self.head_v_dim), z.reshape(-1, self.head_v_dim)
+        ).reshape(-1, self.local_num_v_heads * self.head_v_dim)
+        local_output = self.out_proj(local_output)
+        return torch.where(
+            attn_meta.cp_local_valid_mask[:, None],
+            local_output,
+            torch.zeros_like(local_output),
+        )
+
     # TODO: extract shared conv1d/FLA/ssm-state logic with Qwen3NextGatedDeltaNetPrefill
     # to eliminate duplication
     def _forward_cp_prefill(
@@ -773,23 +1012,8 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         kv_cache: Optional[LayerKVCache],
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
-        """CP prefill path: all-gather projected states, compute on full sequence,
-        extract local zigzag tokens."""
+        """Run CP prefill, relaying causal state for the common single-request case."""
         cp_info = attention_inputs.context_parallel_info
-
-        packed = torch.cat([mixed_qkv, b, a], dim=-1)
-        full_packed = all_gather(packed, group=Group.TP)
-
-        padding_mask = cp_info.prefill_qkv_padding_mask
-        restore_indices = cp_info.prefill_qkv_restore_indice
-        unpad_restore = restore_indices[padding_mask == 1]
-        full_packed = full_packed[unpad_restore]
-
-        qkv_dim = mixed_qkv.shape[-1]
-        b_dim = b.shape[-1]
-        full_mixed_qkv = full_packed[:, :qkv_dim].contiguous()
-        full_b = full_packed[:, qkv_dim : qkv_dim + b_dim].contiguous()
-        full_a = full_packed[:, qkv_dim + b_dim :].contiguous()
 
         gdn = self.prefill_gdn
         full_cu = attn_meta.full_prefill_cu_seqlens
@@ -808,19 +1032,6 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             if kv_cache_tensor is not None
             else None
         )
-        full_mixed_qkv = causal_conv1d_fn(
-            x=full_mixed_qkv.transpose(0, 1),
-            weight=gdn.conv_weights,
-            bias=None,
-            conv_states=conv_states,
-            query_start_loc=full_cu,
-            block_map=attention_inputs.kv_cache_kernel_block_id_device,
-            seq_size_per_block=seq_size_per_block,
-            prefix_lengths=attention_inputs.prefix_lengths_device,
-            metadata=full_conv_meta,
-        ).transpose(0, 1)
-
-        g, beta = fused_gdn_gating(gdn.alog, full_a, full_b, gdn.dt_bias)
         ssm_states = (
             gdn._get_ssm_states(kv_cache_tensor)
             if kv_cache_tensor is not None
@@ -834,7 +1045,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 gdn.local_num_v_heads,
                 gdn.head_v_dim,
                 gdn.head_k_dim,
-                device=full_mixed_qkv.device,
+                device=mixed_qkv.device,
                 dtype=gdn.ssm_state_dtype,
             )
             load_initial_state_from_block_map(
@@ -844,6 +1055,66 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 initial_states,
                 seq_size_per_block,
             )
+
+        can_relay = (
+            context_batch_size == 1
+            and self.parallelism_config.tp_size >= 2
+            and mixed_qkv.shape[0] % (2 * GDN_STATE_CHUNK_SIZE) == 0
+            and not attention_inputs.is_cuda_graph
+            and not self.parallelism_config.prefill_cp_config.kv_cache_sharded
+            and (
+                kv_cache is None
+                or (
+                    seq_size_per_block % GDN_STATE_CHUNK_SIZE == 0
+                    and int(attention_inputs.prefix_lengths[0].item())
+                    % seq_size_per_block
+                    == 0
+                )
+            )
+        )
+        if can_relay:
+            result = self._forward_cp_relay(
+                mixed_qkv,
+                z,
+                b,
+                a,
+                initial_states,
+                conv_states,
+                ssm_states,
+                seq_size_per_block,
+                attention_inputs,
+                attn_meta,
+            )
+            _maybe_write_cp_cache_store(attention_inputs, kv_cache, attn_meta)
+            return result
+
+        packed = torch.cat([mixed_qkv, b, a], dim=-1)
+        full_packed = all_gather(packed, group=Group.TP)
+
+        padding_mask = cp_info.prefill_qkv_padding_mask
+        restore_indices = cp_info.prefill_qkv_restore_indice
+        unpad_restore = restore_indices[padding_mask == 1]
+        full_packed = full_packed[unpad_restore]
+
+        qkv_dim = mixed_qkv.shape[-1]
+        b_dim = b.shape[-1]
+        full_mixed_qkv = full_packed[:, :qkv_dim].contiguous()
+        full_b = full_packed[:, qkv_dim : qkv_dim + b_dim].contiguous()
+        full_a = full_packed[:, qkv_dim + b_dim :].contiguous()
+
+        full_mixed_qkv = causal_conv1d_fn(
+            x=full_mixed_qkv.transpose(0, 1),
+            weight=gdn.conv_weights,
+            bias=None,
+            conv_states=conv_states,
+            query_start_loc=full_cu,
+            block_map=attention_inputs.kv_cache_kernel_block_id_device,
+            seq_size_per_block=seq_size_per_block,
+            prefix_lengths=attention_inputs.prefix_lengths_device,
+            metadata=full_conv_meta,
+        ).transpose(0, 1)
+
+        g, beta = fused_gdn_gating(gdn.alog, full_a, full_b, gdn.dt_bias)
 
         if full_mixed_qkv.shape[0] >= 2048 and gdn.head_k_dim == gdn.head_v_dim:
             query, key, value = scatter_qkv(

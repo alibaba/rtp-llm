@@ -27,6 +27,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.cp_uti
     generate_nonlocal_causal_kv_indices,
     generate_q_indices,
     plan_prefix_paged_attention,
+    resolve_kv_cache_block_id,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     get_py_flashinfer_workspace_buffer,
@@ -132,7 +133,7 @@ class PCPAllGatherOverlapAttnOp:
             self.attn_inputs.prefix_lengths,
             self.attn_inputs.sequence_lengths,
             cp_info.prefill_actual_input_lengths_cpu,
-            self.attn_inputs.kv_cache_kernel_block_id,
+            resolve_kv_cache_block_id(self.attn_inputs),
             self.attn_configs.kernel_tokens_per_block,
         )
 
@@ -208,9 +209,12 @@ class PCPAllGatherOverlapAttnOp:
         self,
         all_keys: torch.Tensor,
         all_values: torch.Tensor,
-        kv_cache: KVCache,
+        kv_cache: Optional[KVCache],
         params: ParamsBase,
     ):
+        # Warm-up runs before any KV cache is allocated, so there is nothing to write to.
+        if kv_cache is None:
+            return None
         restore_k = all_keys[self.kv_restore_unpad_indices]
         restore_v = all_values[self.kv_restore_unpad_indices]
         kv_cache_tensor = kv_cache.kv_cache_base.view(

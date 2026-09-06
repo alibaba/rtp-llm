@@ -14,12 +14,14 @@ from typing import List
 from unittest.mock import patch
 
 import torch
+import torch.multiprocessing as mp
 
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.prefill_mha.alltoall_cp_impl import (
     PCPAll2AllAttnOp,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.test.cp_test_utils import (
     build_cp_attn_inputs,
+    build_shuffle_indices,
     compute_rank_positions,
     extract_kv_from_paged_cache,
     fill_prefix_into_kv_cache,
@@ -29,6 +31,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.test.cp_test_utils
     reference_prefill_with_prefix,
     zigzag_positions_for_rank,
 )
+from rtp_llm.test.utils.port_util import PortManager
 
 _A2A_MODULE = (
     "rtp_llm.models_py.modules.factory.attention."
@@ -43,6 +46,52 @@ def _sleep_us(us: int = _COMM_DELAY_US) -> None:
     end = time.perf_counter() + us * 1e-6
     while time.perf_counter() < end:
         pass
+
+
+def _group_rank_send_recv_worker(world_rank, master_port):
+    from rtp_llm.models_py.distributed.collective_torch import (
+        destroy_distributed_environment,
+        init_distributed_environment,
+    )
+    from rtp_llm.models_py.distributed.user_buffers import (
+        get_user_buffers_communicator,
+    )
+    from rtp_llm.ops import NcclCommConfig, ParallelismConfig
+
+    torch.cuda.set_device(world_rank)
+    config = ParallelismConfig()
+    config.tp_size = 2
+    config.tp_rank = world_rank % 2
+    config.dp_size = 2
+    config.dp_rank = world_rank // 2
+    config.world_size = 4
+    config.world_rank = world_rank
+    config.local_world_size = 4
+    config.local_rank = world_rank
+    config.use_ub_comm = True
+    init_distributed_environment(
+        config,
+        NcclCommConfig(nccl_ip="127.0.0.1"),
+        master_port,
+        timeout=60,
+    )
+    try:
+        device = torch.device(f"cuda:{world_rank}")
+        group_base_rank = config.dp_rank * config.tp_size
+        peer_rank = 1 - config.tp_rank
+        op = PCPAll2AllAttnOp.__new__(PCPAll2AllAttnOp)
+        op.ub_communicator = get_user_buffers_communicator()
+        assert op.ub_communicator is None
+        op.use_ub = op.ub_communicator is not None
+        op.prefill_cp_rank = config.tp_rank
+        sent = torch.tensor([world_rank], dtype=torch.int32, device=device)
+        received = torch.empty_like(sent)
+        op._exchange_kv(sent, received, peer_rank, peer_rank)
+        torch.testing.assert_close(
+            received.cpu(), torch.tensor([group_base_rank + peer_rank], dtype=torch.int32)
+        )
+    finally:
+        destroy_distributed_environment()
 
 
 class TestPCPAll2AllAttnOp(unittest.TestCase):
@@ -69,15 +118,12 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
         new_lengths: List[int],
         cp_size: int,
         rank: int,
-        prefix_lengths: List[int] | None = None,
         device: torch.device = torch.device("cuda"),
     ) -> torch.Tensor:
-        if prefix_lengths is None:
-            prefix_lengths = [0] * len(new_lengths)
         indices: List[int] = []
-        for new_len, pl in zip(new_lengths, prefix_lengths):
+        for new_len in new_lengths:
             positions = zigzag_positions_for_rank(new_len, cp_size, rank)
-            indices.extend(p + pl for p in positions)
+            indices.extend(positions)
         return torch.tensor(indices, dtype=torch.int32, device=device)
 
     # ---- mock builders ----
@@ -108,6 +154,12 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
         )
         with contextlib.ExitStack() as stack:
             stack.enter_context(patch(f"{_A2A_MODULE}.all_gather", side_effect=mock_ag))
+            stack.enter_context(
+                patch(
+                    f"{_A2A_MODULE}.get_global_rank_from_group_rank",
+                    side_effect=lambda rank, group: rank,
+                )
+            )
             stack.enter_context(patch(f"{_A2A_MODULE}.send", side_effect=mock_send))
             stack.enter_context(patch(f"{_A2A_MODULE}.recv", side_effect=mock_recv))
             stack.enter_context(
@@ -119,6 +171,209 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
             op = PCPAll2AllAttnOp(attn_cfg, attn_inputs, par_cfg)
             params = op.prepare(attn_inputs)
             return op.forward(qkv, kv_cache, params)
+
+    def run_padded(
+        self,
+        new_lengths: List[int],
+        prefix_lengths: List[int],
+        with_kv_cache: bool,
+    ):
+        assert with_kv_cache or not any(prefix_lengths)
+        cp_size = 4
+        cp_rank = 1
+        segment_alignment = 64
+        cp_chunk_lengths = [
+            math.ceil(length / (2 * cp_size * segment_alignment))
+            * (2 * segment_alignment)
+            for length in new_lengths
+        ]
+        head_num, kv_head_num, head_dim = 8, 2, 64
+        tokens_per_block = 16
+
+        attn_cfg, par_cfg = make_configs(
+            head_num=head_num,
+            kv_head_num=kv_head_num,
+            head_dim=head_dim,
+            tokens_per_block=tokens_per_block,
+            cp_size=cp_size,
+            cp_rank=cp_rank,
+        )
+        total_new = sum(new_lengths)
+        q_full = torch.randn(
+            total_new,
+            head_num,
+            head_dim,
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        k_full = torch.randn(
+            total_new,
+            kv_head_num,
+            head_dim,
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        v_full = torch.randn_like(k_full)
+        prefix_k = torch.randn(
+            sum(prefix_lengths),
+            kv_head_num,
+            head_dim,
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        prefix_v = torch.randn_like(prefix_k)
+        ref_output = reference_prefill_with_prefix(
+            q_full,
+            prefix_k,
+            prefix_v,
+            k_full,
+            v_full,
+            new_lengths,
+            prefix_lengths,
+        )
+
+        all_shuffle = [
+            build_shuffle_indices(new_lengths, cp_chunk_lengths, cp_size, rank).to(
+                self.device
+            )
+            for rank in range(cp_size)
+        ]
+
+        def padded_rank_tensor(tensor, positions):
+            parts = []
+            token_offset = position_offset = 0
+            for actual, chunk in zip(new_lengths, cp_chunk_lengths):
+                seq_positions = positions[position_offset : position_offset + chunk]
+                valid = seq_positions < actual
+                output = tensor.new_full((chunk, *tensor.shape[1:]), 123)
+                output[valid] = tensor.index_select(
+                    0, seq_positions[valid].long() + token_offset
+                )
+                parts.append(output)
+                token_offset += actual
+                position_offset += chunk
+            return torch.cat(parts)
+
+        all_q = [padded_rank_tensor(q_full, positions) for positions in all_shuffle]
+        all_k = [padded_rank_tensor(k_full, positions) for positions in all_shuffle]
+        all_v = [padded_rank_tensor(v_full, positions) for positions in all_shuffle]
+        all_kv_buffers = {
+            rank: torch.cat(
+                [
+                    all_k[rank].reshape(-1, kv_head_num * head_dim),
+                    all_v[rank].reshape(-1, kv_head_num * head_dim),
+                ],
+                dim=0,
+            )
+            for rank in range(cp_size)
+        }
+        qkv = torch.cat(
+            [
+                all_q[cp_rank].reshape(-1, head_num * head_dim),
+                all_k[cp_rank].reshape(-1, kv_head_num * head_dim),
+                all_v[cp_rank].reshape(-1, kv_head_num * head_dim),
+            ],
+            dim=-1,
+        )
+        attn_inputs = build_cp_attn_inputs(
+            [new + prefix for new, prefix in zip(new_lengths, prefix_lengths)],
+            cp_chunk_lengths,
+            cp_size,
+            tokens_per_block,
+            prefix_lengths=prefix_lengths,
+            device=self.device,
+        )
+        attn_inputs.context_parallel_info.prefill_shuffle_indices = all_shuffle[
+            cp_rank
+        ].cpu()
+        padding_mask = attn_inputs.context_parallel_info.prefill_qkv_padding_mask
+        self.assertGreater((padding_mask == 0).sum().item(), 0)
+
+        kv_cache = None
+        if with_kv_cache:
+            sequence_lengths = [
+                new + prefix for new, prefix in zip(new_lengths, prefix_lengths)
+            ]
+            kv_cache = make_kv_cache(
+                sum(
+                    math.ceil(length / tokens_per_block) for length in sequence_lengths
+                ),
+                kv_head_num,
+                tokens_per_block,
+                head_dim,
+                device=self.device,
+            )
+            fill_prefix_into_kv_cache(
+                kv_cache,
+                prefix_k,
+                prefix_v,
+                prefix_lengths,
+                sequence_lengths,
+                tokens_per_block,
+            )
+        else:
+            empty_ids = torch.empty(0, dtype=torch.int32)
+            attn_inputs.kv_cache_kernel_block_id = empty_ids
+            attn_inputs.kv_cache_kernel_block_id_device = empty_ids.to(self.device)
+
+        output = self._run_with_mocks(
+            attn_cfg,
+            par_cfg,
+            attn_inputs,
+            qkv,
+            kv_cache,
+            all_shuffle,
+            all_kv_buffers,
+        )
+        positions = all_shuffle[cp_rank]
+        batch_indices = torch.cat(
+            [
+                torch.full((chunk,), batch, device=self.device)
+                for batch, chunk in enumerate(cp_chunk_lengths)
+            ]
+        )
+        actual_by_position = torch.tensor(new_lengths, device=self.device)[
+            batch_indices.long()
+        ]
+        valid = positions < actual_by_position
+        expected_parts = []
+        token_offset = position_offset = 0
+        for actual, chunk in zip(new_lengths, cp_chunk_lengths):
+            seq_positions = positions[position_offset : position_offset + chunk]
+            seq_valid = seq_positions < actual
+            expected_parts.append(
+                ref_output.index_select(
+                    0, seq_positions[seq_valid].long() + token_offset
+                )
+            )
+            token_offset += actual
+            position_offset += chunk
+        self._assert_close(output[valid], torch.cat(expected_parts))
+
+        if kv_cache is not None:
+            cache_k, cache_v = extract_kv_from_paged_cache(
+                kv_cache, sequence_lengths, tokens_per_block
+            )
+            expected_k = []
+            expected_v = []
+            prefix_offset = new_offset = 0
+            for prefix, new in zip(prefix_lengths, new_lengths):
+                expected_k.extend(
+                    [
+                        prefix_k[prefix_offset : prefix_offset + prefix],
+                        k_full[new_offset : new_offset + new],
+                    ]
+                )
+                expected_v.extend(
+                    [
+                        prefix_v[prefix_offset : prefix_offset + prefix],
+                        v_full[new_offset : new_offset + new],
+                    ]
+                )
+                prefix_offset += prefix
+                new_offset += new
+            self.assertTrue(torch.equal(cache_k, torch.cat(expected_k)))
+            self.assertTrue(torch.equal(cache_v, torch.cat(expected_v)))
 
     # ---- no-prefix driver ----
 
@@ -345,7 +600,6 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
                 new_lengths,
                 cp_size,
                 r,
-                prefix_lengths=prefix_lengths,
                 device=self.device,
             )
             for r in range(cp_size)
@@ -506,6 +760,26 @@ class TestPCPAll2AllAttnOp(unittest.TestCase):
             cp_rank=2,
             tokens_per_block=16,
         )
+
+    def test_padding_filters_cache_sentinels(self):
+        self.run_padded([65, 130], [64, 32], with_kv_cache=True)
+
+    def test_warmup_without_cache_or_block_ids(self):
+        self.run_padded([65], [0], with_kv_cache=False)
+
+    @unittest.skipUnless(torch.cuda.device_count() >= 4, "four CUDA devices required")
+    def test_nonzero_tp_subgroup_falls_back_from_user_buffers(self):
+        ports, locks = PortManager().get_consecutive_ports(1)
+        try:
+            mp.spawn(
+                _group_rank_send_recv_worker,
+                args=(ports[0],),
+                nprocs=4,
+                join=True,
+            )
+        finally:
+            for lock in locks:
+                lock.__exit__(None, None, None)
 
 
 if __name__ == "__main__":

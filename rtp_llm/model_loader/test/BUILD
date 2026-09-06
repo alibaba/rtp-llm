@@ -38,6 +38,12 @@ py_test(
 )
 
 py_test(
+    name = "test_per_block_fp8_weight",
+    srcs = ["test_per_block_fp8_weight.py"],
+    deps = py_test_deps,
+)
+
+py_test(
     name = "test_compressed_w8a8_int8_per_channel",
     srcs = ["test_compressed_w8a8_int8_per_channel.py"],
     deps = py_test_deps,

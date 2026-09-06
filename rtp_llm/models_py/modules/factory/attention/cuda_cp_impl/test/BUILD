@@ -50,7 +50,7 @@ py_test(
         "//conditions:default": []
     }),
     tags = ["H20"],
-    exec_properties = {'gpu': 'H20'},
+    exec_properties = {'gpu': 'H20', 'gpu_count': '4'},
 )
 
 py_test(
@@ -73,6 +73,7 @@ py_test(
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
-    tags = ["manual"],
-    exec_properties = {'gpu': 'H20'},
+    # H20 is a scheduled CI tag; four GPUs are required by the relay regression.
+    tags = ["H20"],
+    exec_properties = {'gpu': 'H20', 'gpu_count': '4'},
 )

@@ -1,7 +1,7 @@
 import pickle
 import unittest
 
-from rtp_llm.ops import GrammarConfig
+from rtp_llm.ops import CPRotateMethod, GrammarConfig, PrefillCPConfig
 
 
 def _new_grammar_config():
@@ -82,6 +82,51 @@ class GrammarConfigPickleTest(unittest.TestCase):
             ):
                 config = _new_grammar_config()
                 config.__setstate__(state)
+
+
+class PrefillCPConfigPickleTest(unittest.TestCase):
+    def test_current_format_round_trip(self):
+        config = PrefillCPConfig()
+        expected = {
+            "method": CPRotateMethod.ALL_GATHER,
+            "comm_buffer_size": 1024,
+            "kv_cache_sharded": True,
+            "prefill_cp_size": 4,
+            "segment_size_alignment": 64,
+        }
+        for name, value in expected.items():
+            setattr(config, name, value)
+
+        restored = pickle.loads(pickle.dumps(config))
+        for name, value in expected.items():
+            self.assertEqual(getattr(restored, name), value)
+
+    def test_legacy_states_are_loaded(self):
+        for state in (
+            (CPRotateMethod.ALLTOALL, 128),
+            (CPRotateMethod.ALLTOALL, 192, True),
+            (CPRotateMethod.ALL_GATHER, 256, True, 2),
+        ):
+            with self.subTest(state=state):
+                restored = PrefillCPConfig.__new__(PrefillCPConfig)
+                restored.__setstate__(state)
+                expected = (
+                    state[0],
+                    state[1],
+                    state[2] if len(state) >= 3 else False,
+                    state[3] if len(state) >= 4 else 0,
+                    1,
+                )
+                self.assertEqual(
+                    (
+                        restored.method,
+                        restored.comm_buffer_size,
+                        restored.kv_cache_sharded,
+                        restored.prefill_cp_size,
+                        restored.segment_size_alignment,
+                    ),
+                    expected,
+                )
 
 
 if __name__ == "__main__":

@@ -12,6 +12,9 @@ from rtp_llm.model_loader.linear_attn_weight import (
     W8A8Fp8PerBlockLinearAttnAtomicWeight,
 )
 from rtp_llm.model_loader.load_config import LoadConfig
+from rtp_llm.model_loader.per_channel_fp8_quant_weight import (
+    _ckpt_base_matches_quant_exclude,
+)
 from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
@@ -52,6 +55,45 @@ B_SUFFIX = ".bias"
 QW_SUFFIX = ".weight"
 QS_SUFFIX = ".weight_scale_inv"
 APPEND_SUFFIX = "_scale_inv"
+
+
+def _is_whole_weight_excluded(
+    src_weight_info: WeightModule, exclude_modules: set
+) -> bool:
+    """Return true only when an exclusion safely covers the whole weight."""
+    if not exclude_modules or not src_weight_info.weights:
+        return False
+
+    matches = []
+    for ckpt_weight in src_weight_info.weights:
+        base_name = ckpt_weight.name.rsplit(".", 1)[0]
+        matched = _ckpt_base_matches_quant_exclude(base_name, exclude_modules)
+        if matched and "{i}" in base_name and base_name not in exclude_modules:
+            raise ValueError(
+                "FP8 per-block loading cannot represent a partial per-layer "
+                f"quantization exclusion for {base_name}; exclude the whole "
+                "weight template or use a uniformly quantized checkpoint"
+            )
+        matches.append(matched)
+
+    if any(matches) and not all(matches):
+        matched_names = [
+            weight.name
+            for weight, matched in zip(src_weight_info.weights, matches)
+            if matched
+        ]
+        raise ValueError(
+            "FP8 per-block loading cannot mix quantized and unquantized tensors "
+            f"inside fused weight {src_weight_info.name}; matched exclusions: "
+            f"{matched_names}"
+        )
+    return bool(matches) and all(matches)
+
+
+def _rewrite_scale_suffix(weight: WeightModule, scale_suffix: str) -> None:
+    for ckpt_weight in getattr(weight, "weights", ()):
+        if ckpt_weight.name.endswith(QS_SUFFIX):
+            ckpt_weight.name = ckpt_weight.name[: -len(QS_SUFFIX)] + scale_suffix
 
 
 def dequant_weight_split_k(
@@ -119,7 +161,9 @@ def per_block_cast_to_fp8(
     )
     x_amax = x_view.abs().float().amax(dim=(2, 4), keepdim=True).clamp(1e-4)
     x_scaled = (x_view * (FP8_E4M3_MAX / x_amax)).to(torch.float8_e4m3fn)
-    x_quantized = x_scaled.view(b, m_padded, n_padded)[:, :m, :n]
+    # x_view only partitions dimensions; reshape restores the padded row-major matrix.
+    x_quantized_padded = x_scaled.reshape(b, m_padded, n_padded)
+    x_quantized = x_quantized_padded[:, :m, :n]
     scales = (x_amax / FP8_E4M3_MAX).to(torch.float32)
     squeeze_dims = []
 
@@ -284,6 +328,8 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         # registry's "must be exactly one match" check passes.
         if is_v4_weight(src_weight_info):
             return False
+        if _is_whole_weight_excluded(src_weight_info, quant_config.exclude_modules):
+            return False
         return True
 
     def __init__(
@@ -352,6 +398,12 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             )
         else:
             raise ValueError(f"Unsupported weight name {src_weight_info.name}")
+
+        scale_suffix = getattr(quant_config, "weight_scale_suffix", QS_SUFFIX)
+        if scale_suffix != QS_SUFFIX:
+            _rewrite_scale_suffix(kernel, scale_suffix)
+            if scale is not None:
+                _rewrite_scale_suffix(scale, scale_suffix)
 
         sub_weights = {kernel.name: kernel}
         if scale is not None:
@@ -863,7 +915,11 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         ):
             return False
         name = src_weight_info.name
-        return name in cls.w8a8_weight_list and name not in [W.mla_kc, W.mla_vc]
+        if name not in cls.w8a8_weight_list or name in [W.mla_kc, W.mla_vc]:
+            return False
+        if _is_whole_weight_excluded(src_weight_info, quant_config.exclude_modules):
+            return False
+        return True
 
     def __init__(
         self,

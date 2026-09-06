@@ -2,8 +2,8 @@
 Unit tests for CP linear attention (GatedDeltaNet) per-layer all-gather path.
 
 Tests:
-  1. Index math: cp_local_extract_indices correctly maps zigzag positions
-  2. Full forward: single-rank mock verifies CP output matches non-CP reference
+  1. Metadata and forward: production CP metadata maps local zigzag tokens correctly
+  2. Relay: real TP subgroups match non-CP output and cache states
 """
 
 import contextlib
@@ -14,17 +14,18 @@ from typing import List
 from unittest.mock import patch
 
 import torch
+import torch.multiprocessing as mp
 
 from rtp_llm.models_py.modules.factory.attention.cuda_cp_impl.test.cp_test_utils import (
     build_cp_attn_inputs,
-    build_padding_mask,
-    build_restore_indices,
+    build_shuffle_indices,
     compute_rank_positions,
-    zigzag_positions_for_rank,
 )
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
+    causal_conv1d_fn,
     prepare_causal_conv1d_metadata,
 )
+from rtp_llm.test.utils.port_util import PortManager
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -56,90 +57,273 @@ def _add_device_tensors(inputs, device: torch.device):
         {
             "prefix_lengths_device": inputs.prefix_lengths.to(device),
             "input_lengths_device": inputs.input_lengths.to(device),
+            "kv_cache_kernel_block_id_device": (
+                inputs.kv_cache_kernel_block_id.to(device)
+                if inputs.kv_cache_kernel_block_id is not None
+                else None
+            ),
         },
     )
 
 
-class TestCPLinearAttnIndexMath(unittest.TestCase):
-    """Verify that _build_cp_linear_attn_metadata produces correct extract indices."""
+def _make_linear_module(device, parallelism_config):
+    from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextGatedDeltaNet
+    from rtp_llm.ops import DataType, LinearAttentionConfig
+    from rtp_llm.utils.model_weight import W
 
-    def _build_indices(
-        self,
-        sequence_lengths: List[int],
-        cp_size: int,
-        cp_rank: int,
-        device: torch.device,
-    ):
-        """Reproduce the index construction from Qwen3NextModel._build_cp_linear_attn_metadata."""
-        cp_chunk_lengths = [sl // cp_size for sl in sequence_lengths]
-        restore_indices = build_restore_indices(cp_chunk_lengths, cp_size).to(device)
-        padding_mask = build_padding_mask(cp_chunk_lengths, cp_size).to(device)
-        unpad_restore = restore_indices[padding_mask == 1]
+    num_heads, head_dim, hidden_size, conv_width = 2, 64, 128, 4
+    config = LinearAttentionConfig()
+    config.linear_num_key_heads = num_heads
+    config.linear_num_value_heads = num_heads
+    config.linear_key_head_dim = head_dim
+    config.linear_value_head_dim = head_dim
+    config.linear_conv_kernel_dim = conv_width
+    config.ssm_state_dtype = DataType.TYPE_BF16
+    config.conv_state_dtype = DataType.TYPE_BF16
 
-        total_ag = padding_mask.shape[0]
-        local_chunk_total = total_ag // cp_size
-        local_start = cp_rank * local_chunk_total
-        local_end = local_start + local_chunk_total
+    qkv_dim = head_dim * num_heads * 3
+    torch.manual_seed(123)
+    weights = {
+        W.linear_attn_conv1d_w: torch.randn(
+            qkv_dim, 1, conv_width, device=device, dtype=torch.bfloat16
+        ),
+        W.linear_attn_dt_b: torch.randn(num_heads, device=device, dtype=torch.bfloat16),
+        W.linear_attn_alog: torch.randn(num_heads, device=device, dtype=torch.bfloat16),
+        W.linear_attn_norm_w: torch.randn(
+            head_dim, device=device, dtype=torch.bfloat16
+        ),
+        W.linear_attn_qkvz_w: torch.randn(
+            hidden_size,
+            qkv_dim + head_dim * num_heads,
+            device=device,
+            dtype=torch.bfloat16,
+        ),
+        W.linear_attn_qkvz_s: None,
+        W.linear_attn_ba_w: torch.randn(
+            hidden_size, num_heads * 2, device=device, dtype=torch.bfloat16
+        ),
+        W.linear_attn_out_w: torch.randn(
+            head_dim * num_heads,
+            hidden_size,
+            device=device,
+            dtype=torch.bfloat16,
+        ),
+        W.linear_attn_out_s: None,
+    }
+    return Qwen3NextGatedDeltaNet(
+        config, parallelism_config, weights, layernorm_eps=1e-6
+    ).to(device)
 
-        inv_restore = torch.empty(total_ag, dtype=torch.long, device=device)
-        inv_restore.fill_(-1)
-        inv_restore[unpad_restore.long()] = torch.arange(
-            unpad_restore.shape[0], device=device
+
+def _make_nocp_inputs(new_length, prefix_length, device):
+    from rtp_llm.ops.compute_ops import PyAttentionInputs
+
+    total_length = prefix_length + new_length
+    block_count = math.ceil(total_length / 64)
+    block_ids = torch.arange(1, block_count + 1, dtype=torch.int32).view(1, -1)
+    inputs = PyAttentionInputs()
+    inputs.is_prefill = True
+    inputs.cu_seqlens_device = torch.tensor(
+        [0, new_length], dtype=torch.int32, device=device
+    )
+    inputs.input_lengths = torch.tensor([new_length], dtype=torch.int32)
+    inputs.sequence_lengths = torch.tensor([total_length], dtype=torch.int32)
+    inputs.prefix_lengths = torch.tensor([prefix_length], dtype=torch.int32)
+    inputs.kv_cache_kernel_block_id = block_ids
+    inputs.context_parallel_info = None
+    return _add_device_tensors(inputs, device)
+
+
+def _make_cp_metadata(inputs, cp_size, cp_rank, device):
+    from types import SimpleNamespace
+
+    from rtp_llm.models_py.model_desc.qwen3_next import (
+        Qwen3NextMetadata,
+        Qwen3NextModel,
+    )
+
+    metadata_builder = SimpleNamespace(
+        parallelism_config=SimpleNamespace(tp_size=cp_size, tp_rank=cp_rank)
+    )
+    metadata = Qwen3NextModel._build_cp_linear_attn_metadata(
+        metadata_builder, inputs, device
+    )
+    return Qwen3NextMetadata(
+        full_prefill_conv1d_meta=metadata[0],
+        full_prefill_cu_seqlens=metadata[1],
+        cp_restore_indices=metadata[2],
+        cp_local_extract_indices=metadata[3],
+        cp_local_valid_mask=metadata[4],
+    )
+
+
+def _new_linear_cache(module, total_length, device):
+    from rtp_llm.ops.compute_ops import LayerKVCache
+
+    converter = module.prefill_gdn.linear_cache_converter
+    row_elements = math.ceil(converter.block_size_bytes / 2)
+    block_count = math.ceil(total_length / 64)
+    base = torch.zeros(
+        block_count + 1,
+        row_elements,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    return LayerKVCache(base, 64)
+
+
+def _run_cp_relay_case(module, device, cp_rank, new_length, prefix_length, with_cache):
+    from rtp_llm.models_py.distributed.collective_torch import Group
+    from rtp_llm.models_py.distributed.collective_torch import (
+        all_reduce as distributed_all_reduce,
+    )
+    from rtp_llm.models_py.model_desc.qwen3_next import Qwen3NextMetadata
+
+    total_length = prefix_length + new_length
+    reference_cache = cp_cache = None
+    if with_cache:
+        initial_cache = _new_linear_cache(module, total_length, device)
+        if prefix_length:
+            prefix_hidden = torch.randn(
+                prefix_length, 128, device=device, dtype=torch.bfloat16
+            )
+            prefix_inputs = _make_nocp_inputs(prefix_length, 0, device)
+            prefix_cu = prefix_inputs.cu_seqlens_device
+            prefix_meta = Qwen3NextMetadata(
+                prefill_conv1d_meta=prepare_causal_conv1d_metadata(prefix_cu, device)
+            )
+            module(prefix_hidden, None, initial_cache, prefix_inputs, prefix_meta)
+        reference_cache = _new_linear_cache(module, total_length, device)
+        reference_cache.kv_cache_base.copy_(initial_cache.kv_cache_base)
+        cp_cache = _new_linear_cache(module, total_length, device)
+        cp_cache.kv_cache_base.copy_(initial_cache.kv_cache_base)
+
+    full_hidden = torch.randn(new_length, 128, device=device, dtype=torch.bfloat16)
+    reference_inputs = _make_nocp_inputs(new_length, prefix_length, device)
+    reference_cu = reference_inputs.cu_seqlens_device
+    reference_meta = Qwen3NextMetadata(
+        prefill_conv1d_meta=prepare_causal_conv1d_metadata(reference_cu, device)
+    )
+    with torch.no_grad():
+        reference_output = module(
+            full_hidden, None, reference_cache, reference_inputs, reference_meta
         )
 
-        local_mask = padding_mask[local_start:local_end]
-        local_ag_positions = torch.arange(local_start, local_end, device=device)[
-            local_mask == 1
-        ]
-        return inv_restore[local_ag_positions]
+    cp_size = 2
+    segment_alignment = 64
+    padded_length = math.ceil(new_length / (2 * cp_size * segment_alignment)) * (
+        2 * cp_size * segment_alignment
+    )
+    cp_chunk_length = padded_length // cp_size
+    positions = build_shuffle_indices(
+        [new_length], [cp_chunk_length], cp_size, cp_rank
+    ).to(device)
+    valid = positions < new_length
+    local_hidden = full_hidden.new_zeros(cp_chunk_length, full_hidden.shape[1])
+    local_hidden[valid] = full_hidden.index_select(0, positions[valid].long())
+    cp_inputs = build_cp_attn_inputs(
+        [total_length],
+        [cp_chunk_length],
+        cp_size,
+        64,
+        prefix_lengths=[prefix_length],
+        block_id_start=1,
+        device=device,
+    )
+    cp_inputs.context_parallel_info.prefill_shuffle_indices = positions.cpu()
+    cp_inputs = _add_device_tensors(cp_inputs, device)
+    assert (cp_inputs.context_parallel_info.prefill_qkv_padding_mask == 0).any()
+    cp_meta = _make_cp_metadata(cp_inputs, cp_size, cp_rank, device)
 
-    def test_single_seq_cp2_rank0(self):
-        device = torch.device("cpu")
-        seq_lengths = [16]
-        cp_size, cp_rank = 2, 0
-        idx = self._build_indices(seq_lengths, cp_size, cp_rank, device)
-        expected = zigzag_positions_for_rank(16, cp_size, cp_rank)
-        self.assertEqual(idx.tolist(), expected)
+    def out_of_place_all_reduce(tensor, group):
+        assert group == Group.TP
+        result = tensor.clone()
+        return distributed_all_reduce(result, group=group, inplace=True)
 
-    def test_single_seq_cp2_rank1(self):
-        device = torch.device("cpu")
-        seq_lengths = [16]
-        cp_size, cp_rank = 2, 1
-        idx = self._build_indices(seq_lengths, cp_size, cp_rank, device)
-        expected = zigzag_positions_for_rank(16, cp_size, cp_rank)
-        self.assertEqual(idx.tolist(), expected)
+    patch_target = "rtp_llm.models_py.model_desc.qwen3_next.all_reduce"
+    reduce_context = (
+        patch(patch_target, side_effect=out_of_place_all_reduce)
+        if with_cache
+        else contextlib.nullcontext()
+    )
+    with reduce_context, torch.no_grad():
+        cp_output = module(local_hidden, None, cp_cache, cp_inputs, cp_meta)
 
-    def test_single_seq_cp4(self):
-        device = torch.device("cpu")
-        for rank in range(4):
-            idx = self._build_indices([32], 4, rank, device)
-            expected = zigzag_positions_for_rank(32, 4, rank)
-            self.assertEqual(idx.tolist(), expected, f"rank={rank}")
+    torch.testing.assert_close(
+        cp_output[valid].float(),
+        reference_output.index_select(0, positions[valid].long()).float(),
+        rtol=1e-2,
+        atol=1e-2,
+    )
+    if cp_cache is not None:
+        reference_ssm = module.prefill_gdn._get_ssm_states(
+            reference_cache.kv_cache_base
+        )
+        cp_ssm = module.prefill_gdn._get_ssm_states(cp_cache.kv_cache_base)
+        torch.testing.assert_close(
+            cp_ssm.float(), reference_ssm.float(), rtol=2e-2, atol=2e-2
+        )
+        reference_conv = module.prefill_gdn._get_conv_states(
+            reference_cache.kv_cache_base
+        )
+        cp_conv = module.prefill_gdn._get_conv_states(cp_cache.kv_cache_base)
+        torch.testing.assert_close(cp_conv, reference_conv, rtol=0, atol=0)
 
-    def test_multi_batch_cp2(self):
-        device = torch.device("cpu")
-        seq_lengths = [8, 16]
-        cp_size, cp_rank = 2, 0
-        idx = self._build_indices(seq_lengths, cp_size, cp_rank, device)
-        expected = []
-        offset = 0
-        for sl in seq_lengths:
-            positions = zigzag_positions_for_rank(sl, cp_size, cp_rank)
-            expected.extend([p + offset for p in positions])
-            offset += sl
-        self.assertEqual(idx.tolist(), expected)
 
-    def test_roundtrip_all_ranks_cover_all_tokens(self):
-        """All ranks together should cover every token exactly once."""
-        device = torch.device("cpu")
-        seq_lengths = [16, 32]
-        cp_size = 2
-        all_indices = []
-        for rank in range(cp_size):
-            idx = self._build_indices(seq_lengths, cp_size, rank, device)
-            all_indices.extend(idx.tolist())
-        total = sum(seq_lengths)
-        self.assertEqual(sorted(all_indices), list(range(total)))
+def _cp_relay_worker(world_rank, master_port):
+    from rtp_llm.models_py.distributed.collective_torch import (
+        destroy_distributed_environment,
+        init_distributed_environment,
+    )
+    from rtp_llm.ops import CPRotateMethod, NcclCommConfig, ParallelismConfig
+
+    device = torch.device(f"cuda:{world_rank}")
+    torch.cuda.set_device(device)
+    cp_rank = world_rank % 2
+    parallelism_config = ParallelismConfig()
+    parallelism_config.tp_size = 2
+    parallelism_config.tp_rank = cp_rank
+    parallelism_config.dp_size = 2
+    parallelism_config.dp_rank = world_rank // 2
+    parallelism_config.world_size = 4
+    parallelism_config.world_rank = world_rank
+    parallelism_config.local_world_size = 4
+    parallelism_config.local_rank = world_rank
+    parallelism_config.prefill_cp_config.method = CPRotateMethod.ALL_GATHER
+    init_distributed_environment(
+        parallelism_config,
+        NcclCommConfig(nccl_ip="127.0.0.1"),
+        master_port,
+        timeout=60,
+    )
+    try:
+        module = _make_linear_module(device, parallelism_config)
+        for new_length, prefix_length, with_cache in (
+            (1, 0, False),
+            (2, 0, False),
+            (65, 0, True),
+            (65, 64, True),
+        ):
+            _run_cp_relay_case(
+                module,
+                device,
+                cp_rank,
+                new_length,
+                prefix_length,
+                with_cache,
+            )
+    finally:
+        destroy_distributed_environment()
+
+
+class TestCPLinearAttnMetadata(unittest.TestCase):
+    def test_cache_ends_support_short_and_aligned_sequences(self):
+        from rtp_llm.models_py.model_desc.qwen3_next import _cp_cache_ends
+
+        self.assertEqual(_cp_cache_ends(128, 2048, torch.device("cpu")).tolist(), [128])
+        self.assertEqual(
+            _cp_cache_ends(4096, 2048, torch.device("cpu")).tolist(), [2048, 4096]
+        )
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
@@ -150,6 +334,55 @@ class TestCPLinearAttnForward(unittest.TestCase):
         self.device = torch.device("cuda")
         torch.manual_seed(42)
         torch.cuda.manual_seed(42)
+
+    def test_segmented_conv_matches_full_sequence(self):
+        """Carrying the last width-1 inputs preserves causal-conv results."""
+        width = 4
+        dim = 256
+        lengths = [64, 1, 2, 65]
+        total = sum(lengths)
+        x = torch.randn(total, dim, device=self.device, dtype=torch.bfloat16)
+        weight = torch.randn(dim, width, device=self.device, dtype=torch.bfloat16)
+        prefix_lengths = torch.zeros(1, dtype=torch.int32, device=self.device)
+
+        full_cu = torch.tensor([0, total], dtype=torch.int32, device=self.device)
+        full = causal_conv1d_fn(
+            x=x.transpose(0, 1),
+            weight=weight,
+            bias=None,
+            conv_states=None,
+            query_start_loc=full_cu,
+            block_map=None,
+            prefix_lengths=prefix_lengths,
+            seq_size_per_block=1,
+            metadata=prepare_causal_conv1d_metadata(full_cu, self.device),
+        ).transpose(0, 1)
+
+        carry = x.new_zeros(width - 1, dim)
+        outputs = []
+        start = 0
+        for length in lengths:
+            raw_segment = x[start : start + length]
+            segment_input = torch.cat([carry, raw_segment])
+            segment_cu = torch.tensor(
+                [0, segment_input.shape[0]], dtype=torch.int32, device=self.device
+            )
+            segment_output = causal_conv1d_fn(
+                x=segment_input.transpose(0, 1),
+                weight=weight,
+                bias=None,
+                conv_states=None,
+                query_start_loc=segment_cu,
+                block_map=None,
+                prefix_lengths=prefix_lengths,
+                seq_size_per_block=1,
+                metadata=prepare_causal_conv1d_metadata(segment_cu, self.device),
+            ).transpose(0, 1)
+            outputs.append(segment_output[width - 1 :])
+            carry = segment_input[-(width - 1) :].contiguous()
+            start += length
+
+        torch.testing.assert_close(torch.cat(outputs), full, rtol=0, atol=0)
 
     def _run_cp_vs_nocp(
         self,
@@ -172,7 +405,7 @@ class TestCPLinearAttnForward(unittest.TestCase):
             prepare_causal_conv1d_metadata,
         )
         from rtp_llm.ops import DataType, LinearAttentionConfig, ParallelismConfig
-        from rtp_llm.ops.compute_ops import PyAttentionInputs, PyContextParallelParams
+        from rtp_llm.ops.compute_ops import PyAttentionInputs
 
         assert all(sl % (cp_size * 2) == 0 for sl in sequence_lengths)
         cp_chunk_lengths = [sl // cp_size for sl in sequence_lengths]
@@ -293,43 +526,8 @@ class TestCPLinearAttnForward(unittest.TestCase):
                 )
                 all_rank_packed.append(torch.cat([r_mixed_qkv, r_b, r_a], dim=-1))
 
-        cp_info = cp_attn_inputs.context_parallel_info
-        restore_indices = cp_info.prefill_qkv_restore_indice
-        padding_mask = cp_info.prefill_qkv_padding_mask
-        unpad_restore = restore_indices[padding_mask == 1]
-
-        total_ag = padding_mask.shape[0]
-        local_chunk_total = total_ag // cp_size
-        local_start = cp_rank * local_chunk_total
-        local_end = local_start + local_chunk_total
-
-        inv_restore = torch.empty(total_ag, dtype=torch.long, device=self.device)
-        inv_restore.fill_(-1)
-        inv_restore[unpad_restore.long()] = torch.arange(
-            unpad_restore.shape[0], device=self.device
-        )
-        local_inv = inv_restore[local_start:local_end]
-        cp_local_valid_mask = local_inv >= 0
-        cp_local_extract_idx = local_inv[cp_local_valid_mask]
-
-        actual_lengths = torch.tensor(sequence_lengths, dtype=torch.int32)
-        full_cu_from_actual = torch.zeros(
-            batch_size + 1, dtype=torch.int32, device=self.device
-        )
-        full_cu_from_actual[1:] = torch.tensor(
-            sequence_lengths, device=self.device
-        ).cumsum(0)
-
-        full_conv_meta = prepare_causal_conv1d_metadata(
-            query_start_loc=full_cu_from_actual, device=self.device
-        )
-
-        cp_meta = Qwen3NextMetadata(
-            full_prefill_conv1d_meta=full_conv_meta,
-            full_prefill_cu_seqlens=full_cu_from_actual,
-            cp_restore_indices=restore_indices,
-            cp_local_extract_indices=cp_local_extract_idx,
-            cp_local_valid_mask=cp_local_valid_mask,
+        cp_meta = _make_cp_metadata(
+            cp_attn_inputs, cp_size, cp_rank, self.device
         )
 
         def mock_ag(tensor, group=None):
@@ -358,6 +556,15 @@ class TestCPLinearAttnForward(unittest.TestCase):
 
     def test_multi_batch_cp2(self):
         self._run_cp_vs_nocp(sequence_lengths=[16, 32], cp_size=2, cp_rank=0)
+
+    @unittest.skipUnless(torch.cuda.device_count() >= 4, "four CUDA devices required")
+    def test_cp2_relay_short_tail_prefix_and_cache(self):
+        ports, locks = PortManager().get_consecutive_ports(1)
+        try:
+            mp.spawn(_cp_relay_worker, args=(ports[0],), nprocs=4, join=True)
+        finally:
+            for lock in locks:
+                lock.__exit__(None, None, None)
 
 
 if __name__ == "__main__":

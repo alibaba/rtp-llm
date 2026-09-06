@@ -68,8 +68,48 @@ def build_restore_indices(cp_chunk_lengths: List[int], cp_size: int) -> torch.Te
     return torch.tensor(restore, dtype=torch.int32)
 
 
-def build_padding_mask(cp_chunk_lengths: List[int], cp_size: int) -> torch.Tensor:
-    return torch.ones(sum(cp_chunk_lengths) * cp_size, dtype=torch.int32)
+def build_padding_mask(
+    cp_chunk_lengths: List[int],
+    cp_size: int,
+    actual_lengths: List[int] | None = None,
+) -> torch.Tensor:
+    padded_lengths = [length * cp_size for length in cp_chunk_lengths]
+    if actual_lengths is None:
+        actual_lengths = padded_lengths
+    if len(actual_lengths) != len(padded_lengths):
+        raise ValueError("actual and padded length counts must match")
+    masks = []
+    for actual, padded in zip(actual_lengths, padded_lengths):
+        if actual < 0 or actual > padded:
+            raise ValueError(f"actual length {actual} exceeds padded length {padded}")
+        masks.append(
+            torch.cat(
+                [
+                    torch.ones(actual, dtype=torch.int32),
+                    torch.zeros(padded - actual, dtype=torch.int32),
+                ]
+            )
+        )
+    return torch.cat(masks)
+
+
+def build_shuffle_indices(
+    actual_lengths: List[int],
+    cp_chunk_lengths: List[int],
+    cp_size: int,
+    rank: int,
+) -> torch.Tensor:
+    if len(actual_lengths) != len(cp_chunk_lengths):
+        raise ValueError("actual and chunk length counts must match")
+    if rank < 0 or rank >= cp_size:
+        raise ValueError(f"rank {rank} is outside CP size {cp_size}")
+    indices = []
+    for actual, chunk in zip(actual_lengths, cp_chunk_lengths):
+        padded = chunk * cp_size
+        if actual > padded:
+            raise ValueError(f"actual length {actual} exceeds padded length {padded}")
+        indices.extend(zigzag_positions_for_rank(padded, cp_size, rank))
+    return torch.tensor(indices, dtype=torch.int32)
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +204,7 @@ def build_cp_attn_inputs(
     tokens_per_block: int,
     prefix_lengths: List[int] | None = None,
     device: torch.device = torch.device("cuda"),
+    block_id_start: int = 0,
 ) -> PyAttentionInputs:
     """Build ``PyAttentionInputs`` with properly populated CP info.
 
@@ -194,7 +235,11 @@ def build_cp_attn_inputs(
     offset = 0
     for i, sl in enumerate(sequence_lengths):
         nb = math.ceil(sl / tokens_per_block)
-        block_ids[i, :nb] = torch.arange(offset, offset + nb, dtype=torch.int32)
+        block_ids[i, :nb] = torch.arange(
+            block_id_start + offset,
+            block_id_start + offset + nb,
+            dtype=torch.int32,
+        )
         offset += nb
     inp.kv_cache_block_id = block_ids
     inp.kv_cache_kernel_block_id = block_ids
@@ -205,11 +250,17 @@ def build_cp_attn_inputs(
     new_lengths = [sl - pl for sl, pl in zip(sequence_lengths, prefix_lengths)]
 
     cp_info = PyContextParallelParams()
-    cp_info.prefill_cp_chunk_lengths = torch.tensor(cp_chunk_lengths, dtype=torch.int32)
-    cp_info.prefill_cp_padding_lengths = torch.zeros(batch_size, dtype=torch.int32)
-    cp_info.prefill_qkv_padding_mask = build_padding_mask(cp_chunk_lengths, cp_size).to(
-        device
+    cp_info.prefill_cp_chunk_lengths = torch.tensor(
+        cp_chunk_lengths, dtype=torch.int32, device=device
     )
+    padded_lengths = [length * cp_size for length in cp_chunk_lengths]
+    cp_info.prefill_cp_padding_lengths = torch.tensor(
+        [padded - actual for padded, actual in zip(padded_lengths, new_lengths)],
+        dtype=torch.int32,
+    )
+    cp_info.prefill_qkv_padding_mask = build_padding_mask(
+        cp_chunk_lengths, cp_size, new_lengths
+    ).to(device)
     cp_info.prefill_qkv_restore_indice = build_restore_indices(
         cp_chunk_lengths, cp_size
     ).to(device)

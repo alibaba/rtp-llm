@@ -229,6 +229,51 @@ class QuantizationConfig(ABC):
             weight_type = weights_config.get("type")
             weight_strategy = weights_config.get("strategy")
             weight_dynamic = weights_config.get("dynamic", False)
+            ignore_patterns = quant_config.get("ignore") or []
+            if (
+                weight_type == "float"
+                and bits == 8
+                and weight_strategy == "block"
+            ):
+                _validate_compressed_targets(group_name, group_config)
+                block_structure = weights_config.get("block_structure")
+                if block_structure != [128, 128]:
+                    raise ValueError(
+                        "compressed-tensors FP8 block weights require the backend "
+                        "supported block_structure [128, 128], "
+                        f"got {block_structure}"
+                    )
+                if weight_dynamic or not weights_config.get("symmetric", True):
+                    raise ValueError(
+                        "compressed-tensors FP8 block weights must be static and "
+                        f"symmetric, got {weights_config}"
+                    )
+                if not (
+                    isinstance(activation_config, dict)
+                    and activation_config.get("type") == "float"
+                    and activation_config.get("num_bits") == 8
+                    and activation_config.get("strategy") == "group"
+                    and activation_config.get("group_size") == 128
+                    and activation_config.get("dynamic", False)
+                    and activation_config.get("symmetric", True)
+                ):
+                    raise ValueError(
+                        "compressed-tensors FP8 block input activations require "
+                        "dynamic symmetric 8-bit float group quantization with "
+                        f"group_size 128, got {activation_config}"
+                    )
+                return Fp8BlockWiseQuantConfig.from_config(
+                    {
+                        "bits": bits,
+                        "method": Fp8BlockWiseQuantConfig.get_method(),
+                        "group_size": block_structure[0],
+                        "is_quanted": True,
+                        "weight_scale_suffix": weights_config.get(
+                            "weight_scale_suffix", ".weight_scale"
+                        ),
+                        "ignore_patterns": ignore_patterns,
+                    }
+                )
             if (
                 weight_type == "float"
                 and bits == 8
@@ -494,6 +539,8 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
         **kwargs: Any,
     ):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
+        self.weight_scale_suffix = kwargs.get("weight_scale_suffix", ".weight_scale_inv")
+        self.exclude_modules = set(kwargs.get("ignore_patterns", []))
 
     @classmethod
     def get_method(cls) -> str:

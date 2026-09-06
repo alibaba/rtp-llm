@@ -527,6 +527,12 @@ def init_user_buffers_environment(parallelism_config: ParallelismConfig):
     from rtp_llm.models_py.utils.arch import is_cuda
 
     if parallelism_config.use_ub_comm and is_cuda():
+        if parallelism_config.world_size != parallelism_config.tp_size:
+            logging.warning(
+                "User buffers do not support multiple TP groups; falling back to "
+                "the process-group communication path"
+            )
+            return
 
         from rtp_llm.models_py.distributed.user_buffers import (
             init_user_buffers_communicator,
@@ -663,6 +669,10 @@ def send(tensor: torch.Tensor, dst: int, group: Group) -> None:
     torch.distributed.send(tensor, dst, group=process_group)
 
 
+def get_global_rank_from_group_rank(rank: int, group: Group) -> int:
+    return torch.distributed.get_global_rank(_get_group(group), rank)
+
+
 def recv(tensor: torch.Tensor, src: int, group: Group) -> torch.Tensor:
     """Receive a tensor from a source rank.
 
@@ -689,6 +699,13 @@ def broadcast(tensor: torch.Tensor, src: int, group: Group) -> None:
     """
     process_group = _get_group(group)
     torch.distributed.broadcast(tensor, src, group=process_group)
+
+
+def broadcast_from_group_rank(tensor: torch.Tensor, src: int, group: Group) -> None:
+    process_group = _get_group(group)
+    torch.distributed.broadcast(
+        tensor, torch.distributed.get_global_rank(process_group, src), group=process_group
+    )
 
 
 def all_reduce(tensor: torch.Tensor, group: Group, *, inplace: bool = False) -> torch.Tensor:
