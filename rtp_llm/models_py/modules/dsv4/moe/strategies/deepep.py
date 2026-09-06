@@ -62,6 +62,13 @@ _XLAYER_C1 = int(os.environ.get("DSV4_XLAYER_C1", "0"))
 # tests the deferral alone; DSV4_X1_AG_COMM=1 restores the relocation.
 _X1_AG_COMM = int(os.environ.get("DSV4_X1_AG_COMM", "1"))
 _X1_AG_CT = [0]  # X1' engagement proof: relocated count-AG completions
+# P3/S1 (Sep 7): per-forward count-AG cache. CP prefill counts are uniform
+# ([T]*world, measured) so the AG result is a pure function of (world, T_local);
+# populate only on the uniform pattern (rank-invariant), else today's path.
+# Off by default: DSV4_MOE_COUNT_CACHE=1 arms it.
+_COUNT_CACHE_ENABLED = os.environ.get("DSV4_MOE_COUNT_CACHE", "0") == "1"
+_COUNT_CACHE: dict = {}
+_COUNT_CACHE_CT = [0]
 # Halves pay a fixed per-layer pipeline overhead (~0.26 ms: extra rounds,
 # event waits) that wins big at 32K-class T but regressed 8K by +11 ms — so
 # arm only at/below-noise-for-32K sizes. Default keeps 8K (T=2048/rank) on
@@ -922,48 +929,77 @@ class DeepEPStrategy(RoutedExpertsStrategy):
         # request). The per-rank GEMM stays tiled further below, keeping
         # the flashinfer workspace bounded regardless of T.
         send_counts = [int(x.size(0))] * world
-        pair = torch.tensor([send_counts[0]], dtype=torch.int64, device=x.device)
-        gathered = torch.empty(world, 1, dtype=torch.int64, device=x.device)
-        # X1' (Sep 3, results_20260903_x1_c1/VERDICT.md): under the c1
-        # deferral, no WORLD collective may issue on the main stream while a
-        # previous layer's c1 can still be in flight on the comm stream —
-        # one PG = one stream, across layer boundaries. Arm the AG on the
-        # comm stream exactly when the halves run will arm (same T gate);
-        # the host .cpu() below blocks on a main-stream DtoH ordered after
-        # the AG via an event. The C2 host-release point is unchanged: in
-        # the stock order the AG was already serialized behind ev_c1 by the
-        # finish() wait's stream position.
-        _x1_arm = (
-            _XLAYER_C1
-            and _X1_AG_COMM
-            and _A2_HALVES >= 2
-            and world >= 2
-            and int(x.size(0)) >= _A2_MIN_TOKENS
-        )
-        if _x1_arm:
-            comm = _A2_STREAMS.get(x.device.index)
-            if comm is None:
-                comm = _A2_STREAMS.setdefault(
-                    x.device.index, torch.cuda.Stream(device=x.device))
-            with torch.cuda.stream(comm):
-                dist.all_gather_into_tensor(gathered, pair, group=group)
-                gathered.record_stream(comm)  # written on comm, alloc'd on main
-                ev_ag = torch.cuda.Event()
-                ev_ag.record(comm)
-            torch.cuda.current_stream(x.device).wait_event(ev_ag)
-            if os.environ.get("DSV4_DIAG") and _X1_AG_CT[0] < 3:
-                _X1_AG_CT[0] += 1
+        # P3/S1 (Sep 7): per-forward count-AG cache. In the CP prefill modes the
+        # per-rank token counts are IDENTICAL on all ranks (measured:
+        # counts=[4000,4000,4000,4000] every layer, m5a_ship log), so the AG
+        # result is a pure function of (world, T_local). Cache the counts on
+        # first sight of a key — population only when the AG result was UNIFORM
+        # (uniformity is rank-invariant data, so every rank makes the same
+        # cache decision; non-uniform fused/DP modes never cache and keep
+        # today's path) — later layers/forwards with the same key skip the
+        # collective AND the blocking .cpu(). Kill switch:
+        # DSV4_MOE_COUNT_CACHE=0 (default off).
+        _cc_key = (world, int(x.size(0)), x.device.index)
+        cached_counts = _COUNT_CACHE.get(_cc_key) if _COUNT_CACHE_ENABLED else None
+        if cached_counts is not None:
+            recv_counts = cached_counts
+            if os.environ.get("DSV4_DIAG") and _COUNT_CACHE_CT[0] < 3:
+                _COUNT_CACHE_CT[0] += 1
                 import sys
-                print("[X1-AG] rank=%d L=%d T=%d" % (
-                    dist.get_rank(group) if dist.is_initialized() else -1,
-                    self.cfg.layer_id, int(x.size(0))), file=sys.stderr, flush=True)
+                print("[COUNT-CACHE] rank=%d hit key=%s" % (
+                    torch.distributed.get_rank(torch.distributed.group.WORLD)
+                    if torch.distributed.is_initialized() else -1, _cc_key),
+                    file=sys.stderr, flush=True)
+            _bad = False
         else:
-            dist.all_gather_into_tensor(gathered, pair, group=group)
-        recv_counts = [int(v) for v in gathered.view(-1).cpu().tolist()]
-        try:
-            _bad = (sum(recv_counts) > 65536) or any((c < 0) or (c > 65536) for c in recv_counts)
-        except Exception:
-            _bad = True
+            pair = torch.tensor([send_counts[0]], dtype=torch.int64, device=x.device)
+            gathered = torch.empty(world, 1, dtype=torch.int64, device=x.device)
+            # X1' (Sep 3, results_20260903_x1_c1/VERDICT.md): under the c1
+            # deferral, no WORLD collective may issue on the main stream while a
+            # previous layer's c1 can still be in flight on the comm stream —
+            # one PG = one stream, across layer boundaries. Arm the AG on the
+            # comm stream exactly when the halves run will arm (same T gate);
+            # the host .cpu() below blocks on a main-stream DtoH ordered after
+            # the AG via an event. The C2 host-release point is unchanged: in
+            # the stock order the AG was already serialized behind ev_c1 by the
+            # finish() wait's stream position.
+            _x1_arm = (
+                _XLAYER_C1
+                and _X1_AG_COMM
+                and _A2_HALVES >= 2
+                and world >= 2
+                and int(x.size(0)) >= _A2_MIN_TOKENS
+            )
+            if _x1_arm:
+                comm = _A2_STREAMS.get(x.device.index)
+                if comm is None:
+                    comm = _A2_STREAMS.setdefault(
+                        x.device.index, torch.cuda.Stream(device=x.device))
+                with torch.cuda.stream(comm):
+                    dist.all_gather_into_tensor(gathered, pair, group=group)
+                    gathered.record_stream(comm)  # written on comm, alloc'd on main
+                    ev_ag = torch.cuda.Event()
+                    ev_ag.record(comm)
+                torch.cuda.current_stream(x.device).wait_event(ev_ag)
+                if os.environ.get("DSV4_DIAG") and _X1_AG_CT[0] < 3:
+                    _X1_AG_CT[0] += 1
+                    import sys
+                    print("[X1-AG] rank=%d L=%d T=%d" % (
+                        dist.get_rank(group) if dist.is_initialized() else -1,
+                        self.cfg.layer_id, int(x.size(0))), file=sys.stderr, flush=True)
+            else:
+                dist.all_gather_into_tensor(gathered, pair, group=group)
+            recv_counts = [int(v) for v in gathered.view(-1).cpu().tolist()]
+            try:
+                _bad = (sum(recv_counts) > 65536) or any((c < 0) or (c > 65536) for c in recv_counts)
+            except Exception:
+                _bad = True
+            if not _bad and len(_COUNT_CACHE) < 64:
+                # Populate only on the uniform pattern: recv_counts == send_counts
+                # element-wise means every rank's T equals this rank's T, a
+                # rank-invariant condition (the AG result is identical everywhere).
+                if recv_counts == send_counts:
+                    _COUNT_CACHE[_cc_key] = list(recv_counts)
         if _bad:
             if os.environ.get("DSV4_DIAG"):
                 import sys
