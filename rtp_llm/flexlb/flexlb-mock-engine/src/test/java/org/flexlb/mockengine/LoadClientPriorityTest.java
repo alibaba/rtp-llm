@@ -40,15 +40,14 @@ class LoadClientPriorityTest {
         return new JavaLoadClient(config);
     }
 
-    private static JavaLoadClient.TraceRecord record(long requestId, int priority) {
-        return new JavaLoadClient.TraceRecord(requestId, "rid-" + requestId,
+    private static JavaLoadClient.TraceRecord record(String requestId, int priority) {
+        return new JavaLoadClient.TraceRecord(Long.parseLong(requestId), "rid-" + requestId,
                 "trace-" + requestId, 1000L, 2048, 10,
                 List.of(1L, 2L), List.of(1, 2, 3), priority);
     }
 
-    private static EngineRpcService.GenerateInputPB input(long requestId) {
-        return EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+    private static EngineRpcService.GenerateInputPB input(String requestId) {
+        return RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(10)
                         .build())
@@ -61,7 +60,7 @@ class LoadClientPriorityTest {
     void scheduleRequestCarriesRecordPriority() {
         JavaLoadClient client = dryRunClient(0);
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
-                client.buildScheduleRequest(record(1L, 70), input(1L));
+                client.buildScheduleRequest(record("1", 70), input("1"));
         assertEquals(70, request.getPriority());
     }
 
@@ -69,11 +68,11 @@ class LoadClientPriorityTest {
     void priorityZeroStaysOffTheWire() {
         JavaLoadClient client = dryRunClient(0);
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
-                client.buildScheduleRequest(record(2L, 0), input(2L));
+                client.buildScheduleRequest(record("2", 0), input("2"));
         assertEquals(0, request.getPriority());
         // proto3 scalar default: value 0 must not be serialized.
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB withPriority =
-                client.buildScheduleRequest(record(2L, 30), input(2L));
+                client.buildScheduleRequest(record("2", 30), input("2"));
         assertTrue(withPriority.getSerializedSize() > request.getSerializedSize());
     }
 

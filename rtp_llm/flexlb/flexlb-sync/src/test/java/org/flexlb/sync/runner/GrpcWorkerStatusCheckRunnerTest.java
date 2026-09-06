@@ -14,6 +14,7 @@ import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
 
 import java.util.Map;
@@ -82,7 +83,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         String ipPort = "127.0.0.1:8080";
         WorkerStatus workerStatus = status(8080);
         when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
-                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                ArgumentMatchers.any(RoleType.class)))
                 .thenReturn(new CompletableFuture<>());
 
         new GrpcWorkerStatusRunner(
@@ -100,13 +101,13 @@ class GrpcWorkerStatusCheckRunnerTest {
         WorkerStatus workerStatus = status(8080);
         workerStatus.getStatusVersion().set(100L);
         TaskInfo localTask = new TaskInfo();
-        localTask.setRequestId(123L);
+        localTask.setRequestId("123");
         localTask.setInputLength(64_000);
         localTask.setPredictedPrefixLength(48_000);
         workerStatus.putLocalTask("123", localTask);
 
         EngineRpcService.TaskInfoPB waitingTask = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(123L)
+                .setRequestId(String.valueOf(123L))
                 .setInputLength(64_000)
                 .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED)
                 .setIsWaiting(true)
@@ -137,7 +138,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         workerStatus.setRole(RoleType.DECODE);
         PriorityScheduler priorityScheduler = Mockito.mock(PriorityScheduler.class);
         EngineRpcService.TaskInfoPB runningTask = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(123L)
+                .setRequestId(String.valueOf(123L))
                 .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED)
                 .build();
         EngineRpcService.WorkerStatusPB response = EngineRpcService.WorkerStatusPB.newBuilder()
@@ -194,7 +195,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         EndpointRegistry registry = registry();
         registry.ensureEndpoint(RoleType.VIT, ipPort, workerStatus);
         when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
-                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                ArgumentMatchers.any(RoleType.class)))
                 .thenReturn(CompletableFuture.failedFuture(new RuntimeException("unavailable")));
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 "test-model", ipPort, "test-site", RoleType.VIT, "test-group",
@@ -220,7 +221,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         EndpointRegistry registry = registry();
         registry.ensureEndpoint(RoleType.VIT, ipPort, workerStatus);
         when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
-                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                ArgumentMatchers.any(RoleType.class)))
                 .thenReturn(CompletableFuture.failedFuture(new RuntimeException("unavailable")));
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 "test-model", ipPort, "test-site", RoleType.VIT, "test-group",
@@ -246,7 +247,7 @@ class GrpcWorkerStatusCheckRunnerTest {
 
     private void whenStatus(EngineRpcService.WorkerStatusPB response) {
         when(engineGrpcService.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(),
-                org.mockito.ArgumentMatchers.any(RoleType.class)))
+                ArgumentMatchers.any(RoleType.class)))
                 .thenReturn(CompletableFuture.completedFuture(response));
     }
 

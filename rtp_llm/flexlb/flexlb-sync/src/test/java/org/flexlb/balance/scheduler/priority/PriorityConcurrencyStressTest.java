@@ -4,10 +4,12 @@ import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.PriorityScheduler;
+import org.flexlb.balance.scheduler.RequestIdFixtures;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -19,6 +21,7 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -114,7 +117,7 @@ class PriorityConcurrencyStressTest {
                         long id = idBase + threadIdx * 1_000L + i;
                         int priority = PRIORITIES[rnd.nextInt(PRIORITIES.length)];
                         long seqLen = rnd.nextBoolean() ? 128 : 2_000;
-                        futures.put(id, h.scheduler.submit(context(id, priority, seqLen)));
+                        futures.put(id, h.scheduler.submit(context(String.valueOf(id), priority, seqLen)));
                     }
                 } catch (Throwable e) {
                     violations.add("submitter " + threadIdx + " threw: " + e);
@@ -171,7 +174,7 @@ class PriorityConcurrencyStressTest {
                         long id = idBase + rnd.nextInt(THREADS) * 1_000L
                                 + rnd.nextInt(REQUESTS_PER_THREAD);
                         injectedPreempts.add(id);
-                        h.scheduler.finishPreemptedById(id,
+                        h.scheduler.finishPreemptedById(String.valueOf(id),
                                 "preempted by higher-priority request 999999");
                     }
                     TimeUnit.MILLISECONDS.sleep(2);
@@ -290,8 +293,8 @@ class PriorityConcurrencyStressTest {
             SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10);
             SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(16);
             SchedulingTestConfig.usePriorityQueue(config);
-            SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.PREFILL_QUEUED);
-            SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.DECODE_RESERVED);
+            SchedulingTestConfig.allowVictim(config, VictimStage.PREFILL_QUEUED);
+            SchedulingTestConfig.allowVictim(config, VictimStage.DECODE_RESERVED);
             // PR-D: rescue removed — orTimeout on submit() handles stuck requests
             // 有限 decode 槽位：并发下持续触发 slot-full 仲裁
             config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (6));
@@ -353,7 +356,7 @@ class PriorityConcurrencyStressTest {
             Map<String, TaskInfo> finished = new HashMap<>();
             for (Long id : requestIds) {
                 TaskInfo task = new TaskInfo();
-                task.setRequestId(id);
+                task.setRequestId(String.valueOf(id));
                 task.setErrorCode(0);
                 finished.put(String.valueOf(id), task);
             }
@@ -391,7 +394,7 @@ class PriorityConcurrencyStressTest {
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder().setBatchId(request.getBatchId());
         request.getDpSlotsList().stream()
                 .flatMap(slot -> slot.getRequestsList().stream())
-                .map(external -> external.getInput().getRequestId())
+                .map(external -> Long.parseLong(RequestId.parse(external.getInput())))
                 .forEach(requestId -> response.addSuccesses(
                         EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
                                 .setRequestId(requestId)
@@ -399,7 +402,7 @@ class PriorityConcurrencyStressTest {
         return response.build();
     }
 
-    private static BalanceContext context(long requestId, int priority, long seqLen) {
+    private static BalanceContext context(String requestId, int priority, long seqLen) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
@@ -415,9 +418,8 @@ class PriorityConcurrencyStressTest {
         return ctx;
     }
 
-    private static byte[] generateInputBytes(long requestId) {
-        EngineRpcService.GenerateInputPB input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+    private static byte[] generateInputBytes(String requestId) {
+        EngineRpcService.GenerateInputPB input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .addTokenIds(101)
                 .addTokenIds(102)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
@@ -427,7 +429,7 @@ class PriorityConcurrencyStressTest {
         return input.toByteArray();
     }
 
-    private static Response successRoute(long requestId) {
+    private static Response successRoute(String requestId) {
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(List.of(
@@ -438,7 +440,7 @@ class PriorityConcurrencyStressTest {
     }
 
     private static ServerStatus server(RoleType role, String ip, int httpPort, int grpcPort,
-                                       long requestId) {
+                                       String requestId) {
         ServerStatus status = new ServerStatus();
         status.setSuccess(true);
         status.setRole(role);

@@ -6,11 +6,14 @@ import org.flexlb.balance.scheduler.BatchDispatcher;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.PriorityScheduler;
+import org.flexlb.balance.scheduler.RequestIdFixtures;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -20,6 +23,7 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -89,7 +93,7 @@ class DecodeEvictionSchedulerTest {
         SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
         SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10_000);
         SchedulingTestConfig.usePriorityQueue(config);
-        SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.DECODE_RESERVED);
+        SchedulingTestConfig.allowVictim(config, VictimStage.DECODE_RESERVED);
         // Single decode slot: the second admission always hits slot-full.
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (1));
         SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(4);
@@ -124,7 +128,7 @@ class DecodeEvictionSchedulerTest {
                 endpointRegistry, dispatcher, reporter, priorityScheduler, null,
                 new UnsupportedEngineCancelChannel()) {
             @Override
-            public void finishYieldedById(long requestId, String detail) {
+            public void finishYieldedById(String requestId, String detail) {
                 if (failNextVictimSettlement.compareAndSet(true, false)) {
                     throw new IllegalStateException("victim settlement interrupted");
                 }
@@ -178,12 +182,12 @@ class DecodeEvictionSchedulerTest {
     void p70_evicts_reserved_p30_victim_when_decode_slots_full() throws Exception {
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
 
-        CompletableFuture<Response> victim = scheduler.submit(context(1, 30));
-        await(() -> decodeEp.reservedView().containsKey(1L));
+        CompletableFuture<Response> victim = scheduler.submit(context("1", 30));
+        await(() -> decodeEp.reservedView().containsKey("1"));
         // Keep the local victim Master-queued. Its reservation consumes the
         // available KV, so the incoming uses the local KV-eviction path.
 
-        CompletableFuture<Response> incoming = scheduler.submit(context(2, 70));
+        CompletableFuture<Response> incoming = scheduler.submit(context("2", 70));
 
         // Reserved-only victim yields with retryable NO_AVAILABLE_WORKER —
         // the engine never saw it (contract 5.3); never PRIORITY_PREEMPTED.
@@ -193,9 +197,9 @@ class DecodeEvictionSchedulerTest {
         assertTrue(victimResponse.getErrorMessage().contains("yielded to higher-priority request 2"));
 
         // Shadow state swapped atomically: incoming reserved, victim gone
-        await(() -> decodeEp.reservedView().containsKey(2L));
-        assertFalse(decodeEp.reservedView().containsKey(1L));
-        assertEquals(70, decodeEp.reservedView().get(2L).priority());
+        await(() -> decodeEp.reservedView().containsKey("2"));
+        assertFalse(decodeEp.reservedView().containsKey("1"));
+        assertEquals(70, decodeEp.reservedView().get("2").priority());
         assertEquals(1, decodeEp.getInflightCount());
         assertEquals(1, decodeEp.getTotalLoad());
         assertFalse(incoming.isDone());
@@ -210,11 +214,11 @@ class DecodeEvictionSchedulerTest {
     void reservedEvictionReleasesIncomingWhenPlacementHandoffThrows()
             throws Exception {
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
-        CompletableFuture<Response> victim = scheduler.submit(context(3, 30));
-        await(() -> decodeEp.reservedView().containsKey(3L));
+        CompletableFuture<Response> victim = scheduler.submit(context("3", 30));
+        await(() -> decodeEp.reservedView().containsKey("3"));
         failDecodeEvictionPlacement.set(true);
 
-        Response incoming = scheduler.submit(context(4, 70))
+        Response incoming = scheduler.submit(context("4", 70))
                 .get(2, TimeUnit.SECONDS);
 
         assertFalse(incoming.isSuccess());
@@ -222,10 +226,10 @@ class DecodeEvictionSchedulerTest {
                 incoming.getCode());
         assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(),
                 victim.get(1, TimeUnit.SECONDS).getCode());
-        assertFalse(decodeEp.reservedView().containsKey(3L));
-        assertFalse(decodeEp.reservedView().containsKey(4L),
+        assertFalse(decodeEp.reservedView().containsKey("3"));
+        assertFalse(decodeEp.reservedView().containsKey("4"),
                 "failed pre-register handoff must release its provisional reservation");
-        assertFalse(scheduler.ownsRequestGeneration(4L));
+        assertFalse(scheduler.ownsRequestGeneration("4"));
     }
 
     @Test
@@ -237,8 +241,8 @@ class DecodeEvictionSchedulerTest {
         decodeStatus.setTotalKvCacheTokens(new AtomicLong(512L));
         decodeEp.onWorkerStatusUpdate(decodeStatus, new WorkerStatusResponse());
 
-        CompletableFuture<Response> firstVictim = scheduler.submit(context(5, 20));
-        CompletableFuture<Response> secondVictim = scheduler.submit(context(6, 30));
+        CompletableFuture<Response> firstVictim = scheduler.submit(context("5", 20));
+        CompletableFuture<Response> secondVictim = scheduler.submit(context("6", 30));
         await(() -> decodeEp.reservedView().size() == 2);
 
         // A 256-token request needs both 128-token victims. The first reducer
@@ -246,17 +250,17 @@ class DecodeEvictionSchedulerTest {
         // reservations; the idempotent retry and remaining drain must still
         // settle both exact generations.
         failNextVictimSettlement.set(true);
-        CompletableFuture<Response> incoming = scheduler.submit(context(7, 70, 256));
+        CompletableFuture<Response> incoming = scheduler.submit(context("7", 70, 256));
 
         assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(),
                 firstVictim.get(2, TimeUnit.SECONDS).getCode());
         assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(),
                 secondVictim.get(2, TimeUnit.SECONDS).getCode());
         await(() -> decodeEp.reservedView().size() == 1
-                && decodeEp.reservedView().containsKey(7L));
+                && decodeEp.reservedView().containsKey("7"));
         assertFalse(incoming.isDone());
-        assertFalse(scheduler.ownsRequestGeneration(5L));
-        assertFalse(scheduler.ownsRequestGeneration(6L));
+        assertFalse(scheduler.ownsRequestGeneration("5"));
+        assertFalse(scheduler.ownsRequestGeneration("6"));
     }
 
     // ==================== equal priority never yields ====================
@@ -265,14 +269,14 @@ class DecodeEvictionSchedulerTest {
     void equal_priority_is_never_evicted_and_incoming_fails_explicitly() throws Exception {
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
 
-        CompletableFuture<Response> victim = scheduler.submit(context(11, 50));
-        await(() -> decodeEp.reservedView().containsKey(11L));
+        CompletableFuture<Response> victim = scheduler.submit(context("11", 50));
+        await(() -> decodeEp.reservedView().containsKey("11"));
 
-        Response response = scheduler.submit(context(12, 50)).get(2, TimeUnit.SECONDS);
+        Response response = scheduler.submit(context("12", 50)).get(2, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode(), response.getCode());
-        assertEquals(org.flexlb.dao.loadbalance.AdmissionRejectReason.SAME_PRIORITY_AHEAD,
+        assertEquals(AdmissionRejectReason.SAME_PRIORITY_AHEAD,
                 response.getAdmissionRejectReason());
         verify(router, times(2)).route(any(BalanceContext.class));
         verify(priorityReporter)
@@ -281,7 +285,7 @@ class DecodeEvictionSchedulerTest {
 
         // The reserved equal-priority request is untouched
         assertFalse(victim.isDone());
-        assertTrue(decodeEp.reservedView().containsKey(11L));
+        assertTrue(decodeEp.reservedView().containsKey("11"));
         assertEquals(1, decodeEp.getInflightCount());
     }
 
@@ -289,13 +293,13 @@ class DecodeEvictionSchedulerTest {
 
     @Test
     void evict_switch_off_keeps_legacy_failure_and_never_plans() throws Exception {
-        SchedulingTestConfig.disallowVictim(config, org.flexlb.config.VictimStage.DECODE_RESERVED);
+        SchedulingTestConfig.disallowVictim(config, VictimStage.DECODE_RESERVED);
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
 
-        CompletableFuture<Response> victim = scheduler.submit(context(21, 30));
-        await(() -> decodeEp.reservedView().containsKey(21L));
+        CompletableFuture<Response> victim = scheduler.submit(context("21", 30));
+        await(() -> decodeEp.reservedView().containsKey("21"));
 
-        Response response = scheduler.submit(context(22, 70)).get(2, TimeUnit.SECONDS);
+        Response response = scheduler.submit(context("22", 70)).get(2, TimeUnit.SECONDS);
 
         // Auto-TPM never leaks the router's generic 8403. The lower-priority
         // KV looks sufficient, but the disabled eviction gate means this
@@ -303,13 +307,13 @@ class DecodeEvictionSchedulerTest {
         // falls back to resource exhaustion.
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
-        assertEquals(org.flexlb.dao.loadbalance.AdmissionRejectReason.RESOURCE_EXHAUSTED,
+        assertEquals(AdmissionRejectReason.RESOURCE_EXHAUSTED,
                 response.getAdmissionRejectReason());
         verify(router, times(2)).route(any(BalanceContext.class));
         verify(priorityReporter, never()).reportEvictionPlan(anyInt(), anyString(), anyString());
 
         assertFalse(victim.isDone());
-        assertTrue(decodeEp.reservedView().containsKey(21L));
+        assertTrue(decodeEp.reservedView().containsKey("21"));
         assertEquals(1, decodeEp.getInflightCount());
     }
 
@@ -318,13 +322,13 @@ class DecodeEvictionSchedulerTest {
     @Test
     void finish_preempted_by_id_is_idempotent_and_unknown_id_is_noop() throws Exception {
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
-        decodeEp.reserve(77, 128, 136);
-        BatchItem item = dummyItem(77);
+        decodeEp.reserve("77", 128, 136);
+        BatchItem item = dummyItem("77");
         assertTrue(scheduler.registerInflight(item));
 
-        scheduler.finishPreemptedById(77, "preempted by higher-priority request 88");
-        scheduler.finishPreemptedById(77, "second call must be ignored");
-        scheduler.finishPreemptedById(888, "unknown id is a no-op");
+        scheduler.finishPreemptedById("77", "preempted by higher-priority request 88");
+        scheduler.finishPreemptedById("77", "second call must be ignored");
+        scheduler.finishPreemptedById("888", "unknown id is a no-op");
 
         Response response = item.future().get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
@@ -340,19 +344,19 @@ class DecodeEvictionSchedulerTest {
     @Test
     void finish_yielded_by_id_is_idempotent_and_unknown_id_is_noop() throws Exception {
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
-        decodeEp.reserve(78, 128, 136);
-        BatchItem item = dummyItem(78);
+        decodeEp.reserve("78", 128, 136);
+        BatchItem item = dummyItem("78");
         assertTrue(scheduler.registerInflight(item));
 
-        scheduler.finishYieldedById(78, "yielded to higher-priority request 88");
+        scheduler.finishYieldedById("78", "yielded to higher-priority request 88");
         doThrow(new IllegalStateException("metrics unavailable"))
                 .when(priorityReporter)
                 .reportInflightSettleMiss(anyString());
         assertDoesNotThrow(() -> scheduler.finishYieldedById(
-                78, "second call must be ignored"));
-        scheduler.finishYieldedById(888, "unknown id is a no-op");
+                "78", "second call must be ignored"));
+        scheduler.finishYieldedById("888", "unknown id is a no-op");
         // A racing preempt terminal must not override the yielded terminal
-        scheduler.finishPreemptedById(78, "late preempt must be ignored");
+        scheduler.finishPreemptedById("78", "late preempt must be ignored");
 
         Response response = item.future().get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
@@ -377,7 +381,7 @@ class DecodeEvictionSchedulerTest {
         }
     }
 
-    private BatchItem dummyItem(long requestId) {
+    private BatchItem dummyItem(String requestId) {
         Response route = successRoute(requestId);
         return new BatchItem(context(requestId, 50), new CompletableFuture<>(), route,
                 PriorityScheduler.findServer(route, RoleType.PREFILL),
@@ -393,7 +397,7 @@ class DecodeEvictionSchedulerTest {
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder().setBatchId(request.getBatchId());
         request.getDpSlotsList().stream()
                 .flatMap(slot -> slot.getRequestsList().stream())
-                .map(external -> external.getInput().getRequestId())
+                .map(external -> Long.parseLong(RequestId.parse(external.getInput())))
                 .forEach(requestId -> response.addSuccesses(
                         EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
                                 .setRequestId(requestId)
@@ -401,11 +405,11 @@ class DecodeEvictionSchedulerTest {
         return response.build();
     }
 
-    private static BalanceContext context(long requestId, int priority) {
+    private static BalanceContext context(String requestId, int priority) {
         return context(requestId, priority, 128);
     }
 
-    private static BalanceContext context(long requestId, int priority, int seqLen) {
+    private static BalanceContext context(String requestId, int priority, int seqLen) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
@@ -421,9 +425,8 @@ class DecodeEvictionSchedulerTest {
         return ctx;
     }
 
-    private static byte[] generateInputBytes(long requestId) {
-        EngineRpcService.GenerateInputPB input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+    private static byte[] generateInputBytes(String requestId) {
+        EngineRpcService.GenerateInputPB input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .addTokenIds(101)
                 .addTokenIds(102)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
@@ -433,7 +436,7 @@ class DecodeEvictionSchedulerTest {
         return input.toByteArray();
     }
 
-    private static Response successRoute(long requestId) {
+    private static Response successRoute(String requestId) {
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(List.of(
@@ -443,7 +446,7 @@ class DecodeEvictionSchedulerTest {
         return response;
     }
 
-    private static ServerStatus server(RoleType role, String ip, int httpPort, int grpcPort, long requestId) {
+    private static ServerStatus server(RoleType role, String ip, int httpPort, int grpcPort, String requestId) {
         ServerStatus status = new ServerStatus();
         status.setSuccess(true);
         status.setRole(role);

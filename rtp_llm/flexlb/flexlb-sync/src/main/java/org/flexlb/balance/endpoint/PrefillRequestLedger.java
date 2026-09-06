@@ -10,8 +10,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.StampedLock;
 import java.util.function.Consumer;
-import java.util.function.LongPredicate;
 import java.util.function.LongSupplier;
+import java.util.function.Predicate;
 
 /**
  * Request-scoped Prefill accounting for frontend-delivered route decisions.
@@ -38,7 +38,7 @@ final class PrefillRequestLedger {
         BEFORE_CACHE_PUBLISH
     }
 
-    private final ConcurrentHashMap<Long, Entry> entries = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Entry> entries = new ConcurrentHashMap<>();
     private final Stripe[] stripes = createStripes();
     private final RunningWaitState runningWait = new RunningWaitState();
     private final AtomicInteger count = new AtomicInteger();
@@ -78,8 +78,8 @@ final class PrefillRequestLedger {
      * representation limit remains a hard bound. Re-acquiring a live request id
      * is idempotent and does not replace its original prediction.
      */
-    boolean tryAcquire(long requestId, long predictMs, int maxPerWorker) {
-        Long requestKey = requestId;
+    boolean tryAcquire(String requestId, long predictMs, int maxPerWorker) {
+        String requestKey = requestId;
         Stripe stripe = stripeFor(requestId);
         boolean capacityNeedsNotification = false;
         try {
@@ -126,13 +126,13 @@ final class PrefillRequestLedger {
     }
 
     /** Remove an explicitly abandoned route request, idempotently. */
-    boolean release(long requestId) {
+    boolean release(String requestId) {
         return remove(requestId);
     }
 
     /** Pin a live entry while EngineFence resolves ambiguous delivery ownership. */
-    boolean protect(long requestId) {
-        Long requestKey = requestId;
+    boolean protect(String requestId) {
+        String requestKey = requestId;
         Stripe stripe = stripeFor(requestId);
         synchronized (stripe) {
             Entry entry = entries.get(requestKey);
@@ -145,8 +145,8 @@ final class PrefillRequestLedger {
     }
 
     /** Clear EngineFence protection without refreshing the request's TTL age. */
-    boolean unprotect(long requestId) {
-        Long requestKey = requestId;
+    boolean unprotect(String requestId) {
+        String requestKey = requestId;
         Stripe stripe = stripeFor(requestId);
         synchronized (stripe) {
             Entry entry = entries.get(requestKey);
@@ -159,8 +159,8 @@ final class PrefillRequestLedger {
      *
      * @return whether the request is owned by this ledger
      */
-    boolean observe(long requestId, boolean running, long observedAtMs) {
-        Long requestKey = requestId;
+    boolean observe(String requestId, boolean running, long observedAtMs) {
+        String requestKey = requestId;
         Stripe stripe = stripeFor(requestId);
         synchronized (stripe) {
             Entry entry = entries.get(requestKey);
@@ -198,7 +198,7 @@ final class PrefillRequestLedger {
     }
 
     /** Settle an authoritative WorkerStatus terminal, idempotently. */
-    boolean settle(long requestId) {
+    boolean settle(String requestId) {
         return remove(requestId);
     }
 
@@ -274,16 +274,16 @@ final class PrefillRequestLedger {
     }
 
     /** Evict only entries which are no longer owned by the scheduler. */
-    int evict(long ttlMs, LongPredicate schedulerOwnsRequest) {
+    int evict(long ttlMs, Predicate<String> schedulerOwnsRequest) {
         long nowMs = clock.getAsLong();
         int evicted = 0;
-        for (Map.Entry<Long, Entry> observed : entries.entrySet()) {
+        for (Map.Entry<String, Entry> observed : entries.entrySet()) {
             Entry candidate = observed.getValue();
             if (nowMs - candidate.lastObservedAtMs() <= ttlMs) {
                 continue;
             }
 
-            Long requestKey = observed.getKey();
+            String requestKey = observed.getKey();
             Stripe stripe = stripeFor(requestKey);
             synchronized (stripe) {
                 Entry current = entries.get(requestKey);
@@ -314,8 +314,8 @@ final class PrefillRequestLedger {
         return InflightEvictor.maxAgeMs(entries, nowMs);
     }
 
-    private boolean remove(long requestId) {
-        Long requestKey = requestId;
+    private boolean remove(String requestId) {
+        String requestKey = requestId;
         Stripe stripe = stripeFor(requestId);
         synchronized (stripe) {
             Entry entry = entries.get(requestKey);
@@ -405,8 +405,8 @@ final class PrefillRequestLedger {
         }
     }
 
-    private Stripe stripeFor(long requestId) {
-        return stripes[Long.hashCode(requestId) & (STRIPE_COUNT - 1)];
+    private Stripe stripeFor(String requestId) {
+        return stripes[requestId.hashCode() & (STRIPE_COUNT - 1)];
     }
 
     private static Stripe[] createStripes() {

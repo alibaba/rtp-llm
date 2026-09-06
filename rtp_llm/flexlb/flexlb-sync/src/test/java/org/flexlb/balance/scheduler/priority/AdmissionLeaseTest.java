@@ -10,13 +10,13 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -54,7 +54,7 @@ class AdmissionLeaseTest {
     @Test
     void close_is_exactly_once() {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
-        BatchItem item = batchItem(1001L, new CompletableFuture<>());
+        BatchItem item = batchItem("1001", new CompletableFuture<>());
         AdmissionLease lease = new AdmissionLease(item, null, null, registrar,
                 0, null, null);
 
@@ -69,7 +69,7 @@ class AdmissionLeaseTest {
     @Test
     void markDeliverySucceeded_is_exactly_once() {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
-        BatchItem item = batchItem(1002L, new CompletableFuture<>());
+        BatchItem item = batchItem("1002", new CompletableFuture<>());
         AdmissionLease lease = new AdmissionLease(item, null, null, registrar,
                 0, null, null);
 
@@ -84,7 +84,7 @@ class AdmissionLeaseTest {
     @Test
     void close_then_delivery_is_noop() {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
-        BatchItem item = batchItem(1003L, new CompletableFuture<>());
+        BatchItem item = batchItem("1003", new CompletableFuture<>());
         AdmissionLease lease = new AdmissionLease(item, null, null, registrar,
                 0, null, null);
 
@@ -97,7 +97,7 @@ class AdmissionLeaseTest {
     @Test
     void prefill_only_delivery_closes_engine_owned_and_close_is_noop() {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
-        BatchItem item = batchItem(1004L, new CompletableFuture<>());
+        BatchItem item = batchItem("1004", new CompletableFuture<>());
         AdmissionLease lease = new AdmissionLease(item, null, null, registrar,
                 0, null, null);
 
@@ -117,12 +117,12 @@ class AdmissionLeaseTest {
     void bindTo_success_completes_delivery_not_close() {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         CompletableFuture<Response> future = new CompletableFuture<>();
-        BatchItem item = batchItem(1005L, future);
+        BatchItem item = batchItem("1005", future);
         AdmissionLease lease = new AdmissionLease(item, null, null, registrar,
                 0, null, null);
         lease.bindTo(future);
 
-        future.complete(successResponse(1005L));
+        future.complete(successResponse("1005"));
 
         // delivery seals the lease — close (unregisterInflight) must not run
         verify(registrar, never()).unregisterInflight(any());
@@ -134,7 +134,7 @@ class AdmissionLeaseTest {
     void bindTo_failure_completes_close() {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         CompletableFuture<Response> future = new CompletableFuture<>();
-        BatchItem item = batchItem(1006L, future);
+        BatchItem item = batchItem("1006", future);
         AdmissionLease lease = new AdmissionLease(item, null, null, registrar,
                 0, null, null);
         lease.bindTo(future);
@@ -148,7 +148,7 @@ class AdmissionLeaseTest {
     void bindTo_exceptional_completes_close() {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         CompletableFuture<Response> future = new CompletableFuture<>();
-        BatchItem item = batchItem(1007L, future);
+        BatchItem item = batchItem("1007", future);
         AdmissionLease lease = new AdmissionLease(item, null, null, registrar,
                 0, null, null);
         lease.bindTo(future);
@@ -166,14 +166,14 @@ class AdmissionLeaseTest {
         DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
         PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
         CompletableFuture<Response> future = new CompletableFuture<>();
-        BatchItem item = batchItemWithDecode(1008L, future, 1008L);
+        BatchItem item = batchItemWithDecode("1008", future, "1008");
         AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
                 0, null, null);
 
         lease.close();
 
-        verify(prefillQueue, times(1)).tryRemove(1008L, "LEASE_RELEASE");
-        verify(decodeEp, times(1)).release(1008L);
+        verify(prefillQueue, times(1)).tryRemove("1008", "LEASE_RELEASE");
+        verify(decodeEp, times(1)).release("1008");
         verify(registrar, times(1)).unregisterInflight(item);
     }
 
@@ -184,13 +184,13 @@ class AdmissionLeaseTest {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
         CompletableFuture<Response> future = new CompletableFuture<>();
-        BatchItem item = batchItemWithDecode(1009L, future, 1009L);
+        BatchItem item = batchItemWithDecode("1009", future, "1009");
         AdmissionLease lease = new AdmissionLease(item, null, prefillQueue, registrar,
                 0, null, null);
 
         lease.close();
 
-        verify(prefillQueue, times(1)).tryRemove(1009L, "LEASE_RELEASE");
+        verify(prefillQueue, times(1)).tryRemove("1009", "LEASE_RELEASE");
         verify(registrar, times(1)).unregisterInflight(item);
     }
 
@@ -199,13 +199,13 @@ class AdmissionLeaseTest {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
         CompletableFuture<Response> future = new CompletableFuture<>();
-        BatchItem item = batchItemWithDecode(1010L, future, 1010L);
+        BatchItem item = batchItemWithDecode("1010", future, "1010");
         AdmissionLease lease = new AdmissionLease(item, decodeEp, null, registrar,
                 0, null, null);
 
         lease.close();
 
-        verify(decodeEp, times(1)).release(1010L);
+        verify(decodeEp, times(1)).release("1010");
         verify(registrar, times(1)).unregisterInflight(item);
     }
 
@@ -215,13 +215,13 @@ class AdmissionLeaseTest {
         DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
         CompletableFuture<Response> future = new CompletableFuture<>();
         // item with decode = null
-        BatchItem item = batchItem(1011L, future);
+        BatchItem item = batchItem("1011", future);
         AdmissionLease lease = new AdmissionLease(item, decodeEp, null, registrar,
                 0, null, null);
 
         lease.close();
 
-        verify(decodeEp, never()).release(anyLong());
+        verify(decodeEp, never()).release(ArgumentMatchers.anyString());
         verify(registrar, times(1)).unregisterInflight(item);
     }
 
@@ -237,7 +237,7 @@ class AdmissionLeaseTest {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
         PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
-        BatchItem item = batchItemWithDecode(2001L, new CompletableFuture<>(), 2001L);
+        BatchItem item = batchItemWithDecode("2001", new CompletableFuture<>(), "2001");
 
         when(registrar.fenceAfterDeliveryTimeout(item, "post_delivery_soft_timeout"))
                 .thenReturn(InflightRegistrar.PostDeliveryFenceResult.STARTED);
@@ -257,7 +257,7 @@ class AdmissionLeaseTest {
         verify(registrar, times(1))
                 .fenceAfterDeliveryTimeout(item, "post_delivery_soft_timeout");
         verify(registrar, never()).unregisterInflight(item);
-        verify(decodeEp, never()).release(anyLong());
+        verify(decodeEp, never()).release(ArgumentMatchers.anyString());
     }
 
     /**
@@ -270,7 +270,7 @@ class AdmissionLeaseTest {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
         PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
-        BatchItem item = batchItemWithDecode(2002L, new CompletableFuture<>(), 2002L);
+        BatchItem item = batchItemWithDecode("2002", new CompletableFuture<>(), "2002");
 
         activeCount.incrementAndGet();
         AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
@@ -284,7 +284,7 @@ class AdmissionLeaseTest {
         assertEquals(0, activeCount.get()); // counter decremented
         // Resources NOT released (engine owns them)
         verify(registrar, never()).unregisterInflight(any());
-        verify(registrar, never()).finishYieldedById(anyLong(), anyString());
+        verify(registrar, never()).finishYieldedById(ArgumentMatchers.anyString(), anyString());
     }
 
     /**
@@ -298,7 +298,7 @@ class AdmissionLeaseTest {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
         PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
-        BatchItem item = batchItemWithDecode(2003L, new CompletableFuture<>(), 2003L);
+        BatchItem item = batchItemWithDecode("2003", new CompletableFuture<>(), "2003");
 
         activeCount.incrementAndGet();
         AdmissionLease lease = new AdmissionLease(item, decodeEp, prefillQueue, registrar,
@@ -314,7 +314,7 @@ class AdmissionLeaseTest {
 
         // Resources released exactly once (by close())
         verify(registrar, times(1)).unregisterInflight(item);
-        verify(registrar, never()).finishYieldedById(anyLong(), anyString());
+        verify(registrar, never()).finishYieldedById(ArgumentMatchers.anyString(), anyString());
     }
 
     /**
@@ -327,11 +327,11 @@ class AdmissionLeaseTest {
         AtomicInteger activeCount = new AtomicInteger(0);
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
-        BatchItem item = batchItemWithDecode(2004L, new CompletableFuture<>(), 2004L);
+        BatchItem item = batchItemWithDecode("2004", new CompletableFuture<>(), "2004");
 
         // Make releaseResources() throw by having prefillQueue.tryRemove throw
         doThrow(new RuntimeException("simulated queue error"))
-                .when(prefillQueue).tryRemove(2004L, "LEASE_RELEASE");
+                .when(prefillQueue).tryRemove("2004", "LEASE_RELEASE");
 
         activeCount.incrementAndGet();
         AdmissionLease lease = new AdmissionLease(item, null, prefillQueue, registrar,
@@ -342,7 +342,7 @@ class AdmissionLeaseTest {
 
         assertEquals(2, lease.leaseState()); // CLOSED — CAS succeeded
         assertEquals(0, activeCount.get()); // counter decremented despite exception
-        verify(prefillQueue, times(1)).tryRemove(2004L, "LEASE_RELEASE");
+        verify(prefillQueue, times(1)).tryRemove("2004", "LEASE_RELEASE");
     }
 
     /**
@@ -356,7 +356,7 @@ class AdmissionLeaseTest {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
         DecodeEndpoint decodeEp = mock(DecodeEndpoint.class);
         PrefillQueueManager prefillQueue = mock(PrefillQueueManager.class);
-        BatchItem item = batchItemWithDecode(2005L, new CompletableFuture<>(), 2005L);
+        BatchItem item = batchItemWithDecode("2005", new CompletableFuture<>(), "2005");
 
         doThrow(new RuntimeException("simulated cancel error"))
                 .when(registrar)
@@ -375,18 +375,18 @@ class AdmissionLeaseTest {
         verify(registrar, times(1))
                 .fenceAfterDeliveryTimeout(item, "post_delivery_soft_timeout");
         verify(registrar, never()).unregisterInflight(item);
-        verify(decodeEp, never()).release(anyLong());
+        verify(decodeEp, never()).release(ArgumentMatchers.anyString());
     }
 
     // ==================== helpers ====================
 
-    private static BatchItem batchItem(long requestId, CompletableFuture<Response> future) {
-        return batchItemWithDecode(requestId, future, 0L);
+    private static BatchItem batchItem(String requestId, CompletableFuture<Response> future) {
+        return batchItemWithDecode(requestId, future, "0");
     }
 
-    private static BatchItem batchItemWithDecode(long requestId,
+    private static BatchItem batchItemWithDecode(String requestId,
                                                   CompletableFuture<Response> future,
-                                                  long decodeRequestId) {
+                                                  String decodeRequestId) {
         BalanceContext ctx = new BalanceContext();
         ctx.setConfig(SchedulingTestConfig.batchConfig());
         Request request = new Request();
@@ -394,7 +394,7 @@ class AdmissionLeaseTest {
         ctx.setRequest(request);
 
         ServerStatus decode = null;
-        if (decodeRequestId != 0) {
+        if (!"0".equals(decodeRequestId)) {
             decode = new ServerStatus();
             decode.setRequestId(decodeRequestId);
         }
@@ -403,7 +403,7 @@ class AdmissionLeaseTest {
                 new ServerStatus(), decode, null, null, System.currentTimeMillis());
     }
 
-    private static Response successResponse(long requestId) {
+    private static Response successResponse(String requestId) {
         Response response = new Response();
         response.setSuccess(true);
         return response;

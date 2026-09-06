@@ -18,6 +18,7 @@ import org.mockito.Mockito;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
@@ -49,17 +50,17 @@ class WorkerEndpointTest {
 
     @Test
     void commitBatch_incrementsEstimate() {
-        endpoint.commitBatch(1L, 500, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
+        endpoint.commitBatch(1L, 500, List.of(new BatchItem(ctx("100", 1000), null, null, null, null, null, null, 0)));
         assertWaitTimeNear(500);
 
-        endpoint.commitBatch(2L, 300, List.of(new BatchItem(ctx(101L, 500), null, null, null, null, null, null, 0)));
+        endpoint.commitBatch(2L, 300, List.of(new BatchItem(ctx("101", 500), null, null, null, null, null, null, 0)));
         assertWaitTimeNear(800);
     }
 
     @Test
     void releaseBatch_decrementsEstimate() {
-        endpoint.commitBatch(1L, 500, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
-        endpoint.commitBatch(2L, 300, List.of(new BatchItem(ctx(101L, 500), null, null, null, null, null, null, 0)));
+        endpoint.commitBatch(1L, 500, List.of(new BatchItem(ctx("100", 1000), null, null, null, null, null, null, 0)));
+        endpoint.commitBatch(2L, 300, List.of(new BatchItem(ctx("101", 500), null, null, null, null, null, null, 0)));
 
         endpoint.releaseBatch(1L);
         assertWaitTimeNear(300);
@@ -67,14 +68,14 @@ class WorkerEndpointTest {
 
     @Test
     void releaseBatch_unknownBatchId_noEffect() {
-        endpoint.commitBatch(1L, 500, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
+        endpoint.commitBatch(1L, 500, List.of(new BatchItem(ctx("100", 1000), null, null, null, null, null, null, 0)));
         endpoint.releaseBatch(999L);
         assertWaitTimeNear(500);
     }
 
     @Test
     void releaseBatch_neverGoesNegative() {
-        endpoint.commitBatch(1L, 100, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
+        endpoint.commitBatch(1L, 100, List.of(new BatchItem(ctx("100", 1000), null, null, null, null, null, null, 0)));
         endpoint.releaseBatch(1L);
         endpoint.releaseBatch(1L);
         assertEquals(0, endpoint.realWaitTimeMs());
@@ -88,9 +89,9 @@ class WorkerEndpointTest {
 
     @Test
     void calibrate_noInflight_resetsToZero() {
-        endpoint.commitBatch(1L, 500, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
+        endpoint.commitBatch(1L, 500, List.of(new BatchItem(ctx("100", 1000), null, null, null, null, null, null, 0)));
 
-        TaskInfo finished = task(100L, 1000, 0, 1L);
+        TaskInfo finished = task("100", 1000, 0, 1L);
         finished.setErrorCode(0);
         calibrate(Map.of("100", finished), null);
 
@@ -101,11 +102,11 @@ class WorkerEndpointTest {
     @Test
     void calibrate_finishedBatch_removedFromInflight() {
         endpoint.commitBatch(5L, 9999, List.of(
-                new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0), new BatchItem(ctx(101L, 2000), null, null, null, null, null, null, 0)));
+                new BatchItem(ctx("100", 1000), null, null, null, null, null, null, 0), new BatchItem(ctx("101", 2000), null, null, null, null, null, null, 0)));
 
-        TaskInfo t1 = task(100L, 1000, 0, 5L);
+        TaskInfo t1 = task("100", 1000, 0, 5L);
         t1.setErrorCode(0);
-        TaskInfo t2 = task(101L, 2000, 0, 5L);
+        TaskInfo t2 = task("101", 2000, 0, 5L);
         t2.setErrorCode(0);
         calibrate(Map.of("100", t1, "101", t2), null);
 
@@ -116,12 +117,12 @@ class WorkerEndpointTest {
     @Test
     void calibrate_partialBatchFailure_repacks() {
         endpoint.commitBatch(5L, 9999, List.of(
-                new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0), new BatchItem(ctx(101L, 2000), null, null, null, null, null, null, 0)));
+                new BatchItem(ctx("100", 1000), null, null, null, null, null, null, 0), new BatchItem(ctx("101", 2000), null, null, null, null, null, null, 0)));
 
-        TaskInfo failed = task(100L, 1000, 0, 5L);
+        TaskInfo failed = task("100", 1000, 0, 5L);
         failed.setErrorCode(1);
         failed.setErrorMessage("timeout");
-        TaskInfo success = task(101L, 2000, 0, 5L);
+        TaskInfo success = task("101", 2000, 0, 5L);
         success.setErrorCode(0);
         calibrate(Map.of("100", failed, "101", success), null);
 
@@ -131,10 +132,10 @@ class WorkerEndpointTest {
 
     @Test
     void calibrate_inflightUnconfirmedBatchesSurvive() {
-        endpoint.commitBatch(5L, 1000, List.of(new BatchItem(ctx(100L, 500), null, null, null, null, null, null, 0)));
-        endpoint.commitBatch(7L, 2000, List.of(new BatchItem(ctx(200L, 1000), null, null, null, null, null, null, 0)));
+        endpoint.commitBatch(5L, 1000, List.of(new BatchItem(ctx("100", 500), null, null, null, null, null, null, 0)));
+        endpoint.commitBatch(7L, 2000, List.of(new BatchItem(ctx("200", 1000), null, null, null, null, null, null, 0)));
 
-        TaskInfo finished = task(100L, 500, 0, 5L);
+        TaskInfo finished = task("100", 500, 0, 5L);
         finished.setErrorCode(0);
         calibrate(Map.of("100", finished), null);
 
@@ -147,19 +148,19 @@ class WorkerEndpointTest {
     @Test
     void repackBatch_removesFailedRequests() {
         endpoint.commitBatch(5L, 9999, List.of(
-                new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0),
-                new BatchItem(ctx(101L, 2000), null, null, null, null, null, null, 0),
-                new BatchItem(ctx(102L, 3000), null, null, null, null, null, null, 0)));
-        endpoint.repackBatch(5L, java.util.Set.of(101L));
+                new BatchItem(ctx("100", 1000), null, null, null, null, null, null, 0),
+                new BatchItem(ctx("101", 2000), null, null, null, null, null, null, 0),
+                new BatchItem(ctx("102", 3000), null, null, null, null, null, null, 0)));
+        endpoint.repackBatch(5L, Set.of("101"));
 
         assertEquals(2, endpoint.realPendingCount());
     }
 
     @Test
     void repackBatch_allFailed_removesBatch() {
-        endpoint.commitBatch(5L, 500, List.of(new BatchItem(ctx(100L, 1000), null, null, null, null, null, null, 0)));
+        endpoint.commitBatch(5L, 500, List.of(new BatchItem(ctx("100", 1000), null, null, null, null, null, null, 0)));
 
-        endpoint.repackBatch(5L, java.util.Set.of(100L));
+        endpoint.repackBatch(5L, Set.of("100"));
 
         assertEquals(0, endpoint.getInflightBatchCount());
         assertEquals(0, endpoint.realWaitTimeMs());
@@ -256,7 +257,7 @@ class WorkerEndpointTest {
     @Test
     void onWorkerStatusUpdate_calibrates_prefill() {
         WorkerStatusResponse resp = new WorkerStatusResponse();
-        resp.setFinishedTaskInfo(Map.of("100", task(100L, 1000, 0, 1L)));
+        resp.setFinishedTaskInfo(Map.of("100", task("100", 1000, 0, 1L)));
 
         // PrefillEndpoint calibrates even when runningTaskInfo is null
         endpoint.onWorkerStatusUpdate(status, resp);
@@ -287,7 +288,7 @@ class WorkerEndpointTest {
         endpoint.onWorkerStatusUpdate(status, response);
     }
 
-    private BalanceContext ctx(long requestId, long seqLen) {
+    private BalanceContext ctx(String requestId, long seqLen) {
         Request req = new Request();
         req.setRequestId(requestId);
         req.setSeqLen(seqLen);
@@ -297,7 +298,7 @@ class WorkerEndpointTest {
         return ctx;
     }
 
-    private TaskInfo task(long requestId, long inputLength, long prefixLength, long batchId) {
+    private TaskInfo task(String requestId, long inputLength, long prefixLength, long batchId) {
         TaskInfo task = new TaskInfo();
         task.setRequestId(requestId);
         task.setInputLength(inputLength);

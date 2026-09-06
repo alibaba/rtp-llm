@@ -109,7 +109,7 @@ class LearningPredictorTest {
 
     private static BatchItem batchItem(long seqLen, long hitCacheLen) {
         Request request = new Request();
-        request.setRequestId(1L);
+        request.setRequestId("1");
         request.setSeqLen(seqLen);
 
         BalanceContext ctx = new BalanceContext();

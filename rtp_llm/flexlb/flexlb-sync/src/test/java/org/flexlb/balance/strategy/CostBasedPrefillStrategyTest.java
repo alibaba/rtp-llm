@@ -16,6 +16,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.cache.HostCacheMatch;
+import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
@@ -108,7 +109,7 @@ class CostBasedPrefillStrategyTest {
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 500));
         prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 50));
 
-        ServerStatus result = strategy.select(buildContext(1000, 1L), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(1000, "1"), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
@@ -127,7 +128,7 @@ class CostBasedPrefillStrategyTest {
         endpointRegistry.getPrefillEndpoints().put("10.0.0.1:8080", first);
 
         ServerStatus mixed = strategy.select(
-                buildContext(1_000, 7_001L), RoleType.PREFILL, null);
+                buildContext(1000, "7001"), RoleType.PREFILL, null);
 
         assertTrue(mixed.isSuccess());
         assertEquals("10.0.0.2", mixed.getServerIp(),
@@ -139,7 +140,7 @@ class CostBasedPrefillStrategyTest {
         endpointRegistry.getPrefillEndpoints().put("10.0.0.2:8080", second);
 
         ServerStatus allUnavailable = strategy.select(
-                buildContext(1_000, 7_002L), RoleType.PREFILL, null);
+                buildContext(1000, "7002"), RoleType.PREFILL, null);
 
         assertFalse(allUnavailable.isSuccess(),
                 "selection must retry elsewhere when no coherent wait snapshot exists");
@@ -154,7 +155,7 @@ class CostBasedPrefillStrategyTest {
         FlexlbConfig config = new FlexlbConfig();
         useBestOnly(config);
 
-        ServerStatus result = strategy.select(buildContext(1000, 11L, config), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(1000, "11", config), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
@@ -169,7 +170,7 @@ class CostBasedPrefillStrategyTest {
         FlexlbConfig config = new FlexlbConfig();
         useBestOnly(config);
 
-        ServerStatus result = strategy.select(buildContext(1000, 12L, config), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(1000, "12", config), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
     }
@@ -182,7 +183,7 @@ class CostBasedPrefillStrategyTest {
         prefillMap.put("10.0.0.1:8080", w1);
         prefillMap.put("10.0.0.2:8080", w2);
 
-        ServerStatus result = strategy.select(buildContext(500, 2L), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(500, "2"), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
     }
@@ -196,7 +197,7 @@ class CostBasedPrefillStrategyTest {
         CacheMatchResult cacheResults = cacheMatchResult("10.0.0.2:8080", 3);
         Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class))).thenReturn(cacheResults);
 
-        ServerStatus result = strategy.select(buildContext(1000, 3L), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(1000, "3"), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
@@ -221,7 +222,7 @@ class CostBasedPrefillStrategyTest {
         Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class)))
                 .thenReturn(kvcmResult);
 
-        BalanceContext context = buildContext(1_000L, 30_001L, config);
+        BalanceContext context = buildContext(1000, "30001", config);
         context.getRequest().setCacheKeyBlockSize(256L);
         context.getRequest().setLocalStandbyBlockCacheKeys(List.of(11L, 12L));
         context.getRequest().setLocalStandbyBlockSize(128L);
@@ -256,7 +257,7 @@ class CostBasedPrefillStrategyTest {
         FlexlbConfig config = affinityConfig(10_000, 0);
         config.getRouter().getRoles().getPrefill().setCacheAffinity(null);
         ServerStatus result = strategy.select(
-                buildContext(1000, 301L, config), RoleType.PREFILL, null);
+                buildContext(1000, "301", config), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.1", result.getServerIp());
@@ -278,7 +279,7 @@ class CostBasedPrefillStrategyTest {
                         "10.0.0.3:8080", 2L)));
 
         ServerStatus result = strategy.select(
-                buildContext(1000, 302L, affinityConfig(300, 5)),
+                buildContext(1000, "302", affinityConfig(300, 5)),
                 RoleType.PREFILL,
                 null);
 
@@ -302,7 +303,7 @@ class CostBasedPrefillStrategyTest {
                 .thenReturn(cacheMatchResult("10.0.0.2:8080", 1));
 
         ServerStatus result = strategy.select(
-                buildContext(1000, 303L, affinityConfig(255, 5)),
+                buildContext(1000, "303", affinityConfig(255, 5)),
                 RoleType.PREFILL,
                 null);
 
@@ -321,7 +322,7 @@ class CostBasedPrefillStrategyTest {
         prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
         Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class)))
                 .thenReturn(cacheMatchResult("10.0.0.2:8080", 1, 1_024L));
-        BalanceContext context = buildContext(4096, 304L, affinityConfig(1024, 20));
+        BalanceContext context = buildContext(4096, "304", affinityConfig(1024, 20));
         context.getRequest().setCacheKeyBlockSize(1024L);
 
         ServerStatus result = strategy.select(context, RoleType.PREFILL, null);
@@ -344,7 +345,7 @@ class CostBasedPrefillStrategyTest {
                 .thenReturn(cacheMatchResult("10.0.0.2:8080", 3));
 
         ServerStatus result = strategy.select(
-                buildContext(1000, 305L, affinityConfig(10_000, 0)),
+                buildContext(1000, "305", affinityConfig(10_000, 0)),
                 RoleType.PREFILL,
                 null);
 
@@ -362,7 +363,7 @@ class CostBasedPrefillStrategyTest {
         CacheMatchResult cacheResults = cacheMatchResult("10.0.0.1:8080", 4);
         Mockito.when(cacheAwareService.findMatchingEngines(any(CacheMatchQuery.class))).thenReturn(cacheResults);
 
-        ServerStatus result = strategy.select(buildContext(1000, 31L), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(1000, "31"), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertNotNull(result.getDebugInfo());
@@ -375,7 +376,7 @@ class CostBasedPrefillStrategyTest {
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 2000));
         prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 10));
 
-        ServerStatus result = strategy.select(buildContext(500, 4L), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(500, "4"), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
@@ -387,7 +388,7 @@ class CostBasedPrefillStrategyTest {
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 5000));
         prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 3000));
 
-        ServerStatus result = strategy.select(buildContext(500, 5L), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(500, "5"), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
@@ -400,7 +401,7 @@ class CostBasedPrefillStrategyTest {
         prefillMap.put("10.0.0.2:8080", createWorker("10.0.0.2", 0));
         prefillMap.put("10.0.0.3:8080", createWorker("10.0.0.3", 0));
 
-        ServerStatus result = strategy.select(buildContext(500, 6L), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(500, "6"), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertNotEquals("10.0.0.1", result.getServerIp());
@@ -420,7 +421,7 @@ class CostBasedPrefillStrategyTest {
         Map<String, TaskInfo> engineOnlyTasks = new HashMap<>();
         for (long requestId = 1_000; requestId < 1_100; requestId++) {
             TaskInfo task = new TaskInfo();
-            task.setRequestId(requestId);
+            task.setRequestId(String.valueOf(requestId));
             task.setBatchId(requestId);
             task.setPhase(TaskPhase.RUNNING);
             engineOnlyTasks.put(String.valueOf(requestId), task);
@@ -443,7 +444,7 @@ class CostBasedPrefillStrategyTest {
                 .thenReturn(cacheResults);
 
         ServerStatus result = strategy.select(
-                buildContext(1_000, 61L), RoleType.PREFILL, null);
+                buildContext(1000, "61"), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertNotEquals("10.0.0.1", result.getServerIp(),
@@ -462,7 +463,7 @@ class CostBasedPrefillStrategyTest {
 
         FlexlbConfig config = new FlexlbConfig();
 
-        ServerStatus result = strategy.select(buildContext(500, 7L, config), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(500, "7", config), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertNotEquals("10.0.0.1", result.getServerIp());
@@ -472,7 +473,7 @@ class CostBasedPrefillStrategyTest {
     void noAvailableWorkersReturnsError() {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
 
-        ServerStatus result = strategy.select(buildContext(500, 8L), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(500, "8"), RoleType.PREFILL, null);
 
         assertFalse(result.isSuccess());
     }
@@ -483,11 +484,11 @@ class CostBasedPrefillStrategyTest {
         WorkerStatus w = createWorker("10.0.0.1", 0);
         prefillMap.put("10.0.0.1:8080", w);
 
-        ServerStatus result = strategy.select(buildContext(500, 9L), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(500, "9"), RoleType.PREFILL, null);
         assertTrue(result.isSuccess());
 
         assertDoesNotThrow(() -> strategy.rollBack(
-                endpointRegistry.get(RoleType.PREFILL, "10.0.0.1:8080"), 9L));
+                endpointRegistry.get(RoleType.PREFILL, "10.0.0.1:8080"), "9"));
     }
 
     @Test
@@ -504,9 +505,9 @@ class CostBasedPrefillStrategyTest {
         PrefillEndpoint ep1 = (PrefillEndpoint) endpointRegistry.ensureEndpoint(
                 RoleType.PREFILL, "10.0.0.1:8080", w1);
         endpointRegistry.ensureEndpoint(RoleType.PREFILL, "10.0.0.2:8080", w2);
-        ep1.commitBatch(1L, 4000, List.of(batchItem(1L, 1000, 0)));
+        ep1.commitBatch(1L, 4000, List.of(batchItem("1", 1000, 0)));
 
-        ServerStatus result = strategy.select(buildContext(500, 10L), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext(500, "10"), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
@@ -524,7 +525,7 @@ class CostBasedPrefillStrategyTest {
         // Single request: inputTokens=1000, hitCacheTokens=200, computeTokens=800, batchSize=1
         // = 10 + 0.5*800 + 0.001*640000 + 0.0005*160000 + 0.2*200 + 5*1
         // = 10 + 400 + 640 + 80 + 40 + 5 = 1175
-        long single = (long) predictor.predictBatchMs(List.of(batchItem(0, 1000, 200)));
+        long single = (long) predictor.predictBatchMs(List.of(batchItem("0", 1000, 200)));
         assertEquals(1175, single);
 
         // Batch of 2: req1=(1000,200) req2=(500,100)
@@ -534,8 +535,8 @@ class CostBasedPrefillStrategyTest {
         // = 10 + 0.5*1200 + 0.001*800000 + 0.0005*200000 + 0.2*300 + 5*2
         // = 10 + 600 + 800 + 100 + 60 + 10 = 1580
         long batch = (long) predictor.predictBatchMs(List.of(
-                batchItem(0, 1000, 200),
-                batchItem(1, 500, 100)));
+                batchItem("0", 1000, 200),
+                batchItem("1", 500, 100)));
         assertEquals(1580, batch);
 
         assertEquals(0, (long) predictor.predictBatchMs(List.of()));
@@ -551,7 +552,7 @@ class CostBasedPrefillStrategyTest {
         endpointRegistry.ensureEndpoint(RoleType.PDFUSION, ipPort, worker);
 
         ServerStatus result = strategy.select(
-                buildContext(500, 41L), RoleType.PDFUSION, null);
+                buildContext(500, "41"), RoleType.PDFUSION, null);
 
         assertTrue(result.isSuccess());
         assertEquals(RoleType.PDFUSION, result.getRole());
@@ -562,7 +563,7 @@ class CostBasedPrefillStrategyTest {
         Map<String, WorkerStatus> prefillMap =
                 EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
         prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
-        assertTrue(strategy.select(buildContext(500, 51L), RoleType.PREFILL, null).isSuccess());
+        assertTrue(strategy.select(buildContext(500, "51"), RoleType.PREFILL, null).isSuccess());
 
         for (int i = 2; i <= 40; i++) {
             String ip = "10.0.1." + i;
@@ -570,7 +571,7 @@ class CostBasedPrefillStrategyTest {
         }
 
         for (long requestId = 52; requestId < 72; requestId++) {
-            assertTrue(strategy.select(buildContext(500, requestId), RoleType.PREFILL, null).isSuccess());
+            assertTrue(strategy.select(buildContext(500, String.valueOf(requestId)), RoleType.PREFILL, null).isSuccess());
         }
     }
 
@@ -583,7 +584,7 @@ class CostBasedPrefillStrategyTest {
                 RoleType.PREFILL, ipPort, w);
         if (estimatedWaitMs > 0) {
             ep.commitBatch(900000L + ip.hashCode(), estimatedWaitMs,
-                    List.of(batchItem(900000L + ip.hashCode(), estimatedWaitMs, 0)));
+                    List.of(batchItem(String.valueOf(900000L + ip.hashCode()), estimatedWaitMs, 0)));
         }
         return w;
     }
@@ -603,7 +604,7 @@ class CostBasedPrefillStrategyTest {
         return w;
     }
 
-    private BatchItem batchItem(long requestId, long seqLen, long hitCache) {
+    private BatchItem batchItem(String requestId, long seqLen, long hitCache) {
         Request req = new Request();
         req.setRequestId(requestId);
         req.setSeqLen(seqLen);
@@ -615,16 +616,16 @@ class CostBasedPrefillStrategyTest {
         // via the constructor as a convenience; the predictor will call item.hitCache()
         // which reads prefill.debugInfo.hitCacheLen, so we must build a real ServerStatus.
         if (hitCache > 0) {
-            org.flexlb.dao.loadbalance.DebugInfo di = new org.flexlb.dao.loadbalance.DebugInfo();
+            DebugInfo di = new DebugInfo();
             di.setHitCacheLen(hitCache);
-            org.flexlb.dao.loadbalance.ServerStatus ss = new org.flexlb.dao.loadbalance.ServerStatus();
+            ServerStatus ss = new ServerStatus();
             ss.setDebugInfo(di);
             return new BatchItem(ctx, null, null, ss, null, null, null, 0);
         }
         return new BatchItem(ctx, null, null, null, null, null, null, 0);
     }
 
-    private BalanceContext buildContext(long seqLen, long requestId) {
+    private BalanceContext buildContext(long seqLen, String requestId) {
         return buildContext(seqLen, requestId, new FlexlbConfig());
     }
 
@@ -672,7 +673,7 @@ class CostBasedPrefillStrategyTest {
         return new CacheMatchResult(matches, CacheMatchSource.LOCAL_SYNC, 0L, 256L);
     }
 
-    private BalanceContext buildContext(long seqLen, long requestId, FlexlbConfig config) {
+    private BalanceContext buildContext(long seqLen, String requestId, FlexlbConfig config) {
         Request req = new Request();
         req.setSeqLen(seqLen);
         req.setRequestId(requestId);

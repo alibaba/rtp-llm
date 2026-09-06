@@ -73,7 +73,7 @@ public final class PrefillQueueManager {
      * ready. The decision-interval sliding average is the per-cycle cost and
      * the active head's remaining window is the partial first cycle.
      */
-    public long estimateWaitMs(int priority, long requestId) {
+    public long estimateWaitMs(int priority, String requestId) {
         long now = ctx.now();
         int activeItemsAhead = 0;
         int readyItemsAhead = 0;
@@ -140,7 +140,7 @@ public final class PrefillQueueManager {
      * allocation-free primitive overload in {@link PriorityOrdering}.
      */
     private static boolean ordersBefore(BatchItem item, int priority,
-                                        long arrivalMs, long requestId) {
+                                        long arrivalMs, String requestId) {
         return PriorityOrdering.comesBefore(
                 item, item.requestId(), priority, arrivalMs, requestId);
     }
@@ -149,7 +149,7 @@ public final class PrefillQueueManager {
      * Idempotently remove a request during cancellation or expiration. No-op
      * when the item is already delivered, evicted, or removed.
      */
-    public void tryRemove(long requestId, String reason) {
+    public void tryRemove(String requestId, String reason) {
         batcher.tryRemove(List.of(requestId), reason);
     }
 
@@ -158,7 +158,7 @@ public final class PrefillQueueManager {
      * check — any missing victim aborts with a zero-side-effect
      * {@code VICTIM_GONE} carrying the missing ids.
      */
-    public ReplaceOutcome tryReplaceVictimsPresent(List<Long> victimIds, BatchItem incoming) {
+    public ReplaceOutcome tryReplaceVictimsPresent(List<String> victimIds, BatchItem incoming) {
         return batcher.tryReplaceVictimsPresent(victimIds, incoming);
     }
 
@@ -178,9 +178,9 @@ public final class PrefillQueueManager {
 
         private final Status status;
         private final List<BatchItem> removed;
-        private final List<Long> missingVictimIds;
+        private final List<String> missingVictimIds;
 
-        private ReplaceOutcome(Status status, List<BatchItem> removed, List<Long> missingVictimIds) {
+        private ReplaceOutcome(Status status, List<BatchItem> removed, List<String> missingVictimIds) {
             this.status = status;
             this.removed = List.copyOf(removed);
             this.missingVictimIds = List.copyOf(missingVictimIds);
@@ -194,7 +194,7 @@ public final class PrefillQueueManager {
             return new ReplaceOutcome(Status.PARTIAL_FAILURE, removed, List.of());
         }
 
-        static ReplaceOutcome victimGone(List<Long> missingVictimIds) {
+        static ReplaceOutcome victimGone(List<String> missingVictimIds) {
             return new ReplaceOutcome(Status.VICTIM_GONE, List.of(), missingVictimIds);
         }
 
@@ -220,7 +220,7 @@ public final class PrefillQueueManager {
         }
 
         /** Victims no longer queued (presence-guard abort only). */
-        public List<Long> missingVictimIds() {
+        public List<String> missingVictimIds() {
             return missingVictimIds;
         }
     }

@@ -97,7 +97,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
     }
 
     @Override
-    public void rollBack(WorkerEndpoint ep, long requestId) {
+    public void rollBack(WorkerEndpoint ep, String requestId) {
         // Release non-batch prefill inflight reservation on routing failure.
         // Batch path inflight is managed by PriorityScheduler — no-op here.
         if (ep instanceof PrefillEndpoint pe) {
@@ -128,7 +128,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
     // ==================== Core Selection ====================
 
     private ServerStatus doSelect(BalanceContext balanceContext, RoleType roleType, String group) {
-        long requestId = balanceContext.getRequestId();
+        String requestId = balanceContext.getRequestId();
         long seqLen = balanceContext.getRequest().getSeqLen();
         FlexlbConfig config = balanceContext.getConfig();
 
@@ -813,7 +813,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
 
     private ServerStatus buildServerStatus(ScoredEndpoint selected,
                                            RoleType roleType,
-                                           long requestId,
+                                           String requestId,
                                            BalanceContext balanceContext,
                                            CacheMatchResult cacheMatchResult) {
         PrefillEndpoint ep = selected.ep();
@@ -860,7 +860,7 @@ public class ShortestTTFTStrategy implements LoadBalanceStrategy {
     }
 
     private TaskInfo createTaskInfo(
-            long requestId, long inputLength, long prefixLength, String cacheMatchSource) {
+            String requestId, long inputLength, long prefixLength, String cacheMatchSource) {
         TaskInfo task = new TaskInfo();
         task.setRequestId(requestId);
         task.setInputLength(inputLength);

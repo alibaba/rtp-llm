@@ -9,6 +9,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -31,7 +32,7 @@ class GrpcEngineCancelChannelTest {
         EngineCancelChannel.CancelTarget target =
                 new EngineCancelChannel.CancelTarget("10.0.0.1", 8081);
 
-        EngineCancelChannel.CancelOutcome outcome = channel.cancel(target, 77L, 1000L)
+        EngineCancelChannel.CancelOutcome outcome = channel.cancel(target, "77", 1000L)
                 .get(1, TimeUnit.SECONDS);
 
         assertEquals(EngineCancelChannel.CancelAck.ACCEPTED, outcome.ack());
@@ -53,7 +54,7 @@ class GrpcEngineCancelChannelTest {
 
         GrpcEngineCancelChannel channel = new GrpcEngineCancelChannel(client);
         EngineCancelChannel.CancelOutcome outcome = channel.cancel(
-                        new EngineCancelChannel.CancelTarget("10.0.0.1", 8081), 78L, 1000L)
+                        new EngineCancelChannel.CancelTarget("10.0.0.1", 8081), "78", 1000L)
                 .get(1, TimeUnit.SECONDS);
 
         assertEquals(EngineCancelChannel.CancelAck.NOT_FOUND, outcome.ack());
@@ -71,9 +72,17 @@ class GrpcEngineCancelChannelTest {
 
         GrpcEngineCancelChannel channel = new GrpcEngineCancelChannel(client);
         EngineCancelChannel.CancelOutcome outcome = channel.cancel(
-                        new EngineCancelChannel.CancelTarget("10.0.0.1", 8081), 79L, 1000L)
+                        new EngineCancelChannel.CancelTarget("10.0.0.1", 8081), "79", 1000L)
                 .get(1, TimeUnit.SECONDS);
 
         assertEquals(EngineCancelChannel.CancelAck.TOMBSTONED, outcome.ack());
+    }
+
+    @Test
+    void rejectsCancelIdsThatCannotBeParsedAsLong() {
+        GrpcEngineCancelChannel channel = new GrpcEngineCancelChannel(mock(EngineGrpcClient.class));
+        EngineCancelChannel.CancelTarget target = new EngineCancelChannel.CancelTarget("10.0.0.1", 8081);
+        assertThrows(NumberFormatException.class, () -> channel.cancel(target, "req-abc", 1000L));
+        assertThrows(NumberFormatException.class, () -> channel.cancel(target, "9223372036854775808", 1000L));
     }
 }

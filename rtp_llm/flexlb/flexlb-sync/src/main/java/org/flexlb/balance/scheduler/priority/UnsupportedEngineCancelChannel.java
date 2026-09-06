@@ -23,7 +23,7 @@ public class UnsupportedEngineCancelChannel implements EngineCancelChannel {
 
     @Override
     public CompletableFuture<CancelOutcome> cancel(CancelTarget target,
-                                                   long requestId,
+                                                   String requestId,
                                                    long timeoutMs) {
         return CompletableFuture.completedFuture(CancelOutcome.unsupported());
     }

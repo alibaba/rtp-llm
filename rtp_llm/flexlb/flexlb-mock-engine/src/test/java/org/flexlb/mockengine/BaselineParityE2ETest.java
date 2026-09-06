@@ -45,7 +45,7 @@ class BaselineParityE2ETest {
 
             // 预热：首笔请求走冷 gRPC 通道 + JIT，异步发送可能被后续批次超越
             // （传输层竞态，非被测行为）。先发一笔不计入断言的请求压热链路。
-            h.scheduler.submit(h.context(1999, 50)).get(10, TimeUnit.SECONDS);
+            h.scheduler.submit(h.context("1999", 50)).get(10, TimeUnit.SECONDS);
             AutoTpmE2EHarness.await(() -> !h.engineArrivalOrder.isEmpty(), 5_000,
                     "warm-up request must reach the engine");
             h.engineArrivalOrder.clear();
@@ -68,7 +68,7 @@ class BaselineParityE2ETest {
                     submissionOrder.add(requestId);
                     priorityByRid.put(requestId, priority);
                     submitNanos.put(requestId, System.nanoTime());
-                    futures.add(h.scheduler.submit(h.context(requestId, priority)));
+                    futures.add(h.scheduler.submit(h.context(String.valueOf(requestId), priority)));
                 }
             }
             int total = PER_PRIORITY * PRIORITIES.length;

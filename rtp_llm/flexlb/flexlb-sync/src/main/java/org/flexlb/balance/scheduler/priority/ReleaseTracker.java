@@ -11,6 +11,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * AutoTPM Cancel: WorkerStatus-driven release confirmation.
@@ -56,13 +57,13 @@ public class ReleaseTracker implements AutoCloseable {
     public record ReleaseObservation(String workerKey,
                                      long workerEpoch,
                                      long statusVersion,
-                                     long requestId,
+                                     String requestId,
                                      boolean resourceReleased,
                                      long lifecycleRevision,
                                      int terminalErrorCode) {
     }
 
-    private record WaiterKey(String workerKey, long requestId) {
+    private record WaiterKey(String workerKey, String requestId) {
     }
 
     private static final class Waiter {
@@ -91,7 +92,7 @@ public class ReleaseTracker implements AutoCloseable {
      * by {@link #onWorkerStatus}, failed on deadline / worker-epoch change.
      */
     public CompletableFuture<ReleaseObservation> awaitReleased(String workerKey,
-                                                               long requestId,
+                                                               String requestId,
                                                                long deadlineMs) {
         long boundedDeadline = Math.min(Math.max(1, deadlineMs <= 0 ? DEFAULT_DEADLINE_MS : deadlineMs),
                 MAX_DEADLINE_MS);
@@ -117,7 +118,7 @@ public class ReleaseTracker implements AutoCloseable {
                 }
             }
             if (removed) {
-                waiter.future.completeExceptionally(new java.util.concurrent.TimeoutException(
+                waiter.future.completeExceptionally(new TimeoutException(
                         "release not confirmed within " + boundedDeadline + "ms for request "
                                 + requestId + " on " + workerKey));
             }
@@ -199,7 +200,7 @@ public class ReleaseTracker implements AutoCloseable {
     }
 
     /** Drop cached releases of a terminal request (bounded-cache hygiene). */
-    public void forget(String workerKey, long requestId) {
+    public void forget(String workerKey, String requestId) {
         synchronized (lock) {
             releasedCache.remove(new WaiterKey(workerKey, requestId));
         }

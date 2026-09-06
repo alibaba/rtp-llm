@@ -35,6 +35,44 @@ class NacosConfigSourceTest {
     private static final String CONFIG_SCHEMA_VERSION_ENV = "FLEXLB_CONFIG_SCHEMA_VERSION";
 
     @Test
+    void selectedNacosIgnoresEnvironmentBehaviorAndRetainsIndependentModelTopology() throws Exception {
+        com.alibaba.nacos.api.config.ConfigService client =
+                mock(com.alibaba.nacos.api.config.ConfigService.class);
+        when(client.getConfig("flexlb-test", DEFAULT_NACOS_GROUP, 3000L))
+                .thenReturn("{\"schemaVersion\":1,\"router\":{\"availabilityHysteresisPercent\":9}}");
+        new EnvironmentVariables(
+                "FLEXLB_UNICONF_ENABLE", "false",
+                "UNICONF_ENABLE", "true",
+                NACOS_SERVER_ADDR, "127.0.0.1:8848",
+                NACOS_DATA_ID, "flexlb-test",
+                HIPPO_ROLE, "flexlb-test",
+                "FLEXLB_CONFIG", "{\"schemaVersion\":1,\"enableFallback\":true}",
+                "MODEL_SERVICE_CONFIG", "{\"service_id\":\"test-model\",\"role_endpoints\":[]}")
+                .remove(NACOS_GROUP)
+                .remove(SPECTRUM_WORKSPACE_ID)
+                .remove(SPECTRUM_APPLICATION_NAME)
+                .remove(SPECTRUM_DEPLOYMENT_NAME)
+                .execute(() -> {
+                    DeploymentIdentity identity = new DeploymentIdentity();
+                    EnvironmentConfigSource environmentSource = new EnvironmentConfigSource();
+                    environmentSource.initialize();
+                    UniConfigConfigSource uniConfigSource = new UniConfigConfigSource(identity);
+                    uniConfigSource.initialize();
+                    NacosConfigSource source = new NacosConfigSource(identity);
+                    ReflectionTestUtils.setField(source, "client", client);
+                    source.initialize();
+                    ConfigService configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
+                    try {
+                        assertThat(configService.loadBalanceConfig().getRouter().getAvailabilityHysteresisPercent()).isEqualTo(9);
+                        assertThat(configService.loadBalanceConfig().isEnableFallback()).isFalse();
+                        assertThat(configService.modelServiceConfig().getServiceId()).isEqualTo("test-model");
+                    } finally {
+                        configService.close();
+                    }
+                });
+    }
+
+    @Test
     void isDisabledWhenNacosAddressIsNotConfigured() throws Exception {
         NacosConfigSource source = new EnvironmentVariables(HIPPO_ROLE, "flexlb-test")
                 .remove(NACOS_SERVER_ADDR)

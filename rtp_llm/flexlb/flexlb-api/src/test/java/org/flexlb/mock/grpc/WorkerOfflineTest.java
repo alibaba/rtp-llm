@@ -56,7 +56,7 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
     @Timeout(20)
     void workerOffline_uncertainDispatchRetainsFenceUntilAuthoritativeStatus() throws Exception {
         // 1. Submit request with normal worker — should succeed
-        CompletableFuture<Response> future1 = submitRequest(20001);
+        CompletableFuture<Response> future1 = submitRequest("20001");
         Response ackResponse = future1.get(5, TimeUnit.SECONDS);
         assertTrue(ackResponse.isSuccess(), "First request should succeed while worker is online");
         assertTrue(ackResponse.isEnqueuedByMaster(), "Should be enqueued by master");
@@ -70,7 +70,7 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         Thread.sleep(500);
 
         // 4. Submit a new request — gRPC call should fail (connection refused)
-        CompletableFuture<Response> future2 = submitRequest(20002);
+        CompletableFuture<Response> future2 = submitRequest("20002");
         assertThrows(TimeoutException.class,
                 () -> future2.get(2, TimeUnit.SECONDS));
         assertFalse(future2.isDone(),

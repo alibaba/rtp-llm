@@ -10,6 +10,7 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -59,10 +60,10 @@ class WorkerBatcherTest {
         WorkerBatcher batcher = newBatcher();
         long now = System.currentTimeMillis();
 
-        assertTrue(batcher.tryOffer(item(1, 70, now)));
-        assertTrue(batcher.tryOffer(item(2, 50, now)));
-        assertTrue(batcher.tryOffer(item(3, 50, now)));
-        assertTrue(batcher.tryOffer(item(4, 30, now)));
+        assertTrue(batcher.tryOffer(item("1", 70, now)));
+        assertTrue(batcher.tryOffer(item("2", 50, now)));
+        assertTrue(batcher.tryOffer(item("3", 50, now)));
+        assertTrue(batcher.tryOffer(item("4", 30, now)));
 
         Map<Integer, Integer> buckets = batcher.queueSizeByPriority();
         assertEquals(Map.of(70, 1, 50, 2, 30, 1), buckets);
@@ -76,8 +77,8 @@ class WorkerBatcherTest {
         WorkerBatcher batcher = newBatcher();
         long now = System.currentTimeMillis();
 
-        assertTrue(batcher.tryOffer(legacyItem(1, now)));
-        assertTrue(batcher.tryOffer(legacyItem(2, now)));
+        assertTrue(batcher.tryOffer(legacyItem("1", now)));
+        assertTrue(batcher.tryOffer(legacyItem("2", now)));
 
         assertEquals(Map.of(0, 2), batcher.queueSizeByPriority());
     }
@@ -92,18 +93,18 @@ class WorkerBatcherTest {
         WorkerBatcher batcher = newBatcher();
         long now = System.currentTimeMillis();
 
-        assertTrue(batcher.tryOffer(item(1, 70, now)));
-        assertTrue(batcher.tryOffer(item(2, 50, now)));
+        assertTrue(batcher.tryOffer(item("1", 70, now)));
+        assertTrue(batcher.tryOffer(item("2", 50, now)));
 
         // Drain the P70 item: its bucket drops out (present-only, no zero-fill
         // — same empty-bucket behavior as wait-time-by-priority)
-        List<BatchItem> removed = batcher.tryRemove(List.of(1L), "test-drain");
+        List<BatchItem> removed = batcher.tryRemove(List.of("1"), "test-drain");
         assertEquals(1, removed.size());
 
         assertEquals(Map.of(50, 1), batcher.queueSizeByPriority());
 
         // Fully drained queue reports no buckets at all
-        assertEquals(1, batcher.tryRemove(List.of(2L), "test-drain").size());
+        assertEquals(1, batcher.tryRemove(List.of("2"), "test-drain").size());
         assertEquals(Map.of(), batcher.queueSizeByPriority());
     }
 
@@ -111,8 +112,8 @@ class WorkerBatcherTest {
     void decisionCallbackFailure_restoresOnlyStagedItemsWithoutDepthLeak() {
         PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(
                 11, WorkerBatcher.PRIORITY_QUEUE_ORDER);
-        BatchItem first = item(1, 50, 100);
-        BatchItem second = item(2, 50, 200);
+        BatchItem first = item("1", 50, 100);
+        BatchItem second = item("2", 50, 200);
         queue.add(first);
         queue.add(second);
         AtomicInteger depth = new AtomicInteger(2);
@@ -141,7 +142,7 @@ class WorkerBatcherTest {
         assertEquals(2, depth.get());
         assertEquals(0, ctx.pendingDeliveryCount());
         List<BatchItem> restored = ctx.sortedItems();
-        assertEquals(List.of(1L, 2L), restored.stream().map(BatchItem::requestId).toList());
+        assertEquals(List.of("1", "2"), restored.stream().map(BatchItem::requestId).toList());
         assertSame(first, restored.get(0));
         assertSame(second, restored.get(1));
     }
@@ -153,8 +154,8 @@ class WorkerBatcherTest {
         when(endpoint.availableRequestSlots(1)).thenReturn(1);
         PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(
                 11, WorkerBatcher.PRIORITY_QUEUE_ORDER);
-        BatchItem first = routeItem(1, 50, 100);
-        BatchItem second = routeItem(2, 50, 200);
+        BatchItem first = routeItem("1", 50, 100);
+        BatchItem second = routeItem("2", 50, 200);
         queue.add(first);
         queue.add(second);
         AtomicInteger depth = new AtomicInteger(2);
@@ -184,7 +185,7 @@ class WorkerBatcherTest {
         assertEquals(2, ctx.readyDeliveryCount());
         assertEquals(2, depth.get());
         assertEquals(0, ctx.pendingDeliveryCount());
-        assertEquals(List.of(1L, 2L), ctx.sortedQueuedItems().stream()
+        assertEquals(List.of("1", "2"), ctx.sortedQueuedItems().stream()
                 .map(BatchItem::requestId).toList());
 
         // Lease timeout / preemption can still revoke an already-ready item.
@@ -193,7 +194,7 @@ class WorkerBatcherTest {
         assertEquals(1, ctx.readyDeliveryCount());
 
         // Shutdown owns and drains the final ready member exactly once.
-        List<BatchItem> drained = new java.util.ArrayList<>();
+        List<BatchItem> drained = new ArrayList<>();
         ctx.stopAndDrainTo(drained);
         assertEquals(List.of(second), drained);
         assertEquals(0, depth.get());
@@ -212,7 +213,7 @@ class WorkerBatcherTest {
         when(endpoint.availableRequestSlots(0)).thenReturn(1);
         PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(
                 11, WorkerBatcher.PRIORITY_QUEUE_ORDER);
-        BatchItem item = routeItem(1, 50, System.currentTimeMillis());
+        BatchItem item = routeItem("1", 50, System.currentTimeMillis());
         queue.add(item);
         AtomicReference<Throwable> failure = new AtomicReference<>();
         BatcherContext ctx = context(endpoint, queue, new AtomicInteger(1), new DecisionGroupHandler() {
@@ -293,8 +294,8 @@ class WorkerBatcherTest {
                     }
                 }, mock(BatchSchedulerReporter.class));
 
-        assertTrue(batcher.tryOffer(routeItem(1, 70, 100)));
-        assertTrue(batcher.tryOffer(routeItem(2, 50, 200)));
+        assertTrue(batcher.tryOffer(routeItem("1", 70, 100)));
+        assertTrue(batcher.tryOffer(routeItem("2", 50, 200)));
         long offeredVersion = batcher.queueVersion();
         batcher.start();
         try {
@@ -302,22 +303,22 @@ class WorkerBatcherTest {
 
             // Both requests have left the active decision queue and are held
             // behind the request cap, yet remain actionable eviction victims.
-            assertEquals(List.of(1L, 2L), batcher.queueManager().snapshot().items().stream()
+            assertEquals(List.of("1", "2"), batcher.queueManager().snapshot().items().stream()
                     .map(item -> item.requestId()).toList());
             assertEquals(Map.of(70, 1, 50, 1), batcher.queueSizeByPriority());
-            assertEquals(2, batcher.queueManager().estimateWaitMs(100, 99),
+            assertEquals(2, batcher.queueManager().estimateWaitMs(100, "99"),
                     "NON_BATCH wait accounts for each pending request independently");
             assertEquals(0, deliveryCalls.get());
 
-            batcher.queueManager().tryRemove(1L, "ready-lease-timeout");
+            batcher.queueManager().tryRemove("1", "ready-lease-timeout");
             assertEquals(1, batcher.queueSize());
-            assertEquals(List.of(2L), batcher.queueManager().snapshot().items().stream()
+            assertEquals(List.of("2"), batcher.queueManager().snapshot().items().stream()
                     .map(item -> item.requestId()).toList());
         } finally {
             batcher.shutdown();
         }
 
-        assertEquals(2L, shutdownFailure.get().requestId());
+        assertEquals("2", shutdownFailure.get().requestId());
         assertEquals(0, batcher.queueSize());
         assertTrue(batcher.queueManager().snapshot().items().isEmpty());
     }
@@ -345,7 +346,7 @@ class WorkerBatcherTest {
             assertTrue(batcher.isWaitingForSignal(),
                     "an empty AutoTPM worker must block, not wake on a 1ms poll");
 
-            assertTrue(batcher.tryOffer(item(1, 50, System.currentTimeMillis())));
+            assertTrue(batcher.tryOffer(item("1", 50, System.currentTimeMillis())));
             assertTrue(delivered.await(2, TimeUnit.SECONDS));
         } finally {
             batcher.shutdown();
@@ -371,7 +372,7 @@ class WorkerBatcherTest {
                     @Override public void onDeliveryFailure(BatchItem item, Throwable error) { }
                 }, mock(BatchSchedulerReporter.class));
 
-        assertTrue(batcher.tryOffer(routeItem(1, 50, System.currentTimeMillis())));
+        assertTrue(batcher.tryOffer(routeItem("1", 50, System.currentTimeMillis())));
         long offeredVersion = batcher.queueVersion();
         batcher.start();
         try {
@@ -416,14 +417,14 @@ class WorkerBatcherTest {
                     @Override public void onDeliveryFailure(BatchItem item, Throwable error) { }
                 }, mock(BatchSchedulerReporter.class));
 
-        assertTrue(batcher.tryOffer(routeItem(1, 70, System.currentTimeMillis())));
+        assertTrue(batcher.tryOffer(routeItem("1", 70, System.currentTimeMillis())));
         long routeOfferVersion = batcher.queueVersion();
         batcher.start();
         try {
             awaitTrue(() -> batcher.queueVersion() > routeOfferVersion
                     && batcher.isWaitingForSignal());
 
-            assertTrue(batcher.tryOffer(item(2, 50, System.currentTimeMillis())));
+            assertTrue(batcher.tryOffer(item("2", 50, System.currentTimeMillis())));
             assertTrue(batchDelivered.await(2, TimeUnit.SECONDS),
                     "BATCH_ENQUEUE work must pass a capacity-blocked route backlog");
             assertEquals(0, routeDeliveries.get());
@@ -438,8 +439,8 @@ class WorkerBatcherTest {
     void successfulLegacyCallbackConsumesDistinctItemsSharingRequestId() {
         PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(
                 11, WorkerBatcher.PRIORITY_QUEUE_ORDER);
-        BatchItem first = item(0, 50, 100);
-        BatchItem second = item(0, 50, 200);
+        BatchItem first = item("0", 50, 100);
+        BatchItem second = item("0", 50, 200);
         queue.add(first);
         queue.add(second);
         AtomicInteger depth = new AtomicInteger(2);
@@ -476,7 +477,7 @@ class WorkerBatcherTest {
     void claimedDeliveryCompletesOnce_andFinallyCannotRequeueIt() {
         PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(
                 11, WorkerBatcher.PRIORITY_QUEUE_ORDER);
-        BatchItem item = item(7, 50, 100);
+        BatchItem item = item("7", 50, 100);
         queue.add(item);
         AtomicInteger depth = new AtomicInteger(1);
         AtomicInteger dispatchCalls = new AtomicInteger();
@@ -523,7 +524,7 @@ class WorkerBatcherTest {
     void claimedCallbackFailure_usesDeliveryFailureWithoutPendingLeakOrRequeue() {
         PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(
                 11, WorkerBatcher.PRIORITY_QUEUE_ORDER);
-        BatchItem item = item(8, 50, 100);
+        BatchItem item = item("8", 50, 100);
         queue.add(item);
         AtomicInteger depth = new AtomicInteger(1);
         AtomicInteger offerFailures = new AtomicInteger();
@@ -568,7 +569,7 @@ class WorkerBatcherTest {
     void shutdownDrainWinsStagedItemExactlyOnce() throws Exception {
         PriorityBlockingQueue<BatchItem> queue = new PriorityBlockingQueue<>(
                 11, WorkerBatcher.PRIORITY_QUEUE_ORDER);
-        BatchItem item = item(9, 50, 100);
+        BatchItem item = item("9", 50, 100);
         queue.add(item);
         AtomicInteger depth = new AtomicInteger(1);
         AtomicInteger offerFailures = new AtomicInteger();
@@ -605,7 +606,7 @@ class WorkerBatcherTest {
                 ctx.stageForDelivery(List.of(item), new DecisionGroupMetadata("test", 0)));
         assertTrue(callbackEntered.await(2, TimeUnit.SECONDS));
         long stagedVersion = ctx.queueVersionValue();
-        List<BatchItem> drained = new java.util.ArrayList<>();
+        List<BatchItem> drained = new ArrayList<>();
         ctx.stopAndDrainTo(drained);
         assertEquals(List.of(item), drained);
         assertEquals(stagedVersion + 1, ctx.queueVersionValue(),
@@ -622,7 +623,7 @@ class WorkerBatcherTest {
 
     // ==================== helpers ====================
 
-    private static BatchItem item(long requestId, int priority, long enqueuedAtMs) {
+    private static BatchItem item(String requestId, int priority, long enqueuedAtMs) {
         BalanceContext ctx = newContext(requestId, priority);
         ctx.setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
         return new BatchItem(ctx, new CompletableFuture<>(), null,
@@ -630,12 +631,12 @@ class WorkerBatcherTest {
     }
 
     /** Missing scheduling metadata preserves the untrusted priority-zero sentinel. */
-    private static BatchItem legacyItem(long requestId, long enqueuedAtMs) {
+    private static BatchItem legacyItem(String requestId, long enqueuedAtMs) {
         return new BatchItem(newContext(requestId, 0), new CompletableFuture<>(), null,
                 null, null, null, null, enqueuedAtMs);
     }
 
-    private static BatchItem routeItem(long requestId, int priority, long enqueuedAtMs) {
+    private static BatchItem routeItem(String requestId, int priority, long enqueuedAtMs) {
         BalanceContext ctx = newContext(requestId, priority);
         ctx.setSchedulingMetadata(SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
         SchedulingTestConfig.useNonBatchDispatcher(ctx.getConfig());
@@ -643,7 +644,7 @@ class WorkerBatcherTest {
                 null, null, null, null, enqueuedAtMs);
     }
 
-    private static BalanceContext newContext(long requestId, int priority) {
+    private static BalanceContext newContext(String requestId, int priority) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(128);

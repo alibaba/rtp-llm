@@ -13,7 +13,7 @@ import org.springframework.stereotype.Component;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 
 @Component
 public class EndpointRegistry {
@@ -247,7 +247,7 @@ public class EndpointRegistry {
      * @param ttlMs max age before eviction
      */
     public void evictExpiredOrphans(long ttlMs,
-                                    LongPredicate schedulerOwnsRequest) {
+                                    Predicate<String> schedulerOwnsRequest) {
         prefillEndpoints.forEach((endpoint, ep) ->
                 logEndpointEviction(RoleType.PREFILL, endpoint,
                         ep.evictExpiredInflight(ttlMs, schedulerOwnsRequest), ttlMs));

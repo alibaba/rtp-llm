@@ -10,11 +10,13 @@ import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.PrefillQueueManager;
 import org.flexlb.balance.scheduler.PriorityScheduler;
+import org.flexlb.balance.scheduler.RequestIdFixtures;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
@@ -26,6 +28,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -38,6 +41,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -132,8 +136,8 @@ class PlanCommitConcurrencyRedesignTest {
         decodeWs.setIp("10.0.0.2");
         decodeWs.setPort(8081);
         decodeWs.setGrpcPort(8082);
-        decodeWs.setAvailableKvCacheTokens(new java.util.concurrent.atomic.AtomicLong(1_000_000L));
-        decodeWs.setTotalKvCacheTokens(new java.util.concurrent.atomic.AtomicLong(2_000_000L));
+        decodeWs.setAvailableKvCacheTokens(new AtomicLong(1_000_000L));
+        decodeWs.setTotalKvCacheTokens(new AtomicLong(2_000_000L));
         endpointRegistry.ensureEndpoint(RoleType.DECODE, DECODE_IP_PORT, decodeWs);
     }
 
@@ -167,7 +171,7 @@ class PlanCommitConcurrencyRedesignTest {
         });
 
         for (long id = 101; id <= 104; id++) {
-            scheduler.submit(context(id));
+            scheduler.submit(context(String.valueOf(id)));
         }
         awaitQueueSize(4);
 
@@ -230,7 +234,7 @@ class PlanCommitConcurrencyRedesignTest {
             return null;
         }).when(priorityReporter).reportNormalPlacement(anyInt());
 
-        Response response = scheduler.submit(context(105)).get(2, TimeUnit.SECONDS);
+        Response response = scheduler.submit(context("105")).get(2, TimeUnit.SECONDS);
         assertTrue(response.isSuccess());
         assertTrue(committed.await(2, TimeUnit.SECONDS), "onCommitted never finished");
 
@@ -251,19 +255,19 @@ class PlanCommitConcurrencyRedesignTest {
      */
     @Test
     void c2_infeasible_decode_eviction_retries_and_tags_capacity_reason() throws Exception {
-        SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.DECODE_RESERVED);
+        SchedulingTestConfig.allowVictim(config, VictimStage.DECODE_RESERVED);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (4));
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
         // Four same-priority (50) reservations: slotDeficit=1, but no
         // strictly-lower-priority candidate → planDecode is INFEASIBLE.
         for (long id = 801; id <= 804; id++) {
-            decodeEp.reserve(id, 128, 136, 50);
+            decodeEp.reserve(String.valueOf(id), 128, 136, 50);
         }
         // Router reports a decode-capacity failure (8403) → Phase 4 eviction path
         when(router.route(any(BalanceContext.class)))
                 .thenReturn(Response.error(StrategyErrorType.NO_DECODE_WORKER));
 
-        Response response = scheduler.submit(context(200)).get(2, TimeUnit.SECONDS);
+        Response response = scheduler.submit(context("200")).get(2, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode(), response.getCode());
@@ -283,7 +287,7 @@ class PlanCommitConcurrencyRedesignTest {
     @Test
     void a1_orphan_decode_reservation_is_reclaimed_by_cleanup() throws Exception {
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
-        decodeEp.reserve(888, 128, 136); // orphan: never inflight-registered
+        decodeEp.reserve("888", 128, 136); // orphan: never inflight-registered
         assertEquals(1, decodeEp.getInflightCount());
 
         config.queueScheduler().getLifecycle().setStaleInflightTimeoutMs(0);
@@ -291,7 +295,7 @@ class PlanCommitConcurrencyRedesignTest {
         scheduler.cleanupInflight();
 
         // finishYieldedById on an unknown id must remain a no-op either way
-        scheduler.finishYieldedById(888, "stale victim settle");
+        scheduler.finishYieldedById("888", "stale victim settle");
 
         assertEquals(0, decodeEp.getInflightCount(),
                 "orphan reservation must be reclaimed by cleanupInflight");
@@ -302,7 +306,7 @@ class PlanCommitConcurrencyRedesignTest {
 
     @Test
     void b1_preexpired_priority_request_preserves_admission_contract() throws Exception {
-        BalanceContext ctx = context(300);
+        BalanceContext ctx = context("300");
         ctx.setSchedulingMetadata(SchedulingMetadata.explicit(
                 50, System.currentTimeMillis() - 1_000));
 
@@ -319,11 +323,11 @@ class PlanCommitConcurrencyRedesignTest {
 
     @Test
     void d1_infeasible_log_carries_phase_and_candidate_counters() throws Exception {
-        SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.DECODE_RESERVED);
+        SchedulingTestConfig.allowVictim(config, VictimStage.DECODE_RESERVED);
         config.getRouter().getRoles().getDecode().getAvailability().setMaxEngineRequests((long) (4));
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
         for (long id = 811; id <= 814; id++) {
-            decodeEp.reserve(id, 128, 136, 50);
+            decodeEp.reserve(String.valueOf(id), 128, 136, 50);
         }
         when(router.route(any(BalanceContext.class)))
                 .thenReturn(Response.error(StrategyErrorType.NO_DECODE_WORKER));
@@ -334,7 +338,7 @@ class PlanCommitConcurrencyRedesignTest {
         appender.start();
         flexlbLogger.addAppender(appender);
         try {
-            scheduler.submit(context(400)).get(2, TimeUnit.SECONDS);
+            scheduler.submit(context("400")).get(2, TimeUnit.SECONDS);
 
             List<String> messages = appender.list.stream()
                     .map(ILoggingEvent::getFormattedMessage)
@@ -367,7 +371,7 @@ class PlanCommitConcurrencyRedesignTest {
             BalanceContext ctx = inv.getArgument(0);
             if (routeCalls.incrementAndGet() == 1) {
                 // Concurrent enqueue between snapshot and commit → version bump
-                assertTrue(batcher.tryOffer(dummyItem(901)));
+                assertTrue(batcher.tryOffer(dummyItem("901")));
             }
             endpointRegistry.getDecode(DECODE_IP_PORT)
                     .reserve(ctx.getRequestId(), 128, 136,
@@ -375,7 +379,7 @@ class PlanCommitConcurrencyRedesignTest {
             return successRoute(ctx.getRequestId());
         });
 
-        Response response = scheduler.submit(context(501)).get(2, TimeUnit.SECONDS);
+        Response response = scheduler.submit(context("501")).get(2, TimeUnit.SECONDS);
 
         assertTrue(response.isSuccess());
         // Single attempt: unrelated queue mutation does not force re-route.
@@ -403,9 +407,9 @@ class PlanCommitConcurrencyRedesignTest {
         });
         // Fill the single queue slot so every tryOffer() fails
         WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
-        assertTrue(batcher.tryOffer(dummyItem(999)));
+        assertTrue(batcher.tryOffer(dummyItem("999")));
 
-        Response response = scheduler.submit(context(502)).get(2, TimeUnit.SECONDS);
+        Response response = scheduler.submit(context("502")).get(2, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
         // A legal same-priority occupant is the causal blocker.
@@ -428,13 +432,13 @@ class PlanCommitConcurrencyRedesignTest {
         SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
         WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
         PrefillQueueManager queueManager = batcher.queueManager();
-        assertTrue(batcher.tryOffer(dummyItem(601))); // victim
-        assertTrue(batcher.tryOffer(dummyItem(602))); // unrelated churn → version bump
+        assertTrue(batcher.tryOffer(dummyItem("601"))); // victim
+        assertTrue(batcher.tryOffer(dummyItem("602"))); // unrelated churn → version bump
 
         PrefillQueueManager.ReplaceOutcome outcome =
-                queueManager.tryReplaceVictimsPresent(List.of(601L), dummyItem(612));
+                queueManager.tryReplaceVictimsPresent(List.of("601"), dummyItem("612"));
         assertTrue(outcome.isSuccess());
-        assertEquals(601L, outcome.removed().get(0).requestId());
+        assertEquals("601", outcome.removed().get(0).requestId());
     }
 
     /**
@@ -447,14 +451,14 @@ class PlanCommitConcurrencyRedesignTest {
         SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
         WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
         PrefillQueueManager queueManager = batcher.queueManager();
-        assertTrue(batcher.tryOffer(dummyItem(701)));
+        assertTrue(batcher.tryOffer(dummyItem("701")));
         int depthBefore = batcher.queueSize();
 
         PrefillQueueManager.ReplaceOutcome outcome =
-                queueManager.tryReplaceVictimsPresent(List.of(777L), dummyItem(702));
+                queueManager.tryReplaceVictimsPresent(List.of("777"), dummyItem("702"));
 
         assertTrue(outcome.isVictimGone());
-        assertEquals(List.of(777L), outcome.missingVictimIds());
+        assertEquals(List.of("777"), outcome.missingVictimIds());
         assertTrue(outcome.removed().isEmpty());
         assertEquals(depthBefore, batcher.queueSize());
     }
@@ -467,14 +471,14 @@ class PlanCommitConcurrencyRedesignTest {
     @Test
     void n3_release_if_held_is_cas_style_conditional() {
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
-        decodeEp.reserve(31, 128, 136);
-        decodeEp.markQueuedPhase(31);
+        decodeEp.reserve("31", 128, 136);
+        decodeEp.markQueuedPhase("31");
 
-        assertTrue(decodeEp.releaseIfHeld(31));
+        assertTrue(decodeEp.releaseIfHeld("31"));
         assertEquals(0, decodeEp.getInflightCount());
         assertEquals(0, decodeEp.inflightHardKvReserved());
         // Reservation gone → conditional release must not double-release
-        assertFalse(decodeEp.releaseIfHeld(31));
+        assertFalse(decodeEp.releaseIfHeld("31"));
     }
 
     /**
@@ -486,16 +490,16 @@ class PlanCommitConcurrencyRedesignTest {
     @Test
     void n3_presence_decode_eviction_partial_release_keeps_freed_and_replans() {
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
-        decodeEp.reserve(41, 128, 136, 30);
-        decodeEp.markQueuedPhase(41);
+        decodeEp.reserve("41", 128, 136, 30);
+        decodeEp.markQueuedPhase("41");
         // Victim 42 no longer holds a reservation (already dispatched/settled)
 
         DecodeEndpoint.PresenceEvictionOutcome outcome =
                 decodeEp.tryReleaseVictimsIfHeldAndReserveIncoming(
-                        List.of(41L, 42L), 900, 128, 136, 70);
+                        List.of("41", "42"), "900", 128, 136, 70);
 
         assertFalse(outcome.success());
-        assertEquals(List.of(41L), outcome.freedVictimIds());
+        assertEquals(List.of("41"), outcome.freedVictimIds());
         // Freed victim stays released (no rollback), incoming not reserved
         assertEquals(0, decodeEp.getInflightCount());
         assertEquals(0, decodeEp.inflightHardKvReserved());
@@ -503,7 +507,7 @@ class PlanCommitConcurrencyRedesignTest {
 
     // ==================== helpers ====================
 
-    private BatchItem dummyItem(long requestId) {
+    private BatchItem dummyItem(String requestId) {
         Response route = successRoute(requestId);
         return new BatchItem(context(requestId), new CompletableFuture<>(), route,
                 PriorityScheduler.findServer(route, RoleType.PREFILL),
@@ -533,13 +537,12 @@ class PlanCommitConcurrencyRedesignTest {
                 .flatMap(slot -> slot.getRequestsList().stream())
                 .map(EngineRpcService.EnqueueBatchExternalInputPB::getInput)
                 .forEach(input -> response.addSuccesses(
-                        EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
-                                .setRequestId(input.getRequestId())
+                        RequestIdFixtures.write(EngineRpcService.EnqueueBatchSuccessPB.newBuilder(), RequestId.parse(input))
                                 .build()));
         return response.build();
     }
 
-    private BalanceContext context(long requestId) {
+    private BalanceContext context(String requestId) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(128);
@@ -555,9 +558,8 @@ class PlanCommitConcurrencyRedesignTest {
         return ctx;
     }
 
-    private static byte[] generateInputBytes(long requestId) {
-        EngineRpcService.GenerateInputPB input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+    private static byte[] generateInputBytes(String requestId) {
+        EngineRpcService.GenerateInputPB input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .addTokenIds(101)
                 .addTokenIds(102)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
@@ -567,7 +569,7 @@ class PlanCommitConcurrencyRedesignTest {
         return input.toByteArray();
     }
 
-    private static Response successRoute(long requestId) {
+    private static Response successRoute(String requestId) {
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(List.of(
@@ -577,7 +579,7 @@ class PlanCommitConcurrencyRedesignTest {
         return response;
     }
 
-    private static ServerStatus server(RoleType role, String ip, int httpPort, int grpcPort, long requestId) {
+    private static ServerStatus server(RoleType role, String ip, int httpPort, int grpcPort, String requestId) {
         ServerStatus status = new ServerStatus();
         status.setSuccess(true);
         status.setRole(role);

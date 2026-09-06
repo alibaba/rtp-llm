@@ -20,6 +20,7 @@ import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
@@ -67,7 +68,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
                     roleType, balanceContext);
         }
 
-        Map<String, Integer> merged = new java.util.HashMap<>(filterResult.rejections());
+        Map<String, Integer> merged = new HashMap<>(filterResult.rejections());
         hardFilterResult.rejections().forEach((k, v) -> merged.merge(k, v, Integer::sum));
         Logger.debug("Decode select failed: all filtered out, request_id={}, rejections={}",
                 balanceContext.getRequestId(), merged);
@@ -83,7 +84,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             return new EndpointFilterResult(new ArrayList<>(), Map.of("NO_REGISTERED", 1), 0);
         }
         List<DecodeEndpoint> result = new ArrayList<>(engineWorkerStatus.getModelWorkerCapacity(roleType));
-        Map<String, Integer> rejections = new java.util.HashMap<>();
+        Map<String, Integer> rejections = new HashMap<>();
         int registered = engineWorkerStatus.forEachModelWorkerEndpoint(roleType, group, (ipPort, ep) -> {
             if (!(ep instanceof DecodeEndpoint de)) {
                 return;
@@ -105,7 +106,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
     }
 
     @Override
-    public void rollBack(WorkerEndpoint ep, long requestId) {
+    public void rollBack(WorkerEndpoint ep, String requestId) {
         Logger.debug("Decode rollBack - ip: {}, requestId: {}", ep.ipPort(), requestId);
 
         if (ep instanceof DecodeEndpoint de) {
@@ -140,7 +141,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         long avgCacheUsed = sumCacheUsed / n;
 
         List<DecodeEndpoint> survivors = new ArrayList<>(n);
-        Map<String, Integer> rejections = new java.util.HashMap<>();
+        Map<String, Integer> rejections = new HashMap<>();
         for (int i = 0; i < n; i++) {
             DecodeEndpoint ep = eligible.get(i);
             long availableKv = ep.realKvAvailable();
@@ -232,7 +233,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
     private ServerStatus buildServerStatus(DecodeEndpoint optimalEndpoint, long seqLen,
                                            long declaredOutputTokens, RoleType roleType,
                                            BalanceContext balanceContext) {
-        long requestId = balanceContext.getRequestId();
+        String requestId = balanceContext.getRequestId();
         ServerStatus result = new ServerStatus();
         try {
             // All schedule modes (BATCH, DIRECT, QUEUE) reserve decode KV to prevent

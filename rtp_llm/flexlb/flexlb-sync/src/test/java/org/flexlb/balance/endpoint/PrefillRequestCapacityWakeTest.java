@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -39,15 +40,15 @@ class PrefillRequestCapacityWakeTest {
                     @Override public void onDeliveryFailure(BatchItem item, Throwable error) { }
                 }, mock(BatchSchedulerReporter.class));
         try {
-            assertTrue(endpoint.tryCommitRequest(1, 10, 1));
+            assertTrue(endpoint.tryCommitRequest("1", 10, 1));
             assertEquals(0, endpoint.availableRequestSlots(1));
 
             long beforeOfferVersion = endpoint.getBatcher().queueVersion();
-            assertTrue(endpoint.getBatcher().tryOffer(batchItem(2)));
+            assertTrue(endpoint.getBatcher().tryOffer(batchItem("2")));
             awaitTrue(() -> endpoint.getBatcher().queueVersion() > beforeOfferVersion + 1);
             assertEquals(1, delivered.getCount());
 
-            assertTrue(endpoint.releaseRequest(1));
+            assertTrue(endpoint.releaseRequest("1"));
             assertTrue(delivered.await(2, TimeUnit.SECONDS),
                     "releaseRequest must signal the ready-only worker after leaving its stripe");
         } finally {
@@ -76,7 +77,7 @@ class PrefillRequestCapacityWakeTest {
         return status;
     }
 
-    private static BatchItem batchItem(long requestId) {
+    private static BatchItem batchItem(String requestId) {
         long now = System.currentTimeMillis();
         Request request = new Request();
         request.setRequestId(requestId);
@@ -90,7 +91,7 @@ class PrefillRequestCapacityWakeTest {
                 null, null, null, null, now);
     }
 
-    private static void awaitTrue(java.util.function.BooleanSupplier condition)
+    private static void awaitTrue(BooleanSupplier condition)
             throws InterruptedException {
         long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
         while (!condition.getAsBoolean() && System.nanoTime() < deadlineNanos) {

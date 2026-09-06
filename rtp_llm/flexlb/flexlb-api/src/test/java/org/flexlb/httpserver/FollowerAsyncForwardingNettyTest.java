@@ -8,9 +8,11 @@ import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.service.RouteService;
@@ -18,6 +20,7 @@ import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
+import org.flexlb.service.optimizer.OptimizerClient;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -106,7 +109,7 @@ class FollowerAsyncForwardingNettyTest {
         try (SlowMaster master = SlowMaster.start(REQUEST_COUNT);
              Follower follower = Follower.start(master.httpAddress(), REQUEST_COUNT);
              Client client = Client.connect(follower.grpcPort())) {
-            client.warmUp(WARMUP_REQUEST_ID);
+            client.warmUp(String.valueOf(WARMUP_REQUEST_ID));
             awaitCondition(
                     () -> follower.activeRequests.getCount() == 0,
                     Duration.ofSeconds(2),
@@ -115,7 +118,7 @@ class FollowerAsyncForwardingNettyTest {
             long trafficStartNanos = System.nanoTime();
             for (int index = 0; index < REQUEST_COUNT; index++) {
                 paceUntil(trafficStartNanos, index);
-                client.schedule(FIRST_REQUEST_ID + index);
+                client.schedule(String.valueOf(FIRST_REQUEST_ID + index));
             }
 
             try {
@@ -174,7 +177,7 @@ class FollowerAsyncForwardingNettyTest {
                      master.httpAddress(), EXECUTOR_QUEUE_SIZE);
              BenchmarkClient client = BenchmarkClient.connect(
                      follower.grpcPort(), REQUEST_COUNT)) {
-            client.warmUp(WARMUP_REQUEST_ID);
+            client.warmUp(String.valueOf(WARMUP_REQUEST_ID));
             awaitCondition(
                     () -> follower.activeRequests.getCount() == 0,
                     Duration.ofSeconds(2),
@@ -192,7 +195,7 @@ class FollowerAsyncForwardingNettyTest {
             try {
                 for (int index = 0; index < REQUEST_COUNT; index++) {
                     paceUntil(trafficStartNanos, index);
-                    client.schedule(FIRST_REQUEST_ID + index, index);
+                    client.schedule(String.valueOf(FIRST_REQUEST_ID + index), index);
                 }
                 issuanceEndNanos = System.nanoTime();
                 allTerminated = client.awaitTerminals(Duration.ofSeconds(45));
@@ -316,7 +319,7 @@ class FollowerAsyncForwardingNettyTest {
         return -1L;
     }
 
-    private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(long requestId) {
+    private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(String requestId) {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(requestId)
                 .setSeqLen(1024)
@@ -326,8 +329,8 @@ class FollowerAsyncForwardingNettyTest {
 
     private static final class SlowMaster implements AutoCloseable {
         private final CountDownLatch slowRequests;
-        private final Map<Long, AtomicInteger> requestCounts = new ConcurrentHashMap<>();
-        private final Map<Long, Integer> forwardHops = new ConcurrentHashMap<>();
+        private final Map<String, AtomicInteger> requestCounts = new ConcurrentHashMap<>();
+        private final Map<String, Integer> forwardHops = new ConcurrentHashMap<>();
         private final Queue<PendingResponse> pendingResponses = new ConcurrentLinkedQueue<>();
         private final AtomicBoolean responsesReleased = new AtomicBoolean(false);
         private final Server server;
@@ -343,14 +346,14 @@ class FollowerAsyncForwardingNettyTest {
                                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
                                 StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB>
                                         responseObserver) {
-                            if (request.getRequestId() == WARMUP_REQUEST_ID) {
+                            if (RequestId.parse(request).equals(String.valueOf(WARMUP_REQUEST_ID))) {
                                 respond(responseObserver);
                                 return;
                             }
                             requestCounts.computeIfAbsent(
-                                    request.getRequestId(), ignored -> new AtomicInteger())
+                                    RequestId.parse(request), ignored -> new AtomicInteger())
                                     .incrementAndGet();
-                            forwardHops.put(request.getRequestId(), request.getForwardHop());
+                            forwardHops.put(RequestId.parse(request), request.getForwardHop());
                             pendingResponses.add(new PendingResponse(responseObserver));
                             slowRequests.countDown();
                             if (responsesReleased.get()) {
@@ -387,9 +390,9 @@ class FollowerAsyncForwardingNettyTest {
                  requestId < FIRST_REQUEST_ID + REQUEST_COUNT;
                  requestId++) {
                 assertEquals(1, requestCounts.getOrDefault(
-                                requestId, new AtomicInteger()).get(),
+                                String.valueOf(requestId), new AtomicInteger()).get(),
                         "Master received a missing or duplicate request_id=" + requestId);
-                assertEquals(1, forwardHops.getOrDefault(requestId, -1),
+                assertEquals(1, forwardHops.getOrDefault(String.valueOf(requestId), -1),
                         "forward_hop must be incremented exactly once for request_id="
                                 + requestId);
             }
@@ -431,7 +434,7 @@ class FollowerAsyncForwardingNettyTest {
 
     private static final class DelayedMaster implements AutoCloseable {
         private final long responseDelayMs;
-        private final Map<Long, AtomicInteger> requestCounts = new ConcurrentHashMap<>();
+        private final Map<String, AtomicInteger> requestCounts = new ConcurrentHashMap<>();
         private final AtomicInteger receivedRequests = new AtomicInteger();
         private final AtomicInteger duplicateRequests = new AtomicInteger();
         private final AtomicInteger invalidForwardHops = new AtomicInteger();
@@ -450,12 +453,12 @@ class FollowerAsyncForwardingNettyTest {
                                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
                                 StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB>
                                         responseObserver) {
-                            if (request.getRequestId() == WARMUP_REQUEST_ID) {
+                            if (RequestId.parse(request).equals(String.valueOf(WARMUP_REQUEST_ID))) {
                                 SlowMaster.respond(responseObserver);
                                 return;
                             }
                             int occurrences = requestCounts.computeIfAbsent(
-                                            request.getRequestId(), ignored -> new AtomicInteger())
+                                            RequestId.parse(request), ignored -> new AtomicInteger())
                                     .incrementAndGet();
                             receivedRequests.incrementAndGet();
                             if (occurrences > 1) {
@@ -559,8 +562,8 @@ class FollowerAsyncForwardingNettyTest {
                     mock(BatchSchedulerReporter.class),
                     mock(ServerScheduleLatencyRecorder.class),
                     mock(PrioritySchedulerReporter.class),
-                    mock(org.flexlb.cache.match.CacheAwareService.class),
-                    mock(org.flexlb.service.optimizer.OptimizerClient.class));
+                    mock(CacheAwareService.class),
+                    mock(OptimizerClient.class));
 
             requestExecutor = new ThreadPoolExecutor(
                     EXECUTOR_CORE_SIZE,
@@ -631,8 +634,8 @@ class FollowerAsyncForwardingNettyTest {
         private final FlexlbServiceGrpc.FlexlbServiceStub asyncStub;
         private final FlexlbServiceGrpc.FlexlbServiceBlockingStub blockingStub;
         private final CountDownLatch terminals = new CountDownLatch(REQUEST_COUNT);
-        private final Map<Long, AtomicInteger> responseCounts = new ConcurrentHashMap<>();
-        private final Map<Long, AtomicInteger> completionCounts = new ConcurrentHashMap<>();
+        private final Map<String, AtomicInteger> responseCounts = new ConcurrentHashMap<>();
+        private final Map<String, AtomicInteger> completionCounts = new ConcurrentHashMap<>();
         private final Queue<Throwable> errors = new ConcurrentLinkedQueue<>();
 
         private Client(int grpcPort) {
@@ -648,14 +651,14 @@ class FollowerAsyncForwardingNettyTest {
             return new Client(grpcPort);
         }
 
-        void warmUp(long requestId) {
+        void warmUp(String requestId) {
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB response = blockingStub
                     .withDeadlineAfter(5, TimeUnit.SECONDS)
                     .schedule(request(requestId));
             assertTrue(response.getSuccess());
         }
 
-        void schedule(long requestId) {
+        void schedule(String requestId) {
             asyncStub.withDeadlineAfter(30, TimeUnit.SECONDS)
                     .schedule(request(requestId), new StreamObserver<>() {
                         @Override
@@ -697,11 +700,11 @@ class FollowerAsyncForwardingNettyTest {
                  requestId < FIRST_REQUEST_ID + REQUEST_COUNT;
                  requestId++) {
                 assertEquals(1, responseCounts.getOrDefault(
-                                requestId, new AtomicInteger()).get(),
+                                String.valueOf(requestId), new AtomicInteger()).get(),
                         "client received a missing or duplicate response for request_id="
                                 + requestId);
                 assertEquals(1, completionCounts.getOrDefault(
-                                requestId, new AtomicInteger()).get(),
+                                String.valueOf(requestId), new AtomicInteger()).get(),
                         "client received a missing or duplicate completion for request_id="
                                 + requestId);
             }
@@ -749,14 +752,14 @@ class FollowerAsyncForwardingNettyTest {
             return new BenchmarkClient(grpcPort, requestCount);
         }
 
-        void warmUp(long requestId) {
+        void warmUp(String requestId) {
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB response = blockingStub
                     .withDeadlineAfter(5, TimeUnit.SECONDS)
                     .schedule(request(requestId));
             assertTrue(response.getSuccess());
         }
 
-        void schedule(long requestId, int requestIndex) {
+        void schedule(String requestId, int requestIndex) {
             requestStartedNanos[requestIndex] = System.nanoTime();
             long deadlineMs = Math.max(30_000L, LEADER_DELAY_MS * 5L);
             asyncStub.withDeadlineAfter(deadlineMs, TimeUnit.MILLISECONDS)

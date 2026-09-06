@@ -281,11 +281,11 @@ public class WorkerBatcher {
     // ==================== priority scheduling queue operations ====================
 
     /** Idempotently remove queued requests during cancellation or expiration. */
-    List<BatchItem> tryRemove(List<Long> requestIds, String reason) {
+    List<BatchItem> tryRemove(List<String> requestIds, String reason) {
         queueLock.lock();
         try {
             List<BatchItem> removed = new ArrayList<>(requestIds.size());
-            for (long requestId : requestIds) {
+            for (String requestId : requestIds) {
                 BatchItem item = findQueued(requestId);
                 if (item != null && ctx.remove(item)) {
                     removed.add(item);
@@ -301,7 +301,7 @@ public class WorkerBatcher {
         }
     }
 
-    private BatchItem findQueued(long requestId) {
+    private BatchItem findQueued(String requestId) {
         return ctx.findQueued(requestId);
     }
 
@@ -318,7 +318,7 @@ public class WorkerBatcher {
      * not abort the commit.
      */
     PrefillQueueManager.ReplaceOutcome tryReplaceVictimsPresent(
-            List<Long> victimIds, BatchItem incoming) {
+            List<String> victimIds, BatchItem incoming) {
         queueLock.lock();
         try {
             if (stopped) {
@@ -326,8 +326,8 @@ public class WorkerBatcher {
                 return PrefillQueueManager.ReplaceOutcome.victimGone(List.copyOf(victimIds));
             }
             List<BatchItem> present = new ArrayList<>(victimIds.size());
-            List<Long> missing = new ArrayList<>();
-            for (long victimId : victimIds) {
+            List<String> missing = new ArrayList<>();
+            for (String victimId : victimIds) {
                 BatchItem victim = findQueued(victimId);
                 if (victim == null) {
                     missing.add(victimId);

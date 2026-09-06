@@ -42,7 +42,7 @@ public class RandomStrategy implements LoadBalanceStrategy {
     }
 
     @Override
-    public void rollBack(WorkerEndpoint ep, long requestId) {
+    public void rollBack(WorkerEndpoint ep, String requestId) {
         if (ep instanceof DecodeEndpoint decodeEndpoint) {
             Logger.debug("Random decode rollBack - ip: {}, requestId: {}",
                     decodeEndpoint.ipPort(), requestId);
@@ -99,7 +99,7 @@ public class RandomStrategy implements LoadBalanceStrategy {
     private ServerStatus buildServerStatus(WorkerEndpoint ep, RoleType roleType,
                                            BalanceContext balanceContext,
                                            FlexlbConfig config) {
-        long requestId = balanceContext.getRequestId();
+        String requestId = balanceContext.getRequestId();
         ServerStatus result = new ServerStatus();
         try {
             result.setServerIp(ep.getIp());

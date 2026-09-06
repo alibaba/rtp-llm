@@ -24,7 +24,7 @@ public interface InflightRegistrar {
 
     /** Whether the exact public future has crossed the inflight handoff. */
     default boolean isInflightGeneration(
-            long requestId, CompletableFuture<?> future) {
+            String requestId, CompletableFuture<?> future) {
         return false;
     }
 
@@ -32,7 +32,7 @@ public interface InflightRegistrar {
      * Request-scoped admission gate used by asynchronous cancel coordination.
      * Implementations may close it before the public future is published.
      */
-    default boolean isAdmissionOpen(long requestId, CompletableFuture<?> future) {
+    default boolean isAdmissionOpen(String requestId, CompletableFuture<?> future) {
         return !future.isDone();
     }
 
@@ -42,13 +42,13 @@ public interface InflightRegistrar {
      * cancellation is accepted as pending rather than falsely terminal.
      */
     default boolean claimAdmissionMutation(
-            long requestId, CompletableFuture<?> future) {
+            String requestId, CompletableFuture<?> future) {
         return isAdmissionOpen(requestId, future);
     }
 
     /** Release the matching mutation after its external side effects settle. */
     default void completeAdmissionMutation(
-            long requestId, CompletableFuture<?> future) {
+            String requestId, CompletableFuture<?> future) {
     }
 
     /**
@@ -113,7 +113,7 @@ public interface InflightRegistrar {
      * is not inflight — the victim already reached a terminal state;
      * idempotent like {@code finishPreempted}.
      */
-    void finishPreemptedById(long requestId, String detail);
+    void finishPreemptedById(String requestId, String detail);
 
     /**
      * Drive a yielded victim — one the engine never saw (prefill queue
@@ -129,35 +129,35 @@ public interface InflightRegistrar {
      * reserved-only victims whose {@code BatchItem} is not at hand. No-op
      * when the id is not inflight; idempotent like {@code finishYielded}.
      */
-    void finishYieldedById(long requestId, String detail);
+    void finishYieldedById(String requestId, String detail);
 
     /** Atomically attach one victim to a token before endpoint mutation. */
-    boolean claimForPreemption(long requestId, long attemptToken, String detail);
+    boolean claimForPreemption(String requestId, long attemptToken, String detail);
 
     /** Roll back a claim when no Cancel RPC has been issued. */
-    boolean releasePreemptionClaim(long requestId, long attemptToken);
+    boolean releasePreemptionClaim(String requestId, long attemptToken);
 
     /** CLAIMED -> CANCEL_IN_FLIGHT; called for every victim before the first RPC. */
-    boolean markPreemptionCancelInFlight(long requestId, long attemptToken);
+    boolean markPreemptionCancelInFlight(String requestId, long attemptToken);
 
     /** Cancel ACCEPTED; does not complete the victim or release resources. */
-    boolean markPreemptionCancelAccepted(long requestId, long attemptToken);
+    boolean markPreemptionCancelAccepted(String requestId, long attemptToken);
 
     /** Explicit negative acknowledgement; keeps a stale reconciliation fence. */
-    boolean markPreemptionNotFound(long requestId, long attemptToken);
+    boolean markPreemptionNotFound(String requestId, long attemptToken);
 
     /** Transport result unknown; preserves attribution and accounting. */
-    boolean markPreemptionUnknown(long requestId, long attemptToken);
+    boolean markPreemptionUnknown(String requestId, long attemptToken);
 
     /**
      * Signal completed only by original-Prefill WorkerStatus carrying
      * priority_preemption_progress=CANCELED and exact code 8429.
      */
     CompletableFuture<PriorityCanceledObservation> priorityCanceledSignal(
-            long requestId, long attemptToken);
+            String requestId, long attemptToken);
 
     /** Token-fenced terminal settlement after the endpoint accounting CAS wins. */
-    boolean finishPreemptedById(long requestId, long attemptToken, String detail);
+    boolean finishPreemptedById(String requestId, long attemptToken, String detail);
 
     /**
      * Token-fenced settlement for an engine {@code TOMBSTONED} acknowledgement.
@@ -165,19 +165,19 @@ public interface InflightRegistrar {
      * not wait for WorkerStatus: the engine atomically proved absence and
      * fenced every racing late enqueue for the same request id.
      */
-    boolean finishTombstonedById(long requestId, long attemptToken, String detail);
+    boolean finishTombstonedById(String requestId, long attemptToken, String detail);
 
     /** Fresh active observation reopens a NOT_FOUND_STALE victim. */
-    boolean reconcilePreemptionActive(long requestId);
+    boolean reconcilePreemptionActive(String requestId);
 
     /**
      * Resolve the original Prefill route from the authoritative inflight
      * entry. Returning {@code null} means the request is no longer inflight or
      * its Prefill route is unavailable.
      */
-    EngineCancelChannel.CancelTarget resolveCancelTarget(long requestId);
+    EngineCancelChannel.CancelTarget resolveCancelTarget(String requestId);
 
-    record PriorityCanceledObservation(long requestId, long errorCode) {
+    record PriorityCanceledObservation(String requestId, long errorCode) {
     }
 
     enum PostDeliveryFenceResult {

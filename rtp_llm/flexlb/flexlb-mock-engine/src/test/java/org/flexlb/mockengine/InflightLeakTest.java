@@ -139,7 +139,7 @@ class InflightLeakTest {
         for (int i = 0; i < n; i++) {
             JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(i % 2);
             int decodePort = decodeServices.get(i % 2).getGrpcPort();
-            EngineRpcService.GenerateInputPB input = inputWithDecode(i + 1, 10, decodePort);
+            EngineRpcService.GenerateInputPB input = inputWithDecode(String.valueOf(i + 1), 10, decodePort);
             EngineRpcService.EnqueueBatchResponsePB response =
                     enqueue(prefill, batch(3000 + i, slot(0, input)));
             totalErrors += response.getErrorsCount();
@@ -212,7 +212,7 @@ class InflightLeakTest {
         // Enqueue 10 requests without decode routing (prefill-only, stays in-flight)
         EngineRpcService.GenerateInputPB[] inputs = new EngineRpcService.GenerateInputPB[n];
         for (int i = 0; i < n; i++) {
-            inputs[i] = input(i + 1, 10);
+            inputs[i] = input(String.valueOf(i + 1), 10);
         }
         enqueue(prefill, batch(5000, slot(0, inputs)));
 
@@ -263,12 +263,12 @@ class InflightLeakTest {
 
         // Path A: enqueueBatch → schedulePrefillCompletion → prefill done
         //         → startDecode → decode.scheduleDecodeCompletion
-        EngineRpcService.GenerateInputPB inputA = inputWithDecode(requestId, 10, decodePort);
+        EngineRpcService.GenerateInputPB inputA = inputWithDecode(String.valueOf(requestId), 10, decodePort);
         enqueue(prefill, batch(7000, slot(0, inputA)));
 
         // Path B: generateStreamCall on the decode engine with the SAME requestId
         //         → decode.scheduleDecodeCompletion (immediate)
-        EngineRpcService.GenerateInputPB inputB = input(requestId, 10);
+        EngineRpcService.GenerateInputPB inputB = input(String.valueOf(requestId), 10);
         generateStream(decode, inputB);
 
         // Wait for all inflight to drain (prefill 500ms + decode 1000ms + margin)
@@ -385,7 +385,7 @@ class InflightLeakTest {
         EngineRpcService.GenerateInputPB[] inputs = new EngineRpcService.GenerateInputPB[count];
         for (int i = 0; i < count; i++) {
             int decodePort = decodeEngines.get(i % decodeEngines.size()).getGrpcPort();
-            inputs[i] = inputWithDecode(startRequestId + i, 10, decodePort);
+            inputs[i] = inputWithDecode(String.valueOf(startRequestId + i), 10, decodePort);
         }
         enqueue(prefill, batch(batchId, slot(0, inputs)));
     }
@@ -437,9 +437,8 @@ class InflightLeakTest {
 
     // ──────────── Protobuf builders ────────────
 
-    private static EngineRpcService.GenerateInputPB input(long requestId, int inputTokens) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+    private static EngineRpcService.GenerateInputPB input(String requestId, int inputTokens) {
+        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(1)
                         .build());
@@ -450,9 +449,8 @@ class InflightLeakTest {
     }
 
     private static EngineRpcService.GenerateInputPB inputWithDecode(
-            long requestId, int inputTokens, int decodePort) {
-        EngineRpcService.GenerateInputPB.Builder input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+            String requestId, int inputTokens, int decodePort) {
+        EngineRpcService.GenerateInputPB.Builder input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(1)
                         .addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()

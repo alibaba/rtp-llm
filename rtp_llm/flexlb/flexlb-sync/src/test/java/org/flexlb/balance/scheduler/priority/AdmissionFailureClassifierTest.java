@@ -15,7 +15,7 @@ class AdmissionFailureClassifierTest {
     @Test
     void confirmedOccupantWithoutPriorityProvenanceIsAdmissionUnavailable() {
         DecodeRequestSnapshot unattributed = request(
-                1, 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 128, false, false);
+                "1", 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 128, false, false);
         DecodeEndpointSnapshot endpoint = endpoint(
                 1, 1, 1_000, 2_000, List.of(), List.of(unattributed), List.of());
 
@@ -29,7 +29,7 @@ class AdmissionFailureClassifierTest {
     @Test
     void queuedReservationDoesNotExplainEngineSlotDeficit() {
         DecodeRequestSnapshot higherQueued = request(
-                1, 70, DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED,
+                "1", 70, DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED,
                 0, true, true);
         DecodeEndpointSnapshot endpoint = endpoint(
                 1, 1, 1_000, 2_000,
@@ -45,7 +45,7 @@ class AdmissionFailureClassifierTest {
     @Test
     void validPriorityValueWithoutProvenanceIsNotTrusted() {
         DecodeRequestSnapshot untrustedP70 = request(
-                1, 70, DecodeTaskPhase.RUNNING, 0, false, false);
+                "1", 70, DecodeTaskPhase.RUNNING, 0, false, false);
         DecodeEndpointSnapshot endpoint = endpoint(
                 1, 1, 1_000, 2_000,
                 List.of(), List.of(), List.of(untrustedP70));
@@ -60,10 +60,10 @@ class AdmissionFailureClassifierTest {
     @Test
     void higherPriorityOnSlotDoesNotExplainKvOnlyDeficit() {
         DecodeRequestSnapshot higherAccepted = request(
-                1, 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
+                "1", 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
                 0, true, false);
         DecodeRequestSnapshot sameQueued = request(
-                2, 50, DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED,
+                "2", 50, DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED,
                 256, true, true);
         DecodeEndpointSnapshot endpoint = endpoint(
                 1, 0, 0, 2_000,
@@ -79,7 +79,7 @@ class AdmissionFailureClassifierTest {
     @Test
     void queuedReservationWithoutPriorityProvenanceCanExplainKvDeficit() {
         DecodeRequestSnapshot unattributedQueued = request(
-                1, 50, DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED,
+                "1", 50, DecodeTaskPhase.MASTER_QUEUED_NOT_DISPATCHED,
                 512, false, true);
         DecodeEndpointSnapshot endpoint = endpoint(
                 1, 0, 0, 2_000,
@@ -95,9 +95,9 @@ class AdmissionFailureClassifierTest {
     @Test
     void unattributedOccupantOnResidualDimensionOverridesKnownPriorityLabel() {
         DecodeRequestSnapshot unattributed = request(
-                1, 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 0, false, false);
+                "1", 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 0, false, false);
         DecodeRequestSnapshot higher = request(
-                2, 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 0, true, false);
+                "2", 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 0, true, false);
         DecodeEndpointSnapshot endpoint = endpoint(
                 "decode-1", 2, 2, 1_000, 2_000,
                 List.of(), List.of(unattributed, higher), List.of());
@@ -112,9 +112,9 @@ class AdmissionFailureClassifierTest {
     @Test
     void knownHigherSlotCapacityWinsWhenItFullyCoversResidual() {
         DecodeRequestSnapshot unattributed = request(
-                1, 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 0, false, false);
+                "1", 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 0, false, false);
         DecodeRequestSnapshot higher = request(
-                2, 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 0, true, false);
+                "2", 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 0, true, false);
         DecodeEndpointSnapshot endpoint = endpoint(
                 "decode-1", 2, 2, 2, 1_000, 2_000,
                 List.of(), List.of(unattributed, higher), List.of());
@@ -129,11 +129,11 @@ class AdmissionFailureClassifierTest {
     @Test
     void knownHigherAndSameSlotsTogetherCoverResidualDespiteUnattributedOccupant() {
         DecodeRequestSnapshot unattributed = request(
-                1, 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 0, false, false);
+                "1", 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 0, false, false);
         DecodeRequestSnapshot higher = request(
-                2, 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 0, true, false);
+                "2", 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 0, true, false);
         DecodeRequestSnapshot same = request(
-                3, 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 0, true, false);
+                "3", 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 0, true, false);
         DecodeEndpointSnapshot endpoint = endpoint(
                 "decode-1", 3, 3, 2, 1_000, 2_000,
                 List.of(), List.of(unattributed, higher, same), List.of());
@@ -148,9 +148,9 @@ class AdmissionFailureClassifierTest {
     @Test
     void knownSameKvCapacityWinsWhenItFullyCoversResidual() {
         DecodeRequestSnapshot unattributed = request(
-                1, 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 256, false, false);
+                "1", 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 256, false, false);
         DecodeRequestSnapshot same = request(
-                2, 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 256, true, false);
+                "2", 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 256, true, false);
         DecodeEndpointSnapshot endpoint = endpoint(
                 "decode-1", 0, 0, 0, 2_000,
                 List.of(), List.of(unattributed, same), List.of());
@@ -165,9 +165,9 @@ class AdmissionFailureClassifierTest {
     @Test
     void unattributedKvIsCausalWhenKnownProtectedKvCannotCoverResidual() {
         DecodeRequestSnapshot unattributed = request(
-                1, 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 128, false, false);
+                "1", 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 128, false, false);
         DecodeRequestSnapshot higher = request(
-                2, 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 64, true, false);
+                "2", 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 64, true, false);
         DecodeEndpointSnapshot endpoint = endpoint(
                 "decode-1", 0, 0, 0, 2_000,
                 List.of(), List.of(unattributed, higher), List.of());
@@ -182,11 +182,11 @@ class AdmissionFailureClassifierTest {
     @Test
     void knownHigherAndSameKvTogetherCoverResidualDespiteUnattributedOccupant() {
         DecodeRequestSnapshot unattributed = request(
-                1, 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 128, false, false);
+                "1", 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 128, false, false);
         DecodeRequestSnapshot higher = request(
-                2, 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 64, true, false);
+                "2", 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 64, true, false);
         DecodeRequestSnapshot same = request(
-                3, 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 64, true, false);
+                "3", 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING, 64, true, false);
         DecodeEndpointSnapshot endpoint = endpoint(
                 "decode-1", 0, 0, 0, 2_000,
                 List.of(), List.of(unattributed, higher, same), List.of());
@@ -202,11 +202,11 @@ class AdmissionFailureClassifierTest {
     void differingEndpointCausesFallBackToResourceExhausted() {
         DecodeEndpointSnapshot higher = endpoint(
                 "decode-higher", 1, 1, 1_000, 2_000, List.of(),
-                List.of(request(1, 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
+                List.of(request("1", 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
                         0, true, false)), List.of());
         DecodeEndpointSnapshot same = endpoint(
                 "decode-same", 1, 1, 1_000, 2_000, List.of(),
-                List.of(request(2, 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
+                List.of(request("2", 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
                         0, true, false)), List.of());
 
         AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
@@ -220,11 +220,11 @@ class AdmissionFailureClassifierTest {
     void oneEndpointWithUnattributedBlockerMakesClusterAttributionUnavailable() {
         DecodeEndpointSnapshot unattributed = endpoint(
                 "decode-unattributed", 1, 1, 1_000, 2_000, List.of(),
-                List.of(request(1, 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
+                List.of(request("1", 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
                         0, false, false)), List.of());
         DecodeEndpointSnapshot higher = endpoint(
                 "decode-higher", 1, 1, 1_000, 2_000, List.of(),
-                List.of(request(2, 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
+                List.of(request("2", 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
                         0, true, false)), List.of());
 
         AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
@@ -238,7 +238,7 @@ class AdmissionFailureClassifierTest {
     void unattributedEndpointDominatesEndpointWithSnapshotCapacity() {
         DecodeEndpointSnapshot unattributed = endpoint(
                 "decode-unattributed", 1, 1, 1_000, 2_000, List.of(),
-                List.of(request(1, 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
+                List.of(request("1", 50, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
                         0, false, false)), List.of());
         DecodeEndpointSnapshot snapshotHasCapacity = endpoint(
                 "decode-capacity", 0, 0, 1_000, 2_000,
@@ -255,11 +255,11 @@ class AdmissionFailureClassifierTest {
     void unanimousEndpointCauseRemainsTyped() {
         DecodeEndpointSnapshot first = endpoint(
                 "decode-1", 1, 1, 1_000, 2_000, List.of(),
-                List.of(request(1, 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
+                List.of(request("1", 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
                         0, true, false)), List.of());
         DecodeEndpointSnapshot second = endpoint(
                 "decode-2", 1, 1, 1_000, 2_000, List.of(),
-                List.of(request(2, 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
+                List.of(request("2", 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
                         0, true, false)), List.of());
 
         AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
@@ -287,11 +287,11 @@ class AdmissionFailureClassifierTest {
     void physicallyImpossibleEndpointDoesNotManufactureUnattributedCause() {
         DecodeEndpointSnapshot tooSmallWithUnattributedOccupant = endpoint(
                 "decode-too-small", 1, 1, 0, 100, List.of(),
-                List.of(request(1, 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
+                List.of(request("1", 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
                         0, false, false)), List.of());
         DecodeEndpointSnapshot higher = endpoint(
                 "decode-higher", 1, 1, 1_000, 2_000, List.of(),
-                List.of(request(2, 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
+                List.of(request("2", 70, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
                         0, true, false)), List.of());
 
         AdmissionFailure failure = AdmissionFailureClassifier.classifyDecode(
@@ -308,7 +308,7 @@ class AdmissionFailureClassifierTest {
     void prefillWithoutSnapshotDeficitIsResourceExhausted() {
         PrefillQueueSnapshot queue = new PrefillQueueSnapshot(
                 "prefill-1", 1, 4,
-                List.of(new QueuedRequestSnapshot(1, 70, 0,
+                List.of(new QueuedRequestSnapshot("1", 70, 0,
                         128, 0, QueuedRequestSnapshot.PREFILL_QUEUED)));
 
         AdmissionFailure failure = AdmissionFailureClassifier.classifyPrefill(
@@ -322,7 +322,7 @@ class AdmissionFailureClassifierTest {
     void prefillResidualBlockedByLegacyOccupantIsAdmissionUnavailable() {
         PrefillQueueSnapshot queue = new PrefillQueueSnapshot(
                 "prefill-1", 1, 1,
-                List.of(new QueuedRequestSnapshot(1, 0, 0,
+                List.of(new QueuedRequestSnapshot("1", 0, 0,
                         128, 0, QueuedRequestSnapshot.PREFILL_QUEUED)));
 
         AdmissionFailure failure = AdmissionFailureClassifier.classifyPrefill(
@@ -337,8 +337,8 @@ class AdmissionFailureClassifierTest {
         PrefillQueueSnapshot queue = new PrefillQueueSnapshot(
                 "prefill-1", 1, 2,
                 List.of(
-                        queued(1, 70),
-                        new QueuedRequestSnapshot(2, 0, 0,
+                        queued("1", 70),
+                        new QueuedRequestSnapshot("2", 0, 0,
                                 128, 0, QueuedRequestSnapshot.PREFILL_QUEUED)));
 
         AdmissionFailure failure = AdmissionFailureClassifier.classifyPrefill(
@@ -353,8 +353,8 @@ class AdmissionFailureClassifierTest {
         PrefillQueueSnapshot queue = new PrefillQueueSnapshot(
                 "prefill-1", 1, 1,
                 List.of(
-                        queued(1, 70),
-                        new QueuedRequestSnapshot(2, 0, 0,
+                        queued("1", 70),
+                        new QueuedRequestSnapshot("2", 0, 0,
                                 128, 0, QueuedRequestSnapshot.PREFILL_QUEUED)));
 
         AdmissionFailure failure = AdmissionFailureClassifier.classifyPrefill(
@@ -369,9 +369,9 @@ class AdmissionFailureClassifierTest {
         PrefillQueueSnapshot queue = new PrefillQueueSnapshot(
                 "prefill-1", 1, 2,
                 List.of(
-                        new QueuedRequestSnapshot(1, 0, 0,
+                        new QueuedRequestSnapshot("1", 0, 0,
                                 128, 0, QueuedRequestSnapshot.PREFILL_QUEUED),
-                        queued(2, 30)));
+                        queued("2", 30)));
 
         AdmissionFailure failure = AdmissionFailureClassifier.classifyPrefill(
                 incoming(50, 128), queue);
@@ -386,8 +386,8 @@ class AdmissionFailureClassifierTest {
     void queuedTimeoutUsesHigherPriorityPrefix() {
         AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedTimeout(
                 50, List.of(
-                        queued(1, 50),
-                        queued(2, 70)));
+                        queued("1", 50),
+                        queued("2", 70)));
 
         assertFailure(failure, StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
                 AdmissionRejectReason.HIGHER_PRIORITY_AHEAD);
@@ -396,7 +396,7 @@ class AdmissionFailureClassifierTest {
     @Test
     void queuedTimeoutUsesSamePriorityFifoPrefix() {
         AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedTimeout(
-                50, List.of(queued(1, 30), queued(2, 50)));
+                50, List.of(queued("1", 30), queued("2", 50)));
 
         assertFailure(failure, StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
                 AdmissionRejectReason.SAME_PRIORITY_AHEAD);
@@ -405,7 +405,7 @@ class AdmissionFailureClassifierTest {
     @Test
     void queuedTimeoutWithoutProtectedPrefixIsResourceExhausted() {
         AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedTimeout(
-                50, List.of(queued(1, 30)));
+                50, List.of(queued("1", 30)));
 
         assertFailure(failure, StrategyErrorType.RESOURCE_EXHAUSTED,
                 AdmissionRejectReason.RESOURCE_EXHAUSTED);
@@ -414,7 +414,7 @@ class AdmissionFailureClassifierTest {
     @Test
     void queuedTimeoutWithUnattributedItemAheadIsAdmissionUnavailable() {
         AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedTimeout(
-                50, List.of(queued(1, 0)));
+                50, List.of(queued("1", 0)));
 
         assertFailure(failure, StrategyErrorType.ADMISSION_UNAVAILABLE,
                 AdmissionRejectReason.UNSPECIFIED);
@@ -423,14 +423,14 @@ class AdmissionFailureClassifierTest {
     @Test
     void queuedTimeoutUsesProvenHigherBeforeUnattributedFallback() {
         AdmissionFailure failure = AdmissionFailureClassifier.classifyQueuedTimeout(
-                50, List.of(queued(1, 0), queued(2, 70)));
+                50, List.of(queued("1", 0), queued("2", 70)));
 
         assertFailure(failure, StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
                 AdmissionRejectReason.HIGHER_PRIORITY_AHEAD);
     }
 
-    private static QueuedRequestSnapshot queued(long requestId, int priority) {
-        return new QueuedRequestSnapshot(requestId, priority, requestId,
+    private static QueuedRequestSnapshot queued(String requestId, int priority) {
+        return new QueuedRequestSnapshot(requestId, priority, Long.parseLong(requestId),
                 128, 0, QueuedRequestSnapshot.PREFILL_QUEUED);
     }
 
@@ -475,7 +475,7 @@ class AdmissionFailureClassifierTest {
                 hardKv, hardKv, reserved, accepted, running);
     }
 
-    private static DecodeRequestSnapshot request(long requestId,
+    private static DecodeRequestSnapshot request(String requestId,
                                                   int priority,
                                                   DecodeTaskPhase phase,
                                                   long kvTokens,
@@ -486,7 +486,7 @@ class AdmissionFailureClassifierTest {
     }
 
     private static PriorityRequestEnvelope incoming(int priority, long hardKvTokens) {
-        return new PriorityRequestEnvelope(999, priority, hardKvTokens, 0,
+        return new PriorityRequestEnvelope("999", priority, hardKvTokens, 0,
                 0, hardKvTokens, hardKvTokens);
     }
 

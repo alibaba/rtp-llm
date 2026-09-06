@@ -113,7 +113,7 @@ class CostBasedPrefillMultiNodeSelectionTest {
         fillQueue(w2, 30, 40, 2000);
 
         ServerStatus result = strategy.select(
-                priorityContext(9001L, 50), RoleType.PREFILL, null);
+                priorityContext("9001", 50), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.2", result.getServerIp());
@@ -130,7 +130,7 @@ class CostBasedPrefillMultiNodeSelectionTest {
         fillQueue(w2, 70, 40, 2000);
 
         ServerStatus result = strategy.select(
-                priorityContext(9002L, 50), RoleType.PREFILL, null);
+                priorityContext("9002", 50), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.0.1", result.getServerIp());
@@ -152,7 +152,7 @@ class CostBasedPrefillMultiNodeSelectionTest {
                 .thenAnswer(inv -> !"10.0.1.2".equals(
                         ((PrefillEndpoint) inv.getArgument(0)).getIp()));
 
-        ServerStatus result = strategy.select(buildContext(9101L), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext("9101"), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.1.5", result.getServerIp());
@@ -164,7 +164,7 @@ class CostBasedPrefillMultiNodeSelectionTest {
         createWorker("10.0.2.2", 0, false);
         createWorker("10.0.2.3", 0, false);
 
-        ServerStatus result = strategy.select(buildContext(9201L), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext("9201"), RoleType.PREFILL, null);
 
         assertFalse(result.isSuccess());
     }
@@ -176,7 +176,7 @@ class CostBasedPrefillMultiNodeSelectionTest {
         // 唯一存活者哪怕负载最重也必须被选中
         createWorker("10.0.3.3", 5_000, true);
 
-        ServerStatus result = strategy.select(buildContext(9301L), RoleType.PREFILL, null);
+        ServerStatus result = strategy.select(buildContext("9301"), RoleType.PREFILL, null);
 
         assertTrue(result.isSuccess());
         assertEquals("10.0.3.3", result.getServerIp());
@@ -214,7 +214,7 @@ class CostBasedPrefillMultiNodeSelectionTest {
         long now = System.currentTimeMillis();
         for (int i = 0; i < count; i++) {
             Request req = new Request();
-            req.setRequestId(idBase + i);
+            req.setRequestId(String.valueOf(idBase + i));
             req.setSeqLen(100);
             req.setPriority(priority);
             BalanceContext ctx = new BalanceContext();
@@ -228,7 +228,7 @@ class CostBasedPrefillMultiNodeSelectionTest {
                 "parked batcher queue must retain all items for " + ep.getIp());
     }
 
-    private BalanceContext priorityContext(long requestId, int priority) {
+    private BalanceContext priorityContext(String requestId, int priority) {
         BalanceContext ctx = buildContext(requestId);
         ctx.getRequest().setPriority(priority);
         long now = System.currentTimeMillis();
@@ -263,7 +263,7 @@ class CostBasedPrefillMultiNodeSelectionTest {
         return w;
     }
 
-    private BalanceContext buildContext(long requestId) {
+    private BalanceContext buildContext(String requestId) {
         Request req = new Request();
         req.setSeqLen(500);
         req.setRequestId(requestId);

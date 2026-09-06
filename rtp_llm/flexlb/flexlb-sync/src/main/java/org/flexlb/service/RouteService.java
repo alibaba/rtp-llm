@@ -120,7 +120,7 @@ public class RouteService {
         return bytes != null && bytes.length > 0;
     }
 
-    public RequestLifecycleSnapshot getRequestState(long requestId,
+    public RequestLifecycleSnapshot getRequestState(String requestId,
                                                     long expectedBatchId) {
         return priorityScheduler == null ? null
                 : priorityScheduler.getRequestState(requestId, expectedBatchId);
@@ -133,7 +133,7 @@ public class RouteService {
      * reducer there gives BATCH enqueue and QUEUE route-decision delivery the
      * same idempotency and generation-fencing semantics.</p>
      */
-    public RequestLifecycleSnapshot cancelRequest(long requestId,
+    public RequestLifecycleSnapshot cancelRequest(String requestId,
                                                    long expectedBatchId,
                                                    CancelReason reason) {
         return priorityScheduler == null ? null

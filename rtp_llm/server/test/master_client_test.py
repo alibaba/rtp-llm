@@ -254,7 +254,7 @@ class MasterClientGrpcConcurrencyTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(follower_service.schedule_requests, [])
             self.assertTrue(
                 any(
-                    request.request_id == short_request_id
+                    request.request_id == str(short_request_id)
                     for request in service.cancel_requests
                 )
             )
@@ -406,7 +406,7 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(request_pb.block_cache_keys), [1, 2, 3])
         self.assertEqual(request_pb.seq_len, 5)
         self.assertEqual(request_pb.generate_timeout, 3000)
-        self.assertEqual(request_pb.request_id, 99)
+        self.assertEqual(request_pb.request_id, "99")
         self.assertEqual(request_pb.max_new_tokens, 17)
         self.assertEqual(request_pb.num_beams, 2)
         self.assertTrue(request_pb.force_disable_sp_run)

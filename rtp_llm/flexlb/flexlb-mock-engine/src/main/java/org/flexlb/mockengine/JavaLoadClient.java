@@ -38,6 +38,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -45,7 +46,9 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 
 /**
  * Standalone Java load client (replaces the legacy Python load client).
@@ -358,7 +361,7 @@ public final class JavaLoadClient {
             try {
                 RequestResult result = futures.get(i).get(remaining, TimeUnit.NANOSECONDS);
                 results.add(result);
-            } catch (java.util.concurrent.TimeoutException e) {
+            } catch (TimeoutException e) {
                 futures.get(i).cancel(true);
                 RequestResult timeoutResult = new RequestResult();
                 timeoutResult.status = "timeout";
@@ -801,7 +804,7 @@ public final class JavaLoadClient {
             TraceRecord record, EngineRpcService.GenerateInputPB inputPb) {
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB.Builder builder =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(record.requestId)
+                .setRequestId(String.valueOf(record.requestId))
                 .setGenerateInput(inputPb.toByteString())
                 .addAllBlockCacheKeys(record.blockKeys)
                 .setSeqLen(record.inputLen)
@@ -1610,7 +1613,7 @@ public final class JavaLoadClient {
         return node;
     }
 
-    private static ObjectNode countBy(List<RequestResult> rows, java.util.function.Function<RequestResult, String> extractor) {
+    private static ObjectNode countBy(List<RequestResult> rows, Function<RequestResult, String> extractor) {
         Map<String, Integer> counts = new LinkedHashMap<>();
         for (RequestResult row : rows) {
             String value = extractor.apply(row);
@@ -1629,7 +1632,7 @@ public final class JavaLoadClient {
      * terminal status (schedule_error/exception/...).
      */
     static ObjectNode priorityBreakdown(List<RequestResult> rows) {
-        Map<Integer, int[]> counts = new java.util.TreeMap<>();
+        Map<Integer, int[]> counts = new TreeMap<>();
         Map<Integer, double[]> scheduleSums = new HashMap<>();
         for (RequestResult row : rows) {
             int[] c = counts.computeIfAbsent(row.priority, k -> new int[3]);

@@ -21,7 +21,7 @@ import org.flexlb.enums.DecodeTaskPhase;
  *                         engine concurrency slot (review P1-3)
  */
 public record DecodeRequestSnapshot(
-        long requestId,
+        String requestId,
         int priority,
         DecodeTaskPhase phase,
         long kvTokens,

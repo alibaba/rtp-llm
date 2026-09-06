@@ -10,14 +10,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class PriorityOrderingTest {
 
     private static final Comparator<Node> REFERENCE =
-            PriorityOrdering.<Node>strict().thenComparingLong(Node::requestId);
+            PriorityOrdering.<Node>strict().thenComparing(Node::requestId);
 
     @Test
     void primitiveTotalOrderMatchesStrictComparatorAcrossRandomKeys() {
         Random random = new Random(0x5EEDBEEFL);
         for (int i = 0; i < 100_000; i++) {
-            Node left = new Node(random.nextInt(), random.nextLong(), random.nextLong());
-            Node right = new Node(random.nextInt(), random.nextLong(), random.nextLong());
+            Node left = new Node(random.nextInt(), random.nextLong(), Long.toString(random.nextLong()));
+            Node right = new Node(random.nextInt(), random.nextLong(), Long.toString(random.nextLong()));
             assertEquivalent(left, right);
         }
     }
@@ -25,11 +25,11 @@ class PriorityOrderingTest {
     @Test
     void primitiveTotalOrderMatchesStrictComparatorAtNumericBoundaries() {
         Node[] boundaries = {
-                new Node(Integer.MIN_VALUE, Long.MIN_VALUE, Long.MIN_VALUE),
-                new Node(Integer.MIN_VALUE, Long.MIN_VALUE, Long.MAX_VALUE),
-                new Node(0, 0, 0),
-                new Node(Integer.MAX_VALUE, Long.MAX_VALUE, Long.MIN_VALUE),
-                new Node(Integer.MAX_VALUE, Long.MAX_VALUE, Long.MAX_VALUE)
+                new Node(Integer.MIN_VALUE, Long.MIN_VALUE, Long.toString(Long.MIN_VALUE)),
+                new Node(Integer.MIN_VALUE, Long.MIN_VALUE, Long.toString(Long.MAX_VALUE)),
+                new Node(0, 0, "0"),
+                new Node(Integer.MAX_VALUE, Long.MAX_VALUE, Long.toString(Long.MIN_VALUE)),
+                new Node(Integer.MAX_VALUE, Long.MAX_VALUE, Long.toString(Long.MAX_VALUE))
         };
         for (Node left : boundaries) {
             for (Node right : boundaries) {
@@ -49,7 +49,7 @@ class PriorityOrderingTest {
                 right.enqueueSeq(), right.requestId()));
     }
 
-    private record Node(int priority, long enqueueSeq, long requestId)
+    private record Node(int priority, long enqueueSeq, String requestId)
             implements Prioritized {
     }
 }

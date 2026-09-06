@@ -46,6 +46,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -127,22 +128,22 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     private final PriorityAdmissionScheduler admissionScheduler;
     private final EngineCancelChannel engineCancelChannel;
     private final EngineFencePolicy engineFencePolicy;
-    private final Map<Long, InflightEntry> inflight = new ConcurrentHashMap<>();
-    private final Map<Long, RequestLifecycleSnapshot> terminalStates = new ConcurrentHashMap<>();
+    private final Map<String, InflightEntry> inflight = new ConcurrentHashMap<>();
+    private final Map<String, RequestLifecycleSnapshot> terminalStates = new ConcurrentHashMap<>();
     /**
      * One request-generation gate shared by routing, admission, registration,
      * queue commit, deadline and external cancellation. It is never a global
      * hot lock, and the gate itself is the public future so no wrapper is
      * allocated on the request path.
      */
-    private final Map<Long, RequestGenerationGate> generationGates =
+    private final Map<String, RequestGenerationGate> generationGates =
             new ConcurrentHashMap<>();
     /**
      * Cold-path index for fences which exhausted their bounded fast retries.
      * Values do not retain an {@link InflightEntry}; the authoritative request
      * graph remains in {@link #inflight} until an Engine terminal proof arrives.
      */
-    private final Map<Long, EngineFenceRegistration> quarantinedEngineFences =
+    private final Map<String, EngineFenceRegistration> quarantinedEngineFences =
             new ConcurrentHashMap<>();
     /** Fair round-robin probe order; stale generation refs are discarded lazily. */
     private final ConcurrentLinkedQueue<EngineFenceProbeRef> quarantinedProbeQueue =
@@ -634,7 +635,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         }
         long remainingMs = ctx.getRequestExpiresAtMs() - System.currentTimeMillis();
         long delayMs = Math.max(1, remainingMs);
-        long requestId = ctx.getRequestId();
+        String requestId = ctx.getRequestId();
         ScheduledFuture<?> timeout;
         try {
             timeout = requestExpirationTimer.schedule(
@@ -682,7 +683,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
     /** Deliver request expiration through the ordinary-terminal reducer. */
     // Package-visible for dispatch/expiration linearization tests.
-    void onRequestExpired(long requestId,
+    void onRequestExpired(String requestId,
                           CompletableFuture<Response> expectedFuture) {
         if (shuttingDown.get()) {
             return;
@@ -726,7 +727,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
     /** Reduce expiration while the optional request-scoped admission gate is held. */
     private ResponseCompletion reduceRequestExpiration(
-            long requestId,
+            String requestId,
             CompletableFuture<Response> expectedFuture,
             RequestGenerationGate gate) {
         if (expectedFuture.isDone()) {
@@ -797,13 +798,13 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
     @Override
     public boolean isInflightGeneration(
-            long requestId, CompletableFuture<?> future) {
+            String requestId, CompletableFuture<?> future) {
         InflightEntry entry = inflight.get(requestId);
         return entry != null && entry.item.future() == future;
     }
 
     @Override
-    public boolean isAdmissionOpen(long requestId, CompletableFuture<?> future) {
+    public boolean isAdmissionOpen(String requestId, CompletableFuture<?> future) {
         if (shuttingDown.get()) {
             return false;
         }
@@ -819,7 +820,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
     @Override
     public boolean claimAdmissionMutation(
-            long requestId, CompletableFuture<?> future) {
+            String requestId, CompletableFuture<?> future) {
         if (shuttingDown.get()) {
             return false;
         }
@@ -839,7 +840,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
     @Override
     public void completeAdmissionMutation(
-            long requestId, CompletableFuture<?> future) {
+            String requestId, CompletableFuture<?> future) {
         RequestGenerationGate generation = generationGates.get(requestId);
         if (generation != future) {
             return;
@@ -1141,7 +1142,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
      * already reached a terminal state — no-op, idempotent.
      */
     @Override
-    public void finishPreemptedById(long requestId, String detail) {
+    public void finishPreemptedById(String requestId, String detail) {
         InflightEntry entry = inflight.get(requestId);
         if (entry != null) {
             finishPreempted(entry.item, detail);
@@ -1176,7 +1177,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
      * state — no-op, idempotent.
      */
     @Override
-    public void finishYieldedById(long requestId, String detail) {
+    public void finishYieldedById(String requestId, String detail) {
         InflightEntry entry = inflight.get(requestId);
         if (entry != null) {
             finishYielded(entry.item, detail);
@@ -1212,7 +1213,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     }
 
     @Override
-    public boolean claimForPreemption(long requestId, long attemptToken, String detail) {
+    public boolean claimForPreemption(String requestId, long attemptToken, String detail) {
         InflightEntry entry = inflight.get(requestId);
         if (entry == null) {
             return false;
@@ -1240,7 +1241,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     }
 
     @Override
-    public boolean releasePreemptionClaim(long requestId, long attemptToken) {
+    public boolean releasePreemptionClaim(String requestId, long attemptToken) {
         InflightEntry entry = inflight.get(requestId);
         if (entry == null) {
             return false;
@@ -1290,21 +1291,21 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     }
 
     @Override
-    public boolean markPreemptionCancelInFlight(long requestId, long attemptToken) {
+    public boolean markPreemptionCancelInFlight(String requestId, long attemptToken) {
         return transitionPreemption(requestId, attemptToken,
                 PreemptionRegistrationState.CLAIMED,
                 PreemptionRegistrationState.CANCEL_IN_FLIGHT, false);
     }
 
     @Override
-    public boolean markPreemptionCancelAccepted(long requestId, long attemptToken) {
+    public boolean markPreemptionCancelAccepted(String requestId, long attemptToken) {
         return transitionPreemption(requestId, attemptToken,
                 PreemptionRegistrationState.CANCEL_IN_FLIGHT,
                 PreemptionRegistrationState.CANCEL_REQUESTED, true);
     }
 
     @Override
-    public boolean markPreemptionNotFound(long requestId, long attemptToken) {
+    public boolean markPreemptionNotFound(String requestId, long attemptToken) {
         InflightEntry entry = inflight.get(requestId);
         if (entry == null) {
             return false;
@@ -1344,7 +1345,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     }
 
     @Override
-    public boolean markPreemptionUnknown(long requestId, long attemptToken) {
+    public boolean markPreemptionUnknown(String requestId, long attemptToken) {
         InflightEntry entry = inflight.get(requestId);
         if (entry == null) {
             return false;
@@ -1369,7 +1370,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
     @Override
     public CompletableFuture<PriorityCanceledObservation> priorityCanceledSignal(
-            long requestId, long attemptToken) {
+            String requestId, long attemptToken) {
         InflightEntry entry = inflight.get(requestId);
         if (entry == null) {
             return CompletableFuture.failedFuture(
@@ -1385,7 +1386,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     }
 
     @Override
-    public boolean finishPreemptedById(long requestId, long attemptToken, String detail) {
+    public boolean finishPreemptedById(String requestId, long attemptToken, String detail) {
         InflightEntry entry = inflight.get(requestId);
         if (entry == null) {
             return false;
@@ -1407,7 +1408,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     }
 
     @Override
-    public boolean finishTombstonedById(long requestId,
+    public boolean finishTombstonedById(String requestId,
                                         long attemptToken,
                                         String detail) {
         InflightEntry entry = inflight.get(requestId);
@@ -1448,7 +1449,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     }
 
     @Override
-    public boolean reconcilePreemptionActive(long requestId) {
+    public boolean reconcilePreemptionActive(String requestId) {
         InflightEntry entry = inflight.get(requestId);
         if (entry == null) {
             return false;
@@ -1485,7 +1486,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         return true;
     }
 
-    private boolean transitionPreemption(long requestId, long attemptToken,
+    private boolean transitionPreemption(String requestId, long attemptToken,
                                          PreemptionRegistrationState expected,
                                          PreemptionRegistrationState next,
                                          boolean updateLifecycle) {
@@ -1510,7 +1511,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     }
 
     @Override
-    public EngineCancelChannel.CancelTarget resolveCancelTarget(long requestId) {
+    public EngineCancelChannel.CancelTarget resolveCancelTarget(String requestId) {
         InflightEntry entry = inflight.get(requestId);
         if (entry == null) {
             return null;
@@ -1539,7 +1540,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
      *         {@code null} when the request is unknown or {@code batchId}
      *         addresses a different generation
      */
-    public RequestLifecycleSnapshot cancelRequest(long requestId,
+    public RequestLifecycleSnapshot cancelRequest(String requestId,
                                                    long expectedBatchId,
                                                    CancelReason reason) {
         Objects.requireNonNull(reason, "reason");
@@ -1741,7 +1742,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         return result;
     }
 
-    private RequestLifecycleSnapshot matchingTerminalState(long requestId,
+    private RequestLifecycleSnapshot matchingTerminalState(String requestId,
                                                             long expectedBatchId) {
         RequestLifecycleSnapshot terminal = terminalStates.get(requestId);
         return batchMatches(terminal, expectedBatchId) ? terminal : null;
@@ -1967,7 +1968,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         }
 
         for (TaskInfo task : finishedTaskInfo.values()) {
-            long requestId = task.getRequestId();
+            String requestId = task.getRequestId();
             WorkerTerminalObservation observation = new WorkerTerminalObservation(
                     isPrefill, task.getBatchId(), task.getErrorCode());
 
@@ -1994,7 +1995,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
             WorkerTerminalObservation observation,
             boolean isPrefill,
             boolean isDecode) {
-        long requestId = task.getRequestId();
+        String requestId = task.getRequestId();
         if (entry.engineFence != null && entry.cancellationReason != null) {
             RequestLifecycleSnapshot snapshot = entry.lifecycle.snapshot();
             boolean generationMatches = isDecode
@@ -2069,7 +2070,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         executeResponseTask(completion);
     }
 
-    private void markDecodeAccepted(long requestId) {
+    private void markDecodeAccepted(String requestId) {
         InflightEntry entry = inflight.get(requestId);
         if (entry == null) {
             return;
@@ -2314,7 +2315,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     private ResponseCompletion applyWorkerTerminalLocked(
             InflightEntry entry,
             WorkerTerminalObservation observation) {
-        long requestId = entry.item.requestId();
+        String requestId = entry.item.requestId();
         RequestLifecycleSnapshot current = entry.lifecycle.snapshot();
         // Decode workers do not carry a reliable Prefill batch id.
         if (current.deliveryClaimKind() == DeliveryClaimKind.BATCH_ENQUEUE
@@ -2375,7 +2376,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
      */
     public List<RequestLifecycleSnapshot> snapshotActiveRequests() {
         List<RequestLifecycleSnapshot> snapshots = new ArrayList<>(inflight.size());
-        for (Map.Entry<Long, InflightEntry> candidate : inflight.entrySet()) {
+        for (Map.Entry<String, InflightEntry> candidate : inflight.entrySet()) {
             InflightEntry entry = candidate.getValue();
             synchronized (entry) {
                 if (inflight.get(candidate.getKey()) == entry) {
@@ -2386,7 +2387,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         snapshots.sort((left, right) -> {
             int createdOrder = Long.compare(left.createdAtMs(), right.createdAtMs());
             return createdOrder != 0
-                    ? createdOrder : Long.compare(left.requestId(), right.requestId());
+                    ? createdOrder : left.requestId().compareTo(right.requestId());
         });
         return List.copyOf(snapshots);
     }
@@ -2409,7 +2410,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         return item.decodeEp() != null ? item.decodeEp().ipPort() : "unknown";
     }
 
-    public RequestLifecycleSnapshot getRequestState(long requestId,
+    public RequestLifecycleSnapshot getRequestState(String requestId,
                                                     long expectedBatchId) {
         RequestGenerationGate generation = generationGates.get(requestId);
         if (generation != null) {
@@ -2448,8 +2449,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         long now = System.currentTimeMillis();
         int expiredCount = 0;
         long oldestExpiredAgeMs = 0;
-        List<Long> expiredRequestSamples = new ArrayList<>(3);
-        for (Map.Entry<Long, InflightEntry> candidate : inflight.entrySet()) {
+        List<String> expiredRequestSamples = new ArrayList<>(3);
+        for (Map.Entry<String, InflightEntry> candidate : inflight.entrySet()) {
             InflightEntry entry = candidate.getValue();
             long ageMs = now - entry.createdAtMs();
             if (ageMs <= ttlMs) {
@@ -2521,8 +2522,8 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         for (Map.Entry<String, DecodeEndpoint> decodeEntry
                 : endpointRegistry.getDecodeEndpoints().entrySet()) {
             DecodeEndpoint decodeEp = decodeEntry.getValue();
-            for (Map.Entry<Long, RequestInflight> reserved : decodeEp.reservedView().entrySet()) {
-                long requestId = reserved.getKey();
+            for (Map.Entry<String, RequestInflight> reserved : decodeEp.reservedView().entrySet()) {
+                String requestId = reserved.getKey();
                 if (now - reserved.getValue().createdAtMs() > ttlMs
                         && releaseOrphanDecodeReservation(
                                 decodeEp, requestId, reserved.getValue())) {
@@ -2539,7 +2540,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     }
 
     /** Whether scheduler lifecycle still owns endpoint accounting for this id. */
-    public boolean ownsRequestGeneration(long requestId) {
+    public boolean ownsRequestGeneration(String requestId) {
         return generationGates.containsKey(requestId)
                 || inflight.containsKey(requestId);
     }
@@ -2555,7 +2556,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
      */
     private boolean releaseOrphanDecodeReservation(
             DecodeEndpoint decodeEndpoint,
-            long requestId,
+            String requestId,
             RequestInflight expectedReservation) {
         RequestGenerationGate generation = generationGates.get(requestId);
         if (generation == null) {
@@ -2606,9 +2607,9 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         }
         int retained = 0;
         long oldestAgeMs = 0;
-        for (Map.Entry<Long, EngineFenceRegistration> candidate
+        for (Map.Entry<String, EngineFenceRegistration> candidate
                 : quarantinedEngineFences.entrySet()) {
-            long requestId = candidate.getKey();
+            String requestId = candidate.getKey();
             EngineFenceRegistration registration = candidate.getValue();
             InflightEntry entry = inflight.get(requestId);
             if (entry == null) {
@@ -3160,7 +3161,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         BatcherContext.PendingRestoreResult result = batcher.restorePendingDelivery(item);
         if (result == BatcherContext.PendingRestoreResult.STOPPED) {
             onDeliveryFailure(item,
-                    new java.util.concurrent.CancellationException(
+                    new CancellationException(
                             "FlexLB worker scheduling queue stopped while Decode capacity was full"));
         }
     }
@@ -3818,7 +3819,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
 
     /** Cold-path publication with a post-offer gate check for shutdown races. */
     private boolean publishQuarantinedEngineFence(
-            long requestId,
+            String requestId,
             EngineFenceRegistration registration) {
         if (shuttingDown.get()) {
             return false;
@@ -4036,7 +4037,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         List<QueuedRequestSnapshot> ahead = new ArrayList<>();
         for (QueuedRequestSnapshot queued
                 : prefill.getBatcher().queueManager().snapshot().items()) {
-            if (queued.requestId() == item.requestId()) {
+            if (Objects.equals(queued.requestId(), item.requestId())) {
                 return AdmissionFailureClassifier.classifyQueuedTimeout(
                         item.priority(), ahead);
             }
@@ -4352,7 +4353,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         // integration). Do not make shutdown publication depend on the
         // presence or concrete type of the generation gate.
         for (InflightEntry entry : inflight.values()) {
-            long requestId = entry.item.requestId();
+            String requestId = entry.item.requestId();
             synchronized (entry) {
                 if (inflight.get(requestId) == entry
                         && !entry.responseCompletionClaimed) {
@@ -4366,9 +4367,9 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
                 }
             }
         }
-        for (Map.Entry<Long, RequestGenerationGate> generationEntry
+        for (Map.Entry<String, RequestGenerationGate> generationEntry
                 : generationGates.entrySet()) {
-            long requestId = generationEntry.getKey();
+            String requestId = generationEntry.getKey();
             RequestGenerationGate generation = generationEntry.getValue();
             InflightEntry entry = inflight.get(requestId);
             if (entry != null && entry.item.future() == generation) {
@@ -4469,7 +4470,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
     }
 
     /** Request id plus exact fence generation for lazy stale-FIFO rejection. */
-    private record EngineFenceProbeRef(long requestId,
+    private record EngineFenceProbeRef(String requestId,
                                        EngineFenceRegistration registration) {
     }
 
@@ -4788,7 +4789,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
      * state machine.
      */
     private static final class EngineFenceResources {
-        private final long requestId;
+        private final String requestId;
         private final PrefillEndpoint prefill;
         private final DecodeEndpoint decode;
         private final long batchId;
@@ -4797,7 +4798,7 @@ public class PriorityScheduler implements DecisionGroupHandler, DecisionDelivery
         private final boolean decodeProtected;
         private boolean released;
 
-        private EngineFenceResources(long requestId,
+        private EngineFenceResources(String requestId,
                                      PrefillEndpoint prefill,
                                      DecodeEndpoint decode,
                                      long batchId,

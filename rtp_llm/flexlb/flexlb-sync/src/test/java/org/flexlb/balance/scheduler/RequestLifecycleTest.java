@@ -18,7 +18,7 @@ class RequestLifecycleTest {
 
     @Test
     void normalBatchDeliveryTransitionsToCompleted() {
-        RequestLifecycle lifecycle = new RequestLifecycle(1L);
+        RequestLifecycle lifecycle = new RequestLifecycle("1");
 
         assertFalse(lifecycle.hasDeliveryClaim());
         lifecycle.startBatchEnqueue(101L);
@@ -36,7 +36,7 @@ class RequestLifecycleTest {
 
     @Test
     void deadlineTransitionsDirectlyToTimedOutAndCannotBeOverwritten() {
-        RequestLifecycle lifecycle = new RequestLifecycle(3L);
+        RequestLifecycle lifecycle = new RequestLifecycle("3");
         lifecycle.startBatchEnqueue(103L);
 
         RequestLifecycleSnapshot timedOut = lifecycle.timeout("deadline exceeded");
@@ -49,7 +49,7 @@ class RequestLifecycleTest {
 
     @Test
     void routeDecisionDeliveryAcquiresRequestScopedDeliveryClaim() {
-        RequestLifecycle lifecycle = new RequestLifecycle(4L);
+        RequestLifecycle lifecycle = new RequestLifecycle("4");
 
         lifecycle.startRouteDecisionDelivery();
         RequestLifecycleSnapshot acknowledged = lifecycle.markDeliveryConfirmed();
@@ -63,7 +63,7 @@ class RequestLifecycleTest {
 
     @Test
     void deliveryClaimKindAndBatchOwnershipCannotChangeAfterClaim() {
-        RequestLifecycle batchLifecycle = new RequestLifecycle(5L);
+        RequestLifecycle batchLifecycle = new RequestLifecycle("5");
         batchLifecycle.startBatchEnqueue(105L);
         batchLifecycle.startBatchEnqueue(105L);
 
@@ -72,7 +72,7 @@ class RequestLifecycleTest {
         assertEquals(DeliveryClaimKind.BATCH_ENQUEUE, batchLifecycle.snapshot().deliveryClaimKind());
         assertEquals(105L, batchLifecycle.snapshot().batchId());
 
-        RequestLifecycle routeLifecycle = new RequestLifecycle(6L);
+        RequestLifecycle routeLifecycle = new RequestLifecycle("6");
         routeLifecycle.startRouteDecisionDelivery();
         routeLifecycle.startRouteDecisionDelivery();
 
@@ -84,7 +84,7 @@ class RequestLifecycleTest {
 
     @Test
     void rejectedLateDeliveryDoesNotLeavePartialClaim() {
-        RequestLifecycle lifecycle = new RequestLifecycle(7L);
+        RequestLifecycle lifecycle = new RequestLifecycle("7");
         lifecycle.timeout("expired in queue");
 
         assertThrows(IllegalStateException.class, lifecycle::startRouteDecisionDelivery);
@@ -99,13 +99,13 @@ class RequestLifecycleTest {
 
     @Test
     void batchEnqueueTimestampRequiresBatchClaimAndIsFirstWriteWins() throws Exception {
-        RequestLifecycle lifecycle = new RequestLifecycle(8L);
+        RequestLifecycle lifecycle = new RequestLifecycle("8");
         assertThrows(IllegalStateException.class, lifecycle::markBatchEnqueueStarted);
 
         lifecycle.startRouteDecisionDelivery();
         assertThrows(IllegalStateException.class, lifecycle::markBatchEnqueueStarted);
 
-        RequestLifecycle batchLifecycle = new RequestLifecycle(81L);
+        RequestLifecycle batchLifecycle = new RequestLifecycle("81");
         batchLifecycle.startBatchEnqueue(108L);
         batchLifecycle.markBatchEnqueueStarted();
         long firstTimestamp = batchLifecycle.getBatchEnqueueStartedAtMs();
@@ -117,7 +117,7 @@ class RequestLifecycleTest {
 
     @Test
     void concurrentIncompatibleDeliveryClaimsHaveOneWinner() throws Exception {
-        RequestLifecycle lifecycle = new RequestLifecycle(9L);
+        RequestLifecycle lifecycle = new RequestLifecycle("9");
         CountDownLatch start = new CountDownLatch(1);
         AtomicInteger successes = new AtomicInteger();
         AtomicInteger rejected = new AtomicInteger();
@@ -145,7 +145,7 @@ class RequestLifecycleTest {
 
     @Test
     void timeoutRaceCannotProduceAClaimWithoutDeliveryStateWinningFirst() throws Exception {
-        RequestLifecycle lifecycle = new RequestLifecycle(10L);
+        RequestLifecycle lifecycle = new RequestLifecycle("10");
         CountDownLatch start = new CountDownLatch(1);
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {

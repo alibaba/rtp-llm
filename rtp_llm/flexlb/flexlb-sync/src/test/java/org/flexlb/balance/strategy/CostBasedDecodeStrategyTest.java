@@ -18,6 +18,7 @@ import org.flexlb.service.config.parser.V0ConfigDocumentParser;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -39,7 +40,7 @@ class CostBasedDecodeStrategyTest {
         configService = new ConfigService(List.of(new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
     }
 
-    @org.junit.jupiter.api.AfterEach
+    @AfterEach
     void tearDown() {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
     }
@@ -82,7 +83,7 @@ class CostBasedDecodeStrategyTest {
 
         Request req = new Request();
         req.setSeqLen(1000);
-        req.setRequestId(1000L);
+        req.setRequestId("1000");
 
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
@@ -117,7 +118,7 @@ class CostBasedDecodeStrategyTest {
 
         Request req = new Request();
         req.setSeqLen(1000);
-        req.setRequestId(1000L);
+        req.setRequestId("1000");
 
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
@@ -160,7 +161,7 @@ class CostBasedDecodeStrategyTest {
 
         Request req = new Request();
         req.setSeqLen(1000);
-        req.setRequestId(1000L);
+        req.setRequestId("1000");
 
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
@@ -192,7 +193,7 @@ class CostBasedDecodeStrategyTest {
 
         Request req = new Request();
         req.setSeqLen(1000);
-        req.setRequestId(1000L);
+        req.setRequestId("1000");
 
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
@@ -245,14 +246,14 @@ class CostBasedDecodeStrategyTest {
         Map<String, Integer> selectionCount = new HashMap<>();
 
         for (int i = 0; i < totalRuns; i++) {
-            balanceContext.getRequest().setRequestId(1000L + i);
+            balanceContext.getRequest().setRequestId(String.valueOf(1000L + i));
             ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
 
             if (status.isSuccess()) {
                 String selectedIp = status.getServerIp();
                 selectionCount.put(selectedIp, selectionCount.getOrDefault(selectedIp, 0) + 1);
                 costBasedDecodeStrategy.rollBack(
-                        registry.get(RoleType.DECODE, selectedIp + ":8080"), 1000L + i);
+                        registry.get(RoleType.DECODE, selectedIp + ":8080"), String.valueOf(1000L + i));
             }
         }
 
@@ -302,7 +303,7 @@ class CostBasedDecodeStrategyTest {
 
         for (int i = 0; i < 100; i++) {
             long requestId = 10_000L + i;
-            req.setRequestId(requestId);
+            req.setRequestId(String.valueOf(requestId));
             ServerStatus status = Assertions.assertDoesNotThrow(
                     () -> costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null));
 
@@ -310,7 +311,7 @@ class CostBasedDecodeStrategyTest {
             Assertions.assertEquals("127.0.0.1", status.getServerIp(),
                     "The worker with the lowest KV usage should have the highest stable weight");
             costBasedDecodeStrategy.rollBack(
-                    registry.get(RoleType.DECODE, status.getServerIp() + ":8080"), requestId);
+                    registry.get(RoleType.DECODE, status.getServerIp() + ":8080"), String.valueOf(requestId));
         }
     }
 
@@ -334,7 +335,7 @@ class CostBasedDecodeStrategyTest {
 
         Request req = new Request();
         req.setSeqLen(500);
-        req.setRequestId(2000L);
+        req.setRequestId("2000");
 
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
@@ -372,7 +373,7 @@ class CostBasedDecodeStrategyTest {
 
         Request req = new Request();
         req.setSeqLen(200);
-        req.setRequestId(3000L);
+        req.setRequestId("3000");
 
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);

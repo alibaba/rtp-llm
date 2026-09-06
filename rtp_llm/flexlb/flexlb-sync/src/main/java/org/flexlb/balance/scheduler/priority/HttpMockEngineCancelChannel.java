@@ -75,7 +75,7 @@ public class HttpMockEngineCancelChannel implements EngineCancelChannel {
 
     @Override
     public CompletableFuture<CancelOutcome> cancel(CancelTarget target,
-                                                   long requestId,
+                                                   String requestId,
                                                    long timeoutMs) {
         try {
             // TEST-ONLY routing: the mock control plane resolves the target
@@ -106,7 +106,7 @@ public class HttpMockEngineCancelChannel implements EngineCancelChannel {
      * means the target engine itself is unsupported; a 200 body carries either
      * ACCEPTED or NOT_FOUND for the specifically addressed Prefill.
      */
-    private CancelOutcome mapResponse(HttpResponse<String> response, long requestId) {
+    private CancelOutcome mapResponse(HttpResponse<String> response, String requestId) {
         if (response.statusCode() == 404) {
             return CancelOutcome.unsupported();
         }

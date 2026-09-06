@@ -10,6 +10,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatchers;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -31,8 +32,8 @@ class FixedWindowBatcherAlgorithmTest {
 
     @Test
     void contextQueueDepthTracksMutationsWithoutQueueSizeReads() {
-        BatchItem first = enqueuedItem(1L, 1L);
-        BatchItem second = enqueuedItem(2L, 2L);
+        BatchItem first = enqueuedItem("1", 1L);
+        BatchItem second = enqueuedItem("2", 2L);
         PriorityBlockingQueue<BatchItem> queue = queueWith(first, second);
         BatcherContext ctx = context(
                 "test", null, new FlexlbConfig(), null, queue,
@@ -66,8 +67,8 @@ class FixedWindowBatcherAlgorithmTest {
         DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         BatcherContext context = context(
                 "test", endpoint, config, handler,
-                queueWith(enqueuedItem(1, System.currentTimeMillis()),
-                        enqueuedItem(2, System.currentTimeMillis())),
+                queueWith(enqueuedItem("1", System.currentTimeMillis()),
+                        enqueuedItem("2", System.currentTimeMillis())),
                 mock(BatchSchedulerReporter.class));
 
         new FixedWindowBatcherAlgorithm().processQueue(context);
@@ -88,7 +89,7 @@ class FixedWindowBatcherAlgorithmTest {
         DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         BatcherContext context = context(
                 "test", endpoint, config, handler,
-                queueWith(enqueuedItem(1, System.currentTimeMillis() - 170)),
+                queueWith(enqueuedItem("1", System.currentTimeMillis() - 170)),
                 mock(BatchSchedulerReporter.class));
 
         new FixedWindowBatcherAlgorithm().processQueue(context);
@@ -108,7 +109,7 @@ class FixedWindowBatcherAlgorithmTest {
         BatchItem[] items = new BatchItem[32];
         long now = System.currentTimeMillis() - 1_000;
         for (int index = 0; index < items.length; index++) {
-            items[index] = enqueuedItem(index + 1, now);
+            items[index] = enqueuedItem(String.valueOf(index + 1), now);
         }
         BatcherContext context = context(
                 "test", endpoint, config, handler, queueWith(items),
@@ -140,19 +141,19 @@ class FixedWindowBatcherAlgorithmTest {
         long now = System.currentTimeMillis() - 1_000;
         BatcherContext context = context(
                 "test", endpoint, config, handler,
-                queueWith(enqueuedItem(1, now, 60),
-                        enqueuedItem(2, now + 1, 50),
-                        enqueuedItem(3, now + 2, 30)),
+                queueWith(enqueuedItem("1", now, 60),
+                        enqueuedItem("2", now + 1, 50),
+                        enqueuedItem("3", now + 2, 30)),
                 mock(BatchSchedulerReporter.class));
 
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
         ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
-        verify(handler).onDecisionGroupReady(dispatched.capture(), org.mockito.ArgumentMatchers.any());
-        assertEquals(List.of(1L), dispatched.getValue().stream().map(BatchItem::requestId).toList());
+        verify(handler).onDecisionGroupReady(dispatched.capture(), ArgumentMatchers.any());
+        assertEquals(List.of("1"), dispatched.getValue().stream().map(BatchItem::requestId).toList());
         assertEquals(60L, dispatched.getValue().stream().mapToLong(BatchItem::seqLen).sum());
         assertEquals(2, context.size());
-        assertEquals(2L, context.peek().requestId());
+        assertEquals("2", context.peek().requestId());
     }
 
     @Test
@@ -173,9 +174,9 @@ class FixedWindowBatcherAlgorithmTest {
 
         BatchItem[] items = new BatchItem[13];
         long now = System.currentTimeMillis() - 1_000;
-        items[0] = enqueuedItem(1L, now, 929_760L);
+        items[0] = enqueuedItem("1", now, 929_760L);
         for (int index = 1; index < items.length; index++) {
-            items[index] = enqueuedItem(index + 1L, now + index, 9_192L);
+            items[index] = enqueuedItem(String.valueOf(index + 1L), now + index, 9_192L);
         }
 
         DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
@@ -186,8 +187,8 @@ class FixedWindowBatcherAlgorithmTest {
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
         ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
-        verify(handler).onDecisionGroupReady(dispatched.capture(), org.mockito.ArgumentMatchers.any());
-        assertEquals(List.of(1L), dispatched.getValue().stream().map(BatchItem::requestId).toList());
+        verify(handler).onDecisionGroupReady(dispatched.capture(), ArgumentMatchers.any());
+        assertEquals(List.of("1"), dispatched.getValue().stream().map(BatchItem::requestId).toList());
         assertEquals(12, context.size());
     }
 
@@ -209,18 +210,18 @@ class FixedWindowBatcherAlgorithmTest {
         DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         BatcherContext context = context(
                 "test", endpoint, config, handler,
-                queueWith(enqueuedItem(1, now, 60),
-                        enqueuedItem(2, now + 1, 20),
-                        enqueuedItem(3, now + 2, 5)),
+                queueWith(enqueuedItem("1", now, 60),
+                        enqueuedItem("2", now + 1, 20),
+                        enqueuedItem("3", now + 2, 5)),
                 mock(BatchSchedulerReporter.class));
 
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
         ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
-        verify(handler).onDecisionGroupReady(dispatched.capture(), org.mockito.ArgumentMatchers.any());
-        assertEquals(List.of(1L), dispatched.getValue().stream().map(BatchItem::requestId).toList());
+        verify(handler).onDecisionGroupReady(dispatched.capture(), ArgumentMatchers.any());
+        assertEquals(List.of("1"), dispatched.getValue().stream().map(BatchItem::requestId).toList());
         assertEquals(2, context.size());
-        assertEquals(2L, context.peek().requestId());
+        assertEquals("2", context.peek().requestId());
     }
 
     @Test
@@ -244,7 +245,7 @@ class FixedWindowBatcherAlgorithmTest {
         BatchItem[] items = new BatchItem[requestCount];
         long now = System.currentTimeMillis() - 1_000;
         for (int index = 0; index < requestCount; index++) {
-            items[index] = enqueuedItem(index + 1L, now + index, seqLen);
+            items[index] = enqueuedItem(String.valueOf(index + 1L), now + index, seqLen);
         }
         DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         BatcherContext context = context(
@@ -257,7 +258,7 @@ class FixedWindowBatcherAlgorithmTest {
 
         ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
         verify(handler, times(2)).onDecisionGroupReady(
-                dispatched.capture(), org.mockito.ArgumentMatchers.any());
+                dispatched.capture(), ArgumentMatchers.any());
         List<List<BatchItem>> batches = dispatched.getAllValues();
 
         assertEquals(List.of(31, 1), batches.stream().map(List::size).toList());
@@ -287,14 +288,14 @@ class FixedWindowBatcherAlgorithmTest {
         long now = System.currentTimeMillis();
         BatcherContext context = context(
                 "test", endpoint, config, handler,
-                queueWith(enqueuedItem(1, now, 60), enqueuedItem(2, now + 1, 40)),
+                queueWith(enqueuedItem("1", now, 60), enqueuedItem("2", now + 1, 40)),
                 mock(BatchSchedulerReporter.class));
 
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
         ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
-        verify(handler).onDecisionGroupReady(dispatched.capture(), org.mockito.ArgumentMatchers.any());
-        assertEquals(List.of(1L), dispatched.getValue().stream().map(BatchItem::requestId).toList());
+        verify(handler).onDecisionGroupReady(dispatched.capture(), ArgumentMatchers.any());
+        assertEquals(List.of("1"), dispatched.getValue().stream().map(BatchItem::requestId).toList());
         assertEquals(1, context.size());
     }
 
@@ -308,7 +309,7 @@ class FixedWindowBatcherAlgorithmTest {
         PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
         when(endpoint.getStatus()).thenReturn(status);
 
-        BatchItem item = enqueuedItem(1, 1, 100);
+        BatchItem item = enqueuedItem("1", 1, 100);
         DecisionGroupHandler handler = mock(DecisionGroupHandler.class);
         BatcherContext context = context(
                 "test", endpoint, config, handler, queueWith(item),
@@ -333,15 +334,15 @@ class FixedWindowBatcherAlgorithmTest {
         return config;
     }
 
-    private static BatchItem enqueuedItem(long requestId, long enqueuedAtMs) {
+    private static BatchItem enqueuedItem(String requestId, long enqueuedAtMs) {
         return enqueuedItem(requestId, enqueuedAtMs, 0);
     }
 
-    private static BatchItem enqueuedItem(long requestId, long enqueuedAtMs, long seqLen) {
+    private static BatchItem enqueuedItem(String requestId, long enqueuedAtMs, long seqLen) {
         return enqueuedItem(requestId, enqueuedAtMs, seqLen, 0);
     }
 
-    private static BatchItem enqueuedItem(long requestId, long enqueuedAtMs, long seqLen, int priority) {
+    private static BatchItem enqueuedItem(String requestId, long enqueuedAtMs, long seqLen, int priority) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);

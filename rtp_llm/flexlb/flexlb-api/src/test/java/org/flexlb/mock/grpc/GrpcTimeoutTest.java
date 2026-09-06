@@ -65,7 +65,7 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
     @Timeout(15)
     void grpcTimeout_requestFailsAndRecovers() throws Exception {
         // 1. Submit request — gRPC deadline fires at 500ms, mock is still sleeping
-        CompletableFuture<Response> future = submitRequest(10001);
+        CompletableFuture<Response> future = submitRequest("10001");
 
         // 2. A post-send timeout is ambiguous: no terminal response may be published
         // until an authoritative Engine status settles ownership.
@@ -89,7 +89,7 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
 
         // 7. Submit a new request — should succeed on the same gRPC channel
         //    (deadline exceeded only cancels the specific call, not the channel)
-        CompletableFuture<Response> future2 = submitRequest(10002);
+        CompletableFuture<Response> future2 = submitRequest("10002");
         Response response2 = future2.get(5, TimeUnit.SECONDS);
         assertTrue(response2.isSuccess(), "Subsequent request should succeed after recovery");
         assertFalse(future.isDone(), "recovery traffic cannot settle the earlier lost ACK");

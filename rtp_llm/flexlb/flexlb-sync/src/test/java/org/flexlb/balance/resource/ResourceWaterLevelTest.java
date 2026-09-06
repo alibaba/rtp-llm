@@ -20,11 +20,11 @@ class ResourceWaterLevelTest {
         PrefillResourceMeasure measure = new PrefillResourceMeasure(configService());
         WorkerStatus workerStatus = new WorkerStatus();
         workerStatus.updateTaskStates(Map.of(
-                "1", task(1L),
-                "2", task(2L),
-                "3", task(3L),
-                "4", task(4L),
-                "5", task(5L)), Map.of(), Map.of());
+                "1", task("1"),
+                "2", task("2"),
+                "3", task("3"),
+                "4", task("4"),
+                "5", task("5")), Map.of(), Map.of());
 
         assertEquals(25.0, measure.calculateWorkerWaterLevel(workerStatus));
     }
@@ -42,9 +42,9 @@ class ResourceWaterLevelTest {
     void prefillWaterLevelExcludesTaskAlreadyReportedRunningByEngine() {
         PrefillResourceMeasure measure = new PrefillResourceMeasure(configService());
         WorkerStatus workerStatus = new WorkerStatus();
-        TaskInfo local = task(1L);
+        TaskInfo local = task("1");
         workerStatus.putLocalTask("1", local);
-        workerStatus.updateTaskStates(Map.of(), Map.of("1", task(1L)), Map.of());
+        workerStatus.updateTaskStates(Map.of(), Map.of("1", task("1")), Map.of());
 
         assertEquals(0.0, measure.calculateWorkerWaterLevel(workerStatus));
     }
@@ -65,7 +65,7 @@ class ResourceWaterLevelTest {
         return configService;
     }
 
-    private static TaskInfo task(long requestId) {
+    private static TaskInfo task(String requestId) {
         TaskInfo task = new TaskInfo();
         task.setRequestId(requestId);
         return task;
@@ -74,7 +74,7 @@ class ResourceWaterLevelTest {
     private static void addLocalTasks(WorkerStatus workerStatus, int count) {
         for (int i = 0; i < count; i++) {
             String requestId = String.valueOf(i);
-            TaskInfo task = task(i);
+            TaskInfo task = task(String.valueOf(i));
             task.updateTaskState(TaskStateEnum.IN_TRANSIT);
             workerStatus.putLocalTask(requestId, task);
         }

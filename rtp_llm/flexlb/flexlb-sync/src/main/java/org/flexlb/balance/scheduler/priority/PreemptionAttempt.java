@@ -37,14 +37,14 @@ public final class PreemptionAttempt {
         CANCEL_UNKNOWN
     }
 
-    public record Victim(long requestId,
+    public record Victim(String requestId,
                          int priority,
                          long kvTokens,
                          DecodeTaskPhase phase,
                          EngineCancelChannel.CancelTarget target) {
         public Victim {
-            if (requestId <= 0) {
-                throw new IllegalArgumentException("victim requestId must be positive");
+            if (requestId == null || requestId.isBlank()) {
+                throw new IllegalArgumentException("victim requestId must not be blank");
             }
             if (phase == null || !phase.requiresEngineCancel()) {
                 throw new IllegalArgumentException("victim must require Engine Cancel");
@@ -53,17 +53,17 @@ public final class PreemptionAttempt {
     }
 
     private final long token;
-    private final long incomingRequestId;
+    private final String incomingRequestId;
     private final long snapshotVersion;
-    private final Map<Long, Victim> victims;
-    private final Map<Long, VictimState> victimStates;
+    private final Map<String, Victim> victims;
+    private final Map<String, VictimState> victimStates;
     private State state = State.PLANNED;
 
     public PreemptionAttempt(long token,
-                             long incomingRequestId,
+                             String incomingRequestId,
                              long snapshotVersion,
                              List<Victim> victims) {
-        if (token <= 0 || incomingRequestId <= 0 || victims == null || victims.isEmpty()) {
+        if (token <= 0 || (incomingRequestId == null || incomingRequestId.isBlank()) || victims == null || victims.isEmpty()) {
             throw new IllegalArgumentException("token, incoming request and victims are required");
         }
         this.token = token;
@@ -80,13 +80,13 @@ public final class PreemptionAttempt {
     }
 
     public long token() { return token; }
-    public long incomingRequestId() { return incomingRequestId; }
+    public String incomingRequestId() { return incomingRequestId; }
     public long snapshotVersion() { return snapshotVersion; }
     public List<Victim> victims() { return List.copyOf(victims.values()); }
 
     public synchronized State state() { return state; }
 
-    public synchronized VictimState victimState(long requestId) {
+    public synchronized VictimState victimState(String requestId) {
         return requireVictim(requestId);
     }
 
@@ -109,7 +109,7 @@ public final class PreemptionAttempt {
         return true;
     }
 
-    public synchronized boolean recordAccepted(long requestId) {
+    public synchronized boolean recordAccepted(String requestId) {
         if (requireVictim(requestId) != VictimState.CANCEL_IN_FLIGHT) {
             return false;
         }
@@ -117,7 +117,7 @@ public final class PreemptionAttempt {
         return true;
     }
 
-    public synchronized boolean recordNotFound(long requestId) {
+    public synchronized boolean recordNotFound(String requestId) {
         VictimState current = requireVictim(requestId);
         if (current != VictimState.CANCEL_IN_FLIGHT) {
             return false;
@@ -126,7 +126,7 @@ public final class PreemptionAttempt {
         return true;
     }
 
-    public synchronized boolean recordUnknown(long requestId) {
+    public synchronized boolean recordUnknown(String requestId) {
         VictimState current = requireVictim(requestId);
         if (current != VictimState.CANCEL_IN_FLIGHT
                 && current != VictimState.CANCEL_REQUESTED) {
@@ -137,7 +137,7 @@ public final class PreemptionAttempt {
     }
 
     /** Engine absence plus an atomic late-enqueue fence is terminal proof. */
-    public synchronized boolean recordTombstoned(long requestId) {
+    public synchronized boolean recordTombstoned(String requestId) {
         if (requireVictim(requestId) != VictimState.CANCEL_IN_FLIGHT) {
             return false;
         }
@@ -154,7 +154,7 @@ public final class PreemptionAttempt {
     }
 
     /** Exactly-once typed-CANCELED settlement for one victim. */
-    public synchronized boolean recordCanceled(long requestId) {
+    public synchronized boolean recordCanceled(String requestId) {
         VictimState current = requireVictim(requestId);
         if (current != VictimState.CANCEL_REQUESTED
                 && current != VictimState.CANCEL_UNKNOWN) {
@@ -185,7 +185,7 @@ public final class PreemptionAttempt {
         }
     }
 
-    private VictimState requireVictim(long requestId) {
+    private VictimState requireVictim(String requestId) {
         VictimState state = victimStates.get(requestId);
         if (state == null) {
             throw new IllegalArgumentException("request is not a victim: " + requestId);

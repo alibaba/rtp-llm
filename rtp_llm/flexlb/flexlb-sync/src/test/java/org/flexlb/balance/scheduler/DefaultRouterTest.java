@@ -13,13 +13,17 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentMatchers;
 import org.mockito.Mock;
+import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -27,7 +31,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.anyLong;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.isNull;
 import static org.mockito.Mockito.lenient;
@@ -101,10 +104,10 @@ class DefaultRouterTest {
 
         // Mock balance context
         lenient().when(balanceContext.getRequest()).thenReturn(request);
-        lenient().when(balanceContext.getRequestId()).thenReturn(12345L);
+        lenient().when(balanceContext.getRequestId()).thenReturn("12345");
     }
 
-    @org.junit.jupiter.api.AfterEach
+    @AfterEach
     void tearDown() {
         // Clear all status maps after each test
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
@@ -143,12 +146,12 @@ class DefaultRouterTest {
     @Test
     void should_return_success_response_with_prefill_and_decode_servers_when_prefill_selection_succeeds() {
         // Setup - add dummy workers to trigger role types
-        org.flexlb.dao.master.WorkerStatus dummyPrefillWorker = new org.flexlb.dao.master.WorkerStatus();
+        WorkerStatus dummyPrefillWorker = new WorkerStatus();
         dummyPrefillWorker.setIp("192.168.1.1");
         dummyPrefillWorker.setPort(8080);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080", dummyPrefillWorker);
 
-        org.flexlb.dao.master.WorkerStatus dummyDecodeWorker = new org.flexlb.dao.master.WorkerStatus();
+        WorkerStatus dummyDecodeWorker = new WorkerStatus();
         dummyDecodeWorker.setIp("192.168.1.2");
         dummyDecodeWorker.setPort(8081);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081", dummyDecodeWorker);
@@ -180,7 +183,7 @@ class DefaultRouterTest {
     @Test
     void should_return_response_with_no_prefill_worker_error_when_prefill_selection_fails() {
         // Setup - add dummy worker to trigger role type
-        org.flexlb.dao.master.WorkerStatus dummyPrefillWorker = new org.flexlb.dao.master.WorkerStatus();
+        WorkerStatus dummyPrefillWorker = new WorkerStatus();
         dummyPrefillWorker.setIp("192.168.1.1");
         dummyPrefillWorker.setPort(8080);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080", dummyPrefillWorker);
@@ -202,7 +205,7 @@ class DefaultRouterTest {
     @Test
     void should_return_success_response_with_fusion_server_when_pdfusion_selection_succeeds() {
         // Setup - add dummy worker to trigger role type
-        org.flexlb.dao.master.WorkerStatus dummyFusionWorker = new org.flexlb.dao.master.WorkerStatus();
+        WorkerStatus dummyFusionWorker = new WorkerStatus();
         dummyFusionWorker.setIp("192.168.1.3");
         dummyFusionWorker.setPort(8082);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.3:8082", dummyFusionWorker);
@@ -212,7 +215,7 @@ class DefaultRouterTest {
         fusionServerStatus.setServerIp("192.168.1.3");
         fusionServerStatus.setHttpPort(8082);
         fusionServerStatus.setGroup("group2");
-        fusionServerStatus.setRequestId(54321L);
+        fusionServerStatus.setRequestId("54321");
         when(fusionStrategy.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         // Execute
@@ -227,7 +230,7 @@ class DefaultRouterTest {
     @Test
     void should_return_response_with_no_pdfusion_worker_error_when_pdfusion_selection_fails() {
         // Setup - add dummy worker to trigger role type
-        org.flexlb.dao.master.WorkerStatus dummyFusionWorker = new org.flexlb.dao.master.WorkerStatus();
+        WorkerStatus dummyFusionWorker = new WorkerStatus();
         dummyFusionWorker.setIp("192.168.1.3");
         dummyFusionWorker.setPort(8082);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.3:8082", dummyFusionWorker);
@@ -249,12 +252,12 @@ class DefaultRouterTest {
     @Test
     void should_return_success_response_with_fusion_and_vit_servers_when_both_selections_succeed() {
         // Setup - add dummy workers to trigger role types
-        org.flexlb.dao.master.WorkerStatus dummyFusionWorker = new org.flexlb.dao.master.WorkerStatus();
+        WorkerStatus dummyFusionWorker = new WorkerStatus();
         dummyFusionWorker.setIp("192.168.1.3");
         dummyFusionWorker.setPort(8082);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.3:8082", dummyFusionWorker);
 
-        org.flexlb.dao.master.WorkerStatus dummyVitWorker = new org.flexlb.dao.master.WorkerStatus();
+        WorkerStatus dummyVitWorker = new WorkerStatus();
         dummyVitWorker.setIp("192.168.1.4");
         dummyVitWorker.setPort(8083);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.4:8083", dummyVitWorker);
@@ -286,12 +289,12 @@ class DefaultRouterTest {
     @Test
     void should_return_response_with_no_vit_worker_error_when_vit_selection_fails() {
         // Setup - add dummy workers to trigger role types
-        org.flexlb.dao.master.WorkerStatus dummyFusionWorker = new org.flexlb.dao.master.WorkerStatus();
+        WorkerStatus dummyFusionWorker = new WorkerStatus();
         dummyFusionWorker.setIp("192.168.1.3");
         dummyFusionWorker.setPort(8082);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.3:8082", dummyFusionWorker);
 
-        org.flexlb.dao.master.WorkerStatus dummyVitWorker = new org.flexlb.dao.master.WorkerStatus();
+        WorkerStatus dummyVitWorker = new WorkerStatus();
         dummyVitWorker.setIp("192.168.1.4");
         dummyVitWorker.setPort(8083);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.4:8083", dummyVitWorker);
@@ -333,7 +336,7 @@ class DefaultRouterTest {
     @Test
     void should_return_response_with_no_decode_worker_error_when_decode_selection_fails() {
         // Setup - add dummy workers to trigger role types
-        org.flexlb.dao.master.WorkerStatus dummyDecodeWorker = new org.flexlb.dao.master.WorkerStatus();
+        WorkerStatus dummyDecodeWorker = new WorkerStatus();
         dummyDecodeWorker.setIp("192.168.1.2");
         dummyDecodeWorker.setPort(8081);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081", dummyDecodeWorker);
@@ -354,12 +357,12 @@ class DefaultRouterTest {
     @Test
     void should_return_response_with_no_prefill_worker_error_and_release_decode_cache_when_prefill_selection_fails_after_decode() {
         // Setup - add dummy workers to trigger role types (decode comes before prefill)
-        org.flexlb.dao.master.WorkerStatus dummyDecodeWorker = new org.flexlb.dao.master.WorkerStatus();
+        WorkerStatus dummyDecodeWorker = new WorkerStatus();
         dummyDecodeWorker.setIp("192.168.1.2");
         dummyDecodeWorker.setPort(8081);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081", dummyDecodeWorker);
 
-        org.flexlb.dao.master.WorkerStatus dummyPrefillWorker = new org.flexlb.dao.master.WorkerStatus();
+        WorkerStatus dummyPrefillWorker = new WorkerStatus();
         dummyPrefillWorker.setIp("192.168.1.1");
         dummyPrefillWorker.setPort(8080);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080", dummyPrefillWorker);
@@ -379,7 +382,7 @@ class DefaultRouterTest {
 
         // Ensure endpoint registry returns a non-null endpoint so rollback proceeds
         lenient().when(endpointRegistry.get(RoleType.DECODE, "192.168.1.2:8081"))
-                .thenReturn(org.mockito.Mockito.mock(WorkerEndpoint.class));
+                .thenReturn(Mockito.mock(WorkerEndpoint.class));
 
         // Execute
         Response response = defaultRouter.route(balanceContext);
@@ -387,13 +390,13 @@ class DefaultRouterTest {
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
         assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), response.getCode(), "Error code should match NO_PREFILL_WORKER");
-        verify(decodeStrategy).rollBack(any(WorkerEndpoint.class), anyLong());
+        verify(decodeStrategy).rollBack(any(WorkerEndpoint.class), ArgumentMatchers.anyString());
     }
 
     @Test
     void should_return_success_response_with_vit_server_when_only_vit_role_exists_and_selection_succeeds() {
         // Setup - add dummy worker to trigger role type
-        org.flexlb.dao.master.WorkerStatus dummyVitWorker = new org.flexlb.dao.master.WorkerStatus();
+        WorkerStatus dummyVitWorker = new WorkerStatus();
         dummyVitWorker.setIp("192.168.1.5");
         dummyVitWorker.setPort(8084);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.5:8084", dummyVitWorker);
@@ -416,7 +419,7 @@ class DefaultRouterTest {
     @Test
     void should_return_response_with_no_vit_worker_error_when_only_vit_role_exists_and_selection_fails() {
         // Setup - add dummy worker to trigger role type
-        org.flexlb.dao.master.WorkerStatus dummyVitWorker = new org.flexlb.dao.master.WorkerStatus();
+        WorkerStatus dummyVitWorker = new WorkerStatus();
         dummyVitWorker.setIp("192.168.1.5");
         dummyVitWorker.setPort(8084);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.5:8084", dummyVitWorker);
@@ -438,12 +441,12 @@ class DefaultRouterTest {
     @Test
     void should_return_success_response_with_pdfusion_and_vit_servers_when_both_selections_succeed() {
         // Setup - add dummy workers to trigger role types
-        org.flexlb.dao.master.WorkerStatus dummyFusionWorker = new org.flexlb.dao.master.WorkerStatus();
+        WorkerStatus dummyFusionWorker = new WorkerStatus();
         dummyFusionWorker.setIp("192.168.1.3");
         dummyFusionWorker.setPort(8082);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.3:8082", dummyFusionWorker);
 
-        org.flexlb.dao.master.WorkerStatus dummyVitWorker = new org.flexlb.dao.master.WorkerStatus();
+        WorkerStatus dummyVitWorker = new WorkerStatus();
         dummyVitWorker.setIp("192.168.1.4");
         dummyVitWorker.setPort(8083);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.4:8083", dummyVitWorker);
@@ -453,7 +456,7 @@ class DefaultRouterTest {
         fusionServerStatus.setServerIp("192.168.1.3");
         fusionServerStatus.setHttpPort(8082);
         fusionServerStatus.setGroup("group2");
-        fusionServerStatus.setRequestId(54321L);
+        fusionServerStatus.setRequestId("54321");
         when(fusionStrategy.select(any(BalanceContext.class), eq(RoleType.PDFUSION), isNull())).thenReturn(fusionServerStatus);
 
         ServerStatus vitServerStatus = new ServerStatus();
@@ -475,17 +478,17 @@ class DefaultRouterTest {
     @Test
     void should_return_success_response_with_prefill_decode_and_vit_servers_when_all_selections_succeed() {
         // Setup - add dummy workers to trigger role types
-        org.flexlb.dao.master.WorkerStatus dummyPrefillWorker = new org.flexlb.dao.master.WorkerStatus();
+        WorkerStatus dummyPrefillWorker = new WorkerStatus();
         dummyPrefillWorker.setIp("192.168.1.1");
         dummyPrefillWorker.setPort(8080);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080", dummyPrefillWorker);
 
-        org.flexlb.dao.master.WorkerStatus dummyDecodeWorker = new org.flexlb.dao.master.WorkerStatus();
+        WorkerStatus dummyDecodeWorker = new WorkerStatus();
         dummyDecodeWorker.setIp("192.168.1.2");
         dummyDecodeWorker.setPort(8081);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081", dummyDecodeWorker);
 
-        org.flexlb.dao.master.WorkerStatus dummyVitWorker = new org.flexlb.dao.master.WorkerStatus();
+        WorkerStatus dummyVitWorker = new WorkerStatus();
         dummyVitWorker.setIp("192.168.1.5");
         dummyVitWorker.setPort(8084);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().put("192.168.1.5:8084", dummyVitWorker);
@@ -524,18 +527,18 @@ class DefaultRouterTest {
     @Test
     void should_force_initial_group_when_traffic_policy_matches() {
         // Setup - add dummy workers to trigger role types
-        org.flexlb.dao.master.WorkerStatus dummyDecodeWorker = new org.flexlb.dao.master.WorkerStatus();
+        WorkerStatus dummyDecodeWorker = new WorkerStatus();
         dummyDecodeWorker.setIp("192.168.1.2");
         dummyDecodeWorker.setPort(8081);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().put("192.168.1.2:8081", dummyDecodeWorker);
 
-        org.flexlb.dao.master.WorkerStatus dummyPrefillWorker = new org.flexlb.dao.master.WorkerStatus();
+        WorkerStatus dummyPrefillWorker = new WorkerStatus();
         dummyPrefillWorker.setIp("192.168.1.1");
         dummyPrefillWorker.setPort(8080);
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().put("192.168.1.1:8080", dummyPrefillWorker);
 
         Request actualRequest = new Request();
-        actualRequest.setRequestId(12345L);
+        actualRequest.setRequestId("12345");
         actualRequest.setSeqLen(10000L);
         when(balanceContext.getRequest()).thenReturn(actualRequest);
         when(groupRoutingPolicy.route(balanceContext)).thenReturn(GroupRoutingDecision.of("long-group", "long-context"));

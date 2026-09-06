@@ -6,6 +6,7 @@ import org.flexlb.balance.scheduler.BatchDispatcher;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.PriorityScheduler;
+import org.flexlb.balance.scheduler.RequestIdFixtures;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.balance.scheduler.WorkerBatcher;
@@ -24,12 +25,14 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.enums.TaskPhase;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
 
 import java.util.List;
 import java.util.Map;
@@ -150,8 +153,8 @@ class PriorityAdmissionSchedulerTest {
     void switch_off_uses_legacy_path_and_never_invokes_priority_scheduler() throws Exception {
         SchedulingTestConfig.useFifoQueue(config);
 
-        CompletableFuture<Response> first = scheduler.submit(context(11));
-        CompletableFuture<Response> second = scheduler.submit(context(12));
+        CompletableFuture<Response> first = scheduler.submit(context("11"));
+        CompletableFuture<Response> second = scheduler.submit(context("12"));
 
         assertTrue(first.get(2, TimeUnit.SECONDS).isSuccess());
         assertTrue(second.get(2, TimeUnit.SECONDS).isSuccess());
@@ -164,8 +167,8 @@ class PriorityAdmissionSchedulerTest {
 
     @Test
     void switch_on_no_pressure_places_on_router_selected_pd_pair() throws Exception {
-        CompletableFuture<Response> first = scheduler.submit(context(1));
-        CompletableFuture<Response> second = scheduler.submit(context(2));
+        CompletableFuture<Response> first = scheduler.submit(context("1"));
+        CompletableFuture<Response> second = scheduler.submit(context("2"));
 
         Response firstResponse = first.get(2, TimeUnit.SECONDS);
         Response secondResponse = second.get(2, TimeUnit.SECONDS);
@@ -195,7 +198,7 @@ class PriorityAdmissionSchedulerTest {
         // the sole gate — even a raw priority-0 context goes through the
         // priority scheduler and is placed normally.
         SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(1);
-        Response response = scheduler.submit(context(61, 0)).get(2, TimeUnit.SECONDS);
+        Response response = scheduler.submit(context("61", 0)).get(2, TimeUnit.SECONDS);
 
         assertTrue(response.isSuccess());
         verify(priorityScheduler).schedule(any(), any(), any());
@@ -207,7 +210,7 @@ class PriorityAdmissionSchedulerTest {
     void request_without_priority_field_and_no_worker_isResourceExhausted() throws Exception {
         when(router.route(any(BalanceContext.class))).thenReturn(null);
 
-        Response response = scheduler.submit(context(62, 0)).get(1, TimeUnit.SECONDS);
+        Response response = scheduler.submit(context("62", 0)).get(1, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
@@ -221,7 +224,7 @@ class PriorityAdmissionSchedulerTest {
 
     @Test
     void expired_priority_request_remains_resource_exhausted() throws Exception {
-        BalanceContext ctx = context(71);
+        BalanceContext ctx = context("71");
         ctx.setSchedulingMetadata(SchedulingMetadata.explicit(
                 50, System.currentTimeMillis() - 1_000));
 
@@ -239,7 +242,7 @@ class PriorityAdmissionSchedulerTest {
     @Test
     void expired_fifo_request_remains_batch_slo_expired() throws Exception {
         SchedulingTestConfig.useFifoQueue(config);
-        BalanceContext ctx = context(72);
+        BalanceContext ctx = context("72");
         ctx.setSchedulingMetadata(SchedulingMetadata.explicit(
                 50, System.currentTimeMillis() - 1_000));
 
@@ -280,12 +283,12 @@ class PriorityAdmissionSchedulerTest {
 
         ExecutorService submitter = Executors.newSingleThreadExecutor();
         Future<CompletableFuture<Response>> firstSubmission =
-                submitter.submit(() -> scheduler.submit(contextWithBudget(73)));
+                submitter.submit(() -> scheduler.submit(contextWithBudget("73")));
         try {
             assertTrue(firstRouteEntered.await(2, TimeUnit.SECONDS));
             assertEquals(1, priorityScheduler.activeAdmissionCount());
 
-            Response second = scheduler.submit(contextWithBudget(74))
+            Response second = scheduler.submit(contextWithBudget("74"))
                     .get(1, TimeUnit.SECONDS);
 
             assertFalse(second.isSuccess());
@@ -300,7 +303,7 @@ class PriorityAdmissionSchedulerTest {
             assertTrue(first.isSuccess());
             assertEquals(1, priorityScheduler.activeAdmissionCount());
 
-            reportDecodePhase(73, TaskPhase.KV_ALLOCATED);
+            reportDecodePhase("73", TaskPhase.KV_ALLOCATED);
             assertEquals(0, priorityScheduler.activeAdmissionCount());
         } finally {
             allowFirstRoute.countDown();
@@ -321,7 +324,7 @@ class PriorityAdmissionSchedulerTest {
         CompletableFuture<Response> response = new CompletableFuture<>();
         IllegalStateException error = assertThrows(IllegalStateException.class,
                 () -> priorityScheduler.schedule(
-                        contextWithBudget(75), response, registrar));
+                        contextWithBudget("75"), response, registrar));
 
         assertEquals("attach failed", error.getMessage());
         assertEquals(0, priorityScheduler.activeAdmissionCount());
@@ -338,9 +341,9 @@ class PriorityAdmissionSchedulerTest {
             return prefillOnlyRoute(ctx.getRequestId());
         });
 
-        Response first = scheduler.submit(contextWithBudget(78))
+        Response first = scheduler.submit(contextWithBudget("78"))
                 .get(2, TimeUnit.SECONDS);
-        Response second = scheduler.submit(contextWithBudget(79))
+        Response second = scheduler.submit(contextWithBudget("79"))
                 .get(2, TimeUnit.SECONDS);
 
         assertTrue(first.isSuccess(), first.getErrorMessage());
@@ -364,8 +367,8 @@ class PriorityAdmissionSchedulerTest {
                 });
 
         CompletableFuture<Response> admitted = new CompletableFuture<>();
-        priorityScheduler.schedule(contextWithBudget(76), admitted, registrar);
-        admitted.complete(successRoute(76));
+        priorityScheduler.schedule(contextWithBudget("76"), admitted, registrar);
+        admitted.complete(successRoute("76"));
         awaitSoftTimeoutQueueSize(1);
 
         assertTrue(priorityScheduler.removesCanceledSoftTimeouts());
@@ -382,7 +385,7 @@ class PriorityAdmissionSchedulerTest {
                 .fenceAfterDeliveryTimeout(any(BatchItem.class), anyString());
 
         CompletableFuture<Response> rejected = new CompletableFuture<>();
-        priorityScheduler.schedule(contextWithBudget(77), rejected, registrar);
+        priorityScheduler.schedule(contextWithBudget("77"), rejected, registrar);
         Response rejection = rejected.get(1, TimeUnit.SECONDS);
         assertFalse(rejection.isSuccess());
         assertTrue(rejection.getErrorMessage().contains("shut down"));
@@ -414,7 +417,7 @@ class PriorityAdmissionSchedulerTest {
         when(registrar.fenceAfterDeliveryTimeout(any(BatchItem.class), anyString()))
                 .thenAnswer(invocation -> {
                     BatchItem item = invocation.getArgument(0);
-                    if (item.requestId() == firstRequestId) {
+                    if (item.requestId().equals(String.valueOf(firstRequestId))) {
                         firstFenceEntered.countDown();
                         awaitLatch(releaseFirstFence);
                     }
@@ -422,17 +425,17 @@ class PriorityAdmissionSchedulerTest {
                 });
 
         CompletableFuture<Response> first = new CompletableFuture<>();
-        priorityScheduler.schedule(contextWithBudget(firstRequestId), first, registrar);
-        assertTrue(first.complete(successRoute(firstRequestId)));
+        priorityScheduler.schedule(contextWithBudget(String.valueOf(firstRequestId)), first, registrar);
+        assertTrue(first.complete(successRoute(String.valueOf(firstRequestId))));
         assertTrue(firstFenceEntered.await(1, TimeUnit.SECONDS));
         assertEquals(1, priorityScheduler.activeSoftTimeoutCallbackCount());
 
         CompletableFuture<Response> second = new CompletableFuture<>();
-        priorityScheduler.schedule(contextWithBudget(secondRequestId), second, registrar);
+        priorityScheduler.schedule(contextWithBudget(String.valueOf(secondRequestId)), second, registrar);
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
             Future<Boolean> secondCompletion = executor.submit(
-                    () -> second.complete(successRoute(secondRequestId)));
+                    () -> second.complete(successRoute(String.valueOf(secondRequestId))));
             assertTrue(secondCompletion.get(1, TimeUnit.SECONDS),
                     "a running timeout callback must not retain the lifecycle monitor");
             assertEquals(1, priorityScheduler.pendingSoftTimeoutLeaseCount());
@@ -463,7 +466,7 @@ class PriorityAdmissionSchedulerTest {
     void null_route_fails_with_no_available_worker() throws Exception {
         when(router.route(any(BalanceContext.class))).thenReturn(null);
 
-        Response response = scheduler.submit(context(21)).get(1, TimeUnit.SECONDS);
+        Response response = scheduler.submit(context("21")).get(1, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
@@ -477,7 +480,7 @@ class PriorityAdmissionSchedulerTest {
         when(router.route(any(BalanceContext.class)))
                 .thenReturn(Response.error(StrategyErrorType.NO_PREFILL_WORKER));
 
-        Response response = scheduler.submit(context(22)).get(1, TimeUnit.SECONDS);
+        Response response = scheduler.submit(context("22")).get(1, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
@@ -492,7 +495,7 @@ class PriorityAdmissionSchedulerTest {
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
         WorkerStatus decodeStatus = decodeEp.getStatus();
         TaskInfo untrackedRunning = new TaskInfo();
-        untrackedRunning.setRequestId(900L);
+        untrackedRunning.setRequestId("900");
         untrackedRunning.setPhase(TaskPhase.RUNNING);
         untrackedRunning.setInputLength(128L);
         WorkerStatusResponse workerStatus = new WorkerStatusResponse();
@@ -505,7 +508,7 @@ class PriorityAdmissionSchedulerTest {
         when(router.route(any(BalanceContext.class)))
                 .thenReturn(Response.error(StrategyErrorType.NO_DECODE_WORKER));
 
-        Response response = scheduler.submit(context(23)).get(1, TimeUnit.SECONDS);
+        Response response = scheduler.submit(context("23")).get(1, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(), response.getCode());
@@ -530,9 +533,9 @@ class PriorityAdmissionSchedulerTest {
 
         // Fill the single queue slot so tryOffer() must fail (P offer second)
         WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
-        assertTrue(batcher.tryOffer(dummyItem(999)));
+        assertTrue(batcher.tryOffer(dummyItem("999")));
 
-        Response response = scheduler.submit(context(31)).get(2, TimeUnit.SECONDS);
+        Response response = scheduler.submit(context("31")).get(2, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode(), response.getCode());
@@ -548,7 +551,7 @@ class PriorityAdmissionSchedulerTest {
 
     // ==================== helpers ====================
 
-    private BatchItem dummyItem(long requestId) {
+    private BatchItem dummyItem(String requestId) {
         Response route = successRoute(requestId);
         return new BatchItem(context(requestId), new CompletableFuture<>(), route,
                 PriorityScheduler.findServer(route, RoleType.PREFILL),
@@ -562,8 +565,7 @@ class PriorityAdmissionSchedulerTest {
         EngineRpcService.EnqueueBatchResponsePB.Builder response =
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder().setBatchId(request.getBatchId());
         for (EngineRpcService.GenerateInputPB input : batchInputs(request)) {
-            response.addSuccesses(EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
-                    .setRequestId(input.getRequestId())
+            response.addSuccesses(RequestIdFixtures.write(EngineRpcService.EnqueueBatchSuccessPB.newBuilder(), RequestId.parse(input))
                     .build());
         }
         return response.build();
@@ -577,16 +579,16 @@ class PriorityAdmissionSchedulerTest {
                 .toList();
     }
 
-    private BalanceContext context(long requestId) {
+    private BalanceContext context(String requestId) {
         // Production requests always carry a normalized 1-100 priority
         // (normalize() default is 50); the raw-0 overload above documents
         // the removed hasPriority gate.
         return context(requestId, 50);
     }
 
-    private BalanceContext context(long requestId, int priority) {
+    private BalanceContext context(String requestId, int priority) {
         Request request = new Request();
-        request.setRequestId(requestId);
+        request.setRequestId(String.valueOf(requestId));
         request.setSeqLen(128);
         request.setMaxNewTokens(8);
         request.setNumBeams(1);
@@ -600,7 +602,7 @@ class PriorityAdmissionSchedulerTest {
         return ctx;
     }
 
-    private BalanceContext contextWithBudget(long requestId) {
+    private BalanceContext contextWithBudget(String requestId) {
         BalanceContext ctx = context(requestId);
         long nowMs = System.currentTimeMillis();
         ctx.setSchedulingMetadata(SchedulingMetadata.explicit(
@@ -610,14 +612,14 @@ class PriorityAdmissionSchedulerTest {
 
     private static InflightRegistrar openRegistrar() {
         InflightRegistrar registrar = mock(InflightRegistrar.class);
-        when(registrar.isAdmissionOpen(anyLong(), any())).thenReturn(true);
-        when(registrar.claimAdmissionMutation(anyLong(), any())).thenReturn(true);
+        when(registrar.isAdmissionOpen(ArgumentMatchers.anyString(), any())).thenReturn(true);
+        when(registrar.claimAdmissionMutation(ArgumentMatchers.anyString(), any())).thenReturn(true);
         return registrar;
     }
 
-    private void reportDecodePhase(long requestId, TaskPhase phase) {
+    private void reportDecodePhase(String requestId, TaskPhase phase) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(String.valueOf(requestId));
         task.setPhase(phase);
         task.setInputLength(128);
         WorkerStatusResponse response = new WorkerStatusResponse();
@@ -656,9 +658,8 @@ class PriorityAdmissionSchedulerTest {
         }
     }
 
-    private static byte[] generateInputBytes(long requestId) {
-        EngineRpcService.GenerateInputPB input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+    private static byte[] generateInputBytes(String requestId) {
+        EngineRpcService.GenerateInputPB input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .addTokenIds(101)
                 .addTokenIds(102)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
@@ -668,7 +669,7 @@ class PriorityAdmissionSchedulerTest {
         return input.toByteArray();
     }
 
-    private static Response successRoute(long requestId) {
+    private static Response successRoute(String requestId) {
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(List.of(
@@ -678,7 +679,7 @@ class PriorityAdmissionSchedulerTest {
         return response;
     }
 
-    private static Response prefillOnlyRoute(long requestId) {
+    private static Response prefillOnlyRoute(String requestId) {
         Response response = new Response();
         response.setSuccess(true);
 
@@ -689,12 +690,12 @@ class PriorityAdmissionSchedulerTest {
         prefill.setHttpPort(8080);
         prefill.setGrpcPort(8081);
         prefill.setGroup("g1");
-        prefill.setRequestId(requestId);
+        prefill.setRequestId(String.valueOf(requestId));
         response.setServerStatus(List.of(prefill));
         return response;
     }
 
-    private static ServerStatus server(RoleType role, String ip, int httpPort, int grpcPort, long requestId) {
+    private static ServerStatus server(RoleType role, String ip, int httpPort, int grpcPort, String requestId) {
         ServerStatus status = new ServerStatus();
         status.setSuccess(true);
         status.setRole(role);
@@ -703,7 +704,7 @@ class PriorityAdmissionSchedulerTest {
         status.setGrpcPort(grpcPort);
         status.setDpRank(0);
         status.setGroup("g1");
-        status.setRequestId(requestId);
+        status.setRequestId(String.valueOf(requestId));
         return status;
     }
 }

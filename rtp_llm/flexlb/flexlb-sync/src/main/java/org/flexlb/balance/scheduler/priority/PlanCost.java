@@ -18,7 +18,7 @@ public record PlanCost(
         int minVictimPriority,
         long priorityCost,
         int victimCount,
-        long deterministicTieBreak) {
+        String deterministicTieBreak) {
 
     /**
      * Plan preference (smaller = better): exact priority harm profile →
@@ -30,5 +30,5 @@ public record PlanCost(
     public static final Comparator<PlanCost> ORDER = Comparator
             .comparing(PlanCost::priorityHarmProfile)
             .thenComparingInt(PlanCost::victimCount)
-            .thenComparingLong(PlanCost::deterministicTieBreak);
+            .thenComparing(PlanCost::deterministicTieBreak);
 }

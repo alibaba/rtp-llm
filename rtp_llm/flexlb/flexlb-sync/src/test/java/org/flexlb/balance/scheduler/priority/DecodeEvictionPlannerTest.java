@@ -51,9 +51,9 @@ class DecodeEvictionPlannerTest {
     void slotFull_picksLowestPriorityThenRequestId() {
         // limit=2, totalLoad=2 -> slotDeficit = 1; KV is plentiful.
         DecodeEndpointSnapshot ep = endpoint("d1", 7, 100_000, 200_000, 2, 2, List.of(
-                reserved(1, 30, 128),
-                reserved(2, 30, 128),
-                reserved(3, 40, 128)));
+                reserved("1", 30, 128),
+                reserved("2", 30, 128),
+                reserved("3", 40, 128)));
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
@@ -64,7 +64,7 @@ class DecodeEvictionPlannerTest {
         assertEquals(7, proposal.admissionVersion());
         assertEquals(DecodeEvictionProposal.CASE_SLOT, proposal.evictionCase());
         // p30 before p40; request id is the deterministic same-priority tie-break.
-        assertEquals(List.of(1L), proposal.victims().stream()
+        assertEquals(List.of("1"), proposal.victims().stream()
                 .map(DecodeRequestSnapshot::requestId).toList());
         // h(DECODE_SLOT_FULL)=4 x f(30)=1 x g(RESERVED_NOT_ACCEPTED)=1
         assertEquals(16, proposal.totalCost());
@@ -76,8 +76,8 @@ class DecodeEvictionPlannerTest {
     @Test
     void equalPriority_isInfeasible() {
         DecodeEndpointSnapshot ep = endpoint("d1", 1, 100_000, 200_000, 2, 2, List.of(
-                reserved(1, 50, 128),
-                reserved(2, 50, 128)));
+                reserved("1", 50, 128),
+                reserved("2", 50, 128)));
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
@@ -94,8 +94,8 @@ class DecodeEvictionPlannerTest {
         // Slot-full endpoint whose reserved entries are all legacy (priority 0):
         // numerically 0 < incoming 50, but they must stay untouchable.
         DecodeEndpointSnapshot ep = endpoint("d1", 1, 100_000, 200_000, 2, 2, List.of(
-                reserved(1, 0, 128),
-                reserved(2, 0, 128)));
+                reserved("1", 0, 128),
+                reserved("2", 0, 128)));
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
@@ -108,15 +108,15 @@ class DecodeEvictionPlannerTest {
     @Test
     void mixedEntries_onlyPriorityCarryingOnesAreEvicted() {
         DecodeEndpointSnapshot ep = endpoint("d1", 1, 100_000, 200_000, 2, 2, List.of(
-                reserved(1, 0, 128),
-                reserved(2, 30, 128)));
+                reserved("1", 0, 128),
+                reserved("2", 30, 128)));
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
                 incoming(50, 128), List.of(ep), config, channel, failures);
 
         assertNotNull(proposal);
-        assertEquals(List.of(2L), proposal.victims().stream()
+        assertEquals(List.of("2"), proposal.victims().stream()
                 .map(DecodeRequestSnapshot::requestId).toList());
     }
 
@@ -126,9 +126,9 @@ class DecodeEvictionPlannerTest {
     void kvFull_greedyPicksBiggestReleaseFirst() {
         // No slot limit; hardKv=2000 > available 100 -> kvDeficit = 1900.
         DecodeEndpointSnapshot ep = endpoint("d1", 3, 100, 10_000, 3, 0, List.of(
-                reserved(1, 30, 1_024),
-                reserved(2, 30, 2_048),
-                reserved(3, 30, 512)));
+                reserved("1", 30, 1_024),
+                reserved("2", 30, 2_048),
+                reserved("3", 30, 512)));
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
@@ -137,7 +137,7 @@ class DecodeEvictionPlannerTest {
         assertNotNull(proposal);
         assertEquals(DecodeEvictionProposal.CASE_KV, proposal.evictionCase());
         // kvBucket desc: request 2 alone already covers the deficit.
-        assertEquals(List.of(2L), proposal.victims().stream()
+        assertEquals(List.of("2"), proposal.victims().stream()
                 .map(DecodeRequestSnapshot::requestId).toList());
         // h(DECODE_KV_FULL)=8 x f(30)=1 x g=1 x lengthWasteCost(2048)=1
         assertEquals(32, proposal.totalCost());
@@ -147,7 +147,7 @@ class DecodeEvictionPlannerTest {
     @Test
     void kvFull_insufficientReleasableKv_isInfeasible() {
         DecodeEndpointSnapshot ep = endpoint("d1", 3, 100, 10_000, 1, 0, List.of(
-                reserved(3, 30, 512)));
+                reserved("3", 30, 512)));
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
@@ -163,7 +163,7 @@ class DecodeEvictionPlannerTest {
         // a feasible high-priority admission into an artificial cap failure.
         List<DecodeRequestSnapshot> candidates = new ArrayList<>();
         for (int i = 1; i <= 9; i++) {
-            candidates.add(reserved(i, 30, 128));
+            candidates.add(reserved(String.valueOf(i), 30, 128));
         }
         DecodeEndpointSnapshot ep = endpoint(
                 "d1", 1, 100_000, 200_000, 10, 2, candidates);
@@ -184,9 +184,9 @@ class DecodeEvictionPlannerTest {
         // slotDeficit = 3+1-2 = 2; kvDeficit = 1000-0 = 1000.
         // slotPressure 1.0 > kvPressure 0.01 -> slot part plans first.
         DecodeEndpointSnapshot ep = endpoint("d1", 9, 0, 100_000, 3, 2, List.of(
-                reserved(1, 30, 0),
-                reserved(2, 30, 600),
-                reserved(3, 30, 1_200)));
+                reserved("1", 30, 0),
+                reserved("2", 30, 600),
+                reserved("3", 30, 1_200)));
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
@@ -196,7 +196,7 @@ class DecodeEvictionPlannerTest {
         assertEquals(DecodeEvictionProposal.CASE_SLOT_AND_KV, proposal.evictionCase());
         // Slot part [1, 2] frees 600 KV; KV part covers the remaining 400
         // with request 3 only — already-picked victims are excluded (dedup).
-        assertEquals(List.of(1L, 2L, 3L), proposal.victims().stream()
+        assertEquals(List.of("1", "2", "3"), proposal.victims().stream()
                 .map(DecodeRequestSnapshot::requestId).toList());
         // slotPart = 4 x (1 + 1) = 8; kvPart = 8 x 1 x 1 x 1 = 8;
         // totalCost = 8 + 8 = 16 — parts are added, never re-multiplied by h.
@@ -209,7 +209,7 @@ class DecodeEvictionPlannerTest {
         // slotDeficit = 1; kvDeficit = 500; the single slot victim frees 2048
         // KV, so no combined plan is generated (13.2).
         DecodeEndpointSnapshot ep = endpoint("d1", 2, 0, 10_000, 1, 1, List.of(
-                reserved(1, 30, 2_048)));
+                reserved("1", 30, 2_048)));
 
         Map<String, String> failures = new HashMap<>();
         DecodeEvictionProposal proposal = EvictionPlanner.planDecode(
@@ -217,7 +217,7 @@ class DecodeEvictionPlannerTest {
 
         assertNotNull(proposal);
         assertEquals(DecodeEvictionProposal.CASE_SLOT, proposal.evictionCase());
-        assertEquals(List.of(1L), proposal.victims().stream()
+        assertEquals(List.of("1"), proposal.victims().stream()
                 .map(DecodeRequestSnapshot::requestId).toList());
         assertEquals(16, proposal.totalCost());
     }
@@ -227,9 +227,9 @@ class DecodeEvictionPlannerTest {
     @Test
     void confirmedRequests_areNeverCandidates() {
         DecodeEndpointSnapshot ep = endpoint("d1", 1, 100_000, 200_000, 2, 1, List.of(
-                new DecodeRequestSnapshot(1, 30, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
+                new DecodeRequestSnapshot("1", 30, DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
                         128, 136, true, false),
-                new DecodeRequestSnapshot(2, 30, DecodeTaskPhase.RUNNING,
+                new DecodeRequestSnapshot("2", 30, DecodeTaskPhase.RUNNING,
                         128, 136, true, false)));
 
         Map<String, String> failures = new HashMap<>();
@@ -265,7 +265,7 @@ class DecodeEvictionPlannerTest {
                 reserved, List.of(), List.of());
     }
 
-    private static DecodeRequestSnapshot reserved(long requestId, int priority,
+    private static DecodeRequestSnapshot reserved(String requestId, int priority,
                                                   long kvTokens) {
         return new DecodeRequestSnapshot(requestId, priority,
                 DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN,
@@ -273,7 +273,7 @@ class DecodeEvictionPlannerTest {
     }
 
     private static PriorityRequestEnvelope incoming(int priority, long seqLen) {
-        return new PriorityRequestEnvelope(999, priority, seqLen, 8,
+        return new PriorityRequestEnvelope("999", priority, seqLen, 8,
                 System.currentTimeMillis(), seqLen, seqLen + 8);
     }
 }

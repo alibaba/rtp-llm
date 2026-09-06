@@ -6,11 +6,13 @@ import org.flexlb.balance.scheduler.BatchDispatcher;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.PriorityScheduler;
+import org.flexlb.balance.scheduler.RequestIdFixtures;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
@@ -22,6 +24,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.PrioritySchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -88,7 +91,7 @@ class PriorityEvictionSchedulerTest {
         SchedulingTestConfig.useBatchDispatcher(config).setMaxRequests(100);
         SchedulingTestConfig.useBatchDispatcher(config).setMaxCollectionWaitMs(10_000);
         SchedulingTestConfig.usePriorityQueue(config);
-        SchedulingTestConfig.allowVictim(config, org.flexlb.config.VictimStage.PREFILL_QUEUED);
+        SchedulingTestConfig.allowVictim(config, VictimStage.PREFILL_QUEUED);
         SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(1);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
@@ -143,10 +146,10 @@ class PriorityEvictionSchedulerTest {
         WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
 
-        CompletableFuture<Response> victim = scheduler.submit(context(1, 30));
+        CompletableFuture<Response> victim = scheduler.submit(context("1", 30));
         await(() -> batcher.queueSize() == 1);
 
-        CompletableFuture<Response> incoming = scheduler.submit(context(2, 70));
+        CompletableFuture<Response> incoming = scheduler.submit(context("2", 70));
 
         // Queued victim yields with retryable NO_AVAILABLE_WORKER — the engine
         // never saw it (contract 5.3); never PRIORITY_PREEMPTED.
@@ -175,8 +178,8 @@ class PriorityEvictionSchedulerTest {
         // Admit two victims, then lower the live hard limit so the next
         // request must atomically replace both of them.
         SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(2);
-        CompletableFuture<Response> firstVictim = scheduler.submit(context(3, 20));
-        CompletableFuture<Response> secondVictim = scheduler.submit(context(4, 30));
+        CompletableFuture<Response> firstVictim = scheduler.submit(context("3", 20));
+        CompletableFuture<Response> secondVictim = scheduler.submit(context("4", 30));
         await(() -> batcher.queueSize() == 2);
         SchedulingTestConfig.useBatchDispatcher(config).setMaxWaitingRequestsPerPrefillWorker(1);
 
@@ -188,7 +191,7 @@ class PriorityEvictionSchedulerTest {
                 .when(priorityReporter)
                 .reportEvictionCommit(eq(70), eq("prefill_queue_full"), eq("success"));
 
-        CompletableFuture<Response> incoming = scheduler.submit(context(5, 70));
+        CompletableFuture<Response> incoming = scheduler.submit(context("5", 70));
 
         Response firstResponse = firstVictim.get(2, TimeUnit.SECONDS);
         Response secondResponse = secondVictim.get(2, TimeUnit.SECONDS);
@@ -215,10 +218,10 @@ class PriorityEvictionSchedulerTest {
         WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
 
-        CompletableFuture<Response> victim = scheduler.submit(context(11, 50));
+        CompletableFuture<Response> victim = scheduler.submit(context("11", 50));
         await(() -> batcher.queueSize() == 1);
 
-        Response response = scheduler.submit(context(12, 50)).get(2, TimeUnit.SECONDS);
+        Response response = scheduler.submit(context("12", 50)).get(2, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode(),
@@ -244,14 +247,14 @@ class PriorityEvictionSchedulerTest {
 
     @Test
     void evict_switch_off_never_plans_and_fast_rejects_on_capacity() throws Exception {
-        SchedulingTestConfig.disallowVictim(config, org.flexlb.config.VictimStage.PREFILL_QUEUED);
+        SchedulingTestConfig.disallowVictim(config, VictimStage.PREFILL_QUEUED);
         WorkerBatcher batcher = endpointRegistry.getPrefill(PREFILL_IP_PORT).getBatcher();
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
 
-        CompletableFuture<Response> victim = scheduler.submit(context(21, 30));
+        CompletableFuture<Response> victim = scheduler.submit(context("21", 30));
         await(() -> batcher.queueSize() == 1);
 
-        Response response = scheduler.submit(context(22, 70)).get(2, TimeUnit.SECONDS);
+        Response response = scheduler.submit(context("22", 70)).get(2, TimeUnit.SECONDS);
 
         assertFalse(response.isSuccess());
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), response.getCode());
@@ -275,8 +278,8 @@ class PriorityEvictionSchedulerTest {
     @Test
     void finish_preempted_is_idempotent_and_releases_decode_once() throws Exception {
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
-        decodeEp.reserve(77, 128, 136);
-        BatchItem item = dummyItem(77);
+        decodeEp.reserve("77", 128, 136);
+        BatchItem item = dummyItem("77");
         assertTrue(scheduler.registerInflight(item));
 
         scheduler.finishPreempted(item, "preempted by higher-priority request 88");
@@ -296,8 +299,8 @@ class PriorityEvictionSchedulerTest {
     @Test
     void finish_yielded_is_idempotent_and_releases_decode_once() throws Exception {
         DecodeEndpoint decodeEp = endpointRegistry.getDecode(DECODE_IP_PORT);
-        decodeEp.reserve(78, 128, 136);
-        BatchItem item = dummyItem(78);
+        decodeEp.reserve("78", 128, 136);
+        BatchItem item = dummyItem("78");
         assertTrue(scheduler.registerInflight(item));
 
         scheduler.finishYielded(item, "yielded to higher-priority request 88");
@@ -328,7 +331,7 @@ class PriorityEvictionSchedulerTest {
         }
     }
 
-    private BatchItem dummyItem(long requestId) {
+    private BatchItem dummyItem(String requestId) {
         Response route = successRoute(requestId);
         return new BatchItem(context(requestId, 50), new CompletableFuture<>(), route,
                 PriorityScheduler.findServer(route, RoleType.PREFILL),
@@ -344,7 +347,7 @@ class PriorityEvictionSchedulerTest {
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder().setBatchId(request.getBatchId());
         request.getDpSlotsList().stream()
                 .flatMap(slot -> slot.getRequestsList().stream())
-                .map(external -> external.getInput().getRequestId())
+                .map(external -> Long.parseLong(RequestId.parse(external.getInput())))
                 .forEach(requestId -> response.addSuccesses(
                         EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
                                 .setRequestId(requestId)
@@ -352,7 +355,7 @@ class PriorityEvictionSchedulerTest {
         return response.build();
     }
 
-    private static BalanceContext context(long requestId, int priority) {
+    private static BalanceContext context(String requestId, int priority) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(128);
@@ -371,9 +374,8 @@ class PriorityEvictionSchedulerTest {
         return ctx;
     }
 
-    private static byte[] generateInputBytes(long requestId) {
-        EngineRpcService.GenerateInputPB input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+    private static byte[] generateInputBytes(String requestId) {
+        EngineRpcService.GenerateInputPB input = RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
                 .addTokenIds(101)
                 .addTokenIds(102)
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
@@ -383,7 +385,7 @@ class PriorityEvictionSchedulerTest {
         return input.toByteArray();
     }
 
-    private static Response successRoute(long requestId) {
+    private static Response successRoute(String requestId) {
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(List.of(
@@ -393,7 +395,7 @@ class PriorityEvictionSchedulerTest {
         return response;
     }
 
-    private static ServerStatus server(RoleType role, String ip, int httpPort, int grpcPort, long requestId) {
+    private static ServerStatus server(RoleType role, String ip, int httpPort, int grpcPort, String requestId) {
         ServerStatus status = new ServerStatus();
         status.setSuccess(true);
         status.setRole(role);

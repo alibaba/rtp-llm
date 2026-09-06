@@ -33,7 +33,7 @@ public class ServerStatus {
     private DebugInfo debugInfo;
 
     @JsonProperty("request_id")
-    private long requestId;
+    private String requestId;
 
     @JsonProperty("success")
     private boolean success;

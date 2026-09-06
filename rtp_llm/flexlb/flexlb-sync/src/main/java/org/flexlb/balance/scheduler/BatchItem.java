@@ -177,9 +177,9 @@ public final class BatchItem implements Prioritized {
 
     // -- derived accessors --
 
-    public long requestId() {
+    public String requestId() {
         return ctx != null && ctx.getRequest() != null
-                ? ctx.getRequest().getRequestId() : 0;
+                ? ctx.getRequest().getRequestId() : "";
     }
 
     /** Total sequence length of this request. */
