@@ -12,6 +12,7 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.engine.grpc.core.GrpcChannelFactory;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -476,7 +477,7 @@ public class FlexlbGrpcForwarder {
 
     private ManagedChannel createChannel(String ip, int port) {
         return NettyChannelBuilder.forAddress(ip, port)
-                .channelType(NioSocketChannel.class)
+                .channelType(GrpcChannelFactory.channelType(eventLoopGroup))
                 .eventLoopGroup(eventLoopGroup)
                 .executor(executor)
                 .usePlaintext()

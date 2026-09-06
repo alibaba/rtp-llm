@@ -26,6 +26,11 @@
             <artifactId>flexlb-common</artifactId>
         </dependency>
 
+        <dependency>
+            <groupId>org.flexlb</groupId>
+            <artifactId>flexlb-grpc</artifactId>
+        </dependency>
+
         <!-- Spring Boot WebFlux for reactive programming -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

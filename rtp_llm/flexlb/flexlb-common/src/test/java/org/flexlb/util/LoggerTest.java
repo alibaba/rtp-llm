@@ -1,6 +1,8 @@
 package org.flexlb.util;
 
 import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.flexlb.enums.LogLevel;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -11,6 +13,8 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.slf4j.LoggerFactory;
 
+import java.lang.reflect.Method;
+import java.util.Arrays;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -23,9 +27,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class LoggerTest {
 
+    private ch.qos.logback.classic.Logger backendLogger;
+    private Level originalLevel;
+    private ListAppender<ILoggingEvent> appender;
+
     @BeforeEach
     void setUp() {
-        Logger.setLevel(null);
+        backendLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("flexlbLogger");
+        originalLevel = backendLogger.getLevel();
+        appender = new ListAppender<>();
+        appender.start();
+        backendLogger.addAppender(appender);
     }
 
     @AfterEach
@@ -70,25 +82,71 @@ class LoggerTest {
     }
 
     @Test
-    @DisplayName("getLevel reads back the logback level")
-    void getLevel_readsLogbackLevel() {
-        assertEquals(LogLevel.INFO, Logger.getLevel());
+    void delegatesDebugFilteringToLoggingBackend() {
+        backendLogger.setLevel(Level.INFO);
+        assertFalse(Logger.isDebugEnabled());
+        Logger.debug("hidden debug");
+        Logger.info("visible info");
+        assertEquals(1, appender.list.size());
+        assertEquals("visible info", appender.list.getFirst().getFormattedMessage());
 
-        Logger.setLevel(LogLevel.INFO);
-        assertEquals(LogLevel.INFO, Logger.getLevel());
+        backendLogger.setLevel(Level.DEBUG);
+        assertTrue(Logger.isDebugEnabled());
+        Logger.debug("visible debug");
+        assertEquals(2, appender.list.size());
+        assertEquals("visible debug", appender.list.get(1).getFormattedMessage());
+    }
 
+    @Test
+    void formatsFixedArityOverloads() {
+        backendLogger.setLevel(Level.DEBUG);
+
+        Logger.debug("one={}", 1);
+        Logger.debug("one={}, two={}", 1, 2);
+        Logger.debug("{}{}{}", 1, 2, 3);
+        Logger.debug("{}{}{}{}", 1, 2, 3, 4);
+        Logger.debug("{}{}{}{}{}", 1, 2, 3, 4, 5);
+        Logger.debug("{}{}{}{}{}{}", 1, 2, 3, 4, 5, 6);
+        Logger.info("message={}", "value");
+
+        assertEquals("one=1", appender.list.get(0).getFormattedMessage());
+        assertEquals("one=1, two=2", appender.list.get(1).getFormattedMessage());
+        assertEquals("123", appender.list.get(2).getFormattedMessage());
+        assertEquals("1234", appender.list.get(3).getFormattedMessage());
+        assertEquals("12345", appender.list.get(4).getFormattedMessage());
+        assertEquals("123456", appender.list.get(5).getFormattedMessage());
+        assertEquals("message=value", appender.list.get(6).getFormattedMessage());
+    }
+
+    @Test
+    void doesNotExposeVariableArityMethods() {
+        boolean hasVariableArityMethod = Arrays.stream(Logger.class.getDeclaredMethods())
+                .anyMatch(Method::isVarArgs);
+
+        assertFalse(hasVariableArityMethod);
+    }
+    @Test
+    void setLevelNullRestoresInfoDefault() {
         Logger.setLevel(LogLevel.DEBUG);
         assertEquals(LogLevel.DEBUG, Logger.getLevel());
 
         Logger.setLevel(null);
+
         assertEquals(LogLevel.INFO, Logger.getLevel());
+        assertEquals(Level.INFO, backendLogger.getLevel());
     }
 
     @Test
-    @DisplayName("isDebugEnabled follows the effective FlexLB log level")
-    void isDebugEnabled_followsEffectiveLogLevel() {
-        assertFalse(Logger.isDebugEnabled());
+    void runtimeLevelRoundTripsEverySupportedLevel() {
+        for (LogLevel level : LogLevel.values()) {
+            Logger.setLevel(level);
+            assertEquals(level, Logger.getLevel());
+            assertEquals(Level.toLevel(level.name()), backendLogger.getLevel());
+        }
+    }
 
+    @Test
+    void isDebugEnabledFollowsRuntimeLevel() {
         Logger.setLevel(LogLevel.DEBUG);
         assertTrue(Logger.isDebugEnabled());
 

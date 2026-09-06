@@ -16,6 +16,7 @@ public final class WorkerRegistryConfig {
         private long statusPollIntervalMs = 20;
         private long statusRpcTimeoutMs = 5000;
         private long statusStaleAfterMs = 10_000;
+        private long taskConfirmationTimeoutMs = 300_000;
     }
 
     @Getter

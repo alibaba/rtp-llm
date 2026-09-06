@@ -18,10 +18,11 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 
-import static org.mockito.Mockito.anyString;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -59,7 +60,7 @@ class WorkerAddressServiceTest {
         String address = "TestAddress";
         when(modelMetaConfig.endpointsWithGroup(modelName, RoleType.PREFILL))
                 .thenReturn(List.of(Pair.of("group1", endpoint(address))));
-        when(serviceDiscovery.getHosts(anyString()))
+        when(serviceDiscovery.getHosts(any(Endpoint.class)))
                 .thenThrow(new IllegalStateException("discovery unavailable"));
 
         List<WorkerHost> actualHosts = workerAddressService.getEngineWorkerList(
@@ -75,7 +76,7 @@ class WorkerAddressServiceTest {
         List<WorkerHost> expectedHosts = List.of(new WorkerHost("127.0.0.1", 8080, 8081, 8082, "site1", "group1"));
         when(modelMetaConfig.endpointsWithGroup(modelName, RoleType.PREFILL))
                 .thenReturn(List.of(Pair.of("group1", endpoint(address))));
-        when(serviceDiscovery.getHosts(anyString())).thenReturn(expectedHosts);
+        when(serviceDiscovery.getHosts(any(Endpoint.class))).thenReturn(expectedHosts);
 
         List<WorkerHost> actualHosts = workerAddressService.getEngineWorkerList(
                 modelName, RoleType.PREFILL);

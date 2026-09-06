@@ -2,6 +2,7 @@ package org.flexlb.dao.master;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.KvCacheGroupMode;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 
@@ -105,6 +106,9 @@ public class WorkerStatus {
             long dpSize,
             long tpSize,
             long dpRank,
+            int blockHashLookaheadTokens,
+            int cacheMatchRollbackBlocks,
+            KvCacheGroupMode kvCacheGroupMode,
             long maxSeqLen,
             long maxBatchTokensSize,
             long runningQueryLen,
@@ -112,7 +116,43 @@ public class WorkerStatus {
 
         public EngineObservation {
             Objects.requireNonNull(role, "role");
+            kvCacheGroupMode = kvCacheGroupMode == null
+                    ? KvCacheGroupMode.UNSPECIFIED : kvCacheGroupMode;
             runningTaskList = Map.copyOf(runningTaskList);
+        }
+
+        public EngineObservation(
+                RoleType role,
+                Long availableConcurrency,
+                long availableKvCacheTokens,
+                long totalKvCacheTokens,
+                Map<String, TaskObservation> runningTaskList,
+                double stepLatencyMs,
+                long iterateCount,
+                long dpSize,
+                long tpSize,
+                long dpRank,
+                long maxSeqLen,
+                long maxBatchTokensSize,
+                long runningQueryLen,
+                long waitingQueryLen) {
+            this(role,
+                    availableConcurrency,
+                    availableKvCacheTokens,
+                    totalKvCacheTokens,
+                    runningTaskList,
+                    stepLatencyMs,
+                    iterateCount,
+                    dpSize,
+                    tpSize,
+                    dpRank,
+                    0,
+                    0,
+                    KvCacheGroupMode.UNSPECIFIED,
+                    maxSeqLen,
+                    maxBatchTokensSize,
+                    runningQueryLen,
+                    waitingQueryLen);
         }
     }
 
@@ -374,6 +414,9 @@ public class WorkerStatus {
                 response.getDpSize(),
                 response.getTpSize(),
                 response.getDpRank(),
+                response.getBlockHashLookaheadTokens(),
+                response.getCacheMatchRollbackBlocks(),
+                response.getKvCacheGroupMode(),
                 response.getMaxSeqLen(),
                 response.getMaxBatchTokensSize(),
                 response.getRunningQueryLen(),
@@ -621,6 +664,18 @@ public class WorkerStatus {
         return committedStatus.get().fields().dpRank();
     }
 
+    public int getBlockHashLookaheadTokens() {
+        return committedStatus.get().fields().blockHashLookaheadTokens();
+    }
+
+    public int getCacheMatchRollbackBlocks() {
+        return committedStatus.get().fields().cacheMatchRollbackBlocks();
+    }
+
+    public KvCacheGroupMode getKvCacheGroupMode() {
+        return committedStatus.get().fields().kvCacheGroupMode();
+    }
+
     /** Model-level maximum sequence length reported by the Engine. */
     public long getMaxSeqLen() {
         return committedStatus.get().fields().maxSeqLen();
@@ -633,6 +688,10 @@ public class WorkerStatus {
 
     public PollHealth pollHealth() {
         return pollHealth.get();
+    }
+
+    public boolean isAlive() {
+        return pollHealth.get().reportedAlive();
     }
 
     /** Acquire the one in-flight status-poll slot for this generation. */

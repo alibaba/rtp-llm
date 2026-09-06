@@ -14,7 +14,8 @@ class ConfigServiceTest {
 
     @Test
     void empty_environment_uses_valid_defaults() {
-        FlexlbConfig config = new ConfigService(Map.of()).loadBalanceConfig();
+        ConfigService configService = new ConfigService(Map.of());
+        FlexlbConfig config = configService.loadBalanceConfig();
 
         assertTrue(config.isQueue());
         assertFalse(config.isPriorityOrdering());
