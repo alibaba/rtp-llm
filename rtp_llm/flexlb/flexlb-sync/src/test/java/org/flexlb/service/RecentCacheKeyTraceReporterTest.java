@@ -2,7 +2,7 @@ package org.flexlb.service;
 
 import org.flexlb.cache.core.ShardedRecentCacheKeyWindow;
 import org.flexlb.cache.monitor.CacheHitTheoryStats;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
