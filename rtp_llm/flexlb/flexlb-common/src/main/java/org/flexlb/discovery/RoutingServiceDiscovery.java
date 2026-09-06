@@ -2,6 +2,7 @@ package org.flexlb.discovery;
 
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
+import org.flexlb.config.ServiceDiscoveryRuntimeConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.DiscoveryConfig;
 import org.flexlb.dao.route.Endpoint;
@@ -11,6 +12,8 @@ import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.function.Supplier;
 
 /**
  * Routes each endpoint to the provider selected by its discovery configuration.
@@ -19,9 +22,17 @@ import java.util.Map;
 public class RoutingServiceDiscovery implements ServiceDiscovery {
 
     private final Map<ServiceDiscoveryType, ServiceDiscoveryProvider> providers;
+    private final Supplier<ServiceDiscoveryRuntimeConfig> runtimeConfigSupplier;
 
     public RoutingServiceDiscovery(List<ServiceDiscoveryProvider> discoveryProviders) {
+        this(discoveryProviders, ServiceDiscoveryRuntimeConfig::new);
+    }
+
+    public RoutingServiceDiscovery(
+            List<ServiceDiscoveryProvider> discoveryProviders,
+            Supplier<ServiceDiscoveryRuntimeConfig> runtimeConfigSupplier) {
         this.providers = new EnumMap<>(ServiceDiscoveryType.class);
+        this.runtimeConfigSupplier = Objects.requireNonNull(runtimeConfigSupplier);
         for (ServiceDiscoveryProvider provider : discoveryProviders) {
             ServiceDiscoveryProvider previous = providers.putIfAbsent(provider.getType(), provider);
             if (previous != null) {
@@ -34,11 +45,13 @@ public class RoutingServiceDiscovery implements ServiceDiscovery {
 
     @Override
     public void validate(Endpoint endpoint) {
+        bindRuntimeConfig(endpoint);
         validatedProviderFor(endpoint).validate(endpoint);
     }
 
     @Override
     public List<WorkerHost> getHosts(Endpoint endpoint) {
+        bindRuntimeConfig(endpoint);
         List<WorkerHost> discoveredHosts =
                 providers.get(endpoint.getDiscovery().getType()).getHosts(endpoint);
         return normalizeHosts(discoveredHosts, endpoint);
@@ -46,6 +59,7 @@ public class RoutingServiceDiscovery implements ServiceDiscovery {
 
     @Override
     public void listen(Endpoint endpoint, ServiceHostListener listener) {
+        bindRuntimeConfig(endpoint);
         ServiceHostListener normalizedListener = listener == null
                 ? null
                 : hosts -> listener.onHostsChanged(normalizeHosts(hosts, endpoint));
@@ -86,6 +100,12 @@ public class RoutingServiceDiscovery implements ServiceDiscovery {
                             + ", address: " + endpoint.getAddress());
         }
         return provider;
+    }
+
+    private void bindRuntimeConfig(Endpoint endpoint) {
+        if (endpoint != null && endpoint.getDiscovery() != null) {
+            endpoint.getDiscovery().bindRuntimeConfig(runtimeConfigSupplier);
+        }
     }
 
     private List<WorkerHost> normalizeHosts(

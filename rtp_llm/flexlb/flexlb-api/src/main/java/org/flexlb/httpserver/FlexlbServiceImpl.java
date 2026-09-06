@@ -109,7 +109,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             boolean masterAtEntry = consistencyEnabled
                     && masterElectService.isMaster();
             boolean forwardToMaster = consistencyEnabled && !masterAtEntry;
-            engineHealthReporter.reportArriveDelayTime(requestContext);
 
             if (forwardToMaster) {
                 if (request.getForwardHop() != 0) {
@@ -616,7 +615,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeLocally(BalanceContext ctx) {
-        return routeService.route(ctx).thenApply(response -> {
+        return prepareBlockCacheKeys(ctx).thenCompose(ignored -> routeService.route(ctx)).thenApply(response -> {
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB.Builder builder =
                     toProtoResponse(response).toBuilder();
             RequestState lifecycle = isAdmissionRequest(ctx) ? routeService.getRequestState(ctx.getRequestId(), 0) : null;
@@ -625,6 +624,18 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             }
             return builder.build();
         });
+    }
+
+    private CompletableFuture<Void> prepareBlockCacheKeys(BalanceContext context) {
+        Request request = context.getRequest();
+        boolean hasBlockCacheKeys = request.getBlockCacheKeys() != null
+                && !request.getBlockCacheKeys().isEmpty();
+        boolean hasInputIds = request.getInputIds() != null
+                && request.getInputIds().length > 0;
+        if (!hasBlockCacheKeys && !hasInputIds) {
+            return CompletableFuture.completedFuture(null);
+        }
+        return cacheAwareService.prepareBlockCacheKeys(context);
     }
 
     private void completeSchedule(BalanceContext ctx,
@@ -1014,6 +1025,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private enum ScheduleOrigin {
         FORWARDED_TO_MASTER,
         FORWARD_FAILED,
+        CONFIGURED_FALLBACK,
         LOCAL_MASTER,
         LOCAL_FALLBACK,
         LOCAL_STANDALONE,

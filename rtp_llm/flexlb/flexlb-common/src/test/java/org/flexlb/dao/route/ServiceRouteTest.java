@@ -61,11 +61,13 @@ class ServiceRouteTest {
         prefillEndpoint.setAddress("com.aicheng.whale.pre.deepseek_dp_tp_test");
         prefillEndpoint.setProtocol("http");
         prefillEndpoint.setPath("/");
+        prefillEndpoint.setGroup("ea119_PPU_ZW810E_16TP_decode64");
         Assertions.assertEquals(prefillEndpoint, roleEndpoint.getPrefillEndpoint());
         Endpoint decodeEndpoint = new Endpoint();
         decodeEndpoint.setAddress("com.aicheng.whale.pre.test_pd_gang2.decode");
         decodeEndpoint.setProtocol("http");
         decodeEndpoint.setPath("/");
+        decodeEndpoint.setGroup("ea119_PPU_ZW810E_16TP_decode64");
         Assertions.assertEquals(decodeEndpoint, roleEndpoint.getDecodeEndpoint());
     }
 
@@ -112,7 +114,6 @@ class ServiceRouteTest {
                 {
                   "service_id": "test-service",
                   "kvcm": {
-                    "enabled": true,
                     "address": "v-kvcm",
                     "namespace": "vllm-test-0",
                     "discovery": {"type": "dashscope"}
@@ -123,19 +124,13 @@ class ServiceRouteTest {
 
         ServiceRoute serviceRoute = objectMapper.readValue(json, ServiceRoute.class);
 
-        Assertions.assertTrue(serviceRoute.isKvcmEnabled());
+        Assertions.assertNotNull(serviceRoute.getKvcm());
         Assertions.assertEquals("v-kvcm", serviceRoute.getKvcm().getAddress());
         Assertions.assertEquals("vllm-test-0", serviceRoute.getKvcm().getNamespace());
         Assertions.assertEquals("grpc", serviceRoute.getKvcm().toEndpoint().getProtocol());
         Assertions.assertEquals(
                 KvcmConfig.DEFAULT_BOOTSTRAP_PORT,
                 serviceRoute.getKvcm().getPort());
-        Assertions.assertEquals(
-                KvcmConfig.DEFAULT_REQUEST_TIMEOUT_MS,
-                serviceRoute.getKvcm().getRequestTimeoutMs());
-        Assertions.assertEquals(
-                KvcmConfig.DEFAULT_LEADER_REFRESH_INTERVAL_MS,
-                serviceRoute.getKvcm().getLeaderRefreshIntervalMs());
     }
 
     private void assertServiceRoute(ServiceRoute serviceRoute) {

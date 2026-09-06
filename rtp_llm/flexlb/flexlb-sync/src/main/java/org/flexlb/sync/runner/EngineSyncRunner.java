@@ -2,8 +2,8 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
-import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -56,6 +56,8 @@ public class EngineSyncRunner implements Runnable {
 
     private final Long syncEngineStatusInterval;
 
+    private final boolean kvcmEnabled;
+
     private final boolean cacheFullSnapshotDebugMode;
 
     private final long statusStaleAfterUs;
@@ -74,6 +76,28 @@ public class EngineSyncRunner implements Runnable {
                             Long syncEngineStatusInterval,
                             boolean cacheFullSnapshotDebugMode,
                             long statusStaleAfterUs) {
+        this(modelName, workerDirectory, workerAddressService,
+                statusCheckExecutor, engineHealthReporter, engineGrpcService,
+                roleType, cacheAwareService, cacheIntervalService,
+                syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
+                false, cacheFullSnapshotDebugMode, statusStaleAfterUs);
+    }
+
+    public EngineSyncRunner(String modelName,
+                            WorkerDirectory workerDirectory,
+                            WorkerAddressService workerAddressService,
+                            ExecutorService statusCheckExecutor,
+                            EngineHealthReporter engineHealthReporter,
+                            EngineGrpcService engineGrpcService,
+                            RoleType roleType,
+                            CacheAwareService cacheAwareService,
+                            DynamicCacheIntervalService cacheIntervalService,
+                            long syncRequestTimeoutMs,
+                            LongAdder syncCount,
+                            Long syncEngineStatusInterval,
+                            boolean kvcmEnabled,
+                            boolean cacheFullSnapshotDebugMode,
+                            long statusStaleAfterUs) {
 
         this.modelName = modelName;
         this.workerAddressService = workerAddressService;
@@ -90,6 +114,7 @@ public class EngineSyncRunner implements Runnable {
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
         this.syncCount = syncCount;
         this.syncEngineStatusInterval = syncEngineStatusInterval;
+        this.kvcmEnabled = kvcmEnabled;
         this.cacheFullSnapshotDebugMode = cacheFullSnapshotDebugMode;
         if (statusStaleAfterUs <= 0L) {
             throw new IllegalArgumentException(
@@ -143,7 +168,10 @@ public class EngineSyncRunner implements Runnable {
                 String site = host.getSite();
 
                 WorkerStatus workerStatus = getOrCreateWorkerStatus(
-                        workerIpPort, site, host.getGroup());
+                        workerIpPort,
+                        site,
+                        host.getGroup(),
+                        host.getDeploymentName());
 
                 if (!workerStatus.isActiveGeneration()) {
                     logger.debug(
@@ -159,7 +187,8 @@ public class EngineSyncRunner implements Runnable {
                     try {
                         logger.debug("Submitting GrpcWorkerStatusRunner for worker: {}, site: {}", workerIpPort, site);
                         GrpcWorkerStatusRunner grpcWorkerStatusRunner
-                                = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
+                                = new GrpcWorkerStatusRunner(modelName, workerIpPort,
+                                host.getWorkerStatusPort(), site, roleType, host.getGroup(),
                                 workerStatus, statusPollLease, workerDirectory,
                                 engineHealthReporter, engineGrpcService,
                                 syncRequestTimeoutMs,
@@ -177,8 +206,8 @@ public class EngineSyncRunner implements Runnable {
                     logger.debug("Skip status check for worker: {}, previous request in progress", workerIpPort);
                 }
 
-                WorkerStatus.PollLease cachePollLease =
-                        workerStatus.tryBeginCachePoll();
+                WorkerStatus.PollLease cachePollLease = kvcmEnabled
+                        ? null : workerStatus.tryBeginCachePoll();
                 if (cachePollLease != null) {
                     boolean handedOff = false;
                     try {
@@ -199,8 +228,6 @@ public class EngineSyncRunner implements Runnable {
                             cachePollLease.close();
                         }
                     }
-                } else {
-                    logger.debug("Skip cache check for worker: {}, previous request in progress", workerIpPort);
                 }
             }
             logger.debug("Finished submitting status check tasks for model: {}, role: {}, worker count: {}", modelName,
@@ -289,11 +316,13 @@ public class EngineSyncRunner implements Runnable {
     private WorkerStatus getOrCreateWorkerStatus(
             String workerIpPort,
             String site,
-            String group) {
+            String group,
+            String deploymentName) {
         while (true) {
             WorkerStatus workerStatus = workerDirectory.currentOrDiscover(
                     roleType, workerIpPort,
-                    () -> createWorkerStatus(workerIpPort, site, group));
+                    () -> createWorkerStatus(
+                            workerIpPort, site, group, deploymentName));
 
             EndpointRegistry.DetachedGeneration endpointToRetire = null;
             RoleType generationRole = null;
@@ -315,7 +344,8 @@ public class EngineSyncRunner implements Runnable {
                 if (!roleChanged && !groupChanged) {
                     // Site changes do not change scheduling ownership. Publish
                     // the discovery labels atomically on the same generation.
-                    workerStatus.updateDiscoveryLabels(site, group);
+                    workerStatus.updateDiscoveryLabels(
+                            site, group, deploymentName);
                     return workerStatus;
                 }
 
@@ -353,7 +383,8 @@ public class EngineSyncRunner implements Runnable {
     private WorkerStatus createWorkerStatus(
             String workerIpPort,
             String site,
-            String group) {
+            String group,
+            String deploymentName) {
         int separator = workerIpPort.lastIndexOf(':');
         if (separator <= 0 || separator == workerIpPort.length() - 1) {
             throw new IllegalArgumentException(
@@ -367,7 +398,8 @@ public class EngineSyncRunner implements Runnable {
                 ip,
                 port,
                 CommonUtils.toGrpcPort(port),
-                site);
+                site,
+                deploymentName);
         logger.info("Created WorkerStatus generation {} for worker: {}",
                 discovered.getGenerationId(), workerIpPort);
         return discovered;

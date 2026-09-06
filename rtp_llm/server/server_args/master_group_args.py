@@ -11,6 +11,16 @@ def init_master_group_args(parser, master_config):
     )
 
     master_group.add_argument(
+        "--master_connect_timeout_ms",
+        env_name="MASTER_CONNECT_TIMEOUT_MS",
+        bind_to=(master_config, "master_connect_timeout_ms"),
+        type=int,
+        default=100,
+        help="FlexLB Master/follower 每次 gRPC channel-ready 的连接超时（毫秒），必须大于 0；"
+        "实际等待不会超过该请求的调度 deadline",
+    )
+
+    master_group.add_argument(
         "--master_default_timeout_ms",
         env_name="MASTER_DEFAULT_TIMEOUT_MS",
         bind_to=(master_config, "master_default_timeout_ms"),

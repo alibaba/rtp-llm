@@ -7,6 +7,7 @@ import io.grpc.ConnectivityState;
 import io.grpc.ManagedChannel;
 import io.netty.bootstrap.Bootstrap;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.engine.grpc.config.ChannelConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
@@ -18,20 +19,29 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
-@EnabledOnOs(OS.LINUX)
 class GrpcChannelFactoryTest {
 
     @Test
+    void loadsChannelContextWithDefaultConfig() {
+        try (AnnotationConfigApplicationContext context = createChannelContext()) {
+            assertNotNull(context.getBean(GrpcChannelFactory.class));
+        }
+    }
+
+    @Test
+    @EnabledOnOs(OS.LINUX)
     void createsChannelWithoutTcpUserTimeoutWarning() throws InterruptedException {
         Logger bootstrapLogger = (Logger) LoggerFactory.getLogger(Bootstrap.class);
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
         appender.start();
         bootstrapLogger.addAppender(appender);
 
-        try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext(
-                ConfigService.class, ChannelConfiguration.class, GrpcChannelFactory.class)) {
+        try (AnnotationConfigApplicationContext context = createChannelContext()) {
             GrpcChannelFactory factory = context.getBean(GrpcChannelFactory.class);
             ManagedChannel channel = factory.create(new GrpcTarget("127.0.0.1", 1));
             try {
@@ -51,5 +61,15 @@ class GrpcChannelFactoryTest {
                 .map(ILoggingEvent::getFormattedMessage)
                 .anyMatch(message -> message.contains("Unknown channel option")
                         && message.contains("TCP_USER_TIMEOUT")));
+    }
+
+    private static AnnotationConfigApplicationContext createChannelContext() {
+        ConfigService configService = mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
+        AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext();
+        context.getBeanFactory().registerSingleton("configService", configService);
+        context.register(ChannelConfiguration.class, GrpcChannelFactory.class);
+        context.refresh();
+        return context;
     }
 }

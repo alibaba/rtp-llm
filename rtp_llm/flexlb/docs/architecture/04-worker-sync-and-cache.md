@@ -80,13 +80,14 @@ cache 版本做增量；响应恒更新 KV token 总量，版本更新时把 `ca
 
 ### KVCM（外部 KV Cache Manager）
 
-- 开关：`MODEL_SERVICE_CONFIG` 里 ServiceRoute 级 `kvcm.enabled`；
+- 开关：`FLEXLB_CONFIG.cacheMatching.type=KVCM`；`MODEL_SERVICE_CONFIG.kvcm` 只提供
+  KVCM address/namespace/port/discovery 定位信息；
   `CacheMatchConfiguration` 推导不变量 **`localSyncEnabled = !kvcmEnabled`、
   `localStandbyEnabled = kvcmEnabled`**。
 - `KvcmGrpcClient`（flexlb-grpc）：向 KVCM **leader** 发 `GetHostCacheState`
   （namespace = `deploymentName_blockSize`，QueryType 按 worker `kvCacheGroupMode` 映射
   QT_PREFIX_MATCH / QT_PREFIX_MATCH_WITH_MAMBA），响应 `HostCacheMatch{host_ip_port,
-  prefix_match_blocks}`；`p2p_host_count` 默认 5，只对 local 命中最长的前 N 个 host 计算
+  prefix_match_blocks}`；`p2pHostCount` 默认 0，只对 local 命中最长的前 N 个 host 计算
   P2P，配置为 0 时跳过 P2P；查询失败重试至 `maxQueryRetryCount`。
 - 健康管理：daemon 线程每 `leaderRefreshIntervalMs(10s)` 刷 leader（`GetClusterInfo`）与
   worker 元数据；心跳/查询失败计数对 `heartbeatFailureThreshold(3)` /
@@ -132,7 +133,7 @@ hash 不同），路由侧统一用 `blockSize × 匹配块数` 折算 token，�
 ## Block hash 计算
 
 - 策略：`BlockHashStrategy`（flexlb-cache）由 `FlexlbConfig.blockHashStrategy` 选择，默认
-  `VLLM`；`FLEXLB_CONFIG` JSON 或 `BLOCK_HASH_STRATEGY` 环境变量可切换为 `SGLANG`。
+  `VLLM`；只能通过 `FLEXLB_CONFIG` 切换为 `SGLANG`。
 - `VllmBlockHashStrategy` 委托 `BlockCacheKeyCalculator`（flexlb-common）计算 vLLM 兼容的
   `sha256_cbor` 链式块哈希（`PYTHONHASHSEED=0` 语义）：每满块 CBOR 编码
   `[parentHash, tokens, null]` → SHA-256 → 取低 64 位为 Long key；末尾不满块丢弃。
