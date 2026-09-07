@@ -124,3 +124,22 @@ Additional evidence hashes, relative to the same corrected45 root:
 | `window-nonbatch/lane0/part0-yaml/instances/instance-5976904fb61806850038312c6233919c35295ff313e4f848382f845ee8d6494d/result.json` | `b07b134113b5737f9513cca5708dabf430b4ac183881a8d36d242b712f4210c6` |
 | `single-batch/lane0/part0-yaml/instances/instance-8af5e93c4b04d24d406edd66f1588d4fa783d5b8bed2f5612f65ded145605596/ha-client-1/traffic_out/client_events.jsonl` | `8c59de3585887e24bbb857d405d119515f923e4b790e06d6ec685003df8bdd1b` |
 | `window-nonbatch/lane0/part0-yaml/instances/instance-691d571c59ccaa2228f9e5929c7ce79eb850e3e1de4cc8707589dde2b8d50e36/ha-client-1/traffic_out/client_events.jsonl` | `eb0d0ded56f20c57df8c42d8c082c2962c1ba407440197d344f5aac664637580` |
+
+
+## Handoff: outstanding acceptance remains explicit
+
+The coordinator accepted ownership of the remaining seven runtime gaps:
+four wraparound TIMEOUTs and three freeze FAILs. No additional remote pairing,
+retry-for-green, timing-window change or threshold change is authorized in the
+current phase. Paired old/new execution is deferred to a separately frozen
+acceptance batch after the29 candidate families are implemented, with the
+same configuration and profile and explicit source revisions for both sides.
+
+There are18 instances with PASS evidence across their applicable fixed sources:
+15 unaffected original5aff instances, corrected45 dual-kill and single-batch
+freeze, and the independent534 quota run. This is not one all-green25-instance
+run. The seven failures remain open; alignment of the inspected predicates
+with old code does not supply the still-missing paired runtime evidence.
+Original5aff and corrected45 outcomes remain immutable historical evidence.
+The implementation owner now continues the remaining preemption contracts;
+Master acceptance is not declared complete by this handoff.
