@@ -180,6 +180,11 @@ _CP_STREAM_CACHE_LOCK = threading.Lock()
 # host hints to the suffix builders / byte compaction (default off = the
 # per-site .item()/DtoH behavior).
 _S4_GATHER_FIX = int(os.environ.get("DSV4_S4_GATHER_FIX", "0"))
+# M1 (Sep 7): host-compute the workspace scalars from the CPContext's
+# host-side per-request lengths — zero D2H in the workspace prepare.
+# B=1 prefill only (the ship config); falls back otherwise.
+_M1_HOST_META = int(os.environ.get("DSV4_M1_HOST_META", "0"))
+_M1_ENG_CT = [0]
 
 
 def _cuda_device_index(device: torch.device) -> int:
@@ -4667,7 +4672,26 @@ class AttentionFP8(nn.Module):
                 if cp_ctx_local.input_lengths_global is not None
                 else input_lengths
             )
-            if _S4_GATHER_FIX:
+            if _M1_HOST_META and cp_ctx_local is not None:
+                _hp = getattr(cp_ctx_local, "prefix_lengths_host", None)
+                _hi = getattr(cp_ctx_local, "input_lengths_host", None)
+            else:
+                _hp = _hi = None
+            if _M1_HOST_META and _M1_ENG_CT[0] < 4:
+                _M1_ENG_CT[0] += 1
+                import sys as _s
+                print("[M1-ENGAGE] cp_ctx_type=%s hp=%s hi=%s" % (
+                    type(cp_ctx_local).__name__, _hp, _hi), file=_s.stderr, flush=True)
+            if _M1_HOST_META and _hp and _hi and len(_hp) == 1 and len(_hi) == 1:
+                # Host-compute the identical scalars (B=1): the same integer
+                # math the GPU tensors encode — zero D2H.
+                sp_h, s_h = _hp[0], _hi[0]
+                N_max = (sp_h + s_h) // int(ratio)
+                p_max = min(sp_h, win - 1)
+                gather_len_max = s_h + p_max
+                prefix_sum, input_sum = sp_h, s_h
+                gather_lens_cpu_hint = (p_max,)
+            elif _S4_GATHER_FIX:
                 host_scalars = torch.cat(
                     [
                         N_per_req.max().view(1),

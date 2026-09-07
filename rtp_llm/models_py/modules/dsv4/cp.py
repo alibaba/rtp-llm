@@ -113,6 +113,10 @@ class CPContext:
     # per-forward CUDA comparison on the hot path.
     unpad_restore_is_prefix: bool = False
     # Rank-local per-request chunk lengths after ZigZagProcessor splitting.
+    # M1 (Sep 7): host-side per-request lengths — let the attention meta
+    # builders compute workspace scalars without any GPU round-trip.
+    input_lengths_host: Optional[list] = None
+    prefix_lengths_host: Optional[list] = None
     # Each request chunk is laid out as [front half, back half] locally.
     chunk_lengths_per_req: Optional[Tuple[int, ...]] = None
     # Stage 5b: True when the prefill node's CSA / HCA / INDEXER paged pools
@@ -545,6 +549,19 @@ def build_cp_context(
         unpad_restore_is_prefix=unpad_restore_is_prefix,
         chunk_lengths_per_req=tuple(chunk_lengths),
         kv_cache_sharded=bool(kv_cache_sharded),
+        # M1: host lens (one DtoH per FORWARD at construction — 43x cheaper
+        # than the per-layer .item()s these replace; B>1 uses the tensor form).
+        input_lengths_host=(
+            list(input_lengths_host) if input_lengths_host is not None else None
+        ),
+        prefix_lengths_host=(
+            ([prefix_length] * len(input_lengths_host)
+             if not isinstance(position_offset, torch.Tensor)
+             else [int(v) for v in prefix_lengths.detach().cpu().reshape(-1).tolist()])
+            if (input_lengths_host is not None and prefix_lengths is not None
+                and prefix_lengths.numel() > 0)
+            else None
+        ),
     )
 
 
