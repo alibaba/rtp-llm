@@ -308,7 +308,9 @@ def forward_layers(
       * ``positions``   ``[T_total]``    — per-token global absolute position (RoPE)
       * ``cu_seqlens``  ``[B+1]``        — per-request cumulative-token prefix sum
       * ``hidden``      ``[T_total, hc, dim]`` — internal, flat in the token axis
-      * returns         ``[T_total, dim]`` — pre-lm-head, engine applies lm_head
+      * returns         ``[T_total, dim]`` — pre-lm-head, engine applies lm_head.
+        On a non-last PP stage (``v4.norm is None``) it instead returns the
+        pre-reduce ``[T_total, hc, dim]`` boundary tensor for the next stage.
 
     The ``B`` axis is collapsed out of ``input_ids`` / ``hidden`` entirely,
     matching vLLM's ``DeepseekV4`` (``deepseek_v4.py:1310-1317``). Per-request
@@ -534,11 +536,17 @@ def forward_layers(
                     kv_cache=kv_cache,
                     block_tables_by_type=block_tables_by_type,
                 )  # [T, hc, dim]
-                if layer_idx in capture_ids:
-                    v4.capture_aux_hidden(layer_idx, h)
+                # ``capture_ids`` are GLOBAL layer ids while ``layer_idx`` is
+                # this stage's local position, so translate before matching.
+                if capture_aux:
+                    global_layer_id = v4.pp_global_layer_ids[layer_idx]
+                    if global_layer_id in capture_ids:
+                        v4.capture_aux_hidden(global_layer_id, h)
                 if _rt_on:
                     _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
                 if write_cache_store_impl is not None:
+                    # Cache surfaces stay LOCAL on purpose: the C++ layout is
+                    # projected to this stage and numbered 0..len(layers)-1.
                     write_cache_store_impl(kv_cache.get_layer_cache_groups(layer_idx))
                 if _rt_on:
                     _rt.record(f"layer{layer_idx:02d}_out", h)
@@ -594,6 +602,15 @@ def forward_layers(
             if v4._mtp_last_hidden_buffer is not None:
                 _last_pre_hc = _last_hidden_by_request(_pre_hc_flat, cu_seqlens, cp_ctx)
                 v4._write_mtp_last_hidden_buffer(_last_pre_hc)
+
+    # PP: the mHC head reduce and the final norm belong to the LAST stage only —
+    # that is the only stage that loads ``head_hc`` / ``norm`` / ``head_weight``.
+    # A non-last stage must hand downstream the PRE-reduce ``[T, hc, dim]``
+    # tensor: reducing here would collapse the hyper-connection lanes the next
+    # stage continues from.  Returning before the reduce also skips the debug
+    # blocks below, which dereference ``v4.head_weight``.
+    if v4.norm is None:
+        return h  # [T, hc, dim]
 
     # _hc_head_reduce is flat-native: [T, hc, dim] -> [T, dim].
     # Framework ``RMSNorm`` expects 2D, which matches the [T, dim] shape here.
@@ -708,7 +725,9 @@ def forward_prefill(
     the per-layer setup swaps in CPContext's request-absolute positions and
     full-length write-side view.
 
-    Returns ``PyModelOutputs`` with ``[T_total, dim]`` pre-lm-head hidden.
+    Returns ``PyModelOutputs`` with ``[T_total, dim]`` pre-lm-head hidden.  On a
+    non-last PP stage it instead carries the pre-reduce ``[T_total, hc, dim]``
+    boundary tensor, published on ``pp_intermediates`` for the next stage.
     """
     attn_inputs = inputs.attention_inputs
     attn = primary_attention_inputs(attn_inputs, kv_cache)
@@ -773,6 +792,30 @@ def forward_prefill(
 
     block_tables_by_type = build_block_tables_batched(kv_cache, attn_inputs)
 
+    # PP: a non-first stage owns no embedding and resumes the upstream stage's
+    # activations instead.  ``forward_layers`` reads a non-None
+    # ``prepare_hidden_fn`` as "hidden is already ``[T, hc, dim]``", which is
+    # exactly the shape the upstream stage publishes.  Under CP the boundary
+    # tensor is this rank's own CP chunk: PP pairs equal ``cp_rank`` across
+    # stages (``PPLayout::rankOfStage`` preserves ``tp_rank``), so the token
+    # widths already match and no gather is needed here.
+    if v4.embed is None:
+        upstream_hidden = (
+            inputs.pp_intermediates.get("hidden_states")
+            if inputs.pp_intermediates
+            else None
+        )
+        if upstream_hidden is None:
+            raise RuntimeError(
+                "DSV4 prefill on a non-first PP stage received no upstream "
+                "hidden_states in pp_intermediates"
+            )
+
+        def _resume_upstream_hidden(input_ids, positions):
+            return upstream_hidden
+
+        prepare_hidden_fn = _resume_upstream_hidden
+
     hidden = forward_layers(
         v4,
         kv_cache,
@@ -782,5 +825,10 @@ def forward_prefill(
         block_tables_by_type,
         attn_inputs=attn,
         prepare_hidden_fn=prepare_hidden_fn,
-    )  # [T_total, dim]
-    return PyModelOutputs(hidden)
+    )  # [T_total, dim], or [T_total, hc, dim] on a non-last PP stage
+    outputs = PyModelOutputs(hidden)
+    if v4.norm is None:
+        # Non-last stage: hand the pre-reduce mHC lanes downstream.  Dropping
+        # back to [T, dim] here would corrupt the hyper-connection stream.
+        outputs.pp_intermediates = {"hidden_states": hidden}
+    return outputs

@@ -440,10 +440,23 @@ class DeepSeekV4Model(GptModelBase):
         self._is_decode_role = False
         self._shared_runtime_buffers: Optional[Dsv4SharedRuntimeBufferStore] = None
 
+        # PP stage view (from GptModelBase).  ``n_layers`` and
+        # ``compress_ratios`` above deliberately stay GLOBAL: block-type
+        # selection and ``ModelWeights.weights[layer_id]`` are both indexed by
+        # global layer id.  ``pp_layer_ids`` is the slice this stage builds, and
+        # the embedding / final norm / lm head belong to the first and last
+        # stage respectively — the loader skips those weights elsewhere.
+        args.pp_size = self.pp_size
+        args.pp_rank = self.pp_rank
+        args.pp_layer_ids = self.pp_layer_ids() if self.pp_size > 1 else None
+        args.pp_has_embedding = self.pp_has_embedding
+        args.pp_has_lm_head = self.pp_has_lm_head
+
         logging.info(
             "[DeepSeekV4Model] V4Args: n_layers=%d n_heads=%d head_dim=%d q_lora=%d "
             "o_groups=%d n_experts=%d n_act=%d moe_inter=%d win=%d hc_mult=%d "
-            "compress_ratios[:8]=%s score=%s route_scale=%g swiglu_limit=%g",
+            "compress_ratios[:8]=%s score=%s route_scale=%g swiglu_limit=%g "
+            "pp=%d/%d pp_layer_ids=%s embed=%s lm_head=%s",
             args.n_layers,
             args.n_heads,
             args.head_dim,
@@ -458,6 +471,11 @@ class DeepSeekV4Model(GptModelBase):
             args.score_func,
             args.route_scale,
             args.swiglu_limit,
+            args.pp_size,
+            args.pp_rank,
+            "all" if args.pp_layer_ids is None else args.pp_layer_ids,
+            args.pp_has_embedding,
+            args.pp_has_lm_head,
         )
         self._v4_args = args
         # Surface FP8 KV-cache flag at the Model level so
@@ -673,7 +691,11 @@ class DeepSeekV4Model(GptModelBase):
         device = (
             next(iter(self.weight.global_weights.values())).device
             if self.weight.global_weights
-            else "cuda:0"
+            # PP: a middle stage loads neither the embedding (first stage only)
+            # nor lm_head / final layernorm (last stage only), so this dict can
+            # legitimately be empty.  Fall back to this rank's own device —
+            # a bare "cuda:0" would be wrong for every non-zero local_rank.
+            else f"cuda:{int(getattr(self.parallelism_config, 'local_rank', 0) or 0)}"
         )
         device_str = str(device)
 
@@ -1139,6 +1161,45 @@ class DeepSeekV4Model(GptModelBase):
         e_proj/h_proj from the MTP-only globals."""
         return None
 
+    def _weight_device(self) -> torch.device:
+        """Device of any weight this stage owns.
+
+        ``v4.embed`` is ``None`` on a non-first PP stage (and on a DSpARK
+        commit worker), so paths that only need *a* device must not read it
+        unconditionally.  Preferring the embedding keeps pp_size=1 identical.
+        """
+        embed = getattr(self.v4, "embed", None)
+        if embed is not None:
+            return embed.weight.device
+        for layer in self.v4.layers:
+            param = next(iter(layer.parameters()), None)
+            if param is not None:
+                return param.device
+        raise RuntimeError(
+            "DeepSeekV4Model owns no weights to derive a device from"
+        )
+
+    def make_empty_intermediate_tensors(self, hidden_template: Any) -> dict:
+        """PP stage-boundary tensors for stage-local warmup.
+
+        C++ builds ``hidden_template`` as ``[token_num, hidden_size]``
+        (``PyWrappedModel::makePPWarmUpInputTensors``), i.e. the *reduced*
+        width.  DSV4's boundary tensor is the PRE-reduce mHC activation
+        ``[T, hc_mult, dim]``, so take only the token count / dtype / device
+        from the template and build the right shape here rather than widening
+        the C++ warmup for one model.
+        """
+        token_num = int(hidden_template.shape[0])
+        return {
+            "hidden_states": torch.zeros(
+                token_num,
+                int(self._v4_args.hc_mult),
+                int(self._v4_args.dim),
+                dtype=hidden_template.dtype,
+                device=hidden_template.device,
+            )
+        }
+
     def _prepare_decode_hidden(
         self,
         input_ids: torch.Tensor,
@@ -1231,7 +1292,7 @@ class DeepSeekV4Model(GptModelBase):
         #     ``input_lengths=[1]`` or ``[gen+1]`` respectively
         # The C++ CudaGraphRunner captures one graph per (batch, q_len).
         q_len = int(attn.input_lengths[0]) if attn.input_lengths.numel() > 0 else 1
-        device = self.v4.embed.weight.device
+        device = self._weight_device()
 
         paged_pool_specs = build_paged_pool_specs(
             self.kv_cache, self.v4, max_seq_len=int(self._v4_args.max_seq_len)
@@ -1342,11 +1403,21 @@ class DeepSeekV4Model(GptModelBase):
                 "[DeepSeekV4Model] forward() with kv_cache=None — warmup only"
             )
             T = max(inputs.input_ids.numel(), 1)
-            device = self.v4.embed.weight.device
-            hidden = torch.zeros(
-                T, self._v4_args.dim, dtype=torch.bfloat16, device=device
+            device = self._weight_device()
+            owns_lm_head = self.v4.norm is not None
+            # A non-last PP stage's boundary tensor carries the unreduced mHC
+            # lanes, so the warmup dummy has to match that width — otherwise
+            # the downstream stage would resume a mis-shaped activation.
+            shape = (
+                (T, self._v4_args.dim)
+                if owns_lm_head
+                else (T, self._v4_args.hc_mult, self._v4_args.dim)
             )
-            return PyModelOutputs(hidden)
+            hidden = torch.zeros(*shape, dtype=torch.bfloat16, device=device)
+            outputs = PyModelOutputs(hidden)
+            if not owns_lm_head:
+                outputs.pp_intermediates = {"hidden_states": hidden}
+            return outputs
         # Group-invariant view of ``PyModelInputs.attention_inputs``; the
         # per-tag block tables are resolved inside forward_prefill /
         # forward_decode.
