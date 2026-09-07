@@ -41,7 +41,7 @@ public:
     /// @return false 表示任务已在 PENDING 阶段被 cancel，调用方应立即报告失败。
     bool startTransfer();
 
-    /// @brief 强制终止任务，无论当前状态如何（仅供 P2PConnectorWorker 超时安全网使用）。
+    /// @brief 强制终止任务，无论当前状态如何（仅供 P2P connector worker 超时安全网使用）。
     void forceCancel() override;
 
     int64_t totalCostTimeUs() const {

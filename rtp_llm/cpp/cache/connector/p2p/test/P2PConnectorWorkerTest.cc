@@ -9,7 +9,7 @@
 #include <chrono>
 #include <map>
 
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorker.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerPrefill.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerDecode.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
@@ -332,7 +332,7 @@ private:
     bool                                                                   recv_entered_{false};
 };
 
-// Test fixture for P2PConnectorWorker (tests Prefill and Decode sub-objects directly)
+// Test fixture for the Prefill and Decode worker implementations.
 class P2PConnectorWorkerTest: public ::testing::Test {
 protected:
     void SetUp() override {
@@ -1077,8 +1077,11 @@ TEST_F(P2PConnectorWorkerTest, CancelHandleRead_ReturnTrue_ContextNotFound) {
 #ifndef USE_RDMA
 TEST_F(P2PConnectorWorkerTest, Init_ReturnFalse_WhenRdmaBackendUnsupportedInBaseBuild) {
     worker_config_.transfer_backend_config.cache_store_rdma_mode = true;
-    P2PConnectorWorker worker(worker_config_, mock_layer_block_converter_, nullptr);
-    EXPECT_FALSE(worker.init(10 * 1000));
+    P2PConnectorConfig config;
+    config.role_type     = RoleType::PREFILL;
+    config.worker_config = worker_config_;
+    P2PConnectorPrefill connector(config, mock_layer_block_converter_, nullptr);
+    EXPECT_FALSE(connector.init());
 }
 #endif
 

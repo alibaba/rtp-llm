@@ -15,10 +15,9 @@
 
 namespace rtp_llm {
 
-class P2PConnectorScheduler;
-class P2PConnectorWorker;
+class P2PConnectorPrefill;
+class P2PConnectorDecode;
 class P2PConnectorResourceStore;
-struct P2PConnectorResourceEntry;
 
 /**
  * Q: 如何保证kvcache不被写坏
@@ -39,10 +38,8 @@ public:
 public:
     bool init();
 
-    // Expose stream_store_ for testing
-    std::shared_ptr<P2PConnectorResourceStore> streamStore() const {
-        return stream_store_;
-    }
+    // Expose the Prefill resource store for integration and testing.
+    std::shared_ptr<P2PConnectorResourceStore> streamStore() const;
 
 public:
     std::shared_ptr<AsyncContext> asyncRead(const KVCacheResourcePtr&    resource,
@@ -69,45 +66,12 @@ public:
     void cancelRead(const std::shared_ptr<AsyncContext>& context);
 
 private:
-    grpc::Status waitForResourceEntry(const std::string&                          unique_key,
-                                      int64_t                                     request_deadline_ms,
-                                      int64_t                                     transfer_deadline_ms,
-                                      std::function<bool()>                       is_cancelled,
-                                      std::shared_ptr<P2PConnectorResourceEntry>& resource_entry);
-
-    void waitAndFillResponse(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
-                             P2PConnectorStartLoadResponsePB&                  response,
-                             std::function<bool()>                             is_cancelled = nullptr);
-
-    grpc::Status fillResponseWithStreamInfo(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
-                                            P2PConnectorStartLoadResponsePB&                  response);
-
-    bool executeHandleRead(int64_t                                 request_id,
-                           const std::string&                      unique_key,
-                           int64_t                                 deadline_ms,
-                           const P2PConnectorBroadcastTpRequestPB& p2p_request,
-                           FunctionResponsePB&                     response);
-
-    bool executeRead(int64_t                                 request_id,
-                     const std::string&                      unique_key,
-                     int64_t                                 deadline_ms,
-                     const P2PConnectorBroadcastTpRequestPB& p2p_request,
-                     FunctionResponsePB&                     response);
-
-    bool executeCancelRead(const std::string& unique_key, int64_t request_deadline_ms, FunctionResponsePB& response);
-
-    bool executeCancelHandleRead(const std::string& unique_key, FunctionResponsePB& response);
-
-    bool executeQueryLeaseStatus(const std::string& unique_key, FunctionResponsePB& response);
-
-private:
     const P2PConnectorConfig             config_;
     std::shared_ptr<LayerBlockConverter> layer_block_converter_;
     kmonitor::MetricsReporterPtr         metrics_reporter_;
 
-    std::shared_ptr<P2PConnectorScheduler>     scheduler_;
-    std::shared_ptr<P2PConnectorWorker>        worker_;
-    std::shared_ptr<P2PConnectorResourceStore> stream_store_;
+    std::unique_ptr<P2PConnectorPrefill> prefill_;
+    std::unique_ptr<P2PConnectorDecode>  decode_;
 };
 
 }  // namespace rtp_llm

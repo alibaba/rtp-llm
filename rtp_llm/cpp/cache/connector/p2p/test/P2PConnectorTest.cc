@@ -178,6 +178,15 @@ protected:
         return meta;
     }
 
+    P2PConnectorConfig createDecodeConfig() const {
+        auto decode_config                        = config_;
+        decode_config.role_type                   = RoleType::DECODE;
+        decode_config.scheduler_config.role_type  = RoleType::DECODE;
+        decode_config.tp_rank                     = 1;
+        decode_config.worker_config.tp_rank       = 1;
+        return decode_config;
+    }
+
 protected:
     P2PConnectorConfig                          config_;
     std::shared_ptr<MockLayerBlockConverter>    mock_layer_block_converter_;
@@ -322,6 +331,10 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenWaitSideChannelTimeout) {
 }
 
 TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasMismatchedCacheKeysAndBlockIds) {
+    auto decode_connector =
+        std::make_unique<P2PConnector>(createDecodeConfig(), mock_layer_block_converter_, nullptr);
+    ASSERT_TRUE(decode_connector->init());
+
     FunctionRequestPB request;
     auto*             p2p_request = request.mutable_p2p_request();
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
@@ -336,13 +349,17 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasMismatch
     layer_block->add_block_ids(7);
 
     FunctionResponsePB response;
-    EXPECT_FALSE(connector_->executeFunction(request, response));
+    EXPECT_FALSE(decode_connector->executeFunction(request, response));
     ASSERT_TRUE(response.has_p2p_response());
     EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
     EXPECT_NE(response.p2p_response().error_message().find("cache_keys size 2 != block_ids size 1"), std::string::npos);
 }
 
 TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestIsImplicitlyEmpty) {
+    auto decode_connector =
+        std::make_unique<P2PConnector>(createDecodeConfig(), mock_layer_block_converter_, nullptr);
+    ASSERT_TRUE(decode_connector->init());
+
     FunctionRequestPB request;
     auto* p2p_request = request.mutable_p2p_request();
     p2p_request->set_type(P2PConnectorBroadcastType::READ);
@@ -350,12 +367,12 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestIsImplicitl
     p2p_request->set_deadline_ms(currentTimeMs() + 5000);
 
     FunctionResponsePB response;
-    EXPECT_FALSE(connector_->executeFunction(request, response));
+    EXPECT_FALSE(decode_connector->executeFunction(request, response));
     EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
 }
 
 TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsOk_WhenCpEmptyProjectionIsExplicit) {
-    auto cp_config                  = config_;
+    auto cp_config                  = createDecodeConfig();
     cp_config.worker_config.cp_size = 2;
     auto cp_connector = std::make_unique<P2PConnector>(cp_config, mock_layer_block_converter_, nullptr);
     ASSERT_TRUE(cp_connector->init());
@@ -372,7 +389,7 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsOk_WhenCpEmptyProjectionIsExplic
 }
 
 TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenCpEmptyProjectionIsExpired) {
-    auto cp_config                  = config_;
+    auto cp_config                  = createDecodeConfig();
     cp_config.worker_config.cp_size = 2;
     auto cp_connector = std::make_unique<P2PConnector>(cp_config, mock_layer_block_converter_, nullptr);
     ASSERT_TRUE(cp_connector->init());
@@ -389,7 +406,7 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenCpEmptyProjectionIsExp
 }
 
 TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasInvalidBlockId) {
-    auto config = config_;
+    auto config = createDecodeConfig();
     GroupBase group;
     auto spec                       = std::make_shared<MHAKVCacheSpec>();
     spec->tag                       = "full";
@@ -420,7 +437,7 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasInvalidB
 }
 
 TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestRepeatsLayerTag) {
-    auto config = config_;
+    auto config = createDecodeConfig();
     GroupBase group;
     auto spec                       = std::make_shared<MHAKVCacheSpec>();
     spec->tag                       = "full";

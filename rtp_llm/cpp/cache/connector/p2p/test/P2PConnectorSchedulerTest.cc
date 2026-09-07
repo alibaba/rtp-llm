@@ -6,7 +6,9 @@
 #include "autil/NetUtil.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
-#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorScheduler.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerDecode.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerPrefill.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -42,12 +44,13 @@ protected:
         scheduler_config.worker_addrs.push_back("127.0.0.1:12345:" + std::to_string(prefill_server_->listenPort()));
         scheduler_config.topology = test::makeTestCacheTopology(/*group_num=*/2, /*layer_num=*/2, {{0}, {1}});
 
-        scheduler_ = std::make_unique<P2PConnectorScheduler>(std::move(scheduler_config), nullptr);
-        ASSERT_TRUE(scheduler_->init());
+        rebuildSchedulers(std::move(scheduler_config));
     }
 
     void TearDown() override {
-        scheduler_.reset();
+        decode_scheduler_.reset();
+        prefill_scheduler_.reset();
+        tp_broadcast_client_.reset();
         tp_broadcast_servers_.clear();
         prefill_server_.reset();
     }
@@ -92,7 +95,7 @@ protected:
     }
 
     // 等待 async context 完成，调用 checkDone() 以便异常在测试线程中抛出
-    // 注意：如果需要在测试中捕获超时异常，请先调用 scheduler_->stopChecker() 停止后台线程
+    // 注意：如果需要在测试中捕获超时异常，请先停止 Decode scheduler 的后台线程。
     void waitAsyncContextDone(std::shared_ptr<P2PConnectorAsyncReadContext>& context,
                               int                                            timeout_ms = 5000,
                               bool                                           check_done = false) {
@@ -107,18 +110,15 @@ protected:
     }
 
     void rebuildSchedulerWithResourceHoldMs(int64_t hold_ms) {
-        scheduler_.reset();
         P2PConnectorSchedulerConfig cfg;
         cfg.worker_grpc_addrs = tp_broadcast_addrs_;
         cfg.worker_addrs.push_back("127.0.0.1:12345:" + std::to_string(prefill_server_->listenPort()));
         cfg.topology = test::makeTestCacheTopology(/*group_num=*/2, /*layer_num=*/2, {{0}, {1}});
         cfg.p2p_transfer_not_done_resource_hold_ms = hold_ms;
-        scheduler_                                 = std::make_unique<P2PConnectorScheduler>(std::move(cfg), nullptr);
-        ASSERT_TRUE(scheduler_->init());
+        rebuildSchedulers(std::move(cfg));
     }
 
     void rebuildSchedulerWithLayerAttnTypes(const std::vector<CacheGroupType>& layer_attn_types, int cp_size = 1) {
-        scheduler_.reset();
         P2PConnectorSchedulerConfig cfg;
         cfg.worker_grpc_addrs = tp_broadcast_addrs_;
         cfg.worker_addrs.push_back("127.0.0.1:12345:" + std::to_string(prefill_server_->listenPort()));
@@ -132,8 +132,20 @@ protected:
                                                    /*kernel_blocks_per_kv_block=*/1,
                                                    layer_attn_types);
         cfg.cp_size  = cp_size;
-        scheduler_ = std::make_unique<P2PConnectorScheduler>(std::move(cfg), nullptr);
-        ASSERT_TRUE(scheduler_->init());
+        rebuildSchedulers(std::move(cfg));
+    }
+
+    void rebuildSchedulers(P2PConnectorSchedulerConfig scheduler_config) {
+        decode_scheduler_.reset();
+        prefill_scheduler_.reset();
+        tp_broadcast_client_ = std::make_shared<P2PBroadcastClient>(
+            scheduler_config.worker_grpc_addrs, scheduler_config.p2p_cancel_broadcast_timeout_ms);
+        ASSERT_TRUE(tp_broadcast_client_->init());
+        prefill_scheduler_ =
+            std::make_unique<P2PConnectorSchedulerPrefill>(scheduler_config, nullptr, tp_broadcast_client_);
+        decode_scheduler_ =
+            std::make_unique<P2PConnectorSchedulerDecode>(std::move(scheduler_config), nullptr, tp_broadcast_client_);
+        ASSERT_TRUE(decode_scheduler_->init("p2p_connector_scheduler_test"));
     }
 
 protected:
@@ -141,7 +153,9 @@ protected:
     std::vector<std::string>                    tp_broadcast_addrs_;
     std::unique_ptr<TestRpcServer>              prefill_server_;
     std::string                                 prefill_addr_;
-    std::unique_ptr<P2PConnectorScheduler>      scheduler_;
+    std::shared_ptr<P2PBroadcastClient>             tp_broadcast_client_;
+    std::unique_ptr<P2PConnectorSchedulerPrefill>   prefill_scheduler_;
+    std::unique_ptr<P2PConnectorSchedulerDecode>    decode_scheduler_;
 };
 
 // ==================== sendKVCache 测试 (Prefill 端功能) ====================
@@ -155,8 +169,8 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnError_LayerCacheBuffersEmpty)
 
     auto deadline_ms = currentTimeMs() + 1000;
 
-    ErrorInfo error_info =
-        scheduler_->sendKVCache(invalid_resource, "test_unique_key", 1001, decode_transfer_servers, deadline_ms);
+    ErrorInfo error_info = prefill_scheduler_->sendKVCache(
+        invalid_resource, "test_unique_key", 1001, decode_transfer_servers, deadline_ms);
 
     EXPECT_TRUE(error_info.hasError());
 
@@ -176,8 +190,8 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnOK_BroadcastSuccess) {
 
     auto deadline_ms = currentTimeMs() + 1000;
 
-    ErrorInfo error_info =
-        scheduler_->sendKVCache(valid_resource, "test_broadcast_success", 1001, decode_transfer_servers, deadline_ms);
+    ErrorInfo error_info = prefill_scheduler_->sendKVCache(
+        valid_resource, "test_broadcast_success", 1001, decode_transfer_servers, deadline_ms);
 
     EXPECT_TRUE(error_info.ok());
 
@@ -202,7 +216,8 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_FiltersLinearLayersByAttentionType)
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
 
     ErrorInfo error_info =
-        scheduler_->sendKVCache(resource, "test_linear_filter", 1009, decode_transfer_servers, currentTimeMs() + 1000);
+        prefill_scheduler_->sendKVCache(
+            resource, "test_linear_filter", 1009, decode_transfer_servers, currentTimeMs() + 1000);
 
     ASSERT_TRUE(error_info.ok());
     for (const auto& server : tp_broadcast_servers_) {
@@ -237,7 +252,8 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnError_BroadcastPartialFailed)
     auto deadline_ms = currentTimeMs() + 1000;
 
     ErrorInfo error_info =
-        scheduler_->sendKVCache(valid_resource, "test_broadcast_all_fail", 1003, decode_transfer_servers, deadline_ms);
+        prefill_scheduler_->sendKVCache(
+            valid_resource, "test_broadcast_all_fail", 1003, decode_transfer_servers, deadline_ms);
 
     EXPECT_TRUE(error_info.hasError());
 
@@ -262,7 +278,8 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnError_BroadcastTimeout) {
     auto deadline_ms = currentTimeMs() + 50;
 
     ErrorInfo error_info =
-        scheduler_->sendKVCache(valid_resource, "test_broadcast_timeout", 1004, decode_transfer_servers, deadline_ms);
+        prefill_scheduler_->sendKVCache(
+            valid_resource, "test_broadcast_timeout", 1004, decode_transfer_servers, deadline_ms);
 
     EXPECT_TRUE(error_info.hasError());
     EXPECT_EQ(error_info.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT);
@@ -298,7 +315,7 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ExitsImmediately_AfterCancelDoneEve
     });
 
     auto      start_ms   = currentTimeMs();
-    ErrorInfo error_info = scheduler_->sendKVCache(
+    ErrorInfo error_info = prefill_scheduler_->sendKVCache(
         valid_resource, "test_exit_after_cancel_done", 4007, decode_transfer_servers, deadline_ms, is_cancelled);
     auto duration_ms = currentTimeMs() - start_ms;
 
@@ -342,7 +359,7 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnFalse_BroadcastCancelled) {
         cancelled = true;
     });
 
-    ErrorInfo error_info = scheduler_->sendKVCache(
+    ErrorInfo error_info = prefill_scheduler_->sendKVCache(
         valid_resource, "test_broadcast_cancelled", 1005, decode_transfer_servers, deadline_ms, is_cancelled);
 
     cancel_thread.join();
@@ -453,7 +470,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNotNull_AllSuccess) {
     auto meta     = createMockMeta(2001, "test_async_read_1", currentTimeMs() + 5000);
 
     // block_range: {start_block_idx, block_count}, use -1 for block_count to include all blocks
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = decode_scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -482,7 +499,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadCpSendsEachWorkerItsRoundRobinKeys) {
     meta->setPrefillTpSize(2);
     meta->setPrefillCpSize(2);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = decode_scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     ASSERT_NE(result.context, nullptr);
     waitAsyncContextDone(result.context);
@@ -519,7 +536,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadCpRejectsDifferentSourceCpSize) {
     meta->setPrefillTpSize(2);
     meta->setPrefillCpSize(1);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = decode_scheduler_->asyncRead(resource, meta, {0, -1});
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(result.context, nullptr);
     EXPECT_EQ(prefill_server_->service()->getStartLoadCallCount(), 0);
@@ -532,7 +549,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_NoTransferCompletesWithoutDecodeBuff
     auto resource = createValidKVCacheResource(2, 2);
     auto meta     = createMockMeta(2011, "test_async_read_no_transfer", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, meta, {2, 0}, /*no_transfer=*/true);
+    auto result = decode_scheduler_->asyncRead(resource, meta, {2, 0}, /*no_transfer=*/true);
     ASSERT_TRUE(result.ok());
     ASSERT_NE(result.context, nullptr);
 
@@ -552,7 +569,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_WaitDone_UnblocksWhenCheckDoneComple
     auto resource = createValidKVCacheResource(2, 2);
     auto meta     = createMockMeta(2010, "test_async_read_wait_done", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = decode_scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -583,7 +600,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_WaitDone_UnblocksWhenCheckDoneComple
 TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNull_NullResource) {
     auto meta = createMockMeta(2002, "test_async_read_null_resource", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(nullptr, meta, {0, -1});
+    auto result = decode_scheduler_->asyncRead(nullptr, meta, {0, -1});
 
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(result.context, nullptr);
@@ -599,7 +616,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNull_EmptyResource) {
     auto resource = std::make_shared<KVCacheResource>();
     auto meta     = createMockMeta(2003, "test_async_read_empty", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = decode_scheduler_->asyncRead(resource, meta, {0, -1});
 
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(result.context, nullptr);
@@ -617,7 +634,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_BroadcastFailed) {
     auto resource = createValidKVCacheResource(2, 2);
     auto meta     = createMockMeta(2004, "test_async_read_broadcast_fail", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = decode_scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -640,7 +657,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_LoadFailed) {
     auto resource = createValidKVCacheResource(2, 2);
     auto meta     = createMockMeta(2005, "test_async_read_load_fail", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = decode_scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -664,7 +681,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_BothFailed) {
     auto resource = createValidKVCacheResource(2, 2);
     auto meta     = createMockMeta(2006, "test_async_read_both_fail", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = decode_scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -684,7 +701,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_PrefillTimeout) {
     auto resource = createValidKVCacheResource(2, 2);
     auto meta     = createMockMeta(2007, "test_async_read_prefill_timeout", currentTimeMs() + 50);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = decode_scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -702,12 +719,12 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_PrefillTimeout) {
 TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_BroadcastTimeout) {
     tp_broadcast_servers_[0]->service()->setSleepMillis(500);
 
-    scheduler_->stopChecker();
+    decode_scheduler_->stopChecker();
 
     auto resource = createValidKVCacheResource(2, 2);
     auto meta     = createMockMeta(2008, "test_async_read_broadcast_timeout", currentTimeMs() + 50);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = decode_scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -732,7 +749,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_CancelBroadcast_WhenPrefillFailed) {
     auto resource = createValidKVCacheResource(2, 2);
     auto meta     = createMockMeta(3001, "test_cancel_broadcast_when_prefill_failed", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = decode_scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -769,7 +786,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_CancelPrefill_WhenBroadcastFailed) {
     auto resource = createValidKVCacheResource(2, 2);
     auto meta     = createMockMeta(3002, "test_cancel_prefill_when_broadcast_failed", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = decode_scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -803,7 +820,7 @@ TEST_F(P2PConnectorSchedulerTest, SendKVCache_ReturnError_WhenBroadcastExceedsDe
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
 
     const int64_t deadline_ms = currentTimeMs() + 80;
-    ErrorInfo     error_info  = scheduler_->sendKVCache(
+    ErrorInfo     error_info  = prefill_scheduler_->sendKVCache(
         valid_resource, "test_prefill_broadcast_past_deadline", 4006, decode_transfer_servers, deadline_ms);
 
     EXPECT_TRUE(error_info.hasError());
@@ -822,12 +839,12 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_TransferNotDone_CompletesRequestAndR
         server->service()->setSleepMillis(0);
     }
 
-    scheduler_->stopChecker();
+    decode_scheduler_->stopChecker();
 
     auto resource = createValidKVCacheResource(2, 2);
     auto meta     = createMockMeta(5010, "test_transfer_not_done_hold", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = decode_scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -859,12 +876,12 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_TransferNotDone_ZeroHoldDoesNotRetai
         server->service()->setSleepMillis(0);
     }
 
-    scheduler_->stopChecker();
+    decode_scheduler_->stopChecker();
 
     auto resource = createValidKVCacheResource(2, 2);
     auto meta     = createMockMeta(5011, "test_transfer_not_done_zero_hold", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = decode_scheduler_->asyncRead(resource, meta, {0, -1});
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
