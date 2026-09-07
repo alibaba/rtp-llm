@@ -46,7 +46,7 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
                                    BlockTreeTaskPool*             task_pool,
                                    BlockTreeCacheMetricsReporter& metrics_reporter,
                                    std::mutex&                    mutex,
-                                   int                            memory_timeout_ms,
+                                   int                            host_timeout_ms,
                                    int                            disk_timeout_ms,
                                    size_t                         max_device_host_batch,
                                    size_t                         max_non_device_host_batch,
@@ -58,9 +58,8 @@ BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
     mutex_(&mutex),
     is_tier_enabled_(std::move(is_tier_enabled)),
     settled_(std::move(settled)),
-    task_runner_(std::make_unique<EvictionTaskRunner>(
-        tree->groupSets(), transfer_dispatcher, memory_timeout_ms, disk_timeout_ms)),
-    memory_timeout_ms_(memory_timeout_ms),
+    task_runner_(std::make_unique<EvictionTaskRunner>(tree->groupSets(), transfer_dispatcher)),
+    host_timeout_ms_(host_timeout_ms),
     disk_timeout_ms_(disk_timeout_ms),
     max_device_host_batch_(max_device_host_batch),
     max_non_device_host_batch_(max_non_device_host_batch) {
@@ -302,41 +301,51 @@ bool BlockTreeEvictor::batchDropLocked(size_t  group_set_id,
     return processed;
 }
 
-bool BlockTreeEvictor::submitEvictionTask(EvictionTransferTask task) {
-    auto task_ptr = std::make_shared<EvictionTransferTask>(std::move(task));
+bool BlockTreeEvictor::submitEvictionTask(std::vector<TransferDescriptor>     descriptors,
+                                          std::vector<EvictionTimingSnapshot> timings) {
+    const TransferDescriptor& descriptor = descriptors.front();
+    const auto                timeout    = std::chrono::milliseconds(
+        descriptor.source_tier == Tier::DISK || descriptor.target_tier == Tier::DISK ? disk_timeout_ms_ :
+                                                                                       host_timeout_ms_);
+    auto task_ptr =
+        std::make_shared<EvictionTransferTask>(TransferTask(std::move(descriptors), timeout), std::move(timings));
     if (!task_pool_->acquireWorkflowCredit(BlockTreeTaskClass::BACKGROUND)) {
-        rollbackTransferLocked(task_ptr->descs);
+        rollbackTransferLocked(task_ptr->descriptors());
         return false;
     }
-    updatePendingRelease(task_ptr->descs, true);
-    task_ptr->enqueue_time_us = metrics_reporter_->reportBusinessQueueWaitStarted(CacheTransferOperation::EVICT, false);
-    auto on_timeout           = [this, task_ptr]() {
-        metrics_reporter_->reportBusinessQueueWaitFinished(
-            CacheTransferOperation::EVICT, false, task_ptr->enqueue_time_us);
+    updatePendingRelease(task_ptr->descriptors(), true);
+    const int64_t queue_begin = currentTimeUs();
+    auto          on_timeout  = [this, task_ptr, queue_begin]() {
+        metrics_reporter_->reportQueueWaitMetric(false,
+                                                 "business",
+                                                 cacheTransferOperationName(CacheTransferOperation::EVICT),
+                                                 Tier::NONE,
+                                                 Tier::NONE,
+                                                 currentTimeUs() - queue_begin);
         RTP_LLM_LOG_WARNING("eviction expired in business queue, source=%s target=%s descriptors=%zu",
-                            tierName(task_ptr->descs.front().source_tier),
-                            tierName(task_ptr->descs.front().target_tier),
-                            task_ptr->descs.size());
+                            tierName(task_ptr->descriptors().front().source_tier),
+                            tierName(task_ptr->descriptors().front().target_tier),
+                            task_ptr->descriptors().size());
         scheduleEvictionSettlement(task_ptr, false);
     };
-    const auto& first_desc         = task_ptr->descs.front();
-    const auto  queue_wait_timeout = std::chrono::milliseconds(
-        first_desc.source_tier == Tier::DISK || first_desc.target_tier == Tier::DISK ? disk_timeout_ms_ :
-                                                                                       memory_timeout_ms_);
+    const auto deadline  = task_ptr->transfer_task.deadline();
     const bool submitted = task_pool_->submit(
-        [this, task_ptr]() {
-            metrics_reporter_->reportBusinessQueueWaitFinished(
-                CacheTransferOperation::EVICT, false, task_ptr->enqueue_time_us);
+        BlockTreeTaskClass::BACKGROUND,
+        [this, task_ptr, queue_begin]() {
+            metrics_reporter_->reportQueueWaitMetric(false,
+                                                     "business",
+                                                     cacheTransferOperationName(CacheTransferOperation::EVICT),
+                                                     Tier::NONE,
+                                                     Tier::NONE,
+                                                     currentTimeUs() - queue_begin);
             runEvictionTask(task_ptr);
         },
-        queue_wait_timeout,
+        deadline,
         std::move(on_timeout));
     if (!submitted) {
-        metrics_reporter_->reportBusinessQueueWaitFinished(
-            CacheTransferOperation::EVICT, false, task_ptr->enqueue_time_us, false);
         task_pool_->releaseWorkflowCredit(BlockTreeTaskClass::BACKGROUND);
-        updatePendingRelease(task_ptr->descs, false);
-        rollbackTransferLocked(task_ptr->descs);
+        updatePendingRelease(task_ptr->descriptors(), false);
+        rollbackTransferLocked(task_ptr->descriptors());
         return false;
     }
     return true;
@@ -365,10 +374,10 @@ BlockTreeEvictor::batchEvictStepLocked(size_t group_set_id, Tier source_tier, si
                 /*scheduled_count=*/scheduled_count};
     }
 
-    const GroupSetPtr&   group_set = tree_->groupSets()[group_set_id];
-    EvictionTransferTask batch;
-    bool                 dropped_existing_copy  = false;
-    size_t               directly_dropped_count = 0;
+    std::vector<TransferDescriptor>     descriptors;
+    std::vector<EvictionTimingSnapshot> timings;
+    bool                                dropped_existing_copy  = false;
+    size_t                              directly_dropped_count = 0;
     for (size_t victim_count = 0; victim_count < max_victim_count; ++victim_count) {
         auto eviction_desc = chooseVictim(group_set_id, source_tier, /*force_drop=*/false);
         if (!eviction_desc.has_value()) {
@@ -380,12 +389,11 @@ BlockTreeEvictor::batchEvictStepLocked(size_t group_set_id, Tier source_tier, si
             ++directly_dropped_count;
             continue;
         }
-        batch.timings.emplace_back(
-            eviction_desc->node->group_set_resources[eviction_desc->group_set_id].candidate_meta);
+        timings.emplace_back(eviction_desc->node->group_set_resources[eviction_desc->group_set_id].candidate_meta);
         reserveSource({*eviction_desc});
-        batch.descs.push_back(std::move(*eviction_desc));
+        descriptors.push_back(std::move(*eviction_desc));
     }
-    if (batch.descs.empty()) {
+    if (descriptors.empty()) {
         if (dropped_existing_copy) {
             settled_(true, false);
         }
@@ -394,9 +402,10 @@ BlockTreeEvictor::batchEvictStepLocked(size_t group_set_id, Tier source_tier, si
                 /*scheduled_count=*/directly_dropped_count};
     }
 
-    auto target_blocks = group_set->allocateBlocks(batch.descs.size(), target_tier, BlockTreeRefType::EVICTION);
+    auto target_blocks =
+        tree_->groupSets()[group_set_id]->allocateBlocks(descriptors.size(), target_tier, BlockTreeRefType::EVICTION);
     if (!target_blocks.has_value()) {
-        rollbackTransferLocked(batch.descs);
+        rollbackTransferLocked(descriptors);
         if (dropped_existing_copy) {
             settled_(true, false);
         }
@@ -404,11 +413,11 @@ BlockTreeEvictor::batchEvictStepLocked(size_t group_set_id, Tier source_tier, si
                 /*async_submitted=*/false,
                 /*scheduled_count=*/directly_dropped_count};
     }
-    for (size_t desc_index = 0; desc_index < batch.descs.size(); ++desc_index) {
-        batch.descs[desc_index].target_blocks = {(*target_blocks)[desc_index]};
+    for (size_t desc_index = 0; desc_index < descriptors.size(); ++desc_index) {
+        descriptors[desc_index].target_blocks = {(*target_blocks)[desc_index]};
     }
-    const size_t async_scheduled_count = batch.descs.size();
-    const bool   submitted             = submitEvictionTask(std::move(batch));
+    const size_t async_scheduled_count = descriptors.size();
+    const bool   submitted             = submitEvictionTask(std::move(descriptors), std::move(timings));
     if (dropped_existing_copy) {
         settled_(true, false);
     }
@@ -437,12 +446,12 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
             [this]() { task_pool_->releaseWorkflowCredit(BlockTreeTaskClass::BACKGROUND); });
         bool                 any_detached     = false;
         bool                 any_not_detached = false;
-        EvictionTransferTask settled_task;
+        EvictionTransferTask settled_task(task->transfer_task.subtask({}));
         {
             std::lock_guard<std::mutex> lock(*mutex_);
             std::vector<bool>           detached;
-            detached.reserve(task->descs.size());
-            for (const TransferDescriptor& desc : task->descs) {
+            detached.reserve(task->descriptors().size());
+            for (const TransferDescriptor& desc : task->descriptors()) {
                 const bool is_detached = desc.node->group_set_resources[desc.group_set_id].transfer_detached;
                 detached.push_back(is_detached);
                 any_detached     = any_detached || is_detached;
@@ -450,36 +459,41 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
             }
 
             if (success) {
-                completeEvict(task->descs);
-                settleEviction(task->descs);
+                completeEvict(task->descriptors());
+                settleEviction(task->descriptors());
             } else {
-                rollbackTransferLocked(task->descs);
+                rollbackTransferLocked(task->descriptors());
             }
-            updatePendingRelease(task->descs, false);
+            updatePendingRelease(task->descriptors(), false);
 
-            for (size_t desc_index = 0; desc_index < task->descs.size(); ++desc_index) {
-                const TransferDescriptor& desc = task->descs[desc_index];
+            for (size_t desc_index = 0; desc_index < task->descriptors().size(); ++desc_index) {
+                const TransferDescriptor& desc = task->descriptors()[desc_index];
                 if (success || detached[desc_index]) {
                     TransferDescriptor settled_desc = desc;
                     if (detached[desc_index]) {
                         settled_desc.target_tier = Tier::NONE;
                     }
-                    settled_task.descs.push_back(std::move(settled_desc));
+                    settled_task.mutableDescriptorsForPreparation().push_back(std::move(settled_desc));
                     settled_task.timings.push_back(task->timings[desc_index]);
                 }
             }
             settled_(success || any_detached, success && any_not_detached);
         }
-        if (!settled_task.descs.empty()) {
+        if (!settled_task.descriptors().empty()) {
             metrics_reporter_->reportEvictionFinished(settled_task, tree_->groupSets());
         }
     };
 
-    const int64_t queue_begin = metrics_reporter_->reportBusinessQueueWaitStarted(CacheTransferOperation::EVICT, true);
+    const int64_t queue_begin = currentTimeUs();
     bool          submitted   = false;
     try {
         submitted = task_pool_->submitCompletion([this, settle, queue_begin]() mutable {
-            metrics_reporter_->reportBusinessQueueWaitFinished(CacheTransferOperation::EVICT, true, queue_begin);
+            metrics_reporter_->reportQueueWaitMetric(true,
+                                                     "business",
+                                                     cacheTransferOperationName(CacheTransferOperation::EVICT),
+                                                     Tier::NONE,
+                                                     Tier::NONE,
+                                                     currentTimeUs() - queue_begin);
             settle();
         });
     } catch (const std::exception& error) {
@@ -488,7 +502,6 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
         RTP_LLM_LOG_ERROR("failed to enqueue eviction settlement with unknown exception");
     }
     if (!submitted) {
-        metrics_reporter_->reportBusinessQueueWaitFinished(CacheTransferOperation::EVICT, true, queue_begin, false);
         RTP_LLM_LOG_WARNING("eviction completion queue is closed; settling inline");
         settle();
     }

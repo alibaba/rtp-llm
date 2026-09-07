@@ -97,9 +97,10 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
         return;
     }
 
-    StoreTaskPtr task = std::make_shared<StoreTask>();
-    task->target_tier = target_tier;
-    task->cache_keys  = cache_keys;
+    StoreTaskPtr task = std::make_shared<StoreTask>(
+        target_tier,
+        cache_keys,
+        std::chrono::milliseconds(target_tier == Tier::DISK ? disk_timeout_ms_ : host_timeout_ms_));
 
     bool                                   workflow_credit_acquired = false;
     block_tree_cache_detail::ScopeRollback prepare_guard([this, &task, &workflow_credit_acquired]() {
@@ -115,31 +116,40 @@ void BlockTreeStorer::submitLowerTierLocked(const CacheKeysType&                
     if (!task_pool_->acquireWorkflowCredit(BlockTreeTaskClass::BACKGROUND)) {
         RTP_LLM_LOG_WARNING("store aborted: workflow limit reached, target=%s blocks=%zu",
                             tierName(target_tier),
-                            task->descriptors.size());
+                            task->descriptors().size());
         return;
     }
     workflow_credit_acquired = true;
-    task->enqueue_time_us    = metrics_reporter_.reportBusinessQueueWaitStarted(CacheTransferOperation::STORE, false);
-    auto on_timeout          = [this, task]() {
-        metrics_reporter_.reportBusinessQueueWaitFinished(CacheTransferOperation::STORE, false, task->enqueue_time_us);
+    const int64_t queue_begin = currentTimeUs();
+    auto          on_timeout  = [this, task, queue_begin]() {
+        metrics_reporter_.reportQueueWaitMetric(false,
+                                                "business",
+                                                cacheTransferOperationName(CacheTransferOperation::STORE),
+                                                Tier::NONE,
+                                                Tier::NONE,
+                                                currentTimeUs() - queue_begin);
         RTP_LLM_LOG_WARNING("store expired in business queue, target=%s blocks=%zu",
                             tierName(task->target_tier),
-                            task->descriptors.size());
-        scheduleStoreSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "store business queue timeout"));
+                            task->descriptors().size());
+        scheduleStoreSettlement(task, ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "store business queue timeout"));
     };
+    const auto deadline = task->transfer_task.deadline();
     if (!task_pool_->submit(
-            [this, task]() {
-                metrics_reporter_.reportBusinessQueueWaitFinished(
-                    CacheTransferOperation::STORE, false, task->enqueue_time_us);
+            BlockTreeTaskClass::BACKGROUND,
+            [this, task, queue_begin]() {
+                metrics_reporter_.reportQueueWaitMetric(false,
+                                                        "business",
+                                                        cacheTransferOperationName(CacheTransferOperation::STORE),
+                                                        Tier::NONE,
+                                                        Tier::NONE,
+                                                        currentTimeUs() - queue_begin);
                 runStoreTask(task);
             },
-            std::chrono::milliseconds(target_tier == Tier::DISK ? disk_timeout_ms_ : host_timeout_ms_),
+            deadline,
             std::move(on_timeout))) {
-        metrics_reporter_.reportBusinessQueueWaitFinished(
-            CacheTransferOperation::STORE, false, task->enqueue_time_us, false);
         RTP_LLM_LOG_WARNING("store aborted: business task submission rejected, target=%s blocks=%zu",
                             tierName(target_tier),
-                            task->descriptors.size());
+                            task->descriptors().size());
         return;
     }
     prepare_guard.dismiss();
@@ -152,13 +162,9 @@ void BlockTreeStorer::runStoreTask(const StoreTaskPtr& task) {
     }
 
     try {
-        store_task_runner_.runTransfer(
-            task,
-            *transfer_dispatcher_,
-            metrics_reporter_,
-            host_timeout_ms_,
-            disk_timeout_ms_,
-            [this, task](ErrorInfo error) { scheduleStoreSettlement(task, std::move(error)); });
+        store_task_runner_.runTransfer(task, *transfer_dispatcher_, metrics_reporter_, [this, task](ErrorInfo error) {
+            scheduleStoreSettlement(task, std::move(error));
+        });
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("store copy threw: %s", error.what());
         scheduleStoreSettlement(task, ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what()));
@@ -170,12 +176,16 @@ void BlockTreeStorer::runStoreTask(const StoreTaskPtr& task) {
 
 void BlockTreeStorer::scheduleStoreSettlement(const StoreTaskPtr& task, ErrorInfo error) {
     auto          settle      = [this, task, error = std::move(error)]() mutable { settleTask(*task, error.ok()); };
-    const int64_t queue_begin = metrics_reporter_.reportBusinessQueueWaitStarted(CacheTransferOperation::STORE, true);
+    const int64_t queue_begin = currentTimeUs();
     if (!task_pool_->submitCompletion([this, settle, queue_begin]() mutable {
-            metrics_reporter_.reportBusinessQueueWaitFinished(CacheTransferOperation::STORE, true, queue_begin);
+            metrics_reporter_.reportQueueWaitMetric(true,
+                                                    "business",
+                                                    cacheTransferOperationName(CacheTransferOperation::STORE),
+                                                    Tier::NONE,
+                                                    Tier::NONE,
+                                                    currentTimeUs() - queue_begin);
             settle();
         })) {
-        metrics_reporter_.reportBusinessQueueWaitFinished(CacheTransferOperation::STORE, true, queue_begin, false);
         RTP_LLM_LOG_WARNING("store completion queue is closed; settling inline");
         settle();
     }
@@ -195,17 +205,17 @@ void BlockTreeStorer::settleTask(const StoreTask& task, bool copy_success) {
     if (stopping) {
         RTP_LLM_LOG_INFO("store rolled back during shutdown, target=%s blocks=%zu",
                          tierName(task.target_tier),
-                         task.descriptors.size());
+                         task.descriptors().size());
     } else if (!copy_success) {
         RTP_LLM_LOG_WARNING("store copy failed, target=%s blocks=%zu; tree unchanged",
                             tierName(task.target_tier),
-                            task.descriptors.size());
+                            task.descriptors().size());
     } else {
-        metrics_reporter_.reportStorePublish(task.target_tier, accepted, task.descriptors.size() - accepted);
+        metrics_reporter_.reportStorePublish(task.target_tier, accepted, task.descriptors().size() - accepted);
         RTP_LLM_LOG_DEBUG("store published target=%s accepted=%zu duplicate=%zu",
                           tierName(task.target_tier),
                           accepted,
-                          task.descriptors.size() - accepted);
+                          task.descriptors().size() - accepted);
     }
 }
 
@@ -214,7 +224,7 @@ size_t BlockTreeStorer::settleLocked(const StoreTask& task, bool publish) {
     if (publish) {
         std::vector<std::vector<GroupSetResource>> resources(task.cache_keys.size(),
                                                              std::vector<GroupSetResource>(tree_->groupSets().size()));
-        for (const TransferDescriptor& descriptor : task.descriptors) {
+        for (const TransferDescriptor& descriptor : task.descriptors()) {
             resources[descriptor.path_index][descriptor.group_set_id].setBlocks(
                 task.target_tier, {descriptor.singleBlockAt(task.target_tier)});
         }
@@ -226,7 +236,7 @@ size_t BlockTreeStorer::settleLocked(const StoreTask& task, bool publish) {
     if (insert_result.accepted_resource_count > 0) {
         evictor_.onInserted(insert_result);
     }
-    if (!task.descriptors.empty()) {
+    if (!task.descriptors().empty()) {
         settled_(insert_result.accepted_resource_count > 0, true);
     }
     return insert_result.accepted_resource_count;

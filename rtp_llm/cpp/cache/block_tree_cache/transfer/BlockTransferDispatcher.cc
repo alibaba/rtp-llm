@@ -34,36 +34,32 @@ BlockTransferDispatcher::BlockTransferDispatcher(std::shared_ptr<PerRankBlockTra
     RTP_LLM_CHECK(max_non_device_host_descriptors_per_batch_ > 0);
 }
 
-std::shared_ptr<AsyncContext>
-BlockTransferDispatcher::executePerRank(const std::vector<TransferDescriptor>& descriptors) const {
-    return per_rank_engine_->submit(descriptors);
+std::shared_ptr<AsyncContext> BlockTransferDispatcher::executePerRank(TransferTask task) const {
+    if (task.expired()) {
+        return std::make_shared<CompletedAsyncContext>(
+            ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before TE submission"));
+    }
+    return per_rank_engine_->execute(std::move(task));
 }
 
-std::shared_ptr<AsyncContext>
-BlockTransferDispatcher::executeMultiRank(const std::vector<TransferDescriptor>& descriptors, int timeout_ms) const {
-    if (descriptors.empty()) {
-        return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
-    }
+std::shared_ptr<AsyncContext> BlockTransferDispatcher::executeMultiRank(TransferTask task) const {
     if (multi_rank_engine_ != nullptr) {
-        return multi_rank_engine_->execute(descriptors, timeout_ms);
+        return multi_rank_engine_->execute(std::move(task));
     }
-    return executePerRank(descriptors);
+    return executePerRank(std::move(task));
 }
 
-bool BlockTransferDispatcher::runTransfer(const std::vector<TransferDescriptor>& descriptors, int timeout_ms) const {
-    for (const auto& descriptor : descriptors) {
-        auto context = executeMultiRank({descriptor}, timeout_ms);
-        context->waitDone();
-        if (!context->success()) {
-            return false;
-        }
+void BlockTransferDispatcher::runTransfer(TransferTask task, TransferDoneCallback callback) const {
+    const auto& descriptors = task.descriptors();
+    if (descriptors.empty()) {
+        callback(ErrorInfo(ErrorCode::INVALID_PARAMS, "transfer task contains no descriptors"));
+        return;
     }
-    return true;
-}
+    if (task.expired()) {
+        callback(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before dispatch"));
+        return;
+    }
 
-void BlockTransferDispatcher::runTransfer(const std::vector<TransferDescriptor>& descriptors,
-                                          int                                    timeout_ms,
-                                          TransferDoneCallback                   callback) const {
     struct DescriptorGroup {
         Tier                            source{Tier::NONE};
         Tier                            target{Tier::NONE};
@@ -95,7 +91,7 @@ void BlockTransferDispatcher::runTransfer(const std::vector<TransferDescriptor>&
             std::vector<TransferDescriptor> batch(group.descriptors.begin() + begin, group.descriptors.begin() + end);
             stage_state->addBatch();
             try {
-                auto context = executeMultiRank(batch, timeout_ms);
+                auto context = executeMultiRank(task.subtask(std::move(batch)));
                 if (context == nullptr) {
                     stage_state->completeBatch(
                         ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "transfer engine returned a null context"));
@@ -119,10 +115,6 @@ void BlockTransferDispatcher::cancelPendingStagingTransfers() const {
 
 void BlockTransferDispatcher::shutdown() const {
     per_rank_engine_->shutdown();
-}
-
-void BlockTransferDispatcher::setQueueWaitReporter(TransferQueueWaitReporter reporter) const {
-    per_rank_engine_->setQueueWaitReporter(std::move(reporter));
 }
 
 BlockTreeQueueSizes BlockTransferDispatcher::queueSizes() const {

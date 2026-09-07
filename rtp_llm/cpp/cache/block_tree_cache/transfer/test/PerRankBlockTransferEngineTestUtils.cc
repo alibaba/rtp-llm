@@ -331,8 +331,8 @@ TransferDescriptor makeDescriptor(Tier                             source_tier,
     return desc;
 }
 
-bool submitSucceeded(const std::shared_ptr<PerRankBlockTransferEngine>& engine, const TransferDescriptor& desc) {
-    auto context = engine->submit({desc});
+bool executeSucceeded(const std::shared_ptr<PerRankBlockTransferEngine>& engine, const TransferDescriptor& desc) {
+    auto context = engine->execute(makeTransferTask({desc}));
     context->waitDone();
     return context->success();
 }
@@ -340,7 +340,7 @@ bool submitSucceeded(const std::shared_ptr<PerRankBlockTransferEngine>& engine, 
 void expectStatus(const std::shared_ptr<PerRankBlockTransferEngine>& engine,
                   const TransferDescriptor&                          desc,
                   TransferStatus                                     expected) {
-    auto context = engine->submit({desc});
+    auto context = engine->execute(makeTransferTask({desc}));
     ASSERT_NE(context, nullptr);
     context->waitDone();
     EXPECT_EQ(context->success(), expected == TransferStatus::OK);

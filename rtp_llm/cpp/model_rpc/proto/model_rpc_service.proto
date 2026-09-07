@@ -634,6 +634,7 @@ message MemoryOperationRequestPB {
     }
     repeated CopyItem copy_items = 1;
     CopyDirection copy_direction = 2;
+    int64 timeout_ms = 3;
 }
 
 message MemoryOperationResponsePB {

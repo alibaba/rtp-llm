@@ -8,12 +8,29 @@
 #include <mutex>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 
 namespace rtp_llm {
 namespace {
+
+template<typename Timeout, typename = void>
+struct SupportsUnclassifiedSubmit: std::false_type {};
+
+template<typename Timeout>
+struct SupportsUnclassifiedSubmit<
+    Timeout,
+    std::void_t<decltype(std::declval<BlockTreeTaskPool&>().submit(
+        std::declval<std::function<void()>>(), std::declval<Timeout>(), std::declval<std::function<void()>>()))>>:
+    std::true_type {};
+
+static_assert(!SupportsUnclassifiedSubmit<std::chrono::milliseconds>::value,
+              "BlockTreeTaskPool submit must require an explicit task class");
+static_assert(!SupportsUnclassifiedSubmit<BlockTreeTaskPool::Clock::time_point>::value,
+              "BlockTreeTaskPool submit must require an explicit task class");
 
 TEST(BlockTreeTaskPoolTest, StartOnlySucceedsOnce) {
     BlockTreeTaskPool pool(1, 8, "BlockTreeTaskPoolTest");
@@ -27,7 +44,7 @@ TEST(BlockTreeTaskPoolTest, SubmitAndWaitForIdleTrackAcceptedTasks) {
 
     std::atomic<int> completed{0};
     ASSERT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [&completed] { completed.fetch_add(1); }));
-    ASSERT_TRUE(pool.submit([&completed] { completed.fetch_add(1); }));
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&completed] { completed.fetch_add(1); }));
     pool.waitForIdle();
 
     EXPECT_EQ(completed.load(), 2);
@@ -40,7 +57,7 @@ TEST(BlockTreeTaskPoolTest, ExternalAsyncCompletionNeedsAnExplicitWorkflowCredit
 
     std::atomic<bool>     transfer_done{false};
     std::function<void()> finish_transfer;
-    ASSERT_TRUE(pool.submit([&] {
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&] {
         // Model a task that starts an external asynchronous transfer and
         // returns after registering its eventual completion callback.
         finish_transfer = [&transfer_done] { transfer_done.store(true); };
@@ -65,7 +82,7 @@ TEST(BlockTreeTaskPoolTest, WorkflowCreditKeepsIdleBlockedUntilCompletionSettlem
     std::future<void>     registered = transfer_registered.get_future();
     std::function<void()> finish_transfer;
     std::atomic<bool>     settled{false};
-    ASSERT_TRUE(pool.submit([&] {
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&] {
         finish_transfer = [&] {
             ASSERT_TRUE(pool.submitCompletion([&] {
                 settled.store(true);
@@ -157,10 +174,27 @@ TEST(BlockTreeTaskPoolTest, WorkflowCreditsPreserveLoadCapacityAfterBackgroundTa
 TEST(BlockTreeTaskPoolTest, ThrowingTaskStillSettlesPendingCount) {
     BlockTreeTaskPool pool(1, 8, "BlockTreeTaskPoolTest");
     ASSERT_TRUE(pool.start());
-    ASSERT_TRUE(pool.submit([] { throw std::runtime_error("expected"); }));
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [] { throw std::runtime_error("expected"); }));
 
     pool.waitForIdle();
     EXPECT_EQ(pool.pending_tasks_.load(), 0);
+}
+
+TEST(BlockTreeTaskPoolTest, ExpiredAbsoluteDeadlineRunsTimeoutInsteadOfTask) {
+    BlockTreeTaskPool pool(1, 8, "BlockTreeTaskPoolTest");
+    ASSERT_TRUE(pool.start());
+
+    std::atomic<bool> task_ran{false};
+    std::atomic<bool> timeout_ran{false};
+    ASSERT_TRUE(pool.submit(
+        BlockTreeTaskClass::BACKGROUND,
+        [&task_ran] { task_ran.store(true); },
+        std::chrono::steady_clock::now() - std::chrono::milliseconds(1),
+        [&timeout_ran] { timeout_ran.store(true); }));
+    pool.waitForIdle();
+
+    EXPECT_FALSE(task_ran.load());
+    EXPECT_TRUE(timeout_ran.load());
 }
 
 TEST(BlockTreeTaskPoolTest, ShutdownRejectsNewTasksAndIsIdempotent) {
@@ -169,7 +203,7 @@ TEST(BlockTreeTaskPoolTest, ShutdownRejectsNewTasksAndIsIdempotent) {
     pool.shutdown();
     pool.shutdown();
 
-    EXPECT_FALSE(pool.submit([] {}));
+    EXPECT_FALSE(pool.submit(BlockTreeTaskClass::BACKGROUND, [] {}));
     EXPECT_EQ(pool.pending_tasks_.load(), 0);
 }
 
@@ -188,7 +222,7 @@ TEST(BlockTreeTaskPoolTest, ShutdownClearsPopulatedQueuesAndReclaimsPending) {
         }
     };
     [[maybe_unused]] auto release_guard = std::shared_ptr<void>(nullptr, [&](void*) { release(); });
-    ASSERT_TRUE(pool.submit([&] {
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&] {
         worker_ready.set_value();
         release_future.wait();
     }));
@@ -241,17 +275,17 @@ TEST(BlockTreeTaskPoolTest, CompletionTasksPreemptQueuedNormalTasksAndRemainFifo
     auto               release_future = release_worker.get_future();
     std::mutex         events_mutex;
     std::vector<int>   events;
-    ASSERT_TRUE(pool.submit([&] {
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&] {
         worker_ready.set_value();
         release_future.wait();
     }));
     ASSERT_EQ(ready_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
 
-    ASSERT_TRUE(pool.submit([&] {
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&] {
         std::lock_guard<std::mutex> lock(events_mutex);
         events.push_back(3);
     }));
-    ASSERT_TRUE(pool.submit([&] {
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&] {
         std::lock_guard<std::mutex> lock(events_mutex);
         events.push_back(4);
     }));
@@ -284,7 +318,7 @@ TEST(BlockTreeTaskPoolTest, LoadPriorityIsBoundedAndPreservesFifoAcrossClasses) 
         }
     };
     [[maybe_unused]] auto release_guard = std::shared_ptr<void>(nullptr, [&](void*) { release(); });
-    ASSERT_TRUE(pool.submit([&] {
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&] {
         worker_ready.set_value();
         release_future.wait();
     }));
@@ -296,8 +330,8 @@ TEST(BlockTreeTaskPoolTest, LoadPriorityIsBoundedAndPreservesFifoAcrossClasses) 
 
     std::vector<int>  events;
     std::atomic<bool> completion_accepted{false};
-    ASSERT_TRUE(pool.submit([&events] { events.push_back(1); }));
-    ASSERT_TRUE(pool.submit([&events] { events.push_back(2); }));
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&events] { events.push_back(1); }));
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&events] { events.push_back(2); }));
     ASSERT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [&events] { events.push_back(10); }));
     ASSERT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [&] {
         events.push_back(11);
@@ -319,7 +353,7 @@ TEST(BlockTreeTaskPoolTest, StopAdmissionKeepsUnboundedCompletionQueueOpen) {
     ASSERT_TRUE(pool.start());
     pool.stopAdmission();
 
-    EXPECT_FALSE(pool.submit([] {}));
+    EXPECT_FALSE(pool.submit(BlockTreeTaskClass::BACKGROUND, [] {}));
     std::atomic<int> completions{0};
     ASSERT_TRUE(pool.submitCompletion([&] { ++completions; }));
     ASSERT_TRUE(pool.submitCompletion([&] { ++completions; }));
@@ -344,7 +378,7 @@ TEST(BlockTreeTaskPoolTest, ReservedSlotsRejectBackgroundButRemainAvailableToLoa
         }
     };
     [[maybe_unused]] auto release_guard = std::shared_ptr<void>(nullptr, [&](void*) { release(); });
-    ASSERT_TRUE(pool.submit([&] {
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&] {
         worker_ready.set_value();
         release_future.wait();
     }));
@@ -357,9 +391,9 @@ TEST(BlockTreeTaskPoolTest, ReservedSlotsRejectBackgroundButRemainAvailableToLoa
     std::atomic<bool> rejected_task_ran{false};
     // Background may fill only the non-reserved slots.
     for (size_t index = 0; index < background_limit; ++index) {
-        ASSERT_TRUE(pool.submit([] {}));
+        ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [] {}));
     }
-    EXPECT_FALSE(pool.submit([&rejected_task_ran] { rejected_task_ran.store(true); }));
+    EXPECT_FALSE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&rejected_task_ran] { rejected_task_ran.store(true); }));
 
     // Load may also use the reserved slots, up to the shared total capacity.
     for (size_t index = 0; index < BlockTreeTaskPool::kLoadReservedSlots; ++index) {
@@ -392,15 +426,15 @@ TEST(BlockTreeTaskPoolTest, SmallPoolsSkipReserveAndUnboundedQueuesStayUnlimited
             }
         };
         [[maybe_unused]] auto release_guard = std::shared_ptr<void>(nullptr, [&](void*) { release(); });
-        ASSERT_TRUE(pool.submit([&] {
+        ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&] {
             worker_ready.set_value();
             release_future.wait();
         }));
         ASSERT_EQ(ready_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
 
         // The single slot is available to Background despite the reserve.
-        EXPECT_TRUE(pool.submit([] {}));
-        EXPECT_FALSE(pool.submit([] {}));
+        EXPECT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [] {}));
+        EXPECT_FALSE(pool.submit(BlockTreeTaskClass::BACKGROUND, [] {}));
         EXPECT_FALSE(pool.submit(BlockTreeTaskClass::LOAD, [] {}));
 
         release();
@@ -423,13 +457,13 @@ TEST(BlockTreeTaskPoolTest, SmallPoolsSkipReserveAndUnboundedQueuesStayUnlimited
             }
         };
         [[maybe_unused]] auto release_guard = std::shared_ptr<void>(nullptr, [&](void*) { release(); });
-        ASSERT_TRUE(pool.submit([&] {
+        ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&] {
             worker_ready.set_value();
             release_future.wait();
         }));
         ASSERT_EQ(ready_future.wait_for(std::chrono::seconds(5)), std::future_status::ready);
 
-        EXPECT_TRUE(pool.submit([] {}));
+        EXPECT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [] {}));
         EXPECT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [] {}));
 
         release();

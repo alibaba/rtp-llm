@@ -23,8 +23,8 @@ class MultiRankTransferAsyncContext final:
     public AsyncContext,
     public std::enable_shared_from_this<MultiRankTransferAsyncContext> {
 public:
-    static std::shared_ptr<MultiRankTransferAsyncContext>
-    create(std::shared_ptr<TransferBroadcastResult> result, size_t worker_count) {
+    static std::shared_ptr<MultiRankTransferAsyncContext> create(std::shared_ptr<TransferBroadcastResult> result,
+                                                                 size_t worker_count) {
         auto context = std::shared_ptr<MultiRankTransferAsyncContext>(
             new MultiRankTransferAsyncContext(std::move(result), worker_count));
         context->start();
@@ -147,27 +147,20 @@ MultiRankBlockTransferEngine::MultiRankBlockTransferEngine(std::vector<GroupSetP
                                                            std::shared_ptr<BroadcastManager> broadcast_manager):
     group_sets_(std::move(group_sets)), broadcast_manager_(std::move(broadcast_manager)) {}
 
-std::shared_ptr<AsyncContext>
-MultiRankBlockTransferEngine::execute(const std::vector<TransferDescriptor>& descriptors, int timeout_ms) const {
-    if (descriptors.empty() || timeout_ms <= 0) {
-        RTP_LLM_LOG_WARNING("invalid batch, item_count=%zu, timeout_ms=%d", descriptors.size(), timeout_ms);
-        return std::make_shared<CompletedAsyncContext>(
-            ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid multi-rank transfer batch"));
-    }
-
+std::shared_ptr<AsyncContext> MultiRankBlockTransferEngine::execute(TransferTask task) const {
     MemoryOperationRequestPB request;
-    if (!BlockTransferRequestConverter::encodeTransfer(request, descriptors, group_sets_)) {
-        RTP_LLM_LOG_WARNING("failed to encode transfer batch, item_count=%zu", descriptors.size());
+    if (!BlockTransferRequestConverter::encodeTransfer(request, task, group_sets_)) {
+        RTP_LLM_LOG_WARNING("failed to encode transfer batch, item_count=%zu", task.descriptors().size());
         return std::make_shared<CompletedAsyncContext>(
             ErrorInfo(ErrorCode::INVALID_PARAMS, "failed to encode transfer batch"));
     }
-    const size_t              worker_count = broadcast_manager_->workerNum();
-    FunctionRequestPB         function_request;
+    const size_t      worker_count = broadcast_manager_->workerNum();
+    FunctionRequestPB function_request;
     function_request.mutable_mem_request()->CopyFrom(request);
     std::vector<FunctionRequestPB> requests(worker_count, function_request);
     auto broadcast_result = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
         requests,
-        timeout_ms,
+        static_cast<int>(request.timeout_ms()),
         [](const std::shared_ptr<RpcService::Stub>&    stub,
            const std::shared_ptr<grpc::ClientContext>& context,
            const FunctionRequestPB&                    rpc_request,

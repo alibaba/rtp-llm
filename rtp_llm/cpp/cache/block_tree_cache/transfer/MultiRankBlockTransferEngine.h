@@ -16,7 +16,7 @@ public:
     MultiRankBlockTransferEngine(std::vector<GroupSetPtr>          group_sets,
                                  std::shared_ptr<BroadcastManager> broadcast_manager);
 
-    std::shared_ptr<AsyncContext> execute(const std::vector<TransferDescriptor>& descriptors, int timeout_ms) const;
+    std::shared_ptr<AsyncContext> execute(TransferTask task) const;
 
 private:
     std::vector<GroupSetPtr>          group_sets_;

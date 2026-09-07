@@ -21,7 +21,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     ASSERT_EQ(manager_->cpSlotMapper(), cp_mapper);
     ASSERT_TRUE(cp_mapper->isSharded());
 
-    auto pausable_engine = std::make_shared<PausableRecordingTransferEngine>(cache->groupSets());
+    auto pausable_engine =
+        std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, pausable_engine);
     transfer_engine_.reset();
 
@@ -288,7 +289,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     }
     ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/16));
     auto cache  = manager_->blockTreeCache();
-    auto engine = std::make_shared<PausableRecordingTransferEngine>(cache->groupSets());
+    auto engine = std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, engine);
     transfer_engine_.reset();
     const auto initial_device = snapshotDevicePools(manager_);
@@ -424,8 +425,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
                     return false;
                 }
                 const auto& resource = (*resources)[2][group_set_id];
-                return resource.transfer_state == GroupSetTransferState::IDLE
-                       && resource.getTopTier() == Tier::DISK;
+                return resource.transfer_state == GroupSetTransferState::IDLE && resource.getTopTier() == Tier::DISK;
             },
             std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
     }
@@ -515,7 +515,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
     }
     ASSERT_TRUE(failure_entered);
     engine->release();
-    auto second_schedule = scheduler->schedule();
+    auto       second_schedule   = scheduler->schedule();
     const auto schedule_deadline = std::chrono::steady_clock::now() + kTransferWaitTimeout;
     while (second_schedule.ok() && second_schedule.value().empty()
            && std::chrono::steady_clock::now() < schedule_deadline) {
@@ -684,7 +684,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
     ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/16));
     auto             cache               = manager_->blockTreeCache();
     constexpr size_t staging_block_count = 2;
-    auto engine = std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), staging_block_count);
+    auto             engine              = std::make_shared<PausableRecordingTransferEngine>(
+        cache->groupSets(), cache->isDiskCacheEnabled(), staging_block_count);
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, engine);
     transfer_engine_.reset();
     EXPECT_EQ(cache->config().device_disk_staging_block_count, staging_block_count);

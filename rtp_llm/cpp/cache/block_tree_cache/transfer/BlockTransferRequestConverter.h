@@ -10,9 +10,9 @@ namespace rtp_llm {
 
 class BlockTransferRequestConverter {
 public:
-    static bool encodeTransfer(MemoryOperationRequestPB&              request,
-                               const std::vector<TransferDescriptor>& descriptors,
-                               const std::vector<GroupSetPtr>&        group_sets);
+    static bool encodeTransfer(MemoryOperationRequestPB&       request,
+                               const TransferTask&             task,
+                               const std::vector<GroupSetPtr>& group_sets);
 
     static bool decodeTransfer(const MemoryOperationRequestPB&  request,
                                std::vector<TransferDescriptor>& descriptors,
@@ -21,8 +21,8 @@ public:
 private:
     using CopyItem = MemoryOperationRequestPB::CopyItem;
 
-    static bool            directionFor(const TransferDescriptor&                descriptor,
-                                        MemoryOperationRequestPB::CopyDirection& request_direction);
+    static bool directionFor(const TransferDescriptor&                descriptor,
+                             MemoryOperationRequestPB::CopyDirection& request_direction);
     static bool decodeDeviceBlocks(const CopyItem& item, const GroupSet& group_set, std::vector<BlockIdxType>& blocks);
 };
 

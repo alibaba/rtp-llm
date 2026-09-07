@@ -113,8 +113,6 @@ private:
     BlockTreeTaskPool*                      task_pool_;
     BlockTreeCacheMetricsReporter&          metrics_reporter_;
     std::mutex&                             mutex_;
-    int                                     disk_timeout_ms_{0};
-    int                                     host_timeout_ms_{0};
     bool                                    enable_device_cache_{true};
     std::shared_ptr<StorageBackend>         storage_backend_;
     SettledFn                               settled_;

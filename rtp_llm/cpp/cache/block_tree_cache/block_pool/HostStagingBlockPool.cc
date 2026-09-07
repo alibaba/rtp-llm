@@ -32,7 +32,7 @@ std::optional<HostStagingBlockPool::HostStagingBlockBatch> HostStagingBlockPool:
     return allocateBatchLocked(count);
 }
 
-void HostStagingBlockPool::requestBatch(size_t count, BatchReadyCallback callback) {
+void HostStagingBlockPool::requestBatch(size_t count, Clock::time_point deadline, BatchReadyCallback callback) {
     if (!callback) {
         return;
     }
@@ -40,12 +40,12 @@ void HostStagingBlockPool::requestBatch(size_t count, BatchReadyCallback callbac
     std::optional<HostStagingBlockBatch> immediate_result;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (count == 0 || count > block_count_) {
+        if (count == 0 || count > block_count_ || Clock::now() >= deadline) {
             // Keep the empty result; dispatch the invalid request after unlocking.
         } else if (batch_waiters_.empty() && free_id_list_.size() >= count) {
             immediate_result.emplace(allocateBatchLocked(count));
         } else {
-            batch_waiters_.push_back(BatchWaiter{count, std::move(callback)});
+            batch_waiters_.push_back(BatchWaiter{count, deadline, std::move(callback)});
             return;
         }
     }
@@ -92,7 +92,17 @@ HostStagingBlockPool::HostStagingBlockBatch HostStagingBlockPool::allocateBatchL
 
 std::vector<HostStagingBlockPool::ReadyBatch> HostStagingBlockPool::collectReadyBatchesLocked() {
     std::vector<ReadyBatch> ready_batches;
-    while (!batch_waiters_.empty() && free_id_list_.size() >= batch_waiters_.front().count) {
+    const auto              now = Clock::now();
+    while (!batch_waiters_.empty()) {
+        if (now >= batch_waiters_.front().deadline) {
+            BatchWaiter waiter = std::move(batch_waiters_.front());
+            batch_waiters_.pop_front();
+            ready_batches.push_back(ReadyBatch{std::move(waiter.callback), std::nullopt});
+            continue;
+        }
+        if (free_id_list_.size() < batch_waiters_.front().count) {
+            break;
+        }
         BatchWaiter waiter = std::move(batch_waiters_.front());
         batch_waiters_.pop_front();
         ready_batches.push_back(ReadyBatch{std::move(waiter.callback), allocateBatchLocked(waiter.count)});

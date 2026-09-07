@@ -57,13 +57,14 @@ class BatchCountingTransferEngine: public ScriptedTransferEngine {
 public:
     using ScriptedTransferEngine::ScriptedTransferEngine;
 
-    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
+    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
+        const auto& descriptors = task.descriptors();
         batches_.push_back(descriptors);
         if (on_submit_) {
             on_submit_();
         }
         ++batch_count_;
-        return ScriptedTransferEngine::submit(descriptors);
+        return ScriptedTransferEngine::execute(std::move(task));
     }
 
     size_t batchCount() const {
@@ -88,7 +89,8 @@ class DeferredTransferEngine final: public PerRankBlockTransferEngine {
 public:
     explicit DeferredTransferEngine(const std::vector<GroupSetPtr>& groups): PerRankBlockTransferEngine(groups) {}
 
-    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
+    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
+        const auto& descriptors = task.descriptors();
         batches_.push_back(descriptors);
         auto context = std::make_shared<TransferBatchAsyncContext>();
         contexts_.push_back(context);
@@ -125,7 +127,7 @@ protected:
     }
 
     EvictionTaskRunner makeRunner() {
-        return EvictionTaskRunner(group_sets_, transfer_dispatcher_.get(), 0, 0);
+        return EvictionTaskRunner(group_sets_, transfer_dispatcher_.get());
     }
 
     bool runImmediately(EvictionTransferTask task) {
@@ -141,11 +143,6 @@ protected:
         return *result;
     }
 
-    void enableMetrics() {
-        kmonitor::MetricsTags tags;
-        metrics_reporter_.setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
-    }
-
     int64_t evictionInFlight(Tier source_tier, Tier target_tier) const {
         const size_t operation_index = static_cast<size_t>(CacheTransferOperation::EVICT);
         const size_t direction_index =
@@ -156,26 +153,41 @@ protected:
     std::vector<GroupSetPtr>                     group_sets_;
     std::shared_ptr<BatchCountingTransferEngine> transfer_engine_;
     std::unique_ptr<BlockTransferDispatcher>     transfer_dispatcher_;
-    BlockTreeCacheMetricsReporter                metrics_reporter_;
+    std::shared_ptr<kmonitor::MetricsReporter>   kmonitor_metrics_reporter_{
+        std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{})};
+    BlockTreeCacheMetricsReporter metrics_reporter_{kmonitor_metrics_reporter_};
 };
 
 EvictionTransferTask makeCopyTask() {
-    EvictionTransferTask task;
+    EvictionTransferTask task(TransferTask({}, std::chrono::seconds(30)));
     TransferDescriptor   desc;
     desc.group_set_id  = 0;
     desc.source_tier   = Tier::DEVICE;
     desc.target_tier   = Tier::HOST;
     desc.source_blocks = {1, 2};
     desc.target_blocks = {3};
-    task.descs.push_back(std::move(desc));
+    task.mutableDescriptorsForPreparation().push_back(std::move(desc));
     task.timings.emplace_back();
     return task;
+}
+
+TEST(EvictionTransferTaskTest, ConstructorOwnsDescriptorsAndTimings) {
+    TransferDescriptor     descriptor = TransferDescriptor::deviceToHost(0, {1, 2}, 3);
+    EvictionTimingSnapshot timing;
+    timing.selected_time_us = 17;
+
+    EvictionTransferTask task(TransferTask({descriptor}, std::chrono::seconds(30)), {timing});
+
+    ASSERT_EQ(task.descriptors().size(), 1u);
+    EXPECT_EQ(task.descriptors().front().target_blocks, (std::vector<BlockIdxType>{3}));
+    ASSERT_EQ(task.timings.size(), 1u);
+    EXPECT_EQ(task.timings.front().selected_time_us, 17);
 }
 
 TEST_F(EvictionTaskRunnerTest, SubmitsPrimaryWithoutBlocking) {
     auto                    deferred_engine = std::make_shared<DeferredTransferEngine>(group_sets_);
     BlockTransferDispatcher dispatcher(deferred_engine);
-    EvictionTaskRunner      runner(group_sets_, &dispatcher, 0, 0);
+    EvictionTaskRunner      runner(group_sets_, &dispatcher);
     auto                    task = std::make_shared<EvictionTransferTask>(makeCopyTask());
     std::optional<bool>     result;
     size_t                  terminal_count = 0;
@@ -187,7 +199,7 @@ TEST_F(EvictionTaskRunnerTest, SubmitsPrimaryWithoutBlocking) {
 
     ASSERT_EQ(deferred_engine->batchCount(), 1u);
     ASSERT_EQ(deferred_engine->batch(0).size(), 1u);
-    EXPECT_EQ(deferred_engine->batch(0).front().group_set_id, task->descs.front().group_set_id);
+    EXPECT_EQ(deferred_engine->batch(0).front().group_set_id, task->descriptors().front().group_set_id);
     EXPECT_FALSE(result.has_value());
 
     deferred_engine->complete(0, true);
@@ -198,10 +210,10 @@ TEST_F(EvictionTaskRunnerTest, SubmitsPrimaryWithoutBlocking) {
 
 TEST_F(EvictionTaskRunnerTest, SubmitsAllDescriptorsAsOneLogicalTransfer) {
     auto task            = makeCopyTask();
-    auto second          = task.descs.front();
+    auto second          = task.descriptors().front();
     second.source_blocks = {4, 5};
     second.target_blocks = {6};
-    task.descs.push_back(std::move(second));
+    task.mutableDescriptorsForPreparation().push_back(std::move(second));
     task.timings.emplace_back();
 
     const bool success     = runImmediately(std::move(task));
@@ -219,10 +231,9 @@ TEST_F(EvictionTaskRunnerTest, SubmitsAllDescriptorsAsOneLogicalTransfer) {
 }
 
 TEST_F(EvictionTaskRunnerTest, RunTransferOwnsTransferMetricsLifetime) {
-    enableMetrics();
     auto                    deferred_engine = std::make_shared<DeferredTransferEngine>(group_sets_);
     BlockTransferDispatcher dispatcher(deferred_engine);
-    EvictionTaskRunner      runner(group_sets_, &dispatcher, 0, 0);
+    EvictionTaskRunner      runner(group_sets_, &dispatcher);
     auto                    task = std::make_shared<EvictionTransferTask>(makeCopyTask());
     std::optional<bool>     result;
 
@@ -237,7 +248,6 @@ TEST_F(EvictionTaskRunnerTest, RunTransferOwnsTransferMetricsLifetime) {
 }
 
 TEST_F(EvictionTaskRunnerTest, BatchFailureFinishesTransferMetrics) {
-    enableMetrics();
     transfer_engine_->enqueue(false);
     bool observed_in_flight = false;
     transfer_engine_->setOnSubmit([&]() { observed_in_flight = evictionInFlight(Tier::DEVICE, Tier::HOST) == 1; });
@@ -250,9 +260,8 @@ TEST_F(EvictionTaskRunnerTest, BatchFailureFinishesTransferMetrics) {
 }
 
 TEST_F(EvictionTaskRunnerTest, MalformedDescriptorFinishesTransferMetrics) {
-    enableMetrics();
     auto task = makeCopyTask();
-    task.descs.front().source_blocks.clear();
+    task.mutableDescriptorsForPreparation().front().source_blocks.clear();
 
     const bool success = runImmediately(std::move(task));
 
@@ -262,7 +271,6 @@ TEST_F(EvictionTaskRunnerTest, MalformedDescriptorFinishesTransferMetrics) {
 }
 
 TEST_F(EvictionTaskRunnerTest, SubmitExceptionFinishesTransferMetrics) {
-    enableMetrics();
     bool observed_in_flight = false;
     transfer_engine_->setOnSubmit([&]() {
         observed_in_flight = evictionInFlight(Tier::DEVICE, Tier::HOST) == 1;
@@ -284,31 +292,32 @@ TEST_F(EvictionTaskRunnerTest, RunTransferRejectsMalformedDescriptors) {
         EXPECT_FALSE(runImmediately(std::move(task)));
     };
 
-    expect_rejected([](auto& task) { task.descs.front().source_blocks = {}; });
-    expect_rejected([](auto& task) { task.descs.front().source_blocks = {1, NULL_BLOCK_IDX}; });
-    expect_rejected([](auto& task) { task.descs.front().target_blocks = {}; });
-    expect_rejected([](auto& task) { task.descs.front().target_blocks = {3, 4}; });
-    expect_rejected([](auto& task) { task.descs.front().source_tier = Tier::DISK; });
+    expect_rejected([](auto& task) { task.mutableDescriptorsForPreparation().front().source_blocks = {}; });
+    expect_rejected(
+        [](auto& task) { task.mutableDescriptorsForPreparation().front().source_blocks = {1, NULL_BLOCK_IDX}; });
+    expect_rejected([](auto& task) { task.mutableDescriptorsForPreparation().front().target_blocks = {}; });
+    expect_rejected([](auto& task) { task.mutableDescriptorsForPreparation().front().target_blocks = {3, 4}; });
+    expect_rejected([](auto& task) { task.mutableDescriptorsForPreparation().front().source_tier = Tier::DISK; });
 }
 
 TEST_F(EvictionTaskRunnerTest, RejectsHeterogeneousBatches) {
     auto heterogeneous  = makeCopyTask();
-    auto second         = heterogeneous.descs.front();
+    auto second         = heterogeneous.descriptors().front();
     second.group_set_id = 1;
-    heterogeneous.descs.push_back(std::move(second));
+    heterogeneous.mutableDescriptorsForPreparation().push_back(std::move(second));
     heterogeneous.timings.emplace_back();
     EXPECT_FALSE(runImmediately(std::move(heterogeneous)));
 }
 
 TEST_F(EvictionTaskRunnerTest, RunTransferSupportsDeviceToDisk) {
-    EvictionTransferTask task;
+    EvictionTransferTask task(TransferTask({}, std::chrono::seconds(30)));
     TransferDescriptor   desc;
     desc.group_set_id  = 0;
     desc.source_tier   = Tier::DEVICE;
     desc.target_tier   = Tier::DISK;
     desc.source_blocks = {1, 2};
     desc.target_blocks = {3};
-    task.descs.push_back(std::move(desc));
+    task.mutableDescriptorsForPreparation().push_back(std::move(desc));
     task.timings.emplace_back();
 
     ASSERT_TRUE(runImmediately(std::move(task)));

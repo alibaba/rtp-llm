@@ -56,7 +56,7 @@ public:
                      BlockTreeTaskPool*             task_pool,
                      BlockTreeCacheMetricsReporter& metrics_reporter,
                      std::mutex&                    mutex,
-                     int                            memory_timeout_ms,
+                     int                            host_timeout_ms,
                      int                            disk_timeout_ms,
                      size_t                         max_device_host_batch,
                      size_t                         max_non_device_host_batch,
@@ -111,7 +111,7 @@ private:
     EvictionDropTask                  createDropTask(TransferDescriptor eviction_desc);
     bool   batchEvictLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count, size_t& scheduled_count);
     bool   batchDropLocked(size_t group_set_id, Tier source_tier, size_t max_victim_count, size_t& scheduled_count);
-    bool   submitEvictionTask(EvictionTransferTask task);
+    bool   submitEvictionTask(std::vector<TransferDescriptor> descriptors, std::vector<EvictionTimingSnapshot> timings);
     Tier   watermarkTargetTier(Tier source_tier) const;
     size_t watermarkLogicalBatchLimit(Tier source_tier, Tier target_tier) const;
     void   runEvictionTask(std::shared_ptr<const EvictionTransferTask> task) noexcept;
@@ -149,7 +149,7 @@ private:
     IsTierEnabledFn                     is_tier_enabled_;
     SettledFn                           settled_;
     std::unique_ptr<EvictionTaskRunner> task_runner_;
-    int                                 memory_timeout_ms_{0};
+    int                                 host_timeout_ms_{0};
     int                                 disk_timeout_ms_{0};
     size_t                              max_device_host_batch_{8};
     size_t                              max_non_device_host_batch_{16};

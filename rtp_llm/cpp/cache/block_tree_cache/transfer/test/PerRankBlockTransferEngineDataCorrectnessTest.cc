@@ -26,11 +26,12 @@ using block_transfer_engine_test::makeTestDevicePool;
 using block_transfer_engine_test::makeTestGroupBase;
 using block_transfer_engine_test::makeTestGroupSet;
 using block_transfer_engine_test::makeTestTopology;
+using block_transfer_engine_test::makeTransferTask;
 using block_transfer_engine_test::poolMalloc;
 
-constexpr size_t kLayerCount = 2;
-constexpr size_t kKvBytes    = 256;
-constexpr size_t kScaleBytes = 32;
+constexpr size_t kLayerCount   = 2;
+constexpr size_t kKvBytes      = 256;
+constexpr size_t kScaleBytes   = 32;
 constexpr size_t kPayloadBytes = kLayerCount * (kKvBytes + kScaleBytes);
 
 struct AllocatedBlocks {
@@ -53,7 +54,7 @@ std::vector<uint8_t> makePattern(size_t pattern_id) {
 
 AllocatedBlocks allocateBlocks(IBlockPool& pool, size_t count) {
     AllocatedBlocks blocks;
-    const auto allocate = [&pool]() {
+    const auto      allocate = [&pool]() {
         const BlockIdxType block = poolMalloc(pool);
         if (block == NULL_BLOCK_IDX) {
             throw std::runtime_error("test block pool exhausted");
@@ -114,7 +115,7 @@ std::vector<uint8_t> readDevicePayload(const DeviceBlockPoolPtr& pool, BlockIdxT
 
 void writeHostPayload(const std::shared_ptr<HostBlockPool>& pool,
                       BlockIdxType                          block,
-                      const std::vector<uint8_t>&          bytes) {
+                      const std::vector<uint8_t>&           bytes) {
     ASSERT_EQ(bytes.size(), pool->payloadBytes());
     std::memcpy(pool->blockBuffer(block).addr, bytes.data(), bytes.size());
 }
@@ -138,7 +139,7 @@ std::vector<uint8_t> readHostStride(const std::shared_ptr<HostBlockPool>& pool, 
 
 void writeDiskPayload(const BlockTreeDiskBlockPoolPtr& pool,
                       BlockIdxType                     block,
-                      const std::vector<uint8_t>&     bytes,
+                      const std::vector<uint8_t>&      bytes,
                       uint8_t                          padding) {
     ASSERT_EQ(bytes.size(), pool->payloadBytes());
     std::vector<uint8_t> stride(pool->strideBytes(), padding);
@@ -165,7 +166,7 @@ std::vector<uint8_t> readDiskPayload(const BlockTreeDiskBlockPoolPtr& pool, Bloc
 
 void expectTransferSuccess(const std::shared_ptr<PerRankBlockTransferEngine>& engine,
                            const std::vector<TransferDescriptor>&             descriptors) {
-    auto context = engine->submit(descriptors);
+    auto context = engine->execute(makeTransferTask(descriptors));
     ASSERT_NE(context, nullptr);
     context->waitDone();
     ASSERT_TRUE(context->success()) << context->errorInfo().ToString();
@@ -174,22 +175,20 @@ void expectTransferSuccess(const std::shared_ptr<PerRankBlockTransferEngine>& en
 struct TransferFixture {
     TransferFixture(CacheGroupType group_type, size_t data_block_count, const std::string& name):
         temp_dir(name.c_str()) {
-        const size_t usable_count = data_block_count + 2;
-        auto policy                = defaultCacheGroupPolicy(group_type);
+        const size_t usable_count  = data_block_count + 2;
+        auto         policy        = defaultCacheGroupPolicy(group_type);
         policy.enable_prefix_reuse = true;
         if (group_type == CacheGroupType::SWA) {
             policy.sliding_window_size = 2;
         }
 
-        auto topology = makeTestTopology(
-            {makeTestGroupBase(std::move(policy), {0, 1}, kKvBytes, kScaleBytes)});
-        device_pool = makeTestDevicePool(
-            {{kKvBytes, kScaleBytes}, {kKvBytes, kScaleBytes}}, usable_count, name + "_device");
+        auto topology = makeTestTopology({makeTestGroupBase(std::move(policy), {0, 1}, kKvBytes, kScaleBytes)});
+        device_pool =
+            makeTestDevicePool({{kKvBytes, kScaleBytes}, {kKvBytes, kScaleBytes}}, usable_count, name + "_device");
         host_pool = makeHostPool(kPayloadBytes, usable_count, true);
         disk_pool = makeDiskPool(kPayloadBytes, usable_count, temp_dir.path, nullptr, name + "_disk");
-        group_set = makeTestGroupSet(
-            0, std::move(topology), {0}, {device_pool}, host_pool, disk_pool);
-        engine = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group_set});
+        group_set = makeTestGroupSet(0, std::move(topology), {0}, {device_pool}, host_pool, disk_pool);
+        engine    = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group_set}, true);
     }
 
     TempDirGuard                                temp_dir;
@@ -209,7 +208,7 @@ protected:
 
 TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, DeviceHostRoundTripsNineDistinctBlocksExactly) {
     constexpr size_t kDescriptorCount = 9;
-    TransferFixture env(GetParam(), kDescriptorCount, "data_correctness_device_host_" + groupTypeName(GetParam()));
+    TransferFixture  env(GetParam(), kDescriptorCount, "data_correctness_device_host_" + groupTypeName(GetParam()));
     const auto       device_blocks = allocateBlocks(*env.device_pool, kDescriptorCount);
     const auto       host_blocks   = allocateBlocks(*env.host_pool, kDescriptorCount);
     const auto       device_before = makePattern(500);
@@ -227,8 +226,7 @@ TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, DeviceHostRoundTripsNineDi
         h2d_expected.push_back(makePattern(index));
         writeHostPayload(env.host_pool, host_blocks.data[index], h2d_expected.back());
         writeDevicePayload(env.device_pool, device_blocks.data[index], makePattern(100 + index));
-        h2d.push_back(makeDescriptor(
-            Tier::HOST, Tier::DEVICE, {device_blocks.data[index]}, host_blocks.data[index]));
+        h2d.push_back(makeDescriptor(Tier::HOST, Tier::DEVICE, {device_blocks.data[index]}, host_blocks.data[index]));
     }
     expectTransferSuccess(env.engine, h2d);
     for (size_t index = 0; index < kDescriptorCount; ++index) {
@@ -242,8 +240,7 @@ TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, DeviceHostRoundTripsNineDi
         d2h_expected.push_back(makePattern(200 + index));
         writeDevicePayload(env.device_pool, device_blocks.data[index], d2h_expected.back());
         writeHostPayload(env.host_pool, host_blocks.data[index], makePattern(300 + index));
-        d2h.push_back(makeDescriptor(
-            Tier::DEVICE, Tier::HOST, {device_blocks.data[index]}, host_blocks.data[index]));
+        d2h.push_back(makeDescriptor(Tier::DEVICE, Tier::HOST, {device_blocks.data[index]}, host_blocks.data[index]));
     }
     expectTransferSuccess(env.engine, d2h);
     for (size_t index = 0; index < kDescriptorCount; ++index) {
@@ -259,7 +256,7 @@ TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, DeviceHostRoundTripsNineDi
 
 TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, HostDiskRoundTripsDistinctBlocksExactly) {
     constexpr size_t kDescriptorCount = 3;
-    TransferFixture env(GetParam(), kDescriptorCount, "data_correctness_host_disk_" + groupTypeName(GetParam()));
+    TransferFixture  env(GetParam(), kDescriptorCount, "data_correctness_host_disk_" + groupTypeName(GetParam()));
     const auto       host_blocks = allocateBlocks(*env.host_pool, kDescriptorCount);
     const auto       disk_blocks = allocateBlocks(*env.disk_pool, kDescriptorCount);
     writeHostStride(env.host_pool, host_blocks.before, 0xC1);
@@ -277,8 +274,7 @@ TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, HostDiskRoundTripsDistinct
         h2disk_expected.push_back(makePattern(400 + index));
         writeHostPayload(env.host_pool, host_blocks.data[index], h2disk_expected.back());
         writeDiskPayload(env.disk_pool, disk_blocks.data[index], makePattern(450 + index), 0xEE);
-        h2disk.push_back(makeDescriptor(
-            Tier::HOST, Tier::DISK, {}, host_blocks.data[index], disk_blocks.data[index]));
+        h2disk.push_back(makeDescriptor(Tier::HOST, Tier::DISK, {}, host_blocks.data[index], disk_blocks.data[index]));
     }
     expectTransferSuccess(env.engine, h2disk);
     for (size_t index = 0; index < kDescriptorCount; ++index) {
@@ -292,8 +288,7 @@ TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, HostDiskRoundTripsDistinct
         disk2h_expected.push_back(makePattern(500 + index));
         writeDiskPayload(env.disk_pool, disk_blocks.data[index], disk2h_expected.back(), 0xA5);
         writeHostPayload(env.host_pool, host_blocks.data[index], makePattern(550 + index));
-        disk2h.push_back(makeDescriptor(
-            Tier::DISK, Tier::HOST, {}, host_blocks.data[index], disk_blocks.data[index]));
+        disk2h.push_back(makeDescriptor(Tier::DISK, Tier::HOST, {}, host_blocks.data[index], disk_blocks.data[index]));
     }
     expectTransferSuccess(env.engine, disk2h);
     for (size_t index = 0; index < kDescriptorCount; ++index) {
@@ -309,7 +304,7 @@ TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, HostDiskRoundTripsDistinct
 
 TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, DeviceDiskRoundTripsDistinctBlocksWithoutStaleStagingData) {
     constexpr size_t kDescriptorCount = 3;
-    TransferFixture env(GetParam(), kDescriptorCount, "data_correctness_device_disk_" + groupTypeName(GetParam()));
+    TransferFixture  env(GetParam(), kDescriptorCount, "data_correctness_device_disk_" + groupTypeName(GetParam()));
     const auto       device_blocks = allocateBlocks(*env.device_pool, kDescriptorCount);
     const auto       disk_blocks   = allocateBlocks(*env.disk_pool, kDescriptorCount);
     writeDevicePayload(env.device_pool, device_blocks.before, makePattern(600));
@@ -326,12 +321,10 @@ TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, DeviceDiskRoundTripsDistin
         d2disk_expected.push_back(makePattern(700 + index));
         writeDevicePayload(env.device_pool, device_blocks.data[index], d2disk_expected.back());
         writeDiskPayload(env.disk_pool, disk_blocks.data[index], makePattern(750 + index), 0xF0);
-        expectTransferSuccess(env.engine,
-                              {makeDescriptor(Tier::DEVICE,
-                                              Tier::DISK,
-                                              {device_blocks.data[index]},
-                                              NULL_BLOCK_IDX,
-                                              disk_blocks.data[index])});
+        expectTransferSuccess(
+            env.engine,
+            {makeDescriptor(
+                Tier::DEVICE, Tier::DISK, {device_blocks.data[index]}, NULL_BLOCK_IDX, disk_blocks.data[index])});
     }
     for (size_t index = 0; index < kDescriptorCount; ++index) {
         EXPECT_EQ(readDiskPayload(env.disk_pool, disk_blocks.data[index]), d2disk_expected[index]);
@@ -344,11 +337,8 @@ TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, DeviceDiskRoundTripsDistin
         disk2d_expected.push_back(makePattern(800 + index));
         writeDiskPayload(env.disk_pool, disk_blocks.data[index], disk2d_expected.back(), 0xA0 + index);
         writeDevicePayload(env.device_pool, device_blocks.data[index], makePattern(850 + index));
-        disk2d.push_back(makeDescriptor(Tier::DISK,
-                                       Tier::DEVICE,
-                                       {device_blocks.data[index]},
-                                       NULL_BLOCK_IDX,
-                                       disk_blocks.data[index]));
+        disk2d.push_back(makeDescriptor(
+            Tier::DISK, Tier::DEVICE, {device_blocks.data[index]}, NULL_BLOCK_IDX, disk_blocks.data[index]));
     }
     expectTransferSuccess(env.engine, disk2d);
     for (size_t index = 0; index < kDescriptorCount; ++index) {
@@ -362,11 +352,12 @@ TEST_P(PerRankBlockTransferEngineDataCorrectnessTest, DeviceDiskRoundTripsDistin
     EXPECT_EQ(readDiskStride(env.disk_pool, disk_blocks.after), disk_after);
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    FullAndSwa,
-    PerRankBlockTransferEngineDataCorrectnessTest,
-    ::testing::Values(CacheGroupType::FULL, CacheGroupType::SWA),
-    [](const ::testing::TestParamInfo<CacheGroupType>& info) { return groupTypeName(info.param); });
+INSTANTIATE_TEST_SUITE_P(FullAndSwa,
+                         PerRankBlockTransferEngineDataCorrectnessTest,
+                         ::testing::Values(CacheGroupType::FULL, CacheGroupType::SWA),
+                         [](const ::testing::TestParamInfo<CacheGroupType>& info) {
+                             return groupTypeName(info.param);
+                         });
 
 }  // namespace
 }  // namespace rtp_llm

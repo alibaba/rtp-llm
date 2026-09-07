@@ -1,9 +1,11 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
@@ -26,12 +28,17 @@ public:
             FINISHED
         };
 
-        Tier                            target_tier{Tier::NONE};
-        CacheKeysType                   cache_keys;
-        std::vector<TransferDescriptor> descriptors;
-        Phase                           phase{Phase::CREATED};
-        int64_t                         enqueue_time_us{0};
-        int64_t                         transfer_begin_time_us{0};
+        Task(Tier target, CacheKeysType keys, std::chrono::milliseconds timeout):
+            target_tier(target), cache_keys(std::move(keys)), transfer_task({}, timeout) {}
+
+        const std::vector<TransferDescriptor>& descriptors() const {
+            return transfer_task.descriptors();
+        }
+
+        Tier          target_tier{Tier::NONE};
+        CacheKeysType cache_keys;
+        TransferTask  transfer_task;
+        Phase         phase{Phase::CREATED};
     };
     using TaskPtr = std::shared_ptr<Task>;
 
@@ -41,8 +48,6 @@ public:
     void runTransfer(TaskPtr                        task,
                      const BlockTransferDispatcher& transfer_dispatcher,
                      BlockTreeCacheMetricsReporter& metrics_reporter,
-                     int                            host_timeout_ms,
-                     int                            disk_timeout_ms,
                      TransferDoneCallback           callback);
     void releaseTaskResources(const Task& task);
 

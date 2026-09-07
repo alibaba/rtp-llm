@@ -48,7 +48,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerHitPermanentCapacityRejectsBefo
     ASSERT_NE(manager_, nullptr);
     auto cache = manager_->blockTreeCache();
 
-    auto recording_engine = std::make_shared<PausableRecordingTransferEngine>(cache->groupSets());
+    auto recording_engine =
+        std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, recording_engine);
     transfer_engine_.reset();
 

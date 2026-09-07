@@ -14,6 +14,11 @@
 
 namespace rtp_llm::block_transfer_engine_test {
 
+inline TransferTask makeTransferTask(std::vector<TransferDescriptor> descriptors,
+                                     std::chrono::milliseconds timeout = BlockTreeTaskPool::kDefaultQueueWaitTimeout) {
+    return TransferTask(std::move(descriptors), timeout);
+}
+
 GroupBase makeTestGroupBase(CacheGroupPolicy policy                = defaultCacheGroupPolicy(CacheGroupType::FULL),
                             std::vector<int> layer_ids             = {0},
                             size_t           kv_block_stride_bytes = 16,
@@ -108,7 +113,7 @@ TransferDescriptor makeDescriptor(Tier                             source_tier,
                                   BlockIdxType                     disk_block   = NULL_BLOCK_IDX,
                                   size_t                           group_set_id = 0);
 
-bool submitSucceeded(const std::shared_ptr<PerRankBlockTransferEngine>& engine, const TransferDescriptor& desc);
+bool executeSucceeded(const std::shared_ptr<PerRankBlockTransferEngine>& engine, const TransferDescriptor& desc);
 
 void expectStatus(const std::shared_ptr<PerRankBlockTransferEngine>& engine,
                   const TransferDescriptor&                          desc,

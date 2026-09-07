@@ -346,6 +346,7 @@ TransferBenchmarkRunner::buildTransferSetup(const GroupSetInfo&            gs_in
                                                 kBenchmarkMaxDescriptorsPerTask :
                                                 options_.transfer_descriptor_batch_size;
     setup.engine                          = std::make_shared<PerRankBlockTransferEngine>(std::move(engine_group_sets),
+                                                                disk_pool != nullptr,
                                                                 copy_options,
                                                                 options_.device_disk_staging_block_count,
                                                                 max_descriptors_per_task,
@@ -875,60 +876,64 @@ TransferBenchmarkRunner::runTransferBatch(const std::shared_ptr<PerRankBlockTran
                 for (size_t business_index = 0; business_index < business_count; ++business_index) {
                     const size_t business_begin = business_index * business_size;
                     const size_t business_end   = std::min(business_begin + business_size, descriptors.size());
-                    RTP_LLM_CHECK(business_pool->submit([&, business_index, business_begin, business_end] {
-                        auto&      local          = business_stats[business_index];
-                        const auto business_start = Clock::now();
-                        ++local.task_submissions;
-                        local.max_descriptors_per_task = business_end - business_begin;
-                        std::vector<PendingBatch> business_batches;
-                        business_batches.reserve((business_end - business_begin + descriptor_batch_size - 1)
-                                                 / descriptor_batch_size);
-                        const auto prepare_start = Clock::now();
-                        for (size_t begin = business_begin; begin < business_end; begin += descriptor_batch_size) {
-                            const size_t end = std::min(begin + descriptor_batch_size, business_end);
-                            ++local.expected_batch_submissions;
-                            ++local.batch_submissions;
-                            local.expected_max_descriptor_batch_size =
-                                std::max(local.expected_max_descriptor_batch_size, end - begin);
-                            local.max_descriptor_batch_size = std::max(local.max_descriptor_batch_size, end - begin);
-                            local.attempted += end - begin;
-                            business_batches.push_back({end - begin,
-                                                        nullptr,
-                                                        {},
-                                                        std::vector<TransferDescriptor>(descriptors.begin() + begin,
-                                                                                        descriptors.begin() + end)});
-                        }
-                        local.batch_prepare_ns += elapsedNs(prepare_start, Clock::now());
+                    RTP_LLM_CHECK(business_pool->submit(
+                        BlockTreeTaskClass::BACKGROUND, [&, business_index, business_begin, business_end] {
+                            auto&      local          = business_stats[business_index];
+                            const auto business_start = Clock::now();
+                            ++local.task_submissions;
+                            local.max_descriptors_per_task = business_end - business_begin;
+                            std::vector<PendingBatch> business_batches;
+                            business_batches.reserve((business_end - business_begin + descriptor_batch_size - 1)
+                                                     / descriptor_batch_size);
+                            const auto prepare_start = Clock::now();
+                            for (size_t begin = business_begin; begin < business_end; begin += descriptor_batch_size) {
+                                const size_t end = std::min(begin + descriptor_batch_size, business_end);
+                                ++local.expected_batch_submissions;
+                                ++local.batch_submissions;
+                                local.expected_max_descriptor_batch_size =
+                                    std::max(local.expected_max_descriptor_batch_size, end - begin);
+                                local.max_descriptor_batch_size =
+                                    std::max(local.max_descriptor_batch_size, end - begin);
+                                local.attempted += end - begin;
+                                business_batches.push_back(
+                                    {end - begin,
+                                     nullptr,
+                                     {},
+                                     std::vector<TransferDescriptor>(descriptors.begin() + begin,
+                                                                     descriptors.begin() + end)});
+                            }
+                            local.batch_prepare_ns += elapsedNs(prepare_start, Clock::now());
 
-                        const auto business_call_start = Clock::now();
-                        for (auto& batch : business_batches) {
-                            const auto submit_start = Clock::now();
-                            batch.context           = engine->submit(batch.descriptors);
-                            batch.submitted_at      = Clock::now();
-                            local.submit_call_ns += elapsedNs(submit_start, batch.submitted_at);
-                            ++local.submit_call_count;
-                        }
-                        local.business_call_ns += elapsedNs(business_call_start, Clock::now());
+                            const auto business_call_start = Clock::now();
+                            for (auto& batch : business_batches) {
+                                const auto submit_start = Clock::now();
+                                batch.context           = engine->execute(
+                                    TransferTask(batch.descriptors, BlockTreeTaskPool::kDefaultQueueWaitTimeout));
+                                batch.submitted_at = Clock::now();
+                                local.submit_call_ns += elapsedNs(submit_start, batch.submitted_at);
+                                ++local.submit_call_count;
+                            }
+                            local.business_call_ns += elapsedNs(business_call_start, Clock::now());
 
-                        for (auto& batch : business_batches) {
-                            batch.context->waitDone();
-                            local.async_completion_ns += elapsedNs(batch.submitted_at, Clock::now());
-                            if (batch.context->success()) {
-                                local.succeeded += batch.descriptor_count;
-                            } else {
-                                local.failed += batch.descriptor_count;
-                                if (local.first_error.empty()) {
-                                    const auto error         = batch.context->errorInfo();
-                                    local.first_error        = error.ToString();
-                                    local.first_failure_type = ErrorCodeToString(error.code());
+                            for (auto& batch : business_batches) {
+                                batch.context->waitDone();
+                                local.async_completion_ns += elapsedNs(batch.submitted_at, Clock::now());
+                                if (batch.context->success()) {
+                                    local.succeeded += batch.descriptor_count;
+                                } else {
+                                    local.failed += batch.descriptor_count;
+                                    if (local.first_error.empty()) {
+                                        const auto error         = batch.context->errorInfo();
+                                        local.first_error        = error.ToString();
+                                        local.first_failure_type = ErrorCodeToString(error.code());
+                                    }
                                 }
                             }
-                        }
-                        const int64_t business_ns = elapsedNs(business_start, Clock::now());
-                        local.business_e2e_ns += business_ns;
-                        local.business_e2e_ns_max = std::max(local.business_e2e_ns_max, business_ns);
-                        ++local.business_count;
-                    }));
+                            const int64_t business_ns = elapsedNs(business_start, Clock::now());
+                            local.business_e2e_ns += business_ns;
+                            local.business_e2e_ns_max = std::max(local.business_e2e_ns_max, business_ns);
+                            ++local.business_count;
+                        }));
                 }
                 business_pool->waitForIdle();
                 for (const auto& local : business_stats) {
@@ -957,8 +962,10 @@ TransferBenchmarkRunner::runTransferBatch(const std::shared_ptr<PerRankBlockTran
             if (direction == "d2disk") {
                 RTP_LLM_CHECK(d2disk_submit_pool != nullptr);
                 for (size_t index = 0; index < descriptors.size(); ++index) {
-                    RTP_LLM_CHECK(d2disk_submit_pool->submit(
-                        [&, index] { pending[index].context = engine->submit({descriptors[index]}); }));
+                    RTP_LLM_CHECK(d2disk_submit_pool->submit(BlockTreeTaskClass::BACKGROUND, [&, index] {
+                        pending[index].context = engine->execute(
+                            TransferTask({descriptors[index]}, BlockTreeTaskPool::kDefaultQueueWaitTimeout));
+                    }));
                 }
                 d2disk_submit_pool->waitForIdle();
                 stats.batch_submissions += pending.size();
@@ -967,9 +974,10 @@ TransferBenchmarkRunner::runTransferBatch(const std::shared_ptr<PerRankBlockTran
                 size_t begin = 0;
                 for (auto& batch : pending) {
                     const size_t end = begin + batch.descriptor_count;
-                    batch.context    = engine->submit(
-                        std::vector<TransferDescriptor>(descriptors.begin() + begin, descriptors.begin() + end));
-                    begin = end;
+                    batch.context    = engine->execute(TransferTask(
+                        std::vector<TransferDescriptor>(descriptors.begin() + begin, descriptors.begin() + end),
+                        BlockTreeTaskPool::kDefaultQueueWaitTimeout));
+                    begin            = end;
                     ++stats.batch_submissions;
                     stats.max_descriptor_batch_size = std::max(stats.max_descriptor_batch_size, batch.descriptor_count);
                 }

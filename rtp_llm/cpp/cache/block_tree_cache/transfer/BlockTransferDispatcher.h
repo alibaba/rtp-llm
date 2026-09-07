@@ -27,26 +27,19 @@ public:
                             size_t                                        max_device_host_descriptors_per_batch = 8,
                             size_t max_non_device_host_descriptors_per_batch                                    = 16);
 
-    std::shared_ptr<AsyncContext> executePerRank(const std::vector<TransferDescriptor>& descriptors) const;
-    std::shared_ptr<AsyncContext> executeMultiRank(const std::vector<TransferDescriptor>& descriptors,
-                                                   int                                    timeout_ms) const;
-
-    // Synchronous compatibility path: singleton descriptors, strictly serial.
-    bool runTransfer(const std::vector<TransferDescriptor>& descriptors, int timeout_ms) const;
+    std::shared_ptr<AsyncContext> executePerRank(TransferTask task) const;
 
     // Callback-driven path used by Load/Store/Evict: stable grouping and bounded batches.
-    void runTransfer(const std::vector<TransferDescriptor>& descriptors,
-                     int                                    timeout_ms,
-                     TransferDoneCallback                   callback) const;
+    void runTransfer(TransferTask task, TransferDoneCallback callback) const;
 
     void cancelPendingStagingTransfers() const;
-    void shutdown() const;
-    void setQueueWaitReporter(TransferQueueWaitReporter reporter) const;
-
+    void                shutdown() const;
     BlockTreeQueueSizes queueSizes() const;
 
 private:
     friend class block_tree_cache_test::BlockTreeCacheTestPeer;
+
+    std::shared_ptr<AsyncContext> executeMultiRank(TransferTask task) const;
 
     std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine_;
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine_;

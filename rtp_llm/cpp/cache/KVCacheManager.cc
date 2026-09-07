@@ -19,6 +19,7 @@
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/KVCMStorageBackend.h"
 #endif
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/KVCacheMetrics.h"
@@ -297,13 +298,17 @@ bool KVCacheManager::init() {
 #endif
     }
 
-    block_tree_cache_ = createBlockTreeCache(
-        config_, kv_cache_config_, allocator_, parallelism_config_, std::move(storage_backend), broadcast_manager);
+    block_tree_cache_ = createBlockTreeCache(config_,
+                                             kv_cache_config_,
+                                             allocator_,
+                                             parallelism_config_,
+                                             std::move(storage_backend),
+                                             broadcast_manager,
+                                             metrics_reporter_);
     if (!block_tree_cache_) {
         RTP_LLM_LOG_ERROR("KVCacheManager::init: failed to create BlockTreeCache");
         return false;
     }
-    block_tree_cache_->setMetricsReporter(metrics_reporter_);
     allocator_->attachBlockTreeCache(block_tree_cache_);
 
     if (metrics_reporter_) {
@@ -697,7 +702,11 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
         return true;
     }
 
-    if (!block_tree_cache_->executeTransfer(descriptors)) {
+    const int64_t timeout_ms = request.mem_request().timeout_ms();
+    const auto    timeout =
+        timeout_ms > 0 ? std::chrono::milliseconds(timeout_ms) : BlockTreeTaskPool::kDefaultQueueWaitTimeout;
+    const bool transfer_success = block_tree_cache_->executeTransfer(TransferTask(std::move(descriptors), timeout));
+    if (!transfer_success) {
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: grouped transfer failed");
         return true;
     }

@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <thread>
@@ -39,24 +40,22 @@ TEST(StoreTaskRunnerTest, PrepareTaskCreatesHostTransferAndTemporaryHolds) {
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = source_holder[0];
 
-    auto task = std::make_shared<StoreTaskRunner::Task>();
-    task->target_tier = Tier::HOST;
-    task->cache_keys  = {100};
+    auto task = std::make_shared<StoreTaskRunner::Task>(Tier::HOST, CacheKeysType{100}, std::chrono::seconds(30));
     ASSERT_TRUE(runner.prepareTask(*task, resources));
 
-    ASSERT_EQ(task->descriptors.size(), 1u);
-    EXPECT_EQ(task->descriptors[0].path_index, 0u);
-    EXPECT_EQ(task->descriptors[0].group_set_id, 0u);
-    EXPECT_EQ(task->descriptors[0].source_tier, Tier::DEVICE);
-    EXPECT_EQ(task->descriptors[0].target_tier, Tier::HOST);
-    EXPECT_EQ(task->descriptors[0].source_blocks, (BlockIndicesType{source_block}));
-    ASSERT_EQ(task->descriptors[0].target_blocks.size(), 1u);
-    EXPECT_NE(task->descriptors[0].target_blocks[0], NULL_BLOCK_IDX);
+    ASSERT_EQ(task->descriptors().size(), 1u);
+    EXPECT_EQ(task->descriptors()[0].path_index, 0u);
+    EXPECT_EQ(task->descriptors()[0].group_set_id, 0u);
+    EXPECT_EQ(task->descriptors()[0].source_tier, Tier::DEVICE);
+    EXPECT_EQ(task->descriptors()[0].target_tier, Tier::HOST);
+    EXPECT_EQ(task->descriptors()[0].source_blocks, (BlockIndicesType{source_block}));
+    ASSERT_EQ(task->descriptors()[0].target_blocks.size(), 1u);
+    EXPECT_NE(task->descriptors()[0].target_blocks[0], NULL_BLOCK_IDX);
     EXPECT_EQ(device_pool->referencedBlocksNum(BlockTreeRefType::STORE), 1u);
     EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::STORE), 1u);
     EXPECT_EQ(device_pool->refCount(source_block), 2u);
     EXPECT_EQ(device_pool->treeRefCount(source_block), 1u);
-    EXPECT_EQ(host_pool->treeRefCount(task->descriptors[0].target_blocks[0]), 1u);
+    EXPECT_EQ(host_pool->treeRefCount(task->descriptors()[0].target_blocks[0]), 1u);
 
     runner.releaseTaskResources(*task);
     EXPECT_EQ(device_pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
@@ -82,14 +81,12 @@ TEST(StoreTaskRunnerTest, PrepareTaskRecordsPathIndexInTransferDescriptors) {
     resources[0][0].device_blocks = source_holder[0];
     resources[1][0].device_blocks = source_holder[1];
 
-    StoreTaskRunner::Task task;
-    task.target_tier = Tier::HOST;
-    task.cache_keys  = {100, 200};
+    StoreTaskRunner::Task task(Tier::HOST, CacheKeysType{100, 200}, std::chrono::seconds(30));
     ASSERT_TRUE(runner.prepareTask(task, resources));
 
-    ASSERT_EQ(task.descriptors.size(), 2u);
-    EXPECT_EQ(task.descriptors[0].path_index, 0u);
-    EXPECT_EQ(task.descriptors[1].path_index, 1u);
+    ASSERT_EQ(task.descriptors().size(), 2u);
+    EXPECT_EQ(task.descriptors()[0].path_index, 0u);
+    EXPECT_EQ(task.descriptors()[1].path_index, 1u);
 
     runner.releaseTaskResources(task);
     unreferenceDeviceBlocksForTest(*group_set, source_holder);
@@ -111,9 +108,7 @@ TEST(StoreTaskRunnerTest, ReleaseTaskResourcesDropsTemporaryHolds) {
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = source_holder[0];
 
-    auto task = std::make_shared<StoreTaskRunner::Task>();
-    task->target_tier = Tier::HOST;
-    task->cache_keys  = {100};
+    auto task = std::make_shared<StoreTaskRunner::Task>(Tier::HOST, CacheKeysType{100}, std::chrono::seconds(30));
     ASSERT_TRUE(runner.prepareTask(*task, resources));
     runner.releaseTaskResources(*task);
 
@@ -130,7 +125,8 @@ public:
     explicit RecordingStoreTransferEngine(const std::vector<GroupSetPtr>& group_sets):
         PerRankBlockTransferEngine(group_sets) {}
 
-    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
+    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
+        const auto& descriptors = task.descriptors();
         batches.push_back(descriptors);
         return std::make_shared<CompletedAsyncContext>(
             ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected copy failure"));
@@ -143,7 +139,8 @@ class PendingStoreTransferEngine final: public PerRankBlockTransferEngine {
 public:
     PendingStoreTransferEngine(): PerRankBlockTransferEngine(std::vector<GroupSetPtr>{}) {}
 
-    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
+    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
+        const auto& descriptors = task.descriptors();
         batches.push_back(descriptors);
         auto context = std::make_shared<TransferBatchAsyncContext>();
         contexts.push_back(context);
@@ -170,17 +167,14 @@ TEST(StoreTaskRunnerTest, RunTransferReturnsDispatcherFailure) {
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = source_holder[0];
 
-    auto task = std::make_shared<StoreTaskRunner::Task>();
-    task->target_tier = Tier::HOST;
-    task->cache_keys  = {100};
+    auto task = std::make_shared<StoreTaskRunner::Task>(Tier::HOST, CacheKeysType{100}, std::chrono::seconds(30));
     ASSERT_TRUE(runner.prepareTask(*task, resources));
 
     auto engine = std::make_shared<ControlledPerRankBlockTransferEngine>(group_sets, TransferCopyAction::Fail);
     BlockTransferDispatcher       dispatcher(engine);
     BlockTreeCacheMetricsReporter metrics_reporter;
-    std::optional<ErrorInfo> result;
-    runner.runTransfer(task, dispatcher, metrics_reporter, 10, 20,
-                       [&](ErrorInfo error) { result.emplace(std::move(error)); });
+    std::optional<ErrorInfo>      result;
+    runner.runTransfer(task, dispatcher, metrics_reporter, [&](ErrorInfo error) { result.emplace(std::move(error)); });
     ASSERT_TRUE(result.has_value());
     EXPECT_FALSE(result->ok());
 
@@ -189,29 +183,23 @@ TEST(StoreTaskRunnerTest, RunTransferReturnsDispatcherFailure) {
 }
 
 TEST(StoreTaskRunnerTest, TransferSubmissionFollowsTargetTier) {
-    const GroupBase group = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL));
-    const auto      topology = makeTestTopology({group});
+    const GroupBase                group    = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL));
+    const auto                     topology = makeTestTopology({group});
     const std::vector<GroupSetPtr> group_sets{
-        makeTestGroupSet(0,
-                         topology,
-                         {0},
-                         {makeTestDevicePool({{16, 0}}, 2, "store_task_runner_submission_0")}),
-        makeTestGroupSet(1,
-                         topology,
-                         {0},
-                         {makeTestDevicePool({{16, 0}}, 2, "store_task_runner_submission_1")})};
-    StoreTaskRunner                runner(group_sets);
+        makeTestGroupSet(0, topology, {0}, {makeTestDevicePool({{16, 0}}, 2, "store_task_runner_submission_0")}),
+        makeTestGroupSet(1, topology, {0}, {makeTestDevicePool({{16, 0}}, 2, "store_task_runner_submission_1")})};
+    StoreTaskRunner               runner(group_sets);
     BlockTreeCacheMetricsReporter metrics_reporter;
 
-    auto host_task = std::make_shared<StoreTaskRunner::Task>();
-    host_task->target_tier = Tier::HOST;
-    host_task->descriptors = {TransferDescriptor::deviceToHost(0, {1}, 1),
-                              TransferDescriptor::deviceToHost(1, {2}, 2)};
-    auto host_engine = std::make_shared<RecordingStoreTransferEngine>(group_sets);
-    BlockTransferDispatcher host_dispatcher(host_engine);
+    auto host_task = std::make_shared<StoreTaskRunner::Task>(Tier::HOST, CacheKeysType{}, std::chrono::seconds(30));
+    host_task->transfer_task =
+        TransferTask({TransferDescriptor::deviceToHost(0, {1}, 1), TransferDescriptor::deviceToHost(1, {2}, 2)},
+                     std::chrono::seconds(30));
+    auto                     host_engine = std::make_shared<RecordingStoreTransferEngine>(group_sets);
+    BlockTransferDispatcher  host_dispatcher(host_engine);
     std::optional<ErrorInfo> host_result;
-    runner.runTransfer(host_task, host_dispatcher, metrics_reporter, 10, 20,
-                       [&](ErrorInfo error) { host_result.emplace(std::move(error)); });
+    runner.runTransfer(
+        host_task, host_dispatcher, metrics_reporter, [&](ErrorInfo error) { host_result.emplace(std::move(error)); });
     ASSERT_TRUE(host_result.has_value());
     EXPECT_FALSE(host_result->ok());
     ASSERT_EQ(host_engine->batches.size(), 2u);
@@ -221,15 +209,15 @@ TEST(StoreTaskRunnerTest, TransferSubmissionFollowsTargetTier) {
         EXPECT_EQ(host_engine->batches[batch_index].front().target_tier, Tier::HOST);
     }
 
-    auto disk_task = std::make_shared<StoreTaskRunner::Task>();
-    disk_task->target_tier = Tier::DISK;
-    disk_task->descriptors = {TransferDescriptor::deviceToDisk(0, {1}, 1),
-                              TransferDescriptor::deviceToDisk(1, {2}, 2)};
-    auto disk_engine = std::make_shared<RecordingStoreTransferEngine>(group_sets);
-    BlockTransferDispatcher disk_dispatcher(disk_engine);
+    auto disk_task = std::make_shared<StoreTaskRunner::Task>(Tier::DISK, CacheKeysType{}, std::chrono::seconds(30));
+    disk_task->transfer_task =
+        TransferTask({TransferDescriptor::deviceToDisk(0, {1}, 1), TransferDescriptor::deviceToDisk(1, {2}, 2)},
+                     std::chrono::seconds(30));
+    auto                     disk_engine = std::make_shared<RecordingStoreTransferEngine>(group_sets);
+    BlockTransferDispatcher  disk_dispatcher(disk_engine);
     std::optional<ErrorInfo> disk_result;
-    runner.runTransfer(disk_task, disk_dispatcher, metrics_reporter, 10, 20,
-                       [&](ErrorInfo error) { disk_result.emplace(std::move(error)); });
+    runner.runTransfer(
+        disk_task, disk_dispatcher, metrics_reporter, [&](ErrorInfo error) { disk_result.emplace(std::move(error)); });
     ASSERT_TRUE(disk_result.has_value());
     EXPECT_FALSE(disk_result->ok());
     ASSERT_EQ(disk_engine->batches.size(), 2u);
@@ -242,24 +230,22 @@ TEST(StoreTaskRunnerTest, TransferSubmissionFollowsTargetTier) {
 
 TEST(StoreTaskRunnerTest, PendingTransferDoesNotRetainOuterWorker) {
     const std::vector<GroupSetPtr> group_sets;
-    StoreTaskRunner runner(group_sets);
-    auto engine = std::make_shared<PendingStoreTransferEngine>();
-    BlockTransferDispatcher dispatcher(engine);
-    BlockTreeCacheMetricsReporter metrics_reporter;
-    BlockTreeTaskPool outer_pool(1, 8, "AsyncStoreOuter");
+    StoreTaskRunner                runner(group_sets);
+    auto                           engine = std::make_shared<PendingStoreTransferEngine>();
+    BlockTransferDispatcher        dispatcher(engine);
+    BlockTreeCacheMetricsReporter  metrics_reporter;
+    BlockTreeTaskPool              outer_pool(1, 8, "AsyncStoreOuter");
     ASSERT_TRUE(outer_pool.start());
 
-    auto first = std::make_shared<StoreTaskRunner::Task>();
-    auto second = std::make_shared<StoreTaskRunner::Task>();
-    first->target_tier = Tier::HOST;
-    second->target_tier = Tier::HOST;
-    first->descriptors = {TransferDescriptor::deviceToHost(0, {1}, 1)};
-    second->descriptors = {TransferDescriptor::deviceToHost(0, {2}, 2)};
+    auto first  = std::make_shared<StoreTaskRunner::Task>(Tier::HOST, CacheKeysType{}, std::chrono::seconds(30));
+    auto second = std::make_shared<StoreTaskRunner::Task>(Tier::HOST, CacheKeysType{}, std::chrono::seconds(30));
+    first->transfer_task  = TransferTask({TransferDescriptor::deviceToHost(0, {1}, 1)}, std::chrono::seconds(30));
+    second->transfer_task = TransferTask({TransferDescriptor::deviceToHost(0, {2}, 2)}, std::chrono::seconds(30));
     std::atomic<size_t> started{0};
     std::atomic<size_t> settled{0};
-    const auto submit_task = [&](const std::shared_ptr<StoreTaskRunner::Task>& task) {
-        return outer_pool.submit([&, task] {
-            runner.runTransfer(task, dispatcher, metrics_reporter, 10, 20, [&](ErrorInfo) {
+    const auto          submit_task = [&](const std::shared_ptr<StoreTaskRunner::Task>& task) {
+        return outer_pool.submit(BlockTreeTaskClass::BACKGROUND, [&, task] {
+            runner.runTransfer(task, dispatcher, metrics_reporter, [&](ErrorInfo) {
                 EXPECT_TRUE(outer_pool.submitCompletion([&] { settled.fetch_add(1); }));
             });
             started.fetch_add(1);
