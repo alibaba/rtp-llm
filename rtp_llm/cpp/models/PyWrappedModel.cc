@@ -622,6 +622,7 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
         torch::Tensor kv_cache_group_types =
             inputs.kv_cache_group_types.defined() ? inputs.kv_cache_group_types : torch::Tensor();
         RTP_LLM_CHECK_WITH_INFO(inputs.seq_size_per_block > 0, "cache-store seq_size_per_block must be positive");
+        const auto cp_mapper = cache_manager_ ? cache_manager_->cpSlotMapper() : nullptr;
         PyCacheStoreInputs cache_store_inputs{
             context_batch_size,
             decoder_batch_size,
@@ -644,8 +645,10 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             description_.attention_conf.use_mla && mla_ops_type_ != rtp_llm::MlaOpsType::MHA,
             cache_manager_ ? cache_manager_->getCacheStore() : nullptr,
             cache_store_async_writer_.get(),
-            device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_size) : 1,
-            device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_rank) : 0,
+            cache_manager_ ? (cp_mapper ? cp_mapper->cpSize() : 1) :
+                             (device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_size) : 1),
+            cache_manager_ ? (cp_mapper ? cp_mapper->cpRank() : 0) :
+                             (device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_rank) : 0),
             /*cache_store_full_from_begin=*/!inputs.is_prefill_chunk,
             std::move(publish_plan)};
         params = cache_store_inputs;

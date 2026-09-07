@@ -34,6 +34,20 @@ TEST(KVCacheTransferPlannerTest, LinearGroupWaitsForTerminalPublication) {
     EXPECT_THROW(buildIncrementalCacheStoreBlockPlan(
                      8, 0, true, CacheGroupType::LINEAR, 0, 1, CacheStorePublishRange{4, 7, true}),
                  std::invalid_argument);
+
+    // Keys stay in physical-page units; the final checkpoint row can be partial.
+    struct Case { size_t key_count; int row; };
+    for (const auto& c : {Case{16, 1}, Case{17, 2}, Case{1, 0}}) {
+        SCOPED_TRACE(c.key_count);
+        const auto partial = buildIncrementalCacheStoreBlockPlan(
+            c.key_count, 0, true, CacheGroupType::LINEAR, 3, 8, CacheStorePublishRange{0, c.key_count, false});
+        EXPECT_TRUE(partial.empty());
+        const auto final = buildIncrementalCacheStoreBlockPlan(
+            c.key_count, 0, true, CacheGroupType::LINEAR, 3, 8, CacheStorePublishRange{0, c.key_count, true});
+        ASSERT_EQ(final.size(), 1u);
+        EXPECT_EQ(final[0].key_index, c.key_count - 1);
+        EXPECT_EQ(final[0].offset_index, c.row);
+    }
 }
 
 TEST(KVCacheTransferPlannerTest, FullGroupPreservesCpKeyOffsetMapping) {

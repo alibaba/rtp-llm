@@ -16,7 +16,7 @@ std::string layerRegionCacheTransferKey(size_t request_id, size_t layer_id, KVCa
 // One iteration step of cache_store registration: pair the cache_key at
 // ``key_index`` (FULL-length namespace) with the kv_cache_offset slot at
 // ``offset_index`` (rank-local namespace). Outside CP-page-RR sharding the
-// two are equal; under sharding they diverge for FULL groups (see below).
+// two are equal; under sharding they also diverge for checkpoint rows (see below).
 struct CacheStoreBlockPair {
     int key_index;
     int offset_index;
@@ -32,16 +32,17 @@ struct CacheStorePublishRange {
 //
 // Background: ``cache_keys`` is always the FULL logical-block hash sequence
 // (length = total_logical_blocks). ``kv_cache_offset`` is per-group and
-// per-rank: for non-FULL groups every rank holds the full block list (length
-// = total_logical_blocks), for FULL groups under CP-page-RR sharding each
+// per-rank: LINEAR checkpoint and compact SWA rows cover cp_size canonical
+// blocks; for FULL groups under CP-page-RR sharding each
 // rank holds only the 1/cp_size logical blocks it owns, **compactly**, in
 // the order they appear within the rank — i.e. local index ``i`` ↔ logical
 // position ``cp_rank + i*cp_size``.
 //
 // To register the right key with the right buffer the planner emits:
-//   * (pos, pos)                              — non-CP / non-FULL groups
+//   * (pos, pos)                              — non-CP groups
 //   * (cp_rank + i*cp_size, i) for owned i    — CP-sharded FULL groups
-//   * ((i+1)*cp_size-1, i)                    — CP-compact SWA/fixed groups
+//   * (min((i+1)*cp_size-1, total_logical_blocks-1), i)
+//                                             — LINEAR checkpoints / compact SWA
 //
 // Without this re-pairing the prefill side advertises ``cache_keys[i]``
 // (== key for logical position i) attached to data from logical position

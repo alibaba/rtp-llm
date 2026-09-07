@@ -1013,6 +1013,19 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                      CacheGroupType     group_type,
                                      KVCacheRegionName  region_name,
                                      size_t             gid) {
+        if (group_type == CacheGroupType::LINEAR) {
+            // The request frontier selects the checkpoint, not spare rows
+            // reserved in the destination block table for later decoding.
+            const size_t key_count = load_context.cache_keys.size();
+            const size_t checkpoint_blocks = key_count == 0 ? 0 :
+                (key_count - 1) * cfg.seq_size_per_block / cfg.cache_specs[gid]->seq_size_per_block + 1;
+            RTP_LLM_CHECK_WITH_INFO(checkpoint_blocks <= block_num,
+                                    "LINEAR transfer requires %zu checkpoint rows, destination has %zu",
+                                    checkpoint_blocks,
+                                    block_num);
+            return blockPositionsForCacheTransfer(
+                checkpoint_blocks, 0, cfg_use_hybrid, group_type);
+        }
         if (!is_page_level_rr || !isCpSlicedFixedRegion(region_name) || load_context.prefill_cp_size <= 1) {
             return blockPositionsForCacheTransfer(
                 block_num, cfg_use_hybrid ? 0 : load_context.reuse_block_size, cfg_use_hybrid, group_type);
@@ -1047,7 +1060,11 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
             return false;
         }
         cache_key_index = block_pos;
-        if (isCompactFixedBlockTable(cfg, region_name, gid)) {
+        if (cfg.group_types[gid] == CacheGroupType::LINEAR) {
+            cache_key_index = std::min(
+                (block_pos + 1) * cfg.cache_specs[gid]->seq_size_per_block / cfg.seq_size_per_block - 1,
+                cache_key_count - 1);
+        } else if (isCompactFixedBlockTable(cfg, region_name, gid)) {
             cache_key_index =
                 std::min((block_pos + 1) * static_cast<size_t>(load_context.prefill_cp_size) - 1, cache_key_count - 1);
         }
