@@ -310,7 +310,8 @@ class CkptDatabase(BaseDatabase):
         self,
         device: str,
         use_tqdm_on_load: bool,
-        stacked_key_config: Optional[Dict[str, str]] = None,
+        stacked_key_config: Optional[Dict[str, List[str]]] = None,
+        subscribed_keys=None,
     ):
         from fastsafetensors import ParallelLoader, SingleGroup
 
@@ -347,7 +348,11 @@ class CkptDatabase(BaseDatabase):
                 nogds=use_nogds,
             )
             if stacked_key_config:
-                loader = PerExpertParallelLoader(stacked_key_config, **loader_kwargs)
+                loader = PerExpertParallelLoader(
+                    stacked_key_config,
+                    subscribed_keys=subscribed_keys,
+                    **loader_kwargs,
+                )
             else:
                 loader = ParallelLoader(**loader_kwargs)
             try:
