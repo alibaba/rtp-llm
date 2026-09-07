@@ -320,6 +320,13 @@ class StatusProtocolTest(unittest.TestCase):
             ids.index("p_terminal_restore"), ids.index("prefill_after_clear")
         )
         self.assertNotIn("prefill_eventually_retires", ids)
+        special = next(p for p in plans if p["variant_id"] == "special_ids")
+        stages = {s["id"]: s for s in special["stages"]}
+        for name in ("zero_batch_on", "negative_batch_on"):
+            self.assertEqual(8500, stages[name]["params"]["config"]["error_code"])
+        unknown_batch = next(p for p in plans if p["variant_id"] == "unknown_batchid")
+        ids = [s["id"] for s in unknown_batch["stages"]]
+        self.assertLess(ids.index("slow_prefill"), ids.index("baseline_request"))
         nofetch = next(p for p in plans if p["variant_id"] == "normal_no_fetch")
         self.assertFalse(
             any(s["action"] == "status_control" for s in nofetch["stages"])

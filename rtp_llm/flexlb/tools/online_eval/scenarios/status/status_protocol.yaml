@@ -1298,6 +1298,11 @@ variants:
   - id: setup
     action: setup
     timeout_s: 180
+  - id: slow_prefill
+    action: status_perf
+    params:
+      prefill_fixed_ms: 3000
+      restore_prefill_fixed_ms: 100
   - id: baseline_request
     action: status_prepare
     params:
@@ -1325,11 +1330,6 @@ variants:
         $ref: stages.baseline_request.output.requests
       success_min: 1
       failure_max: 0
-  - id: slow_prefill
-    action: status_perf
-    params:
-      prefill_fixed_ms: 3000
-      restore_prefill_fixed_ms: 100
   - id: real
     action: status_prepare
     params:
@@ -1559,6 +1559,7 @@ variants:
       config:
         phase: finished
         batch_id: 0
+        error_code: 8500
       enabled: true
       role: prefill
       selection: landing
@@ -1606,6 +1607,7 @@ variants:
       config:
         phase: finished
         batch_id: -1
+        error_code: 8500
       enabled: true
       role: prefill
       selection: landing
