@@ -1044,13 +1044,12 @@
       "replacement_status": "retain_legacy_pending_paired_evidence",
       "static_review": {
         "status": "passed_at_revision",
-        "revision": "633928795d091fbb53c691d1b835cd6f2f5ffef3",
+        "revision": "94aeb81c1adc8acf4761cb77149e672f7317de53",
         "reviewed_contracts": [
+          "prio_low_no_starvation",
           "prio_same_level_fifo"
         ],
-        "unreviewed_candidate_contracts": [
-          "prio_low_no_starvation"
-        ],
+        "unreviewed_candidate_contracts": [],
         "scope": "Reviewed named programs only, conditional on Decode load OR fix d955; not all current variants or real Java execution.",
         "dependencies": [
           "d955a8434b9c1458e1eadb76f90734eda47b1c23"
@@ -1063,8 +1062,9 @@
         {
           "contract": "prio_low_no_starvation",
           "revision": "9bb01a6d0c5d45091f3b6c542a9f4450aeb2dd21",
-          "status": "pending_owner_correction",
-          "reason": "Compiled low candidate incorrectly inherits FIFO-case PRIORITY/cap1/wait8/omitted queue timeout and 1P4D; old shared profile uses FIFO/default caps/60000ms queue timeout and 2P4D. Empty variant config_overrides does not clear family overrides."
+          "status": "corrected_and_independently_reviewed",
+          "reason": "Compiled low candidate incorrectly inherits FIFO-case PRIORITY/cap1/wait8/omitted queue timeout and 1P4D; old shared profile uses FIFO/default caps/60000ms queue timeout and 2P4D. Empty variant config_overrides does not clear family overrides.",
+          "correction_revision": "94aeb81c1adc8acf4761cb77149e672f7317de53"
         }
       ]
     },
@@ -1090,6 +1090,7 @@
         "atpm_preempt_cancel_tombstoned"
       ],
       "candidate_contracts": [
+        "atpm_preempt_prefill_queued",
         "atpm_same_priority_zero_eviction"
       ],
       "pending_contracts": [
@@ -1102,16 +1103,15 @@
         "atpm_preempt_cancel_tombstoned",
         "atpm_preempt_decode_engine_owned",
         "atpm_preempt_decode_reserved_live",
-        "atpm_preempt_prefill_queued",
         "atpm_preempt_prefill_queued_live",
         "atpm_preemption_disabled_zero_eviction",
         "atpm_timeout_attribution"
       ],
       "candidate_counts": {
         "logical_scenarios": 1,
-        "variants": 1,
-        "instances": 1,
-        "checks": 6
+        "variants": 2,
+        "instances": 2,
+        "checks": 19
       },
       "source_files": [
         "scenarios/priority/priority_preemption.yaml"
@@ -1119,8 +1119,9 @@
       "replacement_status": "retain_legacy_pending_paired_evidence",
       "static_review": {
         "status": "passed_at_revision",
-        "revision": "2a664e150073d7409524252983b92de2d08f3c3d",
+        "revision": "56da98b3e40d81037ddd3b4ee78862f190dca5b3",
         "reviewed_contracts": [
+          "atpm_preempt_prefill_queued",
           "atpm_same_priority_zero_eviction"
         ],
         "unreviewed_candidate_contracts": [],
