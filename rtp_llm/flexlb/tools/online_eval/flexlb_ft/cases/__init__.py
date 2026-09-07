@@ -1,13 +1,8 @@
-"""flexlb_ft case categories (category reorg): nine scenario modules.
+"""Nine ordered category lists consumed by the functional-test runner.
 
-Each ``cases/<category>.py`` registers its cases into a CATEGORY_CASES
-list (cancel -> CANCEL_CASES, status -> STATUS_CASES, kv -> KV_CASES,
-balance -> BALANCE_CASES, elastic -> ELASTIC_CASES, engine_fault ->
-ENGINE_FAULT_CASES, master -> MASTER_CASES, admission ->
-ADMISSION_CASES, priority -> PRIORITY_CASES);
-the runner imports the nine lists and concatenates them into ALL_CASES.  The framework files
-(harness / context / engine_ops / grade) stay in flexlb_ft/ — this
-package holds only scenario definitions, one contract theme per module.
+Category packages explicitly collect their individual Python cases.
+Elastic retains its module during migration. Shared components live in
+flexlb_ft.support and do not register cases.
 """
 
 from .admission import ADMISSION_CASES

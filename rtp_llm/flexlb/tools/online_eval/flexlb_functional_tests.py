@@ -74,6 +74,7 @@ from flexlb_ft.cases import (
 from flexlb_ft.context import CaseContext, CaseDef
 from flexlb_ft.grade import GRADES, VERDICT_LABELS, GradeReport, overall_verdict
 from flexlb_ft.harness import PROFILE_CAPS, PROFILES, EnvManager
+from flexlb_ft.registry import validate_cases
 
 # Category reorg: the nine cases/ modules register into their
 # own CATEGORY_CASES lists; the runner concatenates them in the canonical
@@ -90,6 +91,7 @@ ALL_CASES: list[CaseDef] = (
     + ADMISSION_CASES
     + PRIORITY_CASES
 )
+validate_cases(ALL_CASES)
 
 # CLI spelling (kebab-case) -> CaseDef.category (python identifier).
 CATEGORY_ALIASES = {"engine-fault": "engine_fault"}

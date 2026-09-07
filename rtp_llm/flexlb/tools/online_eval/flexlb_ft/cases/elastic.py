@@ -65,7 +65,7 @@ from ..harness import (
     http_get_status,
     wait_for,
 )
-from .kv import _fam_keys
+from ..support.kv import _fam_keys
 
 ELASTIC_CASES: list[CaseDef] = []
 
