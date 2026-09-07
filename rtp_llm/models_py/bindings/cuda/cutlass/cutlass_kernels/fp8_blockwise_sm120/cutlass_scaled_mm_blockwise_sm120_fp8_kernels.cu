@@ -178,7 +178,7 @@ struct cutlass_3x_gemm_fp8_blockwise {
     // per-row there; the normal path has it per-column. bias_ptr=nullptr at
     // runtime makes the broadcast contribute 0 (i.e. no bias).
     //
-    // When UseGelu_ is true, GELU (tanh approximation) is fused into the
+    // When UseGelu_ is true, exact (erf) GELU is fused into the
     // epilogue after the bias add, eliminating a separate activation kernel.
     using BiasOnlyOp = std::conditional_t<
         swap_ab,
@@ -189,7 +189,7 @@ struct cutlass_3x_gemm_fp8_blockwise {
 
     using BiasGeluOp =
         std::conditional_t<swap_ab,
-                           cutlass::epilogue::fusion::LinCombPerRowBiasEltAct<cutlass::epilogue::thread::GELU_taylor,
+                           cutlass::epilogue::fusion::LinCombPerRowBiasEltAct<cutlass::epilogue::thread::GELU,
                                                                               ElementD,
                                                                               ElementCompute,
                                                                               ElementD,
@@ -197,7 +197,7 @@ struct cutlass_3x_gemm_fp8_blockwise {
                                                                               ElementScalar,
                                                                               AlignmentBias,
                                                                               RoundStyle>,
-                           cutlass::epilogue::fusion::LinCombPerColBiasEltAct<cutlass::epilogue::thread::GELU_taylor,
+                           cutlass::epilogue::fusion::LinCombPerColBiasEltAct<cutlass::epilogue::thread::GELU,
                                                                               ElementD,
                                                                               ElementCompute,
                                                                               ElementD,
@@ -274,7 +274,7 @@ struct sm120_blockwise_fp8_config_default {
     using ClusterShape     = Shape<_1, _1, _1>;
     using Gemm             = cutlass_3x_gemm_fp8_blockwise<OutType,
                                                            1,
-                                                           1,
+                                                           128,
                                                            128,
                                                            TileShape,
                                                            ClusterShape,
@@ -292,7 +292,7 @@ struct sm120_blockwise_fp8_config_pingpong {
     using ClusterShape     = Shape<_1, _1, _1>;
     using Gemm             = cutlass_3x_gemm_fp8_blockwise<OutType,
                                                            1,
-                                                           1,
+                                                           128,
                                                            128,
                                                            TileShape,
                                                            ClusterShape,
@@ -309,7 +309,7 @@ struct sm120_blockwise_fp8_config_swapab {
     using TileShape        = Shape<_128, _32, _128>;
     using ClusterShape     = Shape<_1, _1, _1>;
     using Gemm             = cutlass_3x_gemm_fp8_blockwise<OutType,
-                                                           1,
+                                                           128,
                                                            1,
                                                            128,
                                                            TileShape,
@@ -511,7 +511,7 @@ void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor&                      D
     }
 
     int64_t scale_k = ceil_div(K, 128);
-    int64_t scale_n = N;
+    int64_t scale_n = ceil_div(N, 128);
     TORCH_CHECK(A_sf.dim() == 2, "A_sf must be 2D, got ", A_sf.dim(), "D");
     TORCH_CHECK(A_sf.size(0) == M && A_sf.size(1) == scale_k,
                 "A_sf shape (",
@@ -535,7 +535,7 @@ void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor&                      D
                 B_sf.size(0),
                 ",",
                 B_sf.size(1),
-                ") must be (N=",
+                ") must be (ceil_div(N, 128)=",
                 scale_n,
                 ", ceil_div(K, 128)=",
                 scale_k,
@@ -565,6 +565,7 @@ void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor&                      D
     } else {
         dispatch_blockwise_sm120<cutlass::bfloat16_t, false>(D, A, B, A_sf, B_sf, bias_ptr, M, N, K, stream);
     }
+
 #else
     TORCH_CHECK(false,
                 "cutlass_scaled_mm_blockwise_sm120_fp8 was not compiled with "

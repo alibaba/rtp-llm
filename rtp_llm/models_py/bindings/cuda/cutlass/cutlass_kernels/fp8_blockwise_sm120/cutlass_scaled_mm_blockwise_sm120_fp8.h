@@ -23,6 +23,8 @@
 //   bias: optional per-output-channel bias (N,) same dtype as D. When present
 //         it is added in the GEMM epilogue (per-column bias), avoiding a
 //         separate elementwise add kernel.
+//   use_gelu: apply exact (erf) GELU after bias in the GEMM epilogue. D remains
+//             BF16; activation quantization is a separate operation.
 bool has_cutlass_scaled_mm_blockwise_sm120_fp8();
 
 void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor&                      D,
