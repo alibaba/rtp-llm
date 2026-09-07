@@ -1275,6 +1275,7 @@ class PyFlashinferDecodeImpl(FMHAImplBase):
         self.fmha_impl.prepare_for_cuda_graph_replay(attn_inputs)
         # Update rope params for correct position encoding during cuda graph replay
         new_rope_params = self.rope_impl.prepare(attn_inputs)
+        self.rope_params.positions_device = new_rope_params.positions_device
         common.copy_kv_cache_offset(
             self.rope_params.kv_cache_offset, new_rope_params.kv_cache_offset
         )

@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from functools import cache
-from typing import Optional
+from typing import Dict, Optional
 
 import torch
 
@@ -37,6 +37,8 @@ class FusedRopeAttnParams:
     context_total_kv_length: int
     decode_plan: bool
     attn_type: torch.dtype
+    # Device-resident mirror of sequence_lengths for kernels that index it per CTA.
+    positions_device: Optional[torch.Tensor] = None
 
 
 class FusedRopeKVCachePrefillOpBase:
@@ -177,6 +179,19 @@ class FusedRopeKVCacheDecodeOp:
     def __init__(self, attn_configs: AttentionConfigs) -> None:
         self.attn_configs = attn_configs
         self._dummy_scale: Optional[torch.Tensor] = None
+        self._positions_device: Dict[int, torch.Tensor] = {}
+
+    def _device_positions(self, sequence_lengths: torch.Tensor) -> torch.Tensor:
+        # Keep one stable device pointer per captured CUDA Graph batch size.
+        if sequence_lengths.is_cuda or sequence_lengths.numel() == 0:
+            return sequence_lengths
+        count = sequence_lengths.numel()
+        buffer = self._positions_device.get(count)
+        if buffer is None:
+            buffer = torch.empty(count, dtype=sequence_lengths.dtype, device="cuda")
+            self._positions_device[count] = buffer
+        buffer.copy_(sequence_lengths, non_blocking=True)
+        return buffer
 
     def _get_kv_scale(self, kv_cache: LayerKVCache) -> Optional[torch.Tensor]:
         # FP8 KV cache uses direct cast (no dynamic scaling), so the kernel always writes
@@ -214,7 +229,9 @@ class FusedRopeKVCacheDecodeOp:
         return _get_fused_rope_kvcache().decode_fused_rope_kvcache(
             qkv,
             params.position_ids,
-            params.sequence_lengths,
+            params.positions_device
+            if params.positions_device is not None
+            else params.sequence_lengths,
             params.sequence_lengths.size(0),
             self.attn_configs.head_num,
             self.attn_configs.kv_head_num,
@@ -269,4 +286,5 @@ class FusedRopeKVCacheDecodeOp:
             attn_inputs.context_total_kv_length,
             True,
             get_scalar_type(attn_inputs.dtype),
+            self._device_positions(attn_inputs.sequence_lengths),
         )
