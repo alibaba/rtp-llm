@@ -48,7 +48,13 @@ terminal/consumer records for pumps and survivor. Regressions cover wrong
 protocol with successful streams, counter reset, stale baseline, no resumed
 traffic, survivor failure, and a 21s Schedule finishing beyond either issuance
 window but within its 30s timeout. These are Python construction tests, not Java
-acceptance. Independent review is pending and legacy cases remain available.
+acceptance. Independent static and fixture review passed for
+`8ed827d732017d5de16fd52be65189b394e61f08`: the reviewer independently ran eight
+added-worker tests in 0.458s and 99 elastic tests in 20.748s against core4e,
+and verified all four 17-stage plans with one dynamic addition. This signature
+depends on the integration owner completing the catalog registration below and
+validating the default entry point. Legacy cases remain available; real Java
+acceptance is still pending.
 
 Integration requires two catalog entries (owned branch lacks the shared catalog):
 import `HANDLERS as ELASTIC_ADDED_WORKER_HANDLERS` from
