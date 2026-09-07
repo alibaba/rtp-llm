@@ -198,6 +198,8 @@ class MasterActionsTest(unittest.TestCase):
 
     def test_client_windows_use_issue_epoch_and_keep_full_rows(self):
         rows = [{"send_start_epoch_ms": t * 1000, "rid": t} for t in (1, 2, 3)]
+        for row in rows:
+            row["wall_clock_ts"] = 1000
         handle = self.ctx.register_resource("ha_rows", rows)
         out = master._window(
             self.ctx, {"rows": handle, "from": 2, "until": 3}, self.deadline
@@ -259,26 +261,91 @@ class MasterActionsTest(unittest.TestCase):
                     self.ctx, dict(target="single", op="eq", value=0), self.deadline
                 )
 
+    def test_finished_future_without_consumer_terminal_evidence_fails_cleanup(self):
+        from concurrent.futures import Future
+
+        records = Mock()
+        records.snapshot_records.return_value = [{"consumer_started": True}]
+        batch = master.FiniteMasterBatch(records, 1)
+        future = Future()
+        future.set_result(None)
+        batch.futures = [future]
+        batch.rows = [
+            {
+                "consumer_started": True,
+                "consumer_exit_s": None,
+                "transport_terminal_s": None,
+            }
+        ]
+        batch.artifact = Path(self.tmp.name) / "incomplete.json"
+        with self.assertRaises(RuntimeError):
+            batch.cleanup(self.deadline)
+        self.assertTrue(batch.artifact.exists())
+
+    def test_negative_windows_filter_actual_error_rows_and_reject_empty_success(self):
+        rows = [
+            {"status": "ok", "error_kind": "none"},
+            {"status": "schedule_error", "error_kind": "business", "error": "8431"},
+            {"status": "schedule_error", "error_kind": "deadline"},
+        ]
+        for row in rows:
+            row["wall_clock_ts"] = 1000
+        handle = self.ctx.register_resource("ha_rows", rows)
+        out = master._window(
+            self.ctx,
+            {"rows": handle, "status": "schedule_error", "error_kind": "business"},
+            self.deadline,
+        )
+        self.assertEqual([rows[1]], self.ctx.resource(out.output["rows"], "ha_rows"))
+        empty = self.ctx.register_resource("ha_rows", [])
+        verdict = master._client_check(
+            self.ctx,
+            {
+                "rows": empty,
+                "metric": "wrong_error_code",
+                "op": "eq",
+                "expected": 0,
+                "code": 8431,
+                "min_samples": 5,
+            },
+            self.deadline,
+        )
+        self.assertEqual("FAIL", verdict.checks[0].status)
+
+    def test_tail_inflight_tolerance_uses_actual_count(self):
+        with patch.object(
+            master, "_master_json", return_value={"scheduler_inflight": 8}
+        ):
+            out = master._inflight(
+                self.ctx, {"target": "single", "op": "le", "value": 8}, self.deadline
+            )
+        self.assertEqual(8, out.output["count"])
+
     def test_master_programs_compile_with_explicit_registered_actions(self):
         from flexlb_ft.scenario import compile_scenarios, load_scenarios
         from flexlb_ft.scenario.actions.engine_control import HANDLERS as controls
+        from flexlb_ft.scenario.actions.engine_fault import HANDLERS as faults
 
         root = Path(__file__).resolve().parents[1] / "scenarios/master"
         plans = compile_scenarios(
             load_scenarios(root),
-            handlers={h.name: h for h in master.HANDLERS + controls},
+            handlers={h.name: h for h in master.HANDLERS + controls + faults},
         )
-        self.assertEqual(19, len(plans))
+        self.assertEqual(24, len(plans))
         self.assertEqual(5, len({p["scenario_id"] for p in plans}))
         self.assertTrue(all(any(s["check_ids"] for s in p["stages"]) for p in plans))
         for plan in plans:
             self.assertEqual(0, plan["resource_budget"]["max_dynamic_additions"])
             if plan["scenario_id"] == "master_coldstart":
                 self.assertEqual(0, plan["environment"]["master_stable_window_s"])
-            if plan["scenario_id"] in {
-                "master_ha_failover",
-                "client_fallback_failback",
-            }:
+            if (
+                plan["scenario_id"]
+                in {
+                    "master_ha_failover",
+                    "client_fallback_failback",
+                }
+                and plan["variant_id"] != "direct_generate_error"
+            ):
                 self.assertEqual(
                     "dual_standalone", plan["environment"]["master_layout"]
                 )

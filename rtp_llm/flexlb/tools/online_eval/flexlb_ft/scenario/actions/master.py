@@ -423,7 +423,16 @@ def _window_validate(params, plan):
     p = _params(
         params,
         plan,
-        {"rows", "from", "until", "route", "from_offset_s", "until_offset_s"},
+        {
+            "rows",
+            "from",
+            "until",
+            "route",
+            "status",
+            "error_kind",
+            "from_offset_s",
+            "until_offset_s",
+        },
         {"rows"},
     )
     plan.reference(p["rows"], "ha_rows")
@@ -432,6 +441,15 @@ def _window_validate(params, plan):
             plan.reference(p[key], "number")
     if "route" in p and p["route"] not in {"master", "fallback", "failed"}:
         raise ValueError("invalid window route filter")
+    if "status" in p and p["status"] not in {"ok", "schedule_error"}:
+        raise ValueError("unsupported window status filter")
+    if "error_kind" in p and p["error_kind"] not in {
+        "none",
+        "transport",
+        "business",
+        "deadline",
+    }:
+        raise ValueError("invalid window error filter")
     for field in ("from_offset_s", "until_offset_s"):
         if field in p:
             if (
@@ -459,8 +477,13 @@ def _window(ctx, params, deadline):
     if lower is not None and upper is not None and lower >= upper:
         raise ValueError("HA observation window is empty or inverted")
     selected = rows_between(rows, lower, upper)
-    if "route" in params:
-        selected = [r for r in selected if r["route_path"] == params["route"]]
+    for param, field in (
+        ("route", "route_path"),
+        ("status", "status"),
+        ("error_kind", "error_kind"),
+    ):
+        if param in params:
+            selected = [r for r in selected if r[field] == params[param]]
     return StageOutput(
         {"rows": ctx.register_resource("ha_rows", selected, historical=True)}
     )
@@ -668,17 +691,68 @@ class FiniteMasterBatch:
         self.records = records
         self.pool = ThreadPoolExecutor(max_workers=concurrency)
         self.futures = []
+        self.rows = []
+        self.artifact = None
+        self.samples = []
+
+    def submit(self, row, shape, timeout):
+        self.records.update(row, consumer_started=False)
+        self.rows.append(row)
+
+        def run():
+            self.records.update(row, consumer_started=True)
+            self.records.run(row, shape, timeout)
+
+        future = self.pool.submit(run)
+        self.futures.append(future)
+
+    def persist(self):
+        if self.artifact is not None:
+            self.artifact.write_text(
+                json.dumps(
+                    dict(
+                        records=self.records.snapshot_records(), topology=self.samples
+                    ),
+                    indent=2,
+                )
+                + "\n"
+            )
 
     def cleanup(self, deadline):
         from concurrent.futures import wait
 
         self.records.cancel_active("master_batch_cleanup")
         self.pool.shutdown(wait=False, cancel_futures=True)
-        _, unfinished = wait(self.futures, timeout=deadline.remaining())
-        if unfinished:
-            raise TimeoutError(
-                "master batch consumers did not stop after RPC cancellation"
-            )
+        try:
+            # Cancelled queued jobs never had a consumer. Do not fabricate a
+            # consumer exit for them, or confuse Future.cancel with RPC exit.
+            live = [future for future in self.futures if not future.cancelled()]
+            _, unfinished = wait(live, timeout=deadline.remaining())
+            if unfinished:
+                raise TimeoutError(
+                    "master batch consumers did not stop after RPC cancellation"
+                )
+            for row in self.rows:
+                if not row["consumer_started"]:
+                    self.records.update(
+                        row,
+                        schedule={"status": "NOT_STARTED"},
+                        cancel={
+                            "requested_s": self.records.clock(),
+                            "reason": "queued_at_cleanup",
+                        },
+                    )
+                elif (
+                    row["consumer_exit_s"] is None
+                    or row["transport_terminal_s"] is None
+                ):
+                    raise RuntimeError(
+                        "master consumer completed without terminal evidence"
+                    )
+                else:
+                    self.records.update(row, consumer_completion_verified=True)
+        finally:
+            self.persist()
 
 
 def _batch(ctx, params, deadline):
@@ -700,21 +774,19 @@ def _batch(ctx, params, deadline):
     handle = ctx.register_resource("requests", records, batch.cleanup, historical=True)
     artifact = ctx.artifact_dir / f"master-batch-{handle['id']}.json"
     samples = []
+    batch.artifact, batch.samples = artifact, samples
     try:
         for _ in range(params["count"]):
             deadline.check()
             row = records.issue(ops.next_request_id(), ctx.clock)
-            batch.futures.append(
-                batch.pool.submit(
-                    records.run,
-                    row,
-                    dict(
-                        input_len=2048,
-                        output_len=2,
-                        block_keys=[row["wire_request_id"] * 100 + 1],
-                    ),
-                    min(params["request_timeout_s"], deadline.remaining()),
-                )
+            batch.submit(
+                row,
+                dict(
+                    input_len=2048,
+                    output_len=2,
+                    block_keys=[row["wire_request_id"] * 100 + 1],
+                ),
+                min(params["request_timeout_s"], deadline.remaining()),
             )
         ended = None
         while True:
@@ -842,9 +914,13 @@ HANDLERS += [
 
 def _inflight_validate(params, plan):
     p = _target(_params(params, plan, {"target", "op", "value"}, {"op", "value"}))
-    if p["op"] not in {"eq", "ge"} or type(p["value"]) is not int or p["value"] < 0:
+    if (
+        p["op"] not in {"eq", "ge", "le"}
+        or type(p["value"]) is not int
+        or p["value"] < 0
+    ):
         raise ValueError(
-            "scheduler inflight condition must be eq/ge nonnegative integer"
+            "scheduler inflight condition must be eq/ge/le nonnegative integer"
         )
     _layout(p, plan)
     return p
@@ -863,11 +939,16 @@ def _inflight(ctx, params, deadline):
             if type(count) is not int or count < 0:
                 raise ValueError("missing or invalid scheduler inflight observation")
             samples.append(dict(time_s=ctx.clock(), count=count))
-            if (
+            matched = (
                 count == params["value"]
                 if params["op"] == "eq"
-                else count >= params["value"]
-            ):
+                else (
+                    count >= params["value"]
+                    if params["op"] == "ge"
+                    else count <= params["value"]
+                )
+            )
+            if matched:
                 break
             deadline.sleep(0.5)
     finally:

@@ -1,7 +1,7 @@
 schema_version: 1
 id: client_fallback_failback
-description: Explicit client routing programs for all-master outage and wraparound
-  recovery.
+description: 'Explicit client routing programs: all-master outage, wraparound recovery,
+  no fallback for business/deadline errors, and direct GenerateStreamCall fault recovery.'
 category: master
 profiles:
 - batch-window
@@ -11,6 +11,8 @@ profiles:
 legacy_case_ids:
 - fallback_direct
 - failback_wraparound
+- fallback_negative_errorcode
+- direct_generate_error
 environment:
   backend: java_mock
   n_prefill: 2
@@ -305,5 +307,289 @@ variants:
       metric: duplicate_ids
       op: eq
       expected: 0
+  - id: cleanup
+    action: teardown
+- id: negative_errorcode
+  profiles:
+  - batch-window
+  legacy_case_ids:
+  - fallback_negative_errorcode
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: flow
+    action: master_client_start
+    params:
+      targets:
+      - A
+      - B
+      duration_s: 75
+      timeout_ms: 800
+      fallback: true
+  - id: freeze_begin
+    action: master_mark
+    params:
+      wait_s: 10
+  - id: freeze_a
+    action: master_fault
+    params:
+      target: A
+      mode: freeze
+  - id: freeze_end
+    action: master_mark
+    params:
+      wait_s: 8
+  - id: thaw_a
+    action: master_restore
+    params:
+      fault:
+        $ref: stages.freeze_a.output.fault
+  - id: settled
+    action: master_mark
+    params:
+      wait_s: 8
+  - id: business_fault
+    action: engine_inject
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      type: enqueue_ack_error_code
+      options:
+        code: 8431
+  - id: business_begin
+    action: master_mark
+    params:
+      wait_s: 0
+  - id: business_end
+    action: master_mark
+    params:
+      wait_s: 10
+  - id: clear_business
+    action: engine_clear
+    params:
+      fault:
+        $ref: stages.business_fault.output.fault
+  - id: finish
+    action: master_client_finish
+    params:
+      client:
+        $ref: stages.flow.output.client
+    timeout_s: 120
+  - id: business
+    action: master_client_window
+    params:
+      rows:
+        $ref: stages.finish.output.rows
+      from:
+        $ref: stages.business_begin.output.epoch_s
+      until:
+        $ref: stages.business_end.output.epoch_s
+  - id: schedule_errors
+    action: master_client_window
+    params:
+      rows:
+        $ref: stages.finish.output.rows
+      from:
+        $ref: stages.business_begin.output.epoch_s
+      until:
+        $ref: stages.business_end.output.epoch_s
+      status: schedule_error
+  - id: deadline_window
+    action: master_client_window
+    params:
+      rows:
+        $ref: stages.finish.output.rows
+      from:
+        $ref: stages.freeze_begin.output.epoch_s
+      until:
+        $ref: stages.freeze_end.output.epoch_s
+  - id: deadlines
+    action: master_client_window
+    params:
+      rows:
+        $ref: stages.finish.output.rows
+      from:
+        $ref: stages.freeze_begin.output.epoch_s
+      until:
+        $ref: stages.freeze_end.output.epoch_s
+      error_kind: deadline
+  - id: business_errors_seen
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.schedule_errors.output.rows
+      metric: sample_count
+      op: ge
+      expected: 5
+      min_samples: 5
+  - id: business_code
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.schedule_errors.output.rows
+      metric: wrong_error_code
+      op: eq
+      expected: 0
+      code: 8431
+      min_samples: 5
+  - id: business_route
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.business.output.rows
+      metric: route_share
+      op: eq
+      expected: 1
+      route: master
+  - id: business_no_fallback
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.business.output.rows
+      metric: route_count
+      op: eq
+      expected: 0
+      route: fallback
+  - id: business_no_failed
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.business.output.rows
+      metric: route_count
+      op: eq
+      expected: 0
+      route: failed
+  - id: business_no_retry
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.business.output.rows
+      metric: failover_count
+      op: eq
+      expected: 0
+  - id: deadlines_seen
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.deadlines.output.rows
+      metric: sample_count
+      op: ge
+      expected: 3
+      min_samples: 3
+  - id: deadline_route
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.deadlines.output.rows
+      metric: route_share
+      op: eq
+      expected: 1
+      route: failed
+      min_samples: 3
+  - id: deadline_no_retry
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.deadlines.output.rows
+      metric: failover_count
+      op: eq
+      expected: 0
+      min_samples: 3
+  - id: deadline_no_fallback
+    action: master_client_check
+    params:
+      rows:
+        $ref: stages.deadline_window.output.rows
+      metric: route_count
+      op: eq
+      expected: 0
+      route: fallback
+  - id: tail_settle
+    action: master_wait_inflight
+    params:
+      target: A
+      op: le
+      value: 8
+    timeout_s: 150
+  - id: cleanup
+    action: teardown
+- id: direct_generate_error
+  legacy_case_ids:
+  - direct_generate_error
+  environment_overrides:
+    master_layout: single
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: baseline
+    action: master_direct_request
+    params:
+      engine: prefill-0
+    timeout_s: 30
+  - id: baseline_finished
+    action: check
+    params:
+      actual:
+        $ref: stages.baseline.output.finished
+      op: eq
+      expected: true
+  - id: baseline_no_error
+    action: check
+    params:
+      actual:
+        $ref: stages.baseline.output.error
+      op: eq
+      expected: false
+  - id: generate_fault
+    action: engine_inject
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      type: generate_error
+      options: {}
+  - id: injected
+    action: master_direct_request
+    params:
+      engine: prefill-0
+    timeout_s: 30
+  - id: injected_error
+    action: check
+    params:
+      actual:
+        $ref: stages.injected.output.error
+      op: eq
+      expected: true
+  - id: injected_clean
+    action: master_direct_clean
+  - id: clear_generate
+    action: engine_clear
+    params:
+      fault:
+        $ref: stages.generate_fault.output.fault
+  - id: recovery
+    action: master_direct_request
+    params:
+      engine: prefill-0
+    timeout_s: 30
+  - id: recovered_finished
+    action: check
+    params:
+      actual:
+        $ref: stages.recovery.output.finished
+      op: eq
+      expected: true
+  - id: recovered_no_error
+    action: check
+    params:
+      actual:
+        $ref: stages.recovery.output.error
+      op: eq
+      expected: false
+  - id: recovered_clean
+    action: master_direct_clean
   - id: cleanup
     action: teardown
