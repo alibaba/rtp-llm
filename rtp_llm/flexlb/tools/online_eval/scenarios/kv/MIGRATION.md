@@ -4,7 +4,8 @@
 continuity, eviction propagation and per-engine admission isolation. Each has
 BATCH/NON_BATCH programs across all four profiles (six variants, twelve instances).
 The global-holder family is also implemented below. Affinity has three candidate
-contracts; its leader-saturation finding, capacity and churn remain pending. All old callables remain retained.
+contracts; its leader-saturation finding remains pending. Churn is implemented
+below, while capacity is tracked separately by its owner. All old callables remain retained.
 
 | Original operation or assertion | Explicit stage |
 | --- | --- |
@@ -118,3 +119,38 @@ teardown. Three tests execute all twelve compiled programs with the cache model,
 lock the3:2 interleave, unique half-hit suffixes and seed-inclusive denominator,
 and demonstrate lost affinity and holder overconcentration FAIL. They are local
 model fixtures, not real Java acceptance or completion of the fourth contract.
+
+## Churn and LRU candidates
+
+`cache_churn` maps both original contracts to two variants/eight profile instances.
+
+- `hot_churn`: 2P/2D, prefill24/decode12 blocks, four disjoint10-block families;
+  ten windows of five serial input10240/output2 requests, rotating family by
+  window. Each hit uses a cache snapshot taken BEFORE its request and requires
+  at least8 contiguous keys on that request's actual landing engine. M3 bands
+  remain .72/.50/.40 with a50-request denominator. End-of-window any-key masks
+  produce holder flips (<=80) and final per-family mean replication P5
+  (1.5/1.75/2.0), with the explicit max-holder cap2 retained.
+- `lru_affinity`: prefill4/decode4 blocks; two-key prime/input2048, fixed2s sync,
+  same two-key replay, and exactly one conditional retry after another2s only
+  when the replay lands elsewhere. Cache counters are read AFTER replay/retry,
+  as in the original body: prime keys>=2 and evictions==0. Pressure is the same
+  two-key prefix plus three fresh keys/input4096, followed by0.5s: pressure
+  landing must match the prime, its keys<=4 and evictions>=1. All outputs stay2.
+
+`kv_hit_observe` binds the pre-request snapshot to the actual issued key shape,
+RID and verified terminal landing; a post-request snapshot cannot claim a hit.
+Window masks and counter observations remain separate from graded checks.
+The structural cap is retained despite its limited power in a two-worker model.
+The LRU retry is a bounded public request primitive, with declared shape and
+settle/wait limits; it never calls the original case or adds unconditional work.
+Failed ordinary contracts do not become findings.
+
+New evidence checks reject missing cache counters/key sets, post-request hit
+snapshots, duplicate hit RIDs/windows, and mismatched retry request shapes.
+These and the previously documented consumer/RPC bounds strengthen evidence;
+all old callables remain retained for paired Java validation. Four new local
+tests execute the eight programs, both one-retry outcomes, hit collapse,
+unavailable counters, and a post-request snapshot negative. Seventeen KV tests
+pass with fake external transports and an ordered finite cache model; this is
+not a real-Java result or evidence of production cache behavior.

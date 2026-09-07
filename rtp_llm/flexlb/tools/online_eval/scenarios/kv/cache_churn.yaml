@@ -1,0 +1,3010 @@
+schema_version: 1
+id: cache_churn
+description: Pre-request hit rate and windowed holder masks under four-family churn;
+  bounded LRU replay retry and capacity eviction.
+category: kv
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+legacy_case_ids:
+- kv_storm_hot_churn
+- kv_lru_eviction_affinity
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+  decode_cache_blocks: 12
+  perf_preset: default
+execution:
+  timeout_s: 1200
+  stage_timeout_s: 30
+  cleanup_timeout_s: 120
+variants:
+- id: hot_churn
+  legacy_case_ids:
+  - kv_storm_hot_churn
+  environment_overrides:
+    prefill_cache_blocks: 24
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: w0_r0_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w0_r0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: w0_r0_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w0_r0.output.requests
+    timeout_s: 15
+  - id: w0_r0_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w0_r0_before.output.snapshot
+      requests:
+        $ref: stages.w0_r0.output.requests
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+  - id: w0_r1_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w0_r1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: w0_r1_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w0_r1.output.requests
+    timeout_s: 15
+  - id: w0_r1_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w0_r1_before.output.snapshot
+      requests:
+        $ref: stages.w0_r1.output.requests
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+  - id: w0_r2_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w0_r2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: w0_r2_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w0_r2.output.requests
+    timeout_s: 15
+  - id: w0_r2_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w0_r2_before.output.snapshot
+      requests:
+        $ref: stages.w0_r2.output.requests
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+  - id: w0_r3_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w0_r3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: w0_r3_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w0_r3.output.requests
+    timeout_s: 15
+  - id: w0_r3_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w0_r3_before.output.snapshot
+      requests:
+        $ref: stages.w0_r3.output.requests
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+  - id: w0_r4_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w0_r4
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: w0_r4_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w0_r4.output.requests
+    timeout_s: 15
+  - id: w0_r4_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w0_r4_before.output.snapshot
+      requests:
+        $ref: stages.w0_r4.output.requests
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+  - id: w0_end
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w1_r0_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w1_r0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: w1_r0_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w1_r0.output.requests
+    timeout_s: 15
+  - id: w1_r0_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w1_r0_before.output.snapshot
+      requests:
+        $ref: stages.w1_r0.output.requests
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+  - id: w1_r1_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w1_r1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: w1_r1_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w1_r1.output.requests
+    timeout_s: 15
+  - id: w1_r1_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w1_r1_before.output.snapshot
+      requests:
+        $ref: stages.w1_r1.output.requests
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+  - id: w1_r2_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w1_r2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: w1_r2_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w1_r2.output.requests
+    timeout_s: 15
+  - id: w1_r2_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w1_r2_before.output.snapshot
+      requests:
+        $ref: stages.w1_r2.output.requests
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+  - id: w1_r3_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w1_r3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: w1_r3_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w1_r3.output.requests
+    timeout_s: 15
+  - id: w1_r3_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w1_r3_before.output.snapshot
+      requests:
+        $ref: stages.w1_r3.output.requests
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+  - id: w1_r4_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w1_r4
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: w1_r4_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w1_r4.output.requests
+    timeout_s: 15
+  - id: w1_r4_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w1_r4_before.output.snapshot
+      requests:
+        $ref: stages.w1_r4.output.requests
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+  - id: w1_end
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w2_r0_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w2_r0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+  - id: w2_r0_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w2_r0.output.requests
+    timeout_s: 15
+  - id: w2_r0_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w2_r0_before.output.snapshot
+      requests:
+        $ref: stages.w2_r0.output.requests
+      keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      min_contiguous: 8
+  - id: w2_r1_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w2_r1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+  - id: w2_r1_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w2_r1.output.requests
+    timeout_s: 15
+  - id: w2_r1_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w2_r1_before.output.snapshot
+      requests:
+        $ref: stages.w2_r1.output.requests
+      keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      min_contiguous: 8
+  - id: w2_r2_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w2_r2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+  - id: w2_r2_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w2_r2.output.requests
+    timeout_s: 15
+  - id: w2_r2_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w2_r2_before.output.snapshot
+      requests:
+        $ref: stages.w2_r2.output.requests
+      keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      min_contiguous: 8
+  - id: w2_r3_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w2_r3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+  - id: w2_r3_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w2_r3.output.requests
+    timeout_s: 15
+  - id: w2_r3_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w2_r3_before.output.snapshot
+      requests:
+        $ref: stages.w2_r3.output.requests
+      keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      min_contiguous: 8
+  - id: w2_r4_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w2_r4
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+  - id: w2_r4_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w2_r4.output.requests
+    timeout_s: 15
+  - id: w2_r4_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w2_r4_before.output.snapshot
+      requests:
+        $ref: stages.w2_r4.output.requests
+      keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      min_contiguous: 8
+  - id: w2_end
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w3_r0_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w3_r0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      stream_timeout_s: 15
+  - id: w3_r0_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w3_r0.output.requests
+    timeout_s: 15
+  - id: w3_r0_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w3_r0_before.output.snapshot
+      requests:
+        $ref: stages.w3_r0.output.requests
+      keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      min_contiguous: 8
+  - id: w3_r1_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w3_r1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      stream_timeout_s: 15
+  - id: w3_r1_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w3_r1.output.requests
+    timeout_s: 15
+  - id: w3_r1_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w3_r1_before.output.snapshot
+      requests:
+        $ref: stages.w3_r1.output.requests
+      keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      min_contiguous: 8
+  - id: w3_r2_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w3_r2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      stream_timeout_s: 15
+  - id: w3_r2_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w3_r2.output.requests
+    timeout_s: 15
+  - id: w3_r2_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w3_r2_before.output.snapshot
+      requests:
+        $ref: stages.w3_r2.output.requests
+      keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      min_contiguous: 8
+  - id: w3_r3_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w3_r3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      stream_timeout_s: 15
+  - id: w3_r3_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w3_r3.output.requests
+    timeout_s: 15
+  - id: w3_r3_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w3_r3_before.output.snapshot
+      requests:
+        $ref: stages.w3_r3.output.requests
+      keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      min_contiguous: 8
+  - id: w3_r4_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w3_r4
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      stream_timeout_s: 15
+  - id: w3_r4_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w3_r4.output.requests
+    timeout_s: 15
+  - id: w3_r4_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w3_r4_before.output.snapshot
+      requests:
+        $ref: stages.w3_r4.output.requests
+      keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      min_contiguous: 8
+  - id: w3_end
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w4_r0_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w4_r0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: w4_r0_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w4_r0.output.requests
+    timeout_s: 15
+  - id: w4_r0_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w4_r0_before.output.snapshot
+      requests:
+        $ref: stages.w4_r0.output.requests
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+  - id: w4_r1_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w4_r1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: w4_r1_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w4_r1.output.requests
+    timeout_s: 15
+  - id: w4_r1_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w4_r1_before.output.snapshot
+      requests:
+        $ref: stages.w4_r1.output.requests
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+  - id: w4_r2_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w4_r2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: w4_r2_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w4_r2.output.requests
+    timeout_s: 15
+  - id: w4_r2_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w4_r2_before.output.snapshot
+      requests:
+        $ref: stages.w4_r2.output.requests
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+  - id: w4_r3_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w4_r3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: w4_r3_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w4_r3.output.requests
+    timeout_s: 15
+  - id: w4_r3_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w4_r3_before.output.snapshot
+      requests:
+        $ref: stages.w4_r3.output.requests
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+  - id: w4_r4_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w4_r4
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: w4_r4_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w4_r4.output.requests
+    timeout_s: 15
+  - id: w4_r4_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w4_r4_before.output.snapshot
+      requests:
+        $ref: stages.w4_r4.output.requests
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+  - id: w4_end
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w5_r0_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w5_r0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: w5_r0_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w5_r0.output.requests
+    timeout_s: 15
+  - id: w5_r0_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w5_r0_before.output.snapshot
+      requests:
+        $ref: stages.w5_r0.output.requests
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+  - id: w5_r1_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w5_r1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: w5_r1_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w5_r1.output.requests
+    timeout_s: 15
+  - id: w5_r1_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w5_r1_before.output.snapshot
+      requests:
+        $ref: stages.w5_r1.output.requests
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+  - id: w5_r2_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w5_r2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: w5_r2_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w5_r2.output.requests
+    timeout_s: 15
+  - id: w5_r2_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w5_r2_before.output.snapshot
+      requests:
+        $ref: stages.w5_r2.output.requests
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+  - id: w5_r3_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w5_r3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: w5_r3_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w5_r3.output.requests
+    timeout_s: 15
+  - id: w5_r3_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w5_r3_before.output.snapshot
+      requests:
+        $ref: stages.w5_r3.output.requests
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+  - id: w5_r4_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w5_r4
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: w5_r4_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w5_r4.output.requests
+    timeout_s: 15
+  - id: w5_r4_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w5_r4_before.output.snapshot
+      requests:
+        $ref: stages.w5_r4.output.requests
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+  - id: w5_end
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w6_r0_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w6_r0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+  - id: w6_r0_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w6_r0.output.requests
+    timeout_s: 15
+  - id: w6_r0_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w6_r0_before.output.snapshot
+      requests:
+        $ref: stages.w6_r0.output.requests
+      keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      min_contiguous: 8
+  - id: w6_r1_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w6_r1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+  - id: w6_r1_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w6_r1.output.requests
+    timeout_s: 15
+  - id: w6_r1_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w6_r1_before.output.snapshot
+      requests:
+        $ref: stages.w6_r1.output.requests
+      keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      min_contiguous: 8
+  - id: w6_r2_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w6_r2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+  - id: w6_r2_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w6_r2.output.requests
+    timeout_s: 15
+  - id: w6_r2_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w6_r2_before.output.snapshot
+      requests:
+        $ref: stages.w6_r2.output.requests
+      keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      min_contiguous: 8
+  - id: w6_r3_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w6_r3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+  - id: w6_r3_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w6_r3.output.requests
+    timeout_s: 15
+  - id: w6_r3_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w6_r3_before.output.snapshot
+      requests:
+        $ref: stages.w6_r3.output.requests
+      keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      min_contiguous: 8
+  - id: w6_r4_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w6_r4
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+  - id: w6_r4_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w6_r4.output.requests
+    timeout_s: 15
+  - id: w6_r4_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w6_r4_before.output.snapshot
+      requests:
+        $ref: stages.w6_r4.output.requests
+      keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      min_contiguous: 8
+  - id: w6_end
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w7_r0_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w7_r0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      stream_timeout_s: 15
+  - id: w7_r0_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w7_r0.output.requests
+    timeout_s: 15
+  - id: w7_r0_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w7_r0_before.output.snapshot
+      requests:
+        $ref: stages.w7_r0.output.requests
+      keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      min_contiguous: 8
+  - id: w7_r1_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w7_r1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      stream_timeout_s: 15
+  - id: w7_r1_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w7_r1.output.requests
+    timeout_s: 15
+  - id: w7_r1_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w7_r1_before.output.snapshot
+      requests:
+        $ref: stages.w7_r1.output.requests
+      keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      min_contiguous: 8
+  - id: w7_r2_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w7_r2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      stream_timeout_s: 15
+  - id: w7_r2_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w7_r2.output.requests
+    timeout_s: 15
+  - id: w7_r2_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w7_r2_before.output.snapshot
+      requests:
+        $ref: stages.w7_r2.output.requests
+      keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      min_contiguous: 8
+  - id: w7_r3_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w7_r3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      stream_timeout_s: 15
+  - id: w7_r3_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w7_r3.output.requests
+    timeout_s: 15
+  - id: w7_r3_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w7_r3_before.output.snapshot
+      requests:
+        $ref: stages.w7_r3.output.requests
+      keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      min_contiguous: 8
+  - id: w7_r4_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w7_r4
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      stream_timeout_s: 15
+  - id: w7_r4_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w7_r4.output.requests
+    timeout_s: 15
+  - id: w7_r4_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w7_r4_before.output.snapshot
+      requests:
+        $ref: stages.w7_r4.output.requests
+      keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      min_contiguous: 8
+  - id: w7_end
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w8_r0_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w8_r0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: w8_r0_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w8_r0.output.requests
+    timeout_s: 15
+  - id: w8_r0_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w8_r0_before.output.snapshot
+      requests:
+        $ref: stages.w8_r0.output.requests
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+  - id: w8_r1_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w8_r1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: w8_r1_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w8_r1.output.requests
+    timeout_s: 15
+  - id: w8_r1_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w8_r1_before.output.snapshot
+      requests:
+        $ref: stages.w8_r1.output.requests
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+  - id: w8_r2_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w8_r2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: w8_r2_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w8_r2.output.requests
+    timeout_s: 15
+  - id: w8_r2_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w8_r2_before.output.snapshot
+      requests:
+        $ref: stages.w8_r2.output.requests
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+  - id: w8_r3_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w8_r3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: w8_r3_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w8_r3.output.requests
+    timeout_s: 15
+  - id: w8_r3_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w8_r3_before.output.snapshot
+      requests:
+        $ref: stages.w8_r3.output.requests
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+  - id: w8_r4_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w8_r4
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: w8_r4_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w8_r4.output.requests
+    timeout_s: 15
+  - id: w8_r4_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w8_r4_before.output.snapshot
+      requests:
+        $ref: stages.w8_r4.output.requests
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      min_contiguous: 8
+  - id: w8_end
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w9_r0_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w9_r0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: w9_r0_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w9_r0.output.requests
+    timeout_s: 15
+  - id: w9_r0_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w9_r0_before.output.snapshot
+      requests:
+        $ref: stages.w9_r0.output.requests
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+  - id: w9_r1_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w9_r1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: w9_r1_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w9_r1.output.requests
+    timeout_s: 15
+  - id: w9_r1_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w9_r1_before.output.snapshot
+      requests:
+        $ref: stages.w9_r1.output.requests
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+  - id: w9_r2_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w9_r2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: w9_r2_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w9_r2.output.requests
+    timeout_s: 15
+  - id: w9_r2_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w9_r2_before.output.snapshot
+      requests:
+        $ref: stages.w9_r2.output.requests
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+  - id: w9_r3_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w9_r3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: w9_r3_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w9_r3.output.requests
+    timeout_s: 15
+  - id: w9_r3_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w9_r3_before.output.snapshot
+      requests:
+        $ref: stages.w9_r3.output.requests
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+  - id: w9_r4_before
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: w9_r4
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: w9_r4_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.w9_r4.output.requests
+    timeout_s: 15
+  - id: w9_r4_hit
+    action: kv_hit_observe
+    params:
+      snapshot:
+        $ref: stages.w9_r4_before.output.snapshot
+      requests:
+        $ref: stages.w9_r4.output.requests
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      min_contiguous: 8
+  - id: w9_end
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: flips
+    action: kv_window_transitions
+    params:
+      snapshots:
+      - $ref: stages.w0_end.output.snapshot
+      - $ref: stages.w1_end.output.snapshot
+      - $ref: stages.w2_end.output.snapshot
+      - $ref: stages.w3_end.output.snapshot
+      - $ref: stages.w4_end.output.snapshot
+      - $ref: stages.w5_end.output.snapshot
+      - $ref: stages.w6_end.output.snapshot
+      - $ref: stages.w7_end.output.snapshot
+      - $ref: stages.w8_end.output.snapshot
+      - $ref: stages.w9_end.output.snapshot
+      families:
+      - - 810000
+        - 810001
+        - 810002
+        - 810003
+        - 810004
+        - 810005
+        - 810006
+        - 810007
+        - 810008
+        - 810009
+      - - 811000
+        - 811001
+        - 811002
+        - 811003
+        - 811004
+        - 811005
+        - 811006
+        - 811007
+        - 811008
+        - 811009
+      - - 812000
+        - 812001
+        - 812002
+        - 812003
+        - 812004
+        - 812005
+        - 812006
+        - 812007
+        - 812008
+        - 812009
+      - - 813000
+        - 813001
+        - 813002
+        - 813003
+        - 813004
+        - 813005
+        - 813006
+        - 813007
+        - 813008
+        - 813009
+  - id: flip_bound
+    action: check
+    params:
+      actual:
+        $ref: stages.flips.output.flips
+      op: le
+      expected: 80
+  - id: hit_rate
+    action: kv_hit_rate_check
+    params:
+      samples:
+      - $ref: stages.w0_r0_hit.output.sample
+      - $ref: stages.w0_r1_hit.output.sample
+      - $ref: stages.w0_r2_hit.output.sample
+      - $ref: stages.w0_r3_hit.output.sample
+      - $ref: stages.w0_r4_hit.output.sample
+      - $ref: stages.w1_r0_hit.output.sample
+      - $ref: stages.w1_r1_hit.output.sample
+      - $ref: stages.w1_r2_hit.output.sample
+      - $ref: stages.w1_r3_hit.output.sample
+      - $ref: stages.w1_r4_hit.output.sample
+      - $ref: stages.w2_r0_hit.output.sample
+      - $ref: stages.w2_r1_hit.output.sample
+      - $ref: stages.w2_r2_hit.output.sample
+      - $ref: stages.w2_r3_hit.output.sample
+      - $ref: stages.w2_r4_hit.output.sample
+      - $ref: stages.w3_r0_hit.output.sample
+      - $ref: stages.w3_r1_hit.output.sample
+      - $ref: stages.w3_r2_hit.output.sample
+      - $ref: stages.w3_r3_hit.output.sample
+      - $ref: stages.w3_r4_hit.output.sample
+      - $ref: stages.w4_r0_hit.output.sample
+      - $ref: stages.w4_r1_hit.output.sample
+      - $ref: stages.w4_r2_hit.output.sample
+      - $ref: stages.w4_r3_hit.output.sample
+      - $ref: stages.w4_r4_hit.output.sample
+      - $ref: stages.w5_r0_hit.output.sample
+      - $ref: stages.w5_r1_hit.output.sample
+      - $ref: stages.w5_r2_hit.output.sample
+      - $ref: stages.w5_r3_hit.output.sample
+      - $ref: stages.w5_r4_hit.output.sample
+      - $ref: stages.w6_r0_hit.output.sample
+      - $ref: stages.w6_r1_hit.output.sample
+      - $ref: stages.w6_r2_hit.output.sample
+      - $ref: stages.w6_r3_hit.output.sample
+      - $ref: stages.w6_r4_hit.output.sample
+      - $ref: stages.w7_r0_hit.output.sample
+      - $ref: stages.w7_r1_hit.output.sample
+      - $ref: stages.w7_r2_hit.output.sample
+      - $ref: stages.w7_r3_hit.output.sample
+      - $ref: stages.w7_r4_hit.output.sample
+      - $ref: stages.w8_r0_hit.output.sample
+      - $ref: stages.w8_r1_hit.output.sample
+      - $ref: stages.w8_r2_hit.output.sample
+      - $ref: stages.w8_r3_hit.output.sample
+      - $ref: stages.w8_r4_hit.output.sample
+      - $ref: stages.w9_r0_hit.output.sample
+      - $ref: stages.w9_r1_hit.output.sample
+      - $ref: stages.w9_r2_hit.output.sample
+      - $ref: stages.w9_r3_hit.output.sample
+      - $ref: stages.w9_r4_hit.output.sample
+      min_samples: 50
+      bands:
+        strict: 0.72
+        normal: 0.5
+        loose: 0.4
+  - id: replication
+    action: kv_replication_check
+    params:
+      snapshot:
+        $ref: stages.w9_end.output.snapshot
+      families:
+      - - 810000
+        - 810001
+        - 810002
+        - 810003
+        - 810004
+        - 810005
+        - 810006
+        - 810007
+        - 810008
+        - 810009
+      - - 811000
+        - 811001
+        - 811002
+        - 811003
+        - 811004
+        - 811005
+        - 811006
+        - 811007
+        - 811008
+        - 811009
+      - - 812000
+        - 812001
+        - 812002
+        - 812003
+        - 812004
+        - 812005
+        - 812006
+        - 812007
+        - 812008
+        - 812009
+      - - 813000
+        - 813001
+        - 813002
+        - 813003
+        - 813004
+        - 813005
+        - 813006
+        - 813007
+        - 813008
+        - 813009
+      bands:
+        strict: 1.5
+        normal: 1.75
+        loose: 2
+      max_holders: 2
+  - id: cleanup
+    action: teardown
+- id: lru_affinity
+  legacy_case_ids:
+  - kv_lru_eviction_affinity
+  environment_overrides:
+    prefill_cache_blocks: 4
+    decode_cache_blocks: 4
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: prime
+    action: request
+    params:
+      count: 1
+      input_len: 2048
+      output_len: 2
+      block_keys:
+      - 810001
+      - 810002
+      stream_timeout_s: 15
+  - id: prime_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.prime.output.requests
+    timeout_s: 15
+  - id: prime_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.prime.output.requests
+  - id: prime_sync
+    action: balance_pause
+    params:
+      seconds: 2
+  - id: replay
+    action: request
+    params:
+      count: 1
+      input_len: 2048
+      output_len: 2
+      block_keys:
+      - 810001
+      - 810002
+      stream_timeout_s: 15
+  - id: replay_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.replay.output.requests
+    timeout_s: 15
+  - id: retry
+    action: kv_retry_misdirected
+    params:
+      anchor:
+        $ref: stages.prime.output.requests
+      candidate:
+        $ref: stages.replay.output.requests
+      keys:
+      - 810001
+      - 810002
+      input_len: 2048
+      output_len: 2
+      settle_s: 2
+      request_timeout_s: 15
+    timeout_s: 60
+  - id: replay_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.retry.output.requests
+  - id: replay_affinity
+    action: kv_same
+    params:
+      first:
+        $ref: stages.prime_holder.output.engine
+      second:
+        $ref: stages.replay_holder.output.engine
+  - id: prime_snapshot
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: prime_counters
+    action: kv_cache_statistics
+    params:
+      snapshot:
+        $ref: stages.prime_snapshot.output.snapshot
+      engine:
+        $ref: stages.prime_holder.output.engine
+  - id: prime_keys
+    action: check
+    params:
+      actual:
+        $ref: stages.prime_counters.output.keys
+      op: ge
+      expected: 2
+  - id: prime_evictions
+    action: check
+    params:
+      actual:
+        $ref: stages.prime_counters.output.evictions
+      op: eq
+      expected: 0
+  - id: pressure
+    action: request
+    params:
+      count: 1
+      input_len: 4096
+      output_len: 2
+      block_keys:
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      stream_timeout_s: 15
+  - id: pressure_done
+    action: wait
+    params:
+      requests:
+        $ref: stages.pressure.output.requests
+    timeout_s: 15
+  - id: pressure_settle
+    action: balance_pause
+    params:
+      seconds: 0.5
+  - id: pressure_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.pressure.output.requests
+  - id: pressure_snapshot
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 0
+    timeout_s: 10
+  - id: pressure_counters
+    action: kv_cache_statistics
+    params:
+      snapshot:
+        $ref: stages.pressure_snapshot.output.snapshot
+      engine:
+        $ref: stages.pressure_holder.output.engine
+  - id: pressure_keys
+    action: check
+    params:
+      actual:
+        $ref: stages.pressure_counters.output.keys
+      op: le
+      expected: 4
+  - id: pressure_evictions
+    action: check
+    params:
+      actual:
+        $ref: stages.pressure_counters.output.evictions
+      op: ge
+      expected: 1
+  - id: prefix_affinity
+    action: kv_same
+    params:
+      first:
+        $ref: stages.prime_holder.output.engine
+      second:
+        $ref: stages.pressure_holder.output.engine
+  - id: cleanup
+    action: teardown

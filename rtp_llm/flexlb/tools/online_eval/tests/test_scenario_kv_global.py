@@ -109,6 +109,9 @@ class CacheModel:
             address = f'host:{100+int(name.rsplit("-",1)[1])}'
             if self.foreign and self.rid == 3:
                 address = "foreign:999"
+            row["request_shape"] = {
+                k: params[k] for k in ("input_len", "output_len", "block_keys")
+            }
             records.update(row, schedule=dict(status="OK"), prefill_addr=address)
             if params.get("post_issue_delay_s"):
                 deadline.sleep(params["post_issue_delay_s"])
