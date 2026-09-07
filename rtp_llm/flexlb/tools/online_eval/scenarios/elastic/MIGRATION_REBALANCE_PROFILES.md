@@ -42,6 +42,11 @@ errors independently failing. Boundary fixtures check 0/50 FAIL, 29/50 PASS and
 The batch helper's optional protocol guard defaults to None for all other
 callers. The dedicated module's descriptors are aggregated through the existing
 elastic_lifecycle handler list, so no shared elastic.py or catalog change is
-required. Independent review and real Java acceptance remain pending. Legacy
+required. Independent static and fixture review passed for
+`18fa49dc3b8d5b3dba39bf29430e288a32f06932`: the reviewer independently ran 104
+elastic tests in 22.232s and eight added-worker tests in 0.453s against core4e,
+verified default-catalog compilation, and confirmed the seven non-rebalance
+plans remain unchanged with exactly three new profile pairs. Real Java
+acceptance remains pending. Legacy
 cases and earlier result anchors remain available; those results do not establish
 acceptance of this corrected BW program or its three new profiles.
