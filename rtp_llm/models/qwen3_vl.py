@@ -99,10 +99,10 @@ class QWen3_VL(QwenV3):
         if config.config_dtype is None:
             config.config_dtype = text_config.get("torch_dtype")
 
-        rope_scaling = text_config.get("rope_scaling")
+        rope_scaling = text_config.get("rope_scaling", {})
         if not isinstance(rope_scaling, dict):
             raise ValueError(
-                "Qwen3-VL config.json text_config must contain rope_scaling"
+                "Qwen3-VL config.json text_config.rope_scaling must be an object"
             )
         if "mrope_section" not in rope_scaling:
             logging.warning(
