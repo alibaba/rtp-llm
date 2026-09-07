@@ -415,6 +415,8 @@ def compile_scenarios(documents, profile=None, handlers=None):
                         source + f"::{vid}.{stage['id']}.max_dynamic_additions",
                         integer=True,
                     )
+            if not check_ids:
+                fail(source + f"::{vid}", "scenario must declare at least one check")
             findings = names(
                 doc.get("findings", []),
                 source + ".findings",

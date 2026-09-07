@@ -272,7 +272,9 @@ def execute_instance(
             terminal_status = "ERROR"
         primary_error = primary_error or "cleanup failed"
     if terminal_status == "PASS":
-        if finding_failures:
+        if not any(row["checks"] for row in rows):
+            terminal_status, primary_error = "ERROR", "no checks executed"
+        elif finding_failures:
             terminal_status = "FINDING-CONFIRMED"
         elif finding_passes:
             terminal_status = "FINDING-RESOLVED"
