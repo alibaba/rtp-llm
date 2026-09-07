@@ -129,7 +129,12 @@ void P2PConnectorAsyncReadContext::applyMergedReadOutcome(const MergedReadOutcom
 
     const bool read_result_unconfirmed =
         !no_transfer_ && tp_sync_result_ && tp_sync_result_->done() && !tp_sync_result_->success();
-    if (!success && transfer_not_done_hold_ms_ > 0 && read_result_unconfirmed) {
+    // StartLoad 侧的 TRANSFER_NOT_DONE / READ_CANCELLED 同样意味着物理传输结果未定：
+    // prefill 还没存完（或刚被取消）时，decode worker 的 RDMA 写入可能仍在途，目标块
+    // 必须走 lease 持有路径，不能立即归还。
+    const bool holdable_outcome = error_code == ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE
+                                  || error_code == ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED;
+    if (!success && transfer_not_done_hold_ms_ > 0 && (read_result_unconfirmed || holdable_outcome)) {
         const int64_t now_ms = currentTimeMs();
         const int64_t hold_until_ms =
             transfer_not_done_hold_ms_ > std::numeric_limits<int64_t>::max() - now_ms ?
