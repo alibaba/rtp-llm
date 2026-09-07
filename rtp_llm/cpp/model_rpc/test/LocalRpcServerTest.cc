@@ -595,7 +595,7 @@ TEST(LocalRpcServerTest, UpdateWeightsRejectsEmptyWeightManagerAsUnimplemented) 
     const auto status = server.UpdateWeights(&context, &request, &response);
 
     EXPECT_EQ(status.error_code(), grpc::StatusCode::UNIMPLEMENTED);
-    EXPECT_THAT(status.error_message(), HasSubstr("--require_weight_update true"));
+    EXPECT_THAT(status.error_message(), HasSubstr("no weight manager is configured"));
 }
 
 TEST(LocalRpcServerTest, UpdateWeightsRejectsPythonNoneManagerAsUnimplemented) {
@@ -614,7 +614,7 @@ TEST(LocalRpcServerTest, UpdateWeightsRejectsPythonNoneManagerAsUnimplemented) {
     const auto status = server.UpdateWeights(&context, &request, &response);
 
     EXPECT_EQ(status.error_code(), grpc::StatusCode::UNIMPLEMENTED);
-    EXPECT_THAT(status.error_message(), HasSubstr("--use_new_loader false"));
+    EXPECT_THAT(status.error_message(), HasSubstr("supports online weight updates"));
 }
 
 }  // namespace rtp_llm

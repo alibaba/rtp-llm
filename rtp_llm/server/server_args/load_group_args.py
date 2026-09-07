@@ -45,9 +45,9 @@ def init_load_group_args(parser, load_config, model_args):
         type=str2bool,
         default=None,
         help=(
-            "默认按模型注册表和加载能力选择：已适配且当前配置受支持时使用 "
-            "NewLoader，否则回退 legacy loader；显式置真强制 NewLoader，置假强制 "
-            "legacy loader"
+            "未设置时默认保留 legacy loader；显式声明 --require_weight_update "
+            "false 后，已适配且当前配置受支持的模型自动选择 NewLoader。显式置真 "
+            "强制 NewLoader，置假强制 legacy loader"
         ),
     )
     load_group.add_argument(

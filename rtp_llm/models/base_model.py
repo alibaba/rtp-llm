@@ -25,7 +25,6 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
     BaseTokenizer,
     TokenizerFactory,
 )
-from rtp_llm.metrics import GaugeMetrics, kmonitor
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.model_loader.loader import ModelLoader, get_model_loader
 from rtp_llm.model_loader.model_weight_info import ModelDeployWeightInfo, ModelWeights
@@ -574,6 +573,11 @@ class BaseModel(object):
                     "Legacy loader is not supported for this checkpoint: "
                     f"{legacy_reason}."
                 )
+            if self.keep_mla_checkpoint_weights:
+                raise ValueError(
+                    "keep_mla_checkpoint_weights requires NewLoader, but the "
+                    "resolved loader route is legacy"
+                )
         source = (
             "explicit override"
             if self.model_config.use_new_loader is not None
@@ -600,6 +604,10 @@ class BaseModel(object):
     def _report_update_weights_capability(self, *, available: bool) -> None:
         if self.parallelism_config.world_rank != 0:
             return
+        # Metrics initialization starts its reporting worker. Keep that service
+        # lifecycle side effect out of BaseModel's module import path.
+        from rtp_llm.metrics import GaugeMetrics, kmonitor
+
         kmonitor.report(
             GaugeMetrics.UPDATE_WEIGHTS_AVAILABLE_METRIC,
             1 if available else 0,

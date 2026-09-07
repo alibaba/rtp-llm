@@ -54,15 +54,22 @@ public:
             const auto mtp_layer_num = mtp_sub_config->layer_num;
 
             size_t real_mtp_gid = static_cast<size_t>(mtp_sub_config->groupNums());
+            size_t real_group_count = 0;
             for (size_t gid = 0; gid < static_cast<size_t>(mtp_sub_config->groupNums()); ++gid) {
                 if (!mtp_sub_config->layerIdsForGroup(gid).empty()) {
-                    real_mtp_gid = gid;
-                    break;
+                    if (real_group_count == 0) {
+                        real_mtp_gid = gid;
+                    }
+                    ++real_group_count;
                 }
             }
-            RTP_LLM_CHECK_WITH_INFO(real_mtp_gid < static_cast<size_t>(mtp_sub_config->groupNums()),
+            RTP_LLM_CHECK_WITH_INFO(real_group_count > 0,
                                     "MTP module %zu has no cache group containing layers",
                                     i);
+            RTP_LLM_CHECK_WITH_INFO(real_group_count == 1,
+                                    "MTP module %zu must have exactly one cache group containing layers, got %zu",
+                                    i,
+                                    real_group_count);
             const auto& mtp_spec = mtp_sub_config->specForGroup(real_mtp_gid);
             // The selected group owns the physical KV stride, including any
             // hybrid padding. Sparse MLA is the exception for scale storage:
