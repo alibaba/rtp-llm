@@ -154,6 +154,39 @@ class Response:
 
 
 class BalanceTests(unittest.TestCase):
+    def test_decode_load_legacy_fallback(self):
+        self.assertEqual(b._decode_load(dict(inflight_requests=0, total_load=7)), 7)
+        self.assertEqual(b._decode_load(dict(inflight_requests=0)), 0)
+        self.assertEqual(b._decode_load(dict(total_load=0)), 0)
+        for row in (
+            {},
+            {"total_load": None},
+            {"inflight_requests": False, "total_load": 0},
+        ):
+            with self.assertRaises(ValueError):
+                b._decode_load(row)
+
+    def test_cleanup_does_not_hide_total_load(self):
+        clock = Clock()
+        data = dict(
+            scheduler_inflight=0,
+            prefill_endpoints=[dict(inflight_batches=0)],
+            decode_endpoints=[dict(inflight_requests=0, total_load=7)],
+        )
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            Response, "read", lambda self, n: json.dumps(data).encode()
+        ), patch.object(b.urllib.request, "urlopen", return_value=Response()):
+            ctx = NS(clock=clock, artifact_dir=Path(tmp), ops=NS(master_http_port=1))
+            with self.assertRaises(StageTimeout):
+                b._clean(ctx, {}, Deadline(clock() + 1, clock, clock.sleep))
+            samples = json.loads(
+                next(Path(tmp).glob("balance-master-clean-*.json")).read_text()
+            )
+            self.assertTrue(samples)
+            data["decode_endpoints"] = [{}]
+            with self.assertRaises(ValueError):
+                b._clean(ctx, {}, Deadline(clock() + 1, clock, clock.sleep))
+
     def registry(self):
         h = handlers()
         h.update({x.name: x for x in b.HANDLERS})

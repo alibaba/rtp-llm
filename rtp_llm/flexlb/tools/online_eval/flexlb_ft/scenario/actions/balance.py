@@ -381,6 +381,17 @@ def _empty_validate(params, plan):
     return _params(params, plan, set())
 
 
+def _decode_load(row):
+    present = [key for key in ("inflight_requests", "total_load") if key in row]
+    if not present:
+        raise ValueError("missing Decode load evidence")
+    for key in present:
+        _number(row[key])
+    # Preserve the legacy compatibility expression: a zero first field does
+    # not hide positive total_load when both fields are supplied.
+    return row.get("inflight_requests") or row.get("total_load", 0)
+
+
 def _clean(ctx, params, deadline):
     samples = []
     path = ctx.artifact_dir / f"balance-master-clean-{uuid.uuid4().hex}.json"
@@ -404,10 +415,7 @@ def _clean(ctx, params, deadline):
             ):
                 raise ValueError("missing Master endpoint cleanup evidence")
             p_counts = [_number(row.get("inflight_batches")) for row in p_rows]
-            d_counts = [
-                _number(row.get("inflight_requests", row.get("total_load")))
-                for row in d_rows
-            ]
+            d_counts = [_decode_load(row) for row in d_rows]
             samples.append(dict(time_s=ctx.clock(), raw=data))
             if count == 0 and not any(p_counts + d_counts):
                 return StageOutput(
