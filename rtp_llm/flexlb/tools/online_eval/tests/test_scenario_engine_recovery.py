@@ -22,6 +22,15 @@ class Model:
     def __init__(self, mode="correct"):
         self.mode, self.restored, self.cleaned = mode, False, False
         self.ops = Ops()
+        future = self.ops.future
+
+        def compatible_future(*args, **kwargs):
+            call = future(*args, **kwargs)
+            result = call.result
+            call.result = lambda timeout=None: result(timeout=timeout)
+            return call
+
+        self.ops.future = compatible_future
         self.engines = {}
         for role in ("prefill", "decode"):
             for i in range(2):
@@ -36,6 +45,7 @@ class Model:
                 )
 
     def setup(self, ctx, environment, deadline):
+        self.ops.batch = "nonbatch" not in ctx.instance["profile"]
         directory = ctx.artifact_dir / "master-sync"
         directory.mkdir()
         self.log = directory / "sync.log"
@@ -87,7 +97,14 @@ class Model:
                 if e["role"] == "prefill"
             )
             return 200, {
-                "worker_summary": {"PREFILL": {"alive": alive, "discovered": 2}}
+                "worker_summary": {
+                    "PREFILL": {
+                        "alive": alive,
+                        "discovered": (
+                            3 if self.restored and self.mode == "bad_topology" else 2
+                        ),
+                    }
+                }
             }
         data = owner_frame()["inflight"]
         data["prefill_endpoints"] = [
@@ -193,6 +210,36 @@ class RecoveryTest(unittest.TestCase):
                             s["status"] for s in result["stages"] if s["id"] == failed
                         ),
                     )
+
+    def test_complete_down_phases_program(self):
+        self.run_program("down_phases", "correct", "PASS")
+
+    def test_complete_flap_program(self):
+        self.run_program("flap", "correct", "PASS")
+
+    def test_flap_alive_without_discovery_convergence_fails(self):
+        self.run_program("flap", "bad_topology", "FAIL", "topology_discovered")
+
+    def test_ttft_uses_upper_index_p50_and_missing_is_not_zero(self):
+        records = []
+        for latency in [1, 4, 2, 3]:
+            records.append(
+                {
+                    "business_finished": True,
+                    "business_error_code": None,
+                    "cancel": {"requested_s": None},
+                    "schedule": {"status": "OK", "started_s": 0},
+                    "stream": {
+                        "status": "OK",
+                        "started_s": 0,
+                        "first_output_s": latency,
+                    },
+                }
+            )
+        self.assertEqual(3000, recovery._ttft({"frames": [{"records": records}]}))
+        for record in records:
+            record["stream"]["first_output_s"] = None
+        self.assertIsNone(recovery._ttft({"frames": [{"records": records}]}))
 
     def test_complete_generation_program(self):
         self.run_program("generation_bump", "correct", "PASS")

@@ -1,6 +1,6 @@
 schema_version: 1
 id: engine_fault_recovery
-description: Explicit generation, recovery and per-owner state contracts; first two of nine legacy mappings.
+description: Explicit generation, recovery and per-owner state contracts; four of nine legacy mappings.
 category: engine_fault
 profiles:
 - batch-window
@@ -23,6 +23,8 @@ execution:
   stage_timeout_s: 120
   cleanup_timeout_s: 120
 legacy_case_ids:
+- engine_fault_down_phases
+- engine_fault_flap
 - engine_fault_recovery_generation_bump
 - engine_fault_status_gap_no_bump
 variants:
@@ -372,5 +374,641 @@ variants:
       metric: success
       op: eq
       expected: 4
+  - id: cleanup
+    action: teardown
+- id: down_phases
+  legacy_case_ids:
+  - engine_fault_down_phases
+  environment_overrides:
+    n_decode: 4
+    master_sync_log: false
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: prior_drain_observed
+    action: recovery_observe
+    params:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    timeout_s: 110
+  - id: baseline
+    action: recovery_prepare
+    params:
+      count: 20
+      concurrency: 10
+      unique_key_count: 3
+      generate_payload: legacy_default
+      stream_timeout_s: 30
+  - id: baseline_dispatch
+    action: recovery_dispatch
+    params:
+      requests:
+        $ref: stages.baseline.output.requests
+    timeout_s: 120
+  - id: baseline_state
+    action: recovery_observe
+    params:
+      duration_s: 0
+      requests:
+        $ref: stages.baseline.output.requests
+      include:
+      - client_records
+    timeout_s: 30
+  - id: baseline_succeeds
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.baseline_state.output.snapshot
+      metric: success
+      op: eq
+      expected: 20
+  - id: baseline_health
+    action: recovery_observe
+    params:
+      duration_s: 0
+      include:
+      - inflight
+    timeout_s: 30
+  - id: baseline_health_http_200
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.baseline_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+  - id: outage
+    action: engine_control
+    params:
+      operation: stop
+      targets:
+      - prefill-0
+  - id: eviction
+    action: recovery_observe
+    params:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: le
+        value: 1
+      include:
+      - info
+    timeout_s: 45
+  - id: survivor_only_alive
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.eviction.output.snapshot
+      metric: alive_prefill
+      op: le
+      expected: 1
+  - id: takeover
+    action: recovery_prepare
+    params:
+      count: 20
+      concurrency: 10
+      unique_key_count: 3
+  - id: takeover_dispatch
+    action: recovery_dispatch
+    params:
+      requests:
+        $ref: stages.takeover.output.requests
+    timeout_s: 120
+  - id: takeover_state
+    action: recovery_observe
+    params:
+      duration_s: 0
+      requests:
+        $ref: stages.takeover.output.requests
+      include:
+      - client_records
+    timeout_s: 30
+  - id: downtime_health
+    action: recovery_observe
+    params:
+      duration_s: 0
+      include:
+      - inflight
+    timeout_s: 30
+  - id: downtime_health_http_200
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.downtime_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+  - id: takeover_at_least_ninety_percent
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.takeover_state.output.snapshot
+      metric: success
+      op: ge
+      expected: 18
+  - id: restart
+    action: engine_control
+    params:
+      operation: start
+      targets:
+      - prefill-0
+  - id: alive_restored
+    action: recovery_observe
+    params:
+      duration_s: 30
+      until:
+        metric: alive_prefill
+        op: ge
+        value: 2
+      include:
+      - info
+    timeout_s: 45
+  - id: alive_back
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.alive_restored.output.snapshot
+      metric: alive_prefill
+      op: ge
+      expected: 2
+  - id: reconnect
+    action: recovery_pause
+    params:
+      duration_s: 3
+    timeout_s: 30
+  - id: recovery_batch
+    action: recovery_prepare
+    params:
+      count: 20
+      concurrency: 10
+      unique_key_count: 3
+      generate_payload: legacy_default
+      stream_timeout_s: 30
+  - id: recovery_batch_dispatch
+    action: recovery_dispatch
+    params:
+      requests:
+        $ref: stages.recovery_batch.output.requests
+    timeout_s: 120
+  - id: recovery_batch_state
+    action: recovery_observe
+    params:
+      duration_s: 0
+      requests:
+        $ref: stages.recovery_batch.output.requests
+      include:
+      - client_records
+    timeout_s: 30
+  - id: recovery_at_least_ninety_five_percent
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.recovery_batch_state.output.snapshot
+      metric: success
+      op: ge
+      expected: 19
+  - id: ttft_recovers
+    action: recovery_ttft_check
+    params:
+      baseline:
+        $ref: stages.baseline_state.output.snapshot
+      recovered:
+        $ref: stages.recovery_batch_state.output.snapshot
+  - id: recovered_health
+    action: recovery_observe
+    params:
+      duration_s: 0
+      include:
+      - inflight
+    timeout_s: 30
+  - id: recovered_health_http_200
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.recovered_health.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+  - id: closing_drain
+    action: recovery_observe
+    params:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    timeout_s: 110
+  - id: closing_drain_scheduler
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.closing_drain.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+  - id: closing_drain_prefill_batches
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.closing_drain.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+  - id: closing_drain_decode_load
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.closing_drain.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
+  - id: cleanup
+    action: teardown
+- id: flap
+  legacy_case_ids:
+  - engine_fault_flap
+  environment_overrides:
+    n_decode: 4
+    master_sync_log: false
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: background_flow
+    action: elastic_cold_flow
+  - id: flow_ramp
+    action: recovery_pause
+    params:
+      duration_s: 1
+    timeout_s: 30
+  - id: stop_1
+    action: engine_control
+    params:
+      operation: stop
+      targets:
+      - prefill-0
+  - id: down_window_1
+    action: recovery_pause
+    params:
+      duration_s: 0.8
+    timeout_s: 30
+  - id: alive_during_1
+    action: recovery_observe
+    params:
+      duration_s: 0
+      include:
+      - info
+    timeout_s: 30
+  - id: master_cycle_1
+    action: recovery_observe
+    params:
+      duration_s: 0
+      include:
+      - inflight
+    timeout_s: 30
+  - id: master_cycle_1_http_200
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.master_cycle_1.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+  - id: start_1
+    action: engine_control
+    params:
+      operation: start
+      targets:
+      - prefill-0
+  - id: up_gap_1
+    action: recovery_pause
+    params:
+      duration_s: 0.4
+    timeout_s: 30
+  - id: stop_2
+    action: engine_control
+    params:
+      operation: stop
+      targets:
+      - prefill-0
+  - id: down_window_2
+    action: recovery_pause
+    params:
+      duration_s: 0.8
+    timeout_s: 30
+  - id: alive_during_2
+    action: recovery_observe
+    params:
+      duration_s: 0
+      include:
+      - info
+    timeout_s: 30
+  - id: master_cycle_2
+    action: recovery_observe
+    params:
+      duration_s: 0
+      include:
+      - inflight
+    timeout_s: 30
+  - id: master_cycle_2_http_200
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.master_cycle_2.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+  - id: start_2
+    action: engine_control
+    params:
+      operation: start
+      targets:
+      - prefill-0
+  - id: up_gap_2
+    action: recovery_pause
+    params:
+      duration_s: 0.4
+    timeout_s: 30
+  - id: stop_3
+    action: engine_control
+    params:
+      operation: stop
+      targets:
+      - prefill-0
+  - id: down_window_3
+    action: recovery_pause
+    params:
+      duration_s: 0.8
+    timeout_s: 30
+  - id: alive_during_3
+    action: recovery_observe
+    params:
+      duration_s: 0
+      include:
+      - info
+    timeout_s: 30
+  - id: master_cycle_3
+    action: recovery_observe
+    params:
+      duration_s: 0
+      include:
+      - inflight
+    timeout_s: 30
+  - id: master_cycle_3_http_200
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.master_cycle_3.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+  - id: start_3
+    action: engine_control
+    params:
+      operation: start
+      targets:
+      - prefill-0
+  - id: up_gap_3
+    action: recovery_pause
+    params:
+      duration_s: 0.4
+    timeout_s: 30
+  - id: stop_4
+    action: engine_control
+    params:
+      operation: stop
+      targets:
+      - prefill-0
+  - id: down_window_4
+    action: recovery_pause
+    params:
+      duration_s: 0.8
+    timeout_s: 30
+  - id: alive_during_4
+    action: recovery_observe
+    params:
+      duration_s: 0
+      include:
+      - info
+    timeout_s: 30
+  - id: master_cycle_4
+    action: recovery_observe
+    params:
+      duration_s: 0
+      include:
+      - inflight
+    timeout_s: 30
+  - id: master_cycle_4_http_200
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.master_cycle_4.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+  - id: start_4
+    action: engine_control
+    params:
+      operation: start
+      targets:
+      - prefill-0
+  - id: up_gap_4
+    action: recovery_pause
+    params:
+      duration_s: 0.4
+    timeout_s: 30
+  - id: stop_5
+    action: engine_control
+    params:
+      operation: stop
+      targets:
+      - prefill-0
+  - id: down_window_5
+    action: recovery_pause
+    params:
+      duration_s: 0.8
+    timeout_s: 30
+  - id: alive_during_5
+    action: recovery_observe
+    params:
+      duration_s: 0
+      include:
+      - info
+    timeout_s: 30
+  - id: master_cycle_5
+    action: recovery_observe
+    params:
+      duration_s: 0
+      include:
+      - inflight
+    timeout_s: 30
+  - id: master_cycle_5_http_200
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.master_cycle_5.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+  - id: start_5
+    action: engine_control
+    params:
+      operation: start
+      targets:
+      - prefill-0
+  - id: up_gap_5
+    action: recovery_pause
+    params:
+      duration_s: 0.4
+    timeout_s: 30
+  - id: stop_6
+    action: engine_control
+    params:
+      operation: stop
+      targets:
+      - prefill-0
+  - id: down_window_6
+    action: recovery_pause
+    params:
+      duration_s: 0.8
+    timeout_s: 30
+  - id: alive_during_6
+    action: recovery_observe
+    params:
+      duration_s: 0
+      include:
+      - info
+    timeout_s: 30
+  - id: master_cycle_6
+    action: recovery_observe
+    params:
+      duration_s: 0
+      include:
+      - inflight
+    timeout_s: 30
+  - id: master_cycle_6_http_200
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.master_cycle_6.output.snapshot
+      metric: master_http
+      op: eq
+      expected: 200
+  - id: start_6
+    action: engine_control
+    params:
+      operation: start
+      targets:
+      - prefill-0
+  - id: up_gap_6
+    action: recovery_pause
+    params:
+      duration_s: 0.4
+    timeout_s: 30
+  - id: stop_flow
+    action: elastic_flow_stop
+    params:
+      flow:
+        $ref: stages.background_flow.output.flow
+    timeout_s: 20
+  - id: flow_availability
+    action: elastic_flow_assert
+    params:
+      result:
+        $ref: stages.stop_flow.output.result
+      min_success_rate: 0.5
+  - id: topology
+    action: recovery_observe
+    params:
+      duration_s: 30
+      until:
+        metric: topology_mismatch
+        op: eq
+        value: 0
+      include:
+      - info
+    timeout_s: 45
+  - id: topology_discovered
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.topology.output.snapshot
+      metric: discovered_prefill
+      op: eq
+      expected: 2
+  - id: topology_alive
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.topology.output.snapshot
+      metric: alive_prefill
+      op: eq
+      expected: 2
+  - id: post_flap
+    action: recovery_prepare
+    params:
+      count: 20
+      concurrency: 10
+      unique_key_count: 3
+  - id: post_flap_dispatch
+    action: recovery_dispatch
+    params:
+      requests:
+        $ref: stages.post_flap.output.requests
+    timeout_s: 120
+  - id: post_flap_state
+    action: recovery_observe
+    params:
+      duration_s: 0
+      requests:
+        $ref: stages.post_flap.output.requests
+      include:
+      - client_records
+    timeout_s: 30
+  - id: post_flap_recovers
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.post_flap_state.output.snapshot
+      metric: success
+      op: ge
+      expected: 19
+  - id: closing_drain
+    action: recovery_observe
+    params:
+      duration_s: 95
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    timeout_s: 110
+  - id: closing_drain_scheduler
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.closing_drain.output.snapshot
+      metric: scheduler
+      op: eq
+      expected: 0
+  - id: closing_drain_prefill_batches
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.closing_drain.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+  - id: closing_drain_decode_load
+    action: recovery_check
+    params:
+      snapshot:
+        $ref: stages.closing_drain.output.snapshot
+      metric: decode_total_load
+      op: eq
+      expected: 0
   - id: cleanup
     action: teardown
