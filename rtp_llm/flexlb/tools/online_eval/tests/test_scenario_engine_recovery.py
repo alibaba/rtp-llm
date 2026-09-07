@@ -2,6 +2,8 @@
 
 import copy
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -11,9 +13,10 @@ from flexlb_ft.scenario.actions import engine_control
 from flexlb_ft.scenario.actions import engine_recovery as recovery
 from flexlb_ft.scenario.catalog import handlers
 from flexlb_ft.scenario.compiler import compile_scenarios
+from flexlb_ft.scenario.contracts import PlanContext
 from flexlb_ft.scenario.loader import load_scenarios
-from flexlb_ft.scenario.runtime import Deadline, execute_instance
-from test_scenario_backend import Ops
+from flexlb_ft.scenario.runtime import Deadline, RuntimeContext, execute_instance
+from test_scenario_backend import Ops, Stream
 from test_scenario_runtime import Clock
 from test_scenario_status_protocol import owner_frame
 
@@ -21,16 +24,103 @@ from test_scenario_status_protocol import owner_frame
 class Model:
     def __init__(self, mode="correct"):
         self.mode, self.restored, self.cleaned = mode, False, False
+        self.wiped = set()
+        self.routed = {}
+        self.scheduler_samples = 0
+        self.holder_view = None
+        self.round_robin = 0
         self.ops = Ops()
         future = self.ops.future
 
         def compatible_future(*args, **kwargs):
+            if self.mode == "ttft_regression":
+                self.ctx.sleeper(0.1 if self.restored else 0.001)
             call = future(*args, **kwargs)
+            req = args[0]
+            rid, shape = req
+            keys = shape.get("block_keys", [])
+            if len(keys) == 10:
+                index = (
+                    self.holder_view
+                    if self.holder_view is not None
+                    else self.round_robin % 2
+                )
+                self.round_robin += 1
+            else:
+                index = 0
+            if self.engines[f"prefill-{index}"]["stopped"]:
+                index = 1 - index
+            name = f"prefill-{index}"
+            response = call.result(timeout=None)
+            response.route = name + ":9001"
+            response.HasField = lambda field: False
+            self.routed.setdefault(name, set()).add(rid)
+            if self.ops.batch:
+                self.engines[name]["rpc_counts"]["enqueue_batch"] += 1
+            threshold = self.engines[name].get("crash_after")
+            if (
+                self.ops.batch
+                and threshold
+                and self.engines[name]["rpc_counts"]["enqueue_batch"] >= threshold
+            ):
+                self.engines[name]["stopped"] = True
+                self.wiped.update(self.routed[name])
+                self.append(
+                    f"worker {name}:9000 marked dead after 3 consecutive gRPC failures"
+                )
+                for field in ["accepted", "running", "inflight", "held_blocks"]:
+                    self.engines[name][field] = 0
+                self.engines[name]["cache_key_set"] = []
+                response.code, response.success, response.error_message = (
+                    503,
+                    False,
+                    "empty acknowledgement",
+                )
+                result = call.result
+                call.result = lambda timeout=None: result(timeout=timeout)
+                return call
+            self.engines[name]["cache_key_set"] = sorted(
+                set(self.engines[name]["cache_key_set"]) | set(keys)
+            )
+            self.engines[name]["accepted"] += 1
+            if self.restored and self.mode == "first_wave_lack_mem":
+                self.engines[name]["lack_mem_rejects"] += 1
             result = call.result
             call.result = lambda timeout=None: result(timeout=timeout)
             return call
 
         self.ops.future = compatible_future
+        self.ops.prefill_addr = lambda response: response.route
+        self.ops.role_addr = lambda response, owner: response.route
+        self.ops.schedule_pb2 = NS(
+            FlexlbCancelRequestPB=lambda **kw: NS(**kw),
+            CANCEL_REASON_CLIENT_CANCELLED=1,
+        )
+        factory = self.ops.schedule_pb2_grpc.FlexlbServiceStub
+
+        def service(channel):
+            stub = factory(channel)
+            stub.Cancel = lambda request, timeout: NS(found=True)
+            return stub
+
+        self.ops.schedule_pb2_grpc.FlexlbServiceStub = service
+        fetch = self.ops.fetch
+
+        def fetch_after_crash(request, timeout):
+            if (
+                request["request_id"] in self.wiped
+                and self.mode != "old_request_resurrects"
+            ):
+                self.ops.fetch_count += 1
+
+                class MissingRpc(RuntimeError):
+                    def code(self):
+                        return NS(name="NOT_FOUND")
+
+                return Stream(error=MissingRpc("wiped request"))
+            return fetch(request, timeout)
+
+        self.ops.fetch = fetch_after_crash
         self.engines = {}
         for role in ("prefill", "decode"):
             for i in range(2):
@@ -42,10 +132,21 @@ class Model:
                     grpc_addr=f"{name}:9001",
                     port=9001,
                     stopped=False,
+                    cache_key_set=[],
+                    kv_tokens_used=0,
+                    accepted=0,
+                    lack_mem_rejects=0,
+                    running=0,
+                    inflight=0,
+                    held_blocks=0,
+                    leak_detected=False,
+                    rpc_counts={"enqueue_batch": 0},
                 )
 
     def setup(self, ctx, environment, deadline):
+        self.ctx = ctx
         self.ops.batch = "nonbatch" not in ctx.instance["profile"]
+        self.variant = ctx.instance["variant_id"]
         directory = ctx.artifact_dir / "master-sync"
         directory.mkdir()
         self.log = directory / "sync.log"
@@ -73,10 +174,35 @@ class Model:
         elif endpoint == "start_engine":
             self.engines[name]["stopped"] = False
             self.restored = True
+            self.engines[name].pop("crash_after", None)
+            self.engines[name]["rpc_counts"]["enqueue_batch"] = 0
+            if self.mode == "wipe_keeps_accepted":
+                self.engines[name]["accepted"] = 1
+            self.engines[name]["kv_tokens_used"] = (
+                9 if self.mode == "reset_used_nonzero" else 0
+            )
+            if self.engines[name]["cache_key_set"]:
+                self.holder_view = int(name.rsplit("-", 1)[1])
             if self.mode != "no_generation":
                 self.append(
                     f"Created WorkerStatus generation 2 for worker: {name}:9000"
                 )
+        elif endpoint == "inject":
+            if body["enabled"]:
+                self.engines[name]["crash_after"] = body["n"]
+            else:
+                self.engines[name].pop("crash_after", None)
+            return dict(status="ok", engine=name, port=9001, type=body["type"])
+        elif endpoint == "set_perf":
+            self.engines[name]["prefill_fixed_ms"] = body["prefill_fixed_ms"]
+        elif endpoint == "cache_evict":
+            self.engines[name]["cache_key_set"] = sorted(
+                set(self.engines[name]["cache_key_set"]) - set(body["keys"])
+            )
+            if self.mode != "stale_holder_after_wipe":
+                self.holder_view = None
+        elif endpoint == "set_kv_pressure":
+            self.engines[name]["kv_tokens_used"] = body["active_kv_tokens"]
         else:
             raise RuntimeError(f"unexpected control {endpoint}")
         return dict(status="ok", engine=name, port=9001)
@@ -84,6 +210,15 @@ class Model:
     def http(self, ctx, server, path, deadline, body=None, *args, **kwargs):
         if server == "mock":
             if path == "inject":
+                if self.variant == "status_gap_long_retire":
+                    if body["enabled"]:
+                        self.append(
+                            "worker prefill-0:9000 marked dead after 3 consecutive gRPC failures"
+                        )
+                    else:
+                        self.append(
+                            "Created WorkerStatus generation 2 for worker: prefill-0:9000"
+                        )
                 if not body["enabled"] and self.mode == "jitter_bumps_generation":
                     self.append(
                         "Created WorkerStatus generation 2 for worker: prefill-0:9000"
@@ -107,6 +242,9 @@ class Model:
                 }
             }
         data = owner_frame()["inflight"]
+        if self.mode == "residue_grows" and self.restored:
+            self.scheduler_samples += 1
+            data["scheduler_inflight"] = min(2, self.scheduler_samples)
         data["prefill_endpoints"] = [
             dict(
                 ip_port=f"prefill-{i}:9000",
@@ -181,7 +319,14 @@ class RecoveryTest(unittest.TestCase):
             for p in compile_scenarios(load_scenarios(path), handlers=registry)
             if p["variant_id"] == variant
         ]
-        self.assertEqual(4, len(plans))
+        self.assertEqual(
+            (
+                3
+                if variant == "kv_resync"
+                else (2 if variant in {"crash_after", "no_resurrect"} else 4)
+            ),
+            len(plans),
+        )
         for plan in plans:
             with self.subTest(
                 profile=plan["profile"], mode=mode
@@ -189,7 +334,14 @@ class RecoveryTest(unittest.TestCase):
                 model, clock = Model(mode), Clock()
                 with patch.object(
                     recovery.status, "_http", side_effect=model.http
-                ), patch.object(engine_control, "_http", side_effect=model.control):
+                ), patch.object(
+                    engine_control, "_http", side_effect=model.control
+                ), patch(
+                    "flexlb_ft.scenario.actions.kv._http", side_effect=model.control
+                ), patch(
+                    "flexlb_ft.scenario.actions.engine_fault._http",
+                    side_effect=model.control,
+                ):
                     result = execute_instance(
                         plan,
                         model,
@@ -240,6 +392,109 @@ class RecoveryTest(unittest.TestCase):
         for record in records:
             record["stream"]["first_output_s"] = None
         self.assertIsNone(recovery._ttft({"frames": [{"records": records}]}))
+
+    def test_complete_kv_resync_program(self):
+        self.run_program("kv_resync", "correct", "PASS")
+
+    def test_wiped_holder_stickiness_is_a_failure(self):
+        self.run_program(
+            "kv_resync",
+            "stale_holder_after_wipe",
+            "FAIL",
+            "memory_lost_old_holder_spreads",
+        )
+
+    def test_complete_kv_usage_program(self):
+        self.run_program("kv_usage_reset", "correct", "PASS")
+
+    def test_used_after_reset_remains_observational(self):
+        self.run_program("kv_usage_reset", "reset_used_nonzero", "PASS")
+
+    def test_first_wave_lack_mem_is_a_master_contract_failure(self):
+        self.run_program(
+            "kv_usage_reset", "first_wave_lack_mem", "FAIL", "first_wave_no_lack_mem"
+        )
+
+    def test_complete_crash_takeover_program(self):
+        self.run_program("crash_after", "correct", "PASS")
+
+    def test_crash_residue_growth_fails(self):
+        self.run_program("crash_after", "residue_grows", "FAIL", "residue_window")
+
+    def test_complete_no_resurrection_program(self):
+        self.run_program("no_resurrect", "correct", "PASS")
+
+    def test_old_request_completion_is_resurrection_failure(self):
+        self.run_program(
+            "no_resurrect",
+            "old_request_resurrects",
+            "FAIL",
+            "old_requests_never_complete",
+        )
+
+    def test_wipe_must_clear_accepted_counter_before_consumption(self):
+        self.run_program(
+            "no_resurrect", "wipe_keeps_accepted", "FAIL", "wiped_accepted"
+        )
+
+    def test_complete_long_gap_program(self):
+        self.run_program("status_gap_long_retire", "correct", "PASS")
+
+    def test_recovered_ttft_regression_fails(self):
+        self.run_program("down_phases", "ttft_regression", "FAIL", "ttft_recovers")
+
+    def test_observation_timeout_does_not_cancel_transport_or_accept_late_success(self):
+        released = threading.Event()
+        cancelled = threading.Event()
+
+        class GatedStream:
+            def cancel(self):
+                cancelled.set()
+                released.set()
+                return True
+
+            def __iter__(self):
+                if not released.wait(2):
+                    raise RuntimeError("test did not release stream")
+                yield NS(
+                    HasField=lambda field: False, flatten_output=NS(finished=[True])
+                )
+
+        with tempfile.TemporaryDirectory() as root:
+            ctx = RuntimeContext({}, None, root, time.monotonic, time.sleep)
+            ctx.env_epoch = 1
+            ctx.ops = Ops()
+            ctx.instance_deadline_s = time.monotonic() + 120
+            rpc_limits = []
+            ctx.ops.fetch = lambda request, timeout: (
+                rpc_limits.append(timeout) or GatedStream()
+            )
+            params = recovery.validate_prepare(
+                {"stream_timeout_s": 0.05},
+                PlanContext("test", {}, profiles=("batch-window",)),
+            )
+            cohort = recovery.RecoveryRequests(ctx, params)
+            try:
+                cohort.dispatch(Deadline(time.monotonic() + 5))
+                self.assertFalse(cancelled.is_set())
+                self.assertGreater(rpc_limits[0], 50)
+                self.assertEqual(
+                    0,
+                    recovery.metric({"records": cohort.snapshot_records()}, "success"),
+                )
+                released.set()
+                for child in cohort.children:
+                    for entry in child.entries:
+                        child._await_consumer(entry, Deadline(time.monotonic() + 2))
+                cohort.prove_ended(Deadline(time.monotonic() + 2))
+                self.assertTrue(cohort.snapshot_records()[0]["business_finished"])
+                self.assertEqual(
+                    0,
+                    recovery.metric({"records": cohort.snapshot_records()}, "success"),
+                )
+            finally:
+                released.set()
+                cohort.cleanup(Deadline(time.monotonic() + 2))
 
     def test_complete_generation_program(self):
         self.run_program("generation_bump", "correct", "PASS")
