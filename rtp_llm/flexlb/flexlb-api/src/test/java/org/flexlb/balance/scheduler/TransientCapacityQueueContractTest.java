@@ -912,7 +912,8 @@ class TransientCapacityQueueContractTest {
                     new CostBasedPrefillStrategy(
                             workers,
                             cache,
-                            mock(EngineHealthReporter.class));
+                            mock(EngineHealthReporter.class),
+                            new org.flexlb.balance.session.SessionPlacementStore());
             CostBasedDecodeStrategy decodeSelector =
                     new CostBasedDecodeStrategy(workers);
             runtime.placementAvailability().addListener(

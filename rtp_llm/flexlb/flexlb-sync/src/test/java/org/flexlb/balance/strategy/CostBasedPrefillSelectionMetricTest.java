@@ -3,6 +3,7 @@ package org.flexlb.balance.strategy;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
@@ -46,6 +47,7 @@ class CostBasedPrefillSelectionMetricTest {
     private EngineHealthReporter reporter;
     private CostBasedPrefillStrategy strategy;
     private BalanceContext context;
+    private SessionPlacementStore sessions;
 
     @BeforeEach
     void setUp() {
@@ -61,8 +63,9 @@ class CostBasedPrefillSelectionMetricTest {
         cache = mock(CacheAwareService.class);
         when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
         reporter = mock(EngineHealthReporter.class);
+        sessions = new SessionPlacementStore();
         strategy = new CostBasedPrefillStrategy(
-                new WorkerDirectory(registry), cache, reporter);
+                new WorkerDirectory(registry), cache, reporter, sessions);
 
         Request request = new Request();
         request.setRequestId(10_001L);
@@ -203,6 +206,169 @@ class CostBasedPrefillSelectionMetricTest {
         verify(reporter, times(2))
                 .reportCacheAffinityDecision(
                         RoleType.PREFILL, "10.0.0.2", "CACHE_LEADER");
+    }
+
+    @Test
+    void weakSharedPrefixAllowsEstablishedSessionPreference() {
+        configureSession();
+        RoutingConfig.CacheAffinityConfig cacheAffinity = new RoutingConfig.CacheAffinityConfig();
+        cacheAffinity.setMinPrefixHitPercent(60.0);
+        cacheAffinity.setMaxExtraTtftMs(600L);
+        config.getRouter().getRoles().getPrefill().setCacheAffinity(cacheAffinity);
+        try (SelectedRole selected = select()) {
+            assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
+            assertEquals("SESSION_AFFINITY", context.getSessionAffinityReason());
+        }
+        verify(reporter, times(1)).reportCacheAffinityDecision(any(), any(), any());
+        verify(reporter).reportCacheAffinityDecision(
+                RoleType.PREFILL, "10.0.0.2", "LOW_CACHE_HIT");
+        verify(reporter, times(1)).reportSessionAffinityDecision(any(), any());
+        verify(reporter).reportSessionAffinityDecision(RoleType.PREFILL, "SESSION_AFFINITY");
+    }
+
+    @Test
+    void placementLookupFailureFallsBackWithoutFailingRequest() {
+        configureSession();
+        SessionPlacementStore failingStore = mock(SessionPlacementStore.class);
+        when(failingStore.find("model", "session", 60_000L))
+                .thenThrow(new IllegalStateException("placement store unavailable"));
+        strategy = new CostBasedPrefillStrategy(
+                new WorkerDirectory(registry), cache, reporter, failingStore);
+
+        try (SelectedRole selected = select()) {
+            assertTrue(selected.serverStatus().isSuccess());
+            assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
+            assertEquals("NO_PLACEMENT", context.getSessionAffinityReason());
+        }
+        verify(failingStore).find("model", "session", 60_000L);
+    }
+
+    @Test
+    void cacheLeaderTakesPrecedenceOverSessionPlacement() {
+        configureAffinity(600L, 5.0, RoutingConfig.CandidateChoiceType.BEST_ONLY);
+        enableSession("10.0.0.1:8080");
+        try (SelectedRole selected = select()) {
+            assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
+            assertEquals("CACHE_AFFINITY_PRECEDENCE", context.getSessionAffinityReason());
+        }
+    }
+
+    @Test
+    void overBudgetSessionFallsBackToBaseline() {
+        configureSession();
+        config.getRouter().getRoles().getPrefill().getSessionAffinity().setMaxExtraTtftMs(499L);
+        try (SelectedRole selected = select()) {
+            assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
+            assertEquals("OVER_CAP", context.getSessionAffinityReason());
+        }
+    }
+
+    @Test
+    void unavailablePlacementFallsBackToBaseline() {
+        configureSession();
+        sessions.record("model", "session", "10.0.0.99:8080");
+        try (SelectedRole selected = select()) {
+            assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
+            assertEquals("ENDPOINT_UNAVAILABLE", context.getSessionAffinityReason());
+        }
+    }
+
+    @Test
+    void missingPlacementFallsBackToBaseline() {
+        configureSession();
+        context.getRequest().setInferenceSessionId("unseen-session");
+        try (SelectedRole selected = select()) {
+            assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
+            assertEquals("NO_PLACEMENT", context.getSessionAffinityReason());
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"NEW", "UNSPECIFIED"})
+    void nonEstablishedSessionDoesNotOverrideBaseline(String state) {
+        configureSession();
+        context.getRequest().setInferenceSessionState(Request.SessionState.valueOf(state));
+        try (SelectedRole selected = select()) {
+            assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
+        }
+    }
+
+    @Test
+    void disabledSessionAffinityDoesNotOverrideBaseline() {
+        configureSession();
+        config.getRouter().getRoles().getPrefill().setSessionAffinity(null);
+        try (SelectedRole selected = select()) {
+            assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
+        }
+    }
+
+    @Test
+    void unknownSessionSchemaDoesNotOverrideBaseline() {
+        configureSession();
+        context.getRequest().setSessionSchemaVersion(999);
+        try (SelectedRole selected = select()) {
+            assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
+        }
+    }
+
+    @Test
+    void sessionPreferenceDoesNotTurnLruTimestampIntoCapacity() {
+        configureSession();
+        config.getRouter().getRoles().getPrefill().getCandidateChoice()
+                .setType(RoutingConfig.CandidateChoiceType.LEAST_RECENTLY_USED_IN_POOL);
+        PrefillEndpoint preferred = (PrefillEndpoint) registry.get(
+                RoleType.PREFILL, "10.0.0.2:8080");
+        preferred.getLastSelectedTime().set(Long.MAX_VALUE);
+        try (SelectedRole selected = select()) {
+            assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
+            assertEquals("SESSION_AFFINITY", context.getSessionAffinityReason());
+        }
+        assertEquals(Long.MAX_VALUE, preferred.getLastSelectedTime().get());
+    }
+
+    @Test
+    void unmodeledEngineWorkDoesNotApplySessionAffinity() {
+        configureSession();
+        registry.close();
+        ConfigService configService = mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(config);
+        registry = StrategyTestSupport.endpointRegistry(configService);
+        strategy = new CostBasedPrefillStrategy(
+                new WorkerDirectory(registry), cache, reporter, sessions);
+        for (String ip : List.of("10.0.0.1", "10.0.0.2")) {
+            WorkerStatus status = StrategyTestSupport.workerStatus(
+                    RoleType.PREFILL, null, ip, 8080, 8081,
+                    true, 1_000_000L, 1_000_000L);
+            var response = StrategyTestSupport.response(RoleType.PREFILL, true,
+                    1_000_000L, 1_000_000L, 2L);
+            response.setRunningQueryLen(ip.equals("10.0.0.1") ? 1L : 2L);
+            response.setRunningTaskInfo(Map.of());
+            StrategyTestSupport.publish(status, response);
+            StrategyTestSupport.publishEndpoint(registry, RoleType.PREFILL,
+                    ip + ":8080", status);
+        }
+        try (SelectedRole selected = select()) {
+            assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
+            assertEquals("UNMODELED_TTFT", context.getSessionAffinityReason());
+        }
+    }
+
+    private void configureSession() {
+        configureAffinity(600L, 60.0, RoutingConfig.CandidateChoiceType.BEST_ONLY);
+        config.getRouter().getRoles().getPrefill().setCacheAffinity(null);
+        enableSession("10.0.0.2:8080");
+    }
+
+    private void enableSession(String address) {
+        RoutingConfig.SessionAffinityConfig affinity = new RoutingConfig.SessionAffinityConfig();
+        affinity.setTtlMs(60_000L);
+        affinity.setMaxExtraTtftMs(500L);
+        config.getRouter().getRoles().getPrefill().setSessionAffinity(affinity);
+        context.getRequest().setModel("model");
+        context.getRequest().setSessionSchemaVersion(Request.SESSION_SCHEMA_VERSION);
+        context.getRequest().setInferenceSessionId("session");
+        context.getRequest().setInferenceSessionState(Request.SessionState.ESTABLISHED);
+        sessions.record("model", "session", address);
     }
 
     private SelectedRole select() {

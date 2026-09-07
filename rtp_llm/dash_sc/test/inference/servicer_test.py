@@ -29,13 +29,11 @@ from rtp_llm.dash_sc.access_log import DASH_SC_GRPC_ACCESS_LOGGER_NAME
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord
 from rtp_llm.dash_sc.codec import (
     DASH_ERROR_ABORT,
-    DASH_ERROR_ADMISSION_OVERLOADED,
     DASH_ERROR_AUTO_TPM_PREEMPTED,
     DASH_ERROR_BAD_REQUEST,
     DASH_ERROR_CAPACITY,
     DASH_ERROR_INTERNAL,
     DASH_ERROR_INVALID_OUTPUT,
-    DASH_ERROR_RESOURCE_EXHAUSTED,
     DASH_ERROR_TIMEOUT,
     DASH_ERROR_TOO_LONG,
     DASH_ERROR_UNSUPPORTED,
@@ -57,6 +55,9 @@ from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.metrics import AccMetrics
 from rtp_llm.ops import RoleType
 from rtp_llm.server.master_client import MasterClient
+from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
+    SESSION_STATE_ESTABLISHED,
+)
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateInput,
@@ -3160,6 +3161,36 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             {"user_id": "u2", "x-dashscope-apikeyid": "ak2"},
         )
 
+    async def test_invocation_metadata_overrides_ds_header_attributes(self) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        context = MagicMock()
+        context.invocation_metadata.return_value = (
+            ("user_id", "metadata-user"),
+            ("x-ds-inference-session-id", "metadata-session"),
+        )
+        request = self._valid_infer_request()
+        request.parameters["ds_header_attributes"].string_param = json.dumps(
+            {
+                "user_id": "body-user",
+                "x-ds-inference-session-id": "body-session",
+                "x-ds-inference-session-state": "established",
+            }
+        )
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([request]), context))
+
+        self.assertIsNotNone(visitor.last_generate_input)
+        self.assertEqual(visitor.last_generate_input.headers["user_id"], "metadata-user")
+        self.assertEqual(
+            visitor.last_generate_input.headers["x-ds-inference-session-id"],
+            "metadata-session",
+        )
+        self.assertEqual(
+            visitor.last_generate_input.headers["x-ds-inference-session-state"],
+            "established",
+        )
+
     async def test_real_mode_uses_ds_header_attributes_for_backend_controls(
         self,
     ) -> None:
@@ -3174,6 +3205,8 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                 "x-ds-request-priority": "10",
                 "user_id": "u1",
                 "x-dashscope-apikeyid": "ak1",
+                "x-ds-inference-session-id": "isess_v1_grpc",
+                "x-ds-inference-session-state": "established",
             }
         )
         request.parameters["enable_thinking"].bool_param = False
@@ -3191,8 +3224,17 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(generate_config.traffic_reject_priority, 10)
         self.assertEqual(
             visitor.last_generate_input.headers,
-            {"user_id": "u1", "x-dashscope-apikeyid": "ak1"},
+            {
+                "user_id": "u1",
+                "x-dashscope-apikeyid": "ak1",
+                "x-ds-inference-session-id": "isess_v1_grpc",
+                "x-ds-inference-session-state": "established",
+            },
         )
+        hint = MasterClient._extract_session_routing_hint(visitor.last_generate_input)
+        self.assertIsNotNone(hint)
+        self.assertEqual(hint.session_id, "isess_v1_grpc")
+        self.assertEqual(hint.state, SESSION_STATE_ESTABLISHED)
         # qos_priority must NOT be set when x-dashscope-inner-qos-level
         # is absent from the request.
         self.assertIsNone(generate_config.qos_priority)

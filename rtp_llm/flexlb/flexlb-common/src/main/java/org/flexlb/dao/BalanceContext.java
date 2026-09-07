@@ -95,6 +95,8 @@ public class BalanceContext {
     /** Victims preempted to place this request; 0 for normal placement. */
     private int victimCount;
 
+    private String sessionAffinityReason;
+
     //===================== Method ===================//
 
     public long getRequestId() {

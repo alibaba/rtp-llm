@@ -8,6 +8,7 @@ import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.DeliveryClaimKind;
 import org.flexlb.balance.scheduler.RequestState;
+import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
@@ -15,7 +16,9 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
@@ -26,9 +29,11 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.function.BiConsumer;
@@ -59,6 +64,7 @@ class FlexlbServiceImplTest {
     private BatchSchedulerReporter batchSchedulerReporter;
     private ServerScheduleLatencyRecorder serverLatencyRecorder;
     private ActiveRequestCounter.RequestToken requestToken;
+    private SessionPlacementStore sessionPlacementStore;
     private FlexlbServiceImpl service;
     private ch.qos.logback.classic.Logger pvLogger;
     private ListAppender<ILoggingEvent> pvAppender;
@@ -72,9 +78,14 @@ class FlexlbServiceImplTest {
         grpcForwarder = mock(FlexlbGrpcForwarder.class);
         batchSchedulerReporter = mock(BatchSchedulerReporter.class);
         serverLatencyRecorder = mock(ServerScheduleLatencyRecorder.class);
+        sessionPlacementStore = mock(SessionPlacementStore.class);
 
         configService = mock(ConfigService.class);
         FlexlbConfig flexlbConfig = new FlexlbConfig();
+        var sessionAffinity = new org.flexlb.config.RoutingConfig.SessionAffinityConfig();
+        sessionAffinity.setTtlMs(1_800_000L);
+        sessionAffinity.setMaxExtraTtftMs(40L);
+        flexlbConfig.getRouter().getRoles().getPrefill().setSessionAffinity(sessionAffinity);
         when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
 
         requestToken = mock(ActiveRequestCounter.RequestToken.class);
@@ -89,7 +100,8 @@ class FlexlbServiceImplTest {
                 configService,
                 batchSchedulerReporter,
                 serverLatencyRecorder,
-                mock(RequestSchedulerReporter.class)
+                mock(RequestSchedulerReporter.class),
+                sessionPlacementStore
         );
 
         pvLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger");
@@ -289,7 +301,67 @@ class FlexlbServiceImplTest {
         FlexlbScheduleProtocol.FlexlbScheduleResponsePB resp = captor.getValue();
         assertTrue(resp.getSuccess());
         assertTrue(resp.getEnqueuedByMaster());
+        verifyNoInteractions(sessionPlacementStore);
         assertTrue(pvAppender.list.isEmpty());
+    }
+
+    @Test
+    void forwardedEstablishedSessionDoesNotCreateFollowerPlacementState() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        FlexlbScheduleProtocol.FlexlbScheduleResponsePB masterResponse =
+                FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                        .setSuccess(true)
+                        .setCode(200)
+                        .build();
+        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(
+                CompletableFuture.completedFuture(
+                        FlexlbGrpcForwarder.MasterForwardResult.forwarded(
+                                masterResponse, "10.0.0.2:7001")));
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(100_008L)
+                        .setModel("kimi-k3")
+                        .setSessionRoutingHint(FlexlbScheduleProtocol.SessionRoutingHintPB
+                                .newBuilder()
+                                .setSchemaVersion(1)
+                                .setSessionId("isess_v1_example")
+                                .setState(FlexlbScheduleProtocol.SessionStatePB
+                                        .SESSION_STATE_ESTABLISHED))
+                        .build();
+
+        service.schedule(request, mock(StreamObserver.class));
+
+        verify(grpcForwarder).forwardScheduleToMaster(request);
+        verifyNoInteractions(sessionPlacementStore);
+        verify(routeService, never()).route(any());
+    }
+
+    @Test
+    void forwardedNewSessionDoesNotInvalidateFollowerPlacement() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(
+                CompletableFuture.completedFuture(
+                        FlexlbGrpcForwarder.MasterForwardResult.forwarded(
+                                FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                                        .setSuccess(true).setCode(200).build(),
+                                "10.0.0.2:7001")));
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(100_010L)
+                        .setModel("kimi-k3")
+                        .setSessionRoutingHint(FlexlbScheduleProtocol.SessionRoutingHintPB
+                                .newBuilder().setSchemaVersion(1)
+                                .setSessionId("isess_v1_example")
+                                .setState(FlexlbScheduleProtocol.SessionStatePB.SESSION_STATE_NEW))
+                        .build();
+
+        service.schedule(request, mock(StreamObserver.class));
+
+        verify(grpcForwarder).forwardScheduleToMaster(request);
+        verifyNoInteractions(sessionPlacementStore);
+        verify(routeService, never()).route(any());
     }
 
     @Test
@@ -460,6 +532,43 @@ class FlexlbServiceImplTest {
     }
 
     @Test
+    void masterNotFoundRoutesLocallyAndRecordsSessionPlacement() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
+        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(
+                CompletableFuture.completedFuture(
+                        FlexlbGrpcForwarder.MasterForwardResult.noMaster()));
+        ArgumentCaptor<BalanceContext> contextCaptor =
+                ArgumentCaptor.forClass(BalanceContext.class);
+        Response localResponse = new Response();
+        localResponse.setSuccess(true);
+        localResponse.setCode(200);
+        ServerStatus prefill = new ServerStatus();
+        prefill.setRole(RoleType.PREFILL);
+        prefill.setServerIp("10.0.0.2");
+        prefill.setHttpPort(8080);
+        localResponse.setServerStatus(List.of(prefill));
+        when(routeService.route(contextCaptor.capture()))
+                .thenReturn(CompletableFuture.completedFuture(localResponse));
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(100_010L)
+                        .setModel("kimi-k3")
+                        .setSessionRoutingHint(FlexlbScheduleProtocol.SessionRoutingHintPB
+                                .newBuilder()
+                                .setSchemaVersion(1)
+                                .setSessionId("isess_v1_example")
+                                .setState(FlexlbScheduleProtocol.SessionStatePB
+                                        .SESSION_STATE_ESTABLISHED))
+                        .build();
+
+        service.schedule(request, mock(StreamObserver.class));
+
+        verify(sessionPlacementStore).record(
+                "kimi-k3", "isess_v1_example", "10.0.0.2:8080");
+    }
+
+    @Test
     void testSchedule_forwardFailureIsTerminalAndNeverRoutesLocally() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
         when(lbStatusConsistencyService.isMaster()).thenReturn(false);
@@ -621,6 +730,323 @@ class FlexlbServiceImplTest {
     }
 
     @Test
+    void testSchedule_buildContextPreservesSessionRoutingHint() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        ArgumentCaptor<BalanceContext> ctxCaptor = ArgumentCaptor.forClass(BalanceContext.class);
+        when(routeService.route(ctxCaptor.capture()))
+                .thenReturn(CompletableFuture.completedFuture(response));
+
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(100_001L)
+                        .setModel("kimi-k3")
+                        .setSessionRoutingHint(FlexlbScheduleProtocol.SessionRoutingHintPB
+                                .newBuilder()
+                                .setSchemaVersion(1)
+                                .setSessionId("isess_v1_example")
+                                .setState(FlexlbScheduleProtocol.SessionStatePB
+                                        .SESSION_STATE_ESTABLISHED))
+                        .build();
+
+        service.schedule(request, mock(StreamObserver.class));
+
+        Request captured = ctxCaptor.getValue().getRequest();
+        assertEquals(1, captured.getSessionSchemaVersion());
+        assertEquals("isess_v1_example", captured.getInferenceSessionId());
+        assertEquals(Request.SessionState.ESTABLISHED, captured.getInferenceSessionState());
+    }
+
+    @Test
+    void newSessionInvalidatesPlacementBeforeRouting() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        ArgumentCaptor<BalanceContext> contextCaptor =
+                ArgumentCaptor.forClass(BalanceContext.class);
+        Response response = new Response();
+        response.setSuccess(false);
+        when(routeService.route(contextCaptor.capture()))
+                .thenReturn(CompletableFuture.completedFuture(response));
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(100_007L)
+                        .setModel("kimi-k3")
+                        .setSessionRoutingHint(FlexlbScheduleProtocol.SessionRoutingHintPB
+                                .newBuilder()
+                                .setSchemaVersion(1)
+                                .setSessionId("isess_v1_example")
+                                .setState(FlexlbScheduleProtocol.SessionStatePB.SESSION_STATE_NEW))
+                        .build();
+
+        service.schedule(request, mock(StreamObserver.class));
+
+        InOrder order = inOrder(sessionPlacementStore, routeService);
+        order.verify(sessionPlacementStore).invalidate("kimi-k3", "isess_v1_example");
+        order.verify(routeService).route(any(BalanceContext.class));
+    }
+
+    @Test
+    void sessionPlacementInvalidationFailureFallsBackToNormalRouting() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        doThrow(new IllegalStateException("store unavailable"))
+                .when(sessionPlacementStore)
+                .invalidate("kimi-k3", "isess_v1_example");
+        ArgumentCaptor<BalanceContext> contextCaptor =
+                ArgumentCaptor.forClass(BalanceContext.class);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        when(routeService.route(contextCaptor.capture()))
+                .thenReturn(CompletableFuture.completedFuture(response));
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
+                mock(StreamObserver.class);
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(100_009L)
+                        .setModel("kimi-k3")
+                        .setSessionRoutingHint(FlexlbScheduleProtocol.SessionRoutingHintPB
+                                .newBuilder()
+                                .setSchemaVersion(1)
+                                .setSessionId("isess_v1_example")
+                                .setState(FlexlbScheduleProtocol.SessionStatePB
+                                .SESSION_STATE_NEW))
+                        .build();
+
+        service.schedule(request, observer);
+
+        verify(routeService).route(any(BalanceContext.class));
+        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseCaptor =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(responseCaptor.capture());
+        verify(observer).onCompleted();
+        verify(observer, never()).onError(any());
+        assertTrue(responseCaptor.getValue().getSuccess());
+        assertEquals(Request.SessionState.NEW,
+                contextCaptor.getValue().getRequest().getInferenceSessionState());
+    }
+
+    @Test
+    void testSchedule_missingSessionHintKeepsAffinityDisabled() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        ArgumentCaptor<BalanceContext> ctxCaptor = ArgumentCaptor.forClass(BalanceContext.class);
+        when(routeService.route(ctxCaptor.capture()))
+                .thenReturn(CompletableFuture.completedFuture(response));
+
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(100_002L)
+                .build(), mock(StreamObserver.class));
+
+        Request captured = ctxCaptor.getValue().getRequest();
+        assertEquals(0, captured.getSessionSchemaVersion());
+        assertEquals("", captured.getInferenceSessionId());
+        assertEquals(Request.SessionState.UNSPECIFIED, captured.getInferenceSessionState());
+    }
+
+    @Test
+    void successfulLocalDeliveryRecordsPrefillSessionPlacement() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        ServerStatus prefill = new ServerStatus();
+        prefill.setRole(RoleType.PREFILL);
+        prefill.setServerIp("10.0.0.2");
+        prefill.setHttpPort(8080);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        response.setServerStatus(List.of(prefill));
+        when(routeService.route(any(BalanceContext.class)))
+                .thenAnswer(invocation -> {
+                    BalanceContext context = invocation.getArgument(0);
+                    context.setConfig(configService.loadBalanceConfig());
+                    context.setSessionAffinityReason("SESSION_AFFINITY");
+                    return CompletableFuture.completedFuture(response);
+                });
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(100_003L)
+                        .setModel("kimi-k3")
+                        .setSessionRoutingHint(FlexlbScheduleProtocol.SessionRoutingHintPB
+                                .newBuilder()
+                                .setSchemaVersion(1)
+                                .setSessionId("isess_v1_example")
+                                .setState(FlexlbScheduleProtocol.SessionStatePB.SESSION_STATE_NEW))
+                        .build();
+
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
+                mock(StreamObserver.class);
+        service.schedule(request, observer);
+
+        verify(sessionPlacementStore).record(
+                "kimi-k3", "isess_v1_example", "10.0.0.2:8080");
+        InOrder publicationOrder = inOrder(sessionPlacementStore, observer);
+        publicationOrder.verify(sessionPlacementStore).record(
+                "kimi-k3", "isess_v1_example", "10.0.0.2:8080");
+        publicationOrder.verify(observer).onNext(any());
+        assertPvContains("\"sessionAffinityReason\":\"SESSION_AFFINITY\"");
+    }
+
+    @Test
+    void sessionPlacementFailureDoesNotFailSuccessfulScheduleResponse() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        ServerStatus prefill = new ServerStatus();
+        prefill.setRole(RoleType.PREFILL);
+        prefill.setServerIp("10.0.0.2");
+        prefill.setHttpPort(8080);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        response.setServerStatus(List.of(prefill));
+        when(routeService.route(any(BalanceContext.class)))
+                .thenAnswer(invocation -> {
+                    BalanceContext context = invocation.getArgument(0);
+                    context.setConfig(configService.loadBalanceConfig());
+                    return CompletableFuture.completedFuture(response);
+                });
+        doThrow(new IllegalStateException("placement unavailable"))
+                .when(sessionPlacementStore)
+                .record("kimi-k3", "isess_v1_example", "10.0.0.2:8080");
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(100_005L)
+                        .setModel("kimi-k3")
+                        .setSessionRoutingHint(FlexlbScheduleProtocol.SessionRoutingHintPB
+                                .newBuilder()
+                                .setSchemaVersion(1)
+                                .setSessionId("isess_v1_example")
+                                .setState(FlexlbScheduleProtocol.SessionStatePB
+                                        .SESSION_STATE_ESTABLISHED))
+                        .build();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
+                mock(StreamObserver.class);
+
+        service.schedule(request, observer);
+
+        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseCaptor =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(responseCaptor.capture());
+        verify(observer).onCompleted();
+        verify(observer, never()).onError(any());
+        assertTrue(responseCaptor.getValue().getSuccess());
+    }
+
+    @Test
+    void unsuccessfulScheduleDoesNotRecordSessionPlacement() {
+        assertSessionPlacementNotRecorded(false, configuredAffinity(), 1,
+                FlexlbScheduleProtocol.SessionStatePB.SESSION_STATE_ESTABLISHED,
+                RoleType.PREFILL);
+    }
+
+    @Test
+    void disabledSessionAffinityDoesNotRecordSessionPlacement() {
+        FlexlbConfig config = configuredAffinity();
+        config.getRouter().getRoles().getPrefill().setSessionAffinity(null);
+        assertSessionPlacementNotRecorded(true, config, 1,
+                FlexlbScheduleProtocol.SessionStatePB.SESSION_STATE_ESTABLISHED,
+                RoleType.PREFILL);
+    }
+
+    @Test
+    void unsupportedSessionSchemaDoesNotRecordSessionPlacement() {
+        assertSessionPlacementNotRecorded(true, configuredAffinity(), 2,
+                FlexlbScheduleProtocol.SessionStatePB.SESSION_STATE_ESTABLISHED,
+                RoleType.PREFILL);
+    }
+
+    @Test
+    void unspecifiedSessionStateDoesNotRecordSessionPlacement() {
+        assertSessionPlacementNotRecorded(true, configuredAffinity(), 1,
+                FlexlbScheduleProtocol.SessionStatePB.SESSION_STATE_UNSPECIFIED,
+                RoleType.PREFILL);
+    }
+
+    @Test
+    void decodeOnlyScheduleDoesNotRecordSessionPlacement() {
+        assertSessionPlacementNotRecorded(true, configuredAffinity(), 1,
+                FlexlbScheduleProtocol.SessionStatePB.SESSION_STATE_ESTABLISHED,
+                RoleType.DECODE);
+    }
+
+    @Test
+    void responseObserverFailureDoesNotSkipSessionPlacement() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        ServerStatus prefill = new ServerStatus();
+        prefill.setRole(RoleType.PREFILL);
+        prefill.setServerIp("10.0.0.2");
+        prefill.setHttpPort(8080);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        response.setServerStatus(List.of(prefill));
+        when(routeService.route(any(BalanceContext.class)))
+                .thenAnswer(invocation -> {
+                    BalanceContext context = invocation.getArgument(0);
+                    context.setConfig(configService.loadBalanceConfig());
+                    return CompletableFuture.completedFuture(response);
+                });
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
+                mock(StreamObserver.class);
+        doThrow(new IllegalStateException("client closed")).when(observer).onNext(any());
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(100_006L)
+                        .setModel("kimi-k3")
+                        .setSessionRoutingHint(FlexlbScheduleProtocol.SessionRoutingHintPB
+                                .newBuilder()
+                                .setSchemaVersion(1)
+                                .setSessionId("isess_v1_example")
+                                .setState(FlexlbScheduleProtocol.SessionStatePB
+                                        .SESSION_STATE_ESTABLISHED))
+                        .build();
+
+        service.schedule(request, observer);
+
+        verify(sessionPlacementStore).record(
+                "kimi-k3", "isess_v1_example", "10.0.0.2:8080");
+        verify(routeService).cancelRequest(
+                100_006L, 0L, CancelReason.CLIENT_CANCELLED);
+        verify(sessionPlacementStore, never()).invalidate(any(), any());
+        verify(requestToken, times(1)).close();
+    }
+
+    @Test
+    void successfulLocalDeliveryRecordsPdfusionSessionPlacement() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        ServerStatus pdfusion = new ServerStatus();
+        pdfusion.setRole(RoleType.PDFUSION);
+        pdfusion.setServerIp("10.0.0.3");
+        pdfusion.setHttpPort(8081);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        response.setServerStatus(List.of(pdfusion));
+        when(routeService.route(any(BalanceContext.class)))
+                .thenAnswer(invocation -> {
+                    BalanceContext context = invocation.getArgument(0);
+                    context.setConfig(configService.loadBalanceConfig());
+                    return CompletableFuture.completedFuture(response);
+                });
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(100_004L)
+                        .setModel("kimi-k3")
+                        .setSessionRoutingHint(FlexlbScheduleProtocol.SessionRoutingHintPB
+                                .newBuilder()
+                                .setSchemaVersion(1)
+                                .setSessionId("isess_v1_pdfusion")
+                                .setState(FlexlbScheduleProtocol.SessionStatePB
+                                        .SESSION_STATE_ESTABLISHED))
+                        .build();
+
+        service.schedule(request, mock(StreamObserver.class));
+
+        verify(sessionPlacementStore).record(
+                "kimi-k3", "isess_v1_pdfusion", "10.0.0.3:8081");
+    }
+
+    @Test
     void queueTimeoutComesFromFlexlbConfigAndOverridesCallerTimeout() {
         FlexlbConfig queueConfig = ConfigService.parse("""
                 {
@@ -719,6 +1145,52 @@ class FlexlbServiceImplTest {
         assertEquals(1, pvAppender.list.size());
         assertTrue(pvAppender.list.get(0).getFormattedMessage().contains(expected),
                 pvAppender.list.get(0).getFormattedMessage());
+    }
+
+    private FlexlbConfig configuredAffinity() {
+        FlexlbConfig config = new FlexlbConfig();
+        var affinity = new org.flexlb.config.RoutingConfig.SessionAffinityConfig();
+        affinity.setTtlMs(1_800_000L);
+        affinity.setMaxExtraTtftMs(40L);
+        config.getRouter().getRoles().getPrefill().setSessionAffinity(affinity);
+        return config;
+    }
+
+    private void assertSessionPlacementNotRecorded(
+            boolean success,
+            FlexlbConfig config,
+            int schemaVersion,
+            FlexlbScheduleProtocol.SessionStatePB state,
+            RoleType role) {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        ServerStatus status = new ServerStatus();
+        status.setRole(role);
+        status.setServerIp("10.0.0.2");
+        status.setHttpPort(8080);
+        Response response = new Response();
+        response.setSuccess(success);
+        response.setCode(success ? 200 : 500);
+        response.setServerStatus(List.of(status));
+        when(routeService.route(any(BalanceContext.class)))
+                .thenAnswer(invocation -> {
+                    BalanceContext context = invocation.getArgument(0);
+                    context.setConfig(config);
+                    return CompletableFuture.completedFuture(response);
+                });
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
+                FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                        .setRequestId(100_020L + schemaVersion + role.ordinal())
+                        .setModel("kimi-k3")
+                        .setSessionRoutingHint(FlexlbScheduleProtocol.SessionRoutingHintPB
+                                .newBuilder()
+                                .setSchemaVersion(schemaVersion)
+                                .setSessionId("isess_v1_example")
+                                .setState(state))
+                        .build();
+
+        service.schedule(request, mock(StreamObserver.class));
+
+        verify(sessionPlacementStore, never()).record(any(), any(), any());
     }
 
 }

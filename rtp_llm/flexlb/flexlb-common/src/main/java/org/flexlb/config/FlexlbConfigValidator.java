@@ -233,6 +233,16 @@ final class FlexlbConfigValidator {
                     RoutingConfig.PERCENTAGE_SCALE,
                     "router.roles.prefill.cacheAffinity.minPrefixHitPercent");
         }
+        var sessionAffinity = prefill.getSessionAffinity();
+        if (sessionAffinity != null) {
+            range(sessionAffinity.getTtlMs(), 1,
+                    RoutingConfig.SessionAffinityConfig.MAX_TTL_MS,
+                    "router.roles.prefill.sessionAffinity.ttlMs");
+            nonNegative(sessionAffinity.getMaxExtraTtftMs(),
+                    "router.roles.prefill.sessionAffinity.maxExtraTtftMs");
+            positive(sessionAffinity.getMaxEntries(),
+                    "router.roles.prefill.sessionAffinity.maxEntries");
+        }
 
         require(routing.getRoles().getDecode() != null,
                 "router.roles.decode", "is required");

@@ -5,6 +5,7 @@ import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.RequestState;
+import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.consistency.MasterElectService;
@@ -54,6 +55,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private final BatchSchedulerReporter batchSchedulerReporter;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
     private final RequestSchedulerReporter requestSchedulerReporter;
+    private final SessionPlacementStore sessionPlacementStore;
 
     @Autowired
     public FlexlbServiceImpl(RouteService routeService,
@@ -64,11 +66,12 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                              ConfigService configService,
                              BatchSchedulerReporter batchSchedulerReporter,
                              ServerScheduleLatencyRecorder serverLatencyRecorder,
-                             RequestSchedulerReporter requestSchedulerReporter) {
+                             RequestSchedulerReporter requestSchedulerReporter,
+                             SessionPlacementStore sessionPlacementStore) {
         this(routeService, (MasterElectService) lbStatusConsistencyService,
                 engineHealthReporter, activeRequestCounter, grpcForwarder,
                 configService, batchSchedulerReporter, serverLatencyRecorder,
-                requestSchedulerReporter);
+                requestSchedulerReporter, sessionPlacementStore);
     }
 
     FlexlbServiceImpl(RouteService routeService,
@@ -79,7 +82,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                       ConfigService configService,
                       BatchSchedulerReporter batchSchedulerReporter,
                       ServerScheduleLatencyRecorder serverLatencyRecorder,
-                      RequestSchedulerReporter requestSchedulerReporter) {
+                      RequestSchedulerReporter requestSchedulerReporter,
+                      SessionPlacementStore sessionPlacementStore) {
         this.routeService = routeService;
         this.masterElectService = masterElectService;
         this.engineHealthReporter = engineHealthReporter;
@@ -89,6 +93,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         this.batchSchedulerReporter = batchSchedulerReporter;
         this.serverLatencyRecorder = serverLatencyRecorder;
         this.requestSchedulerReporter = requestSchedulerReporter;
+        this.sessionPlacementStore = sessionPlacementStore;
     }
 
     @Override
@@ -262,6 +267,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             ScheduleOrigin origin) {
         CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeFuture;
         try {
+            invalidateNewSessionPlacementSafely(context);
             // route() registers the scheduler owner synchronously. Install the
             // cancellation listener only after that owner exists, so an
             // already-cancelled Context cannot race ahead of registration.
@@ -308,6 +314,21 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     completionClaimed,
                     removeCancellationListener);
         });
+    }
+
+    private void invalidateNewSessionPlacementSafely(BalanceContext context) {
+        try {
+            Request request = context.getRequest();
+            if (context.getConfig().getRouter().getRoles().getPrefill()
+                    .getSessionAffinity() != null
+                    && request.getSessionSchemaVersion() == Request.SESSION_SCHEMA_VERSION
+                    && request.getInferenceSessionState() == Request.SessionState.NEW) {
+                sessionPlacementStore.invalidate(
+                        request.getModel(), request.getInferenceSessionId());
+            }
+        } catch (RuntimeException exception) {
+            Logger.warn("Failed to invalidate session placement", exception);
+        }
     }
 
     private void completeOnce(
@@ -627,6 +648,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             }
         }
         try {
+            // Publish the scheduling hint before the caller can submit its next request.
+            recordSessionPlacementSafely(ctx, response, origin);
             observer.onNext(response);
             observer.onCompleted();
         } catch (RuntimeException deliveryError) {
@@ -662,6 +685,44 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         return origin == ScheduleOrigin.LOCAL_MASTER
                 || origin == ScheduleOrigin.LOCAL_FALLBACK
                 || origin == ScheduleOrigin.LOCAL_STANDALONE;
+    }
+
+    private void recordSessionPlacementSafely(
+            BalanceContext ctx,
+            FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
+            ScheduleOrigin origin) {
+        try {
+            recordSessionPlacement(ctx, response, origin);
+        } catch (RuntimeException exception) {
+            Logger.warn("Failed to record session placement", exception);
+        }
+    }
+
+    private void recordSessionPlacement(
+            BalanceContext ctx,
+            FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
+            ScheduleOrigin origin) {
+        if (ctx == null || !response.getSuccess()
+                || !ownsLocalRoute(origin)
+                || ctx.getConfig() == null
+                || ctx.getConfig().getRouter().getRoles().getPrefill().getSessionAffinity() == null) {
+            return;
+        }
+        Request request = ctx.getRequest();
+        if (request.getSessionSchemaVersion() != Request.SESSION_SCHEMA_VERSION
+                || request.getInferenceSessionId() == null
+                || request.getInferenceSessionId().isBlank()
+                || request.getInferenceSessionState() == Request.SessionState.UNSPECIFIED) {
+            return;
+        }
+        response.getServerStatusList().stream()
+                .filter(status -> RoleType.PREFILL.getCode().equals(status.getRole())
+                        || RoleType.PDFUSION.getCode().equals(status.getRole()))
+                .findFirst()
+                .ifPresent(status -> sessionPlacementStore.record(
+                        request.getModel(),
+                        request.getInferenceSessionId(),
+                        status.getServerIp() + ":" + status.getHttpPort()));
     }
 
     /** Write one PV record on the node that made the scheduling decision. */
@@ -802,6 +863,16 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setModel(pb.getModel());
         request.setApiKey(pb.getApiKey());
         request.setCacheKeyBlockSize(pb.getCacheKeyBlockSize());
+        if (pb.hasSessionRoutingHint()) {
+            var hint = pb.getSessionRoutingHint();
+            request.setSessionSchemaVersion(hint.getSchemaVersion());
+            request.setInferenceSessionId(hint.getSessionId());
+            request.setInferenceSessionState(switch (hint.getState()) {
+                case SESSION_STATE_NEW -> Request.SessionState.NEW;
+                case SESSION_STATE_ESTABLISHED -> Request.SessionState.ESTABLISHED;
+                default -> Request.SessionState.UNSPECIFIED;
+            });
+        }
 
         var config = configService.loadBalanceConfig();
         // QUEUE owns one absolute scheduling deadline, measured from FlexLB
@@ -819,6 +890,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 requestExpiresAtMs,
                 defaultPriority);
         request.setPriority(schedulingMetadata.priority());
+        ctx.setConfig(config);
         ctx.setRequest(request);
         ctx.setSchedulingMetadata(schedulingMetadata);
         requestSchedulerReporter.reportRequest(schedulingMetadata.priority());

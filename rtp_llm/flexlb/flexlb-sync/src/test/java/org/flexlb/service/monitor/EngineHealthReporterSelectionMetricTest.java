@@ -1,6 +1,7 @@
 package org.flexlb.service.monitor;
 
 import io.netty.channel.EventLoopGroup;
+import org.flexlb.balance.session.SessionPlacementStore;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
@@ -18,6 +19,8 @@ import reactor.netty.resources.LoopResources;
 
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_ESTIMATED_TTFT_MS;
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_EXECUTION_TIME_MS;
+import static org.flexlb.constant.MetricConstant.SESSION_AFFINITY_DECISION;
+import static org.flexlb.constant.MetricConstant.SESSION_PLACEMENT_SIZE;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -32,6 +35,8 @@ class EngineHealthReporterSelectionMetricTest {
     private EngineGrpcClient engineGrpcClient;
     @Mock
     private LoopResources loopResources;
+    @Mock
+    private SessionPlacementStore sessionPlacementStore;
     @Mock
     private EventLoopGroup serverWorker;
     @Mock
@@ -50,7 +55,7 @@ class EngineHealthReporterSelectionMetricTest {
         when(engineGrpcClient.getEventLoopGroup()).thenReturn(grpcEventLoop);
         reporter = new EngineHealthReporter(
                 monitor, cacheMetricsReporter, engineGrpcClient, loopResources,
-                workerDirectory);
+                workerDirectory, sessionPlacementStore);
     }
 
     @Test
@@ -61,6 +66,8 @@ class EngineHealthReporterSelectionMetricTest {
                 FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         verify(monitor).register(PREFILL_SELECTED_EXECUTION_TIME_MS,
                 FlexMetricType.TIMER, FlexPriorityType.PRECISE);
+        verify(monitor).register(SESSION_AFFINITY_DECISION, FlexMetricType.QPS);
+        verify(monitor).register(SESSION_PLACEMENT_SIZE, FlexMetricType.GAUGE);
     }
 
     @Test
@@ -74,5 +81,22 @@ class EngineHealthReporterSelectionMetricTest {
                 "delivery_mode", "NON_BATCH");
         verify(monitor).report(PREFILL_SELECTED_ESTIMATED_TTFT_MS, tags, 1_250.0);
         verify(monitor).report(PREFILL_SELECTED_EXECUTION_TIME_MS, tags, 400.0);
+    }
+
+    @Test
+    void reportsLowCardinalitySessionAffinityDecisions() {
+        reporter.reportSessionAffinityDecision(RoleType.PREFILL, "NO_PLACEMENT");
+
+        verify(monitor).report(SESSION_AFFINITY_DECISION,
+                FlexMetricTags.of("role", "PREFILL", "reason", "NO_PLACEMENT"), 1.0);
+    }
+
+    @Test
+    void reportsSessionPlacementSize() {
+        when(sessionPlacementStore.estimatedSize()).thenReturn(123L);
+
+        reporter.reportSessionPlacementSize();
+
+        verify(monitor).report(SESSION_PLACEMENT_SIZE, 123.0);
     }
 }
