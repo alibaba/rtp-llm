@@ -14,7 +14,9 @@ contracts are assigned explicitly to existing families, never silently dropped.
   371 selected instances); duplicate FINISHED requires a settled replay baseline. A digest is an audit anchor, not proof of YAML equivalence.
 - `target_manifest.json` assigns all 139 contracts to the 29 planned families and
   records module ownership, candidate source files and counts, pending contract
-  IDs, and static reviews anchored to immutable revisions. `candidate_complete`
+  IDs, and static reviews anchored to named revisions. Explicit `dependencies`
+  record required shared fixes; a review cannot be applied to the original
+  program without those fixes. `candidate_complete`
   only means all assigned IDs have explicit candidate programs; it does not mean
   runtime equivalence, full-profile Java execution or permission to delete them.
   `candidate_scenario_ids` also records temporary pilot names separately from the

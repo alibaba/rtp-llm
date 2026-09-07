@@ -250,7 +250,7 @@
       "replacement_status": "retain_legacy_pending_paired_evidence",
       "static_review": {
         "status": "passed_at_revision",
-        "revision": "bb2d14b4c63bd30d97c133f654fb572a10e30b9c",
+        "revision": "d955a8434b9c1458e1eadb76f90734eda47b1c23",
         "reviewed_contracts": [
           "balance_concurrent_mix",
           "balance_decode_spread",
@@ -1024,19 +1024,19 @@
         "prio_queue_timeout_terminal"
       ],
       "candidate_contracts": [
+        "prio_low_no_starvation",
         "prio_same_level_fifo"
       ],
       "pending_contracts": [
-        "prio_low_no_starvation",
         "prio_normalize",
         "prio_order_basic",
         "prio_queue_timeout_terminal"
       ],
       "candidate_counts": {
         "logical_scenarios": 1,
-        "variants": 1,
-        "instances": 1,
-        "checks": 3
+        "variants": 2,
+        "instances": 2,
+        "checks": 7
       },
       "source_files": [
         "scenarios/priority/priority_queue.yaml"
@@ -1048,18 +1048,31 @@
         "reviewed_contracts": [
           "prio_same_level_fifo"
         ],
-        "unreviewed_candidate_contracts": [],
-        "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
+        "unreviewed_candidate_contracts": [
+          "prio_low_no_starvation"
+        ],
+        "scope": "Reviewed named programs only, conditional on Decode load OR fix d955; not all current variants or real Java execution.",
+        "dependencies": [
+          "d955a8434b9c1458e1eadb76f90734eda47b1c23"
+        ]
       },
       "candidate_scenario_ids": [
         "priority_queue"
+      ],
+      "known_candidate_issues": [
+        {
+          "contract": "prio_low_no_starvation",
+          "revision": "9bb01a6d0c5d45091f3b6c542a9f4450aeb2dd21",
+          "status": "pending_owner_correction",
+          "reason": "Compiled low candidate incorrectly inherits FIFO-case PRIORITY/cap1/wait8/omitted queue timeout and 1P4D; old shared profile uses FIFO/default caps/60000ms queue timeout and 2P4D. Empty variant config_overrides does not clear family overrides."
+        }
       ]
     },
     {
       "id": "priority_preemption",
       "category": "priority",
       "owner": "agent4",
-      "implementation_status": "planned",
+      "implementation_status": "candidate_partial",
       "legacy_case_ids": [
         "atpm_preempt_prefill_queued",
         "atpm_preempt_decode_engine_owned",
@@ -1076,7 +1089,9 @@
         "atpm_preempt_cancel_not_found",
         "atpm_preempt_cancel_tombstoned"
       ],
-      "candidate_contracts": [],
+      "candidate_contracts": [
+        "atpm_same_priority_zero_eviction"
+      ],
       "pending_contracts": [
         "atpm_comparator_frozen_weak",
         "atpm_config_strict_reject",
@@ -1090,21 +1105,33 @@
         "atpm_preempt_prefill_queued",
         "atpm_preempt_prefill_queued_live",
         "atpm_preemption_disabled_zero_eviction",
-        "atpm_same_priority_zero_eviction",
         "atpm_timeout_attribution"
       ],
       "candidate_counts": {
-        "logical_scenarios": 0,
-        "variants": 0,
-        "instances": 0,
-        "checks": 0
+        "logical_scenarios": 1,
+        "variants": 1,
+        "instances": 1,
+        "checks": 6
       },
-      "source_files": [],
+      "source_files": [
+        "scenarios/priority/priority_preemption.yaml"
+      ],
       "replacement_status": "retain_legacy_pending_paired_evidence",
       "static_review": {
-        "status": "pending"
+        "status": "passed_at_revision",
+        "revision": "2a664e150073d7409524252983b92de2d08f3c3d",
+        "reviewed_contracts": [
+          "atpm_same_priority_zero_eviction"
+        ],
+        "unreviewed_candidate_contracts": [],
+        "scope": "Reviewed named programs only, conditional on Decode load OR fix d955; not all current variants or real Java execution.",
+        "dependencies": [
+          "d955a8434b9c1458e1eadb76f90734eda47b1c23"
+        ]
       },
-      "candidate_scenario_ids": []
+      "candidate_scenario_ids": [
+        "priority_preemption"
+      ]
     },
     {
       "id": "batch_ack_and_execution",
