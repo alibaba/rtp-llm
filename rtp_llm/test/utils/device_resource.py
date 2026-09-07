@@ -97,6 +97,12 @@ class DeviceResource:
         self.gpu_locks = ExitStack()
         self.global_lock_file = "/tmp/rtp_llm/smoke/test/gpu_status_lock"
         self.gpu_status_root_path = "/tmp/rtp_llm/smoke/test/gpu_status"
+        # Bound the wait for a GPU group. Unbounded, a test that can never
+        # assemble its group -- e.g. required_gpu_count equal to the node's card
+        # count, where any co-tenant blocks it -- silently consumes the whole
+        # bazel test timeout (7200s in CI) and reports "timed out" with no hint
+        # that it never got a device.
+        self.acquire_timeout = int(os.environ.get("RTP_GPU_ACQUIRE_TIMEOUT", 1800))
 
     def _get_gpu_pids(self, gpu_id: str) -> Optional[List[int]]:
         """PIDs of compute processes on a physical GPU, or None if unknowable.
@@ -217,6 +223,20 @@ class DeviceResource:
         )
         return False
 
+    def _locked_gpu_ids(self) -> List[int]:
+        """Visible GPUs currently held by someone else, for diagnostics only."""
+        held = []
+        for id in self.total_gpus:
+            probe = FileLock(f"{self.gpu_status_root_path}/{id}")
+            try:
+                with probe.acquire(timeout=0):
+                    pass
+            except Timeout:
+                held.append(id)
+            except Exception:
+                pass
+        return held
+
     def _lock_gpus(self):
         candidate_groups = self._candidate_gpu_groups()
         with ExitStack() as stack:
@@ -308,7 +328,12 @@ class DeviceResource:
             return []
 
     def __enter__(self):
-        logging.info(f"waiting for gpu count:[{self.required_gpu_count}]")
+        logging.info(
+            f"waiting for gpu count:[{self.required_gpu_count}] "
+            f"of {len(self.total_gpus)} visible, timeout={self.acquire_timeout}s"
+        )
+        deadline = time.time() + self.acquire_timeout
+        next_report = time.time() + 60
         while True:
             with FileLock(self.global_lock_file):
                 try:
@@ -324,6 +349,23 @@ class DeviceResource:
                         self.gpu_locks.close()
                 except Exception as e:
                     logging.warn(f"{traceback.format_exc()}")
+            now = time.time()
+            if now >= deadline:
+                raise TimeoutError(
+                    f"could not acquire {self.required_gpu_count} of "
+                    f"{len(self.total_gpus)} visible GPUs within "
+                    f"{self.acquire_timeout}s; currently held: "
+                    f"{sorted(self._locked_gpu_ids())}. Waiting longer would just "
+                    f"burn the bazel test timeout and report a timeout with no "
+                    f"cause. Set RTP_GPU_ACQUIRE_TIMEOUT to change the budget."
+                )
+            if now >= next_report:
+                logging.info(
+                    f"still waiting for {self.required_gpu_count} GPUs after "
+                    f"{int(now - (deadline - self.acquire_timeout))}s; "
+                    f"held: {sorted(self._locked_gpu_ids())}"
+                )
+                next_report = now + 60
             time.sleep(1)
         return self
 
