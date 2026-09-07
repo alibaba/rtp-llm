@@ -63,10 +63,15 @@ def _snapshot(ctx, targets, deadline):
 
 
 def _snapshot_validate(params, plan):
-    p = _fields(params, {"targets", "quiet_s"}, {"targets"})
+    p = _fields(params, {"targets", "quiet_s", "exclude"}, {"targets"})
     if not isinstance(p["targets"], list) or not 1 <= len(p["targets"]) <= 32:
         raise ValueError("KV snapshot needs 1..32 explicit targets")
     for name in p["targets"]:
+        _engine(name, plan)
+    p.setdefault("exclude", [])
+    if not isinstance(p["exclude"], list) or len(p["exclude"]) > 31:
+        raise ValueError("snapshot exclusions must be a bounded engine list")
+    for name in p["exclude"]:
         _engine(name, plan)
     p.setdefault("quiet_s", 0)
     if (
@@ -82,6 +87,12 @@ def snapshot(ctx, params, deadline):
     targets = [_target(ctx, value) for value in params["targets"]]
     if len(set(targets)) != len(targets):
         raise ValueError("duplicate resolved KV targets")
+    excluded = [_target(ctx, value) for value in params["exclude"]]
+    if len(set(excluded)) != len(excluded) or not set(excluded) <= set(targets):
+        raise ValueError("snapshot exclusions must be distinct declared targets")
+    targets = [name for name in targets if name not in excluded]
+    if not targets:
+        raise ValueError("KV snapshot cannot exclude every target")
     samples, previous, changed = [], None, ctx.clock()
     try:
         while True:
@@ -491,7 +502,216 @@ def membership(ctx, params, deadline):
     )
 
 
+def _holders_validate(params, plan):
+    p = _fields(
+        params,
+        {"snapshot", "keys", "holders", "match"},
+        {"snapshot", "keys", "holders", "match"},
+    )
+    plan.reference(p["snapshot"], "kv_snapshot")
+    _keys(p["keys"])
+    if not isinstance(p["holders"], list) or len(p["holders"]) > 32:
+        raise ValueError("holders must be a bounded explicit engine list")
+    for value in p["holders"]:
+        _engine(value, plan)
+    if p["match"] not in ("full_family", "any_key"):
+        raise ValueError("holder match must be full_family or any_key")
+    return p
+
+
+def holders(ctx, params, deadline):
+    deadline.check()
+    data = ctx.resource(params["snapshot"], "kv_snapshot")
+    expected = [_target(ctx, value) for value in params["holders"]]
+    if len(set(expected)) != len(expected) or not set(expected) <= set(data["engines"]):
+        raise ValueError("holder expectation must name distinct observed engines")
+    wanted = set(params["keys"])
+    actual = sorted(
+        name
+        for name, row in data["engines"].items()
+        if (
+            wanted <= set(row["cache_key_set"])
+            if params["match"] == "full_family"
+            else bool(wanted & set(row["cache_key_set"]))
+        )
+    )
+    evidence = dict(
+        complete=True,
+        sample_count=len(data["engines"]),
+        min_samples=len(data["engines"]),
+        snapshot=data,
+        keys=params["keys"],
+        match=params["match"],
+    )
+    return StageOutput(
+        {"matched": actual == sorted(expected)},
+        [
+            CheckResult(
+                "holder_set",
+                "PASS" if actual == sorted(expected) else "FAIL",
+                actual=actual,
+                expected=sorted(expected),
+                evidence=evidence,
+            )
+        ],
+    )
+
+
+def _union_validate(params, plan):
+    p = _fields(
+        params,
+        {"requests", "holders", "min_samples", "min_used"},
+        {"requests", "holders", "min_samples", "min_used"},
+    )
+    if not isinstance(p["requests"], list) or not 1 <= len(p["requests"]) <= 100:
+        raise ValueError("holder union requires bounded request cohorts")
+    for value in p["requests"]:
+        plan.reference(value, "requests")
+    if not isinstance(p["holders"], list) or not 1 <= len(p["holders"]) <= 32:
+        raise ValueError("holder union requires explicit holders")
+    for value in p["holders"]:
+        _engine(value, plan)
+    if (
+        type(p["min_samples"]) is not int
+        or p["min_samples"] < 1
+        or type(p["min_used"]) is not int
+        or not 1 <= p["min_used"] <= len(p["holders"])
+    ):
+        raise ValueError("invalid holder union sample or worker floor")
+    return p
+
+
+def union(ctx, params, deadline):
+    names = [_target(ctx, value) for value in params["holders"]]
+    if len(set(names)) != len(names):
+        raise ValueError("holder union contains duplicate engine identity")
+    engines = _engines(_http(ctx.ops, "snapshot", deadline), names)
+    rows = [
+        row
+        for ref in params["requests"]
+        for row in ctx.resource(ref, "requests").snapshot_records()
+    ]
+    if (
+        not rows
+        or len({row["wire_request_id"] for row in rows}) != len(rows)
+        or any(
+            row.get("consumer_completion_verified") is not True
+            or not row.get("prefill_addr")
+            for row in rows
+        )
+    ):
+        raise ValueError("holder union lacks distinct terminal landing evidence")
+    addresses = {row["grpc_addr"] for row in engines.values()}
+    used = {row["prefill_addr"] for row in rows}
+    complete = len(rows) >= params["min_samples"] and all(
+        request_success(row) for row in rows
+    )
+    evidence = dict(
+        complete=True,
+        sample_count=len(rows),
+        min_samples=params["min_samples"],
+        records=rows,
+        engines=engines,
+    )
+    checks = [
+        CheckResult(
+            "P2",
+            "PASS" if complete and len(used) >= params["min_used"] else "FAIL",
+            actual=len(used),
+            expected=params["min_used"],
+            evidence=evidence,
+        ),
+        CheckResult(
+            "P6",
+            "PASS" if complete and used <= addresses else "FAIL",
+            actual=sorted(used),
+            expected=sorted(addresses),
+            evidence=evidence,
+        ),
+    ]
+    return StageOutput(
+        {"used": len(used)}, checks, [_artifact(ctx, "kv-holder-union", evidence)]
+    )
+
+
+def _alive_validate(params, plan):
+    p = _fields(params, {"role", "count"}, {"role", "count"})
+    if (
+        p["role"] not in ("PREFILL", "DECODE")
+        or type(p["count"]) is not int
+        or not 0 <= p["count"] <= 32
+    ):
+        raise ValueError("master alive requires a role and bounded exact count")
+    return p
+
+
+def master_alive(ctx, params, deadline):
+    from ...harness import http_post_json
+
+    samples = []
+    try:
+        while True:
+            deadline.check()
+            status, body = http_post_json(
+                f"http://127.0.0.1:{ctx.ops.master_http_port}/rtp_llm/master/info",
+                {},
+                timeout=min(2, deadline.remaining()),
+            )
+            samples.append(dict(sampled_s=ctx.clock(), status=status, body=body))
+            count = (
+                body.get("worker_summary", {}).get(params["role"], {}).get("alive")
+                if isinstance(body, dict)
+                else None
+            )
+            if status != 200 or type(count) is not int or count < 0:
+                raise ValueError("master alive count lacks typed observation")
+            if count == params["count"]:
+                break
+            deadline.sleep(0.5)
+    finally:
+        path = _artifact(ctx, "kv-master-alive", samples)
+    return StageOutput(
+        {"count": count},
+        [
+            CheckResult(
+                "master_alive",
+                "PASS",
+                actual=count,
+                expected=params["count"],
+                evidence=dict(
+                    complete=True,
+                    sample_count=len(samples),
+                    min_samples=1,
+                    samples=samples,
+                ),
+            )
+        ],
+        [path],
+    )
+
+
 HANDLERS = [
+    StageHandler(
+        "kv_holders_check",
+        _holders_validate,
+        holders,
+        {"matched": "boolean"},
+        checks=frozenset({"holder_set"}),
+    ),
+    StageHandler(
+        "kv_union_check",
+        _union_validate,
+        union,
+        {"used": "integer"},
+        checks=frozenset({"P2", "P6"}),
+    ),
+    StageHandler(
+        "kv_master_alive",
+        _alive_validate,
+        master_alive,
+        {"count": "integer"},
+        checks=frozenset({"master_alive"}),
+    ),
     StageHandler(
         "kv_same",
         _distinct_validate,

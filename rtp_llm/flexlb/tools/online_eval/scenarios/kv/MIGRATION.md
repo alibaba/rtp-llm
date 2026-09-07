@@ -3,7 +3,8 @@
 `cache_local_index` now has explicit programs for all three contracts: prefix
 continuity, eviction propagation and per-engine admission isolation. Each has
 BATCH/NON_BATCH programs across all four profiles (six variants, twelve instances).
-The four other KV families remain pending. All three old callables remain retained.
+The global-holder family is also implemented below; affinity, capacity and churn
+remain pending. All old callables remain retained.
 
 | Original operation or assertion | Explicit stage |
 | --- | --- |
@@ -47,3 +48,42 @@ fails before continuations; missing key sets error; a0.6 measured concentration
 passes loose and fails normal/strict. Stale post-eviction concentration fails P1;
 foreign final cache membership fails the separate isolation assertion. Real Java
 paired execution is still needed before replacing the retained callables.
+
+
+## Global holder programs
+
+`cache_global_holders` contains five old contracts as ten explicit delivery
+variants and twenty profile instances. These are candidate implementations;
+paired Java execution remains pending.
+
+| Old contract | Construction and retained predicates |
+| --- | --- |
+| shared_block_both_match | Same shared seed (2000ms, 1.5s, pending6s, drain30s, restore100ms), quiet3.5s within8s; both holders contain the family; twenty serial requests; P1 .65/.75/.85, P2 at least two workers, P6 all land inside the holder union |
+| full_release_no_ghost | Shared seed and quiet; evict both full copies; quiet then no family key on either engine; twenty fires with120ms after every issue including the last; P1 spread |
+| partial_release_redirect | Evict first holder only; quiet; first has no key and second has the entire family; ten serial continuations with P9 .95/.90/.80 |
+| engine_down_cleanup | 3P/2D discovery_file; seed two holders, third has no family key; graceful removal with the original default60000ms drain; exact Master alive2 within30s; five serial continuations with P9; survivor still has all keys |
+| sync_convergence | Two family0 admits, first eviction, family1 admit, second family0 eviction, two family2 admits and first family2 eviction; one final quiet window; family0 has no key, family1 and family2 have exactly their observed full-family holders; family0 twenty-fire P1 plus five serial P9 continuations for each surviving family |
+
+The mixed stream does not insert extra quiet windows between mutations. Holder
+matching distinguishes full-family membership from any-key residue. Dynamic
+engine references come from actual Schedule landing addresses; they do not
+assume which engine wins. The removed worker is explicitly excluded from the
+final survivor snapshot, and the Master alive count has its own observation
+stage; neither is inferred from a removal acknowledgement.
+
+All cohorts require the declared sample count and verified consumer completion,
+including fired waves whose old helper could otherwise hide a drain failure.
+As with local-index programs, absent cache sets, duplicate request IDs and
+unobserved/duplicate expected holder identities are ERROR. Cache eviction has
+an additional immediate visible-effect gate. These are declared evidence
+strengthenings. RPC/caller deadline differences still need paired execution.
+Each YAML instance tears down its owned environment, so the legacy reuse-only
+finally/add_engine restoration is replaced by owned-environment cleanup; no
+shared environment is left with a missing worker or altered performance.
+
+Three additional local tests execute all twenty compiled programs through
+actual handlers with a small cache and transport model. Negative cases cover
+stale routing after acknowledged eviction, foreign landing outside the holder
+union, acknowledged eviction without effect, unavailable cache observations,
+and duplicate/unobserved holder expectations. These model runs are not Java,
+Master cache-index version proof, or permission to remove old callables.

@@ -1,0 +1,4835 @@
+schema_version: 1
+id: cache_global_holders
+description: Shared holder sets, partial and full eviction, graceful holder removal,
+  and interleaved admit/evict routing evidence.
+category: kv
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+legacy_case_ids:
+- kv_g_shared_block_both_match
+- kv_g_full_release_no_ghost
+- kv_g_partial_release_redirect
+- kv_g_engine_down_cleanup
+- kv_g_sync_convergence
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+  decode_cache_blocks: 12
+  perf_preset: default
+execution:
+  timeout_s: 900
+  stage_timeout_s: 30
+  cleanup_timeout_s: 120
+variants:
+- id: shared_batch
+  profiles:
+  - batch-window
+  - single-batch
+  legacy_case_ids:
+  - kv_g_shared_block_both_match
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: balance_snapshot
+    params:
+      role: prefill
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+  - id: perf_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: seed_first
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: deferred
+  - id: first_pending
+    action: balance_pending
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+    timeout_s: 6
+  - id: first_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+      phase: scheduled
+  - id: seed_second
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: second_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_second.output.requests
+    timeout_s: 15
+  - id: second_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_second.output.requests
+  - id: two_holders
+    action: kv_distinct
+    params:
+      first:
+        $ref: stages.first_holder.output.engine
+      second:
+        $ref: stages.second_holder.output.engine
+  - id: first_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+    timeout_s: 30
+  - id: restore_perf
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+  - id: seed_quiet
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    timeout_s: 8
+  - id: shared_holders
+    action: kv_holders_check
+    params:
+      snapshot:
+        $ref: stages.seed_quiet.output.snapshot
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      holders:
+      - $ref: stages.first_holder.output.engine
+      - $ref: stages.second_holder.output.engine
+      match: full_family
+  - id: continuation_0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_0_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_0.output.requests
+    timeout_s: 15
+  - id: continuation_1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_1_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_1.output.requests
+    timeout_s: 15
+  - id: continuation_2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_2_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_2.output.requests
+    timeout_s: 15
+  - id: continuation_3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_3_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_3.output.requests
+    timeout_s: 15
+  - id: continuation_4
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_4_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_4.output.requests
+    timeout_s: 15
+  - id: continuation_5
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_5_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_5.output.requests
+    timeout_s: 15
+  - id: continuation_6
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_6_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_6.output.requests
+    timeout_s: 15
+  - id: continuation_7
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_7_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_7.output.requests
+    timeout_s: 15
+  - id: continuation_8
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_8_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_8.output.requests
+    timeout_s: 15
+  - id: continuation_9
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_9_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_9.output.requests
+    timeout_s: 15
+  - id: continuation_10
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_10_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_10.output.requests
+    timeout_s: 15
+  - id: continuation_11
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_11_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_11.output.requests
+    timeout_s: 15
+  - id: continuation_12
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_12_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_12.output.requests
+    timeout_s: 15
+  - id: continuation_13
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_13_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_13.output.requests
+    timeout_s: 15
+  - id: continuation_14
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_14_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_14.output.requests
+    timeout_s: 15
+  - id: continuation_15
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_15_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_15.output.requests
+    timeout_s: 15
+  - id: continuation_16
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_16_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_16.output.requests
+    timeout_s: 15
+  - id: continuation_17
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_17_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_17.output.requests
+    timeout_s: 15
+  - id: continuation_18
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_18_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_18.output.requests
+    timeout_s: 15
+  - id: continuation_19
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_19_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_19.output.requests
+    timeout_s: 15
+  - id: spread
+    action: kv_spread_check
+    params:
+      requests:
+      - $ref: stages.continuation_0.output.requests
+      - $ref: stages.continuation_1.output.requests
+      - $ref: stages.continuation_2.output.requests
+      - $ref: stages.continuation_3.output.requests
+      - $ref: stages.continuation_4.output.requests
+      - $ref: stages.continuation_5.output.requests
+      - $ref: stages.continuation_6.output.requests
+      - $ref: stages.continuation_7.output.requests
+      - $ref: stages.continuation_8.output.requests
+      - $ref: stages.continuation_9.output.requests
+      - $ref: stages.continuation_10.output.requests
+      - $ref: stages.continuation_11.output.requests
+      - $ref: stages.continuation_12.output.requests
+      - $ref: stages.continuation_13.output.requests
+      - $ref: stages.continuation_14.output.requests
+      - $ref: stages.continuation_15.output.requests
+      - $ref: stages.continuation_16.output.requests
+      - $ref: stages.continuation_17.output.requests
+      - $ref: stages.continuation_18.output.requests
+      - $ref: stages.continuation_19.output.requests
+      min_samples: 20
+      bands:
+        strict: 0.65
+        normal: 0.75
+        loose: 0.85
+  - id: holder_union
+    action: kv_union_check
+    params:
+      requests:
+      - $ref: stages.continuation_0.output.requests
+      - $ref: stages.continuation_1.output.requests
+      - $ref: stages.continuation_2.output.requests
+      - $ref: stages.continuation_3.output.requests
+      - $ref: stages.continuation_4.output.requests
+      - $ref: stages.continuation_5.output.requests
+      - $ref: stages.continuation_6.output.requests
+      - $ref: stages.continuation_7.output.requests
+      - $ref: stages.continuation_8.output.requests
+      - $ref: stages.continuation_9.output.requests
+      - $ref: stages.continuation_10.output.requests
+      - $ref: stages.continuation_11.output.requests
+      - $ref: stages.continuation_12.output.requests
+      - $ref: stages.continuation_13.output.requests
+      - $ref: stages.continuation_14.output.requests
+      - $ref: stages.continuation_15.output.requests
+      - $ref: stages.continuation_16.output.requests
+      - $ref: stages.continuation_17.output.requests
+      - $ref: stages.continuation_18.output.requests
+      - $ref: stages.continuation_19.output.requests
+      holders:
+      - $ref: stages.first_holder.output.engine
+      - $ref: stages.second_holder.output.engine
+      min_samples: 20
+      min_used: 2
+  - id: cleanup
+    action: teardown
+  requires:
+  - enqueue_batch
+- id: shared_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  legacy_case_ids:
+  - kv_g_shared_block_both_match
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: balance_snapshot
+    params:
+      role: prefill
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+  - id: perf_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: seed_first
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: immediate
+  - id: first_pending
+    action: balance_pending
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+    timeout_s: 6
+  - id: first_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+      phase: scheduled
+  - id: seed_second
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: second_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_second.output.requests
+    timeout_s: 15
+  - id: second_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_second.output.requests
+  - id: two_holders
+    action: kv_distinct
+    params:
+      first:
+        $ref: stages.first_holder.output.engine
+      second:
+        $ref: stages.second_holder.output.engine
+  - id: first_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+    timeout_s: 30
+  - id: restore_perf
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+  - id: seed_quiet
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    timeout_s: 8
+  - id: shared_holders
+    action: kv_holders_check
+    params:
+      snapshot:
+        $ref: stages.seed_quiet.output.snapshot
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      holders:
+      - $ref: stages.first_holder.output.engine
+      - $ref: stages.second_holder.output.engine
+      match: full_family
+  - id: continuation_0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_0_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_0.output.requests
+    timeout_s: 15
+  - id: continuation_1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_1_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_1.output.requests
+    timeout_s: 15
+  - id: continuation_2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_2_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_2.output.requests
+    timeout_s: 15
+  - id: continuation_3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_3_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_3.output.requests
+    timeout_s: 15
+  - id: continuation_4
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_4_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_4.output.requests
+    timeout_s: 15
+  - id: continuation_5
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_5_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_5.output.requests
+    timeout_s: 15
+  - id: continuation_6
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_6_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_6.output.requests
+    timeout_s: 15
+  - id: continuation_7
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_7_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_7.output.requests
+    timeout_s: 15
+  - id: continuation_8
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_8_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_8.output.requests
+    timeout_s: 15
+  - id: continuation_9
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_9_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_9.output.requests
+    timeout_s: 15
+  - id: continuation_10
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_10_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_10.output.requests
+    timeout_s: 15
+  - id: continuation_11
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_11_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_11.output.requests
+    timeout_s: 15
+  - id: continuation_12
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_12_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_12.output.requests
+    timeout_s: 15
+  - id: continuation_13
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_13_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_13.output.requests
+    timeout_s: 15
+  - id: continuation_14
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_14_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_14.output.requests
+    timeout_s: 15
+  - id: continuation_15
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_15_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_15.output.requests
+    timeout_s: 15
+  - id: continuation_16
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_16_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_16.output.requests
+    timeout_s: 15
+  - id: continuation_17
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_17_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_17.output.requests
+    timeout_s: 15
+  - id: continuation_18
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_18_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_18.output.requests
+    timeout_s: 15
+  - id: continuation_19
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_19_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_19.output.requests
+    timeout_s: 15
+  - id: spread
+    action: kv_spread_check
+    params:
+      requests:
+      - $ref: stages.continuation_0.output.requests
+      - $ref: stages.continuation_1.output.requests
+      - $ref: stages.continuation_2.output.requests
+      - $ref: stages.continuation_3.output.requests
+      - $ref: stages.continuation_4.output.requests
+      - $ref: stages.continuation_5.output.requests
+      - $ref: stages.continuation_6.output.requests
+      - $ref: stages.continuation_7.output.requests
+      - $ref: stages.continuation_8.output.requests
+      - $ref: stages.continuation_9.output.requests
+      - $ref: stages.continuation_10.output.requests
+      - $ref: stages.continuation_11.output.requests
+      - $ref: stages.continuation_12.output.requests
+      - $ref: stages.continuation_13.output.requests
+      - $ref: stages.continuation_14.output.requests
+      - $ref: stages.continuation_15.output.requests
+      - $ref: stages.continuation_16.output.requests
+      - $ref: stages.continuation_17.output.requests
+      - $ref: stages.continuation_18.output.requests
+      - $ref: stages.continuation_19.output.requests
+      min_samples: 20
+      bands:
+        strict: 0.65
+        normal: 0.75
+        loose: 0.85
+  - id: holder_union
+    action: kv_union_check
+    params:
+      requests:
+      - $ref: stages.continuation_0.output.requests
+      - $ref: stages.continuation_1.output.requests
+      - $ref: stages.continuation_2.output.requests
+      - $ref: stages.continuation_3.output.requests
+      - $ref: stages.continuation_4.output.requests
+      - $ref: stages.continuation_5.output.requests
+      - $ref: stages.continuation_6.output.requests
+      - $ref: stages.continuation_7.output.requests
+      - $ref: stages.continuation_8.output.requests
+      - $ref: stages.continuation_9.output.requests
+      - $ref: stages.continuation_10.output.requests
+      - $ref: stages.continuation_11.output.requests
+      - $ref: stages.continuation_12.output.requests
+      - $ref: stages.continuation_13.output.requests
+      - $ref: stages.continuation_14.output.requests
+      - $ref: stages.continuation_15.output.requests
+      - $ref: stages.continuation_16.output.requests
+      - $ref: stages.continuation_17.output.requests
+      - $ref: stages.continuation_18.output.requests
+      - $ref: stages.continuation_19.output.requests
+      holders:
+      - $ref: stages.first_holder.output.engine
+      - $ref: stages.second_holder.output.engine
+      min_samples: 20
+      min_used: 2
+  - id: cleanup
+    action: teardown
+- id: release_batch
+  profiles:
+  - batch-window
+  - single-batch
+  legacy_case_ids:
+  - kv_g_full_release_no_ghost
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: balance_snapshot
+    params:
+      role: prefill
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+  - id: perf_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: seed_first
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: deferred
+  - id: first_pending
+    action: balance_pending
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+    timeout_s: 6
+  - id: first_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+      phase: scheduled
+  - id: seed_second
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: second_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_second.output.requests
+    timeout_s: 15
+  - id: second_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_second.output.requests
+  - id: two_holders
+    action: kv_distinct
+    params:
+      first:
+        $ref: stages.first_holder.output.engine
+      second:
+        $ref: stages.second_holder.output.engine
+  - id: first_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+    timeout_s: 30
+  - id: restore_perf
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+  - id: seed_quiet
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    timeout_s: 8
+  - id: shared_holders
+    action: kv_holders_check
+    params:
+      snapshot:
+        $ref: stages.seed_quiet.output.snapshot
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      holders:
+      - $ref: stages.first_holder.output.engine
+      - $ref: stages.second_holder.output.engine
+      match: full_family
+  - id: release_first
+    action: kv_evict
+    params:
+      engine:
+        $ref: stages.first_holder.output.engine
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+  - id: release_second
+    action: kv_evict
+    params:
+      engine:
+        $ref: stages.second_holder.output.engine
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+  - id: released_quiet
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    timeout_s: 8
+  - id: no_ghost
+    action: kv_holders_check
+    params:
+      snapshot:
+        $ref: stages.released_quiet.output.snapshot
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      holders: []
+      match: any_key
+  - id: wave
+    action: request
+    params:
+      count: 20
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: deferred
+      post_issue_delay_s: 0.12
+    timeout_s: 90
+  - id: wave_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+    timeout_s: 30
+  - id: spread
+    action: kv_spread_check
+    params:
+      requests:
+      - $ref: stages.wave.output.requests
+      min_samples: 20
+      bands:
+        strict: 0.65
+        normal: 0.75
+        loose: 0.85
+  - id: cleanup
+    action: teardown
+  requires:
+  - enqueue_batch
+- id: release_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  legacy_case_ids:
+  - kv_g_full_release_no_ghost
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: balance_snapshot
+    params:
+      role: prefill
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+  - id: perf_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: seed_first
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: immediate
+  - id: first_pending
+    action: balance_pending
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+    timeout_s: 6
+  - id: first_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+      phase: scheduled
+  - id: seed_second
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: second_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_second.output.requests
+    timeout_s: 15
+  - id: second_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_second.output.requests
+  - id: two_holders
+    action: kv_distinct
+    params:
+      first:
+        $ref: stages.first_holder.output.engine
+      second:
+        $ref: stages.second_holder.output.engine
+  - id: first_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+    timeout_s: 30
+  - id: restore_perf
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+  - id: seed_quiet
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    timeout_s: 8
+  - id: shared_holders
+    action: kv_holders_check
+    params:
+      snapshot:
+        $ref: stages.seed_quiet.output.snapshot
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      holders:
+      - $ref: stages.first_holder.output.engine
+      - $ref: stages.second_holder.output.engine
+      match: full_family
+  - id: release_first
+    action: kv_evict
+    params:
+      engine:
+        $ref: stages.first_holder.output.engine
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+  - id: release_second
+    action: kv_evict
+    params:
+      engine:
+        $ref: stages.second_holder.output.engine
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+  - id: released_quiet
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    timeout_s: 8
+  - id: no_ghost
+    action: kv_holders_check
+    params:
+      snapshot:
+        $ref: stages.released_quiet.output.snapshot
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      holders: []
+      match: any_key
+  - id: wave
+    action: request
+    params:
+      count: 20
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: immediate
+      post_issue_delay_s: 0.12
+    timeout_s: 90
+  - id: wave_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+    timeout_s: 30
+  - id: spread
+    action: kv_spread_check
+    params:
+      requests:
+      - $ref: stages.wave.output.requests
+      min_samples: 20
+      bands:
+        strict: 0.65
+        normal: 0.75
+        loose: 0.85
+  - id: cleanup
+    action: teardown
+- id: redirect_batch
+  profiles:
+  - batch-window
+  - single-batch
+  legacy_case_ids:
+  - kv_g_partial_release_redirect
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: balance_snapshot
+    params:
+      role: prefill
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+  - id: perf_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: seed_first
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: deferred
+  - id: first_pending
+    action: balance_pending
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+    timeout_s: 6
+  - id: first_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+      phase: scheduled
+  - id: seed_second
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: second_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_second.output.requests
+    timeout_s: 15
+  - id: second_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_second.output.requests
+  - id: two_holders
+    action: kv_distinct
+    params:
+      first:
+        $ref: stages.first_holder.output.engine
+      second:
+        $ref: stages.second_holder.output.engine
+  - id: first_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+    timeout_s: 30
+  - id: restore_perf
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+  - id: seed_quiet
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    timeout_s: 8
+  - id: shared_holders
+    action: kv_holders_check
+    params:
+      snapshot:
+        $ref: stages.seed_quiet.output.snapshot
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      holders:
+      - $ref: stages.first_holder.output.engine
+      - $ref: stages.second_holder.output.engine
+      match: full_family
+  - id: release_first
+    action: kv_evict
+    params:
+      engine:
+        $ref: stages.first_holder.output.engine
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+  - id: released_quiet
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    timeout_s: 8
+  - id: first_empty
+    action: kv_membership_check
+    params:
+      snapshot:
+        $ref: stages.released_quiet.output.snapshot
+      engine:
+        $ref: stages.first_holder.output.engine
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      relation: none
+  - id: sole_holder
+    action: kv_holders_check
+    params:
+      snapshot:
+        $ref: stages.released_quiet.output.snapshot
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      holders:
+      - $ref: stages.second_holder.output.engine
+      match: full_family
+  - id: continuation_0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_0_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_0.output.requests
+    timeout_s: 15
+  - id: continuation_1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_1_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_1.output.requests
+    timeout_s: 15
+  - id: continuation_2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_2_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_2.output.requests
+    timeout_s: 15
+  - id: continuation_3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_3_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_3.output.requests
+    timeout_s: 15
+  - id: continuation_4
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_4_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_4.output.requests
+    timeout_s: 15
+  - id: continuation_5
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_5_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_5.output.requests
+    timeout_s: 15
+  - id: continuation_6
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_6_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_6.output.requests
+    timeout_s: 15
+  - id: continuation_7
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_7_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_7.output.requests
+    timeout_s: 15
+  - id: continuation_8
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_8_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_8.output.requests
+    timeout_s: 15
+  - id: continuation_9
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_9_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_9.output.requests
+    timeout_s: 15
+  - id: redirect
+    action: kv_fidelity_check
+    params:
+      requests:
+      - $ref: stages.continuation_0.output.requests
+      - $ref: stages.continuation_1.output.requests
+      - $ref: stages.continuation_2.output.requests
+      - $ref: stages.continuation_3.output.requests
+      - $ref: stages.continuation_4.output.requests
+      - $ref: stages.continuation_5.output.requests
+      - $ref: stages.continuation_6.output.requests
+      - $ref: stages.continuation_7.output.requests
+      - $ref: stages.continuation_8.output.requests
+      - $ref: stages.continuation_9.output.requests
+      min_samples: 10
+      holder:
+        $ref: stages.second_holder.output.engine
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8
+  - id: cleanup
+    action: teardown
+  requires:
+  - enqueue_batch
+- id: redirect_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  legacy_case_ids:
+  - kv_g_partial_release_redirect
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: balance_snapshot
+    params:
+      role: prefill
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+  - id: perf_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: seed_first
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: immediate
+  - id: first_pending
+    action: balance_pending
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+    timeout_s: 6
+  - id: first_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+      phase: scheduled
+  - id: seed_second
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: second_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_second.output.requests
+    timeout_s: 15
+  - id: second_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_second.output.requests
+  - id: two_holders
+    action: kv_distinct
+    params:
+      first:
+        $ref: stages.first_holder.output.engine
+      second:
+        $ref: stages.second_holder.output.engine
+  - id: first_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+    timeout_s: 30
+  - id: restore_perf
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+  - id: seed_quiet
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    timeout_s: 8
+  - id: shared_holders
+    action: kv_holders_check
+    params:
+      snapshot:
+        $ref: stages.seed_quiet.output.snapshot
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      holders:
+      - $ref: stages.first_holder.output.engine
+      - $ref: stages.second_holder.output.engine
+      match: full_family
+  - id: release_first
+    action: kv_evict
+    params:
+      engine:
+        $ref: stages.first_holder.output.engine
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+  - id: released_quiet
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    timeout_s: 8
+  - id: first_empty
+    action: kv_membership_check
+    params:
+      snapshot:
+        $ref: stages.released_quiet.output.snapshot
+      engine:
+        $ref: stages.first_holder.output.engine
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      relation: none
+  - id: sole_holder
+    action: kv_holders_check
+    params:
+      snapshot:
+        $ref: stages.released_quiet.output.snapshot
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      holders:
+      - $ref: stages.second_holder.output.engine
+      match: full_family
+  - id: continuation_0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_0_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_0.output.requests
+    timeout_s: 15
+  - id: continuation_1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_1_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_1.output.requests
+    timeout_s: 15
+  - id: continuation_2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_2_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_2.output.requests
+    timeout_s: 15
+  - id: continuation_3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_3_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_3.output.requests
+    timeout_s: 15
+  - id: continuation_4
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_4_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_4.output.requests
+    timeout_s: 15
+  - id: continuation_5
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_5_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_5.output.requests
+    timeout_s: 15
+  - id: continuation_6
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_6_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_6.output.requests
+    timeout_s: 15
+  - id: continuation_7
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_7_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_7.output.requests
+    timeout_s: 15
+  - id: continuation_8
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_8_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_8.output.requests
+    timeout_s: 15
+  - id: continuation_9
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_9_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_9.output.requests
+    timeout_s: 15
+  - id: redirect
+    action: kv_fidelity_check
+    params:
+      requests:
+      - $ref: stages.continuation_0.output.requests
+      - $ref: stages.continuation_1.output.requests
+      - $ref: stages.continuation_2.output.requests
+      - $ref: stages.continuation_3.output.requests
+      - $ref: stages.continuation_4.output.requests
+      - $ref: stages.continuation_5.output.requests
+      - $ref: stages.continuation_6.output.requests
+      - $ref: stages.continuation_7.output.requests
+      - $ref: stages.continuation_8.output.requests
+      - $ref: stages.continuation_9.output.requests
+      min_samples: 10
+      holder:
+        $ref: stages.second_holder.output.engine
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8
+  - id: cleanup
+    action: teardown
+- id: down_batch
+  profiles:
+  - batch-window
+  - single-batch
+  legacy_case_ids:
+  - kv_g_engine_down_cleanup
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: balance_snapshot
+    params:
+      role: prefill
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      - prefill-2
+      perf:
+        prefill_fixed_ms: 2000
+  - id: perf_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: seed_first
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: deferred
+  - id: first_pending
+    action: balance_pending
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+    timeout_s: 6
+  - id: first_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+      phase: scheduled
+  - id: seed_second
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: second_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_second.output.requests
+    timeout_s: 15
+  - id: second_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_second.output.requests
+  - id: two_holders
+    action: kv_distinct
+    params:
+      first:
+        $ref: stages.first_holder.output.engine
+      second:
+        $ref: stages.second_holder.output.engine
+  - id: first_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+    timeout_s: 30
+  - id: restore_perf
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      - prefill-2
+      perf:
+        prefill_fixed_ms: 100
+  - id: seed_quiet
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      - prefill-2
+      quiet_s: 3.5
+    timeout_s: 8
+  - id: shared_holders
+    action: kv_holders_check
+    params:
+      snapshot:
+        $ref: stages.seed_quiet.output.snapshot
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      holders:
+      - $ref: stages.first_holder.output.engine
+      - $ref: stages.second_holder.output.engine
+      match: full_family
+  - id: third_worker
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      - prefill-2
+      quiet_s: 0
+      exclude:
+      - $ref: stages.first_holder.output.engine
+      - $ref: stages.second_holder.output.engine
+    timeout_s: 10
+  - id: third_empty
+    action: kv_holders_check
+    params:
+      snapshot:
+        $ref: stages.third_worker.output.snapshot
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      holders: []
+      match: any_key
+  - id: remove_holder
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.first_holder.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 70
+  - id: master_converged
+    action: kv_master_alive
+    params:
+      role: PREFILL
+      count: 2
+    timeout_s: 30
+  - id: continuation_0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_0_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_0.output.requests
+    timeout_s: 15
+  - id: continuation_1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_1_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_1.output.requests
+    timeout_s: 15
+  - id: continuation_2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_2_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_2.output.requests
+    timeout_s: 15
+  - id: continuation_3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_3_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_3.output.requests
+    timeout_s: 15
+  - id: continuation_4
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_4_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_4.output.requests
+    timeout_s: 15
+  - id: survivor_snapshot
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      - prefill-2
+      quiet_s: 0
+      exclude:
+      - $ref: stages.first_holder.output.engine
+    timeout_s: 10
+  - id: survivor_kept
+    action: kv_membership_check
+    params:
+      snapshot:
+        $ref: stages.survivor_snapshot.output.snapshot
+      engine:
+        $ref: stages.second_holder.output.engine
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      relation: all
+  - id: survivor_fidelity
+    action: kv_fidelity_check
+    params:
+      requests:
+      - $ref: stages.continuation_0.output.requests
+      - $ref: stages.continuation_1.output.requests
+      - $ref: stages.continuation_2.output.requests
+      - $ref: stages.continuation_3.output.requests
+      - $ref: stages.continuation_4.output.requests
+      min_samples: 5
+      holder:
+        $ref: stages.second_holder.output.engine
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8
+  - id: cleanup
+    action: teardown
+  requires:
+  - enqueue_batch
+  environment_overrides:
+    n_prefill: 3
+    discovery: discovery_file
+- id: down_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  legacy_case_ids:
+  - kv_g_engine_down_cleanup
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: balance_snapshot
+    params:
+      role: prefill
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      - prefill-2
+      perf:
+        prefill_fixed_ms: 2000
+  - id: perf_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: seed_first
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: immediate
+  - id: first_pending
+    action: balance_pending
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+    timeout_s: 6
+  - id: first_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+      phase: scheduled
+  - id: seed_second
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: second_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_second.output.requests
+    timeout_s: 15
+  - id: second_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_second.output.requests
+  - id: two_holders
+    action: kv_distinct
+    params:
+      first:
+        $ref: stages.first_holder.output.engine
+      second:
+        $ref: stages.second_holder.output.engine
+  - id: first_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+    timeout_s: 30
+  - id: restore_perf
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      - prefill-2
+      perf:
+        prefill_fixed_ms: 100
+  - id: seed_quiet
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      - prefill-2
+      quiet_s: 3.5
+    timeout_s: 8
+  - id: shared_holders
+    action: kv_holders_check
+    params:
+      snapshot:
+        $ref: stages.seed_quiet.output.snapshot
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      holders:
+      - $ref: stages.first_holder.output.engine
+      - $ref: stages.second_holder.output.engine
+      match: full_family
+  - id: third_worker
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      - prefill-2
+      quiet_s: 0
+      exclude:
+      - $ref: stages.first_holder.output.engine
+      - $ref: stages.second_holder.output.engine
+    timeout_s: 10
+  - id: third_empty
+    action: kv_holders_check
+    params:
+      snapshot:
+        $ref: stages.third_worker.output.snapshot
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      holders: []
+      match: any_key
+  - id: remove_holder
+    action: elastic_remove
+    params:
+      engine:
+        $ref: stages.first_holder.output.engine
+      drain_timeout_ms: 60000
+    timeout_s: 70
+  - id: master_converged
+    action: kv_master_alive
+    params:
+      role: PREFILL
+      count: 2
+    timeout_s: 30
+  - id: continuation_0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_0_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_0.output.requests
+    timeout_s: 15
+  - id: continuation_1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_1_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_1.output.requests
+    timeout_s: 15
+  - id: continuation_2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_2_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_2.output.requests
+    timeout_s: 15
+  - id: continuation_3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_3_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_3.output.requests
+    timeout_s: 15
+  - id: continuation_4
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: continuation_4_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_4.output.requests
+    timeout_s: 15
+  - id: survivor_snapshot
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      - prefill-2
+      quiet_s: 0
+      exclude:
+      - $ref: stages.first_holder.output.engine
+    timeout_s: 10
+  - id: survivor_kept
+    action: kv_membership_check
+    params:
+      snapshot:
+        $ref: stages.survivor_snapshot.output.snapshot
+      engine:
+        $ref: stages.second_holder.output.engine
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      relation: all
+  - id: survivor_fidelity
+    action: kv_fidelity_check
+    params:
+      requests:
+      - $ref: stages.continuation_0.output.requests
+      - $ref: stages.continuation_1.output.requests
+      - $ref: stages.continuation_2.output.requests
+      - $ref: stages.continuation_3.output.requests
+      - $ref: stages.continuation_4.output.requests
+      min_samples: 5
+      holder:
+        $ref: stages.second_holder.output.engine
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8
+  - id: cleanup
+    action: teardown
+  environment_overrides:
+    n_prefill: 3
+    discovery: discovery_file
+- id: mixed_batch
+  profiles:
+  - batch-window
+  - single-batch
+  legacy_case_ids:
+  - kv_g_sync_convergence
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: balance_snapshot
+    params:
+      role: prefill
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+  - id: perf_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: seed_first
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: deferred
+  - id: first_pending
+    action: balance_pending
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+    timeout_s: 6
+  - id: first_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+      phase: scheduled
+  - id: seed_second
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: second_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_second.output.requests
+    timeout_s: 15
+  - id: second_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_second.output.requests
+  - id: two_holders
+    action: kv_distinct
+    params:
+      first:
+        $ref: stages.first_holder.output.engine
+      second:
+        $ref: stages.second_holder.output.engine
+  - id: first_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+    timeout_s: 30
+  - id: restore_perf
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+  - id: first_release
+    action: kv_evict
+    params:
+      engine:
+        $ref: stages.first_holder.output.engine
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+  - id: family_one_0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: family_one_0_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.family_one_0.output.requests
+    timeout_s: 15
+  - id: family_one_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.family_one_0.output.requests
+  - id: second_release
+    action: kv_evict
+    params:
+      engine:
+        $ref: stages.second_holder.output.engine
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+  - id: family_two_fleet
+    action: balance_snapshot
+    params:
+      role: prefill
+  - id: family_two_slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+  - id: family_two_perf_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: family_two_seed_first
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 30
+      consume: deferred
+  - id: family_two_first_pending
+    action: balance_pending
+    params:
+      requests:
+        $ref: stages.family_two_seed_first.output.requests
+      fleet:
+        $ref: stages.family_two_fleet.output.snapshot
+    timeout_s: 6
+  - id: family_two_first_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.family_two_seed_first.output.requests
+      phase: scheduled
+  - id: family_two_seed_second
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+  - id: family_two_second_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.family_two_seed_second.output.requests
+    timeout_s: 15
+  - id: family_two_second_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.family_two_seed_second.output.requests
+  - id: family_two_two_holders
+    action: kv_distinct
+    params:
+      first:
+        $ref: stages.family_two_first_holder.output.engine
+      second:
+        $ref: stages.family_two_second_holder.output.engine
+  - id: family_two_first_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.family_two_seed_first.output.requests
+    timeout_s: 30
+  - id: family_two_restore_perf
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+  - id: family_two_release
+    action: kv_evict
+    params:
+      engine:
+        $ref: stages.family_two_first_holder.output.engine
+      keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+  - id: mixed_quiet
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    timeout_s: 8
+  - id: family_zero_empty
+    action: kv_holders_check
+    params:
+      snapshot:
+        $ref: stages.mixed_quiet.output.snapshot
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      holders: []
+      match: any_key
+  - id: family_one_sole
+    action: kv_holders_check
+    params:
+      snapshot:
+        $ref: stages.mixed_quiet.output.snapshot
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      holders:
+      - $ref: stages.family_one_holder.output.engine
+      match: full_family
+  - id: family_two_sole
+    action: kv_holders_check
+    params:
+      snapshot:
+        $ref: stages.mixed_quiet.output.snapshot
+      keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      holders:
+      - $ref: stages.family_two_second_holder.output.engine
+      match: full_family
+  - id: wave
+    action: request
+    params:
+      count: 20
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: deferred
+      post_issue_delay_s: 0.12
+    timeout_s: 90
+  - id: wave_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+    timeout_s: 30
+  - id: spread
+    action: kv_spread_check
+    params:
+      requests:
+      - $ref: stages.wave.output.requests
+      min_samples: 20
+      bands:
+        strict: 0.65
+        normal: 0.75
+        loose: 0.85
+  - id: continuation_f1_0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: continuation_f1_0_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_f1_0.output.requests
+    timeout_s: 15
+  - id: continuation_f1_1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: continuation_f1_1_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_f1_1.output.requests
+    timeout_s: 15
+  - id: continuation_f1_2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: continuation_f1_2_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_f1_2.output.requests
+    timeout_s: 15
+  - id: continuation_f1_3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: continuation_f1_3_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_f1_3.output.requests
+    timeout_s: 15
+  - id: continuation_f1_4
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: continuation_f1_4_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_f1_4.output.requests
+    timeout_s: 15
+  - id: fidelity_f1
+    action: kv_fidelity_check
+    params:
+      requests:
+      - $ref: stages.continuation_f1_0.output.requests
+      - $ref: stages.continuation_f1_1.output.requests
+      - $ref: stages.continuation_f1_2.output.requests
+      - $ref: stages.continuation_f1_3.output.requests
+      - $ref: stages.continuation_f1_4.output.requests
+      min_samples: 5
+      holder:
+        $ref: stages.family_one_holder.output.engine
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8
+  - id: continuation_f2_0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+  - id: continuation_f2_0_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_f2_0.output.requests
+    timeout_s: 15
+  - id: continuation_f2_1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+  - id: continuation_f2_1_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_f2_1.output.requests
+    timeout_s: 15
+  - id: continuation_f2_2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+  - id: continuation_f2_2_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_f2_2.output.requests
+    timeout_s: 15
+  - id: continuation_f2_3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+  - id: continuation_f2_3_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_f2_3.output.requests
+    timeout_s: 15
+  - id: continuation_f2_4
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+  - id: continuation_f2_4_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_f2_4.output.requests
+    timeout_s: 15
+  - id: fidelity_f2
+    action: kv_fidelity_check
+    params:
+      requests:
+      - $ref: stages.continuation_f2_0.output.requests
+      - $ref: stages.continuation_f2_1.output.requests
+      - $ref: stages.continuation_f2_2.output.requests
+      - $ref: stages.continuation_f2_3.output.requests
+      - $ref: stages.continuation_f2_4.output.requests
+      min_samples: 5
+      holder:
+        $ref: stages.family_two_second_holder.output.engine
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8
+  - id: cleanup
+    action: teardown
+  requires:
+  - enqueue_batch
+- id: mixed_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  legacy_case_ids:
+  - kv_g_sync_convergence
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: balance_snapshot
+    params:
+      role: prefill
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+  - id: perf_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: seed_first
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: immediate
+  - id: first_pending
+    action: balance_pending
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+    timeout_s: 6
+  - id: first_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+      phase: scheduled
+  - id: seed_second
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 15
+  - id: second_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_second.output.requests
+    timeout_s: 15
+  - id: second_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_second.output.requests
+  - id: two_holders
+    action: kv_distinct
+    params:
+      first:
+        $ref: stages.first_holder.output.engine
+      second:
+        $ref: stages.second_holder.output.engine
+  - id: first_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_first.output.requests
+    timeout_s: 30
+  - id: restore_perf
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+  - id: first_release
+    action: kv_evict
+    params:
+      engine:
+        $ref: stages.first_holder.output.engine
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+  - id: family_one_0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: family_one_0_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.family_one_0.output.requests
+    timeout_s: 15
+  - id: family_one_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.family_one_0.output.requests
+  - id: second_release
+    action: kv_evict
+    params:
+      engine:
+        $ref: stages.second_holder.output.engine
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+  - id: family_two_fleet
+    action: balance_snapshot
+    params:
+      role: prefill
+  - id: family_two_slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+  - id: family_two_perf_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: family_two_seed_first
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 30
+      consume: immediate
+  - id: family_two_first_pending
+    action: balance_pending
+    params:
+      requests:
+        $ref: stages.family_two_seed_first.output.requests
+      fleet:
+        $ref: stages.family_two_fleet.output.snapshot
+    timeout_s: 6
+  - id: family_two_first_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.family_two_seed_first.output.requests
+      phase: scheduled
+  - id: family_two_seed_second
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+  - id: family_two_second_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.family_two_seed_second.output.requests
+    timeout_s: 15
+  - id: family_two_second_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.family_two_seed_second.output.requests
+  - id: family_two_two_holders
+    action: kv_distinct
+    params:
+      first:
+        $ref: stages.family_two_first_holder.output.engine
+      second:
+        $ref: stages.family_two_second_holder.output.engine
+  - id: family_two_first_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.family_two_seed_first.output.requests
+    timeout_s: 30
+  - id: family_two_restore_perf
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+  - id: family_two_release
+    action: kv_evict
+    params:
+      engine:
+        $ref: stages.family_two_first_holder.output.engine
+      keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+  - id: mixed_quiet
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    timeout_s: 8
+  - id: family_zero_empty
+    action: kv_holders_check
+    params:
+      snapshot:
+        $ref: stages.mixed_quiet.output.snapshot
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      holders: []
+      match: any_key
+  - id: family_one_sole
+    action: kv_holders_check
+    params:
+      snapshot:
+        $ref: stages.mixed_quiet.output.snapshot
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      holders:
+      - $ref: stages.family_one_holder.output.engine
+      match: full_family
+  - id: family_two_sole
+    action: kv_holders_check
+    params:
+      snapshot:
+        $ref: stages.mixed_quiet.output.snapshot
+      keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      holders:
+      - $ref: stages.family_two_second_holder.output.engine
+      match: full_family
+  - id: wave
+    action: request
+    params:
+      count: 20
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      stream_timeout_s: 30
+      consume: immediate
+      post_issue_delay_s: 0.12
+    timeout_s: 90
+  - id: wave_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+    timeout_s: 30
+  - id: spread
+    action: kv_spread_check
+    params:
+      requests:
+      - $ref: stages.wave.output.requests
+      min_samples: 20
+      bands:
+        strict: 0.65
+        normal: 0.75
+        loose: 0.85
+  - id: continuation_f1_0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: continuation_f1_0_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_f1_0.output.requests
+    timeout_s: 15
+  - id: continuation_f1_1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: continuation_f1_1_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_f1_1.output.requests
+    timeout_s: 15
+  - id: continuation_f1_2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: continuation_f1_2_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_f1_2.output.requests
+    timeout_s: 15
+  - id: continuation_f1_3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: continuation_f1_3_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_f1_3.output.requests
+    timeout_s: 15
+  - id: continuation_f1_4
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      stream_timeout_s: 15
+  - id: continuation_f1_4_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_f1_4.output.requests
+    timeout_s: 15
+  - id: fidelity_f1
+    action: kv_fidelity_check
+    params:
+      requests:
+      - $ref: stages.continuation_f1_0.output.requests
+      - $ref: stages.continuation_f1_1.output.requests
+      - $ref: stages.continuation_f1_2.output.requests
+      - $ref: stages.continuation_f1_3.output.requests
+      - $ref: stages.continuation_f1_4.output.requests
+      min_samples: 5
+      holder:
+        $ref: stages.family_one_holder.output.engine
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8
+  - id: continuation_f2_0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+  - id: continuation_f2_0_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_f2_0.output.requests
+    timeout_s: 15
+  - id: continuation_f2_1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+  - id: continuation_f2_1_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_f2_1.output.requests
+    timeout_s: 15
+  - id: continuation_f2_2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+  - id: continuation_f2_2_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_f2_2.output.requests
+    timeout_s: 15
+  - id: continuation_f2_3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+  - id: continuation_f2_3_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_f2_3.output.requests
+    timeout_s: 15
+  - id: continuation_f2_4
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      stream_timeout_s: 15
+  - id: continuation_f2_4_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_f2_4.output.requests
+    timeout_s: 15
+  - id: fidelity_f2
+    action: kv_fidelity_check
+    params:
+      requests:
+      - $ref: stages.continuation_f2_0.output.requests
+      - $ref: stages.continuation_f2_1.output.requests
+      - $ref: stages.continuation_f2_2.output.requests
+      - $ref: stages.continuation_f2_3.output.requests
+      - $ref: stages.continuation_f2_4.output.requests
+      min_samples: 5
+      holder:
+        $ref: stages.family_two_second_holder.output.engine
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8
+  - id: cleanup
+    action: teardown
