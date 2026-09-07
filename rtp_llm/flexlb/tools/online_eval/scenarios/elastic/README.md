@@ -105,15 +105,45 @@ independent contract acceptance are pending. Historical pilot execution results
 keep their original instance IDs and SHA; they are not relabelled as acceptance
 of these new variants. Legacy Python functions remain available.
 
+## Concurrent mutation
+
+`concurrent_mutation.yaml` implements `elastic_concurrent_ops` in the final
+`elastic_concurrent_mutation` family. Four real threads share a candidate pool:
+one Prefill adder, one Decode adder and two independently seeded removers. The
+10s mutation admission window and the original add intervals (.25/.40s), remove
+intervals (.40/.55s), graceful removal and serial health request followed by a
+Master HTTP probe are preserved. Concurrent removal races and failed mutation
+attempts remain recorded observations, not an invented zero-error contract.
+
+| Legacy contract | Actual stage/check |
+| --- | --- |
+| Every sampled Master endpoint returns HTTP 200 | `crossfire.master_http` |
+| Nonempty health requests, success rate at least 50% | `health.nonempty`, `health.success_rate` |
+| Discovery parses after the storm | `discovery.parsable` |
+| Prefill and Decode discovery counts equal mock services | `discovery.counts_match` |
+
+Boundedness is explicit: the two adders can attempt at most 40 and 25 additions
+(the maxima implied by the 10s window and original intervals), so the compiler
+reserves 65 dynamic additions. Even failed attempts consume that budget. No
+ordered loop replaces concurrent mutation. Each attempt retains its request,
+response or exception and timestamps; health request outcomes are retained too.
+
+`crossfire.workers_finished` and `health.complete` are additional construction
+checks. Independent done events replace the old unchecked 15s thread joins;
+final discovery is read only after every mutation worker exits. Slow graceful
+calls may finish after the 10s admission window, within the 100s stage budget.
+Cleanup cancels request work and waits for mutation workers before tearing down
+the instance-owned environment. The legacy function remains until independent
+acceptance; real Java mock acceptance of this new family is pending.
+
 ## Remaining families
 
 | Final family | Remaining migration |
 | --- | --- |
 | `elastic_pending_drain` | Explicit pending construction and cohort ledger, legacy 40s visible terminal, accounting cleanup, new zero-error assertion |
-| `elastic_concurrent_mutation` | Bounded concurrent add/remove program with the original independent robustness checks |
 
 The later full-shrink, transient-imbalance and steady-recovery contracts still
 remain legacy. Along with the two skew variants now mapped above, these are the
 five additions beyond the original eight elastic cases (13 current legacy
-cases). They must not be deleted to reach the four-family target. Two final
+cases). They must not be deleted to reach the four-family target. Three final
 families have YAML implementations; this is not acceptance of all four.
