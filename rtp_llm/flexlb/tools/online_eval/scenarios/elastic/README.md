@@ -45,7 +45,7 @@ legacy function is retained.
 
 ## Ordered lifecycle
 
-`lifecycle.yaml` defines five explicit `batch-window` variants. `normal` and
+`lifecycle.yaml` defines six explicit `batch-window` variants. `normal` and
 `strict` each contain 57 stages and preserve four original lifecycle
 contracts below. The independent 10-stage `rebalance` variant preserves the fifth
 contract without preference traffic warming the new worker. `kv_skew_hot` and `kv_skew_cold` retain the two pilot programs
@@ -195,9 +195,50 @@ engine completion, the 40s terminal boundary, empty/cancelled terminals, recover
 19/20 versus 18/20, and missing owner counters. Real Java mock and independent
 contract acceptance remain pending; legacy code stays available.
 
+## Steady recovery variant
+
+`elastic_lifecycle::steady_recovery::batch-window` folds the old
+`elastic_steady_state_recovery` into the lifecycle family as a separate 14-stage,
+15-check program. It uses a private 2P/4D environment, PRIORITY/FIXED_WINDOW/BATCH
+and omitted queue timeout. The legacy fingerprint-only environment marker is not
+needed for the scenario runtime's instance-owned environment. This candidate is
+batch-window only; other legacy profiles remain unmigrated.
+
+The serial pump preserves 2048 input / 2 output / one unique cold key, Schedule
+30s and stream 30s, followed by a 200ms pause. It runs through a 20s baseline,
+graceful removal of `decode-0` (60s drain / 95s HTTP), 20s transient wait,
+convergence to three Decode workers, a pure 60s steady window and 20-request
+recovery. Inflight-clean is not a settle prerequisite while this pump is running.
+The recorded pump success rate remains an observation; request consumer completion
+and cleanup are still required. Stopping the pump is explicit before final verdict.
+
+| Legacy steady contract | Actual stage/check or evidence |
+| --- | --- |
+| Nonempty baseline Decode traffic | `baseline_guard.nonempty_decode_traffic` |
+| Last-third share max <= max(baseline+0.10, 1/3+0.15) and min >= 0.10 | `verdict.share_max`, `.share_min`, `.nonempty_decode_traffic` |
+| Last-third Decode survivor waiting peak <= 2 | `verdict.waiting_peak` |
+| Last-third occupancy spread <= baseline+0.05 and each peak <= 0.95 | `verdict.occupancy_spread`, `.occupancy_peak` |
+| Two time-adjacent 3s windows deviate in the same direction beyond +/-0.10 from 1/3 | `verdict.oscillation`; 20 subwindows over the full steady minute |
+| Recovery >=19/20 with concurrency 10 | `recovery.complete`, `.success_rate` |
+| Swing, execution-time CV, cluster hit rate, Decode generate-TPS ratio and reference bands | Verdict artifact observations, never pass thresholds |
+
+Decode shares use completed counters, not Prefill accepted counters. Empty
+traffic subwindows keep their time indexes and cannot join separated departures
+into a false adjacent pair. Required engine series, missing occupancy fields,
+counter resets and gaps over 2.5s are errors rather than fabricated zero values;
+this explicit data-completeness guard strengthens the old best-effort sampler.
+Optional observation fields retain an unavailable reason. Baseline/steady windows
+and removal have independent artifacts; continuous sampling spans the blocking
+removal. No production code changed and no legacy function was removed.
+
+Local tests execute the formal YAML with actual pump threads and simulated
+services. Independent checks cover a balanced last third with earlier persistent
+drift, queue depth three, missing occupancy, counter resets and empty subwindow
+gaps. This candidate still needs independent review and real Java mock acceptance.
+
 ## Remaining variants
 
-Full-shrink, transient-imbalance and steady-recovery contracts remain legacy and
+Full-shrink and transient-imbalance contracts remain legacy and
 must be folded into the four families. Along with the two skew variants mapped
 above, these are the five additions beyond the original eight elastic cases
 (13 current legacy cases). They must not be deleted to reach the four-family
