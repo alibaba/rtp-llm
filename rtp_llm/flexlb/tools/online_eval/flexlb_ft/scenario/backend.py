@@ -477,6 +477,7 @@ def make_env_spec(plan, profile, lease):
             fault_env_perf() if plan["perf_preset"] == "fault_env" else default_perf()
         ),
         master_env=({"FLEXLB_DEBUG_ENABLED": "true"} if plan["debug_enabled"] else {}),
+        master_debug_log=plan.get("master_debug_log", False),
     )
     for key in ("prefill_cache_blocks", "decode_cache_blocks"):
         if key in plan:
@@ -485,6 +486,10 @@ def make_env_spec(plan, profile, lease):
         spec.master_env["FLEXLB_MONITOR_METRIC_WHITELIST"] = plan["metric_whitelist"]
     if "prefill_perf" in plan:
         spec.perf["prefill"] = dict(plan["prefill_perf"])
+    if "prefill_max_waiting_batches" in plan:
+        spec.perf.setdefault("prefill", {})["max_waiting_batches"] = plan[
+            "prefill_max_waiting_batches"
+        ]
     return spec
 
 

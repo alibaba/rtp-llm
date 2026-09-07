@@ -151,6 +151,8 @@ def environment(value, path, profile):
             "discovery",
             "perf_preset",
             "prefill_perf",
+            "prefill_max_waiting_batches",
+            "master_debug_log",
             "debug_enabled",
             "master_layout",
             "master_stable_window_s",
@@ -176,6 +178,16 @@ def environment(value, path, profile):
     if type(value.get("debug_enabled", False)) is not bool:
         fail(path + ".debug_enabled", "expected boolean")
     result["debug_enabled"] = value.get("debug_enabled", False)
+    if "master_debug_log" in value:
+        if type(value["master_debug_log"]) is not bool:
+            fail(path + ".master_debug_log", "expected boolean")
+        result["master_debug_log"] = value["master_debug_log"]
+    if "prefill_max_waiting_batches" in value:
+        result["prefill_max_waiting_batches"] = number(
+            value["prefill_max_waiting_batches"],
+            path + ".prefill_max_waiting_batches",
+            integer=True,
+        )
     if "metric_whitelist" in value:
         whitelist = value["metric_whitelist"]
         if not isinstance(whitelist, str) or not re.fullmatch(
@@ -580,6 +592,8 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                     "discovery",
                     "perf_preset",
                     "prefill_perf",
+                    "prefill_max_waiting_batches",
+                    "master_debug_log",
                     "debug_enabled",
                     "master_layout",
                     "master_stable_window_s",
