@@ -60,6 +60,15 @@ except ImportError:
     _HAS_DEEP_GEMM = False
     _HAS_DEEP_GEMM_MQA = False
 
+# M5-B (Sep 7): the SM120 bf16 fallback below predates nv_dev DeepGEMM's
+# sm120_fp8_mqa_logits (built at DeepGEMM/build/lib...). DSV4_INDEXER_FP8_DEEPGEMM=1
+# lets cap-12 devices call deep_gemm.fp8_mqa_logits on the FP8 operands directly
+# instead of dequanting to bf16 and re-running the triton kernel. Offline race
+# (bench/p2_m5b_fp8_score.py): 6.6x at the 32K shape, rel-diff p50 0.0005 /
+# max 0.36%, Jaccard@512 p50 1.0 (min 0.988). Requires the launcher PYTHONPATH
+# shadow (RF wheel bundles an OLD deep_gemm without the SM120 kernel).
+_FP8_DEEPGEMM_ON_SM120 = os.environ.get("DSV4_INDEXER_FP8_DEEPGEMM", "0") == "1"
+
 
 def has_fp8_paged_mqa_logits() -> bool:
     return _HAS_DEEP_GEMM
@@ -218,7 +227,11 @@ def fp8_mqa_indexer_score(
     ``cu_seqlen_ke[m]`` are left untouched; the topk-with-causal-mask path
     in :class:`Indexer.forward` re-applies its own ``q_pos`` causal cap.
     """
-    if q_fp8.is_cuda and torch.cuda.get_device_capability(q_fp8.device)[0] == 12:
+    if (
+        q_fp8.is_cuda
+        and torch.cuda.get_device_capability(q_fp8.device)[0] == 12
+        and not _FP8_DEEPGEMM_ON_SM120
+    ):
         from rtp_llm.models_py.modules.dsv4._indexer_score_triton import (
             v4_indexer_score,
         )
