@@ -20,7 +20,7 @@ Finding checks: `transient_policy.contract`.
 
 `status_batch_async_partial_fail` — profiles: batch-window.
 
-typed_terminal → normal_execution_terminal; inflight_ok → normal_drained_*; stable → no_resurrection; recovery_ok → healthy_recovery_success; typed_terminal_2 → serial_execution_terminal; inflight_ok2 → serial_drained_*.
+typed_terminal → normal_execution_terminal; inflight_ok → normal_drained_*; stable → no_resurrection; recovery_ok → healthy_recovery_success; typed_terminal_2 → serial_execution_terminal; inflight_ok2 → serial_drained_* (explicit serial_perf_restore before verdict/drain).
 
 Checks: `normal_execution_terminal.contract`, `normal_execution_terminal_phase.contract`, `normal_drained_scheduler.contract`, `normal_drained_prefill_batches.contract`, `normal_drained_prefill_members.contract`, `normal_drained_decode_load.contract`, `no_resurrection.contract`, `healthy_recovery_success.contract`, `serial_execution_terminal.contract`, `serial_execution_terminal_phase.contract`, `serial_drained_scheduler.contract`, `serial_drained_prefill_batches.contract`, `serial_drained_prefill_members.contract`, `serial_drained_decode_load.contract`, `master_http_200.contract`.
 
@@ -28,9 +28,9 @@ Checks: `normal_execution_terminal.contract`, `normal_execution_terminal_phase.c
 
 `status_ack_multi_error` — profiles: batch-window.
 
-passthrough → code_8431_passthrough + code_8510_passthrough; no_resurrect → no_resurrection (initial scheduler drain remains an explicit precondition).
+passthrough → code_8431_passthrough + code_8510_passthrough; no_resurrect → failed_scheduler_drained + no_resurrection (scheduler-only, 15-second drain and endpoint sample after three seconds).
 
-Checks: `code_8431_passthrough.contract`, `code_8431_passthrough_phase.contract`, `code_8510_passthrough.contract`, `code_8510_passthrough_phase.contract`, `failed_batches_drained_scheduler.contract`, `failed_batches_drained_prefill_batches.contract`, `failed_batches_drained_prefill_members.contract`, `failed_batches_drained_decode_load.contract`, `no_resurrection.contract`, `master_http_200.contract`.
+Checks: `code_8431_passthrough.contract`, `code_8431_passthrough_phase.contract`, `code_8510_passthrough.contract`, `code_8510_passthrough_phase.contract`, `failed_scheduler_drained.contract`, `no_resurrection.contract`, `master_http_200.contract`.
 
 ## batch_ack_and_execution / ack_drop
 
@@ -142,9 +142,9 @@ Checks: `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.con
 
 `status_duplicate_finished` — profiles: batch-window, single-nonbatch, single-batch, window-nonbatch.
 
-ok==4 → traffic_success; clean_ok → after_clear_*; stable → terminal_replay_is_idempotent; scheduler drain before replay remains a precondition.
+ok==4 → traffic_success; clean_ok → after_clear_*; stable → terminal_replay_is_idempotent; scheduler drain before replay remains an observation: the old return value was ignored.
 
-Checks: `traffic_success.contract`, `scheduler_retires.contract`, `terminal_replay_is_idempotent.contract`, `after_clear_scheduler.contract`, `after_clear_prefill_batches.contract`, `after_clear_prefill_members.contract`, `after_clear_decode_load.contract`, `master_http_200.contract`.
+Checks: `traffic_success.contract`, `terminal_replay_is_idempotent.contract`, `after_clear_scheduler.contract`, `after_clear_prefill_batches.contract`, `after_clear_prefill_members.contract`, `after_clear_decode_load.contract`, `master_http_200.contract`.
 
 ## status_protocol / cursor_regress
 
@@ -182,9 +182,9 @@ Checks: `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.con
 
 `status_decode_before_prefill` — profiles: batch-window.
 
-ok==4 → decode_completes_requests; p_batches_fast → decode_terminal_retires_prefill_promptly; final_p==0 → prefill_eventually_retires; recovery_ok → recovery_success.
+ok==4 → decode_completes_requests; p_batches_fast → decode_terminal_retires_prefill_promptly; final_p==0 → prefill_zero_after_clear; recovery_ok → recovery_success.
 
-Checks: `decode_completes_requests.contract`, `decode_terminal_retires_prefill_promptly.contract`, `prefill_eventually_retires.contract`, `recovery_success.contract`, `master_http_200.contract`.
+Checks: `decode_completes_requests.contract`, `decode_terminal_retires_prefill_promptly.contract`, `prefill_zero_after_clear.contract`, `recovery_success.contract`, `master_http_200.contract`.
 
 Finding checks: `decode_terminal_retires_prefill_promptly.contract`.
 
@@ -242,4 +242,6 @@ Checks: `fresh_accepted_zero.contract`, `fresh_fetch_zero.contract`, `prefill_co
 
 The four variants that read TTL metrics retain the old 180-second cold-exporter readiness gate as an explicit `metrics_ready` stage, with recorded attempts and actuator/prometheus → prometheus fallback. Later event observations use the selected epoch-bound source; a failed readiness deadline cannot become a zero counter.
 
-Debug observation also verifies scheduler/queue presence and the complete declared Prefill/Decode/engine directory, with matching endpoint generation identities. Iterating only the pages a server happened to return is insufficient evidence of complete owner coverage.
+Debug observation verifies scheduler/queue presence and the complete declared Prefill/Decode/engine directory, with matching endpoint generations. Iterating only returned pages is insufficient owner coverage.
+
+Review corrections preserve legacy observation points: ACK multi-error checks only scheduler drain and the three-second endpoint sample; execution partial compares the two fingerprint endpoints and restores serial Prefill to 100 ms immediately after clearing its fault; duplicate-finished does not promote the ignored preliminary drain result to a new assertion; Decode-before-Prefill keeps fallback drain observational and checks final Prefill batches after clearing suppression.

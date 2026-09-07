@@ -2311,15 +2311,6 @@ variants:
         op: eq
         value: 0
     timeout_s: 110
-  - id: scheduler_retires
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.initial_drain.output.snapshot
-      metric: scheduler
-      op: eq
-      expected: 0
-      aggregate: last
   - id: duplicate_replay_window
     action: status_sample
     params:
@@ -3161,15 +3152,6 @@ variants:
         op: eq
         value: 0
     timeout_s: 110
-  - id: prefill_eventually_retires
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.fallback_retirement_window.output.snapshot
-      metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
   - id: p_terminal_restore
     action: status_control
     params:
@@ -3180,6 +3162,20 @@ variants:
       requests:
         $ref: stages.traffic.output.requests
       rids: all
+  - id: prefill_after_clear
+    action: status_sample
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: prefill_zero_after_clear
+    action: status_check
+    params:
+      snapshot:
+        $ref: stages.prefill_after_clear.output.snapshot
+      metric: prefill_batches
+      op: eq
+      expected: 0
+      aggregate: last
   - id: recovery
     action: status_prepare
     params:
