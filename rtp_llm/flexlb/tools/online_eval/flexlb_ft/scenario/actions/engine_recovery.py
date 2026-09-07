@@ -12,6 +12,7 @@ from .engine_control import ENGINE_NAME
 
 MAX_LOG_BYTES = 8 * 1024 * 1024
 EXTRA_METRICS = {
+    "topology_mismatch",
     "created",
     "retired",
     "retired_targets",
@@ -146,6 +147,12 @@ def _log_counts(mark, deadline):
 
 
 def metric(frame, name):
+    if name == "topology_mismatch":
+        info = frame["info"]["worker_summary"]["PREFILL"]
+        expected = frame["expected_prefill"]
+        return abs(status._count(info["alive"]) - expected) + abs(
+            status._count(info["discovered"]) - expected
+        )
     if name in {"created", "retired", "retired_targets"}:
         counts = frame["log"]["counts"]
         if not counts:
@@ -260,6 +267,7 @@ def execute_observe(ctx, params, deadline):
                 },
                 deadline,
             )
+            frame["expected_prefill"] = ctx.instance["environment"]["n_prefill"]
             if selection:
                 frame["targets"] = selection["targets"]
             if mark:
@@ -531,5 +539,69 @@ def execute_pause(ctx, params, deadline):
 HANDLERS.append(
     StageHandler(
         "recovery_pause", validate_pause, execute_pause, {"elapsed_s": "number"}
+    )
+)
+
+
+def _ttft(source):
+    from .elastic import request_success
+
+    values = []
+    for record in source["frames"][-1]["records"]:
+        if not request_success(record):
+            continue
+        first, stream_start = (
+            record["stream"]["first_output_s"],
+            record["stream"]["started_s"],
+        )
+        if first is None or first - stream_start > 15:
+            continue
+        elapsed = (first - record["schedule"]["started_s"]) * 1000
+        if elapsed < 0:
+            raise RuntimeError("inverted TTFT timestamps")
+        values.append(elapsed)
+    return sorted(values)[len(values) // 2] if values else None
+
+
+def validate_ttft(params, plan):
+    p = status._validate(
+        params, plan, {"baseline", "recovered"}, {"baseline", "recovered"}
+    )
+    for key in p:
+        plan.reference(p[key], "snapshot")
+    return p
+
+
+def execute_ttft(ctx, params, deadline):
+    deadline.check()
+    before, after = (
+        _ttft(_snapshot(ctx, params[k])) for k in ("baseline", "recovered")
+    )
+    passed = (
+        before is not None
+        and after is not None
+        and (before <= 0 or after <= 1.5 * before)
+    )
+    return StageOutput(
+        {"passed": passed},
+        [
+            CheckResult(
+                "ttft",
+                "PASS" if passed else "FAIL",
+                "successful-request index p50 recovery bound",
+                actual={"baseline_ms": before, "recovered_ms": after},
+                expected="<= 1.5x baseline; missing timing fails",
+            )
+        ],
+    )
+
+
+HANDLERS.append(
+    StageHandler(
+        "recovery_ttft_check",
+        validate_ttft,
+        execute_ttft,
+        {"passed": "boolean"},
+        checks=frozenset({"ttft"}),
     )
 )
