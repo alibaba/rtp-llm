@@ -331,7 +331,9 @@ def _slo_spec(ctx: CaseContext) -> EnvSpec:
 
 @case(
     "admission_slo_queue_deadline",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-batch"],  # +sb (tier2 wave2): KV gate +
+    # queue deadline live on the scheduler queue regardless of the decision
+    # axis; SINGLE just admits each fire as its own single-member batch.
     source="gap G11: SLO queue deadline + kv_pressure admission (wait-then-expire)",
 )
 def admission_slo_deadline(ctx: CaseContext):
@@ -344,12 +346,13 @@ def admission_slo_deadline(ctx: CaseContext):
 
     Recovery: clear kv_pressure and a fresh request must succeed.
 
-    Profile semantics (v2, task #55): the KV gate + queue deadline apply
-    to the scheduler queue regardless of the decision/dispatcher axes,
-    but _slo_spec pins the legacy fault axes (PRIORITY + FIXED_WINDOW +
-    BATCH) via FLEXLB_CONFIG — re-running under another --profile would
-    execute the identical configuration, so the declaration stays
-    batch-window (label honesty + regression efficiency).
+    Profile semantics: the KV gate + queue deadline apply to the
+    scheduler queue regardless of the decision/dispatcher axes.
+    _slo_spec is profile-aware (PRIORITY ordering + queueTimeoutMs=1500
+    layered on the ctx profile's own decision/dispatcher axes), so the
+    single-batch lane runs the SINGLE decision axis on the same KV-gate
+    + typed-expiry contract with zero assertion changes (audit 2026-09,
+    case 2 sb ⚠️ → covered).
     """
     env = ctx.env_manager.ensure(_slo_spec(ctx))
     ops = ctx.engine_ops(env)
@@ -426,7 +429,9 @@ def _capacity_spec(ctx: CaseContext) -> EnvSpec:
 
 @case(
     "admission_master_capacity_reject",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-batch"],  # +sb (tier2 wave2): the permit
+    # is taken on the master submit path for every delivery mode; the run()
+    # input_pb fallback below adapts the stream open per response.
     source=(
         "gap G11: master outstanding-capacity admission — typed QUEUE_FULL "
         "(8502 TooManyRequests) fast reject.  F6 verdict overturned: the "
@@ -453,12 +458,13 @@ def admission_master_capacity(ctx: CaseContext):
     the outstanding permit).  The master behaviour was always typed; the
     defect was the test's assertion family.
 
-    Profile semantics (v2, task #55): the outstanding-capacity permit is
-    taken on the master submit path for every delivery mode, but
-    _capacity_spec pins the legacy fault axes (PRIORITY + FIXED_WINDOW +
-    BATCH) via FLEXLB_CONFIG — re-running under another --profile would
-    execute the identical configuration, so the declaration stays
-    batch-window (label honesty + regression efficiency).
+    Profile semantics: the outstanding-capacity permit is taken on
+    the master submit path for every delivery mode.  _capacity_spec is
+    profile-aware (PRIORITY ordering + maxOutstanding=2 on the ctx
+    profile's own axes), so the single-batch lane exercises the same
+    typed 8502 fast-reject contract under the SINGLE decision axis
+    (audit 2026-09, case 3 sb ⚠️ → covered; the sn/wn lanes stay
+    later-phase optional work).
     """
     env = ctx.env_manager.ensure(_capacity_spec(ctx))
     ops = ctx.engine_ops(env)
@@ -484,8 +490,15 @@ def admission_master_capacity(ctx: CaseContext):
                     str(resp.error_message),
                     (time.monotonic() - t0),
                 )
-            # batch-window profile: BATCH dispatch -> FetchResponse stream.
-            handle = ops.start_stream(resp, rid)
+            # Stream open per response: BATCH dispatch -> FetchResponse;
+            # NON_BATCH -> GenerateStreamCall with an input_pb rebuilt from
+            # the SAME shape (start_stream's default-shape fallback would
+            # desync the engine from the master's schedule — the
+            # _fire_tracked pattern).
+            input_pb = None
+            if not resp.enqueued_by_master:
+                input_pb = ops.build_generate_input(rid, input_len=512, output_len=2)
+            handle = ops.start_stream(resp, rid, input_pb=input_pb)
             handle.wait_end(15.0)
             snap = handle.snap
             if snap.error or not snap.completed:
@@ -622,7 +635,9 @@ def _prefill_park_spec(ctx: CaseContext) -> EnvSpec:
 
 @case(
     "engine_prefill_concurrency_gate_park",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-batch"],  # +sb (tier2 wave2): the engine
+    # maxPrefillConcurrency gate sits behind the EnqueueBatch path; the
+    # SINGLE decision just makes each 0.4s-spaced fire its own batch.
     requires=["enqueue_batch"],
     source=(
         "admission wave-2 W1: engine prefill-concurrency gate "
@@ -785,7 +800,9 @@ def _decode_names(ops) -> list[str]:
 
 @case(
     "engine_decode_hard_gate_unbounded_park",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-batch"],  # +sb (tier2 wave2): decode
+    # hand-off + the 128 hard gate are decision-axis agnostic (the decode
+    # arrival path is prefill completion, not the scheduler decision).
     requires=["enqueue_batch"],
     source=(
         "admission wave-2 W2: engine decode hard gate "
@@ -1367,7 +1384,9 @@ def _batcher_queue_spec(ctx: CaseContext, queue_timeout_ms: int) -> EnvSpec:
 
 @case(
     "admission_batcher_queue_capacity_park",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-batch"],  # +sb (tier2 wave2): same BATCH
+    # dispatcher lease/queue/park chain; SINGLE fires each 0.4s-spaced
+    # request as its own single-member batch under the same knobs.
     requires=["enqueue_batch"],
     source=(
         "admission wave-2 A5: master batcher-queue capacity gate "
@@ -1519,7 +1538,9 @@ def admission_batcher_queue_capacity_park(ctx: CaseContext):
 
 @case(
     "admission_batcher_queue_deadline",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-batch"],  # +sb (tier2 wave2): the
+    # queueTimeoutMs expiry rides the scheduler queue layer (decision-axis
+    # agnostic); SINGLE keeps the same lease/queue seats per fire.
     requires=["enqueue_batch"],
     source=(
         "admission wave-2 A5: batcher-queue gate deadline — the same "
@@ -1752,9 +1773,10 @@ def admission_batcher_queue_deadline(ctx: CaseContext):
 
 
 def _pool_wait_spec(ctx: CaseContext) -> EnvSpec:
-    """A4 env (verdict §4.1 rebuild): 1P+2D on the profile's own
-    SINGLE+NON_BATCH axes (profile-aware since the tier2 spec unpick)
-    with the two LIVE capacity knobs — dispatcher
+    """A4 env (verdict §4.1 rebuild): 1P+2D on the NON_BATCH dispatcher
+    axes of the ctx profile (single-nonbatch / window-nonbatch lanes;
+    profile-aware since the tier2 spec unpick) with the two LIVE capacity
+    knobs — dispatcher
     maxInflightRequestsPerPrefillWorker=1 (RoutePrefillAdmission leases
     one in-flight delivery per dispatch; priority.py's verified backlog
     window — without the cap every request dispatches immediately, no
@@ -1787,7 +1809,10 @@ def _pool_wait_spec(ctx: CaseContext) -> EnvSpec:
 
 @case(
     "admission_placement_pool_wait",
-    profiles=["single-nonbatch"],
+    profiles=["single-nonbatch", "window-nonbatch"],  # +wn (tier2 wave2):
+    # same NON_BATCH dispatcher axis, same request-level lease knob, same
+    # Blocked park mechanism — the decision axis never touches the
+    # per-request delivery lease (audit 2026-09, case 9 wn ⚠️ → covered).
     requires=["generate_stream"],
     source=(
         "admission wave-2 A4 (verdict §4.1 rebuild): prefill placement "
@@ -1801,7 +1826,9 @@ def admission_placement_pool_wait(ctx: CaseContext):
     (verdict §4.1; the case name keeps its historical "pool_wait" form
     from the pre-intake3 availability-filter contract).
 
-    Scenario: dedicated 1P+2D env on the SINGLE+NON_BATCH base with
+    Scenario: dedicated 1P+2D env on the NON_BATCH base (single-nonbatch
+    and window-nonbatch lanes — the request-level delivery lease is the
+    same knob on both) with
     dispatcher.maxInflightRequestsPerPrefillWorker=1 and
     scheduler.capacity.maxWaitingRequestsPerPrefillWorker=2, all under
     prefill_fixed_ms=5000.  Request A is fired first; once A is
@@ -2004,7 +2031,9 @@ def _waiting_cap_spec(ctx: CaseContext) -> EnvSpec:
 
 @case(
     "admission_engine_waiting_batch_cap_reject",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-batch"],  # +sb (tier2 wave2): the
+    # max_waiting_batches cap + whole-batch backpressure reject live on the
+    # EnqueueBatch path (Phase 2), untouched by the decision axis.
     requires=["enqueue_batch"],
     source=(
         "admission wave-3 B3: engine prefill waiting-queue cap "
@@ -2233,7 +2262,9 @@ def _lease_keys(rid: int) -> list:
 
 @case(
     "admission_engine_kv_lack_mem_fast_reject",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-batch"],  # +sb (tier2 wave2): the
+    # BlockLease admission check is EnqueueBatch Phase 1.5 — the 602
+    # LACK_MEM fast reject is decision-axis agnostic.
     requires=["enqueue_batch"],
     source=(
         "admission wave-3 B2: engine prefill KV block-pool gate "
