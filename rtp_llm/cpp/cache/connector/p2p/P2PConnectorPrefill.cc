@@ -114,7 +114,7 @@ bool P2PConnectorPrefill::writeByLayerTag(int                                   
                                           const std::string&                    tag,
                                           const KVCacheResourcePtr&             resource,
                                           int64_t                               request_id,
-                                          const std::shared_ptr<torch::Event>& event,
+                                          const std::shared_ptr<c10::Event>& event,
                                           int64_t                               deadline_ms) {
     if (!worker_ || !resource) {
         RTP_LLM_LOG_WARNING("writeByLayerTag failed, worker or resource is null, request_id=%ld layer_id=%d tag=%s",

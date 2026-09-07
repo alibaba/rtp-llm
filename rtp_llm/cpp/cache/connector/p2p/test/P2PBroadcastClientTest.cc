@@ -85,7 +85,6 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
                                      unique_key,
                                      deadline_ms,
                                      P2PConnectorBroadcastType::READ,
-                                     0,
                                      request_deadline_ms);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result->uniqueKey(), unique_key);

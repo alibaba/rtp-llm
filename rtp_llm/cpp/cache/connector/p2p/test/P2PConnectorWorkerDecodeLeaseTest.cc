@@ -221,7 +221,7 @@ private:
 // =============================================================================
 class LeaseTestMockLayerBlockConverter: public LayerBlockConverter {
 public:
-    std::vector<BlockInfo> convertIndexToBuffer(int, int, int, int) const override {
+    std::vector<BlockInfo> convertIndexToBuffer(int, const std::string&, int, int, int) const override {
         return {};
     }
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
@@ -314,7 +314,18 @@ TEST_F(DecodeLeaseRaceTest, PartialRecvRegistrationFailureKeepsLeaseUntilStarted
     const std::string key = "partial_registration_failure";
     inflight_receiver_->setFailRecvCallIndex(2);
 
-    auto error = decode_->read(1, key, currentTimeMs() + 5000, makeBuffers(2));
+    // 编排层下发 route：两条 layer buffer 装在同一条 route 里，等价于旧接口的
+    // 每层一个 recv task —— 第 2 个 recv 调用失败，第 1 个已启动。
+    auto buffers = makeBuffers(2);
+    P2PWorkerRoutePlan plan;
+    P2PWorkerRoute  route;
+    route.route_id      = 0;
+    route.cache_tag     = buffers[0]->cacheTag();
+    route.partition     = PartitionSpec{1, 0};
+    route.layer_buffers = buffers;
+    plan.routes.push_back(route);
+
+    auto error = decode_->read(1, key, currentTimeMs() + 5000, plan);
     ASSERT_TRUE(error.hasError());
     EXPECT_EQ(error.code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE);
 

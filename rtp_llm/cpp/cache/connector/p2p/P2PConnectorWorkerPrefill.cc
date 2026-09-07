@@ -60,7 +60,7 @@ P2PConnectorWorkerPrefill::P2PConnectorWorkerPrefill(P2PConnectorWorkerConfig   
     layer_block_converter_(layer_block_converter),
     metrics_reporter_(metrics_reporter),
     sender_(sender),
-    computed_buffers_(std::make_shared<ComputedLayerCacheBufferStore>()) {}
+    computed_buffers_(std::make_shared<ComputedLayerCacheBufferStore>(config_.p2p_cancelled_keys_ttl_ms)) {}
 
 P2PConnectorWorkerPrefill::~P2PConnectorWorkerPrefill() {
     if (cleanup_thread_) {

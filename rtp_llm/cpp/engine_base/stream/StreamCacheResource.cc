@@ -565,7 +565,7 @@ bool StreamCacheResource::asyncLoadCache() {
     RTP_LLM_PROFILE_FUNCTION();
     if (!p2p_load_context_ && resource_context_.cache_manager && resource_context_.cache_manager->hasP2PConnector()) {
         auto meta = std::make_shared<MetaImpl>(
-            reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
+            reuseCache() && enableHostCache(), reuseCache() && resource_context_.enable_remote_cache, stream_->traceId());
         meta->generate_stream_ = stream_;
         meta->fillRoutingContext(stream_);
         const size_t tree_covered_block_num = treeCoveredBlockNum();

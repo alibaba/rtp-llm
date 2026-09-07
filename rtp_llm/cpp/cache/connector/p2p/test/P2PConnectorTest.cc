@@ -30,7 +30,10 @@ public:
                                                 int /*block_id*/,
                                                 int /*partition_count*/,
                                                 int /*partition_id*/) const override {
-        return {};
+        BlockInfo info;
+        info.is_cuda    = true;
+        info.size_bytes = 1024;
+        return {info};
     }
 
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {

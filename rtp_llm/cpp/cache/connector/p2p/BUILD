@@ -31,6 +31,7 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:time_util",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "@havenask//aios/autil:thread",
     ],
@@ -124,6 +125,7 @@ cc_library(
         "P2PConnectorSchedulerDecode.h",
         "P2PConnectorWorkerPrefill.h",
         "P2PConnectorWorkerDecode.h",
+        "P2PWorkerRoute.h",
         "P2PConnector.h",
     ],
     deps = [

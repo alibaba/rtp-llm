@@ -44,7 +44,7 @@ private:
 
 class ComputedLayerCacheBufferStore {
 public:
-    ComputedLayerCacheBufferStore();
+    explicit ComputedLayerCacheBufferStore(int64_t removed_request_ttl_ms = 3600 * 1000);
     ~ComputedLayerCacheBufferStore();
 
 public:
@@ -97,6 +97,7 @@ private:
                         std::vector<RemovedRequestExpiry>,
                         RemovedRequestExpiryCompare>
         removed_request_expiry_queue_;
+    int64_t removed_request_ttl_ms_;
 };
 
 }  // namespace rtp_llm
