@@ -2,6 +2,7 @@
 """List or execute compiled scenario instances inside a parent-owned port lane."""
 
 import argparse
+import hashlib
 import json
 import signal
 import sys
@@ -26,6 +27,12 @@ LIST_FIELDS = (
     "estimated_duration_s",
     "resource_budget",
 )
+
+
+def instance_directory(instance_id):
+    # JVM -Xlog uses ':' as a delimiter even when the argv is shell-quoted.
+    # The public ID remains unchanged; only its filesystem storage key differs.
+    return "instance-" + hashlib.sha256(instance_id.encode("utf-8")).hexdigest()
 
 
 def inventory(plans):
@@ -91,6 +98,10 @@ def main(argv=None):
             raise ScenarioError(
                 "execution requires --out-dir and --lease-json from the parent port planner"
             )
+        if ":" in str(args.out_dir.resolve()):
+            raise ScenarioError(
+                "Java mock output directory cannot contain a colon (JVM -Xlog delimiter)"
+            )
         leases = [validate_lease(args.lease_json, p["resource_budget"]) for p in plans]
     except (ScenarioError, OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
@@ -123,7 +134,7 @@ def main(argv=None):
                     plan,
                     JavaMockBackend(lease),
                     registry,
-                    args.out_dir / "instances" / plan["id"],
+                    args.out_dir / "instances" / instance_directory(plan["id"]),
                     cancelled=cancelled,
                     enforce_deadlines=True,
                 )
