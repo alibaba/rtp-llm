@@ -84,6 +84,18 @@ def tier1_dual_spec(ctx) -> EnvSpec:
     )
 
 
+def dual_spec_for_layout(ctx) -> EnvSpec:
+    """Dual-master layout selector for the HA failover pair.
+
+    master_ha_failover / failback_wraparound ensure this spec instead of
+    calling tier1_dual_spec directly, keeping the failover family's
+    layout decision in one place. Current layout: Tier-1 dual standalone
+    (two masters on distinct port groups, no ZK) — identical to
+    tier1_dual_spec; profile-dependent layouts can dispatch here later.
+    """
+    return tier1_dual_spec(ctx)
+
+
 # ---------------------------------------------------------------------------
 # Per-instance helpers
 # ---------------------------------------------------------------------------
