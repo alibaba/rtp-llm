@@ -150,9 +150,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (mm_features_num) {
         mm_features_shape_t   = torch::empty({mm_features_num}, torch::kInt64).pin_memory();
         mm_features_shape_ptr = mm_features_shape_t.data_ptr<int64_t>();
-        for (int64_t i = 0; i < mm_features_num; ++i) {
-            mm_features_shape_ptr[i] =
-                inputs.multimodal_features.has_value() ? inputs.multimodal_features.value()[i].size(0) : 0;
+        // Non-root CP ranks may hold fewer feature slices, including an empty
+        // vector. Only root can read local features using the broadcast count.
+        if (parallelism_config.tp_rank == 0) {
+            for (int64_t i = 0; i < mm_features_num; ++i) {
+                mm_features_shape_ptr[i] = inputs.multimodal_features.value()[i].size(0);
+            }
         }
         // CPU broadcast (UDS path; fallback handles cudaSyncAndCheck).
         execBroadcastCpu({{mm_features_shape_t}, 0});
