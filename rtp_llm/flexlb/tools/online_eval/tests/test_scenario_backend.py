@@ -235,6 +235,37 @@ class BackendTest(unittest.TestCase):
             )
             self.assertEqual(ctx.cleanup(1)[0]["status"], "PASS")
 
+    def test_paced_deferred_wave_preserves_each_post_issue_delay_without_fetch(self):
+        now = [0.0]
+        clock = lambda: now[0]
+
+        def sleep(value):
+            now[0] += value
+
+        with tempfile.TemporaryDirectory() as root:
+            ctx = RuntimeContext({}, None, root, clock, sleep)
+            ctx.ops = Ops()
+            ctx.instance_deadline_s = 10
+            batch = RequestBatch(
+                ctx,
+                dict(
+                    count=3,
+                    input_len=10,
+                    output_len=2,
+                    consume="deferred",
+                    post_issue_delay_s=0.12,
+                ),
+            )
+            ctx.register_resource("requests", batch, batch.cleanup)
+            batch.submit(Deadline(5, clock, sleep))
+            self.assertEqual(
+                [row["issued_s"] for row in batch.snapshot_records()], [0, 0.12, 0.24]
+            )
+            self.assertAlmostEqual(now[0], 0.36)
+            self.assertEqual(ctx.ops.fetch_count, 0)
+            self.assertTrue(batch.wait(Deadline(5, clock, sleep))["completed"])
+            self.assertEqual(ctx.cleanup(1)[0]["status"], "PASS")
+
     def test_wait_timeout_cleanup_cancels_actual_call_and_joins(self):
         requests, ctx = self.run_batch("immediate", hanging=True)
         with self.assertRaises(StageTimeout):

@@ -180,6 +180,24 @@ def distinct(ctx, params, deadline):
     )
 
 
+def same(ctx, params, deadline):
+    deadline.check()
+    first, second = (_target(ctx, params[key]) for key in ("first", "second"))
+    passed = first == second
+    return StageOutput(
+        {"same": passed},
+        [
+            CheckResult(
+                "same_holder",
+                "PASS" if passed else "FAIL",
+                actual=[first, second],
+                expected="same prefill engine",
+                evidence=dict(complete=True, sample_count=2, min_samples=2),
+            )
+        ],
+    )
+
+
 def evict(ctx, params, deadline):
     name = _target(ctx, params["engine"])
     evidence = dict(
@@ -289,7 +307,7 @@ def _affinity_validate(params, plan):
     return p
 
 
-def affinity(ctx, params, deadline):
+def affinity(ctx, params, deadline, property_id="M3"):
     rows = [
         row
         for ref in params["requests"]
@@ -306,7 +324,7 @@ def affinity(ctx, params, deadline):
         request_success(row) for row in rows
     )
     report = GradeReport(run_grade=ctx.instance.get("grade", "normal"))
-    passed = report.check("M3", share, bands=params["bands"])
+    passed = report.check(property_id, share, bands=params["bands"])
     evidence = dict(
         complete=True,
         sample_count=len(rows),
@@ -328,7 +346,7 @@ def affinity(ctx, params, deadline):
                 evidence=evidence,
             ),
             CheckResult(
-                "M3",
+                property_id,
                 "PASS" if passed and len(rows) >= params["min_samples"] else "FAIL",
                 actual=share,
                 expected=params["bands"][report.run_grade],
@@ -339,7 +357,169 @@ def affinity(ctx, params, deadline):
     )
 
 
+def fidelity(ctx, params, deadline):
+    return affinity(ctx, params, deadline, property_id="P9")
+
+
+def _spread_validate(params, plan):
+    p = _fields(
+        params,
+        {"requests", "min_samples", "bands"},
+        {"requests", "min_samples", "bands"},
+    )
+    if not isinstance(p["requests"], list) or not 1 <= len(p["requests"]) <= 100:
+        raise ValueError("spread requires explicit bounded request cohorts")
+    for ref in p["requests"]:
+        plan.reference(ref, "requests")
+    if type(p["min_samples"]) is not int or p["min_samples"] < 1:
+        raise ValueError("spread needs a positive sample floor")
+    bands = p["bands"]
+    if (
+        not isinstance(bands, dict)
+        or set(bands) != {"strict", "normal", "loose"}
+        or any(
+            type(v) not in (int, float) or not math.isfinite(v) or not 0 <= v <= 1
+            for v in bands.values()
+        )
+        or not bands["strict"] <= bands["normal"] <= bands["loose"]
+    ):
+        raise ValueError("spread requires ordered upper bands")
+    return p
+
+
+def spread(ctx, params, deadline):
+    from collections import Counter
+
+    deadline.check()
+    rows = [
+        row
+        for ref in params["requests"]
+        for row in ctx.resource(ref, "requests").snapshot_records()
+    ]
+    if not rows or len({row["wire_request_id"] for row in rows}) != len(rows):
+        raise ValueError("spread cohort empty or duplicated")
+    if any(
+        row.get("consumer_completion_verified") is not True
+        or not isinstance(row.get("prefill_addr"), str)
+        or not row["prefill_addr"]
+        for row in rows
+    ):
+        raise ValueError("spread cohort lacks terminal or landing evidence")
+    distribution = Counter(row["prefill_addr"] for row in rows)
+    maximum = max(distribution.values()) / len(rows)
+    complete = len(rows) >= params["min_samples"] and all(
+        request_success(row) for row in rows
+    )
+    report = GradeReport(run_grade=ctx.instance.get("grade", "normal"))
+    passed = report.check("P1", maximum, bands=params["bands"])
+    evidence = dict(
+        complete=True,
+        sample_count=len(rows),
+        min_samples=params["min_samples"],
+        records=rows,
+        distribution=dict(distribution),
+        grade=report.run_grade,
+        achieved=report.achieved,
+        bands=params["bands"],
+    )
+    return StageOutput(
+        {"max_share": maximum},
+        [
+            CheckResult(
+                "P6",
+                "PASS" if complete else "FAIL",
+                actual=complete,
+                expected=True,
+                evidence=evidence,
+            ),
+            CheckResult(
+                "P1",
+                "PASS" if passed and len(rows) >= params["min_samples"] else "FAIL",
+                actual=maximum,
+                expected=params["bands"][report.run_grade],
+                evidence=evidence,
+            ),
+        ],
+        [_artifact(ctx, "kv-spread", evidence)],
+    )
+
+
+def _membership_validate(params, plan):
+    p = _fields(
+        params,
+        {"snapshot", "engine", "keys", "relation"},
+        {"snapshot", "engine", "keys", "relation"},
+    )
+    plan.reference(p["snapshot"], "kv_snapshot")
+    _engine(p["engine"], plan)
+    _keys(p["keys"])
+    if p["relation"] not in ("all", "none", "exact"):
+        raise ValueError("unknown key membership relation")
+    return p
+
+
+def membership(ctx, params, deadline):
+    deadline.check()
+    data = ctx.resource(params["snapshot"], "kv_snapshot")
+    name = _target(ctx, params["engine"])
+    actual = set(data["engines"][name]["cache_key_set"])
+    wanted = set(params["keys"])
+    passed = (
+        wanted <= actual
+        if params["relation"] == "all"
+        else (not wanted & actual if params["relation"] == "none" else wanted == actual)
+    )
+    evidence = dict(
+        complete=True,
+        sample_count=1,
+        min_samples=1,
+        snapshot=data,
+        engine=name,
+        requested_keys=params["keys"],
+    )
+    return StageOutput(
+        {"matched": passed},
+        [
+            CheckResult(
+                "key_membership",
+                "PASS" if passed else "FAIL",
+                actual=sorted(actual & wanted),
+                expected=params["relation"],
+                evidence=evidence,
+            )
+        ],
+    )
+
+
 HANDLERS = [
+    StageHandler(
+        "kv_same",
+        _distinct_validate,
+        same,
+        {"same": "boolean"},
+        checks=frozenset({"same_holder"}),
+    ),
+    StageHandler(
+        "kv_fidelity_check",
+        _affinity_validate,
+        fidelity,
+        {"share": "number"},
+        checks=frozenset({"P6", "P9"}),
+    ),
+    StageHandler(
+        "kv_spread_check",
+        _spread_validate,
+        spread,
+        {"max_share": "number"},
+        checks=frozenset({"P6", "P1"}),
+    ),
+    StageHandler(
+        "kv_membership_check",
+        _membership_validate,
+        membership,
+        {"matched": "boolean"},
+        checks=frozenset({"key_membership"}),
+    ),
     StageHandler(
         "kv_snapshot", _snapshot_validate, snapshot, {"snapshot": "kv_snapshot"}
     ),

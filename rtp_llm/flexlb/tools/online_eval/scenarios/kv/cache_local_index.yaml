@@ -10,6 +10,8 @@ profiles:
 - window-nonbatch
 legacy_case_ids:
 - kv_pe_prefix_continuity
+- kv_pe_evict_zero_match
+- kv_pe_admit_isolation
 environment:
   backend: java_mock
   n_prefill: 2
@@ -30,10 +32,1820 @@ variants:
   stage_overrides:
     seed_first:
       consume: deferred
+  legacy_case_ids:
+  - kv_pe_prefix_continuity
 - id: continuity_nonbatch
   profiles:
   - single-nonbatch
   - window-nonbatch
+  legacy_case_ids:
+  - kv_pe_prefix_continuity
+- id: evict_batch
+  profiles:
+  - batch-window
+  - single-batch
+  legacy_case_ids:
+  - kv_pe_evict_zero_match
+  environment_overrides:
+    prefill_cache_blocks: 16
+  requires:
+  - enqueue_batch
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: prime
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: prime_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.prime.output.requests
+    timeout_s: 15
+  - id: holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.prime.output.requests
+      phase: terminal
+  - id: prime_quiet
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    timeout_s: 8
+  - id: positive
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: positive_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.positive.output.requests
+    timeout_s: 15
+  - id: positive_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.positive.output.requests
+      phase: terminal
+  - id: positive_affinity
+    action: kv_same
+    params:
+      first:
+        $ref: stages.holder.output.engine
+      second:
+        $ref: stages.positive_holder.output.engine
+  - id: evict
+    action: kv_evict
+    params:
+      engine:
+        $ref: stages.holder.output.engine
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+  - id: eviction_quiet
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    timeout_s: 8
+  - id: eviction_membership
+    action: kv_membership_check
+    params:
+      snapshot:
+        $ref: stages.eviction_quiet.output.snapshot
+      engine:
+        $ref: stages.holder.output.engine
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      relation: none
+  - id: wave
+    action: request
+    params:
+      count: 20
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: deferred
+      stream_timeout_s: 30
+      post_issue_delay_s: 0.12
+  - id: wave_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+    timeout_s: 30
+  - id: spread
+    action: kv_spread_check
+    params:
+      requests:
+      - $ref: stages.wave.output.requests
+      min_samples: 20
+      bands:
+        strict: 0.65
+        normal: 0.75
+        loose: 0.85
+  - id: cleanup
+    action: teardown
+- id: isolation_batch
+  profiles:
+  - batch-window
+  - single-batch
+  legacy_case_ids:
+  - kv_pe_admit_isolation
+  requires:
+  - enqueue_batch
+  execution:
+    timeout_s: 600
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: balance_snapshot
+    params:
+      role: prefill
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+  - id: perf_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: seed_a
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: deferred
+      stream_timeout_s: 30
+  - id: a_pending
+    action: balance_pending
+    params:
+      requests:
+        $ref: stages.seed_a.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+    timeout_s: 6
+  - id: a_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_a.output.requests
+    timeout_s: 30
+  - id: a_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_a.output.requests
+      phase: terminal
+  - id: seed_b
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 815000
+      - 815001
+      - 815002
+      - 815003
+      - 815004
+      - 815005
+      - 815006
+      - 815007
+      - 815008
+      - 815009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: b_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_b.output.requests
+    timeout_s: 15
+  - id: b_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_b.output.requests
+      phase: terminal
+  - id: two_holders
+    action: kv_distinct
+    params:
+      first:
+        $ref: stages.a_holder.output.engine
+      second:
+        $ref: stages.b_holder.output.engine
+  - id: restore_perf
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+  - id: slow_b
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.b_holder.output.engine
+      perf:
+        prefill_fixed_ms: 5000
+  - id: b_perf_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: admit_0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: admit_0_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.admit_0.output.requests
+    timeout_s: 15
+  - id: admit_0_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.admit_0.output.requests
+      phase: terminal
+  - id: admit_0_on_a
+    action: kv_same
+    params:
+      first:
+        $ref: stages.a_holder.output.engine
+      second:
+        $ref: stages.admit_0_holder.output.engine
+  - id: admit_1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: admit_1_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.admit_1.output.requests
+    timeout_s: 15
+  - id: admit_1_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.admit_1.output.requests
+      phase: terminal
+  - id: admit_1_on_a
+    action: kv_same
+    params:
+      first:
+        $ref: stages.a_holder.output.engine
+      second:
+        $ref: stages.admit_1_holder.output.engine
+  - id: admit_2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: admit_2_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.admit_2.output.requests
+    timeout_s: 15
+  - id: admit_2_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.admit_2.output.requests
+      phase: terminal
+  - id: admit_2_on_a
+    action: kv_same
+    params:
+      first:
+        $ref: stages.a_holder.output.engine
+      second:
+        $ref: stages.admit_2_holder.output.engine
+  - id: admit_3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: admit_3_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.admit_3.output.requests
+    timeout_s: 15
+  - id: admit_3_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.admit_3.output.requests
+      phase: terminal
+  - id: admit_3_on_a
+    action: kv_same
+    params:
+      first:
+        $ref: stages.a_holder.output.engine
+      second:
+        $ref: stages.admit_3_holder.output.engine
+  - id: restore_b
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.b_holder.output.engine
+      perf:
+        prefill_fixed_ms: 100
+  - id: admission_quiet
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    timeout_s: 8
+  - id: a_membership
+    action: kv_membership_check
+    params:
+      snapshot:
+        $ref: stages.admission_quiet.output.snapshot
+      engine:
+        $ref: stages.a_holder.output.engine
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      relation: all
+  - id: b_isolation
+    action: kv_membership_check
+    params:
+      snapshot:
+        $ref: stages.admission_quiet.output.snapshot
+      engine:
+        $ref: stages.b_holder.output.engine
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      relation: none
+  - id: continuation_0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: continuation_0_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_0.output.requests
+    timeout_s: 15
+  - id: continuation_1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: continuation_1_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_1.output.requests
+    timeout_s: 15
+  - id: continuation_2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: continuation_2_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_2.output.requests
+    timeout_s: 15
+  - id: continuation_3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: continuation_3_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_3.output.requests
+    timeout_s: 15
+  - id: continuation_4
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: continuation_4_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_4.output.requests
+    timeout_s: 15
+  - id: continuation_5
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: continuation_5_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_5.output.requests
+    timeout_s: 15
+  - id: continuation_6
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: continuation_6_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_6.output.requests
+    timeout_s: 15
+  - id: continuation_7
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: continuation_7_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_7.output.requests
+    timeout_s: 15
+  - id: continuation_8
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: continuation_8_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_8.output.requests
+    timeout_s: 15
+  - id: continuation_9
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: continuation_9_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_9.output.requests
+    timeout_s: 15
+  - id: fidelity
+    action: kv_fidelity_check
+    params:
+      requests:
+      - $ref: stages.continuation_0.output.requests
+      - $ref: stages.continuation_1.output.requests
+      - $ref: stages.continuation_2.output.requests
+      - $ref: stages.continuation_3.output.requests
+      - $ref: stages.continuation_4.output.requests
+      - $ref: stages.continuation_5.output.requests
+      - $ref: stages.continuation_6.output.requests
+      - $ref: stages.continuation_7.output.requests
+      - $ref: stages.continuation_8.output.requests
+      - $ref: stages.continuation_9.output.requests
+      holder:
+        $ref: stages.a_holder.output.engine
+      min_samples: 10
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8
+  - id: final_cache
+    action: kv_snapshot
+    params:
+      targets:
+      - $ref: stages.b_holder.output.engine
+  - id: final_b_isolation
+    action: kv_membership_check
+    params:
+      snapshot:
+        $ref: stages.final_cache.output.snapshot
+      engine:
+        $ref: stages.b_holder.output.engine
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      relation: none
+  - id: cleanup
+    action: teardown
+- id: evict_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  legacy_case_ids:
+  - kv_pe_evict_zero_match
+  environment_overrides:
+    prefill_cache_blocks: 16
+  requires: []
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: prime
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: prime_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.prime.output.requests
+    timeout_s: 15
+  - id: holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.prime.output.requests
+      phase: terminal
+  - id: prime_quiet
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    timeout_s: 8
+  - id: positive
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: positive_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.positive.output.requests
+    timeout_s: 15
+  - id: positive_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.positive.output.requests
+      phase: terminal
+  - id: positive_affinity
+    action: kv_same
+    params:
+      first:
+        $ref: stages.holder.output.engine
+      second:
+        $ref: stages.positive_holder.output.engine
+  - id: evict
+    action: kv_evict
+    params:
+      engine:
+        $ref: stages.holder.output.engine
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+  - id: eviction_quiet
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    timeout_s: 8
+  - id: eviction_membership
+    action: kv_membership_check
+    params:
+      snapshot:
+        $ref: stages.eviction_quiet.output.snapshot
+      engine:
+        $ref: stages.holder.output.engine
+      keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      relation: none
+  - id: wave
+    action: request
+    params:
+      count: 20
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+      post_issue_delay_s: 0.12
+  - id: wave_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+    timeout_s: 30
+  - id: spread
+    action: kv_spread_check
+    params:
+      requests:
+      - $ref: stages.wave.output.requests
+      min_samples: 20
+      bands:
+        strict: 0.65
+        normal: 0.75
+        loose: 0.85
+  - id: cleanup
+    action: teardown
+- id: isolation_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  legacy_case_ids:
+  - kv_pe_admit_isolation
+  requires: []
+  execution:
+    timeout_s: 600
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: balance_snapshot
+    params:
+      role: prefill
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 2000
+  - id: perf_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: seed_a
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      consume: immediate
+      stream_timeout_s: 30
+  - id: a_pending
+    action: balance_pending
+    params:
+      requests:
+        $ref: stages.seed_a.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+    timeout_s: 6
+  - id: a_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_a.output.requests
+    timeout_s: 30
+  - id: a_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_a.output.requests
+      phase: terminal
+  - id: seed_b
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 815000
+      - 815001
+      - 815002
+      - 815003
+      - 815004
+      - 815005
+      - 815006
+      - 815007
+      - 815008
+      - 815009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: b_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.seed_b.output.requests
+    timeout_s: 15
+  - id: b_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.seed_b.output.requests
+      phase: terminal
+  - id: two_holders
+    action: kv_distinct
+    params:
+      first:
+        $ref: stages.a_holder.output.engine
+      second:
+        $ref: stages.b_holder.output.engine
+  - id: restore_perf
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - prefill-0
+      - prefill-1
+      perf:
+        prefill_fixed_ms: 100
+  - id: slow_b
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.b_holder.output.engine
+      perf:
+        prefill_fixed_ms: 5000
+  - id: b_perf_sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: admit_0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: admit_0_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.admit_0.output.requests
+    timeout_s: 15
+  - id: admit_0_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.admit_0.output.requests
+      phase: terminal
+  - id: admit_0_on_a
+    action: kv_same
+    params:
+      first:
+        $ref: stages.a_holder.output.engine
+      second:
+        $ref: stages.admit_0_holder.output.engine
+  - id: admit_1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: admit_1_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.admit_1.output.requests
+    timeout_s: 15
+  - id: admit_1_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.admit_1.output.requests
+      phase: terminal
+  - id: admit_1_on_a
+    action: kv_same
+    params:
+      first:
+        $ref: stages.a_holder.output.engine
+      second:
+        $ref: stages.admit_1_holder.output.engine
+  - id: admit_2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: admit_2_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.admit_2.output.requests
+    timeout_s: 15
+  - id: admit_2_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.admit_2.output.requests
+      phase: terminal
+  - id: admit_2_on_a
+    action: kv_same
+    params:
+      first:
+        $ref: stages.a_holder.output.engine
+      second:
+        $ref: stages.admit_2_holder.output.engine
+  - id: admit_3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: admit_3_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.admit_3.output.requests
+    timeout_s: 15
+  - id: admit_3_holder
+    action: kv_landing
+    params:
+      requests:
+        $ref: stages.admit_3.output.requests
+      phase: terminal
+  - id: admit_3_on_a
+    action: kv_same
+    params:
+      first:
+        $ref: stages.a_holder.output.engine
+      second:
+        $ref: stages.admit_3_holder.output.engine
+  - id: restore_b
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.b_holder.output.engine
+      perf:
+        prefill_fixed_ms: 100
+  - id: admission_quiet
+    action: kv_snapshot
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      quiet_s: 3.5
+    timeout_s: 8
+  - id: a_membership
+    action: kv_membership_check
+    params:
+      snapshot:
+        $ref: stages.admission_quiet.output.snapshot
+      engine:
+        $ref: stages.a_holder.output.engine
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      relation: all
+  - id: b_isolation
+    action: kv_membership_check
+    params:
+      snapshot:
+        $ref: stages.admission_quiet.output.snapshot
+      engine:
+        $ref: stages.b_holder.output.engine
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      relation: none
+  - id: continuation_0
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: continuation_0_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_0.output.requests
+    timeout_s: 15
+  - id: continuation_1
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: continuation_1_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_1.output.requests
+    timeout_s: 15
+  - id: continuation_2
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: continuation_2_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_2.output.requests
+    timeout_s: 15
+  - id: continuation_3
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: continuation_3_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_3.output.requests
+    timeout_s: 15
+  - id: continuation_4
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: continuation_4_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_4.output.requests
+    timeout_s: 15
+  - id: continuation_5
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: continuation_5_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_5.output.requests
+    timeout_s: 15
+  - id: continuation_6
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: continuation_6_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_6.output.requests
+    timeout_s: 15
+  - id: continuation_7
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: continuation_7_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_7.output.requests
+    timeout_s: 15
+  - id: continuation_8
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: continuation_8_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_8.output.requests
+    timeout_s: 15
+  - id: continuation_9
+    action: request
+    params:
+      count: 1
+      input_len: 10240
+      output_len: 2
+      block_keys:
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      consume: immediate
+      stream_timeout_s: 15
+  - id: continuation_9_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.continuation_9.output.requests
+    timeout_s: 15
+  - id: fidelity
+    action: kv_fidelity_check
+    params:
+      requests:
+      - $ref: stages.continuation_0.output.requests
+      - $ref: stages.continuation_1.output.requests
+      - $ref: stages.continuation_2.output.requests
+      - $ref: stages.continuation_3.output.requests
+      - $ref: stages.continuation_4.output.requests
+      - $ref: stages.continuation_5.output.requests
+      - $ref: stages.continuation_6.output.requests
+      - $ref: stages.continuation_7.output.requests
+      - $ref: stages.continuation_8.output.requests
+      - $ref: stages.continuation_9.output.requests
+      holder:
+        $ref: stages.a_holder.output.engine
+      min_samples: 10
+      bands:
+        strict: 0.95
+        normal: 0.9
+        loose: 0.8
+  - id: final_cache
+    action: kv_snapshot
+    params:
+      targets:
+      - $ref: stages.b_holder.output.engine
+  - id: final_b_isolation
+    action: kv_membership_check
+    params:
+      snapshot:
+        $ref: stages.final_cache.output.snapshot
+      engine:
+        $ref: stages.b_holder.output.engine
+      keys:
+      - 811000
+      - 811001
+      - 811002
+      - 811003
+      - 811004
+      - 811005
+      - 811006
+      - 811007
+      - 811008
+      - 811009
+      - 812000
+      - 812001
+      - 812002
+      - 812003
+      - 812004
+      - 812005
+      - 812006
+      - 812007
+      - 812008
+      - 812009
+      - 813000
+      - 813001
+      - 813002
+      - 813003
+      - 813004
+      - 813005
+      - 813006
+      - 813007
+      - 813008
+      - 813009
+      - 814000
+      - 814001
+      - 814002
+      - 814003
+      - 814004
+      - 814005
+      - 814006
+      - 814007
+      - 814008
+      - 814009
+      - 810000
+      - 810001
+      - 810002
+      - 810003
+      - 810004
+      - 810005
+      - 810006
+      - 810007
+      - 810008
+      - 810009
+      relation: none
+  - id: cleanup
+    action: teardown
 stages:
 - id: setup
   action: setup
@@ -72,7 +1884,7 @@ stages:
     - 810007
     - 810008
     - 810009
-    stream_timeout_s: 15
+    stream_timeout_s: 30
     consume: immediate
 - id: first_pending
   action: balance_pending
@@ -129,7 +1941,7 @@ stages:
   params:
     requests:
       $ref: stages.seed_first.output.requests
-  timeout_s: 15
+  timeout_s: 30
 - id: restore_perf
   action: engine_control
   params:

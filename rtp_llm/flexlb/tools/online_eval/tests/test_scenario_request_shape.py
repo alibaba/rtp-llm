@@ -53,6 +53,8 @@ class RequestShapeTests(unittest.TestCase):
             {"schedule_timeout_s": 0},
             {"stream_timeout_s": 61},
             {"stream_timeout_s": float("inf")},
+            {"post_issue_delay_s": -1},
+            {"post_issue_delay_s": 3},
         ):
             source = self.source()
             source["stages"][1]["params"].update(extra)

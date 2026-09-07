@@ -315,6 +315,7 @@ def stages(values, path, default_timeout, handlers, env=None, profiles=()):
                     "qos_level",
                     "schedule_timeout_s",
                     "stream_timeout_s",
+                    "post_issue_delay_s",
                 },
             )
             for key, default in (("input_len", 2048), ("output_len", 10), ("count", 1)):
@@ -327,6 +328,12 @@ def stages(values, path, default_timeout, handlers, env=None, profiles=()):
             params.setdefault("consume", "immediate")
             if params["consume"] not in ("immediate", "deferred"):
                 fail(loc, "consume must be immediate or deferred")
+            if "post_issue_delay_s" in params:
+                pause = number(
+                    params["post_issue_delay_s"], loc + ".params.post_issue_delay_s"
+                )
+                if pause > 2:
+                    fail(loc, "post_issue_delay_s cannot exceed two seconds")
             if "block_keys" in params:
                 keys = params["block_keys"]
                 if (

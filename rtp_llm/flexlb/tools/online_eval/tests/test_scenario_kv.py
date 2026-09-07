@@ -67,40 +67,89 @@ class Backend:
         return dict(status="ok", engine=name, port=100 if name == "prefill-0" else 101)
 
     def start_requests(self, ctx, params, deadline):
-        self.rid += 1
-        second = self.rid == 2 or 3 <= self.rid < 3 + self.continuation_hits
-        name = "prefill-1" if second else "prefill-0"
-        self.keys[name].update(params["block_keys"])
         records = ClientRecords(ctx.env_epoch)
-        row = records.issue(self.rid, ctx.clock)
-        records.update(
-            row,
-            schedule=dict(status="OK"),
-            prefill_addr="host:101" if second else "host:100",
-        )
-        records.row = row
+        records.rows = []
+        for _ in range(params["count"]):
+            self.rid += 1
+            mode = ctx.instance["variant_id"].split("_")[0]
+            if mode == "evict":
+                second = (
+                    self.rid > 2
+                    and self.rid % 2 == 0
+                    and not getattr(self, "collapse", False)
+                )
+            elif mode == "isolation":
+                second = self.rid == 2
+            else:
+                second = self.rid == 2 or 3 <= self.rid < 3 + self.continuation_hits
+            name = "prefill-1" if second else "prefill-0"
+            self.keys[name].update(params["block_keys"])
+            if mode == "isolation" and self.rid == 16 and getattr(self, "leak", False):
+                self.keys["prefill-1"].add(811000)
+            row = records.issue(self.rid, ctx.clock)
+            records.rows.append(row)
+            records.update(
+                row,
+                schedule=dict(status="OK"),
+                prefill_addr="host:101" if second else "host:100",
+            )
+            if params.get("post_issue_delay_s"):
+                deadline.sleep(params["post_issue_delay_s"])
         if params["consume"] == "immediate":
             self.wait_requests(ctx, records, deadline)
         return ctx.register_resource("requests", records)
 
     def wait_requests(self, ctx, records, deadline):
-        records.update(
-            records.row,
-            business_finished=True,
-            stream=dict(status="OK"),
-            transport_terminal_s=ctx.clock(),
-            consumer_exit_s=ctx.clock(),
-            consumer_done=True,
-            consumer_completion_verified=True,
-        )
+        for row in records.rows:
+            records.update(
+                row,
+                business_finished=True,
+                stream=dict(status="OK"),
+                transport_terminal_s=ctx.clock(),
+                consumer_exit_s=ctx.clock(),
+                consumer_done=True,
+                consumer_completion_verified=True,
+            )
         return dict(completed=True, error_count=0)
 
 
 class KvScenarioTests(unittest.TestCase):
-    def plans(self, grade="normal"):
-        return compile_scenarios(
-            load_scenarios(ROOT / "scenarios/kv"), handlers=handlers(), grade=grade
-        )
+    def plans(self, grade="normal", prefix="continuity"):
+        return [
+            plan
+            for plan in compile_scenarios(
+                load_scenarios(ROOT / "scenarios/kv"), handlers=handlers(), grade=grade
+            )
+            if plan["variant_id"].startswith(prefix)
+        ]
+
+    def test_eviction_and_isolation_programs_execute_all_profiles(self):
+        for mode in ("evict", "isolation"):
+            plans = self.plans(prefix=mode)
+            self.assertEqual(len(plans), 4)
+            for plan in plans:
+                result = self.run_plan(plan, Backend())
+                self.assertEqual(result["status"], "PASS", result["error"])
+                if mode == "evict":
+                    wave = next(row for row in plan["stages"] if row["id"] == "wave")
+                    self.assertEqual(wave["params"]["post_issue_delay_s"], 0.12)
+                    self.assertEqual(wave["params"]["count"], 20)
+
+    def test_stale_stickiness_and_foreign_cache_admission_fail_distinct_checks(self):
+        for mode, attr, failed_stage in (
+            ("evict", "collapse", "spread"),
+            ("isolation", "leak", "final_b_isolation"),
+        ):
+            backend = Backend()
+            setattr(backend, attr, True)
+            result = self.run_plan(self.plans(prefix=mode)[0], backend)
+            self.assertEqual(result["status"], "FAIL", result["error"])
+            self.assertEqual(
+                next(row for row in result["stages"] if row["id"] == failed_stage)[
+                    "status"
+                ],
+                "FAIL",
+            )
 
     def run_plan(self, plan, backend):
         clock = Clock()

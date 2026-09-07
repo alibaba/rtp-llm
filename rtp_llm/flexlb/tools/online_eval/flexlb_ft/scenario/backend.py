@@ -155,6 +155,8 @@ class RequestBatch(ClientRecords):
                 raise
             finally:
                 self.persist()
+                if self.params.get("post_issue_delay_s", 0):
+                    deadline.sleep(self.params["post_issue_delay_s"])
 
     @property
     def shape(self):
