@@ -84,6 +84,59 @@ def ops(schedule_error=None, stream_error=None, frames=(), enqueued=True):
 
 
 class ElasticEvidenceTests(unittest.TestCase):
+    def test_lifecycle_request_keeps_separate_30s_and_10s_rpc_caps(self):
+        operation, timeouts, _, _ = ops(frames=[frame(True)])
+        records = e.RecordedRequests(operation, 1)
+        record = records.issue(1, time.monotonic)
+        records.run(record, dict(output_len=2), timeout_s=40, stream_timeout_s=10)
+        self.assertEqual(timeouts[0], ("Schedule", 30))
+        self.assertEqual(timeouts[1], ("FetchResponse", 10))
+
+    def test_cold_flow_preserves_unique_key_and_independent_completion(self):
+        import threading
+
+        flow = e.ColdFlow(NS(next_request_id=lambda: 7), 1)
+        called = []
+        entered = threading.Event()
+
+        def run(record, shape, **kwargs):
+            called.append((shape, kwargs))
+            flow.update(
+                record,
+                consumer_exit_s=time.monotonic(),
+                transport_terminal_s=time.monotonic(),
+            )
+            flow._stop.set()
+            entered.set()
+
+        flow.run = run
+        flow.start()
+        self.assertTrue(entered.wait(2))
+        result = flow.stop(Deadline(2))
+        self.assertTrue(flow.done.is_set())
+        self.assertEqual(called[0][0], dict(output_len=2, block_keys=[701]))
+        self.assertEqual(called[0][1]["stream_timeout_s"], 10)
+        self.assertTrue(result["result_complete"])
+        self.assertFalse(result["zero_errors"])
+
+    def test_flow_assert_keeps_zero_error_and_90_percent_contracts_distinct(self):
+        ctx = NS(
+            resource=lambda *args: dict(issued=10, completed=9, result_complete=True)
+        )
+        for floor, expected in [(0.9, "PASS"), (1, "FAIL")]:
+            result = e._flow_assert(
+                ctx, dict(result={}, min_success_rate=floor), Deadline()
+            )
+            self.assertEqual(result.checks[-1].status, expected)
+
+    def test_empty_flow_never_passes_even_with_zero_success_floor(self):
+        ctx = NS(
+            resource=lambda *args: dict(issued=0, completed=0, result_complete=True)
+        )
+        result = e._flow_assert(ctx, dict(result={}, min_success_rate=0), Deadline())
+        self.assertEqual(result.checks[0].status, "FAIL")
+        self.assertEqual(result.checks[-1].status, "FAIL")
+
     def run_record(self, **kwargs):
         operation, timeouts, scheduled, streamed = ops(**kwargs)
         records = e.RecordedRequests(operation, 7)

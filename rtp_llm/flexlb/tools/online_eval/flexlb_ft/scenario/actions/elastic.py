@@ -161,7 +161,14 @@ class RecordedRequests(ClientRecords):
             for record, call in list(self._calls.values()):
                 self._cancel_call(record, call, reason)
 
-    def run(self, record, shape, timeout_s=90.0):
+    def run(
+        self,
+        record,
+        shape,
+        timeout_s=90.0,
+        schedule_timeout_s=30.0,
+        stream_timeout_s=60.0,
+    ):
         ops, clock = self.ops, self.clock
         end = clock() + timeout_s
         phase = "schedule"
@@ -173,7 +180,7 @@ class RecordedRequests(ClientRecords):
             return value
 
         try:
-            limit = remaining(30.0)
+            limit = remaining(schedule_timeout_s)
             self.update(
                 record, schedule=dict(started_s=clock(), deadline_s=clock() + limit)
             )
@@ -201,7 +208,7 @@ class RecordedRequests(ClientRecords):
             method = (
                 "FetchResponse" if response.enqueued_by_master else "GenerateStreamCall"
             )
-            limit = remaining(60.0)
+            limit = remaining(stream_timeout_s)
             self.update(
                 record,
                 stream=dict(
@@ -317,6 +324,191 @@ class BoundedFlow(RecordedRequests):
             ):
                 raise RuntimeError("flow completed without final consumer records")
         return completeness(self.snapshot_records())
+
+
+class ColdFlow(BoundedFlow):
+    """Preserve legacy serial cold traffic: completion, then a 200ms pause.
+
+    Schedule retains its 30s cap and Fetch its 10s cap. All attempts survive in
+    the ledger, including failures. The independent done event comes from the
+    same worker that performs and finishes the actual RPC consumption.
+    """
+
+    def __init__(self, ops, env_epoch, clock=time.monotonic):
+        super().__init__(
+            ops, env_epoch, [], interval_s=0.2, max_inflight=1, clock=clock
+        )
+
+    def _pump(self):
+        end = self.clock() + 600
+        try:
+            while not self._stop.is_set():
+                if self.clock() >= end:
+                    raise TimeoutError("cold flow exceeded its 600s lifetime budget")
+                rid = self.ops.next_request_id()
+                record = self.issue(rid, self.clock)
+                self.run(
+                    record,
+                    dict(output_len=2, block_keys=[rid * 100 + 1]),
+                    timeout_s=min(40, end - self.clock()),
+                    stream_timeout_s=10,
+                )
+                self._stop.wait(0.2)
+        except Exception as exc:
+            self.pump_error = repr(exc)
+        finally:
+            self.done.set()
+
+
+def _cold_flow_validate(params, plan):
+    return _validate(params, plan, set())
+
+
+def _cold_flow_start(ctx, params, deadline):
+    flow = ColdFlow(ctx.ops, ctx.env_epoch, clock=ctx.clock)
+    flow.artifact_path = ctx.artifact_dir / f"elastic-cold-flow-{time.time_ns()}.json"
+
+    def cleanup(d):
+        try:
+            flow.stop(d, cancel=True)
+            if flow.pump_error:
+                raise RuntimeError(flow.pump_error)
+        finally:
+            flow.artifact_path.write_text(json.dumps(flow.snapshot_records(), indent=2))
+
+    handle = ctx.register_resource("flow", flow, cleanup=cleanup)
+    deadline.check()
+    flow.start()
+    return StageOutput(output=dict(flow=handle))
+
+
+def _flow_assert_validate(params, plan):
+    p = _validate(
+        params, plan, {"result", "min_success_rate"}, {"result", "min_success_rate"}
+    )
+    plan.reference(p["result"], "snapshot")
+    rate = p["min_success_rate"]
+    if type(rate) not in (int, float) or not 0 <= rate <= 1:
+        raise ValueError("min_success_rate must be finite and between zero and one")
+    return p
+
+
+def _flow_assert(ctx, params, deadline):
+    deadline.check()
+    result = ctx.resource(params["result"], "snapshot")
+    if (
+        any(type(result.get(k)) is not int for k in ("issued", "completed"))
+        or type(result.get("result_complete")) is not bool
+    ):
+        raise ValueError("flow result lacks complete attempt-accounting evidence")
+    if not 0 <= result["completed"] <= result["issued"]:
+        raise ValueError("flow success count exceeds attempt denominator")
+    nonempty = result["issued"] > 0
+    rate = result["completed"] / result["issued"] if nonempty else 0
+    return StageOutput(
+        checks=[
+            CheckResult(
+                "nonempty",
+                "PASS" if nonempty else "FAIL",
+                actual=result["issued"],
+                expected=">0",
+            ),
+            CheckResult(
+                "complete",
+                "PASS" if result["result_complete"] else "FAIL",
+                evidence=result,
+            ),
+            CheckResult(
+                "success_rate",
+                "PASS" if nonempty and rate >= params["min_success_rate"] else "FAIL",
+                actual=rate,
+                expected=params["min_success_rate"],
+                evidence=result,
+            ),
+        ]
+    )
+
+
+def _accepted_validate(params, plan):
+    p = _validate(
+        params,
+        plan,
+        {"engine", "baseline", "window_s"},
+        {"engine", "baseline", "window_s"},
+    )
+    for key, kind in (("engine", "string"), ("baseline", "integer")):
+        if isinstance(p[key], dict):
+            plan.reference(p[key], kind)
+        elif key == "engine" and (not isinstance(p[key], str) or not p[key]):
+            raise ValueError("accepted engine must be a name")
+        elif key == "baseline" and (type(p[key]) is not int or p[key] < 0):
+            raise ValueError("accepted baseline must be nonnegative")
+    if type(p["window_s"]) not in (int, float) or not 0 < p["window_s"] <= 30:
+        raise ValueError("accepted window must be in (0,30]")
+    return p
+
+
+def _accepted_wait(ctx, params, deadline):
+    name, baseline = ctx.resolve(params["engine"]), ctx.resolve(params["baseline"])
+    started = ctx.clock()
+    evidence = dict(engine=name, baseline=baseline, started_s=started, samples=[])
+    path = ctx.artifact_dir / f"elastic-accepted-{time.time_ns()}.json"
+    try:
+        while True:
+            deadline.check()
+            engine = _snapshot(ctx, deadline).get(name)
+            if not isinstance(engine, dict) or type(engine.get("accepted")) is not int:
+                raise ValueError("engine accepted counter evidence missing")
+            accepted = engine["accepted"]
+            if accepted < baseline:
+                raise ValueError("accepted counter reset during traffic observation")
+            elapsed = ctx.clock() - started
+            evidence["samples"].append(dict(time_s=ctx.clock(), accepted=accepted))
+            received = accepted > baseline and elapsed <= params["window_s"]
+            if received or elapsed >= params["window_s"]:
+                break
+            deadline.sleep(min(0.2, params["window_s"] - elapsed))
+        return StageOutput(
+            output=dict(accepted=accepted),
+            checks=[
+                CheckResult(
+                    "received",
+                    "PASS" if received else "FAIL",
+                    actual=accepted - baseline,
+                    expected=">0 within window",
+                    evidence=evidence,
+                )
+            ],
+            artifacts=[str(path)],
+        )
+    except BaseException as exc:
+        evidence["error"] = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        evidence["ended_s"] = ctx.clock()
+        path.write_text(json.dumps(evidence, indent=2))
+
+
+def _accepted_snapshot_validate(params, plan):
+    p = _validate(params, plan, {"engine"}, {"engine"})
+    _accepted_validate(dict(p, baseline=0, window_s=1), plan)
+    return p
+
+
+def _accepted_snapshot(ctx, params, deadline):
+    name = ctx.resolve(params["engine"])
+    engine = _snapshot(ctx, deadline).get(name)
+    if (
+        not isinstance(engine, dict)
+        or type(engine.get("accepted")) is not int
+        or engine["accepted"] < 0
+    ):
+        raise ValueError("engine accepted snapshot evidence missing")
+    path = ctx.artifact_dir / f"elastic-accepted-baseline-{time.time_ns()}.json"
+    path.write_text(
+        json.dumps(dict(engine=name, snapshot=engine, time_s=ctx.clock()), indent=2)
+    )
+    return StageOutput(output=dict(accepted=engine["accepted"]), artifacts=[str(path)])
 
 
 def _http(ops, path, deadline, body=None):
@@ -754,7 +946,9 @@ def _flow_stop(ctx, params, deadline):
     result = flow.stop(deadline)
     if flow.pump_error:
         raise RuntimeError(flow.pump_error)
-    path = ctx.artifact_dir / "elastic-client-records.json"
+    path = getattr(
+        flow, "artifact_path", ctx.artifact_dir / "elastic-client-records.json"
+    )
     path.write_text(json.dumps(flow.snapshot_records(), indent=2))
     evidence = ctx.register_resource("snapshot", result, historical=True)
     return StageOutput(
@@ -859,6 +1053,29 @@ def _recovery(ctx, params, deadline):
 
 
 HANDLERS = [
+    StageHandler(
+        "elastic_accepted_snapshot",
+        _accepted_snapshot_validate,
+        _accepted_snapshot,
+        {"accepted": "integer"},
+    ),
+    StageHandler(
+        "elastic_accepted",
+        _accepted_validate,
+        _accepted_wait,
+        {"accepted": "integer"},
+        checks=frozenset({"received"}),
+    ),
+    StageHandler(
+        "elastic_cold_flow", _cold_flow_validate, _cold_flow_start, {"flow": "flow"}
+    ),
+    StageHandler(
+        "elastic_flow_assert",
+        _flow_assert_validate,
+        _flow_assert,
+        {},
+        checks=frozenset({"nonempty", "complete", "success_rate"}),
+    ),
     StageHandler(
         "elastic_topology",
         _topology_validate,
