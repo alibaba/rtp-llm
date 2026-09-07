@@ -24,12 +24,12 @@ Each check below is qualified as `stage.check`. Windows use the actual Java clie
 |---|---|---|
 | kill_single | baseline request completes without error | baseline_complete.comparison; baseline_no_errors.comparison |
 | kill_single | restored master discovers/alives 2P/4D | restored_topology.topology |
-| kill_single | scheduler and endpoint inflight clean | restored_topology.inflight |
+| kill_single | scheduler and endpoint inflight clean | restored_inflight.inflight |
 | kill_single | fresh recovery request completes without error | recovery_complete.comparison; recovery_no_errors.comparison |
 | kill_dual_b_to_a | steady non-failover rows >=10, all B; rescued pre-kill boundary rows excluded | steady_b.criterion |
 | kill_dual_b_to_a | retry in 10s straddle, >=1 switch row A, failures <=max(1,floor(5%*N)) | retry_seen.criterion; switch_to_a.criterion; switch_errors.criterion |
 | kill_dual_b_to_a | post-switch A share >=95%, success >=90%, no duplicate IDs | after_a.criterion; after_success.criterion; unique_requests.criterion |
-| kill_dual_b_to_a | restarted B PID changes, topology reconverges, scheduler/endpoint inflight clean | restart_b.process_identity; ready_b.topology; ready_b.inflight |
+| kill_dual_b_to_a | restarted B PID changes, topology reconverges, scheduler/endpoint inflight clean | restart_b.process_identity; ready_b.topology; clean_b.inflight |
 | kill_dual_b_to_a | surviving A serves 20 serial recovery requests with >=95% success | recovery_rate.comparison |
 | freeze_short_long | short-hang requests, if issued, complete on B; >=3 post-thaw burst rows all OK on B; post window stays B | short_verdict.short_hang |
 | freeze_short_long | same master process survives freeze | continuity.same_process |
@@ -76,6 +76,7 @@ Each check below is qualified as `stage.check`. Windows use the actual Java clie
 ## Explicit additional checks and limits
 
 - `direct_generate_error/injected_clean.engine_inflight` independently checks engine inflight before clear, stronger than the old post-recovery-only check. It is separate from the retained old checks.
+- Both kill variants retain sequential topology convergence (60s), then a separate scheduler/endpoint-clean window (10s starting after convergence). The clean stage also rechecks full topology, an additional constraint; these two deadlines must not be merged into one 60s window.
 - Master restoration verifies the owned process identity. Finite master batches require consumer exit and transport-terminal records; a completed Future alone cannot pass cleanup. Cancelled jobs which never started remain explicitly NOT_STARTED, with no fabricated consumer exit.
 - `master_ready` requires ready=true and both full discovered/alive counts. Where the old predicate checked only a minimum alive count or B readiness, this is stricter. Quota `ready.inflight` additionally checks scheduler/endpoint zero after restart. These extra checks are not presented as legacy-only equivalence.
 - Count predicates such as “at least one switched request” use target_count>=1, not an arbitrary 1% threshold. Failure tolerance is zero for count<=1, otherwise count/N<=0.05, exactly equivalent to the original integer tolerance; empty traffic cannot independently establish success.
