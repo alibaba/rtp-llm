@@ -1,6 +1,6 @@
 # Master migration contract
 
-Status: implementation and local compilation/unit checks only; real Java execution and independent acceptance remain pending. Legacy functions remain intact and are never invoked by these YAML programs. Baseline legacy source: commit `834b5eea2866dea71e3d27adb37f8c8a8b02c160`, `flexlb_ft/cases/master/`. Paths below are relative to `online_eval`.
+Status: all five families are implemented. Two exact batch-window lifecycle instances have real Java PASS evidence on fixed integration commit `5affc1c6de64fc8a1bf0d74dc3789d035c9a7307`, pending independent runtime acceptance. The other 23 profile instances have no real execution claim here. Legacy functions remain intact and are never invoked by these YAML programs. Baseline legacy source: commit `834b5eea2866dea71e3d27adb37f8c8a8b02c160`, `flexlb_ft/cases/master/`. Paths below are relative to `online_eval`.
 
 Nine legacy cases map to five YAML families, ten variants and 25 profile instances. `all4` means batch-window, single-nonbatch, single-batch, window-nonbatch. `batch` means batch-window only. HA uses actual owned dual standalone masters, without an ambient HA skip gate, ZK forwarding or Tier-3 claims.
 
@@ -89,3 +89,51 @@ Each check below is qualified as `stage.check`. Windows use the actual Java clie
 Compile the shipped master YAML with the registered master, engine_control and engine_fault handlers. All 25 plans have checks, fixed resource budgets and no dynamic additions. Unit tests cover partial quota admission, one-of-1000 switch evidence, empty negative windows, strict inflight parsing, consumer-terminal cleanup evidence, owned freeze/restart, direct RPC bypass of Schedule and explicit profile/layout enforcement.
 
 Catalog registration and integrated execution are owned by the core integrator. These local checks do not substitute for the real Java pilot or the 29-family migration acceptance.
+
+
+## Fixed two-instance Java pilot (2026-09-08)
+
+Source: `5affc1c6de64fc8a1bf0d74dc3789d035c9a7307`, clean integration tree.
+Its Master YAML and action files are byte-identical to
+`dab752d830fcf9a9bd886f9b280a8a1b9d208b7d`. The formal parent runner selected
+exactly two instances with `--source yaml --profile batch-window --grade normal
+--parallel 1 --shard case`; no profile or concurrency expansion was made.
+Evidence root: `/tmp/agent1-yaml-evidence/master5aff`.
+
+| Exact instance | Result | Elapsed | Checks | Cleanup |
+| --- | --- | --- | --- | --- |
+| `master_lifecycle::kill_single::batch-window` | PASS | 17453ms | 9 PASS | 4 PASS |
+| `master_lifecycle::kill_dual_b_to_a::batch-window` | PASS | 108478ms | 13 PASS | 5 PASS |
+
+`master-two/lane0/part0-yaml/scenarios.json` records 2 passed, 0 failed,
+0 findings and exit code 0; the parent also exited 0. Single-Master restart
+changed PID 101738 to 102157; restored topology was 2P/4D and the separate
+inflight check returned zero. The two ordinary request artifacts have business
+completion, consumer_done and nonempty transport/consumer exit timestamps.
+Do not infer an absent verification field from these request records.
+
+Dual-Master restart changed B PID 103646 to 106151. Actual checks measured
+steady B share 1.0, eight retries, 213 switch-window requests to A, zero switch
+errors, after-window A and success shares 1.0, and zero duplicate request IDs.
+The raw Java client log contains 1894 requests (all status ok) and eight
+failovers. The separate 20-request recovery batch has success rate 1.0;
+its records include consumer_completion_verified. These are different evidence
+schemas and must not be conflated.
+
+`source-jar-verification.json` records 783 matching tracked files, no source or
+JAR hash mismatch, and unchanged Java/build inputs relative to the already built
+9d8576 baseline. The two verified JAR SHA-256 values are
+`0602971206b1fdb0b158ec7a71a8389b15fe8879b4962daeca1fb59db9938278` and
+`0bdbfcf8205daed79cd985608e207679a9a2193bf5958dc670e2249e05ff3baa`.
+
+`master-two-live-lock-audit.json` shows the parent owning both complete port
+interval locks and the output-directory lock. `master-two-post-audit.json`
+retains the initial transient busy port 61000; no root cause is inferred.
+The later `release-audit.json` records no busy ports, all three locks reacquired
+and all eight owned process IDs gone. The unrelated sentinel survived scenario
+cleanup. `lease-release.json` confirms lease release; the wrapper was already
+PPID-1 zombie state rather than a live test process.
+
+This pilot does not establish real execution coverage of all 25 Master
+instances, all four profiles, the other Master families, or the full migration.
+Legacy functions remain retained. Independent runtime acceptance is the next gate.
