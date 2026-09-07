@@ -124,6 +124,22 @@ class AdmissionTests(unittest.TestCase):
             )
             self.assertEqual(expected, verdict.status)
 
+    def test_schedule_latency_does_not_include_later_stream_time(self):
+        row = self.row()
+        row["consumer_exit_s"] = 50.0
+        self.assertEqual(
+            "PASS",
+            self.check(
+                [row], metric="schedule_latency_max", expected=3, op="lt"
+            ).status,
+        )
+        self.assertEqual(
+            "FAIL", self.check([row], metric="latency_max", expected=3, op="lt").status
+        )
+        self.assertNotIn("priority", admission._traffic_validate({}, None))
+        with self.assertRaises(ValueError):
+            admission._traffic_validate({"priority": True}, None)
+
     def test_missing_latency_timestamp_is_error(self):
         row = self.row(8502, "error")
         row["schedule"]["started_s"] = None
@@ -223,6 +239,8 @@ class AdmissionProgramsTest(unittest.TestCase):
                     state.sent += 1
                     i = state.sent
                 code, text, latency = 200, None, 0.1
+                if variant == "permit_released_without_preemption":
+                    test.assertEqual({1: 30, 2: 70}.get(i), self.params.get("priority"))
                 if variant == "master_capacity" and 2 < i <= 4:
                     code, text = (
                         85020 if bad_code else 8502
@@ -392,6 +410,16 @@ class AdmissionProgramsTest(unittest.TestCase):
                     self.assertTrue(
                         all(c["status"] == "PASS" for c in result["cleanup"])
                     )
+
+    def test_priority_incomer_program_admits_both_without_setting_recovery_priority(
+        self,
+    ):
+        result = self.run_program("permit_released_without_preemption")
+        self.assertEqual("PASS", result["status"], result)
+        self.assertTrue(all(s["status"] == "PASS" for s in result["stages"]))
+        self.assertNotIn("preemption", result["resolved_config"]["scheduler"])
+        cfg = result["resolved_config"]["scheduler"]
+        self.assertEqual(1, cfg["lifecycle"]["maxDeliveredNotAcceptedRequestsGlobal"])
 
     def test_wrong_numeric_capacity_code_fails_its_actual_program_check(self):
         result = self.run_program("master_capacity", bad_code=True)
