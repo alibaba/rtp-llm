@@ -16,6 +16,10 @@ class CancelRequests(status.StatusRequests):
         self.auto_consume = params["consume"] == "immediate"
         super().__init__(ctx, dict(params, consume="immediate"))
         for child in self.children:
+            if params.get("unique_block_keys"):
+                child.params["block_keys"] = [
+                    child.prepared["wire_request_id"] * 100 + 1
+                ]
             original = child._start_consumer
 
             def gated(entry, end, start=original):
@@ -101,16 +105,19 @@ def validate_prepare(params, plan):
         "output_len",
         "consume",
         "stream_timeout_s",
+        "schedule_timeout_s",
         "priority",
         "block_keys",
+        "unique_block_keys",
         "expected_stream_statuses",
+        "expected_rpc_statuses",
     }
     p = status._validate(params, plan, allowed)
     for key, default, high in (
         ("count", 1, 16),
         ("concurrency", 1, 16),
         ("input_len", 2048, 1048576),
-        ("output_len", 10, 4096),
+        ("output_len", 10, 10000),
     ):
         p[key] = status._number(p.get(key, default), plan, key, 1, high, True)
     p.setdefault("consume", "immediate")
@@ -118,6 +125,9 @@ def validate_prepare(params, plan):
         raise ValueError(f"{plan.path}: consume must be immediate/manual")
     p["stream_timeout_s"] = status._number(
         p.get("stream_timeout_s", 60), plan, "stream_timeout_s", 0.05, 60
+    )
+    p["schedule_timeout_s"] = status._number(
+        p.get("schedule_timeout_s", 30), plan, "schedule_timeout_s", 0.05, 60
     )
     if "priority" in p:
         status._number(p["priority"], plan, "priority", -(2**31), 2**31 - 1, True)
@@ -130,6 +140,11 @@ def validate_prepare(params, plan):
             raise ValueError(f"{plan.path}: invalid block keys")
         for value in p["block_keys"]:
             status._number(value, plan, "block_key", -(2**63), 2**63 - 1, True)
+    if "unique_block_keys" in p:
+        if type(p["unique_block_keys"]) is not bool or "block_keys" in p:
+            raise ValueError(
+                f"{plan.path}: unique_block_keys must be boolean and exclusive"
+            )
     allowed = p.setdefault("expected_stream_statuses", ["CANCELLED"])
     if not isinstance(allowed, list) or any(
         value
@@ -137,7 +152,12 @@ def validate_prepare(params, plan):
         for value in allowed
     ):
         raise ValueError(f"{plan.path}: invalid expected stream statuses")
-    p["expected_rpc_statuses"] = []
+    rpc_statuses = p.setdefault("expected_rpc_statuses", [])
+    if not isinstance(rpc_statuses, list) or any(
+        v not in {"DEADLINE_EXCEEDED", "UNAVAILABLE", "INTERNAL", "UNKNOWN"}
+        for v in rpc_statuses
+    ):
+        raise ValueError(f"{plan.path}: invalid explicit Schedule status allowlist")
     return p
 
 
@@ -295,6 +315,10 @@ def execute_rpc(ctx, params, deadline):
             try:
                 ack = stub.Cancel(request, timeout=min(10, deadline.remaining()))
                 receipt.update(rpc_status="OK", response=_ack_fields(ack))
+                if owner != "master":
+                    receipt["response"]["typed_not_found"] = (
+                        ack.status == ctx.ops.pb2.CANCEL_STATUS_NOT_FOUND
+                    )
             except Exception as error:
                 code_fn = getattr(error, "code", None)
                 rpc_status = (
@@ -319,6 +343,11 @@ COHORT_METRICS = {
     "issued",
     "schedule_ok",
     "schedule_cancelled",
+    "decode_running",
+    "typed_preempted",
+    "engine_not_found",
+    "fence_rejected_8429",
+    "probe_accepted",
     "first_output",
     "stream_ended",
     "business_finished",
@@ -333,6 +362,23 @@ METRICS = COHORT_METRICS | status.METRICS
 
 
 def metric(frame, name):
+    if name in {"fence_rejected_8429", "probe_accepted"}:
+        rows = frame["receipts"]
+        if (
+            len(rows) != 1
+            or rows[0]["rpc_status"] != "OK"
+            or rows[0].get("ended_s") is None
+        ):
+            raise RuntimeError("direct Enqueue acknowledgement is incomplete")
+        row = rows[0]
+        if name == "probe_accepted":
+            return status._count(row["successes"])
+        return int(
+            row["successes"] == 0
+            and len(row["errors"]) == 1
+            and row["errors"][0]["request_id"] == row["request_id"]
+            and row["errors"][0]["error_code"] == 8429
+        )
     if name == "engine_clean_total":
         return status.metric(frame, "engine_inflight") + status.metric(
             frame, "engine_leaks"
@@ -341,7 +387,7 @@ def metric(frame, name):
         return sum(
             status._count(e["rpc_counts"]["cancel"]) for e in frame["mock"].values()
         )
-    if name in {"rpc_ok", "rpc_not_found"}:
+    if name in {"rpc_ok", "rpc_not_found", "engine_not_found"}:
         rows = frame["receipts"]
         if not rows or any(
             r.get("ended_s") is None or r.get("rpc_status") is None for r in rows
@@ -349,6 +395,11 @@ def metric(frame, name):
             raise RuntimeError("cancellation RPC receipt is incomplete")
         if name == "rpc_ok":
             return sum(r["rpc_status"] == "OK" for r in rows)
+        if name == "engine_not_found":
+            return sum(
+                r["rpc_status"] == "OK" and r["response"]["typed_not_found"] is True
+                for r in rows
+            )
         return sum(
             r["rpc_status"] == "NOT_FOUND"
             or (r["rpc_status"] == "OK" and r["response"].get("found") is False)
@@ -359,14 +410,43 @@ def metric(frame, name):
     records = frame["records"]
     if not records:
         raise RuntimeError("empty cancellation cohort evidence")
+    if name == "decode_running":
+        engines = frame["mock"]
+        decode = [e for e in engines.values() if e["role"] == "decode"]
+        if not decode or any(
+            not isinstance(e["request_lifecycle"], dict) for e in decode
+        ):
+            raise RuntimeError("missing decode lifecycle evidence")
+        return sum(
+            any(
+                e["request_lifecycle"]
+                .get(str(r["wire_request_id"]), {})
+                .get("end_state")
+                == "running"
+                for e in decode
+            )
+            for r in records
+        )
     if name == "engine_cancelled":
         engines = frame["mock"]
         if not engines or any(
-            not isinstance(e.get("cancelled_rids"), list) for e in engines.values()
+            not isinstance(e.get("cancelled_rids"), list)
+            or not isinstance(e.get("request_lifecycle"), dict)
+            for e in engines.values()
         ):
             raise RuntimeError("missing engine cancellation evidence")
         cancelled = {str(rid) for e in engines.values() for rid in e["cancelled_rids"]}
-        return sum(str(r["wire_request_id"]) in cancelled for r in records)
+        return sum(
+            str(r["wire_request_id"]) in cancelled
+            or any(
+                e["request_lifecycle"]
+                .get(str(r["wire_request_id"]), {})
+                .get("end_state")
+                == "cancelled"
+                for e in engines.values()
+            )
+            for r in records
+        )
     predicates = {
         "issued": lambda r: r["issued_s"] is not None,
         "schedule_ok": lambda r: r["schedule"]["status"] == "OK",
@@ -381,6 +461,7 @@ def metric(frame, name):
         and r.get("consumer_completion_verified") is True
         and r["consumer_exit_s"] is not None
         and r["transport_terminal_s"] is not None,
+        "typed_preempted": lambda r: r["business_error_code"] in {2, 8429},
         "business_finished": lambda r: r["business_finished"] is True,
         "success": request_success,
     }
@@ -411,7 +492,7 @@ def validate_observe(params, plan):
         not isinstance(p["include"], list)
         or not p["include"]
         or any(
-            value not in {"inflight", "mock", "client_records"}
+            value not in {"inflight", "mock", "info", "client_records"}
             for value in p["include"]
         )
     ):
@@ -638,5 +719,96 @@ def execute_group(ctx, params, deadline):
 HANDLERS.append(
     StageHandler(
         "cancel_dispatch_group", validate_group, execute_group, {"started": "integer"}
+    )
+)
+
+
+def validate_probe(params, plan):
+    p = status._validate(
+        params,
+        plan,
+        {"requests", "output_len", "attempt", "wait_port_s"},
+        {"requests", "output_len", "attempt"},
+    )
+    plan.reference(p["requests"], "requests")
+    status._number(p["output_len"], plan, "output_len", 1, 10000, True)
+    status._number(p["attempt"], plan, "attempt", 1, 2, True)
+    p["wait_port_s"] = status._number(
+        p.get("wait_port_s", 0), plan, "wait_port_s", 0, 10
+    )
+    return p
+
+
+def execute_probe(ctx, params, deadline):
+    import socket
+
+    cohort = _cohort(ctx, params["requests"])
+    entries = cohort.entries()
+    if len(entries) != 1 or entries[0]["response"] is None:
+        raise RuntimeError("direct Enqueue probe requires one actual scheduled route")
+    entry = entries[0]
+    rid, response = entry["record"]["wire_request_id"], entry["response"]
+    target = ctx.ops.prefill_addr(response)
+    if not target:
+        raise RuntimeError("direct Enqueue probe has no original Prefill route")
+    if params["wait_port_s"]:
+        host, _, port = target.rpartition(":")
+        end = min(deadline.expires_at, ctx.clock() + params["wait_port_s"])
+        while True:
+            deadline.check()
+            try:
+                with socket.create_connection(
+                    (host, int(port)), timeout=min(1, max(0.01, end - ctx.clock()))
+                ):
+                    break
+            except OSError:
+                if ctx.clock() >= end:
+                    raise TimeoutError("original Prefill port did not become ready")
+                deadline.sleep(min(0.1, end - ctx.clock()))
+    inp = ctx.ops.build_generate_input(rid, output_len=params["output_len"])
+    ctx.ops._copy_role_addrs(inp, response)
+    request = ctx.ops.pb2.EnqueueBatchRequestPB(
+        batch_id=rid * 10 + params["attempt"],
+        dp_slots=[
+            ctx.ops.pb2.EnqueueBatchDpSlotPB(
+                dp_rank=0, requests=[ctx.ops.pb2.EnqueueBatchExternalInputPB(input=inp)]
+            )
+        ],
+        fetch_attach_timeout_ms=30000,
+    )
+    receipt = {
+        "request_id": str(rid),
+        "target": target,
+        "owner": "original_prefill",
+        "started_s": ctx.clock(),
+        "rpc_status": None,
+    }
+    try:
+        stub = ctx.ops.pb2_grpc.RpcServiceStub(ctx.ops._channel(target))
+        # One RPC only. Retrying the same request ID could admit an orphan twice.
+        ack = stub.EnqueueBatch(request, timeout=min(10, deadline.remaining()))
+        receipt.update(
+            rpc_status="OK",
+            successes=len(ack.successes),
+            errors=[
+                {
+                    "request_id": str(e.request_id),
+                    "error_code": int(e.error_info.error_code),
+                }
+                for e in ack.errors
+            ],
+        )
+    except Exception as error:
+        receipt["error"] = repr(error)
+        status._artifact(ctx, "direct-enqueue-incomplete", receipt)
+        raise
+    finally:
+        receipt["ended_s"] = ctx.clock()
+    return status._frozen(ctx, "direct-enqueue", {"receipts": [receipt]})
+
+
+HANDLERS.append(
+    StageHandler(
+        "cancel_enqueue_probe", validate_probe, execute_probe, {"snapshot": "snapshot"}
     )
 )

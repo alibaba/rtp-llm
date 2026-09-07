@@ -106,7 +106,7 @@ class CancelTest(unittest.TestCase):
                     {
                         "capture_finished_s": 7,
                         "records": [{"wire_request_id": 1}],
-                        "mock": {"p": {"cancelled_rids": [1]}},
+                        "mock": {"p": {"cancelled_rids": [1], "request_lifecycle": {}}},
                     }
                 ],
             },
@@ -227,7 +227,93 @@ class CancelTest(unittest.TestCase):
         source = self.ctx.resource(result.output["snapshot"], "snapshot").to_dict()
         self.assertEqual(2, len(source["frames"]))
 
-    def test_initial_lifecycle_programs_keep_batch_and_nonbatch_contracts_explicit(
+    def test_lifecycle_cancelled_is_valid_without_cancelled_rid_list_entry(self):
+        frame = {
+            "records": [{"wire_request_id": 9}],
+            "mock": {
+                "p": {
+                    "cancelled_rids": [],
+                    "request_lifecycle": {"9": {"end_state": "cancelled"}},
+                }
+            },
+        }
+        self.assertEqual(1, cancel.metric(frame, "engine_cancelled"))
+        del frame["mock"]["p"]["request_lifecycle"]
+        with self.assertRaises(RuntimeError):
+            cancel.metric(frame, "engine_cancelled")
+
+    def test_typed_preemption_excludes_master_local_eviction(self):
+        for code, expected in [(8400, 0), (8429, 1), (2, 1), (None, 0)]:
+            self.assertEqual(
+                expected,
+                cancel.metric(
+                    {"records": [{"business_error_code": code}]}, "typed_preempted"
+                ),
+            )
+
+    def test_unique_prefix_keys_are_prepared_and_reach_schedule(self):
+        handle, cohort = self.prepare(unique_block_keys=True, consume="manual")
+        rid = cohort.snapshot_records()[0]["wire_request_id"]
+        cohort.dispatch(self.deadline())
+        self.assertEqual(
+            [rid * 100 + 1], self.ctx.ops.last_schedule[0][1]["block_keys"]
+        )
+        cohort.open_streams(self.deadline())
+
+    def test_direct_fence_probe_uses_original_route_and_sends_once(self):
+        handle, cohort = self.prepare(consume="manual")
+        cohort.dispatch(self.deadline())
+        rid = cohort.snapshot_records()[0]["wire_request_id"]
+        sent = []
+        for name in (
+            "EnqueueBatchRequestPB",
+            "EnqueueBatchDpSlotPB",
+            "EnqueueBatchExternalInputPB",
+        ):
+            setattr(self.ctx.ops.pb2, name, lambda **kw: NS(**kw))
+        ack = NS(
+            successes=[], errors=[NS(request_id=rid, error_info=NS(error_code=8429))]
+        )
+
+        def stub(target):
+            self.assertEqual("prefill", target)
+            return NS(
+                EnqueueBatch=lambda request, timeout: (sent.append(request) or ack)
+            )
+
+        with patch.object(
+            self.ctx.ops.pb2_grpc, "RpcServiceStub", side_effect=stub
+        ), patch.object(self.ctx.ops.schedule_pb2_grpc, "FlexlbServiceStub") as master:
+            result = cancel.execute_probe(
+                self.ctx,
+                {"requests": handle, "output_len": 100, "attempt": 1, "wait_port_s": 0},
+                self.deadline(),
+            )
+        master.assert_not_called()
+        self.assertEqual(1, len(sent))
+        self.assertEqual(rid * 10 + 1, sent[0].batch_id)
+        source = self.ctx.resource(result.output["snapshot"], "snapshot").to_dict()
+        self.assertEqual(1, cancel.metric(source, "fence_rejected_8429"))
+        source["receipts"][0]["errors"][0]["request_id"] = "wrong"
+        self.assertEqual(0, cancel.metric(source, "fence_rejected_8429"))
+        cohort.open_streams(self.deadline())
+
+    def test_decode_running_requires_decode_owner(self):
+        frame = {
+            "records": [{"wire_request_id": 1}],
+            "mock": {
+                "p": {
+                    "role": "prefill",
+                    "request_lifecycle": {"1": {"end_state": "running"}},
+                },
+                "d": {"role": "decode", "request_lifecycle": {}},
+            },
+        }
+        self.assertEqual(0, cancel.metric(frame, "decode_running"))
+        frame["mock"]["d"]["request_lifecycle"]["1"] = {"end_state": "running"}
+        self.assertEqual(1, cancel.metric(frame, "decode_running"))
+
+    def test_lifecycle_programs_keep_batch_and_nonbatch_contracts_explicit(
         self,
     ):
         from flexlb_ft.scenario.catalog import handlers
@@ -238,9 +324,43 @@ class CancelTest(unittest.TestCase):
         registry = handlers()
         registry.update({h.name: h for h in cancel.HANDLERS})
         plans = compile_scenarios(load_scenarios(root), handlers=registry)
-        self.assertEqual(38, plan_counts(plans)["instances"])
+        self.assertEqual(66, plan_counts(plans)["instances"])
+        legacy = {c for plan in plans for c in plan["legacy_case_ids"]}
+        old = {
+            p.stem
+            for p in (root.parents[1] / "flexlb_ft/cases/cancel").glob("cancel_*.py")
+        }
+        self.assertEqual(old, legacy)
+        self.assertEqual(19, len(legacy))
         for plan in plans:
             ids = {s["id"] for s in plan["stages"]}
+            if plan["variant_id"] in {
+                "engine_restarted_tombstoned_settle",
+                "fencing_lost_on_engine_restart",
+            }:
+                self.assertIn(plan["profile"], {"batch-window", "single-batch"})
+                self.assertIn("armed_fence_rejects_exact_rid_8429", ids)
+            if plan["variant_id"] in {
+                "transport_failure_one_shot",
+                "unexpected_status_await_terminal",
+            }:
+                self.assertEqual(
+                    ["master"],
+                    [
+                        s["params"]["destination"]
+                        for s in plan["stages"]
+                        if s["action"] == "cancel_rpc"
+                    ],
+                )
+            if plan["variant_id"] == "engine_restarted_tombstoned_settle":
+                self.assertEqual(
+                    45,
+                    next(
+                        s["params"]["duration_s"]
+                        for s in plan["stages"]
+                        if s["id"] == "engine_drain"
+                    ),
+                )
             if plan["variant_id"] == "basic_batch":
                 self.assertIn("engine_receives_cancel_within_five", ids)
             if plan["variant_id"] == "basic_nonbatch":
