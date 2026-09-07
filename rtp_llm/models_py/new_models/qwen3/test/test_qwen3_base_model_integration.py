@@ -14,6 +14,7 @@ from rtp_llm.config.quant_config import (
     Fp8PerTensorCompressedQuantConfig,
     GPTQConfig,
     ModelOptFp4Config,
+    init_quant_config,
 )
 from rtp_llm.config.quant_config import QuantizationConfig as SourceQuantizationConfig
 from rtp_llm.config.quant_config import WeightOnlyInt8PerChannelQuantConfig
@@ -137,6 +138,7 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
                 probe.device_resource_config = kwargs["device_resource_config"]
                 probe.load_method = kwargs["load_method"]
                 probe.force_cpu_load_weights = kwargs["force_cpu_load_weights"]
+                probe.keep_mla_checkpoint_weights = False
                 probe.custom_module = None
                 uses_new_loader = probe._use_new_loader()
                 routes.append((probe.force_cpu_load_weights, uses_new_loader))
@@ -212,6 +214,7 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
             use_new_loader=None,
             require_weight_update=False,
         )
+        model.keep_mla_checkpoint_weights = False
         model._new_loader_unsupported_reason = lambda **kwargs: None
 
         self.assertTrue(model._use_new_loader())
@@ -229,6 +232,7 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         model.model_config = types.SimpleNamespace(
             model_type="qwen_3", use_new_loader=None
         )
+        model.keep_mla_checkpoint_weights = False
         model._new_loader_unsupported_reason = (
             lambda **kwargs: "unsupported test configuration"
         )
@@ -375,6 +379,30 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
             return_value="test checkpoint has no legacy layout",
         ), self.assertRaisesRegex(ValueError, "no legacy layout"):
             model._use_new_loader()
+
+    def test_keep_mla_checkpoint_weights_rejects_legacy_route(self):
+        config = _model_config()
+        config.use_new_loader = False
+        model = _base_model(config)
+        model.keep_mla_checkpoint_weights = True
+
+        with self.assertRaisesRegex(
+            ValueError, "keep_mla_checkpoint_weights requires NewLoader"
+        ):
+            model._use_new_loader()
+
+    def test_init_quant_config_preserves_schema_validation_error(self):
+        invalid = json.dumps(
+            {
+                "method": "W4A8_INT4_PER_CHANNEL",
+                "bits": 8,
+                "group_size": 128,
+                "is_quanted": True,
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "W4A8 requires bits=4"):
+            init_quant_config(invalid)
 
     def test_registry_default_falls_back_for_unsupported_quantization(self):
         config = _model_config()

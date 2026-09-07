@@ -6,10 +6,26 @@
 
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 
 namespace rtp_llm {
 namespace test {
 namespace {
+
+class BlockPoolConfigHelperTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        old_core_dump_on_exception_                  = StaticConfig::user_ft_core_dump_on_exception;
+        StaticConfig::user_ft_core_dump_on_exception = false;
+    }
+
+    void TearDown() override {
+        StaticConfig::user_ft_core_dump_on_exception = old_core_dump_on_exception_;
+    }
+
+private:
+    bool old_core_dump_on_exception_{false};
+};
 
 CacheConfig makeSparseMlaConfig(uint32_t layer_num,
                                 uint32_t block_num,
@@ -35,7 +51,7 @@ void expectRuntimeErrorContains(Fn&& fn, const std::string& expected) {
     }
 }
 
-TEST(BlockPoolConfigHelperTest, MTPSparseIndexerUsesProposeTopologyAndScaleStride) {
+TEST_F(BlockPoolConfigHelperTest, MTPSparseIndexerUsesProposeTopologyAndScaleStride) {
     auto score_config   = makeSparseMlaConfig(/*layer_num=*/2,
                                             /*block_num=*/4,
                                             /*tokens_per_block=*/4,
@@ -76,7 +92,7 @@ TEST(BlockPoolConfigHelperTest, MTPSparseIndexerUsesProposeTopologyAndScaleStrid
     EXPECT_EQ(pool_config.total_size_bytes, 1536u);
 }
 
-TEST(BlockPoolConfigHelperTest, MTPSparseIndexerPrefersSelectedGroupScaleStride) {
+TEST_F(BlockPoolConfigHelperTest, MTPSparseIndexerPrefersSelectedGroupScaleStride) {
     auto score_config   = makeSparseMlaConfig(2, 4, 4, 4, 32);
     auto propose_config = std::make_shared<CacheConfig>(makeSparseMlaConfig(1, 4, 4, 2, 128));
     propose_config->setGroupBlockLayout({4}, {64}, {96});
@@ -89,7 +105,7 @@ TEST(BlockPoolConfigHelperTest, MTPSparseIndexerPrefersSelectedGroupScaleStride)
     EXPECT_EQ(pool_config.memory_layouts[1].kv_scale_stride_bytes, 96u);
 }
 
-TEST(BlockPoolConfigHelperTest, MTPNonSparseUsesNonzeroPhysicalScaleStride) {
+TEST_F(BlockPoolConfigHelperTest, MTPNonSparseUsesNonzeroPhysicalScaleStride) {
     auto score_config   = makeSparseMlaConfig(/*layer_num=*/2,
                                             /*block_num=*/4,
                                             /*tokens_per_block=*/4,
@@ -119,7 +135,7 @@ TEST(BlockPoolConfigHelperTest, MTPNonSparseUsesNonzeroPhysicalScaleStride) {
     EXPECT_EQ(pool_config.total_size_bytes, 960u);
 }
 
-TEST(BlockPoolConfigHelperTest, MTPSelectsRealGroupAndAccumulatesMultipleOffsets) {
+TEST_F(BlockPoolConfigHelperTest, MTPSelectsRealGroupAndAccumulatesMultipleOffsets) {
     auto score_config = makeSparseMlaConfig(/*layer_num=*/2,
                                             /*block_num=*/4,
                                             /*tokens_per_block=*/4,
@@ -168,13 +184,13 @@ TEST(BlockPoolConfigHelperTest, MTPSelectsRealGroupAndAccumulatesMultipleOffsets
     EXPECT_EQ(pool_config.total_size_bytes, 3584u);
 }
 
-TEST(BlockPoolConfigHelperTest, RejectsNullMTPSubConfig) {
+TEST_F(BlockPoolConfigHelperTest, RejectsNullMTPSubConfig) {
     auto score_config = makeSparseMlaConfig(2, 4, 4, 4, 32);
     score_config.mtp_sub_configs.push_back(nullptr);
     expectRuntimeErrorContains([&score_config] { BlockPoolConfigHelper::createConfig(score_config); }, "is null");
 }
 
-TEST(BlockPoolConfigHelperTest, RejectsMTPSubConfigWithoutGroups) {
+TEST_F(BlockPoolConfigHelperTest, RejectsMTPSubConfigWithoutGroups) {
     auto score_config            = makeSparseMlaConfig(2, 4, 4, 4, 32);
     auto empty                   = std::make_shared<CacheConfig>();
     score_config.mtp_sub_configs = {empty};
@@ -182,7 +198,32 @@ TEST(BlockPoolConfigHelperTest, RejectsMTPSubConfigWithoutGroups) {
                                "cache groups must not be empty");
 }
 
-TEST(BlockPoolConfigHelperTest, MTPLayoutUsesSynchronizedMainBlockNum) {
+TEST_F(BlockPoolConfigHelperTest, RejectsMTPSubConfigWithoutLayerOwningGroup) {
+    auto score_config = makeSparseMlaConfig(2, 4, 4, 4, 32);
+    auto empty_layers = std::make_shared<CacheConfig>(makeSparseMlaConfig(1, 4, 4, 2, 32));
+    auto placeholder  = makeMhaSpec("placeholder", 8, DataType::TYPE_BF16, 1, 1);
+    empty_layers->fromGroupedSpecs(
+        {placeholder}, {{}}, {CacheGroupType::FULL}, {"placeholder"});
+    score_config.mtp_sub_configs = {empty_layers};
+
+    expectRuntimeErrorContains([&score_config] { BlockPoolConfigHelper::createConfig(score_config); },
+                               "has no cache group containing layers");
+}
+
+TEST_F(BlockPoolConfigHelperTest, RejectsMTPSubConfigWithMultipleLayerOwningGroups) {
+    auto score_config = makeSparseMlaConfig(2, 4, 4, 4, 32);
+    auto multiple     = std::make_shared<CacheConfig>(makeSparseMlaConfig(2, 4, 4, 2, 32));
+    auto first_spec   = makeMhaSpec("first", 8, DataType::TYPE_BF16, 1, 1);
+    auto second_spec  = makeMlaSpec("second", 8, DataType::TYPE_BF16, 4, 4);
+    multiple->fromGroupedSpecs(
+        {first_spec, second_spec}, {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"first", "second"});
+    score_config.mtp_sub_configs = {multiple};
+
+    expectRuntimeErrorContains([&score_config] { BlockPoolConfigHelper::createConfig(score_config); },
+                               "must have exactly one cache group containing layers");
+}
+
+TEST_F(BlockPoolConfigHelperTest, MTPLayoutUsesSynchronizedMainBlockNum) {
     auto score_config            = makeSparseMlaConfig(2, 4, 4, 4, 32);
     auto stale_mtp_config        = std::make_shared<CacheConfig>(makeSparseMlaConfig(1, 3, 4, 2, 128));
     score_config.mtp_sub_configs = {stale_mtp_config};
@@ -196,7 +237,7 @@ TEST(BlockPoolConfigHelperTest, MTPLayoutUsesSynchronizedMainBlockNum) {
     EXPECT_EQ(mtp_layout.kv_scale_pool_size_bytes, 1u * 4u * 128u);
 }
 
-TEST(BlockPoolConfigHelperTest, MTPWithoutScaleKeepsContiguousOffsets) {
+TEST_F(BlockPoolConfigHelperTest, MTPWithoutScaleKeepsContiguousOffsets) {
     auto score_config            = makeSparseMlaConfig(2, 4, 4, 4, 32);
     auto no_scale                = std::make_shared<CacheConfig>(makeSimpleMlaCacheConfig(
         /*layer_num=*/1,
