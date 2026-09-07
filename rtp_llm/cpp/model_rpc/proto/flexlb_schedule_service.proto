@@ -45,6 +45,8 @@ enum SessionStatePB {
 }
 
 message SessionRoutingHintPB {
+    // Version 1 accepts a 1-256 character ASCII ID in [0x21, 0x7e]. Invalid
+    // hints disable session affinity, not baseline routing or cache affinity.
     // Unknown schema versions are ignored as one unit. The caller guarantees
     // session_id uniqueness; DashScope namespaces by user and model before
     // generating an 80-bit random identifier. NEW means first use of this ID.

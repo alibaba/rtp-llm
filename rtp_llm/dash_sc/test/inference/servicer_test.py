@@ -1742,6 +1742,106 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.enqueue_called, 1)
         self.assertEqual(_gen_ids(chunks[0]), [10, 1, 11])
 
+    async def test_phase2_continues_session_without_replaying_new(self) -> None:
+        id_key = "x-ds-inference-session-id"
+        state_key = "x-ds-inference-session-state"
+        tok = _FakeTokenizer(
+            {
+                "<think>\n": [128821, 198],
+                "</think>\n\n": [128822, 271],
+                "<think>\n\n</think>\n\n": [128821, 271, 128822, 271],
+                "</think>": [128822],
+            }
+        )
+        env_cfg = _GenerateEnvCfg()
+        for session_id, state, expected in (
+            ("session", "new", "established"),
+            ("session", "NEW", "established"),
+            ("session", "established", "established"),
+            ("session", "unknown", "unknown"),
+            ("", "new", "new"),
+            ("invalid id", "new", "new"),
+        ):
+            for from_metadata in (False, True):
+                with self.subTest(
+                    state=state, session_id=session_id, metadata=from_metadata
+                ):
+                    headers = {id_key: session_id, state_key: state}
+                    metadata = list(headers.items()) if from_metadata else []
+                    body_headers = (
+                        {state_key: "unknown"} if from_metadata else dict(headers)
+                    )
+                    original_body_headers = dict(body_headers)
+                    other = OtherParams(
+                        enable_thinking=True, request_headers=body_headers
+                    )
+                    visitor = _MultiStreamVisitor(
+                        [
+                            _FakeAsyncStream(
+                                [
+                                    GenerateOutputs(
+                                        generate_outputs=[
+                                            GenerateOutput(
+                                                output_ids=torch.tensor(
+                                                    [10, 1], dtype=torch.int32
+                                                ),
+                                                finished=False,
+                                                aux_info=AuxInfo(
+                                                    input_len=3, reuse_len=0
+                                                ),
+                                            )
+                                        ]
+                                    )
+                                ]
+                            ),
+                            _FakeAsyncStream(
+                                [
+                                    GenerateOutputs(
+                                        generate_outputs=[
+                                            GenerateOutput(
+                                                output_ids=torch.tensor(
+                                                    [20], dtype=torch.int32
+                                                ),
+                                                finished=True,
+                                                aux_info=AuxInfo(
+                                                    input_len=4, reuse_len=0
+                                                ),
+                                            )
+                                        ]
+                                    )
+                                ]
+                            ),
+                        ]
+                    )
+                    await _drain(
+                        iter_real_model_stream_infer(
+                            self._minimal_request(),
+                            _parsed_input_ids([7, 8, 128821]),
+                            SamplingParams(),
+                            other,
+                            visitor,
+                            rtp_llm_request_id=100,
+                            invocation_metadata=metadata,
+                            echo_prefix_ids=[128821, 198],
+                            tokenizer=tok,
+                            generate_env_config=env_cfg,
+                            think_runtime=build_think_runtime(
+                                tok, env_cfg, "deepseek_v4"
+                            ),
+                            phase2_request_id_factory=lambda: 200,
+                        )
+                    )
+                    self.assertEqual(visitor.enqueue_called, 2)
+                    first, second = visitor.generate_inputs
+                    self.assertEqual(first.headers[state_key], state)
+                    self.assertEqual(second.headers[state_key], expected)
+                    self.assertEqual(second.headers.get(id_key, ""), session_id)
+                    self.assertIsNot(first.headers, second.headers)
+                    self.assertEqual(other.request_headers, original_body_headers)
+                    self.assertEqual(
+                        metadata, list(headers.items()) if from_metadata else []
+                    )
+
     async def test_terminate_token_id_configurable_value(self) -> None:
         """A non-default ``terminate_token_id`` (here 42) drives the same
         truncation + phase-2 prompt rewrite that token id 1 does by default."""

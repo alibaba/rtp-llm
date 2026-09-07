@@ -221,7 +221,7 @@ class CostBasedPrefillSelectionMetricTest {
         }
         verify(reporter, times(1)).reportCacheAffinityDecision(any(), any(), any());
         verify(reporter).reportCacheAffinityDecision(
-                RoleType.PREFILL, "10.0.0.2", "LOW_CACHE_HIT");
+                RoleType.PREFILL, "10.0.0.2", "SESSION_OVERRIDE");
         verify(reporter, times(1)).reportSessionAffinityDecision(any(), any());
         verify(reporter).reportSessionAffinityDecision(RoleType.PREFILL, "SESSION_AFFINITY");
     }
@@ -357,6 +357,28 @@ class CostBasedPrefillSelectionMetricTest {
         configureAffinity(600L, 60.0, RoutingConfig.CandidateChoiceType.BEST_ONLY);
         config.getRouter().getRoles().getPrefill().setCacheAffinity(null);
         enableSession("10.0.0.2:8080");
+    }
+
+    @Test
+    void sessionTelemetryFailureDoesNotDiscardSelectedEndpoint() {
+        configureSession();
+        doThrow(new IllegalStateException("telemetry unavailable"))
+                .when(reporter).reportSessionAffinityDecision(any(), any());
+        try (SelectedRole selected = select()) {
+            assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"NEW", "ESTABLISHED"})
+    void invalidSessionIdHasDistinctFallbackReason(String state) {
+        configureSession();
+        context.getRequest().setInferenceSessionState(Request.SessionState.valueOf(state));
+        context.getRequest().setInferenceSessionId("invalid session");
+        try (SelectedRole selected = select()) {
+            assertEquals("10.0.0.1", selected.serverStatus().getServerIp());
+            assertEquals("INVALID_SESSION_ID", context.getSessionAffinityReason());
+        }
     }
 
     private void enableSession(String address) {

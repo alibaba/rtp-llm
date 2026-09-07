@@ -970,7 +970,7 @@ class FlexlbServiceImplTest {
     }
 
     @Test
-    void responseObserverFailureDoesNotSkipSessionPlacement() {
+    void responseObserverFailureRollsBackOnlyItsSessionPlacement() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
         ServerStatus prefill = new ServerStatus();
         prefill.setRole(RoleType.PREFILL);
@@ -989,6 +989,9 @@ class FlexlbServiceImplTest {
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                 mock(StreamObserver.class);
         doThrow(new IllegalStateException("client closed")).when(observer).onNext(any());
+        var publication = new SessionPlacementStore.Placement("10.0.0.2:8080", 1L);
+        when(sessionPlacementStore.record("kimi-k3", "isess_v1_example", "10.0.0.2:8080"))
+                .thenReturn(publication);
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB request =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                         .setRequestId(100_006L)
@@ -1008,6 +1011,7 @@ class FlexlbServiceImplTest {
         verify(routeService).cancelRequest(
                 100_006L, 0L, CancelReason.CLIENT_CANCELLED);
         verify(sessionPlacementStore, never()).invalidate(any(), any());
+        verify(sessionPlacementStore).invalidate("kimi-k3", "isess_v1_example", publication);
         verify(requestToken, times(1)).close();
     }
 

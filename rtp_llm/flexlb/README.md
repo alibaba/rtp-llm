@@ -381,6 +381,14 @@ Roll out the FlexLB binary before adding `sessionAffinity` to `FLEXLB_CONFIG`, b
 older binaries reject unknown JSON fields. Removing or changing the setting also
 requires restart; configuration is not hot reloaded.
 
+Placement TTL uses elapsed monotonic time and is renewed by a successful local
+scheduling publication, not by lookups. Failed response delivery removes only that
+publication if it is still current. Session decisions use
+`session.affinity.decision{role,reason}`; invalid version-1 IDs report
+`INVALID_SESSION_ID`. Cache decision metrics retain their request denominator and
+report `SESSION_OVERRIDE` when the final endpoint was selected by session affinity,
+rather than attributing that endpoint to a cache-policy decision.
+
 ### Run
 
 ```bash

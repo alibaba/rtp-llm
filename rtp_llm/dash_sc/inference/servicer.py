@@ -72,9 +72,12 @@ from rtp_llm.dash_sc.repetition_monitor import RequestRepetitionMonitorConfig
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, kmonitor
 from rtp_llm.server.request_headers import (
+    INFERENCE_SESSION_ID_HEADER,
+    INFERENCE_SESSION_STATE_HEADER,
     extract_correlation_request_id,
     extract_request_headers,
     extract_trace_id,
+    is_valid_inference_session_id,
 )
 from rtp_llm.utils.base_model_datatypes import GenerateInput, RequestInfo
 from rtp_llm.utils.util import AtomicCounter
@@ -1030,6 +1033,18 @@ async def iter_real_model_stream_infer(
                 invocation_metadata=invocation_metadata,
                 request_headers=other.request_headers,
             )
+            # Only the continuation advances the copied session hint after metadata merging.
+            phase2_headers = extract_request_headers(phase2_generate_input.headers)
+            if (
+                is_valid_inference_session_id(
+                    phase2_headers.get(INFERENCE_SESSION_ID_HEADER, "")
+                )
+                and phase2_headers.get(INFERENCE_SESSION_STATE_HEADER, "").lower()
+                == "new"
+            ):
+                phase2_generate_input.headers[INFERENCE_SESSION_STATE_HEADER] = (
+                    "established"
+                )
             logging.debug(
                 "[DashScGrpc] [%s] phase-2 generate_input: %s",
                 phase2_tag,

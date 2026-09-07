@@ -214,7 +214,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             // the selector classes exercised by the bound production router.
             super(new CostBasedPrefillStrategy(workers,
                             org.mockito.Mockito.mock(org.flexlb.cache.service.CacheAwareService.class),
-                            org.mockito.Mockito.mock(org.flexlb.service.monitor.EngineHealthReporter.class)),
+                            org.mockito.Mockito.mock(org.flexlb.service.monitor.EngineHealthReporter.class),
+                            new org.flexlb.balance.session.SessionPlacementStore()),
                     new CostBasedDecodeStrategy(workers),
                     new RandomStrategy(workers),
                     configs,

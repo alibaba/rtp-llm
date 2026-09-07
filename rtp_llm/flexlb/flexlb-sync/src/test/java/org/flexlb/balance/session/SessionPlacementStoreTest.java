@@ -98,4 +98,40 @@ class SessionPlacementStoreTest {
 
         assertTrue(store.estimatedSize() <= 2L);
     }
+
+    @Test
+    void readsDoNotKeepExpiredPlacementsResident() {
+        AtomicLong now = new AtomicLong(1_000L);
+        SessionPlacementStore store = new SessionPlacementStore(10, now::get);
+        store.record("model", "session", "10.0.0.1:9000");
+        for (int i = 0; i < 5; i++) {
+            now.addAndGet(100L);
+            store.find("model", "session", 200L);
+        }
+        assertEquals(0L, store.estimatedSize());
+    }
+
+    @Test
+    void rollbackRemovesOnlyTheExactPublication() {
+        AtomicLong now = new AtomicLong(1_000L);
+        SessionPlacementStore store = new SessionPlacementStore(10, now::get);
+        var first = store.record("model", "session", "10.0.0.1:9000");
+        var second = store.record("model", "session", "10.0.0.1:9000");
+        store.invalidate("model", "session", first);
+        assertTrue(store.find("model", "session", 500L).isPresent());
+        store.invalidate("model", "session", second);
+        assertTrue(store.find("model", "session", 500L).isEmpty());
+    }
+
+    @Test
+    void readsDoNotRenewWriteExpiry() {
+        AtomicLong elapsed = new AtomicLong(1_000L);
+        SessionPlacementStore store = new SessionPlacementStore(10, elapsed::get);
+        store.record("model", "session", "10.0.0.1:9000");
+        for (int i = 0; i < 4; i++) {
+            elapsed.addAndGet(RoutingConfig.SessionAffinityConfig.MAX_TTL_MS / 4);
+            store.find("model", "session", RoutingConfig.SessionAffinityConfig.MAX_TTL_MS);
+        }
+        assertEquals(0L, store.estimatedSize());
+    }
 }

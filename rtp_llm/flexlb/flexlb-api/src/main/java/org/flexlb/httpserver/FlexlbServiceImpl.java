@@ -647,12 +647,20 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 ctx.setErrorMessage(response.getErrorMessage());
             }
         }
+        // Publish the scheduling hint before the caller can submit its next request.
+        var publication = recordSessionPlacementSafely(ctx, response, origin);
         try {
-            // Publish the scheduling hint before the caller can submit its next request.
-            recordSessionPlacementSafely(ctx, response, origin);
             observer.onNext(response);
             observer.onCompleted();
         } catch (RuntimeException deliveryError) {
+            if (publication != null) {
+                try {
+                    sessionPlacementStore.invalidate(ctx.getRequest().getModel(),
+                            ctx.getRequest().getInferenceSessionId(), publication);
+                } catch (RuntimeException storeError) {
+                    Logger.warn("Failed to roll back session placement", storeError);
+                }
+            }
             if (response.getSuccess() && ownsLocalRoute(origin) && ctx != null) {
                 cancelUndeliveredRoute(ctx.getRequestId());
             }
@@ -687,18 +695,19 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 || origin == ScheduleOrigin.LOCAL_STANDALONE;
     }
 
-    private void recordSessionPlacementSafely(
+    private SessionPlacementStore.Placement recordSessionPlacementSafely(
             BalanceContext ctx,
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
             ScheduleOrigin origin) {
         try {
-            recordSessionPlacement(ctx, response, origin);
+            return recordSessionPlacement(ctx, response, origin);
         } catch (RuntimeException exception) {
             Logger.warn("Failed to record session placement", exception);
+            return null;
         }
     }
 
-    private void recordSessionPlacement(
+    private SessionPlacementStore.Placement recordSessionPlacement(
             BalanceContext ctx,
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB response,
             ScheduleOrigin origin) {
@@ -706,23 +715,24 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 || !ownsLocalRoute(origin)
                 || ctx.getConfig() == null
                 || ctx.getConfig().getRouter().getRoles().getPrefill().getSessionAffinity() == null) {
-            return;
+            return null;
         }
         Request request = ctx.getRequest();
         if (request.getSessionSchemaVersion() != Request.SESSION_SCHEMA_VERSION
                 || request.getInferenceSessionId() == null
                 || request.getInferenceSessionId().isBlank()
                 || request.getInferenceSessionState() == Request.SessionState.UNSPECIFIED) {
-            return;
+            return null;
         }
-        response.getServerStatusList().stream()
+        return response.getServerStatusList().stream()
                 .filter(status -> RoleType.PREFILL.getCode().equals(status.getRole())
                         || RoleType.PDFUSION.getCode().equals(status.getRole()))
                 .findFirst()
-                .ifPresent(status -> sessionPlacementStore.record(
+                .map(status -> sessionPlacementStore.record(
                         request.getModel(),
                         request.getInferenceSessionId(),
-                        status.getServerIp() + ":" + status.getHttpPort()));
+                        status.getServerIp() + ":" + status.getHttpPort()))
+                .orElse(null);
     }
 
     /** Write one PV record on the node that made the scheduling decision. */

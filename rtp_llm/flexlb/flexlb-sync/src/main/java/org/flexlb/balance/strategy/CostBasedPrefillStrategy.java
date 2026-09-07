@@ -281,7 +281,7 @@ public class CostBasedPrefillStrategy {
             }
             if (cacheAffinity != null) {
                 reportCacheAffinityDecision(roleType, survivors.endpoint(selected).getIp(),
-                        affinityReason);
+                        "SESSION_OVERRIDE");
             }
             SessionAffinityPolicy.reportDecision(context, roleType, engineHealthReporter,
                     session.reason());

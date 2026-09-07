@@ -25,13 +25,18 @@ final class SessionAffinityPolicy {
         Request request = context.getRequest();
         if (config == null
                 || request.getSessionSchemaVersion() != Request.SESSION_SCHEMA_VERSION
-                || request.getInferenceSessionState() != Request.SessionState.ESTABLISHED
-                || request.getInferenceSessionId() == null
-                || request.getInferenceSessionId().isBlank()) {
+                || request.getInferenceSessionState() == Request.SessionState.UNSPECIFIED) {
             return;
         }
+        if (!SessionPlacementStore.isValidSessionId(request.getInferenceSessionId())) {
+            reason = Reason.INVALID_SESSION_ID;
+        }
         context.setSessionAffinityReason(reason.name());
-        reporter.reportSessionAffinityDecision(roleType, reason.name());
+        try {
+            reporter.reportSessionAffinityDecision(roleType, reason.name());
+        } catch (RuntimeException exception) {
+            Logger.debug("Session affinity telemetry unavailable", exception);
+        }
     }
 
     static Decision evaluate(Request request,
@@ -41,10 +46,11 @@ final class SessionAffinityPolicy {
                              IntFunction<String> endpoint,
                              IntToLongFunction score,
                              long minScore) {
-        if (request.getSessionSchemaVersion() != Request.SESSION_SCHEMA_VERSION
-                || request.getInferenceSessionId() == null
-                || request.getInferenceSessionId().isBlank()) {
+        if (request.getSessionSchemaVersion() != Request.SESSION_SCHEMA_VERSION) {
             return Decision.none(Reason.DISABLED);
+        }
+        if (!SessionPlacementStore.isValidSessionId(request.getInferenceSessionId())) {
+            return Decision.none(Reason.INVALID_SESSION_ID);
         }
         String model = request.getModel();
         String sessionId = request.getInferenceSessionId();
@@ -91,6 +97,7 @@ final class SessionAffinityPolicy {
 
     enum Reason {
         DISABLED,
+        INVALID_SESSION_ID,
         NEW_SESSION,
         CACHE_AFFINITY_PRECEDENCE,
         NO_PLACEMENT,

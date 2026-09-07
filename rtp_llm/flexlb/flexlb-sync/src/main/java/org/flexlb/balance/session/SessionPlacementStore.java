@@ -21,7 +21,7 @@ public final class SessionPlacementStore {
     public SessionPlacementStore() {
         this(RoutingConfig.SessionAffinityConfig.DEFAULT_MAX_ENTRIES,
                 RoutingConfig.SessionAffinityConfig.MAX_TTL_MS,
-                System::currentTimeMillis,
+                () -> TimeUnit.NANOSECONDS.toMillis(System.nanoTime()),
                 System::nanoTime);
     }
 
@@ -33,21 +33,21 @@ public final class SessionPlacementStore {
     @Autowired
     public SessionPlacementStore(ConfigService configService) {
         this(maximumSize(configService), retentionMs(configService),
-                System::currentTimeMillis, System::nanoTime);
+                () -> TimeUnit.NANOSECONDS.toMillis(System.nanoTime()), System::nanoTime);
     }
 
     private SessionPlacementStore(long maximumSize, long retentionMs, LongSupplier clock,
                                   LongSupplier ticker) {
         this.placements = Caffeine.newBuilder()
                 .maximumSize(maximumSize)
-                .expireAfterAccess(retentionMs, TimeUnit.MILLISECONDS)
+                .expireAfterWrite(retentionMs, TimeUnit.MILLISECONDS)
                 .ticker(ticker::getAsLong)
                 .build();
         this.clock = clock;
     }
 
     public Optional<Placement> find(String model, String sessionId, long ttlMs) {
-        if (!valid(sessionId)) {
+        if (!isValidSessionId(sessionId)) {
             return Optional.empty();
         }
         Key key = new Key(model, sessionId);
@@ -55,22 +55,32 @@ public final class SessionPlacementStore {
         if (placement == null) {
             return Optional.empty();
         }
-        if (clock.getAsLong() - placement.storedAtMs() > ttlMs) {
+        if (clock.getAsLong() - placement.storedAtMs() >= ttlMs) {
+            invalidate(model, sessionId, placement);
             return Optional.empty();
         }
         return Optional.of(placement);
     }
 
-    public void record(String model, String sessionId, String ipPort) {
-        if (!valid(sessionId) || ipPort == null || ipPort.isBlank()) {
-            return;
+    public Placement record(String model, String sessionId, String ipPort) {
+        if (!isValidSessionId(sessionId) || ipPort == null || ipPort.isBlank()) {
+            return null;
         }
-        placements.put(new Key(model, sessionId), new Placement(ipPort, clock.getAsLong()));
+        Placement placement = new Placement(ipPort, clock.getAsLong());
+        placements.put(new Key(model, sessionId), placement);
+        return placement;
     }
 
     public void invalidate(String model, String sessionId) {
-        if (valid(sessionId)) {
+        if (isValidSessionId(sessionId)) {
             placements.invalidate(new Key(model, sessionId));
+        }
+    }
+
+    public void invalidate(String model, String sessionId, Placement expected) {
+        if (expected != null && isValidSessionId(sessionId)) {
+            placements.asMap().computeIfPresent(new Key(model, sessionId),
+                    (key, current) -> current == expected ? null : current);
         }
     }
 
@@ -83,7 +93,7 @@ public final class SessionPlacementStore {
         placements.cleanUp();
     }
 
-    private static boolean valid(String sessionId) {
+    public static boolean isValidSessionId(String sessionId) {
         if (sessionId == null || sessionId.isEmpty()
                 || sessionId.length() > MAX_SESSION_ID_LENGTH) {
             return false;

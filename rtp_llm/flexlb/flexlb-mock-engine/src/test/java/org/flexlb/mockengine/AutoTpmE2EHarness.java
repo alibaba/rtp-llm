@@ -458,7 +458,8 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                 List.of(RoleType.DECODE, RoleType.PREFILL));
         return new DefaultRouter(
                 new CostBasedPrefillStrategy(
-                        workers, cache, healthReporter),
+                        workers, cache, healthReporter,
+                        new org.flexlb.balance.session.SessionPlacementStore()),
                 new CostBasedDecodeStrategy(workers),
                 new RandomStrategy(workers),
                 configService,
