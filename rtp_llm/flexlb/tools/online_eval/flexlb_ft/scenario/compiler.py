@@ -316,9 +316,11 @@ def stages(values, path, default_timeout, handlers, env=None, profiles=()):
     return compiled
 
 
-def compile_scenarios(documents, profile=None, handlers=None):
+def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
     """Expand named variants and selected profiles, preserving declaration order."""
     handlers = dict(handlers or {})
+    if grade not in ("strict", "normal", "loose"):
+        fail("grade", "must be strict, normal or loose")
     if set(handlers) & set(OUTPUTS):
         fail("handlers", "adapters cannot override core action names")
     if profile is not None and profile not in PROFILES:
@@ -578,6 +580,7 @@ def compile_scenarios(documents, profile=None, handlers=None):
                         "variant": vid,
                         "variant_id": vid,
                         "profile": p,
+                        "grade": grade,
                         "category": doc["category"],
                         "description": doc["description"],
                         "requires": sorted(action_requires),

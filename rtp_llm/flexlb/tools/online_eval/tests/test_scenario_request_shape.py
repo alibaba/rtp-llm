@@ -9,6 +9,13 @@ from flexlb_ft.scenario import compile_scenarios, load_scenarios
 
 
 class RequestShapeTests(unittest.TestCase):
+    def test_grade_is_validated_and_preserved_as_instance_metadata(self):
+        docs = [("shape.yaml", self.source())]
+        self.assertEqual(compile_scenarios(docs)[0]["grade"], "normal")
+        self.assertEqual(compile_scenarios(docs, grade="strict")[0]["grade"], "strict")
+        with self.assertRaises(ValueError):
+            compile_scenarios(docs, grade="invented")
+
     def source(self):
         source = copy.deepcopy(load_scenarios(ROOT / "scenarios/core")[0][1])
         source.pop("variants")

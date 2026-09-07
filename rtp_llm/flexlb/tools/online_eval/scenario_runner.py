@@ -19,6 +19,7 @@ LIST_FIELDS = (
     "scenario_id",
     "variant_id",
     "profile",
+    "grade",
     "category",
     "tags",
     "requires",
@@ -81,6 +82,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", required=True, help="scenario file or directory")
     parser.add_argument("--profile")
+    parser.add_argument(
+        "--grade", choices=("strict", "normal", "loose"), default="normal"
+    )
     parser.add_argument("--instances", help="comma separated exact instance IDs")
     parser.add_argument("--list-json", action="store_true")
     parser.add_argument("--out-dir", type=Path)
@@ -89,7 +93,9 @@ def main(argv=None):
     try:
         registry = handlers()
         plans = select(
-            compile_scenarios(load_scenarios(args.source), args.profile, registry),
+            compile_scenarios(
+                load_scenarios(args.source), args.profile, registry, grade=args.grade
+            ),
             args.instances,
         )
         if args.list_json:

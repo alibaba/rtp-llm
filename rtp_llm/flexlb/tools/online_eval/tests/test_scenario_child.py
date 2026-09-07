@@ -54,6 +54,8 @@ class ChildTest(unittest.TestCase):
                 "--list-json",
                 "--profile",
                 "batch-window",
+                "--grade",
+                "loose",
             ],
             cwd=TOOLS,
             capture_output=True,
@@ -63,6 +65,7 @@ class ChildTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         rows = json.loads(proc.stdout)["instances"]
         self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["grade"] == "loose" for row in rows))
         self.assertNotIn("stages", rows[0])
         self.assertNotIn("environment", rows[0])
         self.assertGreater(rows[0]["execution"]["cleanup_timeout_s"], 0)

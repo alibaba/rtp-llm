@@ -15,9 +15,14 @@ def main(argv=None):
     )
     parser.add_argument("root")
     parser.add_argument("--profile")
+    parser.add_argument(
+        "--grade", choices=("strict", "normal", "loose"), default="normal"
+    )
     args = parser.parse_args(argv)
     try:
-        plans = compile_scenarios(load_scenarios(args.root), args.profile, handlers())
+        plans = compile_scenarios(
+            load_scenarios(args.root), args.profile, handlers(), grade=args.grade
+        )
         if not plans:
             raise ScenarioError("selection contains no scenario instances")
     except ScenarioError as exc:

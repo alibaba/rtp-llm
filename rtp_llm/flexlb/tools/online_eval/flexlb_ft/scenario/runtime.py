@@ -340,6 +340,7 @@ def execute_instance(
     }
     result.update(
         status=terminal_status,
+        grade=instance.get("grade", "normal"),
         stages=rows,
         cleanup=cleanup,
         error=primary_error,
