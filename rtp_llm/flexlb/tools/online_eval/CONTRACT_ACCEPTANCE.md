@@ -2,8 +2,19 @@
 
 `flexlb_ft.acceptance` audits normalized JSON without starting engines. Run it
 from this directory with `python3 -m flexlb_ft.acceptance`. This is an independent
-oracle, not a scenario compiler or executor. The scenario v1 adapter is a separate
-integration step once the implementation has a stable commit.
+oracle, not a scenario compiler or executor. `flexlb_ft.scenario_acceptance`
+adapts the core v1 plans and results independently of the runtime module.
+
+The adapter provides `normalize_plans(plans, check_contracts=None)`,
+`normalize_results(plans, results)` and `expand_coverage(document, inventory)`.
+Check contracts are keyed by instance ID then qualified check ID, and can supply
+reviewed `numeric`/`min_samples` fields. They cannot override finding/check identity.
+For non-core checks, evidence requires explicit `complete: true`; sampled metrics
+also need `sample_count`. An empty evidence dictionary is not complete observation.
+Core typed boolean/integer comparisons are scalar contracts rather than sampled
+metrics. Callback success is labeled `reported_callbacks_only`; it does not attest
+that remote processes or sockets are gone. Unknown/missing explicit coverage
+variant/profile targets reject rather than silently disappear during expansion.
 
 ## Freeze the actual source
 
