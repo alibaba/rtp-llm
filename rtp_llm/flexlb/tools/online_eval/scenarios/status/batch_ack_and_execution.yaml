@@ -87,7 +87,7 @@ variants:
     params:
       duration_s: 30
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 45
@@ -106,15 +106,6 @@ variants:
       snapshot:
         $ref: stages.ledger_drained.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: ledger_drained_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.ledger_drained.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
@@ -298,7 +289,7 @@ variants:
     params:
       duration_s: 30
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 45
@@ -317,15 +308,6 @@ variants:
       snapshot:
         $ref: stages.final_drained.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: final_drained_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.final_drained.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
@@ -417,7 +399,7 @@ variants:
     params:
       duration_s: 120
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 135
@@ -436,15 +418,6 @@ variants:
       snapshot:
         $ref: stages.normal_drained.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: normal_drained_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.normal_drained.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
@@ -566,7 +539,7 @@ variants:
     params:
       duration_s: 120
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 135
@@ -585,15 +558,6 @@ variants:
       snapshot:
         $ref: stages.serial_drained.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: serial_drained_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.serial_drained.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last

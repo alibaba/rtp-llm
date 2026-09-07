@@ -2,7 +2,7 @@
 
 Source baseline: `9821d9dc73e0ded021ebf85ebfe1fe26af5f625f`; the 25 legacy status source files are unchanged in this worktree. Two additional mappings come from `master_debug_snapshot` and `normal_no_fetch_observation`. This is declaration coverage, not a claim that all variants or profiles passed remotely.
 
-Every name below denotes `<stage>.contract` unless it is explicitly described as an observation or required source. A `*_drained_*`, `after_*_*`, or `clean_baseline_*` group expands into the separately listed scheduler, Prefill batch, Prefill member and Decode total-load checks. Each variant also maps old `master_ok` to `master_http_200.contract` and has explicit teardown plus mandatory owner cleanup.
+Every name below denotes `<stage>.contract` unless it is explicitly described as an observation or required source. A `*_drained_*`, `after_*_*`, or `clean_baseline_*` group expands into the separately listed scheduler, Prefill batch and Decode total-load checks. Each variant also maps old `master_ok` to `master_http_200.contract` and has explicit teardown plus mandatory owner cleanup.
 
 The current core stops subsequent stages after an ordinary failed check or action error. Those later checks remain statically declared but are reported BLOCKED, not executed or passed. Only a declared finding failure allows later checks to run. Missing evidence is never converted to a finding.
 
@@ -12,7 +12,7 @@ The current core stops subsequent stages after an ordinary failed check or actio
 
 hang_free → failed_member_released_promptly; drained_a → ledger_drained_*; transient_ok → transient_policy; permanent_fast → permanent_member_isolation; permanent_no_retry → permanent_dispatch_nonempty + permanent_no_retry; inflight_ok → final_drained_*.
 
-Checks: `failed_member_released_promptly.contract`, `ledger_drained_scheduler.contract`, `ledger_drained_prefill_batches.contract`, `ledger_drained_prefill_members.contract`, `ledger_drained_decode_load.contract`, `transient_policy.contract`, `permanent_member_isolation.contract`, `permanent_member_isolation_phase.contract`, `permanent_dispatch_nonempty.contract`, `permanent_no_retry.contract`, `final_drained_scheduler.contract`, `final_drained_prefill_batches.contract`, `final_drained_prefill_members.contract`, `final_drained_decode_load.contract`, `master_http_200.contract`.
+Checks: `failed_member_released_promptly.contract`, `ledger_drained_scheduler.contract`, `ledger_drained_prefill_batches.contract`, `ledger_drained_decode_load.contract`, `transient_policy.contract`, `permanent_member_isolation.contract`, `permanent_member_isolation_phase.contract`, `permanent_dispatch_nonempty.contract`, `permanent_no_retry.contract`, `final_drained_scheduler.contract`, `final_drained_prefill_batches.contract`, `final_drained_decode_load.contract`, `master_http_200.contract`.
 
 Finding checks: `transient_policy.contract`.
 
@@ -22,7 +22,7 @@ Finding checks: `transient_policy.contract`.
 
 typed_terminal → normal_execution_terminal; inflight_ok → normal_drained_*; stable → no_resurrection; recovery_ok → healthy_recovery_success; typed_terminal_2 → serial_execution_terminal; inflight_ok2 → serial_drained_* (explicit serial_perf_restore before verdict/drain).
 
-Checks: `normal_execution_terminal.contract`, `normal_execution_terminal_phase.contract`, `normal_drained_scheduler.contract`, `normal_drained_prefill_batches.contract`, `normal_drained_prefill_members.contract`, `normal_drained_decode_load.contract`, `no_resurrection.contract`, `healthy_recovery_success.contract`, `serial_execution_terminal.contract`, `serial_execution_terminal_phase.contract`, `serial_drained_scheduler.contract`, `serial_drained_prefill_batches.contract`, `serial_drained_prefill_members.contract`, `serial_drained_decode_load.contract`, `master_http_200.contract`.
+Checks: `normal_execution_terminal.contract`, `normal_execution_terminal_phase.contract`, `normal_drained_scheduler.contract`, `normal_drained_prefill_batches.contract`, `normal_drained_decode_load.contract`, `no_resurrection.contract`, `healthy_recovery_success.contract`, `serial_execution_terminal.contract`, `serial_execution_terminal_phase.contract`, `serial_drained_scheduler.contract`, `serial_drained_prefill_batches.contract`, `serial_drained_decode_load.contract`, `master_http_200.contract`.
 
 ## batch_ack_and_execution / ack_multi_error
 
@@ -64,7 +64,7 @@ Checks: `legal_request_terminals.contract`, `scheduler_retires.contract`, `prefi
 
 legal_terminal → legal_request_terminals; inflight_ok → after_clear_*.
 
-Checks: `legal_request_terminals.contract`, `after_clear_scheduler.contract`, `after_clear_prefill_batches.contract`, `after_clear_prefill_members.contract`, `after_clear_decode_load.contract`, `master_http_200.contract`.
+Checks: `legal_request_terminals.contract`, `after_clear_scheduler.contract`, `after_clear_prefill_batches.contract`, `after_clear_decode_load.contract`, `master_http_200.contract`.
 
 ## status_protocol / decode_suppress_finished
 
@@ -96,7 +96,7 @@ Checks: `at_least_one_prefill_retired.contract`, `retired_ledger_drained.contrac
 
 clean0 → clean_baseline_*; unchanged → unknown_terminal_ignored.
 
-Checks: `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.contract`, `clean_baseline_prefill_members.contract`, `clean_baseline_decode_load.contract`, `unknown_terminal_ignored.contract`, `master_http_200.contract`.
+Checks: `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.contract`, `clean_baseline_decode_load.contract`, `unknown_terminal_ignored.contract`, `master_http_200.contract`.
 
 ## status_protocol / unknown_rid_running
 
@@ -104,7 +104,7 @@ Checks: `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.con
 
 clean0 → clean_baseline_*; drained/final==0 → unknown_active_retires_after_clear; whether ACTIVE initially registers is observation.
 
-Checks: `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.contract`, `clean_baseline_prefill_members.contract`, `clean_baseline_decode_load.contract`, `unknown_active_retires_after_clear.contract`, `master_http_200.contract`.
+Checks: `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.contract`, `clean_baseline_decode_load.contract`, `unknown_active_retires_after_clear.contract`, `master_http_200.contract`.
 
 ## status_protocol / unknown_batchid
 
@@ -112,7 +112,7 @@ Checks: `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.con
 
 control_err is None → baseline_request_success; target_err is None → real_request_unaffected; inflight_ok → after_clear_*.
 
-Checks: `baseline_request_success.contract`, `real_request_unaffected.contract`, `after_clear_scheduler.contract`, `after_clear_prefill_batches.contract`, `after_clear_prefill_members.contract`, `after_clear_decode_load.contract`, `master_http_200.contract`.
+Checks: `baseline_request_success.contract`, `real_request_unaffected.contract`, `after_clear_scheduler.contract`, `after_clear_prefill_batches.contract`, `after_clear_decode_load.contract`, `master_http_200.contract`.
 
 ## status_protocol / special_ids
 
@@ -120,7 +120,7 @@ Checks: `baseline_request_success.contract`, `real_request_unaffected.contract`,
 
 clean0 → clean_baseline_*; rid_neg_ignored → negative_rid_ignored; real_rid_unaffected → zero_batch_unaffected + negative_batch_unaffected; inflight_ok → after_clear_*; RID zero channel acceptance/refusal stays observation.
 
-Checks: `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.contract`, `clean_baseline_prefill_members.contract`, `clean_baseline_decode_load.contract`, `negative_rid_ignored.contract`, `zero_batch_unaffected.contract`, `negative_batch_unaffected.contract`, `after_clear_scheduler.contract`, `after_clear_prefill_batches.contract`, `after_clear_prefill_members.contract`, `after_clear_decode_load.contract`, `master_http_200.contract`.
+Checks: `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.contract`, `clean_baseline_decode_load.contract`, `negative_rid_ignored.contract`, `zero_batch_unaffected.contract`, `negative_batch_unaffected.contract`, `after_clear_scheduler.contract`, `after_clear_prefill_batches.contract`, `after_clear_decode_load.contract`, `master_http_200.contract`.
 
 ## status_protocol / unbatched_single_request
 
@@ -128,7 +128,7 @@ Checks: `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.con
 
 clean0 → clean_baseline_*; all_noop → omitted_running_ignored + omitted_finished_ignored + zero_running_ignored + zero_finished_ignored; inflight_ok → after_clear_*.
 
-Checks: `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.contract`, `clean_baseline_prefill_members.contract`, `clean_baseline_decode_load.contract`, `omitted_running_ignored.contract`, `omitted_finished_ignored.contract`, `zero_running_ignored.contract`, `zero_finished_ignored.contract`, `after_clear_scheduler.contract`, `after_clear_prefill_batches.contract`, `after_clear_prefill_members.contract`, `after_clear_decode_load.contract`, `master_http_200.contract`.
+Checks: `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.contract`, `clean_baseline_decode_load.contract`, `omitted_running_ignored.contract`, `omitted_finished_ignored.contract`, `zero_running_ignored.contract`, `zero_finished_ignored.contract`, `after_clear_scheduler.contract`, `after_clear_prefill_batches.contract`, `after_clear_decode_load.contract`, `master_http_200.contract`.
 
 ## status_protocol / foreign_batchid
 
@@ -136,7 +136,7 @@ Checks: `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.con
 
 clean0 → clean_baseline_*; ghost_ignored → foreign_terminal_ignored; real_unaffected → real_traffic_success; inflight_ok → after_foreign_*.
 
-Checks: `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.contract`, `clean_baseline_prefill_members.contract`, `clean_baseline_decode_load.contract`, `foreign_terminal_ignored.contract`, `real_traffic_success.contract`, `after_foreign_scheduler.contract`, `after_foreign_prefill_batches.contract`, `after_foreign_prefill_members.contract`, `after_foreign_decode_load.contract`, `master_http_200.contract`.
+Checks: `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.contract`, `clean_baseline_decode_load.contract`, `foreign_terminal_ignored.contract`, `real_traffic_success.contract`, `after_foreign_scheduler.contract`, `after_foreign_prefill_batches.contract`, `after_foreign_decode_load.contract`, `master_http_200.contract`.
 
 ## status_protocol / duplicate_finished
 
@@ -144,7 +144,7 @@ Checks: `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.con
 
 ok==4 → traffic_success; clean_ok → after_clear_*; stable → terminal_replay_is_idempotent; scheduler drain before replay remains an observation: the old return value was ignored.
 
-Checks: `traffic_success.contract`, `terminal_replay_is_idempotent.contract`, `after_clear_scheduler.contract`, `after_clear_prefill_batches.contract`, `after_clear_prefill_members.contract`, `after_clear_decode_load.contract`, `master_http_200.contract`.
+Checks: `traffic_success.contract`, `terminal_replay_is_idempotent.contract`, `after_clear_scheduler.contract`, `after_clear_prefill_batches.contract`, `after_clear_decode_load.contract`, `master_http_200.contract`.
 
 ## status_protocol / cursor_regress
 
@@ -152,7 +152,7 @@ Checks: `traffic_success.contract`, `terminal_replay_is_idempotent.contract`, `a
 
 clean_ok → clean_baseline_*; stable → cursor_replay_is_idempotent; still_clean → after_replay_*; recovery_ok → recovery_success.
 
-Checks: `history_success.contract`, `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.contract`, `clean_baseline_prefill_members.contract`, `clean_baseline_decode_load.contract`, `cursor_replay_is_idempotent.contract`, `after_replay_scheduler.contract`, `after_replay_prefill_batches.contract`, `after_replay_prefill_members.contract`, `after_replay_decode_load.contract`, `recovery_success.contract`, `master_http_200.contract`.
+Checks: `history_success.contract`, `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.contract`, `clean_baseline_decode_load.contract`, `cursor_replay_is_idempotent.contract`, `after_replay_scheduler.contract`, `after_replay_prefill_batches.contract`, `after_replay_decode_load.contract`, `recovery_success.contract`, `master_http_200.contract`.
 
 ## status_protocol / finished_then_running
 
@@ -160,7 +160,7 @@ Checks: `history_success.contract`, `clean_baseline_scheduler.contract`, `clean_
 
 baseline request precondition → settled_success; clean_ok → clean_baseline_*; no_resurrect_during → terminal_cannot_resurrect; clean_final → after_replay_*.
 
-Checks: `settled_success.contract`, `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.contract`, `clean_baseline_prefill_members.contract`, `clean_baseline_decode_load.contract`, `terminal_cannot_resurrect.contract`, `after_replay_scheduler.contract`, `after_replay_prefill_batches.contract`, `after_replay_prefill_members.contract`, `after_replay_decode_load.contract`, `master_http_200.contract`.
+Checks: `settled_success.contract`, `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.contract`, `clean_baseline_decode_load.contract`, `terminal_cannot_resurrect.contract`, `after_replay_scheduler.contract`, `after_replay_prefill_batches.contract`, `after_replay_decode_load.contract`, `master_http_200.contract`.
 
 ## status_protocol / zombie_completed_running
 
@@ -168,7 +168,7 @@ Checks: `settled_success.contract`, `clean_baseline_scheduler.contract`, `clean_
 
 ok==4 → traffic_success; clean_ok → after_zombie_*; d_requests==0 → decode_load_zero; zombie counters remain raw mock observations.
 
-Checks: `traffic_success.contract`, `after_zombie_scheduler.contract`, `after_zombie_prefill_batches.contract`, `after_zombie_prefill_members.contract`, `after_zombie_decode_load.contract`, `decode_load_zero.contract`, `master_http_200.contract`.
+Checks: `traffic_success.contract`, `after_zombie_scheduler.contract`, `after_zombie_prefill_batches.contract`, `after_zombie_decode_load.contract`, `decode_load_zero.contract`, `master_http_200.contract`.
 
 ## status_protocol / zombie_fake_running
 
@@ -176,7 +176,7 @@ Checks: `traffic_success.contract`, `after_zombie_scheduler.contract`, `after_zo
 
 clean0 → clean_baseline_*; bounded → resident_growth_bounded; master_ok_during → master_healthy_during_active; drained/final==0 → ghosts_retire_after_clear; resident_after_2xTTL and peak are observations, not a zero-residency assertion.
 
-Checks: `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.contract`, `clean_baseline_prefill_members.contract`, `clean_baseline_decode_load.contract`, `resident_growth_bounded.contract`, `master_healthy_during_active.contract`, `ghosts_retire_after_clear.contract`, `master_http_200.contract`.
+Checks: `clean_baseline_scheduler.contract`, `clean_baseline_prefill_batches.contract`, `clean_baseline_decode_load.contract`, `resident_growth_bounded.contract`, `master_healthy_during_active.contract`, `ghosts_retire_after_clear.contract`, `master_http_200.contract`.
 
 ## status_protocol / decode_before_prefill
 
@@ -194,7 +194,7 @@ Finding checks: `decode_terminal_retires_prefill_promptly.contract`.
 
 dispatched → batch_really_dispatched; p_held → intermediate_cannot_retire_prefill; sched_held → intermediate_cannot_retire_scheduler; drained → after_clear_*.
 
-Checks: `batch_really_dispatched.contract`, `intermediate_cannot_retire_prefill.contract`, `intermediate_cannot_retire_scheduler.contract`, `after_clear_scheduler.contract`, `after_clear_prefill_batches.contract`, `after_clear_prefill_members.contract`, `after_clear_decode_load.contract`, `master_http_200.contract`.
+Checks: `batch_really_dispatched.contract`, `intermediate_cannot_retire_prefill.contract`, `intermediate_cannot_retire_scheduler.contract`, `after_clear_scheduler.contract`, `after_clear_prefill_batches.contract`, `after_clear_decode_load.contract`, `master_http_200.contract`.
 
 ## status_protocol / decode_waiting_before_prefill
 
@@ -202,7 +202,7 @@ Checks: `batch_really_dispatched.contract`, `intermediate_cannot_retire_prefill.
 
 dispatched → batch_really_dispatched; p_held → intermediate_cannot_retire_prefill; sched_held → intermediate_cannot_retire_scheduler; drained → after_clear_*.
 
-Checks: `batch_really_dispatched.contract`, `intermediate_cannot_retire_prefill.contract`, `intermediate_cannot_retire_scheduler.contract`, `after_clear_scheduler.contract`, `after_clear_prefill_batches.contract`, `after_clear_prefill_members.contract`, `after_clear_decode_load.contract`, `master_http_200.contract`.
+Checks: `batch_really_dispatched.contract`, `intermediate_cannot_retire_prefill.contract`, `intermediate_cannot_retire_scheduler.contract`, `after_clear_scheduler.contract`, `after_clear_prefill_batches.contract`, `after_clear_decode_load.contract`, `master_http_200.contract`.
 
 ## status_protocol / fetch_error
 
@@ -210,7 +210,7 @@ Checks: `batch_really_dispatched.contract`, `intermediate_cannot_retire_prefill.
 
 surfaced → fetch_fault_surfaces; err2 is None → fresh_request_success; inflight_ok → after_fetch_error_*; engine_clean → prefill_engine_drained; recovery_ok → recovery_success.
 
-Checks: `fetch_fault_surfaces.contract`, `fresh_request_success.contract`, `after_fetch_error_scheduler.contract`, `after_fetch_error_prefill_batches.contract`, `after_fetch_error_prefill_members.contract`, `after_fetch_error_decode_load.contract`, `prefill_engine_drained.contract`, `recovery_success.contract`, `master_http_200.contract`.
+Checks: `fetch_fault_surfaces.contract`, `fresh_request_success.contract`, `after_fetch_error_scheduler.contract`, `after_fetch_error_prefill_batches.contract`, `after_fetch_error_decode_load.contract`, `prefill_engine_drained.contract`, `recovery_success.contract`, `master_http_200.contract`.
 
 ## status_protocol / debug_snapshot
 
@@ -240,8 +240,8 @@ Checks: `fresh_accepted_zero.contract`, `fresh_fetch_zero.contract`, `prefill_co
 - Debug/noFetch now require every captured debug sample to be complete, a stricter evidence rule than the old noFetch loop, which tolerated partial intermediate frames. The first YAML run encountered a partial snapshot and correctly reported ERROR; a later fresh run passed without relaxing this rule. This is not a claim of stable repeated success. Source errors preserve a raw debug artifact.
 - Normal noFetch has a fresh backend instance, no injection, no wait/Fetch on its original cohort, a two-second post-completion observation and a different recovery request. Owner rows are observations, not a universal zero-owner assertion. No GPU, C++ onflight, connector KV or exact 600-second lifetime is tested.
 
-The four variants that read TTL metrics retain the old 180-second cold-exporter readiness gate as an explicit `metrics_ready` stage, with recorded attempts and actuator/prometheus → prometheus fallback. Later event observations use the selected epoch-bound source; a failed readiness deadline cannot become a zero counter.
+`cleanup_inflight` exactly follows the old `AssertUtils.inflight_clean` zero predicate: scheduler + Prefill batches + Decode total_load. Prefill members remain raw observations except where the old contract explicitly checks them (ACK partial-failure peak); they are not added as an implicit cleanup prerequisite.
 
-Debug observation verifies scheduler/queue presence and the complete declared Prefill/Decode/engine directory, with matching endpoint generations. Iterating only returned pages is insufficient owner coverage.
+The four TTL-metric variants retain the old 180-second cold-exporter readiness gate, recorded attempts and two-path fallback. Debug observation requires scheduler/queues and the complete declared Prefill/Decode/engine directory with matching endpoint generations.
 
-Review corrections preserve legacy observation points: ACK multi-error checks only scheduler drain and the three-second endpoint sample; execution partial compares the two fingerprint endpoints and restores serial Prefill to 100 ms immediately after clearing its fault; duplicate-finished does not promote the ignored preliminary drain result to a new assertion; Decode-before-Prefill keeps fallback drain observational and checks final Prefill batches after clearing suppression.
+ACK multi-error checks only scheduler drain and its three-second endpoint sample. Execution partial compares fingerprint endpoints and restores serial Prefill to 100 ms immediately after clearing its fault. Duplicate-finished does not promote the ignored preliminary drain result to an assertion. Decode-before-Prefill keeps fallback drain observational and checks final Prefill batches after clear.

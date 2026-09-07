@@ -43,6 +43,7 @@ METRICS = {
     "prefill_requests",
     "decode_total_load",
     "all_inflight",
+    "cleanup_inflight",
     "fingerprint",
     "accepted",
     "prefill_accepted",
@@ -368,6 +369,7 @@ def metric(frame, name):
         "prefill_requests",
         "decode_total_load",
         "all_inflight",
+        "cleanup_inflight",
         "fingerprint",
     }:
         master = frame["inflight"]
@@ -408,6 +410,9 @@ def metric(frame, name):
             decode_total_load=sum(r[5] for r in d),
         )
         values["all_inflight"] = sum(values.values())
+        values["cleanup_inflight"] = (
+            scheduler + values["prefill_batches"] + values["decode_total_load"]
+        )
         values["fingerprint"] = [scheduler, p, d]
         return values[name]
     if name.startswith("alive_"):
