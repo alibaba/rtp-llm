@@ -96,7 +96,12 @@ def snapshot_dmesg() -> int:
 _DMESG_ERROR_PATTERNS = re.compile(
     r"oom|killed process|segfault|traps:|general protection|"
     r"out of memory|sigkill|sigsegv|sigabrt|invoked oom-killer|"
-    r"page allocation failure|memory cgroup",
+    r"page allocation failure|memory cgroup|"
+    # Driver-level faults. Without these, a rank killed by a degraded GPU -- an
+    # unspecified launch failure, or a device that fell off the bus -- yielded a
+    # diagnostic that said there were no crash messages at all.
+    r"nvrm|xid|fallen off the bus|pcieport|"
+    r"uncorrectable|row remap|retired page",
     re.IGNORECASE,
 )
 

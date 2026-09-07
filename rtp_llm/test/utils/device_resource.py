@@ -98,8 +98,14 @@ class DeviceResource:
         self.global_lock_file = "/tmp/rtp_llm/smoke/test/gpu_status_lock"
         self.gpu_status_root_path = "/tmp/rtp_llm/smoke/test/gpu_status"
 
-    def _get_gpu_pids(self, gpu_id: str) -> List[int]:
-        """Return PIDs of compute processes on a physical GPU via nvidia-smi."""
+    def _get_gpu_pids(self, gpu_id: str) -> Optional[List[int]]:
+        """PIDs of compute processes on a physical GPU, or None if unknowable.
+
+        None means nvidia-smi could not answer -- it errored, or timed out. That
+        must not be confused with "no processes": a wedged or degraded device is
+        precisely the case where the query fails, and reporting it as idle keeps
+        handing it to tests.
+        """
         try:
             result = subprocess.run(
                 [
@@ -112,15 +118,25 @@ class DeviceResource:
                 text=True,
                 timeout=10,
             )
-            if result.returncode == 0 and result.stdout.strip():
-                return [
-                    int(p.strip())
-                    for p in result.stdout.strip().splitlines()
-                    if p.strip()
-                ]
-        except Exception:
-            pass
-        return []
+            if result.returncode != 0:
+                logging.warning(
+                    "nvidia-smi failed for gpu %s (rc=%s): %s",
+                    gpu_id,
+                    result.returncode,
+                    (result.stderr or "").strip()[:200],
+                )
+                return None
+            return [
+                int(p.strip())
+                for p in result.stdout.strip().splitlines()
+                if p.strip()
+            ]
+        except subprocess.TimeoutExpired:
+            logging.warning("nvidia-smi timed out querying gpu %s", gpu_id)
+            return None
+        except Exception as e:
+            logging.warning("nvidia-smi query failed for gpu %s: %s", gpu_id, e)
+            return None
 
     @staticmethod
     def _pid_alive(pid: int) -> bool:
@@ -128,13 +144,17 @@ class DeviceResource:
         return os.path.exists(f"/proc/{pid}")
 
     def _has_zombie_gpu_contexts(self, gpu_id: str) -> bool:
-        """Check if a GPU has zombie CUDA contexts (dead processes still holding memory).
+        """Whether this GPU should be considered unusable.
 
-        When CUDA processes are SIGKILLed, the driver may fail to reclaim
-        GPU memory, leaving permanent zombie contexts. These GPUs are unusable
-        until a GPU reset or reboot.
+        Covers two cases: dead processes still holding memory (the driver
+        sometimes fails to reclaim after a SIGKILL, leaving contexts that survive
+        until a reset), and a device we cannot query at all -- treated as bad, so
+        a degraded GPU is skipped rather than handed out repeatedly.
         """
         pids = self._get_gpu_pids(gpu_id)
+        if pids is None:
+            logging.warning("gpu %s is not queryable; treating as unusable", gpu_id)
+            return True
         if not pids:
             return False
         return all(not self._pid_alive(p) for p in pids)
