@@ -434,6 +434,7 @@ class PyFlashinferPrefillAttnOp(object):
         self,
         attn_configs: AttentionConfigs,
         backend: str = "auto",
+        sm_scale: Optional[float] = None,
     ) -> None:
         self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
         # attn_configs.head_num and kv_head_num are already divided by tp_size in ModelConfig::getAttentionConfigs
@@ -451,6 +452,7 @@ class PyFlashinferPrefillAttnOp(object):
         self.q_dtype = attn_q_dtype(attn_configs)
         self.kv_dtype = attn_kv_dtype(attn_configs)
         self.is_causal = attn_configs.is_causal
+        self.sm_scale = sm_scale
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
 
     def __del__(self):
@@ -494,6 +496,7 @@ class PyFlashinferPrefillAttnOp(object):
             self.head_dim_qk,
             self.head_dim_vo,
             causal=self.is_causal,
+            sm_scale=self.sm_scale,
             q_data_type=self.q_dtype,
             kv_data_type=self.kv_dtype,
             o_data_type=self.dtype,
