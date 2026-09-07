@@ -20,7 +20,9 @@ from test_scenario_backend import Ops
 
 
 class Backend:
-    def __init__(self, reverse=False, missing=False, unfinished=False):
+    def __init__(
+        self, reverse=False, missing=False, unfinished=False, expiry_code=None
+    ):
         self.ops = Ops(batch=False)
         self.ops.master_http_port = 1
         self.reverse, self.missing = reverse, missing
@@ -34,6 +36,21 @@ class Backend:
             return original(rid, **shape)
 
         self.ops.build_schedule_request = build
+        if expiry_code is not None:
+            original_future = self.ops.future
+
+            def future(req, timeout, metadata=None):
+                call = original_future(req, timeout, metadata)
+                response = call.result(timeout)
+                if req[0] > 1:
+                    response.code = expiry_code
+                    response.success = False
+                    response.error_message = "queued expiry"
+                return NS(result=lambda timeout: response, cancel=lambda: True)
+
+            self.ops.schedule_pb2_grpc.FlexlbServiceStub = lambda channel: NS(
+                Schedule=NS(future=future)
+            )
         if unfinished:
             self.ops.pb2_grpc.RpcServiceStub = lambda channel: NS(
                 GenerateStreamCall=lambda req, timeout: iter(
@@ -73,6 +90,8 @@ class Backend:
                     grpc_addr="prefill",
                     port=1234,
                     stopped=False,
+                    waiting=1,
+                    running=0,
                     request_lifecycle=lifecycle if index == 0 else {},
                 )
                 for index in range(self.n_prefill)
@@ -211,6 +230,71 @@ class Tests(unittest.TestCase):
             self.assertEqual(stages[f"wave{w}"]["params"]["gap_s"], 1.5)
             self.assertEqual(stages[f"clean{w}"]["timeout_s"], 30)
             self.assertEqual(stages[f"quiet{w}"]["params"]["seconds"], 2)
+
+    def test_queue_expiry_typed_and_one_consumer(self):
+        result, rows, backend = self.run_program(
+            variant="queue_timeout_terminal", expiry_code=8511
+        )
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(backend.ops.generate_count, 1)
+        self.assertEqual(sum(r["schedule"]["status"] == "REJECTED" for r in rows), 4)
+        self.assertTrue(all(c["status"] == "PASS" for c in result["cleanup"]))
+
+    def test_queue_wrong_typed_expiry_fails(self):
+        result, _, _ = self.run_program(
+            variant="queue_timeout_terminal", expiry_code=8503
+        )
+        self.assertEqual(result["status"], "FAIL", result)
+
+    def test_expiry_stage_order_and_budget(self):
+        doc = load_scenarios(ROOT / "scenarios/priority/priority_queue.yaml")[0][1]
+        v = next(v for v in doc["variants"] if v["id"] == "queue_timeout_terminal")
+        ids = [s["id"] for s in v["stages"]]
+        self.assertLess(ids.index("wave_settled"), ids.index("placeholder_terminal"))
+        self.assertLess(ids.index("placeholder_terminal"), ids.index("wave_terminal"))
+        self.assertNotIn("owner_clean", ids)
+        self.assertEqual(
+            v["environment_overrides"]["config_overrides"]["queue_timeout_ms"], 8000
+        )
+        self.assertEqual(
+            next(s for s in v["stages"] if s["id"] == "slow")["params"]["perf"][
+                "prefill_fixed_ms"
+            ],
+            10000,
+        )
+
+    def test_expiry_grade_uses_per_request_elapsed(self):
+        _, records, _ = self.run_program(
+            variant="queue_timeout_terminal", expiry_code=8511
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = NS(artifact_dir=Path(tmp), instance={"grade": "strict"})
+            waves = {}
+            for key, selected in (
+                ("ph", [r for r in records if r["tag"] == "h1"]),
+                ("wave", [r for r in records if r["tag"] != "h1"]),
+            ):
+                wave = p.PriorityWave(ctx, {})
+                wave.complete = True
+                for r in selected:
+                    record = dict(r)
+                    tag = record.pop("tag")
+                    record.pop("submitted_s", None)
+                    record["schedule"] = dict(record["schedule"], ended_s=111.2)
+                    batch = NS(
+                        snapshot_records=lambda record=record: [record],
+                        entries=[dict(response=NS(code=8511))],
+                    )
+                    wave.entries.append(dict(tag=tag, submitted_s=100, batch=batch))
+                waves[key] = wave
+            ctx.resource = lambda ref, kind: waves[ref]
+            strict = p._expiry(ctx, dict(placeholder="ph", wave="wave"), None)
+            self.assertEqual(strict.checks[0].status, "FAIL")
+            self.assertAlmostEqual(strict.checks[0].actual, 1.4)
+            ctx.instance["grade"] = "normal"
+            normal = p._expiry(ctx, dict(placeholder="ph", wave="wave"), None)
+            self.assertEqual(normal.checks[0].status, "PASS")
 
 
 if __name__ == "__main__":

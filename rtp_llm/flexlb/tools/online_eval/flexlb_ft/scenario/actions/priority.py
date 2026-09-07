@@ -150,6 +150,7 @@ class PriorityWave:
 
     def _submit(self, item, end):
         try:
+            item["submitted_s"] = self.ctx.clock()
             item["batch"].submit(Deadline(end, self.ctx.clock, self.ctx.sleeper))
         except Exception as exc:
             item["error"] = exc
@@ -185,7 +186,9 @@ class PriorityWave:
         rows = []
         for item in self.entries:
             for record in item["batch"].snapshot_records():
-                rows.append(dict(tag=item["tag"], **record))
+                rows.append(
+                    dict(tag=item["tag"], submitted_s=item.get("submitted_s"), **record)
+                )
         return rows
 
     def persist(self):
@@ -231,6 +234,16 @@ def _wave(ctx, p):
 def _wait(ctx, p, deadline):
     wave = _wave(ctx, p)
     wave.wait(deadline)
+    return StageOutput(artifacts=[str(wave.path)])
+
+
+def _settled(ctx, p, deadline):
+    wave = _wave(ctx, p)
+    for item in wave.entries:
+        wave._join(item, deadline)
+        if item["error"] is not None:
+            raise item["error"]
+    wave.persist()
     return StageOutput(artifacts=[str(wave.path)])
 
 
@@ -281,6 +294,103 @@ def _completion(ctx, p, deadline):
                 actual=groups,
             )
         ]
+    )
+
+
+def _pending_params(p, plan):
+    p = _params(p, {"prefill", "requests"}, {"prefill", "requests"})
+    plan.reference(p["prefill"], "string")
+    plan.reference(p["requests"], "requests")
+    return p
+
+
+def _pending(ctx, p, deadline):
+    wave = _wave(ctx, p)
+    for item in wave.entries:
+        wave._join(item, deadline)
+        if item["error"] is not None:
+            raise item["error"]
+        response = item["batch"].entries[0]["response"]
+        if response.code != 200 or not response.success:
+            return StageOutput(
+                checks=[CheckResult("dispatched", "FAIL", "placeholder rejected")]
+            )
+    name = ctx.resolve(p["prefill"])
+    samples = []
+    path = ctx.artifact_dir / f"priority-pending-{uuid.uuid4().hex}.json"
+    try:
+        while True:
+            deadline.check()
+            raw = _http(ctx.ops, "snapshot", deadline)
+            rows = [
+                r
+                for r in raw.get("engines", [])
+                if r.get("name") == name and r.get("role") == "prefill"
+            ]
+            if len(rows) != 1:
+                raise ValueError("pending Prefill missing or ambiguous")
+            row = rows[0]
+            count = _number(row.get("waiting"), 0, 1e9) + _number(
+                row.get("running"), 0, 1e9
+            )
+            samples.append(dict(time_s=ctx.clock(), raw=raw))
+            if count >= 1:
+                return StageOutput(
+                    checks=[CheckResult("dispatched", "PASS", actual=count)],
+                    artifacts=[str(path)],
+                )
+            deadline.sleep(0.1)
+    finally:
+        path.write_text(json.dumps(samples, indent=2) + "\n")
+
+
+def _expiry_params(p, plan):
+    p = _params(p, {"placeholder", "wave"}, {"placeholder", "wave"})
+    for key in p:
+        plan.reference(p[key], "requests")
+    return p
+
+
+def _expiry(ctx, p, deadline):
+    from ...grade import GradeReport
+    from .elastic import request_success
+
+    placeholder = _wave(ctx, {"requests": p["placeholder"]})
+    wave = _wave(ctx, {"requests": p["wave"]})
+    if not placeholder.complete or not wave.complete:
+        raise ValueError("expiry check requires completed waits")
+    ph, rows = placeholder.records(), wave.records()
+    if len(ph) != 1 or len(rows) != 4:
+        raise ValueError("expiry cohort must contain one placeholder and four peers")
+    codes = []
+    for item in wave.entries:
+        if len(item["batch"].entries) != 1:
+            raise ValueError("missing expiry response")
+        response = item["batch"].entries[0]["response"]
+        if response is None:
+            raise ValueError("missing Schedule result")
+        codes.append(int(response.code))
+    low = [r for r in rows if r["request_shape"].get("priority") == 30]
+    if len(low) != 3:
+        raise ValueError("expiry ratio requires three priority30 peers")
+    times = []
+    for row in low:
+        start = _number(row["submitted_s"], 0, 1e18)
+        end = _number(row["schedule"]["ended_s"], start, 1e18)
+        times.append(end - start)
+    ratio = max(times) / 8.0
+    report = GradeReport(run_grade=ctx.instance.get("grade", "normal"))
+    report.check("PR8", ratio)
+    return StageOutput(
+        checks=[
+            CheckResult("PR8", "PASS" if report.passed else "FAIL", actual=ratio),
+            CheckResult(
+                "P6",
+                "PASS" if request_success(ph[0]) and codes == [8511] * 4 else "FAIL",
+                actual=codes,
+            ),
+        ],
+        artifacts=[str(placeholder.path), str(wave.path)],
     )
 
 
@@ -336,6 +446,17 @@ def _fifo(ctx, p, deadline):
 
 
 HANDLERS = [
+    StageHandler("priority_settled", _reference, _settled, {}),
+    StageHandler(
+        "priority_pending",
+        _pending_params,
+        _pending,
+        {},
+        checks=frozenset({"dispatched"}),
+    ),
+    StageHandler(
+        "priority_expiry", _expiry_params, _expiry, {}, checks=frozenset({"PR8", "P6"})
+    ),
     StageHandler("priority_prefill_perf", _perf_params, _prefill_perf, {}),
     StageHandler("priority_fleet", _empty, _fleet, {"prefill": "string"}),
     StageHandler("priority_start", _wave_params, _start, {"requests": "requests"}),
