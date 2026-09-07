@@ -4,7 +4,18 @@ No runtime import is required. Metrics must supply their reviewed check contract
 an empty evidence dictionary never proves a sampled observation is complete.
 """
 
+import math
+
 from .acceptance import _index
+
+
+def _scalar_comparison_complete(actual, expected, op):
+    numeric = (int, float)
+    if type(actual) in numeric and type(expected) in numeric:
+        return op in ("eq", "le", "ge") and all(
+            type(value) is int or math.isfinite(value) for value in (actual, expected)
+        )
+    return type(actual) in (bool, str) and type(expected) is type(actual) and op == "eq"
 
 
 def normalize_plans(plans, check_contracts=None):
@@ -36,6 +47,14 @@ def normalize_plans(plans, check_contracts=None):
                 "scenario_id": plan["scenario_id"],
                 "variant_id": plan["variant_id"],
                 "profile": plan["profile"],
+                "grade": plan.get("grade"),
+                "effective_axes": plan.get(
+                    "effective_axes", plan["environment"].get("effective_axes")
+                ),
+                "effective_capabilities": plan.get(
+                    "effective_capabilities",
+                    plan["environment"].get("effective_capabilities"),
+                ),
                 "category": plan["category"],
                 "requires": plan["requires"],
                 "source": plan["source"],
@@ -62,6 +81,7 @@ def normalize_results(plans, results):
     for result in results:
         plan = indexed[result["id"]]
         actions = {s["id"]: s["action"] for s in plan["stages"]}
+        params = {s["id"]: s.get("params", {}) for s in plan["stages"]}
         checks, errors = [], []
         if result.get("error"):
             errors.append(result["error"])
@@ -76,9 +96,11 @@ def normalize_results(plans, results):
                 if actions.get(stage["id"]) == "check":
                     # Core comparisons have a compiled primitive type contract.
                     # They are not metric aggregates requiring sampled windows.
-                    complete = type(check.get("actual")) in (bool, int) and type(
-                        check.get("expected")
-                    ) is type(check.get("actual"))
+                    complete = _scalar_comparison_complete(
+                        check.get("actual"),
+                        check.get("expected"),
+                        params[stage["id"]].get("op", "eq"),
+                    )
                 checks.append(
                     {
                         "id": stage["id"] + "." + check["id"],
