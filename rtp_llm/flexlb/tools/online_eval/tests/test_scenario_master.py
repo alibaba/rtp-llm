@@ -351,6 +351,17 @@ class MasterActionsTest(unittest.TestCase):
         )
         self.assertEqual("PASS", verdict.checks[0].status)
 
+    def test_dual_kill_steady_excludes_rescued_boundary_requests(self):
+        rows = [
+            {"wall_clock_ts": 1000, "failover": False, "master_target": "B"},
+            {"wall_clock_ts": 1000, "failover": True, "master_target": "A"},
+        ]
+        handle = self.ctx.register_resource("ha_rows", rows)
+        out = master._window(
+            self.ctx, {"rows": handle, "failover": False}, self.deadline
+        )
+        self.assertEqual([rows[0]], self.ctx.resource(out.output["rows"], "ha_rows"))
+
     def test_master_programs_compile_with_explicit_registered_actions(self):
         from flexlb_ft.scenario import compile_scenarios, load_scenarios
         from flexlb_ft.scenario.actions.engine_control import HANDLERS as controls
@@ -361,7 +372,7 @@ class MasterActionsTest(unittest.TestCase):
             load_scenarios(root),
             handlers={h.name: h for h in master.HANDLERS + controls + faults},
         )
-        self.assertEqual(24, len(plans))
+        self.assertEqual(25, len(plans))
         self.assertEqual(5, len({p["scenario_id"] for p in plans}))
         self.assertTrue(all(any(s["check_ids"] for s in p["stages"]) for p in plans))
         for plan in plans:
