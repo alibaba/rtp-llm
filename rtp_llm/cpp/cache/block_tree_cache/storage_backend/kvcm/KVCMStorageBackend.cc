@@ -62,7 +62,7 @@ public:
         sp_config_(sp_config),
         broadcast_manager_(std::move(broadcast_manager)),
         client_wrapper_(std::move(client_wrapper)),
-        sdk_check_enabled_(autil::EnvUtil::getEnv("KVCM_SDK_CHECK", false)) {}
+        sdk_check_enabled_(autil::EnvUtil::getEnv("KVCM_SDK_CHECK", autil::EnvUtil::getEnv("RECO_SDK_CHECK", false))) {}
 
     bool init(const CacheTopology&                   topology,
               StorageBackend::BufferResolver         buffer_resolver,

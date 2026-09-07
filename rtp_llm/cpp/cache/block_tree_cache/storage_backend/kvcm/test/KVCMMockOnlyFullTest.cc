@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 
+#include <tuple>
+
 namespace rtp_llm {
 namespace {
 
@@ -279,10 +281,20 @@ TEST(KVCMMockOnlyFullTest, RejectsMismatchedTransferVectorsBeforeClientIO) {
     EXPECT_FALSE(backend->execute(request, response));
 }
 
-TEST(KVCMMockOnlyFullTest, SDKCheckTracesReadAndWriteBlockIds) {
-    autil::EnvGuard sdk_check("KVCM_SDK_CHECK", "1");
-    auto            environment    = makeBackendEnvironment("kvcm_storage_backend_sdk_check");
-    auto            client_wrapper = std::make_shared<MockClientWrapper>();
+class KVCMSdkCheckTest: public ::testing::TestWithParam<std::tuple<const char*, const char*, bool>> {};
+
+TEST_P(KVCMSdkCheckTest, TracesReadAndWriteBlockIdsWithLegacyFallback) {
+    const auto [canonical, legacy, enabled] = GetParam();
+    autil::EnvGuard sdk_check("KVCM_SDK_CHECK", canonical ? canonical : "0");
+    autil::EnvGuard legacy_sdk_check("RECO_SDK_CHECK", legacy ? legacy : "0");
+    if (!canonical) {
+        autil::EnvUtil::unsetEnv("KVCM_SDK_CHECK");
+    }
+    if (!legacy) {
+        autil::EnvUtil::unsetEnv("RECO_SDK_CHECK");
+    }
+    auto environment    = makeBackendEnvironment("kvcm_storage_backend_sdk_check");
+    auto client_wrapper = std::make_shared<MockClientWrapper>();
 
     EXPECT_CALL(*client_wrapper, init(_, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
@@ -295,9 +307,10 @@ TEST(KVCMMockOnlyFullTest, SDKCheckTracesReadAndWriteBlockIds) {
                              kv_cache_manager::BlockBuffers&,
                              const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
             if (trace_info == nullptr) {
-                ADD_FAILURE() << "KVCM_SDK_CHECK read omitted transfer trace info";
-                return false;
+                EXPECT_FALSE(enabled);
+                return !enabled;
             }
+            EXPECT_TRUE(enabled);
             EXPECT_TRUE(trace_info->need_print);
             EXPECT_EQ(trace_info->block_ids, expected_block_ids);
             return true;
@@ -315,9 +328,10 @@ TEST(KVCMMockOnlyFullTest, SDKCheckTracesReadAndWriteBlockIds) {
                              const kv_cache_manager::BlockBuffers&,
                              const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
             if (trace_info == nullptr) {
-                ADD_FAILURE() << "KVCM_SDK_CHECK write omitted transfer trace info";
-                return std::make_pair(false, kv_cache_manager::UriStrVec{});
+                EXPECT_FALSE(enabled);
+                return std::make_pair(!enabled, kv_cache_manager::UriStrVec{});
             }
+            EXPECT_TRUE(enabled);
             EXPECT_TRUE(trace_info->need_print);
             EXPECT_EQ(trace_info->block_ids, expected_block_ids);
             return std::make_pair(true, kv_cache_manager::UriStrVec{});
@@ -330,6 +344,13 @@ TEST(KVCMMockOnlyFullTest, SDKCheckTracesReadAndWriteBlockIds) {
     RemoteOperationResponsePB write_response;
     EXPECT_TRUE(backend->execute(write_request, write_response));
 }
+
+INSTANTIATE_TEST_SUITE_P(Compatibility,
+                         KVCMSdkCheckTest,
+                         ::testing::Values(std::make_tuple("1", "0", true),
+                                           std::make_tuple(nullptr, "1", true),
+                                           std::make_tuple("0", "1", false),
+                                           std::make_tuple(nullptr, nullptr, false)));
 
 TEST(KVCMMockOnlyFullTest, WritePublishesActualUri) {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_write");
