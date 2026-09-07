@@ -1,7 +1,7 @@
 # Priority preemption migration
 
 Owner: agent4. Source baseline: `295af797bd7ed3a842c9cad42b5722c64cd24c9a`.
-This checkpoint implements ten complete candidate programs out of fourteen old
+This checkpoint implements eleven complete candidate families out of fourteen old
 contracts. No old case is called or deleted. Independent review, default catalog
 integration and actual Java execution remain pending.
 
@@ -55,9 +55,8 @@ observed order and terminal outcomes are saved as artifacts.
   restores its original blocking dependency. An explicit zero submission gap
   avoids inserting a .15s pause after the standalone placeholder.
 
-## Pending contracts (4)
+## Pending contracts (3)
 
-- atpm_preempt_prefill_queued_live
 - atpm_preempt_decode_reserved_live
 - atpm_preempt_cancel_not_found
 - atpm_preempt_cancel_tombstoned
@@ -538,3 +537,61 @@ remain registered. Six complete-program fixtures cover positive evidence,
 missing required metric, duplicate accepted without an extra consumer,
 foreign RID prefix, reversed actual dispatch and missing private DEBUG
 marker. No Java or paired acceptance is claimed.
+
+
+## Live Prefill queue replacement
+
+`prefill_queued_live_single` and `prefill_queued_live_window` implement
+one old family, `atpm_preempt_prefill_queued_live`, on its two declared
+profiles: single-batch and batch-window. Existing ten families remain
+single-nonbatch; the compiled checkpoint has12 instances/11 families.
+The two actual EnvSpecs match `_pq_live_spec`: 1P/4D default perf,
+PRIORITY+BATCH, waiting2, queue60000, PREFILL_QUEUED only, auto_tpm
+whitelist. SINGLE stays SINGLE; FIXED_WINDOW retains32/400ms and the
+profile's other limits. The NON_BATCH request inflight cap is omitted,
+while the original BATCH quota remains intact.
+
+P4000 and sync1.5 precede a deferred Schedule-only placeholder50/2048/2
+and the original pending6/.1 precondition. Three owned Schedule workers
+issue victim_a30, victim_b30, incoming70 (all2048/2); exactly .15s between
+submissions, without an extra sleep after incoming. Schedule RPCs stay90
+and settle before any FetchResponse. The owned live-start action reuses
+RequestBatch and PriorityWave's worker/cleanup accounting while preserving
+this between-submissions-only timing.
+
+Consume only placeholder, victim_a, incoming, sequentially, with separate
+60s Fetch transport and fresh45s observation clocks, matching old
+start_stream/wait_end. A Schedule-rejected survivor is skipped as before;
+victim_b never gets a consumer from this choreography. Each successful
+survivor requires real Fetch output, transport terminal, consumer exit and
+completion verification. Request threads and partially issued batches
+are registered for cleanup before dispatch.
+
+PR10 retains exact victim_b Schedule8400 with success=false, victim_a and
+incoming Schedule200+success, and all three survivors complete. PR5 is
+victim_b8400 plus no victim lifecycle entry in the engine snapshot. The
+snapshot must contain the full declared role/name inventory and typed
+lifecycle maps; absence cannot prove never-delivered. PR6 retains stage
+prefill_queued victim_count==1 and priority_preempt_count>=1, plus actual
+victim8400. The 30<-70 tagged counter is diagnostic only in the old
+executable predicate and remains so. An8429 victim is not accepted.
+
+Predicates stay scalar until the final report, allowing independent P6:
+Master clean30, engine inflight0/leak=false within30 (poll.5), then one
+fresh recovery request (unset priority,2048/2, unique RID*100+1 key,
+Schedule30/stream transport60/observation30). Recovery runs with Prefill
+still at4000, as in the old source. RestoreP100 follows the final report,
+with registered cleanup also covering failure paths. Missing engine
+owners/typed fields, invalid metric evidence or consumer-observation
+expiry raise ERROR/TIMEOUT instead of weak old defaults/soft diagnostics;
+Master cleanup remains a mandatory hard gate, an explicit stronger
+boundary. Ordinary PR failures still allow engine clean and recovery.
+
+Focused complete programs cover both profiles' exact configuration,
+zero Fetch until all four Schedule responses, serial Fetch IDs1/2/4,
+three completed consumers plus recovery, exact8400 versus8429, a victim
+seen by an engine, missing required victim counter, diagnostic priority
+tags and missing engine inventory. Existing ten compiled plans retain
+identical environment/stages/execution/resource_budget values after
+adding the two profiles. This is fixture evidence, not live Java eviction
+or paired acceptance.

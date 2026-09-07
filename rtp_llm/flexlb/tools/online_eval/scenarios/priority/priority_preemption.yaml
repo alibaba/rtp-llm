@@ -4,6 +4,8 @@ description: Explicit preemption cohorts and legacy design-final predicates.
 category: priority
 profiles:
 - single-nonbatch
+- single-batch
+- batch-window
 legacy_case_ids:
 - atpm_same_priority_zero_eviction
 - atpm_preempt_prefill_queued
@@ -15,6 +17,7 @@ legacy_case_ids:
 - atpm_error_code_family
 - atpm_decode_reservation_priority
 - atpm_observability_integrity
+- atpm_preempt_prefill_queued_live
 environment:
   backend: java_mock
   n_prefill: 1
@@ -33,6 +36,8 @@ execution:
   cleanup_timeout_s: 120
 variants:
 - id: same_priority_zero_eviction
+  profiles:
+  - single-nonbatch
   legacy_case_ids:
   - atpm_same_priority_zero_eviction
   environment_overrides:
@@ -41,6 +46,8 @@ variants:
         allowed_victim_stages:
         - PREFILL_QUEUED
 - id: prefill_queued
+  profiles:
+  - single-nonbatch
   legacy_case_ids:
   - atpm_preempt_prefill_queued
   stages:
@@ -278,6 +285,8 @@ variants:
         allowed_victim_stages:
         - PREFILL_QUEUED
 - id: timeout_attribution
+  profiles:
+  - single-nonbatch
   legacy_case_ids:
   - atpm_timeout_attribution
   stages:
@@ -536,6 +545,8 @@ variants:
         allowed_victim_stages:
         - PREFILL_QUEUED
 - id: disabled_zero_eviction
+  profiles:
+  - single-nonbatch
   legacy_case_ids:
   - atpm_preemption_disabled_zero_eviction
   stages:
@@ -771,6 +782,8 @@ variants:
     config_overrides:
       queue_timeout_ms: 8000
 - id: comparator_frozen_weak
+  profiles:
+  - single-nonbatch
   legacy_case_ids:
   - atpm_comparator_frozen_weak
   stages:
@@ -1009,6 +1022,8 @@ variants:
         allowed_victim_stages:
         - PREFILL_QUEUED
 - id: config_strict_reject
+  profiles:
+  - single-nonbatch
   legacy_case_ids:
   - atpm_config_strict_reject
   environment_overrides:
@@ -1082,6 +1097,8 @@ variants:
   - id: teardown
     action: teardown
 - id: decode_engine_owned
+  profiles:
+  - single-nonbatch
   legacy_case_ids:
   - atpm_preempt_decode_engine_owned
   environment_overrides:
@@ -1343,6 +1360,8 @@ variants:
   - id: teardown
     action: teardown
 - id: error_code_family
+  profiles:
+  - single-nonbatch
   legacy_case_ids:
   - atpm_error_code_family
   environment_overrides:
@@ -1777,6 +1796,8 @@ variants:
   - id: teardown
     action: teardown
 - id: decode_reservation_priority
+  profiles:
+  - single-nonbatch
   legacy_case_ids:
   - atpm_decode_reservation_priority
   environment_overrides:
@@ -2151,6 +2172,8 @@ variants:
   - id: teardown
     action: teardown
 - id: observability_integrity
+  profiles:
+  - single-nonbatch
   legacy_case_ids:
   - atpm_observability_integrity
   environment_overrides:
@@ -2293,6 +2316,347 @@ variants:
         $ref: stages.observe.output.planes
       duplicate:
         $ref: stages.duplicate.output.rejected
+  - id: restore
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 100
+  - id: teardown
+    action: teardown
+    timeout_s: 120
+- id: prefill_queued_live_single
+  profiles:
+  - single-batch
+  requires:
+  - enqueue_batch
+  legacy_case_ids:
+  - atpm_preempt_prefill_queued_live
+  environment_overrides:
+    metric_whitelist: flexlb_auto_tpm
+    config_overrides:
+      dispatcher: batch
+      decision: single
+      max_inflight_requests_per_worker:
+        omit: true
+      max_waiting_requests_per_prefill_worker: 2
+      queue_timeout_ms: 60000
+      preemption:
+        allowed_victim_stages:
+        - PREFILL_QUEUED
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: priority_fleet
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 4000
+  - id: sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: placeholder
+    action: preemption_live_start
+    timeout_s: 5
+    params:
+      gap_s: 0
+      requests:
+      - tag: placeholder
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      defer_batch: true
+  - id: placeholder_settled
+    action: preemption_settled
+    timeout_s: 90
+    params:
+      requests:
+        $ref: stages.placeholder.output.requests
+  - id: placeholder_admitted
+    action: check
+    params:
+      actual:
+        $ref: stages.placeholder_settled.output.admitted
+      op: eq
+      expected: true
+  - id: placeholder_pending
+    action: preemption_pending
+    timeout_s: 6
+    params:
+      target:
+        $ref: stages.fleet.output.prefill
+  - id: wave
+    action: preemption_live_start
+    timeout_s: 15
+    params:
+      gap_s: 0.15
+      requests:
+      - tag: victim_a
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: victim_b
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: incoming
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      defer_batch: true
+  - id: wave_settled
+    action: preemption_settled
+    timeout_s: 90
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+  - id: placeholder_drain
+    action: preemption_live_drain
+    timeout_s: 50
+    params:
+      requests:
+        $ref: stages.placeholder.output.requests
+      tags:
+      - placeholder
+  - id: wave_drain
+    action: preemption_live_drain
+    timeout_s: 100
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+      tags:
+      - victim_a
+      - incoming
+  - id: live_verdict
+    action: preemption_live_prefill
+    params:
+      placeholder:
+        $ref: stages.placeholder.output.requests
+      wave:
+        $ref: stages.wave.output.requests
+  - id: master_clean
+    action: balance_clean
+    timeout_s: 30
+  - id: engine_clean
+    action: preemption_live_engine_clean
+    timeout_s: 35
+  - id: recovery_prepare
+    action: recovery_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      schedule_timeout_s: 30
+      stream_timeout_s: 30
+      unique_key_count: 1
+      unique_key_start: 1
+      generate_payload: match_schedule
+  - id: recovery_dispatch
+    action: recovery_dispatch
+    params:
+      requests:
+        $ref: stages.recovery_prepare.output.requests
+    timeout_s: 60
+  - id: recovery_result
+    action: preemption_error_recovery
+    params:
+      requests:
+        $ref: stages.recovery_prepare.output.requests
+  - id: live_final
+    action: preemption_live_final
+    params:
+      pr10:
+        $ref: stages.live_verdict.output.pr10
+      pr5:
+        $ref: stages.live_verdict.output.pr5
+      pr6:
+        $ref: stages.live_verdict.output.pr6
+      engine_clean:
+        $ref: stages.engine_clean.output.passed
+      recovery:
+        $ref: stages.recovery_result.output.passed
+  - id: restore
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 100
+  - id: teardown
+    action: teardown
+    timeout_s: 120
+- id: prefill_queued_live_window
+  profiles:
+  - batch-window
+  requires:
+  - enqueue_batch
+  legacy_case_ids:
+  - atpm_preempt_prefill_queued_live
+  environment_overrides:
+    metric_whitelist: flexlb_auto_tpm
+    config_overrides:
+      dispatcher: batch
+      decision: fixed_window
+      max_inflight_requests_per_worker:
+        omit: true
+      max_waiting_requests_per_prefill_worker: 2
+      queue_timeout_ms: 60000
+      preemption:
+        allowed_victim_stages:
+        - PREFILL_QUEUED
+      max_collection_wait_ms: 400
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: priority_fleet
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 4000
+  - id: sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: placeholder
+    action: preemption_live_start
+    timeout_s: 5
+    params:
+      gap_s: 0
+      requests:
+      - tag: placeholder
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      defer_batch: true
+  - id: placeholder_settled
+    action: preemption_settled
+    timeout_s: 90
+    params:
+      requests:
+        $ref: stages.placeholder.output.requests
+  - id: placeholder_admitted
+    action: check
+    params:
+      actual:
+        $ref: stages.placeholder_settled.output.admitted
+      op: eq
+      expected: true
+  - id: placeholder_pending
+    action: preemption_pending
+    timeout_s: 6
+    params:
+      target:
+        $ref: stages.fleet.output.prefill
+  - id: wave
+    action: preemption_live_start
+    timeout_s: 15
+    params:
+      gap_s: 0.15
+      requests:
+      - tag: victim_a
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: victim_b
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: incoming
+        priority: 70
+        input_len: 2048
+        output_len: 2
+      defer_batch: true
+  - id: wave_settled
+    action: preemption_settled
+    timeout_s: 90
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+  - id: placeholder_drain
+    action: preemption_live_drain
+    timeout_s: 50
+    params:
+      requests:
+        $ref: stages.placeholder.output.requests
+      tags:
+      - placeholder
+  - id: wave_drain
+    action: preemption_live_drain
+    timeout_s: 100
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+      tags:
+      - victim_a
+      - incoming
+  - id: live_verdict
+    action: preemption_live_prefill
+    params:
+      placeholder:
+        $ref: stages.placeholder.output.requests
+      wave:
+        $ref: stages.wave.output.requests
+  - id: master_clean
+    action: balance_clean
+    timeout_s: 30
+  - id: engine_clean
+    action: preemption_live_engine_clean
+    timeout_s: 35
+  - id: recovery_prepare
+    action: recovery_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      schedule_timeout_s: 30
+      stream_timeout_s: 30
+      unique_key_count: 1
+      unique_key_start: 1
+      generate_payload: match_schedule
+  - id: recovery_dispatch
+    action: recovery_dispatch
+    params:
+      requests:
+        $ref: stages.recovery_prepare.output.requests
+    timeout_s: 60
+  - id: recovery_result
+    action: preemption_error_recovery
+    params:
+      requests:
+        $ref: stages.recovery_prepare.output.requests
+  - id: live_final
+    action: preemption_live_final
+    params:
+      pr10:
+        $ref: stages.live_verdict.output.pr10
+      pr5:
+        $ref: stages.live_verdict.output.pr5
+      pr6:
+        $ref: stages.live_verdict.output.pr6
+      engine_clean:
+        $ref: stages.engine_clean.output.passed
+      recovery:
+        $ref: stages.recovery_result.output.passed
   - id: restore
     action: engine_control
     params:

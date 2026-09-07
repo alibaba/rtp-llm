@@ -148,7 +148,7 @@ class PreemptionPrograms(unittest.TestCase):
             load_scenarios(ROOT / "scenarios/priority/priority_preemption.yaml"),
             handlers=registry,
         )
-        self.assertEqual(10, len(plans))
+        self.assertEqual(12, len(plans))
         return next(p for p in plans if p["variant_id"] == variant), registry
 
     def run_program(self, variant="same_priority_zero_eviction", **kwargs):

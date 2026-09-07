@@ -1368,7 +1368,277 @@ def _observability_final(ctx, p, deadline):
     )
 
 
+def _live_start_params(p, plan):
+    from .priority import _wave_params
+
+    p = _wave_params(p, plan)
+    if not p["defer_batch"] or p["serial_schedule"]:
+        raise ValueError("live eviction requires concurrent deferred Schedule")
+    return p
+
+
+def _live_start(ctx, p, deadline):
+    import threading
+
+    from ..backend import RequestBatch
+
+    if ctx.instance["environment"]["resolved_config"]["dispatcher"]["type"] != "BATCH":
+        raise ValueError("live eviction requires BATCH dispatcher")
+    wave = PriorityWave(ctx, p)
+    handle = ctx.register_resource("requests", wave, cleanup=wave.cleanup)
+    try:
+        for index, shape in enumerate(p["requests"]):
+            deadline.check()
+            params = {k: v for k, v in shape.items() if k != "tag"}
+            params.update(
+                count=1, consume="deferred", schedule_timeout_s=90, stream_timeout_s=60
+            )
+            batch = RequestBatch(ctx, params)
+            batch.artifact = (
+                ctx.artifact_dir / f"priority-request-{uuid.uuid4().hex}.json"
+            )
+            item = dict(
+                tag=shape["tag"], batch=batch, done=threading.Event(), error=None
+            )
+            wave.entries.append(item)
+            end = min(ctx.instance_deadline_s, ctx.clock() + 90)
+            item["thread"] = threading.Thread(
+                target=wave._submit, args=(item, end), daemon=True
+            )
+            item["thread"].start()
+            # The legacy live ThreadPoolExecutor sleeps only BETWEEN submissions.
+            if index + 1 < len(p["requests"]):
+                deadline.sleep(p["gap_s"])
+    finally:
+        wave.persist()
+    return StageOutput({"requests": handle}, artifacts=[str(wave.path)])
+
+
+def _live_drain_params(p, plan):
+    p = _params(p, {"requests", "tags"}, {"requests", "tags"})
+    plan.reference(p["requests"], "requests")
+    if (
+        not isinstance(p["tags"], list)
+        or not p["tags"]
+        or any(not isinstance(t, str) for t in p["tags"])
+        or len(set(p["tags"])) != len(p["tags"])
+    ):
+        raise ValueError("live drain requires distinct survivor tags")
+    return p
+
+
+def _live_drain(ctx, p, deadline):
+    wave = _cohort(ctx, p["requests"])
+    if not wave.p.get("defer_batch"):
+        raise ValueError("live eviction requires deferred BATCH consumers")
+    for item in wave.entries:
+        wave._join(item, deadline)
+        if item["error"] is not None:
+            raise item["error"]
+    if any(r.get("fetch_invocations", 0) for r in wave.records()):
+        raise ValueError("live eviction consumed before survivor drain")
+    by_tag = {e["tag"]: e for e in wave.entries}
+    if set(p["tags"]) - set(by_tag):
+        raise ValueError("unknown live survivor tag")
+    for tag in p["tags"]:
+        batch = by_tag[tag]["batch"]
+        if len(batch.entries) != 1:
+            raise ValueError("live survivor requires one settled Schedule")
+        entry = batch.entries[0]
+        if entry["record"]["schedule"]["status"] != "OK":
+            continue
+        if not entry["response"].enqueued_by_master:
+            raise ValueError("live survivor was not enqueued by Master")
+        # Old start_stream has a 60s transport timeout and a separate 45s wait.
+        batch.params["stream_timeout_s"] = 60
+        batch._start_consumer(entry, min(ctx.instance_deadline_s, ctx.clock() + 60))
+        batch._await_consumer(
+            entry,
+            Deadline(
+                min(deadline.expires_at, ctx.clock() + 45), ctx.clock, ctx.sleeper
+            ),
+        )
+        batch.persist()
+    wave.complete = True
+    wave.persist()
+    return StageOutput(artifacts=[str(wave.path)])
+
+
+def _live_engine_rows(ctx, deadline):
+    raw = _http(ctx.ops, "snapshot", deadline)
+    engines = raw.get("engines")
+    env = ctx.instance["environment"]
+    if (
+        not isinstance(engines, list)
+        or len(engines) != env["n_prefill"] + env["n_decode"]
+    ):
+        raise ValueError("live proof requires the complete declared engine fleet")
+    if any(not isinstance(e.get("name"), str) or not e["name"] for e in engines) or len(
+        {e.get("name") for e in engines}
+    ) != len(engines):
+        raise ValueError("duplicate live engine owner")
+    for role in ("prefill", "decode"):
+        if sum(e.get("role") == role for e in engines) != env["n_" + role]:
+            raise ValueError("live engine role inventory mismatch")
+    return raw, engines
+
+
+def _live_prefill(ctx, p, deadline):
+    ph_wave, wave = [_cohort(ctx, p[k]) for k in ("placeholder", "wave")]
+    if not ph_wave.complete or not wave.complete:
+        raise ValueError("live verdict requires drained survivor cohorts")
+    ph, rows = ph_wave.records(), wave.records()
+    if len(ph) != 1 or len(rows) != 3:
+        raise ValueError(
+            "live Prefill cohort must contain placeholder plus three requests"
+        )
+    for cohort, tags, priorities in (
+        (ph_wave, ["placeholder"], [50]),
+        (wave, ["victim_a", "victim_b", "incoming"], [30, 30, 70]),
+    ):
+        shapes = cohort.p["requests"]
+        if (
+            [r["tag"] for r in shapes] != tags
+            or [r.get("priority") for r in shapes] != priorities
+            or any((r["input_len"], r["output_len"]) != (2048, 2) for r in shapes)
+        ):
+            raise ValueError("live Prefill request shape differs from old contract")
+    responses = [e["batch"].entries[0]["response"] for e in wave.entries]
+    if any(r is None for r in responses):
+        raise ValueError("live verdict lacks Schedule response")
+    va, vb, inc = responses
+    evicted = vb.code == 8400 and not vb.success
+    survivors = [ph[0], rows[0], rows[2]]
+    completed = all(request_success(r) for r in survivors)
+    raw, engines = _live_engine_rows(ctx, deadline)
+    if any(not isinstance(e.get("request_lifecycle"), dict) for e in engines):
+        raise ValueError("live never-delivered proof lacks lifecycle inventory")
+    rid = rows[1]["wire_request_id"]
+    never_seen = all(str(rid) not in e["request_lifecycle"] for e in engines)
+    metric = _reservation_metric(ctx, {"labels": {}}, deadline)
+    snapshot = ctx.resource(metric.output["snapshot"], "snapshot")
+    from ...engine_ops import parse_prometheus_samples
+
+    samples = parse_prometheus_samples(snapshot["attempts"][-1]["body"], "")
+
+    def total(name, labels):
+        values = [
+            _number(v, 0, 1e18)
+            for n, ls, v in samples
+            if name in n and all(ls.get(k) == v for k, v in labels.items())
+        ]
+        return sum(values) if values else None
+
+    stage = {"stage": "prefill_queued"}
+    victim = total("auto_tpm_victim_count", stage)
+    tagged = total(
+        "auto_tpm_victim_count",
+        dict(stage, victim_priority="30", incoming_priority="70"),
+    )
+    preempt = total("auto_tpm_priority_preempt_count", stage)
+    pr10 = (
+        evicted
+        and va.code == 200
+        and va.success
+        and inc.code == 200
+        and inc.success
+        and completed
+    )
+    pr5 = never_seen and evicted
+    pr6 = evicted and victim == 1.0 and (preempt or 0.0) >= 1.0
+    evidence = dict(
+        placeholder=ph,
+        wave=rows,
+        schedule_codes=[r.code for r in responses],
+        survivors_completed=completed,
+        never_seen=never_seen,
+        raw=raw,
+        victim_total=victim,
+        tagged_victim_diagnostic=tagged,
+        preempt_total=preempt,
+        PR10=pr10,
+        PR5=pr5,
+        PR6=pr6,
+    )
+    path = ctx.artifact_dir / f"preemption-live-prefill-{uuid.uuid4().hex}.json"
+    path.write_text(json.dumps(evidence, indent=2) + "\n")
+    return StageOutput(
+        {"pr10": pr10, "pr5": pr5, "pr6": pr6}, artifacts=metric.artifacts + [str(path)]
+    )
+
+
+def _live_engine_clean(ctx, p, deadline):
+    end = min(deadline.expires_at, ctx.clock() + 30)
+    samples = []
+    passed = False
+    while ctx.clock() < end:
+        raw, engines = _live_engine_rows(ctx, deadline)
+        if any(type(e.get("leak_detected")) is not bool for e in engines):
+            raise ValueError("missing engine leak flag")
+        passed = all(
+            _number(e.get("inflight"), 0, 1e9, True) == 0 and not e["leak_detected"]
+            for e in engines
+        )
+        samples.append(dict(at_s=ctx.clock(), raw=raw, passed=passed))
+        if passed:
+            break
+        deadline.sleep(min(0.5, max(0, end - ctx.clock())))
+    path = ctx.artifact_dir / f"preemption-live-engine-clean-{uuid.uuid4().hex}.json"
+    path.write_text(json.dumps(samples, indent=2) + "\n")
+    return StageOutput({"passed": passed}, artifacts=[str(path)])
+
+
+def _live_final_params(p, plan):
+    keys = {"pr10", "pr5", "pr6", "engine_clean", "recovery"}
+    p = _params(p, keys, keys)
+    for k in p:
+        plan.reference(p[k], "boolean")
+    return p
+
+
+def _live_final(ctx, p, deadline):
+    actual = {k: ctx.resolve(v) for k, v in p.items()}
+    checks = [
+        ("PR10", actual["pr10"]),
+        ("PR5", actual["pr5"]),
+        ("PR6", actual["pr6"]),
+        ("P6", actual["engine_clean"] and actual["recovery"]),
+    ]
+    return StageOutput(
+        checks=[
+            CheckResult(k, "PASS" if v else "FAIL", actual=v, expected=True)
+            for k, v in checks
+        ]
+    )
+
+
 HANDLERS = [
+    StageHandler(
+        "preemption_live_start",
+        _live_start_params,
+        _live_start,
+        {"requests": "requests"},
+    ),
+    StageHandler("preemption_live_drain", _live_drain_params, _live_drain, {}),
+    StageHandler(
+        "preemption_live_prefill",
+        _same_params,
+        _live_prefill,
+        {"pr10": "boolean", "pr5": "boolean", "pr6": "boolean"},
+    ),
+    StageHandler(
+        "preemption_live_engine_clean",
+        lambda p, plan: _params(p, (), ()),
+        _live_engine_clean,
+        {"passed": "boolean"},
+    ),
+    StageHandler(
+        "preemption_live_final",
+        _live_final_params,
+        _live_final,
+        {},
+        checks=frozenset({"PR10", "PR5", "PR6", "P6"}),
+    ),
     StageHandler(
         "preemption_observability_duplicate",
         _settled_params,
