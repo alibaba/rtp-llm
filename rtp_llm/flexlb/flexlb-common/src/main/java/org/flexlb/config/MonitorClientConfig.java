@@ -30,8 +30,7 @@ public class MonitorClientConfig {
     @ConditionalOnMissingBean(FlexMonitor.class)
     @ConditionalOnClass(name = "io.micrometer.core.instrument.MeterRegistry")
     @ConditionalOnMissingClass("com.taobao.kmonitor.KMonitor")
-    public FlexMonitor micrometerFlexMonitor(
-            ObjectProvider<MeterRegistry> registryProvider) {
+    public FlexMonitor micrometerFlexMonitor(ObjectProvider<MeterRegistry> registryProvider) {
         MeterRegistry meterRegistry = registryProvider.getIfAvailable();
         if (meterRegistry != null) {
             log.info("Creating MicrometerFlexMonitor - bridging FlexMonitor to micrometer/Prometheus");
