@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/XGrammarBootstrap.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingQuery.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/cast.h"
 #include "pybind11/stl.h"
@@ -51,6 +52,8 @@ void registerEmbeddingOutput(const py::module& m) {
 }
 
 PYBIND11_MODULE(libth_transformer, m) {
+    m.def("pause_kmonitor_for_scr", &pauseKmonitorForScr, py::call_guard<py::gil_scoped_release>());
+    m.def("resume_kmonitor_after_scr", &resumeKmonitorAfterScr, py::call_guard<py::gil_scoped_release>());
     registerRtpLLMOp(m);
     registerXGrammarBootstrap(m);
     registerMultimodalInput(m);

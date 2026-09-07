@@ -3,8 +3,10 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "kmonitor/client/KMonitorFactory.h"
 #include "kmonitor/client/KMonitorWorker.h"
+#include "kmonitor/client/core/MetricsConfig.h"
 #include "kmonitor/client/core/MetricsSystem.h"
 #include "rtp_llm/cpp/metrics/KmonParam.h"
+#include <stdexcept>
 
 namespace rtp_llm {
 
@@ -1192,25 +1194,38 @@ bool pauseKmonitorForScr() {
     if (!kmonitor::KMonitorFactory::IsStarted()) {
         return false;
     }
-    auto* worker = kmonitor::KMonitorFactory::GetWorker();
-    if (worker == nullptr || worker->getMetricsSystem() == nullptr
-        || !worker->getMetricsSystem()->Started()) {
+    auto* system = kmonitor::KMonitorFactory::GetWorker()->getMetricsSystem();
+    if (!system->Started()) {
         return false;
     }
-    worker->getMetricsSystem()->Stop();
+    auto*                   config = kmonitor::KMonitorFactory::GetConfig();
+    kmonitor::MetricsConfig paused_config;
+    paused_config = *config;
+    paused_config.set_manually_mode(true);
+    // Join the sampling/sending threads before replacing their sink. Init
+    // preserves registered metric sources; replacing the sink destroys its
+    // transport and closes the external socket. Shutdown deletes the sources.
+    system->Stop();
+    system->Init(&paused_config);
+    if (!system->Started()) {
+        system->Init(config);
+        throw std::runtime_error("failed to quiesce Kmonitor sink for SCR");
+    }
+    RTP_LLM_LOG_INFO("SCR native Kmonitor paused; metric registrations retained");
     return true;
 }
 
-bool resumeKmonitorAfterScr() {
-    auto* worker = kmonitor::KMonitorFactory::GetWorker();
-    if (worker == nullptr || worker->getMetricsSystem() == nullptr) {
-        return false;
+void resumeKmonitorAfterScr() {
+    if (!kmonitor::KMonitorFactory::IsStarted()) {
+        throw std::runtime_error("Kmonitor factory disappeared during SCR");
     }
-    if (worker->getMetricsSystem()->Started()) {
-        return true;
+    auto* system = kmonitor::KMonitorFactory::GetWorker()->getMetricsSystem();
+    system->Stop();
+    system->Init(kmonitor::KMonitorFactory::GetConfig());
+    if (!system->Started()) {
+        throw std::runtime_error("failed to resume Kmonitor after SCR");
     }
-    worker->getMetricsSystem()->Init(worker->GetConfig());
-    return worker->getMetricsSystem()->Started();
+    RTP_LLM_LOG_INFO("SCR native Kmonitor resumed");
 }
 
 void setHippoTags(kmonitor::MetricsConfig& config) {

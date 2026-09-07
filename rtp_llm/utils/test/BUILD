@@ -202,3 +202,9 @@ py_test(
     srcs = ["scr_local_comm_test.py"],
     deps = ["//rtp_llm:utils"],
 )
+
+py_test(
+    name = "scr_kmonitor_lifecycle_test",
+    srcs = ["scr_kmonitor_lifecycle_test.py"],
+    deps = ["//rtp_llm:utils", "//rtp_llm/aios/kmonitor:kmonitor_py"],
+)

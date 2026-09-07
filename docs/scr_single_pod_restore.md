@@ -51,3 +51,23 @@ Require all of the following for the same attempt:
 
 The environment flag is opt-in because loopback only works for ranks sharing one
 network namespace. Leave it unset for multi-node deployments.
+
+## Monitoring connections at the checkpoint boundary
+
+Each SCR participant pauses its already-loaded Kmonitor reporters before entering
+the Epsilon barrier. Python reporters join their reporting thread and close Flume.
+The native reporter stops its sampling/sending threads and reinitializes the
+configured sink in manual mode, releasing the old transport while retaining the
+registered metric sources. It does not shut down the Kmonitor factory.
+
+When the barrier returns, including after a checkpoint error, both reporters
+resume using their original configuration. The native library must provide the
+matching lifecycle hooks; mixing new Python helpers with an older loaded native
+library rejects checkpoint participation rather than silently retaining sockets.
+Ordinary serving without SCR does not pause reporting.
+
+CPU validation covers real Python TCP closure/reconnection and native metric
+registration retention across sink replacement. Full acceptance must additionally
+verify dump/restore, restored inference, and resumed reporting in a fresh image.
+These hooks address the configured built-in sink; custom sinks and independently
+retained sink references require their own external-connection lifecycle checks.
