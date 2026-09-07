@@ -154,3 +154,11 @@ tests execute the eight programs, both one-retry outcomes, hit collapse,
 unavailable counters, and a post-request snapshot negative. Seventeen KV tests
 pass with fake external transports and an ordered finite cache model; this is
 not a real-Java result or evidence of production cache behavior.
+
+
+Additional LRU execution difference: the old body still issues pressure after
+replay affinity is false and combines all predicates at the end. The staged
+candidate stops before pressure when replay_affinity or prime-counter gates
+fail. The overall FAIL verdict is preserved, but later failure diagnostics are
+narrower; execution traces are not claimed to be identical (the stay-wrong
+fixture stops at its third RID).

@@ -1,0 +1,156 @@
+{
+  "schema_version": 1,
+  "scope": "Selected immutable evidence anchors, not a complete execution inventory and not authorization to delete legacy callables.",
+  "runs": [
+    {
+      "kind": "real_java_selected_candidates",
+      "source_revision": "5c31248d0503336e9904ff5c88adeceb84821f8b",
+      "scope": "Three batch-window admission instances only; no full-family or paired legacy replacement acceptance.",
+      "evidence_root": "/tmp/agent1-yaml-evidence/admission5c",
+      "instances": [
+        {
+          "id": "admission_queue::queue_depth::batch-window",
+          "status": "PASS",
+          "grade": "normal",
+          "duration_ms": 19582,
+          "checks": 7,
+          "cleanup_statuses": [
+            "PASS",
+            "PASS",
+            "PASS",
+            "PASS",
+            "PASS"
+          ]
+        },
+        {
+          "id": "engine_admission_gate::prefill_concurrency::batch-window",
+          "status": "PASS",
+          "grade": "normal",
+          "duration_ms": 19643,
+          "checks": 7,
+          "cleanup_statuses": [
+            "PASS",
+            "PASS",
+            "PASS"
+          ]
+        },
+        {
+          "id": "priority_admission::permit_released_without_preemption::batch-window",
+          "status": "PASS",
+          "grade": "normal",
+          "duration_ms": 13131,
+          "checks": 11,
+          "cleanup_statuses": [
+            "PASS",
+            "PASS",
+            "PASS",
+            "PASS"
+          ]
+        }
+      ],
+      "summary": {
+        "passed_count": 3,
+        "failed_count": 0,
+        "finding_confirmed": 0,
+        "finding_resolved": 0,
+        "exit_code": 0
+      },
+      "source_verification": {
+        "verified_files": 765,
+        "source_mismatches": [],
+        "jar_mismatches": []
+      },
+      "jars": [
+        {
+          "name": "flexlb-api-1.0.0-SNAPSHOT.jar",
+          "sha256": "0602971206b1fdb0b158ec7a71a8389b15fe8879b4962daeca1fb59db9938278"
+        },
+        {
+          "name": "flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar",
+          "sha256": "0bdbfcf8205daed79cd985608e207679a9a2193bf5958dc670e2249e05ff3baa"
+        }
+      ],
+      "release_observation": {
+        "ports_checked": 200,
+        "busy_ports": [],
+        "owned_jvm_count": 6,
+        "owned_remaining": [],
+        "locks_reacquired": [
+          true,
+          true,
+          true
+        ]
+      },
+      "artifacts": [
+        {
+          "file": "source-jar-verification.json",
+          "sha256": "e9d33c1d848f64b2b5e454d8253e6d19f8c17271db489495c8dfa9484f6d21b6"
+        },
+        {
+          "file": "admission-three/lane0/part0-yaml/scenarios.json",
+          "sha256": "3dfef831b8484e9c81de1bb273987f13e0c2d2830ede08c8be3cc1f2d9f22802"
+        },
+        {
+          "file": "admission-three-live-lock-audit.json",
+          "sha256": "e9b3bcea78d22e14621a86041af9d1ba6d0fbef4c6d2e09c19ee2c513eb30c51"
+        },
+        {
+          "file": "admission-three-release-audit.json",
+          "sha256": "d7812badd7c18d994dad8dc3398e424f1f9ab1452565fdd37186f29a0f547542"
+        },
+        {
+          "file": "lease-release.json",
+          "sha256": "0b5166afecaa735c8497bbf184cb2856c42bf52c38780e7ce18b70c6837b7bd4"
+        }
+      ]
+    },
+    {
+      "kind": "real_java_unresolved_contract_failure",
+      "source_revision": "9613cbaf775dbd5af1fd0a54921964100e206613",
+      "scope": "Retain this failure; no expanded production investigation and no expected-failure exemption.",
+      "evidence_root": "/tmp/agent1-yaml-evidence/elastic9613",
+      "summary": {
+        "passed_count": 0,
+        "failed_count": 1,
+        "finding_confirmed": 0,
+        "finding_resolved": 0,
+        "exit_code": 1
+      },
+      "instances": [
+        {
+          "id": "elastic_kv_skew_shrink::hot::batch-window",
+          "status": "FAIL",
+          "failed_checks": [
+            {
+              "id": "verdict.P6",
+              "status": "FAIL",
+              "actual": {
+                "issued": 200,
+                "sample_count": 200,
+                "min_samples": 1,
+                "complete": true,
+                "completed": 199,
+                "incomplete_request_ids": [],
+                "failed_request_ids": [
+                  20060
+                ],
+                "result_complete": true,
+                "zero_errors": false
+              }
+            }
+          ]
+        }
+      ],
+      "artifacts": [
+        {
+          "file": "remote-source-verification.json",
+          "sha256": "fd4232babcf5a50ff6cf9baae71e0f1fce930c50ffe8080f0d47a46bb2aaccec"
+        },
+        {
+          "file": "elastic-hot/lane0/part0-yaml/scenarios.json",
+          "sha256": "81f9ce731ec705bede61727b10718d9a3d85d1af06c5f57cbfde40b2a9ff96a3"
+        }
+      ]
+    }
+  ]
+}
