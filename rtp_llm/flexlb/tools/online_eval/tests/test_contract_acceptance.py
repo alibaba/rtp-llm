@@ -145,6 +145,12 @@ class CoverageTest(unittest.TestCase):
 
 
 class EvidenceTest(unittest.TestCase):
+    def test_one_valid_instance_cannot_hide_another_with_no_checks(self):
+        _, i, _, r = documents()
+        i["instances"][0]["checks"] = []
+        r["instances"][0]["checks"] = []
+        self.assertFalse(audit_results(i, r)["ok"])
+
     def test_zero_is_valid_only_with_real_samples(self):
         _, i, _, r = documents()
         self.assertTrue(audit_results(i, r)["ok"])

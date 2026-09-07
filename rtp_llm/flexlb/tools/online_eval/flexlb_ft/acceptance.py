@@ -166,6 +166,8 @@ def audit_results(inventory, results):
                 errors.append(f"{iid}/{stage}: stage did not complete successfully")
         observed = _index(result["checks"], "id", f"{iid} check result")
         check_plan = _index(instance["checks"], "id", f"{iid} check")
+        if not check_plan:
+            errors.append(f"{iid}: zero declared checks")
         for cid in observed.keys() - check_plan.keys():
             errors.append(f"{iid}/{cid}: unplanned check")
         for stage, row in stages.items():
