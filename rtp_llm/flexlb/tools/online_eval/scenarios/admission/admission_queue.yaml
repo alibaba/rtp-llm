@@ -1,0 +1,386 @@
+schema_version: 1
+id: admission_queue
+description: Distinct queue-depth, KV wait/deadline, and global outstanding-capacity
+  admission contracts.
+category: admission
+profiles:
+- batch-window
+- single-batch
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 2
+  perf_preset: default
+execution:
+  timeout_s: 480
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: queue_depth
+  legacy_case_ids:
+  - admission_queue_depth_reject
+  requires:
+  - enqueue_batch
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: slow
+    action: engine_control
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 4000
+  - id: depth_gate
+    action: engine_inject
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      type: queue_depth
+      options:
+        depth: 1
+  - id: occupants
+    action: admission_occupy
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+    timeout_s: 15
+  - id: probe
+    action: admission_wave
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 20
+  - id: probe_done
+    action: admission_wait
+    params:
+      wave:
+        $ref: stages.probe.output.wave
+    timeout_s: 60
+  - id: depth_error
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.probe_done.output.rows
+      metric: all_error_contains
+      expected: true
+      op: eq
+      text:
+      - queue depth
+  - id: fast_reject
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.probe_done.output.rows
+      metric: latency_max
+      expected: 3
+      op: lt
+  - id: clear_depth
+    action: engine_clear
+    params:
+      fault:
+        $ref: stages.depth_gate.output.fault
+  - id: occupants_done
+    action: admission_wait
+    params:
+      wave:
+        $ref: stages.occupants.output.wave
+    timeout_s: 60
+  - id: recovery
+    action: admission_wave
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 15
+  - id: recovery_done
+    action: admission_wait
+    params:
+      wave:
+        $ref: stages.recovery.output.wave
+    timeout_s: 60
+  - id: recovered
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.recovery_done.output.rows
+      metric: success_count
+      expected: 1
+      op: eq
+  - id: master_clean
+    action: master_ready
+    params:
+      target: single
+      inflight_zero: true
+    timeout_s: 30
+  - id: engine_clean
+    action: master_direct_clean
+  - id: normal_perf
+    action: engine_control
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+  - id: cleanup
+    action: teardown
+  environment_overrides:
+    n_decode: 4
+- id: slo_deadline
+  legacy_case_ids:
+  - admission_slo_queue_deadline
+  environment_overrides:
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms: 1500
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: kv_squeeze
+    action: engine_inject
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      type: kv_pressure
+      options:
+        tokens: 6291456
+  - id: poll_squeeze
+    action: master_mark
+    params:
+      wait_s: 1
+  - id: probe
+    action: admission_wave
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 12
+  - id: probe_done
+    action: admission_wait
+    params:
+      wave:
+        $ref: stages.probe.output.wave
+    timeout_s: 60
+  - id: deadline_error_family
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.probe_done.output.rows
+      metric: any_error_contains
+      expected: true
+      op: eq
+      text:
+      - deadline
+      - expired
+      - exhaust
+      - '8400'
+      - '8511'
+      - '8431'
+  - id: waited
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.probe_done.output.rows
+      metric: latency_min
+      expected: 1
+      op: ge
+  - id: bounded_deadline
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.probe_done.output.rows
+      metric: latency_max
+      expected: 8
+      op: le
+  - id: clear_pressure
+    action: engine_clear
+    params:
+      fault:
+        $ref: stages.kv_squeeze.output.fault
+  - id: poll_recovery
+    action: master_mark
+    params:
+      wait_s: 1
+  - id: recovery
+    action: admission_wave
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 15
+  - id: recovery_done
+    action: admission_wait
+    params:
+      wave:
+        $ref: stages.recovery.output.wave
+    timeout_s: 60
+  - id: recovered
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.recovery_done.output.rows
+      metric: success_count
+      expected: 1
+      op: eq
+  - id: master_clean
+    action: master_ready
+    params:
+      target: single
+      inflight_zero: true
+    timeout_s: 20
+  - id: cleanup
+    action: teardown
+- id: master_capacity
+  legacy_case_ids:
+  - admission_master_capacity_reject
+  environment_overrides:
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms: 60000
+      max_outstanding: 2
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: slow
+    action: engine_control
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 4000
+  - id: wave
+    action: admission_wave
+    params:
+      count: 4
+      concurrency: 4
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 15
+  - id: wave_done
+    action: admission_wait
+    params:
+      wave:
+        $ref: stages.wave.output.wave
+    timeout_s: 60
+  - id: at_least_one_reject
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.wave_done.output.rows
+      metric: reject_count
+      expected: 1
+      op: ge
+  - id: at_most_two_rejects
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.wave_done.output.rows
+      metric: reject_count
+      expected: 2
+      op: le
+  - id: at_least_two_served
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.wave_done.output.rows
+      metric: success_count
+      expected: 2
+      op: ge
+  - id: no_serving_error
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.wave_done.output.rows
+      metric: serve_error_count
+      expected: 0
+      op: eq
+  - id: typed_code
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.wave_done.output.rows
+      metric: all_reject_code
+      expected: 8502
+      op: eq
+      scope: rejected
+  - id: typed_detail
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.wave_done.output.rows
+      metric: all_error_contains
+      expected: true
+      op: eq
+      text:
+      - toomanyrequests
+      - queue_full
+      scope: rejected
+  - id: reject_fast
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.wave_done.output.rows
+      metric: latency_max
+      expected: 3
+      op: lt
+      scope: rejected
+  - id: normal_perf
+    action: engine_control
+    params:
+      targets:
+      - prefill-0
+      - prefill-1
+      operation: set_perf
+      perf:
+        prefill_fixed_ms: 100
+  - id: recovery
+    action: admission_wave
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 512
+      output_len: 2
+      request_timeout_s: 15
+  - id: recovery_done
+    action: admission_wait
+    params:
+      wave:
+        $ref: stages.recovery.output.wave
+    timeout_s: 60
+  - id: recovered
+    action: admission_check
+    params:
+      rows:
+        $ref: stages.recovery_done.output.rows
+      metric: success_count
+      expected: 1
+      op: eq
+  - id: master_clean
+    action: master_ready
+    params:
+      target: single
+      inflight_zero: true
+    timeout_s: 30
+  - id: cleanup
+    action: teardown
+legacy_case_ids:
+- admission_queue_depth_reject
+- admission_slo_queue_deadline
+- admission_master_capacity_reject
