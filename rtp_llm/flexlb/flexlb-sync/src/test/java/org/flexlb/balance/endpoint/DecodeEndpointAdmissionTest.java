@@ -625,7 +625,7 @@ class DecodeEndpointAdmissionTest {
     }
 
     @Test
-    void staleCommittedPermitCannotAffectReplacementGeneration() {
+    void staleCommittedPermitCannotAffectReplacementGeneration() throws Exception {
         long requestId = 1L;
         reserve(requestId, 100, 110, 50);
         markQueued(requestId);
@@ -634,6 +634,11 @@ class DecodeEndpointAdmissionTest {
         assertEquals(TRANSFERRED, stale.dispatch());
 
         settleFromWorkerStatus(requestId);
+        assertThrows(IllegalStateException.class,
+                () -> reserve(requestId, 200, 220, 70),
+                "the worker-terminal tombstone must fence immediate id reuse");
+        Thread.sleep(5L);
+        endpoint.evictExpiredRequests(1L, ignored -> false);
         reserve(requestId, 200, 220, 70);
         markQueued(requestId);
         DecodeEndpoint.DecodeRequestView replacement = reserved().get(requestId);
@@ -753,6 +758,21 @@ class DecodeEndpointAdmissionTest {
         assertEquals(0, endpoint.getInflightCount());
         assertEquals(1, endpoint.routingView().totalLoad());
         assertEquals(0, endpoint.routingView().inflightHardKv());
+    }
+
+    @Test
+    void workerTerminalTombstoneAbsorbsLaterZombieRunningStatus() {
+        reserve(11L, 500, 508, 30);
+        settleFromWorkerStatus(11L);
+
+        TaskInfo zombie = new TaskInfo();
+        zombie.setRequestId("11");
+        zombie.setPhase(TaskPhase.RUNNING);
+        updateStatus(Map.of("11", zombie), Map.of(), 10_000L);
+
+        assertNull(endpoint.reservationHandle(11L));
+        assertEquals(0, endpoint.routingView().totalLoad());
+        assertEquals(0, endpoint.getInflightCount());
     }
 
     @Test

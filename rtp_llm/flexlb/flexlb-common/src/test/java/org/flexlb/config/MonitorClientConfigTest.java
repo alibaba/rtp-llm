@@ -26,6 +26,16 @@ class MonitorClientConfigTest {
     }
 
     @Test
+    void providesNoOpMonitorWhenRegistryBeanIsUnavailable() {
+        contextRunner.run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context).hasSingleBean(FlexMonitor.class);
+            assertThat(context.getBean(FlexMonitor.class))
+                    .isSameAs(NoOpFlexMonitor.getInstance());
+        });
+    }
+
+    @Test
     void backsOffWhenProviderMonitorAlreadyExists() {
         contextRunner.withBean(
                         "providerMonitor",
