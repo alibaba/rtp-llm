@@ -11,9 +11,8 @@ from ...support.master import _master_http, _master_kill_dual
 
 @case(
     "master_kill",
-    category="master",
-    profiles=["batch-window"],  # _elastic_env pins the legacy fault axes
     source="master HA: kill -9 master → restart → clean state + recovery",
+    category="master",
 )
 def master_kill(ctx: CaseContext):
     # HA generalized branch (brief p3: "master_kill 用例泛化双 master 定向",

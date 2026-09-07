@@ -19,13 +19,10 @@ from ...support.admission import (
 
 @case(
     "admission_batcher_queue_capacity_park",
-    category="admission",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-batch"],
     requires=["enqueue_batch"],
-    source=(
-        "admission wave-2 A5: master batcher-queue capacity gate "
-        "(maxWaitingRequestsPerPrefillWorker park — waitable, no fast reject)"
-    ),
+    source="admission wave-2 A5: master batcher-queue capacity gate (maxWaitingRequestsPerPrefillWorker park — waitable, no fast reject)",
+    category="admission",
 )
 def admission_batcher_queue_capacity_park(ctx: CaseContext):
     """Master batcher-queue capacity gate: the gate is a WAIT condition.

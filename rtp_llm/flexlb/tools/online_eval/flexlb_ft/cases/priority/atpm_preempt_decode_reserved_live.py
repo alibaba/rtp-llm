@@ -29,9 +29,9 @@ from ...support.priority import (
 
 @case(
     "atpm_preempt_decode_reserved_live",
-    category="priority",
-    profiles=["single-batch"],
+    profiles=["single-batch", "batch-window"],
     source="preemption-stages audit (2026-09) — live DECODE_RESERVED eviction",
+    category="priority",
 )
 def atpm_preempt_decode_reserved_live(ctx: CaseContext):
     """LIVE DECODE_RESERVED eviction: the incoming's decode placement
@@ -44,7 +44,11 @@ def atpm_preempt_decode_reserved_live(ctx: CaseContext):
     {PREFILL_QUEUED, DECODE_RESERVED} (master_fixed_window.json values —
     no engineCancellation because no engine-owned stage is enabled), a
     4-block decode KV pool (4096 tokens at blockSize=1024) on a SINGLE
-    decode engine, 1P+1D, prefill slowed to 4s.
+    decode engine, 1P+1D, prefill slowed to 4s.  Decision axis: SINGLE
+    on the single-batch lane; FIXED_WINDOW maxRequests=32/wait 400ms on
+    batch-window (production-isomorphic — audit #17; the 400ms
+    collection window's effect on shadow-reservation eviction timing is
+    UNVERIFIED and is exactly what the bw smoke run checks).
 
     Choreography (both shadows land on the one decode pool):
       * P90 placeholder input=512 dispatches to prefill — its decode

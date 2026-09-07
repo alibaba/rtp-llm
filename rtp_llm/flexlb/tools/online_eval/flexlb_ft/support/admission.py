@@ -441,9 +441,10 @@ def _batcher_queue_spec(ctx: CaseContext, queue_timeout_ms: int) -> EnvSpec:
 
 
 def _pool_wait_spec(ctx: CaseContext) -> EnvSpec:
-    """A4 env (verdict §4.1 rebuild): 1P+2D on the profile's own
-    SINGLE+NON_BATCH axes (profile-aware since the tier2 spec unpick)
-    with the two LIVE capacity knobs — dispatcher
+    """A4 env (verdict §4.1 rebuild): 1P+2D on the NON_BATCH dispatcher
+    axes of the ctx profile (single-nonbatch / window-nonbatch lanes;
+    profile-aware since the tier2 spec unpick) with the two LIVE capacity
+    knobs — dispatcher
     maxInflightRequestsPerPrefillWorker=1 (RoutePrefillAdmission leases
     one in-flight delivery per dispatch; priority.py's verified backlog
     window — without the cap every request dispatches immediately, no

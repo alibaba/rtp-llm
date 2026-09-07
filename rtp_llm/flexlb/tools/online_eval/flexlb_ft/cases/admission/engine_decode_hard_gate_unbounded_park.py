@@ -18,13 +18,10 @@ from ...support.admission import (
 
 @case(
     "engine_decode_hard_gate_unbounded_park",
-    category="admission",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-batch"],
     requires=["enqueue_batch"],
-    source=(
-        "admission wave-2 W2: engine decode hard gate "
-        "(decodeMaxConcurrency=128 unbounded park — no queue-pressure reject)"
-    ),
+    source="admission wave-2 W2: engine decode hard gate (decodeMaxConcurrency=128 unbounded park — no queue-pressure reject)",
+    category="admission",
 )
 def engine_decode_hard_gate_unbounded_park(ctx: CaseContext):
     """Engine decode hard gate: unbounded park, never a queue-pressure

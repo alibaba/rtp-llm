@@ -17,9 +17,9 @@ from ...support.admission import (
 
 @case(
     "admission_slo_queue_deadline",
-    category="admission",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-batch"],
     source="gap G11: SLO queue deadline + kv_pressure admission (wait-then-expire)",
+    category="admission",
 )
 def admission_slo_deadline(ctx: CaseContext):
     """SLO/KV admission: kv_pressure squeezes every prefill's
@@ -31,12 +31,13 @@ def admission_slo_deadline(ctx: CaseContext):
 
     Recovery: clear kv_pressure and a fresh request must succeed.
 
-    Profile semantics (v2): the KV gate + queue deadline apply
-    to the scheduler queue regardless of the decision/dispatcher axes,
-    but _slo_spec pins the legacy fault axes (PRIORITY + FIXED_WINDOW +
-    BATCH) via FLEXLB_CONFIG — re-running under another --profile would
-    execute the identical configuration, so the declaration stays
-    batch-window (label honesty + regression efficiency).
+    Profile semantics: the KV gate + queue deadline apply to the
+    scheduler queue regardless of the decision/dispatcher axes.
+    _slo_spec is profile-aware (PRIORITY ordering + queueTimeoutMs=1500
+    layered on the ctx profile's own decision/dispatcher axes), so the
+    single-batch lane runs the SINGLE decision axis on the same KV-gate
+    + typed-expiry contract with zero assertion changes (audit 2026-09,
+    case 2 sb ⚠️ → covered).
     """
     env = ctx.env_manager.ensure(_slo_spec(ctx))
     ops = ctx.engine_ops(env)

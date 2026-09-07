@@ -108,7 +108,6 @@ def _master_http(ops) -> str:
 
 @case(
     "elastic_add_flow",
-    profiles=["batch-window"],  # elastic_spec pins the legacy fault axes
     source="elastic acceptance: add under load (FileDiscoveryDynamicScaleEndToEndTest phase 2)",
 )
 def elastic_add_flow(ctx: CaseContext):
@@ -158,7 +157,6 @@ def elastic_add_flow(ctx: CaseContext):
 
 @case(
     "elastic_remove_flow",
-    profiles=["batch-window"],  # elastic_spec pins the legacy fault axes
     source="elastic acceptance: remove under load (FileDiscoveryDynamicScaleEndToEndTest phase 3)",
 )
 def elastic_remove_flow(ctx: CaseContext):
@@ -219,7 +217,7 @@ def elastic_remove_flow(ctx: CaseContext):
         # (TTL_DRAIN_TIMEOUT_S — covers the 30s stale-inflight TTL plus the
         # 60s ExpirationTimer sweep; the legacy 90s cap sat below the
         # worst-phase settle and let residue poison later cases on this
-        # shared env).
+        # shared env, task #87).
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(
             _master_http(ops), TTL_DRAIN_TIMEOUT_S
         )
@@ -253,7 +251,6 @@ def elastic_remove_flow(ctx: CaseContext):
 
 @case(
     "elastic_add_remove_cycle",
-    profiles=["batch-window"],  # elastic_spec pins the legacy fault axes
     source="elastic acceptance: 3x add→verify→remove under load→verify cycle",
 )
 def elastic_add_remove_cycle(ctx: CaseContext):
@@ -354,7 +351,6 @@ def elastic_add_remove_cycle(ctx: CaseContext):
 
 @case(
     "elastic_rebalance",
-    profiles=["batch-window"],  # elastic_spec pins the legacy fault axes
     source="elastic acceptance: cost-based rebalance after scale-out (share < 60%)",
 )
 def elastic_rebalance(ctx: CaseContext):
@@ -449,7 +445,6 @@ def elastic_rebalance(ctx: CaseContext):
 
 @case(
     "elastic_stop_after_add",
-    profiles=["batch-window"],  # elastic_spec pins the legacy fault axes
     source="elastic acceptance: add → traffic → /stop_engine (3-fail evict) → /start_engine recovery",
 )
 def elastic_stop_after_add(ctx: CaseContext):
@@ -538,7 +533,6 @@ def elastic_stop_after_add(ctx: CaseContext):
 
 @case(
     "elastic_concurrent_ops",
-    profiles=["batch-window"],  # elastic_spec pins the legacy fault axes
     source="elastic acceptance: concurrent add/remove storm, master stays healthy",
 )
 def elastic_concurrent_ops(ctx: CaseContext):
@@ -771,7 +765,7 @@ def _pending_drain_spec(ctx: CaseContext) -> EnvSpec:
 
 @case(
     "elastic_remove_pending_drain",
-    profiles=["batch-window"],  # elastic family: BATCH dispatcher + fault axes
+    profiles=["batch-window", "single-batch"],
     source="user-identified gap: scale-in protection for requests queued-but-undispatched on the removed engine",
 )
 def elastic_remove_pending_drain(ctx: CaseContext):
@@ -783,7 +777,9 @@ def elastic_remove_pending_drain(ctx: CaseContext):
     discovery-file rewrite -> master FileServiceDiscovery loss).  Both
     prefills run at 8s so the victim's two inflight-batch leases stay
     occupied while a serial wave (one request per 300ms — each its own
-    FIXED_WINDOW batch) keeps landing requests on it: after the first two
+    batch: its own FIXED_WINDOW batch on batch-window, a single-member
+    batch per fire under the SINGLE decision on single-batch) keeps
+    landing requests on it: after the first two
     single-request batches dispatch, every further victim-routed request
     sits in the master-side WorkerBatcher queue — accepted by Schedule,
     never EnqueueBatch'd.  A pre-assertion proves the stranded set is
@@ -862,7 +858,8 @@ def elastic_remove_pending_drain(ctx: CaseContext):
             ops.set_perf(name, prefill_fixed_ms=PENDING_DRAIN_SLOW_MS)
         time.sleep(1.5)  # master perf sync
 
-        # -- serial wave: each request its own FIXED_WINDOW batch; the
+        # -- serial wave: each request its own batch (FIXED_WINDOW window
+        #    on batch-window, per-fire SINGLE decision on single-batch); the
         #    victim's first two batches take both leases, everything routed
         #    there afterwards parks in the master-side WorkerBatcher queue.
         wave = 0
@@ -1164,11 +1161,7 @@ def _accepted_timeline(ops, engine_names, offsets_s):
 
 @case(
     "elastic_add_preference",
-    profiles=["batch-window"],  # elastic family: BATCH dispatcher + fault axes
-    source=(
-        "user-named gap: post-scale-out traffic preference shape "
-        "(queue-empty newcomer)"
-    ),
+    source="user-named gap: post-scale-out traffic preference shape (queue-empty newcomer)",
 )
 def elastic_add_preference(ctx: CaseContext):
     """Post-scale-out traffic-preference SHAPE (user-named coverage gap:
