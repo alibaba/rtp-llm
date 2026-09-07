@@ -30,9 +30,20 @@ class Backend:
     ):
         self.ops = Ops(batch=False)
         self.ops.master_http_port = 1
+        self.ops.master_management_port = 2
         self.reverse, self.missing = reverse, missing
         self.dispatch_order = dispatch_order
         self.ops.last_shapes = []
+        self.ops.schedule_options = []
+        original_future = self.ops.future
+
+        def recorded_future(req, timeout, metadata=None):
+            self.ops.schedule_options.append((req, metadata))
+            return original_future(req, timeout, metadata)
+
+        self.ops.schedule_pb2_grpc.FlexlbServiceStub = lambda channel: NS(
+            Schedule=NS(future=recorded_future)
+        )
         self.perf_calls = []
         self.n_prefill = 1
         original = self.ops.build_schedule_request
@@ -71,6 +82,7 @@ class Backend:
 
     def setup(self, ctx, environment, deadline):
         self.n_prefill = environment["n_prefill"]
+        self.ops.batch = environment["resolved_config"]["dispatcher"]["type"] == "BATCH"
         return NS(), self.ops
 
     def teardown(self, ctx, deadline):
@@ -128,23 +140,50 @@ class Clean:
 
 
 class Tests(unittest.TestCase):
-    def run_program(self, variant="same_level_fifo", **kwargs):
+    def run_program(
+        self,
+        variant="same_level_fifo",
+        profile="single-nonbatch",
+        metric_values=None,
+        **kwargs,
+    ):
         registry = handlers()
         registry.update({h.name: h for h in p.HANDLERS})
         plans = compile_scenarios(
             load_scenarios(ROOT / "scenarios/priority/priority_queue.yaml"),
             handlers=registry,
         )
-        plans = [plan for plan in plans if plan["variant_id"] == variant]
+        plans = [
+            plan
+            for plan in plans
+            if plan["variant_id"] == variant and plan["profile"] == profile
+        ]
         self.assertEqual(len(plans), 1)
         backend = Backend(**kwargs)
+
+        class Metrics(Clean):
+            def read(self, n):
+                values = (
+                    metric_values
+                    if metric_values is not None
+                    else {30: 1, 50: 1, 70: 1}
+                )
+                return "\n".join(
+                    f'flexlb_auto_tpm_request_count{{priority="{key}"}} {value}'
+                    for key, value in values.items()
+                ).encode()
+
+        def urlopen(request, timeout):
+            url = request if isinstance(request, str) else request.full_url
+            return Metrics() if "prometheus" in url else Clean()
+
         with tempfile.TemporaryDirectory() as tmp, patch.object(
             p, "_http", backend.http
         ), patch(
             "flexlb_ft.scenario.actions.engine_control._http", backend.http
         ), patch(
             "flexlb_ft.scenario.actions.balance.urllib.request.urlopen",
-            return_value=Clean(),
+            side_effect=urlopen,
         ), (
             patch.object(p.Deadline, "sleep", lambda self, seconds: None)
             if variant != "same_level_fifo"
@@ -341,6 +380,115 @@ class Tests(unittest.TestCase):
         self.assertEqual(
             next(c for c in order["checks"] if c["id"] == "PR2")["status"], "FAIL"
         )
+
+    def test_normalization_all_four_segments_profiles(self):
+        for profile in (
+            "batch-window",
+            "single-nonbatch",
+            "single-batch",
+            "window-nonbatch",
+        ):
+            for variant, order, count in [
+                ("normalize_default50", [1, 2, 3, 4], 4),
+                ("normalize_channels", [1, 3, 4, 5, 2], 5),
+                ("normalize_default30", [1, 2, 4, 3, 5], 5),
+                ("normalize_metrics", [1, 2, 3], 3),
+            ]:
+                with self.subTest(profile=profile, variant=variant):
+                    result, rows, backend = self.run_program(
+                        variant=variant, profile=profile, dispatch_order=order
+                    )
+                    self.assertEqual(result["status"], "PASS", result)
+                    self.assertEqual(len(rows), count)
+                    if variant == "normalize_default50" and profile in (
+                        "batch-window",
+                        "single-batch",
+                    ):
+                        self.assertEqual(backend.ops.fetch_count, 0)
+                        self.assertEqual(backend.ops.generate_count, 0)
+                        self.assertTrue(all(not r["business_finished"] for r in rows))
+                    else:
+                        self.assertEqual(backend.ops.generate_count, count)
+                    self.assertTrue(
+                        all(c["status"] == "PASS" for c in result["cleanup"])
+                    )
+
+    def test_normalization_channel_wire_fields(self):
+        _, _, backend = self.run_program(
+            variant="normalize_channels",
+            profile="batch-window",
+            dispatch_order=[1, 3, 4, 5, 2],
+        )
+        shapes = backend.ops.last_shapes
+        self.assertNotIn("priority", shapes[0])
+        self.assertNotIn("priority", shapes[1])
+        self.assertEqual(shapes[2]["priority"], 70)
+        self.assertNotIn("priority", shapes[3])
+        options = backend.ops.schedule_options
+        self.assertEqual(options[2][1][0][1], "30")
+        self.assertEqual(options[3][1][0][1], "70")
+
+    def test_normalization_wrong_order_and_buckets(self):
+        for variant, order in [
+            ("normalize_channels", [1, 2, 3, 4, 5]),
+            ("normalize_default30", [1, 2, 3, 4, 5]),
+        ]:
+            result, _, _ = self.run_program(variant=variant, dispatch_order=order)
+            self.assertEqual(result["status"], "FAIL", result)
+        result, _, _ = self.run_program(
+            variant="normalize_metrics", metric_values={30: 2, 50: 1, 70: 0}
+        )
+        self.assertEqual(result["status"], "FAIL", result)
+
+    def test_normalization_metrics_counts_rejects(self):
+        result, rows, backend = self.run_program(
+            variant="normalize_metrics", expiry_code=8511
+        )
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(backend.ops.generate_count, 1)
+        self.assertEqual(sum(r["schedule"]["status"] == "REJECTED" for r in rows), 2)
+
+    def test_normalization_resolved_configs_match_legacy(self):
+        from flexlb_cfg import render_env
+        from flexlb_ft.support.priority import _n1_spec, _q1_spec, _q3_spec
+
+        registry = handlers()
+        registry.update({h.name: h for h in p.HANDLERS})
+        plans = compile_scenarios(
+            load_scenarios(ROOT / "scenarios/priority/priority_queue.yaml"),
+            handlers=registry,
+        )
+        self.assertEqual(len(plans), 20)
+        normalized = [
+            plan for plan in plans if plan["variant_id"].startswith("normalize_")
+        ]
+        self.assertEqual(len(normalized), 16)
+        for plan in normalized:
+            with self.subTest(id=plan["id"]):
+                variant = plan["variant_id"]
+                profile = plan["profile"]
+                if variant == "normalize_default50":
+                    expected = json.loads(render_env(profile))
+                    topology = (2, 4)
+                else:
+                    factory = {
+                        "normalize_channels": _q1_spec,
+                        "normalize_default30": _n1_spec,
+                        "normalize_metrics": _q3_spec,
+                    }[variant]
+                    spec = factory(NS(profile=profile))
+                    expected = json.loads(render_env(profile, spec.config_overrides))
+                    topology = (spec.n_prefill, spec.n_decode)
+                    if variant == "normalize_metrics":
+                        self.assertEqual(
+                            plan["environment"]["metric_whitelist"],
+                            spec.master_env["FLEXLB_MONITOR_METRIC_WHITELIST"],
+                        )
+                self.assertEqual(plan["environment"]["resolved_config"], expected)
+                self.assertEqual(
+                    (plan["environment"]["n_prefill"], plan["environment"]["n_decode"]),
+                    topology,
+                )
 
 
 if __name__ == "__main__":

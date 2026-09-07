@@ -1,8 +1,9 @@
 # Priority migration checkpoint
 
-Candidate only: 4 of 19 old priority cases. `priority_queue::same_level_fifo`
+Queue candidate implementation covers all 5 old queue cases; the separate
+14 preemption cases are owned by agent4. `priority_queue::same_level_fifo`
 maps `prio_same_level_fifo` on `single-nonbatch`. No legacy callable is invoked
-or removed. The remaining normalization queue case is pending here. The separate preemption module is owned by agent4.
+or removed. Normalization is split into four mandatory segment variants as described below. The separate preemption module is owned by agent4.
 Default catalog registration is owned by the central framework task; this
 checkpoint's tests explicitly merge the exported HANDLERS.
 
@@ -99,3 +100,48 @@ checks and a separate30s owner clean (shared d955 correction required).
 Priority inversion and same-level inversion are independently exercised:
 swapping70a/70b leaves PR1 zero but fails PR2. All7 consumers are real core
 threads with fake RPC; no Java coverage is claimed.
+
+## Four mandatory normalization segments
+
+`prio_normalize` is represented by normalize_default50, normalize_channels,
+normalize_default30 and normalize_metrics. Each expands on all four profiles.
+All four segments for a profile are mandatory to cover the one old case;
+no single segment PASS is normalization acceptance. The old callable is retained.
+Independent segment failures allow the other instances to run, unlike the old
+one-callable early exit; diagnostic execution differs. Segment1 uses a fresh
+2P4D default-profile environment instead of the old shared smoke environment.
+Segments2/3/4 retain their own fresh1P4D environments.
+
+Segment1 preserves the actual BATCH branch of old support.priority._drain:
+Schedule success is admitted, with no Fetch or business-finished claim.
+Explicit deferred issuance plus normalize_wait performs zeroFetch; NON_BATCH
+uses real consumers. Missing running_ms sorts last with settled-rank fallback,
+as in the old dispatch observer. Four requests alternate unset/explicit50 at
+.3s gaps. PR3 checks dispatch==submit plus old admitted/completed outcome
+according to the actual response; owner-clean30 remains separate.
+
+Segment2 forces PRIORITY/SINGLE/NON_BATCH/Q1 on every profile, not the label's
+axes. Placeholder unset; C unset, A proto70/header30, B header70-only, G proto70.
+The structural rule ph-first and A<B<G beforeC is equivalent to ph,A,B,G,C
+for exactly those five unique identities, with all successful. Segment3 N1
+sets default_priority30 and placeholder10, Y50/Dunset/Z40/X30: ph,Y,Z,D,X.
+Both preserve P3000+1.5, pending6/.1, .15 gaps including last, all Schedule
+settled before ph35 then each peer35, and independent30s owner-clean.
+
+Segment4 Q3 pins only FLEXLB_MONITOR_METRIC_WHITELIST=
+flexlb_auto_tpm_request_count through the typed startup field. Its three
+Schedule channels (proto70/header30; header30; unset) must yield absolute
+priority buckets70:1/30:1/50:1 in the fresh environment. Request success is
+not a gate: rejected Schedule counts still belong to the metric denominator.
+Management availability warmup180s/2s/HTTP5 and the two-path ladder precede
+one fresh scrape; incorrect bucket values are not polled until green.
+Exhausting the availability budget is TIMEOUT rather than the old
+missing-bucket FAIL; a failed post-warmup scrape is ERROR. These are declared
+evidence-strengthening boundaries; missing series remain None and fail PR3.
+Input2048/output2 and90Schedule/120Generate/35consumer budgets persist.
+
+Tests execute16 full segment/profile programs with external I/O faked, validate
+zeroFetch on both BATCH segment1 profiles, inspect actual proto/header fields,
+check channel/default-order failures and wrong buckets, and compare all16
+complete resolved_config JSONs and topologies to old spec/render_env factories.
+These model executions do not establish real normalization or Java acceptance.

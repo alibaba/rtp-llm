@@ -7,8 +7,12 @@ legacy_case_ids:
 - prio_low_no_starvation
 - prio_queue_timeout_terminal
 - prio_order_basic
+- prio_normalize
 profiles:
+- batch-window
 - single-nonbatch
+- single-batch
+- window-nonbatch
 environment:
   backend: java_mock
   n_prefill: 2
@@ -106,6 +110,8 @@ variants:
         omit: true
       max_inflight_requests_per_worker: 1
       max_waiting_requests_per_prefill_worker: 8
+  profiles:
+  - single-nonbatch
 - id: low_no_starvation
   legacy_case_ids:
   - prio_low_no_starvation
@@ -247,6 +253,8 @@ variants:
   - id: teardown
     action: teardown
     timeout_s: 120
+  profiles:
+  - single-nonbatch
 - id: queue_timeout_terminal
   legacy_case_ids:
   - prio_queue_timeout_terminal
@@ -352,6 +360,8 @@ variants:
   - id: teardown
     action: teardown
     timeout_s: 120
+  profiles:
+  - single-nonbatch
 - id: order_basic
   legacy_case_ids:
   - prio_order_basic
@@ -466,6 +476,372 @@ variants:
       - $ref: stages.fleet.output.prefill
       perf:
         prefill_fixed_ms: 100
+  - id: teardown
+    action: teardown
+    timeout_s: 120
+  profiles:
+  - single-nonbatch
+- id: normalize_default50
+  requires:
+  - queue
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  legacy_case_ids:
+  - prio_normalize
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: wave
+    action: priority_start
+    timeout_s: 15
+    params:
+      defer_batch: true
+      gap_s: 0.3
+      requests:
+      - tag: peer0
+        input_len: 2048
+        output_len: 2
+      - tag: peer1
+        input_len: 2048
+        output_len: 2
+        priority: 50
+      - tag: peer2
+        input_len: 2048
+        output_len: 2
+      - tag: peer3
+        input_len: 2048
+        output_len: 2
+        priority: 50
+  - id: terminal
+    action: priority_normalize_wait
+    timeout_s: 235
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+  - id: normalization
+    action: priority_normalize_order
+    params:
+      requests:
+      - $ref: stages.wave.output.requests
+      expected_tags:
+      - peer0
+      - peer1
+      - peer2
+      - peer3
+      batch_admission: true
+  - id: owner_clean
+    action: balance_clean
+    timeout_s: 30
+  - id: teardown
+    action: teardown
+    timeout_s: 120
+- id: normalize_channels
+  legacy_case_ids:
+  - prio_normalize
+  environment_overrides:
+    n_prefill: 1
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms:
+        omit: true
+      max_inflight_requests_per_worker: 1
+      max_waiting_requests_per_prefill_worker: 8
+      decision: single
+      dispatcher: non_batch
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: priority_fleet
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 3000
+  - id: sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: placeholder
+    action: priority_start
+    timeout_s: 95
+    params:
+      serial_schedule: true
+      gap_s: 0
+      requests:
+      - tag: ph
+        input_len: 2048
+        output_len: 2
+  - id: pending
+    action: priority_pending
+    timeout_s: 6
+    params:
+      prefill:
+        $ref: stages.fleet.output.prefill
+      requests:
+        $ref: stages.placeholder.output.requests
+  - id: wave
+    action: priority_start
+    timeout_s: 15
+    params:
+      gap_s: 0.15
+      requests:
+      - tag: C
+        input_len: 2048
+        output_len: 2
+      - tag: A
+        priority: 70
+        qos_level: 30
+        input_len: 2048
+        output_len: 2
+      - tag: B
+        qos_level: 70
+        input_len: 2048
+        output_len: 2
+      - tag: G
+        priority: 70
+        input_len: 2048
+        output_len: 2
+  - id: wave_settled
+    action: priority_settled
+    timeout_s: 95
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+  - id: placeholder_terminal
+    action: priority_wait
+    timeout_s: 35
+    params:
+      requests:
+        $ref: stages.placeholder.output.requests
+  - id: wave_terminal
+    action: priority_wait
+    timeout_s: 215
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+  - id: normalization
+    action: priority_normalize_order
+    params:
+      requests:
+      - $ref: stages.placeholder.output.requests
+      - $ref: stages.wave.output.requests
+      expected_tags:
+      - ph
+      - A
+      - B
+      - G
+      - C
+  - id: owner_clean
+    action: balance_clean
+    timeout_s: 30
+  - id: restore
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 100
+  - id: teardown
+    action: teardown
+    timeout_s: 120
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  requires:
+  - queue
+- id: normalize_default30
+  legacy_case_ids:
+  - prio_normalize
+  environment_overrides:
+    n_prefill: 1
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms:
+        omit: true
+      max_inflight_requests_per_worker: 1
+      max_waiting_requests_per_prefill_worker: 8
+      decision: single
+      dispatcher: non_batch
+      default_priority: 30
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: priority_fleet
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 3000
+  - id: sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: placeholder
+    action: priority_start
+    timeout_s: 95
+    params:
+      serial_schedule: true
+      gap_s: 0
+      requests:
+      - tag: ph
+        input_len: 2048
+        output_len: 2
+        priority: 10
+  - id: pending
+    action: priority_pending
+    timeout_s: 6
+    params:
+      prefill:
+        $ref: stages.fleet.output.prefill
+      requests:
+        $ref: stages.placeholder.output.requests
+  - id: wave
+    action: priority_start
+    timeout_s: 15
+    params:
+      gap_s: 0.15
+      requests:
+      - tag: Y
+        priority: 50
+        input_len: 2048
+        output_len: 2
+      - tag: D
+        input_len: 2048
+        output_len: 2
+      - tag: Z
+        priority: 40
+        input_len: 2048
+        output_len: 2
+      - tag: X
+        priority: 30
+        input_len: 2048
+        output_len: 2
+  - id: wave_settled
+    action: priority_settled
+    timeout_s: 95
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+  - id: placeholder_terminal
+    action: priority_wait
+    timeout_s: 35
+    params:
+      requests:
+        $ref: stages.placeholder.output.requests
+  - id: wave_terminal
+    action: priority_wait
+    timeout_s: 215
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+  - id: normalization
+    action: priority_normalize_order
+    params:
+      requests:
+      - $ref: stages.placeholder.output.requests
+      - $ref: stages.wave.output.requests
+      expected_tags:
+      - ph
+      - Y
+      - Z
+      - D
+      - X
+  - id: owner_clean
+    action: balance_clean
+    timeout_s: 30
+  - id: restore
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 100
+  - id: teardown
+    action: teardown
+    timeout_s: 120
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  requires:
+  - queue
+- id: normalize_metrics
+  requires:
+  - queue
+  profiles:
+  - batch-window
+  - single-nonbatch
+  - single-batch
+  - window-nonbatch
+  legacy_case_ids:
+  - prio_normalize
+  environment_overrides:
+    n_prefill: 1
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms:
+        omit: true
+      max_inflight_requests_per_worker: 1
+      max_waiting_requests_per_prefill_worker: 8
+      decision: single
+      dispatcher: non_batch
+    metric_whitelist: flexlb_auto_tpm_request_count
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: wave
+    action: priority_start
+    timeout_s: 15
+    params:
+      gap_s: 0.15
+      requests:
+      - tag: proto70
+        priority: 70
+        qos_level: 30
+        input_len: 2048
+        output_len: 2
+      - tag: header30
+        qos_level: 30
+        input_len: 2048
+        output_len: 2
+      - tag: default50
+        input_len: 2048
+        output_len: 2
+  - id: terminal
+    action: priority_wait
+    timeout_s: 200
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+  - id: metrics
+    action: priority_normalize_metrics
+    timeout_s: 195
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+  - id: owner_clean
+    action: balance_clean
+    timeout_s: 30
   - id: teardown
     action: teardown
     timeout_s: 120
