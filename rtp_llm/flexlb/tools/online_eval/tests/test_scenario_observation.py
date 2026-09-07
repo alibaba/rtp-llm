@@ -208,7 +208,15 @@ class ObservationTest(unittest.TestCase):
     def test_live_thread_cannot_be_reported_clean(self):
         observer = Observer(self.ctx, params())
         release = threading.Event()
-        observer.thread = threading.Thread(target=release.wait)
+
+        def worker():
+            try:
+                release.wait()
+            finally:
+                observer.worker_exit_mono = time.monotonic()
+                observer.done_event.set()
+
+        observer.thread = threading.Thread(target=worker)
         observer.thread.start()
         try:
             with self.assertRaises(TimeoutError):
@@ -218,6 +226,36 @@ class ObservationTest(unittest.TestCase):
             release.set()
             observer.thread.join(1)
         observer.stop(deadline())
+
+    def test_reported_dead_thread_without_completion_signal_cannot_freeze(self):
+        # Controlled fixture for a missing exit proof, not a claimed CPython bug.
+        observer = Observer(self.ctx, params())
+        observer.thread = SimpleNamespace(
+            join=lambda timeout: None, is_alive=lambda: False
+        )
+        with self.assertRaises(TimeoutError):
+            observer.stop(deadline(0.01))
+        self.assertIsNone(observer.frozen)
+        observer.done_event.set()
+        with self.assertRaises(DebugUnavailable):
+            observer.stop(deadline())
+        observer.worker_exit_mono = time.monotonic()
+        observer.stop(deadline())
+
+    def test_worker_exception_publishes_done_after_exit_record(self):
+        observer = Observer(self.ctx, params())
+        observer.params["interval_s"] = 0.001
+        with patch.object(
+            observer.sources, "capture", side_effect=RuntimeError("source failure")
+        ):
+            observer.thread = threading.Thread(target=observer._run)
+            observer.thread.start()
+            self.assertTrue(observer.done_event.wait(1))
+            frozen = observer.stop(deadline()).to_dict()
+        self.assertIsNotNone(frozen["worker_exit_mono"])
+        self.assertTrue(frozen["background_done"])
+        self.assertEqual("partial", frozen["status"])
+        self.assertIn("source failure", frozen["error"])
 
     def test_real_compiler_runtime_freezes_yaml_cohort(self):
         from flexlb_ft.scenario.actions.observation import HANDLERS
