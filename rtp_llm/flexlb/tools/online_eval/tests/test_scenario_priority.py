@@ -27,6 +27,7 @@ class Backend:
         unfinished=False,
         expiry_code=None,
         dispatch_order=None,
+        stream_error=None,
     ):
         self.ops = Ops(batch=False)
         self.ops.master_http_port = 1
@@ -78,6 +79,24 @@ class Backend:
                         )
                     ]
                 )
+            )
+        if stream_error:
+
+            class StreamError(Exception):
+                def code(self):
+                    return NS(name=stream_error)
+
+            def stream(req, timeout):
+                self.ops.generate_count += 1
+
+                def outputs():
+                    raise StreamError("server stream terminal")
+                    yield
+
+                return outputs()
+
+            self.ops.pb2_grpc.RpcServiceStub = lambda channel: NS(
+                GenerateStreamCall=stream
             )
 
     def setup(self, ctx, environment, deadline):
@@ -447,6 +466,59 @@ class Tests(unittest.TestCase):
         self.assertEqual(result["status"], "PASS", result)
         self.assertEqual(backend.ops.generate_count, 1)
         self.assertEqual(sum(r["schedule"]["status"] == "REJECTED" for r in rows), 2)
+
+    def test_normalization_metrics_observes_failed_exited_streams(self):
+        result, rows, backend = self.run_program(
+            variant="normalize_metrics", stream_error="INTERNAL"
+        )
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(backend.ops.generate_count, 3)
+        self.assertEqual(len(rows), 3)
+        for row in rows:
+            self.assertEqual(row["stream"]["status"], "INTERNAL")
+            self.assertTrue(row["consumer_done"])
+            self.assertTrue(row["consumer_completion_verified"])
+            self.assertIsNotNone(row["consumer_exit_s"])
+            self.assertIsNotNone(row["transport_terminal_s"])
+            self.assertFalse(row["business_finished"])
+        result, _, _ = self.run_program(
+            variant="normalize_metrics",
+            stream_error="INTERNAL",
+            metric_values={30: 0, 50: 1, 70: 2},
+        )
+        self.assertEqual(result["status"], "FAIL", result)
+
+    def test_normalization_metrics_keeps_deadline_and_cancel_failures(self):
+        for code, status in [("DEADLINE_EXCEEDED", "TIMEOUT"), ("CANCELLED", "ERROR")]:
+            result, _, _ = self.run_program(
+                variant="normalize_metrics", stream_error=code
+            )
+            self.assertEqual(result["status"], status, result)
+            self.assertEqual(
+                next(s for s in result["stages"] if s["id"] == "metrics")["status"],
+                "BLOCKED",
+            )
+
+    def test_normalization_metrics_requires_completion_witness(self):
+        original = p.RequestBatch.wait
+
+        def unverified(batch, deadline):
+            try:
+                return original(batch, deadline)
+            except RuntimeError:
+                for entry in batch.entries:
+                    batch.update(entry["record"], consumer_completion_verified=False)
+                raise
+
+        with patch.object(p.RequestBatch, "wait", unverified):
+            result, _, _ = self.run_program(
+                variant="normalize_metrics", stream_error="INTERNAL"
+            )
+        self.assertEqual(result["status"], "ERROR", result)
+        self.assertEqual(
+            next(s for s in result["stages"] if s["id"] == "metrics")["status"],
+            "BLOCKED",
+        )
 
     def test_normalization_resolved_configs_match_legacy(self):
         from flexlb_cfg import render_env

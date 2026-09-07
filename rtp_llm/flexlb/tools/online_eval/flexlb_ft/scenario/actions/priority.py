@@ -567,6 +567,56 @@ def _normalize_wait(ctx, p, deadline):
     return StageOutput(artifacts=[str(wave.path)])
 
 
+def _normalize_metrics_wait(ctx, p, deadline):
+    """Observe exited streams without adding a business-success metric gate."""
+    wave = _wave(ctx, p)
+    _settled(ctx, p, deadline)
+    server_errors = {
+        "UNKNOWN",
+        "INVALID_ARGUMENT",
+        "NOT_FOUND",
+        "ALREADY_EXISTS",
+        "PERMISSION_DENIED",
+        "RESOURCE_EXHAUSTED",
+        "FAILED_PRECONDITION",
+        "ABORTED",
+        "OUT_OF_RANGE",
+        "UNIMPLEMENTED",
+        "INTERNAL",
+        "UNAVAILABLE",
+        "DATA_LOSS",
+        "UNAUTHENTICATED",
+    }
+    for item in wave.entries:
+        deadline.check()
+        try:
+            item["batch"].wait(
+                Deadline(
+                    min(deadline.expires_at, ctx.clock() + 35), ctx.clock, ctx.sleeper
+                )
+            )
+        except RuntimeError:
+            rows = item["batch"].snapshot_records()
+            if len(rows) != 1:
+                raise
+            row = rows[0]
+            if not (
+                row["schedule"]["status"] == "OK"
+                and row["stream"]["status"] in server_errors
+                and row.get("consumer_done") is True
+                and row.get("consumer_completion_verified") is True
+                and row.get("consumer_exit_s") is not None
+                and row.get("transport_terminal_s") is not None
+                and row["stream"]["ended_s"] is not None
+                and row["cancel"]["requested_s"] is None
+            ):
+                raise
+        deadline.check()
+    wave.complete = True
+    wave.persist()
+    return StageOutput(artifacts=[str(wave.path)])
+
+
 def _normalize_params(p, plan):
     p = _params(
         p,
@@ -689,6 +739,9 @@ def _normalization_metrics(ctx, p, deadline):
 
 HANDLERS = [
     StageHandler("priority_normalize_wait", _reference, _normalize_wait, {}),
+    StageHandler(
+        "priority_normalize_metrics_wait", _reference, _normalize_metrics_wait, {}
+    ),
     StageHandler(
         "priority_normalize_order",
         _normalize_params,

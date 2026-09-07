@@ -828,7 +828,7 @@ variants:
         input_len: 2048
         output_len: 2
   - id: terminal
-    action: priority_wait
+    action: priority_normalize_metrics_wait
     timeout_s: 200
     params:
       requests:

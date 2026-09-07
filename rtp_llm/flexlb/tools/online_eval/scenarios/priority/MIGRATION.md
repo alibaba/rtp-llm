@@ -133,6 +133,13 @@ flexlb_auto_tpm_request_count through the typed startup field. Its three
 Schedule channels (proto70/header30; header30; unset) must yield absolute
 priority buckets70:1/30:1/50:1 in the fresh environment. Request success is
 not a gate: rejected Schedule counts still belong to the metric denominator.
+The S4-only observation wait also permits a completed non-deadline gRPC error
+stream to reach the metric check, matching the ignored old _drain result.
+It requires actual consumer done/verified/exit and transport terminal evidence;
+raw stream status remains unchanged and business success is never fabricated.
+Cancellation, deadline expiry, missing exit evidence and local harness errors
+still stop execution, unlike the old ignored drain failure. This is an explicit
+evidence-strengthening boundary, not an additional request-success assertion.
 Management availability warmup180s/2s/HTTP5 and the two-path ladder precede
 one fresh scrape; incorrect bucket values are not polled until green.
 Exhausting the availability budget is TIMEOUT rather than the old
