@@ -331,7 +331,7 @@ def _coldstart_spec(ctx: CaseContext) -> EnvSpec:
 
 @case(
     "master_coldstart_burst",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
     source="intake defect regression probe (cold-start first-connect storm)",
 )
 def coldstart_burst(ctx: CaseContext):
@@ -624,7 +624,7 @@ def _master_kill_dual(ctx: CaseContext):
 
 @case(
     "master_freeze",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
     source="Mode 2 freeze (SIGSTOP→SIGCONT): content-not-lost assertions, "
     "short + long hang tiers (brief p3/p4)",
 )
@@ -985,7 +985,7 @@ def master_ha_failover(ctx: CaseContext):
 
 @case(
     "fallback_direct",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
     source="scenario 3 positive (brief p7/p8): kill A + kill B (all masters "
     "down) -> ENABLE_FALLBACK -> direct-to-engine streams",
 )
@@ -1243,7 +1243,7 @@ def fallback_negative_errorcode(ctx: CaseContext):
 
 @case(
     "failback_wraparound",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
     source="scenario 4 recovery (brief p9/p10): rebuild scenario-2 end "
     "state (sticky B, A dead), restart + converge A, kill B -> wrap "
     "back to A",

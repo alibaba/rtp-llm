@@ -4897,7 +4897,6 @@ def atpm_preempt_cancel_not_found(ctx: CaseContext):
 
 @case(
     "atpm_preempt_cancel_tombstoned",
-    profiles=["single-batch"],
     requires=["enqueue_batch"],
     source="preemption-stages audit (2026-09) — Cancel TOMBSTONED branch",
 )
