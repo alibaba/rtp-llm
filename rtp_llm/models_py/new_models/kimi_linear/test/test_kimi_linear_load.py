@@ -504,6 +504,9 @@ class KimiLinearNewLoaderTest(unittest.TestCase):
         module = KimiLinearKDA(cfg, prefix="layers.0.self_attn")
         with self.assertRaisesRegex(RuntimeError, "only on CUDA"):
             module.validate_runtime_device(torch.device("cpu"))
+        with mock.patch.object(torch.version, "hip", "6.3"):
+            with self.assertRaisesRegex(RuntimeError, "only on CUDA"):
+                module.validate_runtime_device(torch.device("cuda"))
 
 
 if __name__ == "__main__":

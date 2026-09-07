@@ -11,13 +11,19 @@ from safetensors.torch import save_file
 
 from rtp_llm.config.quant_config import (
     CompressedW8A8Int8PerChannelQuantConfig,
+    Fp8PerChannelCompressedQuantConfig,
+    Fp8PerChannelQuarkQuantConfig,
     Fp8PerTensorCompressedQuantConfig,
     GPTQConfig,
     ModelOptFp4Config,
-    init_quant_config,
 )
 from rtp_llm.config.quant_config import QuantizationConfig as SourceQuantizationConfig
-from rtp_llm.config.quant_config import WeightOnlyInt8PerChannelQuantConfig
+from rtp_llm.config.quant_config import (
+    W4a8Int4PerChannelQuantConfig,
+    WeightOnlyInt8PerChannelQuantConfig,
+    init_quant_config,
+)
+from rtp_llm.device.device_type import DeviceType
 from rtp_llm.metrics import GaugeMetrics
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_loader.load_config import LoadMethod
@@ -473,6 +479,112 @@ class Qwen3BaseModelIntegrationTest(unittest.TestCase):
         )
         self.assertIsNone(model._new_loader_unsupported_reason())
         self.assertTrue(model._use_new_loader())
+
+    def test_device_moe_strategy_matrix_routes_or_fails_early(self):
+        config = _model_config()
+        config.model_type = "qwen_3_moe"
+        config.expert_num = 8
+        config.use_new_loader = None
+        model = _base_model(config)
+
+        cases = (
+            Fp8PerChannelCompressedQuantConfig(is_quanted=True),
+            Fp8PerChannelCompressedQuantConfig(is_quanted=False),
+            Fp8PerChannelQuarkQuantConfig(is_quanted=True),
+            Fp8PerChannelQuarkQuantConfig(is_quanted=False),
+        )
+        for device_type in (DeviceType.Cuda, DeviceType.Ppu):
+            with patch(
+                "rtp_llm.device.device_type.get_device_type",
+                return_value=device_type,
+            ):
+                for quant_config in cases:
+                    with self.subTest(
+                        device=device_type.name,
+                        config=type(quant_config).__name__,
+                        is_quanted=quant_config.is_quanted(),
+                    ):
+                        config.quant_config = quant_config
+                        self.assertIn(
+                            "FP8_PER_CHANNEL",
+                            model._new_loader_unsupported_reason(),
+                        )
+                        self.assertFalse(model._use_new_loader())
+
+                        config.use_new_loader = True
+                        self.assertTrue(model._use_new_loader())
+                        with self.assertRaisesRegex(ValueError, "FP8_PER_CHANNEL"):
+                            model._load_with_new_loader()
+                        config.use_new_loader = None
+
+        rocm_unsupported_cases = (
+            Fp8PerTensorCompressedQuantConfig(is_quanted=False, dynamic=True),
+            W4a8Int4PerChannelQuantConfig(bits=4, group_size=128, is_quanted=True),
+        )
+        with patch(
+            "rtp_llm.device.device_type.get_device_type",
+            return_value=DeviceType.ROCm,
+        ):
+            for quant_config in rocm_unsupported_cases:
+                with self.subTest(
+                    device=DeviceType.ROCm.name,
+                    config=type(quant_config).__name__,
+                    is_quanted=quant_config.is_quanted(),
+                ):
+                    config.quant_config = quant_config
+                    self.assertIn(
+                        "ROCm",
+                        model._new_loader_unsupported_reason(),
+                    )
+                    self.assertFalse(model._use_new_loader())
+
+                    config.use_new_loader = True
+                    self.assertTrue(model._use_new_loader())
+                    with self.assertRaisesRegex(ValueError, "ROCm"):
+                        model._load_with_new_loader()
+                    config.use_new_loader = None
+
+        config.quant_config = Fp8PerTensorCompressedQuantConfig(
+            is_quanted=False, dynamic=True
+        )
+        with patch(
+            "rtp_llm.device.device_type.get_device_type",
+            return_value=DeviceType.Cpu,
+        ):
+            self.assertIn("Cpu", model._new_loader_unsupported_reason())
+            self.assertFalse(model._use_new_loader())
+
+        config.quant_config = Fp8PerChannelCompressedQuantConfig(is_quanted=True)
+        with patch(
+            "rtp_llm.device.device_type.get_device_type",
+            return_value=DeviceType.ROCm,
+        ):
+            self.assertIsNone(model._new_loader_unsupported_reason())
+            self.assertTrue(model._use_new_loader())
+
+    def test_rocm_deepep_low_latency_routes_to_legacy_or_fails_early(self):
+        config = _model_config()
+        config.model_type = "qwen_3_moe"
+        config.expert_num = 8
+        config.quant_config = None
+        config.use_new_loader = None
+        model = _base_model(config)
+        model.moe_config = types.SimpleNamespace(use_deepep_low_latency=True)
+
+        with patch(
+            "rtp_llm.device.device_type.get_device_type",
+            return_value=DeviceType.ROCm,
+        ):
+            self.assertIn(
+                "DeepEP low-latency MoE",
+                model._new_loader_unsupported_reason(),
+            )
+            self.assertFalse(model._use_new_loader())
+
+            config.use_new_loader = True
+            self.assertTrue(model._use_new_loader())
+            with self.assertRaisesRegex(ValueError, "DeepEP low-latency MoE"):
+                model._load_with_new_loader()
 
     def test_automatic_newloader_preserves_legacy_until_policy_is_declared(self):
         config = _model_config()

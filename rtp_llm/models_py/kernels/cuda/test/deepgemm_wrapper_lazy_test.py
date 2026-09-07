@@ -1,9 +1,8 @@
+import importlib
 import sys
 import types
 import unittest
 from unittest import mock
-
-from rtp_llm.models_py.kernels.cuda import deepgemm_wrapper
 
 
 class DeepGemmWrapperLazyTest(unittest.TestCase):
@@ -13,6 +12,12 @@ class DeepGemmWrapperLazyTest(unittest.TestCase):
         a = (object(), object())
         b = (object(), object())
         output = object()
+        module_name = "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper"
+        sys.modules.pop(module_name, None)
+        with mock.patch.dict(sys.modules, {"deep_gemm": fake_deep_gemm}):
+            deepgemm_wrapper = importlib.import_module(module_name)
+            self.assertIsNone(deepgemm_wrapper._fp8_fp4_gemm_nt_impl)
+
         with mock.patch.dict(
             sys.modules, {"deep_gemm": fake_deep_gemm}
         ), mock.patch.object(

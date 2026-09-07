@@ -6,11 +6,13 @@ from unittest import mock
 
 import torch
 import torch.nn as nn
+from safetensors.torch import save_file
+
 from rtp_llm.models_py.layers import activation
+from rtp_llm.models_py.layers.embedding import VocabParallelEmbedding
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
 from rtp_llm.models_py.registry import register_model
-from safetensors.torch import save_file
 
 
 class _GpuModel(RtpModule):
@@ -55,6 +57,38 @@ register_model("foundation_gpu_alias_model")(_GpuAliasModel)
 
 
 class FoundationGpuTest(unittest.TestCase):
+    @staticmethod
+    def _tp_embedding():
+        embedding = VocabParallelEmbedding(
+            vocab_size=8,
+            embedding_dim=2,
+            tp_size=2,
+            tp_rank=0,
+            params_dtype=torch.float32,
+        )
+        embedding.weight.data.copy_(torch.arange(8, dtype=torch.float32).view(4, 2))
+        return embedding
+
+    def test_tp_embedding_preserves_local_and_remote_tokens(self):
+        embedding = self._tp_embedding()
+        with mock.patch(
+            "rtp_llm.models_py.layers.embedding.all_reduce",
+            side_effect=lambda tensor, **_: tensor,
+        ):
+            output = embedding(torch.tensor([1, 6]))
+        torch.testing.assert_close(output[0], embedding.weight[1])
+        torch.testing.assert_close(output[1], torch.zeros(2))
+
+    def test_tp_embedding_rejects_global_out_of_range_tokens(self):
+        embedding = self._tp_embedding()
+        with mock.patch(
+            "rtp_llm.models_py.layers.embedding.all_reduce",
+            side_effect=lambda tensor, **_: tensor,
+        ):
+            for token_id in (-1, 8):
+                with self.subTest(token_id=token_id), self.assertRaises(IndexError):
+                    embedding(torch.tensor([token_id]))
+
     def test_fused_silu_uses_the_input_device_stream(self):
         gate_up = torch.randn(2, 256, dtype=torch.bfloat16, device="cuda:0")
         fake_stream = types.SimpleNamespace(cuda_stream=12345)

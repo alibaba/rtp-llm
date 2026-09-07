@@ -14,14 +14,6 @@ from enum import IntEnum, auto
 from typing import Optional, Tuple
 
 import torch
-
-try:
-    from deep_ep import Buffer as DeepEPBuffer
-    from deep_ep import Config as DeepEPConfig
-except ImportError:
-    DeepEPBuffer = None  # type: ignore[misc,assignment]
-    DeepEPConfig = None  # type: ignore[misc,assignment]
-
 from torch.distributed import ProcessGroup
 
 try:
@@ -67,6 +59,9 @@ from rtp_llm.config.quant_config import QuantizationConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
+)
+from rtp_llm.models_py.quant_methods.base import (
+    QuantizationConfig as RuntimeQuantizationConfig,
 )
 from rtp_llm.models_py.utils.arch import is_sm10x
 from rtp_llm.ops import SpeculativeType
@@ -272,6 +267,7 @@ class DeepepWrapperConfig:
         ll_num_max_token: int,
         tp_size: int,
         quant_config: Optional[QuantizationConfig],
+        model_config: Optional[ModelConfig] = None,
     ) -> int:
         """Size the process-wide DeepEP buffer for every layer in the model.
 
@@ -284,9 +280,37 @@ class DeepepWrapperConfig:
         capacity = DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
             ll_num_max_token, tp_size, quant_config
         )
-        if quant_config is not None and (
-            quant_config.ignored_layers or quant_config.exclude_modules
-        ):
+        exclusions_exist = bool(
+            quant_config is not None
+            and (quant_config.ignored_layers or quant_config.exclude_modules)
+        )
+        has_unquantized_moe_layer = exclusions_exist and model_config is None
+        if exclusions_exist and model_config is not None:
+            runtime_quant = RuntimeQuantizationConfig(
+                quant_config.get_runtime_method_key(),
+                source_config=quant_config,
+            )
+            moe_layer_indices = list(getattr(model_config, "moe_layer_index", ()))
+            if not moe_layer_indices and model_config.expert_num > 0:
+                moe_layer_indices = list(range(model_config.num_layers))
+            projections = ("gate_proj", "up_proj", "down_proj")
+            for layer_idx in moe_layer_indices:
+                prefix = f"layers.{layer_idx}.mlp.experts"
+                root_ignored = runtime_quant.is_layer_ignored(prefix)
+                projection_ignored = [
+                    runtime_quant.is_layer_ignored(f"{prefix}.{projection}")
+                    for projection in projections
+                ]
+                if root_ignored or all(projection_ignored):
+                    has_unquantized_moe_layer = True
+                    break
+                if any(projection_ignored):
+                    raise ValueError(
+                        "Quantization exclusions partially match fused MoE layer "
+                        f"{prefix!r}; all expert projections must use the same "
+                        "quantization layout"
+                    )
+        if has_unquantized_moe_layer:
             capacity = max(
                 capacity,
                 DeepepWrapperConfig.calc_low_latency_max_token_per_rank(
@@ -728,6 +752,7 @@ def init_deepep_wrapper(
             # each rank dispatches its full local token set.
             deepep_config_adapter.tp_size,
             model_config.quant_config,
+            model_config,
         )
 
     deepep_config = DeepepWrapperConfig.from_config_adapter(

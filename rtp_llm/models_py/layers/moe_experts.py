@@ -905,7 +905,9 @@ class BaseMoEExperts(RtpModule):
     def requires_staged_device_postprocess(self) -> bool:
         return bool(self.quant_method.requires_staged_device_postprocess)
 
-    def _build_weights_dict(self) -> Dict[str, torch.Tensor]:
+    def _build_weights_dict(
+        self, *, apply_runtime_shuffle: bool = True
+    ) -> Dict[str, torch.Tensor]:
         """Build the weight dict for FusedMoeFactory.
 
         Registered quant methods add any extra runtime tensors such as FP8 or
@@ -932,7 +934,7 @@ class BaseMoEExperts(RtpModule):
                 type(runtime_device).__name__ if runtime_device is not None else None,
             )
             self._logged_moe_runtime_device = True
-        if runtime_device is not None:
+        if runtime_device is not None and apply_runtime_shuffle:
             for name in (W.moe_w1, W.moe_w2, W.moe_s1, W.moe_s2):
                 tensor = weights_dict.get(name)
                 if tensor is None:
@@ -959,7 +961,7 @@ class BaseMoEExperts(RtpModule):
                 weights_dict[name] = owned_tensor.data
         return weights_dict
 
-    def _maybe_build_fused_moe(self):
+    def _maybe_build_fused_moe(self, *, apply_runtime_shuffle: bool = True):
         if self.fused_moe is not None:
             return
         # MoEConfigAdapter.quant_config must be the CONFIG-side QuantizationConfig
@@ -976,8 +978,31 @@ class BaseMoEExperts(RtpModule):
             quant_config=self._effective_model_quant_config,
             enable_cuda_graph=self._enable_cuda_graph(),
         )
-        weights_dict = self._build_weights_dict()
+        weights_dict = self._build_weights_dict(
+            apply_runtime_shuffle=apply_runtime_shuffle
+        )
         self.fused_moe = FusedMoeFactory().create_fused_moe(adapter, weights_dict)
+
+    def _apply(self, fn, recurse: bool = True):
+        """Move module-owned tensors and rebuild executor tensor references.
+
+        FusedMoe executors are ordinary strategy objects rather than child
+        ``nn.Module`` instances. They retain the tensors passed at build time,
+        so a later ``module.to(...)`` would otherwise leave them pointing at
+        the pre-migration allocations. Runtime layout shuffling must not run a
+        second time because its output is already bound to this module.
+        """
+        rebuild_fused_moe = self.fused_moe is not None
+        if rebuild_fused_moe:
+            self.fused_moe = None
+        result = super()._apply(fn, recurse=recurse)
+        if rebuild_fused_moe:
+            if self.w13.is_cuda:
+                with torch.cuda.device(self.w13.device):
+                    self._maybe_build_fused_moe(apply_runtime_shuffle=False)
+            else:
+                self._maybe_build_fused_moe(apply_runtime_shuffle=False)
+        return result
 
     def _enable_cuda_graph(self) -> bool:
         hw_kernel_config = getattr(self._quant_config, "hw_kernel_config", None)
@@ -1004,6 +1029,8 @@ class BaseMoEExperts(RtpModule):
         hidden_states: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        *,
+        skip_tp_allreduce: bool = False,
     ) -> torch.Tensor:
         if self.fused_moe is None:
             raise RuntimeError(
@@ -1035,9 +1062,12 @@ class BaseMoEExperts(RtpModule):
             raise ValueError(
                 "MoE hidden states, topk weights, and topk ids must share a device"
             )
-        return self.fused_moe(
+        fused_kwargs = dict(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=self.activation_type,
         )
+        if skip_tp_allreduce:
+            fused_kwargs["skip_tp_allreduce"] = True
+        return self.fused_moe(**fused_kwargs)

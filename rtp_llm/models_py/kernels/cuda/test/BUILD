@@ -28,7 +28,7 @@ py_test (
     # Not sm90-bound: the op under test has an sm86 cubin, but the in-test Triton
     # reference stores fp8e4nv, which Triton only allows at capability >= 89.
     # A10 (sm86) would hard-fail, so this runs on L20 (sm89) instead of H20.
-    tags = ["open_skip", "L20"],
+    tags = ["L20"],
     exec_properties = {'gpu':'L20'},
 )
 

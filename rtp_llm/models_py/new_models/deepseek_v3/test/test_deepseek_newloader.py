@@ -921,18 +921,8 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         ):
             NewModelLoader._validate_loaded_weights(root)
 
-    @unittest.skipIf(
-        torch.version.hip is not None,
-        "ROCm factory construction is covered by the ROCm GPU target",
-    )
-    def test_mtp_new_model_loader_reads_only_appended_draft_weights(self):
+    def _gpu_mtp_new_model_loader_reads_only_appended_draft_weights(self):
         weights = _mtp_checkpoint_weights()
-        # The test intentionally loads CPU tensors. Preserve their layout while
-        # still executing the real MoE post-load validation/factory hook; device
-        # shuffling is covered by the GPU loader/smoke suites.
-        cpu_device = types.SimpleNamespace(
-            shuffle_moe_weight=lambda tensor, data_type, name: tensor,
-        )
         with tempfile.TemporaryDirectory() as checkpoint_path:
             with open(
                 f"{checkpoint_path}/config.json",
@@ -941,38 +931,36 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             ) as config_file:
                 json.dump(_mtp_loader_config_json(), config_file)
             save_file(weights, f"{checkpoint_path}/model.safetensors")
-            with mock.patch(
-                "rtp_llm.models_py.layers.moe_experts.get_current_device",
-                return_value=cpu_device,
-            ):
-                model = NewModelLoader(
-                    model_config=_mtp_loader_model_config(checkpoint_path),
-                    load_config=NewLoaderConfig(
-                        tp_size=1,
-                        tp_rank=0,
-                        ep_size=1,
-                        ep_rank=0,
-                        compute_dtype=torch.float32,
-                        device="cpu",
-                        parallelism_config=_single_rank_parallelism_config(),
-                    ),
-                    model_path=checkpoint_path,
-                ).load()
+            model_config = _mtp_loader_model_config(checkpoint_path)
+            model_config.data_type = "bf16"
+            model = NewModelLoader(
+                model_config=model_config,
+                load_config=NewLoaderConfig(
+                    tp_size=1,
+                    tp_rank=0,
+                    ep_size=1,
+                    ep_rank=0,
+                    compute_dtype=torch.bfloat16,
+                    device="cuda",
+                    parallelism_config=_single_rank_parallelism_config(),
+                ),
+                model_path=checkpoint_path,
+            ).load()
 
         self.assertIsInstance(model, DeepSeekV32MTPForCausalLM)
         self.assertEqual(model._checkpoint_prefix, "model.layers.1.")
         self.assertFalse(model.training)
         torch.testing.assert_close(
-            model.embed_tokens.weight,
-            weights["model.layers.1.embed_tokens.weight"],
+            model.embed_tokens.weight.cpu(),
+            weights["model.layers.1.embed_tokens.weight"].bfloat16(),
         )
         torch.testing.assert_close(
-            model.mtp_block.fc.weight,
-            weights["model.layers.1.eh_proj.weight"],
+            model.mtp_block.fc.weight.cpu(),
+            weights["model.layers.1.eh_proj.weight"].bfloat16(),
         )
         torch.testing.assert_close(
-            model.lm_head.weight,
-            weights["model.layers.1.shared_head.head.weight"],
+            model.lm_head.weight.cpu(),
+            weights["model.layers.1.shared_head.head.weight"].bfloat16(),
         )
         self.assertIsNotNone(model.layers[0].mlp.experts.fused_moe)
         model._ensure_mla_kernel_layout()
@@ -2659,8 +2647,8 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertTrue(torch.allclose(actual_weights, expected_weights, atol=1e-6))
         self.assertTrue(torch.equal(output, hidden_states))
 
-    @unittest.skipUnless(is_cuda(), "CUDA SelectTopk is required")
-    def _gpu_moe_cuda_fast_select_topk_matches_reference(self):
+    @unittest.skipUnless(is_cuda() or is_hip(), "accelerator SelectTopk is required")
+    def _gpu_moe_native_fast_select_topk_matches_reference(self):
         model_config = ModelConfig()
         model_config.attn_config.head_num = 1
         model_config.attn_config.size_per_head = 128
