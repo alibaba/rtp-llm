@@ -411,3 +411,119 @@ class ElasticCompletionTests(unittest.TestCase):
             metrics.stop(Deadline(1))
             evidence = json.loads((Path(root) / "elastic-metrics.json").read_text())
             self.assertTrue(evidence["complete"])
+
+
+class ElasticMutationTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.saved = []
+
+        def register(kind, value, **kwargs):
+            self.saved.append(value)
+            return dict(kind=kind, id=str(len(self.saved)), env_epoch=1)
+
+        self.ctx = NS(
+            clock=time.monotonic,
+            ops=NS(),
+            artifact_dir=Path(self.temp.name),
+            resolve=lambda value: "p2" if isinstance(value, dict) else value,
+            register_resource=register,
+        )
+        self.engine = dict(role="prefill", grpc_addr="127.0.0.1:12345")
+
+    def test_add_budget_is_explicit_and_role_is_validated(self):
+        handler = next(h for h in e.HANDLERS if h.name == "elastic_add")
+        self.assertEqual(handler.max_dynamic_additions, 1)
+        for role in ["worker", "PREFILL", None]:
+            with self.assertRaises(ValueError):
+                handler.validate(dict(role=role), NS(path="add"))
+        with self.assertRaises(ValueError):
+            handler.validate(dict(role="prefill", port=9999), NS(path="add"))
+
+    def test_add_matches_ack_to_new_snapshot_identity(self):
+        response = dict(
+            status="ok", action="added", engine="p2", port=12345, http_port=12344
+        )
+        with patch.object(
+            e, "_snapshot", side_effect=[{}, {"p2": self.engine}]
+        ), patch.object(e, "_http", return_value=response) as http:
+            result = e._add(self.ctx, dict(role="prefill"), Deadline())
+        self.assertEqual(result.output["engine"], "p2")
+        self.assertEqual(result.checks[0].status, "PASS")
+        self.assertEqual(http.call_args.args[1], "add_engine")
+        self.assertTrue(self.saved[0]["complete"])
+
+    def test_wrong_add_identity_preserves_response_and_errors(self):
+        import json
+
+        response = dict(
+            status="ok", action="added", engine="p2", port=12346, http_port=12345
+        )
+        with patch.object(
+            e, "_snapshot", side_effect=[{}, {"p2": self.engine}]
+        ), patch.object(e, "_http", return_value=response):
+            with self.assertRaisesRegex(ValueError, "role or address mismatch"):
+                e._add(self.ctx, dict(role="prefill"), Deadline())
+        evidence = json.loads(
+            next(Path(self.temp.name).glob("elastic-add-*.json")).read_text()
+        )
+        self.assertEqual(evidence["response"], response)
+        self.assertFalse(evidence["complete"])
+
+    def test_remove_resolves_target_and_keeps_false_drained(self):
+        response = dict(
+            status="ok",
+            action="removed",
+            engine="p2",
+            port=12345,
+            mode="graceful",
+            drained=False,
+        )
+        with patch.object(
+            e, "_snapshot", side_effect=[{"p2": self.engine}, {}]
+        ), patch.object(e, "_http", return_value=response) as http:
+            result = e._remove(
+                self.ctx,
+                dict(
+                    engine={"$ref": "stages.add.output.engine"}, drain_timeout_ms=5000
+                ),
+                Deadline(),
+            )
+        self.assertEqual(
+            http.call_args.args[3],
+            dict(engine="p2", mode="graceful", drain_timeout_ms=5000),
+        )
+        self.assertEqual(result.checks[0].id, "membership")
+        self.assertIs(self.saved[0]["response"]["drained"], False)
+
+    def test_remove_checks_remaining_budget_before_mutation(self):
+        with patch.object(
+            e, "_snapshot", return_value={"p2": self.engine}
+        ), patch.object(e, "_http") as http:
+            with self.assertRaises(TimeoutError):
+                e._remove(
+                    self.ctx, dict(engine="p2", drain_timeout_ms=60000), Deadline(5)
+                )
+            http.assert_not_called()
+
+    def test_missing_drain_evidence_is_error(self):
+        response = dict(
+            status="ok", action="removed", engine="p2", port=12345, mode="graceful"
+        )
+        with patch.object(
+            e, "_snapshot", side_effect=[{"p2": self.engine}, {}]
+        ), patch.object(e, "_http", return_value=response):
+            with self.assertRaisesRegex(ValueError, "drain evidence"):
+                e._remove(
+                    self.ctx, dict(engine="p2", drain_timeout_ms=5000), Deadline()
+                )
+
+    def test_remove_timeout_must_preserve_named_contract(self):
+        for cap in [True, 0, 1000, 5000.0, 600000]:
+            with self.assertRaises(ValueError):
+                e._remove_validate(
+                    dict(engine="p2", drain_timeout_ms=cap), NS(path="remove")
+                )
