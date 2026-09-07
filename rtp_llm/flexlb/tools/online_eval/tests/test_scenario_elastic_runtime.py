@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 from flexlb_ft.scenario import compile_scenarios
 from flexlb_ft.scenario.actions import elastic as e
 from flexlb_ft.scenario.contracts import CheckResult, StageOutput
+from flexlb_ft.scenario.loader import load_scenarios
 from flexlb_ft.scenario.runtime import execute_instance
 
 
@@ -93,7 +94,7 @@ class ElasticRuntimeTests(unittest.TestCase):
         self.assertEqual(result["stages"][2]["checks"][0]["id"], "membership")
 
     def source(self):
-        source = yaml.safe_load((ROOT / "scenarios/elastic/lifecycle.yaml").read_text())
+        source = load_scenarios(ROOT / "scenarios/elastic/lifecycle.yaml")[0][1]
         source["variants"] = [
             v for v in source["variants"] if v["id"].startswith("kv_skew_")
         ]

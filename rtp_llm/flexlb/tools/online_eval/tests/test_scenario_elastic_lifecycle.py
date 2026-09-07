@@ -10,13 +10,12 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
-import yaml
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from flexlb_ft.scenario import compile_scenarios
 from flexlb_ft.scenario.actions import elastic as e
 from flexlb_ft.scenario.actions import elastic_lifecycle as life
+from flexlb_ft.scenario.loader import load_scenarios
 from flexlb_ft.scenario.runtime import execute_instance
 
 
@@ -193,9 +192,10 @@ class LifecycleTests(unittest.TestCase):
         )
         lock = threading.Lock()
         flows = []
-        source = yaml.safe_load((ROOT / "scenarios/elastic/lifecycle.yaml").read_text())
         handlers = {h.name: h for h in e.HANDLERS}
-        plans = compile_scenarios([("lifecycle.yaml", source)], handlers=handlers)
+        plans = compile_scenarios(
+            load_scenarios(ROOT / "scenarios/elastic/lifecycle.yaml"), handlers=handlers
+        )
         plan = next(p for p in plans if p["variant_id"] == variant)
         self.assertEqual(len(plan["stages"]), 10 if variant == "rebalance" else 57)
         self.assertEqual(

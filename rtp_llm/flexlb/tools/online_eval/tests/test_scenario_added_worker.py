@@ -9,13 +9,12 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
-import yaml
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from flexlb_ft.scenario import compile_scenarios
 from flexlb_ft.scenario.actions import elastic as e
 from flexlb_ft.scenario.actions import engine_control as ec
+from flexlb_ft.scenario.loader import load_scenarios
 from flexlb_ft.scenario.runtime import execute_instance
 
 
@@ -35,12 +34,10 @@ class AddedWorkerTests(unittest.TestCase):
         clock = Clock()
         state = dict(stopped=False, added=False, accepted=0, flow_starts=0)
         flows = []
-        source = yaml.safe_load(
-            (ROOT / "scenarios/elastic/added_worker_fault.yaml").read_text()
-        )
         handlers = {h.name: h for h in [*e.HANDLERS, *ec.HANDLERS]}
         plan = compile_scenarios(
-            [("added_worker_fault.yaml", source)], handlers=handlers
+            load_scenarios(ROOT / "scenarios/elastic/added_worker_fault.yaml"),
+            handlers=handlers,
         )[0]
         self.assertEqual(plan["resource_budget"]["max_dynamic_additions"], 1)
         self.assertEqual(plan["legacy_case_ids"], ["elastic_stop_after_add"])
