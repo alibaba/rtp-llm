@@ -182,7 +182,7 @@ class ElasticEvidenceTests(unittest.TestCase):
             e, "_http", return_value={"drained": False}
         ):
             output = e._scale(ctx, {"families": {}, "victim": "hot"}, Deadline())
-        self.assertEqual(output.checks[-1].status, "FAIL")
+        self.assertEqual(output.checks[-1].id, "pre_scale_skew")
         self.assertFalse(output.output["drained"])
 
     def test_scale_refuses_short_client_budget_before_side_effect(self):
@@ -201,3 +201,103 @@ class ElasticEvidenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ElasticMetricTests(unittest.TestCase):
+    @staticmethod
+    def data():
+        samples = []
+        for second in range(21):
+            samples.append(
+                dict(
+                    time_s=second,
+                    engines={
+                        "p1": dict(
+                            role="prefill",
+                            mock_engine_cache_key_hits_total=second * 9,
+                            mock_engine_cache_keys_requested_total=second * 10,
+                            mock_engine_waiting=1,
+                            mock_engine_cache_blocks=100,
+                            mock_engine_available_blocks=20,
+                        )
+                    },
+                )
+            )
+        return dict(samples=samples, errors=[], env_epoch=1)
+
+    def test_hit_rate_uses_real_counter_delta(self):
+        value = e.metric_window(self.data(), 0, 20, "p1")
+        self.assertEqual(value["hit_rate"], 0.9)
+        self.assertEqual(value["requested"], 200)
+        self.assertAlmostEqual(value["occupancy_peak"], 0.8)
+
+    def test_zero_traffic_is_error(self):
+        data = self.data()
+        for sample in data["samples"]:
+            sample["engines"]["p1"]["mock_engine_cache_keys_requested_total"] = 0
+        with self.assertRaises(ValueError):
+            e.metric_window(data, 0, 20)
+
+    def test_counter_reset_is_error(self):
+        data = self.data()
+        data["samples"][-1]["engines"]["p1"]["mock_engine_cache_key_hits_total"] = 0
+        with self.assertRaisesRegex(ValueError, "epoch reset"):
+            e.metric_window(data, 0, 20)
+
+    def test_sample_gap_is_error(self):
+        data = self.data()
+        del data["samples"][5:10]
+        with self.assertRaisesRegex(ValueError, "uncovered gap"):
+            e.metric_window(data, 0, 20)
+
+    def test_failed_scrape_not_silently_skipped(self):
+        data = self.data()
+        data["errors"].append(dict(time_s=2, error="timeout"))
+        with self.assertRaisesRegex(ValueError, "acquisition failed"):
+            e.metric_window(data, 0, 20)
+
+    def test_missing_survivor_is_error(self):
+        with self.assertRaisesRegex(ValueError, "survivor missing"):
+            e.metric_window(self.data(), 0, 20, "p2")
+
+    def test_parse_rejects_nan_and_duplicate_series(self):
+        line = 'mock_engine_cache_key_hits_total{role="prefill",engine_name="p1"} '
+        with self.assertRaises(ValueError):
+            e.parse_metrics(line + "NaN")
+        with self.assertRaises(ValueError):
+            e.parse_metrics(line + "1\n" + line + "2")
+        self.assertEqual(
+            e.parse_metrics(line + "2")["p1"]["mock_engine_cache_key_hits_total"], 2
+        )
+
+
+class ElasticVerdictTests(unittest.TestCase):
+    def test_all_independent_failures_are_reported_together(self):
+        import tempfile
+
+        flow = dict(
+            issued=2,
+            completed=1,
+            result_complete=True,
+            zero_errors=False,
+            failed_request_ids=[7],
+        )
+        objects = dict(
+            baseline=dict(hit_rate=1),
+            transient=dict(hit_rate=0.1),
+            steady=dict(hit_rate=0.9, waiting_peak=3, occupancy_peak=0.99),
+            scale=dict(response=dict(drained=False)),
+            flow_result=flow,
+            recovery=e.ClientRecords(1),
+        )
+        with tempfile.TemporaryDirectory() as root:
+            ctx = NS(
+                resource=lambda value, kind: objects[value], artifact_dir=Path(root)
+            )
+            params = {k: k for k in objects}
+            params["victim"] = "cold"
+            result = e._verdict(ctx, params, Deadline())
+        self.assertEqual(
+            [c.id for c in result.checks], ["drained", "PC", "PQ", "PK", "P6", "P2"]
+        )
+        self.assertTrue(all(c.status == "FAIL" for c in result.checks))
