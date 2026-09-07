@@ -4,21 +4,24 @@ FlexLB 调度器的场景测试套件：每个用例启动一小片 mock 引擎�
 
 ## 快速开始
 
-前置清单（任一不满足时，启动会直接报错指路）：
+先进入待测 `github-opensource` 仓库或它的子目录（独立内层 worktree 也可）。下文使用同一 shell；从该仓库根定位构建和运行目录，避免构建后相对路径重复拼接。
 
 1. **JDK 21+**：解析顺序 `JAVA_HOME` → `JAVA21_HOME` → `~/java21` → homebrew（`/opt/homebrew/opt/openjdk@21`；harness 内置该顺序，任一命中即可，下文命令写作 `<JDK21>`）。
-2. **Python ≥3.8**，并安装 gRPC 工具链：`pip install grpcio grpcio-tools protobuf`（import 链在 `engine_ops.py` 模块级 import grpc，缺 `grpcio` 连 `--list` 都无法运行）。
+2. **Python ≥3.9**（入口 `flexlb_functional_tests.py` 直接求值 `list[CaseDef]` 注解，需要 3.9；本地已验证 3.9.6），并安装 gRPC 工具链：`python3 -m pip install grpcio grpcio-tools protobuf`（import 链在 `engine_ops.py` 模块级 import grpc，缺 `grpcio` 连 `--list` 都无法运行）。
 3. **构建两个 jar**（mock 引擎与 master，一条命令同时构建）：
 
 ```bash
-cd rtp_llm/flexlb
-JAVA_HOME=<JDK21> ./mvnw -P'opensource,!internal' -pl flexlb-mock-engine,flexlb-api -am package -Dmaven.test.skip=true
+FT_REPO="$(git rev-parse --show-toplevel)"
+test -f "$FT_REPO/rtp_llm/flexlb/tools/online_eval/parallel_runner.py" || exit 1
+export JAVA_HOME="<JDK21>"  # 替换为实际 JDK 21 安装目录，后续 runner 也使用它
+cd "$FT_REPO/rtp_llm/flexlb"
+./mvnw -P'opensource,!internal' -pl flexlb-mock-engine,flexlb-api -am package -Dmaven.test.skip=true
 ```
 
-产物：`flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar`（mock 引擎与 load client 共用的 all-in-one jar）与 `flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar`（master），即 `harness.MOCK_JAR` / `harness.API_JAR`。profile 组合的含义：`opensource` 是默认激活的 profile；`internal` 只在仓内存在 `internal_source` 目录时自动激活，`!internal` 显式关掉它，防止旁边的内网仓把依赖解析到 internal-only 构件。改动代码后可先做编译验证：`JAVA_HOME=<JDK21> ./mvnw -pl flexlb-mock-engine -am clean test-compile -P '!internal'`。
+产物：`flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar`（mock 引擎与 load client 共用的 all-in-one jar）与 `flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar`（master），即 `harness.MOCK_JAR` / `harness.API_JAR`。profile 组合的含义：`opensource` 是默认激活的 profile；`internal` 只在仓内存在 `internal_source` 目录时自动激活，`!internal` 显式关掉它，防止旁边的内网仓把依赖解析到 internal-only 构件。改动代码后可先做编译验证：`JAVA_HOME="<JDK21>" ./mvnw -pl flexlb-mock-engine -am clean test-compile -P '!internal'`。
 
 ```bash
-cd rtp_llm/flexlb/tools/online_eval
+cd "$FT_REPO/rtp_llm/flexlb/tools/online_eval"
 
 python3 parallel_runner.py                    # 全量：默认 4 路 case 级分片（profile=batch-window grade=normal）
 python3 parallel_runner.py --dry-run          # 只打印分片矩阵与端口矩阵（含端口窗口预检状态），不执行
@@ -47,12 +50,13 @@ python3 parallel_runner.py --categories kv --parallel 2   # 只跑指定分类
 
 ```bash
 python3 flexlb_functional_tests.py --list                              # 列出用例
-python3 flexlb_functional_tests.py --cases a,b,c                       # 精确 case 名列表（优先于 --category/--filter）
+python3 flexlb_functional_tests.py --cases cancel_basic,cancel_idempotent --profile batch-window --list
+python3 flexlb_functional_tests.py --cases cancel_basic,cancel_idempotent --profile batch-window --json cancel-results.json
 python3 flexlb_functional_tests.py --category kv --json results.json   # 单分类 + JSON 结果
 python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbatch   # 子串过滤
 ```
 
-`--cases` 为精确 case 名逗号列表，仍受 `--profile` 过滤，未知名报错退出（rc=2）。其余 runner 参数（`--run-root` 等）见其 `--help`；全集 **137 例**（9 分类），`--list` 按当前 profile 过滤，默认 batch-window 下 117 例（含 5 个 expected-fail 探针：status 家族 4 个、kv 家族 1 个）；不进 batch-window 形态的 20 例 = priority 18 例（15 例固定 single-nonbatch、3 例固定 single-batch——含 4 例抢占 live/分支 case；priority 家族仅 `prio_normalize` 全 profile）+ `admission_placement_pool_wait`（固定 single-nonbatch）+ `cancel_stream_break_decode_autonomous`（仅 NON_BATCH 投递），用例间环境按需复用 / 重建。
+`parallel_runner.py` 只通过 `--categories` 过滤分类，不接受 `--cases` / `--filter`；精确 case 或子串复跑使用上面的底层 runner。底层 runner 的 `--cases` 为精确 case 名逗号列表，仍受 `--profile` 过滤，未知名报错退出（rc=2）。其余 runner 参数（`--run-root` 等）见其 `--help`；全集 **137 例**（9 分类），`--list` 按当前 profile 过滤，默认 batch-window 下 117 例（含 5 个 expected-fail 探针：status 家族 4 个、kv 家族 1 个）；不进 batch-window 形态的 20 例 = priority 18 例（15 例固定 single-nonbatch、3 例固定 single-batch——含 4 例抢占 live/分支 case；priority 家族仅 `prio_normalize` 全 profile）+ `admission_placement_pool_wait`（固定 single-nonbatch）+ `cancel_stream_break_decode_autonomous`（仅 NON_BATCH 投递），用例间环境按需复用 / 重建。
 
 `--profile` / `--grade` 的取值语义（两个入口通用）：
 
@@ -60,6 +64,53 @@ python3 flexlb_functional_tests.py --filter cancel_basic --profile single-nonbat
 | --- | --- | --- |
 | `--profile` | `batch-window` / `single-nonbatch` / `single-batch` / `window-nonbatch` | 调度形态（默认 `batch-window`）：decision（fixed_window / single）× dispatcher（batch / non_batch）两轴组合 |
 | `--grade` | `strict` / `normal` / `loose` | 断言档位（默认 `normal`）：数值断言按档位边界评估，超出运行档界值即 FAIL；逐例记录实际达到档并汇总为运行判定（优异 / 良好 / 边缘 / 不可用） |
+
+### 四个 profile：先核对选择，再执行
+
+`68157c0a43` 快照的注册全集为 137 例（5 个 expected-fail），四个 profile 的选择数分别为：
+
+| profile | 该快照的 case 数 |
+| --- | ---: |
+| `batch-window` | 117 |
+| `single-nonbatch` | 54 |
+| `single-batch` | 52 |
+| `window-nonbatch` | 38 |
+
+这些是快照计数，后续以待测提交的 `--list` 为准；profile 间有重叠，不能将计数相加当成独立用例数，也不能把默认 117 例写成执行了 137 例。下面的模板依次处理四个 profile，`FT_LANES=1` 为串行，改成 `4` 为并行；每次新建结果目录。`--list` 只列选择，`--dry-run` 只检查计划，二者通过均不代表 case 执行通过。
+
+```bash
+cd "$FT_REPO/rtp_llm/flexlb/tools/online_eval"
+FT_LANES=1  # 并行验证时改为 4
+FT_RESULTS="$(mktemp -d "${TMPDIR:-/tmp}/flexlb_ft_examples.XXXXXX")"
+export FLEXLB_EVAL_PROTO_OUT="$FT_RESULTS/proto"
+for FT_PROFILE in batch-window single-nonbatch single-batch window-nonbatch; do
+    python3 flexlb_functional_tests.py --profile "$FT_PROFILE" --list || break
+    python3 parallel_runner.py --profile "$FT_PROFILE" --parallel "$FT_LANES" \
+        --out-dir "$FT_RESULTS/$FT_PROFILE" --dry-run || break
+done
+```
+
+确认上方各 profile 的 case 名单、lane 数、端口计划均符合本次意图后，再执行（真实启动 mock/master）：
+
+```bash
+for FT_PROFILE in batch-window single-nonbatch single-batch window-nonbatch; do
+    FT_RC=0
+    python3 parallel_runner.py --profile "$FT_PROFILE" --parallel "$FT_LANES" \
+        --out-dir "$FT_RESULTS/$FT_PROFILE" || FT_RC=$?
+    printf '%s rc=%s results=%s\n' "$FT_PROFILE" "$FT_RC" "$FT_RESULTS/$FT_PROFILE"
+done
+```
+
+只跑某一分类时，两侧选择器必须对应，例如先 `python3 flexlb_functional_tests.py --profile batch-window --category kv --list`，再对同一 profile 使用 `parallel_runner.py --categories kv` 做 dry-run 和执行。底层 runner 的精确名/子串筛选没有 dry-run 选项，先用相同 `--cases` 或 `--filter` 加 `--list` 核对，再去掉 `--list` 执行并用 `--json` 保存结果。
+
+### 结果与日志定位
+
+- 默认 case 分片：`<out-dir>/aggregate.json` 是聚合结果，`<out-dir>/laneN/cases.json` 是逐 lane 结果，`<out-dir>/laneN/cases.log` 是 runner 日志。category 分片使用 `laneN/<category>.json` / `.log`；`--json` 可另外指定聚合文件位置。
+- 引擎与 master 环境目录不在 out-dir 内：编排器传给底层的 run root 为 `/tmp/flexlb_ft_p<stamp>_laneN`，实际路径会打印在 lane 日志中。直接调用底层 runner 可用 `--run-root` 指定；未指定时为 `/tmp/flexlb_ft_<epoch>`。
+- 执行后同时核对进程退出码、`summary.total`、`summary.failed`、`summary.finding_confirmed` / `finding_resolved` 以及 `cases[].name` 是否符合运行前选择。普通 FAIL 或 lane 非零退出使编排结果失败；FINDING-CONFIRMED 表示声明的问题仍在，FINDING-RESOLVED 表示该探针通过并需复核标记，均不能写成普通 PASS。不要用零失败数掩盖漏跑或空结果。
+- 当前底层 runner 未匹配到任何 case 的实际执行返回 1；未知 `--cases` 名称或非法 CLI 参数返回 2；`--list` 的空选择可以返回 0。编排器对空分类集合/零有效用例报错停止。判断时保留原始 stderr，不把设计文档的未来退出码当作当前实现。
+
+本提交仍运行 legacy Python case。设计文档中的 `--source yaml`、`--case-id`、`--variant`、`--validate-only` 尚未实现；当前 `--list --json` 也不输出结构化清单 JSON。不要将这些未来接口混入上面的命令。
 
 ## 并行编排与耗时基线
 
