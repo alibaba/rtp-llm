@@ -19,6 +19,11 @@ from rtp_llm.config.py_config_modules import (
 )
 from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
+from rtp_llm.utils.scr_local_comm import (
+    local_comm_enabled,
+    validate_local_members,
+    validate_local_world,
+)
 
 
 def _template_loopback_enabled(parallelism_config: ParallelismConfig) -> bool:
@@ -125,7 +130,11 @@ def get_dp_addrs_from_world_info(
             if (member.world_rank % parallelism_config.tp_size) == 0
         ]
 
-    addresses = [f"{member.ip}:{member.rpc_server_port}" for member in members]
+    if local_comm_enabled():
+        validate_local_members(world_info, parallelism_config)
+        addresses = [f"127.0.0.1:{member.rpc_server_port}" for member in members]
+    else:
+        addresses = [f"{member.ip}:{member.rpc_server_port}" for member in members]
     logging.info(
         f"[world_rank: {parallelism_config.world_rank}] "
         f"using addresses from world_info: {addresses}"
@@ -250,6 +259,12 @@ class DistributedServer(object):
             self.master_server_port = py_env_configs.server_config.start_port
         else:
             self.master_server_port = int(master_server_port)
+
+        if local_comm_enabled():
+            validate_local_world(
+                pc.world_size, pc.local_world_size, self._world_info.num_nodes
+            )
+            self.master_ip = "127.0.0.1"
 
         self._nccl_comm_config = _build_nccl_comm_config(
             "127.0.0.1" if _template_loopback_enabled(pc) else self.master_ip,

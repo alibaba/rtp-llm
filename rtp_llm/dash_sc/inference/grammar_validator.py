@@ -40,10 +40,6 @@ from rtp_llm.dash_sc.inference.core_dump_control import (
     _configure_xgrammar_sandbox_core_dump_for_current_process,
 )
 from rtp_llm.ops import GrammarConfig
-from rtp_llm.utils.scr_template_lifecycle import (
-    get_template_lifecycle,
-    template_phase_active,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -116,9 +112,7 @@ def _read_worker_fault_trace(fault_file: BinaryIO | None) -> str:
     except (OSError, ValueError):
         return ""
     truncated = len(raw_trace) > _MAX_WORKER_FAULT_TRACE_BYTES
-    trace = raw_trace[:_MAX_WORKER_FAULT_TRACE_BYTES].decode(
-        "utf-8", errors="replace"
-    )
+    trace = raw_trace[:_MAX_WORKER_FAULT_TRACE_BYTES].decode("utf-8", errors="replace")
     trace = trace.strip()
     if truncated:
         trace += "\n[worker fatal traceback truncated]"
@@ -171,20 +165,16 @@ class GrammarValidator:
         grammar_config: GrammarConfig,
         admission_config: GrammarAdmissionConfig,
     ) -> None:
-        self._result_cache_max_entries = int(
-            admission_config.result_cache_max_entries
-        )
+        self._result_cache_max_entries = int(admission_config.result_cache_max_entries)
         if self._result_cache_max_entries < 0:
             raise ValueError(
                 "grammar admission result_cache_max_entries must be non-negative"
             )
         self._result_cache_lock = threading.Lock()
-        self._result_cache: OrderedDict[
-            tuple[str, str], _GrammarCheckResult
-        ] = OrderedDict()
-        self._initialize_compiler(
-            tokenizer_info_json, grammar_config, admission_config
+        self._result_cache: OrderedDict[tuple[str, str], _GrammarCheckResult] = (
+            OrderedDict()
         )
+        self._initialize_compiler(tokenizer_info_json, grammar_config, admission_config)
         self._worker_tokenizer_info_json = tokenizer_info_json
         self._worker_grammar_config = grammar_config
         self._worker_admission_config = admission_config
@@ -228,81 +218,28 @@ class GrammarValidator:
         # for the same key to execute more than once. Keep one in-flight Future per exact
         # grammar so duplicate requests share the leader's compile result.
         self._inflight_lock = threading.Lock()
-        self._inflight: dict[
-            tuple[str, str], Future[_GrammarCheckResult]
-        ] = {}
-        self._template_paused = False
-        self._template_hook_name = f"grammar-validator:{id(self)}"
+        self._inflight: dict[tuple[str, str], Future[_GrammarCheckResult]] = {}
         self._live = 0
         self._spawning = 0
         self._coordinator_running = False
         self._mp = multiprocessing.get_context("spawn")
         self._idle = queue.Queue()
-        get_template_lifecycle().register(self._template_hook_name, self)
-        # A template participant must not carry compiler children into the
-        # snapshot.  The first validation after release creates the pool.
-        if not template_phase_active():
-            self._ensure_pool()  # warm N workers in the background; never blocks init
+        # Sandbox workers impose RLIMIT_AS; capturing them after CUDA initialization
+        # prevents their address space from being restored. Validation still lazily
+        # creates the pool on the first request after restore.
+        if (
+            os.environ.get("SCR_ENABLE") == "1"
+            and os.environ.get("SCR_PHASE") == "checkpoint"
+        ):
+            logger.info(
+                "SCR checkpoint: defer grammar sandbox pool until first validation"
+            )
+        else:
+            self._ensure_pool()  # warm workers in the background
 
         worker_limit_mb = max(0, self._worker_memory_limit_bytes // 1024 // 1024)
         msg = f"GrammarValidator mode=sandbox compile_backend=on queue_timeout_s={self._queue_timeout_s:g} compile_timeout_s={self._compile_timeout_s:g} compiler_threads={self._compile_threads} compiler_cache_bytes={self._cache_limit_bytes} result_cache_max_entries={self._result_cache_max_entries} pool={self._pool_target} worker_memory_limit_mb={worker_limit_mb}"
         logger.debug(msg)
-
-    def prepare_for_template(self, generation: str) -> None:
-        """Stop admission and tear down sandbox children before SCR arrival."""
-        with self._inflight_lock:
-            if self._inflight:
-                raise GrammarCheckUnavailable(
-                    "grammar validation has in-flight requests at template barrier"
-                )
-        self._template_paused = True
-        with self._pool_lock:
-            self._pool_target_before_template = self._pool_target
-            self._pool_target = 0
-            self._coordinator_running = False
-        while True:
-            try:
-                proc, conn, fault_file = self._idle.get_nowait()
-            except queue.Empty:
-                break
-            try:
-                conn.close()
-            except Exception:
-                pass
-            try:
-                if proc.is_alive():
-                    proc.terminate()
-                proc.join(timeout=1)
-            except Exception:
-                pass
-            try:
-                fault_file.close()
-            except Exception:
-                pass
-        with self._pool_lock:
-            self._live = 0
-            self._spawning = 0
-        logger.info("grammar sandbox paused for template generation=%s", generation)
-
-    def restore_fixup(self, generation: str) -> None:
-        # Children are intentionally created only after final release.
-        return None
-
-    def release_template(self, generation: str) -> None:
-        self._template_paused = False
-        with self._pool_lock:
-            self._pool_target = getattr(
-                self, "_pool_target_before_template", self._pool_target
-            )
-        logger.info("grammar sandbox released for template generation=%s", generation)
-
-    def abort_template(self, generation: str) -> None:
-        self._template_paused = False
-        with self._pool_lock:
-            self._pool_target = getattr(
-                self, "_pool_target_before_template", self._pool_target
-            )
-        self._ensure_pool()
 
     # -- public entry points (shape checks first, then maybe compile) ------- #
 
@@ -355,8 +292,6 @@ class GrammarValidator:
         """Memoized full admission result for ``spec``. Once grammar validation is enabled, an
         unavailable check rejects the request instead of letting a risky grammar reach the engine.
         """
-        if getattr(self, "_template_paused", False):
-            raise GrammarCheckUnavailable("grammar validation paused for template barrier")
         logger.debug(
             _with_request_id(
                 f"GrammarValidator: start sandbox check grammar kind={kind}"
@@ -366,9 +301,7 @@ class GrammarValidator:
             # no sort_keys: validate/cache the exact string xgrammar will compile.
             spec_str = spec if isinstance(spec, str) else json.dumps(spec)
         except Exception as e:
-            detail = (str(e) or type(e).__name__)[
-                :_MAX_COMPILE_ERROR_MESSAGE_LENGTH
-            ]
+            detail = (str(e) or type(e).__name__)[:_MAX_COMPILE_ERROR_MESSAGE_LENGTH]
             logger.warning(
                 _with_request_id(
                     f"GrammarValidator: cannot serialize grammar spec ({detail}); rejecting it"
@@ -392,9 +325,7 @@ class GrammarValidator:
             )
             raise
         except Exception as e:
-            detail = (str(e) or type(e).__name__)[
-                :_MAX_COMPILE_ERROR_MESSAGE_LENGTH
-            ]
+            detail = (str(e) or type(e).__name__)[:_MAX_COMPILE_ERROR_MESSAGE_LENGTH]
             logger.warning(
                 _with_request_id(
                     f"GrammarValidator: unexpected grammar check failure ({detail}); request may be retried"
@@ -450,9 +381,7 @@ class GrammarValidator:
                 if self._inflight.get(key) is future:
                     del self._inflight[key]
 
-    def _get_cached_result(
-        self, key: tuple[str, str]
-    ) -> _GrammarCheckResult | None:
+    def _get_cached_result(self, key: tuple[str, str]) -> _GrammarCheckResult | None:
         if self._result_cache_max_entries == 0:
             return None
         with self._result_cache_lock:
@@ -461,9 +390,7 @@ class GrammarValidator:
                 self._result_cache.move_to_end(key)
             return result
 
-    def _cache_result(
-        self, key: tuple[str, str], result: _GrammarCheckResult
-    ) -> None:
+    def _cache_result(self, key: tuple[str, str], result: _GrammarCheckResult) -> None:
         if self._result_cache_max_entries == 0:
             return
         with self._result_cache_lock:
@@ -767,9 +694,7 @@ class GrammarValidator:
             if owned_worker is not None:
                 retire_owned()
 
-    def _retire(
-        self, proc: Any, conn: Any, fault_file: BinaryIO | None = None
-    ) -> None:
+    def _retire(self, proc: Any, conn: Any, fault_file: BinaryIO | None = None) -> None:
         """Kill a dead/bad worker, drop it from the live count, and schedule a background
         replacement so the pool self-heals to its target."""
         if conn is not None:

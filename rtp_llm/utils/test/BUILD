@@ -196,3 +196,9 @@ py_test(
         "//rtp_llm:utils",
     ],
 )
+
+py_test(
+    name = "scr_local_comm_test",
+    srcs = ["scr_local_comm_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
