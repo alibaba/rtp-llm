@@ -70,7 +70,7 @@ class ObservationRegistryTest(unittest.TestCase):
                 ctx = NS(
                     profile="batch-window",
                     smoke_spec=lambda: EnvSpec(),
-                    env_manager=NS(ensure=ensure),
+                    env_manager=NS(ensure=ensure, teardown=Mock()),
                     engine_ops=lambda env: ops,
                     case_dir=lambda name: Path(tmp),
                 )
