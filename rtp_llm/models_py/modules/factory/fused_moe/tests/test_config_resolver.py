@@ -68,6 +68,7 @@ def create_config_adapter(
         model_config=model_config,
         parallelism_config=parallelism_config,
         moe_config=moe_config,
+        quant_config=quant_config,
     )
 
 

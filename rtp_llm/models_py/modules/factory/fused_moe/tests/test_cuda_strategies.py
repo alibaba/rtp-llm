@@ -152,6 +152,7 @@ def create_moe_config_adapter(
         model_config=model_config,
         parallelism_config=parallelism_config,
         moe_config=moe_config,
+        quant_config=model_config.quant_config,
         enable_cuda_graph=enable_cuda_graph,
     )
 
