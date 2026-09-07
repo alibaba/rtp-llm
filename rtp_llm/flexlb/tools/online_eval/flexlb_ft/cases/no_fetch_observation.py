@@ -33,6 +33,10 @@ def normal_no_fetch_observation(ctx):
         label=f"normal_no_fetch_{ctx.profile}",
         master_env={"FLEXLB_DEBUG_ENABLED": "true"},
     )
+    # Labels do not participate in EnvSpec.fingerprint(): a previous debug
+    # case may have the identical reusable configuration and nonzero counters.
+    # This cohort requires a fresh process generation, not merely a new label.
+    ctx.env_manager.teardown()
     env = ctx.env_manager.ensure(spec)
     ops = ctx.engine_ops(env)
     client = DebugClient(f"http://127.0.0.1:{env.master_http_port}")
