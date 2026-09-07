@@ -554,7 +554,7 @@
       "id": "engine_fault_recovery",
       "category": "engine_fault",
       "owner": "agent5",
-      "implementation_status": "candidate_partial",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "engine_fault_down_phases",
         "engine_fault_flap",
@@ -567,23 +567,22 @@
         "engine_fault_recovery_kv_usage_reset"
       ],
       "candidate_contracts": [
-        "engine_fault_recovery_generation_bump",
-        "engine_fault_status_gap_no_bump"
-      ],
-      "pending_contracts": [
         "engine_fault_crash_after",
         "engine_fault_down_phases",
         "engine_fault_flap",
+        "engine_fault_recovery_generation_bump",
         "engine_fault_recovery_kv_resync",
         "engine_fault_recovery_kv_usage_reset",
         "engine_fault_recovery_no_resurrect",
-        "engine_fault_status_gap_long_retire"
+        "engine_fault_status_gap_long_retire",
+        "engine_fault_status_gap_no_bump"
       ],
+      "pending_contracts": [],
       "candidate_counts": {
         "logical_scenarios": 1,
-        "variants": 2,
-        "instances": 8,
-        "checks": 48
+        "variants": 9,
+        "instances": 31,
+        "checks": 298
       },
       "source_files": [
         "scenarios/engine_fault/engine_fault_recovery.yaml"
@@ -749,15 +748,14 @@
       "replacement_status": "retain_legacy_pending_paired_evidence",
       "static_review": {
         "status": "passed_at_revision",
-        "revision": "7d2f37123b142b2889ae347b9c6fbc33ea7108b7",
+        "revision": "b79e9bac80f0fe6aa8d3b71ce8d169cef82edcfd",
         "reviewed_contracts": [
           "kv_hot_prefix_tension",
+          "kv_leader_saturation_spill",
           "kv_match_mixed",
           "kv_prefix_stickiness"
         ],
-        "unreviewed_candidate_contracts": [
-          "kv_leader_saturation_spill"
-        ],
+        "unreviewed_candidate_contracts": [],
         "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
       },
       "candidate_scenario_ids": [

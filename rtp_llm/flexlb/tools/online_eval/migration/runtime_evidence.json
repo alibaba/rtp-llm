@@ -151,6 +151,137 @@
           "sha256": "81f9ce731ec705bede61727b10718d9a3d85d1af06c5f57cbfde40b2a9ff96a3"
         }
       ]
+    },
+    {
+      "kind": "real_java_selected_candidates",
+      "source_revision": "5affc1c6de64fc8a1bf0d74dc3789d035c9a7307",
+      "scope": "Two batch-window Master lifecycle representatives only; not all 25 Master instances or paired legacy replacement acceptance.",
+      "evidence_root": "/tmp/agent1-yaml-evidence/master5aff",
+      "independent_runtime_review": "passed_selected_instances_by_agent3",
+      "instances": [
+        {
+          "id": "master_lifecycle::kill_single::batch-window",
+          "status": "PASS",
+          "grade": "normal",
+          "duration_ms": 17453,
+          "checks": 9,
+          "cleanup_statuses": [
+            "PASS",
+            "PASS",
+            "PASS",
+            "PASS"
+          ]
+        },
+        {
+          "id": "master_lifecycle::kill_dual_b_to_a::batch-window",
+          "status": "PASS",
+          "grade": "normal",
+          "duration_ms": 108478,
+          "checks": 13,
+          "cleanup_statuses": [
+            "PASS",
+            "PASS",
+            "PASS",
+            "PASS",
+            "PASS"
+          ]
+        }
+      ],
+      "summary": {
+        "total": 2,
+        "passed": 2,
+        "failed": 0,
+        "errors": 0,
+        "timeouts": 0,
+        "finding_confirmed": 0,
+        "finding_resolved": 0,
+        "exit_code": 0,
+        "profile": "batch-window",
+        "grade": "normal",
+        "parallel": 1,
+        "wall_time_s": 126.182
+      },
+      "source_verification": {
+        "verified_files": 783,
+        "source_mismatches": [],
+        "jar_mismatches": []
+      },
+      "jars": [
+        {
+          "name": "flexlb-api-1.0.0-SNAPSHOT.jar",
+          "sha256": "0602971206b1fdb0b158ec7a71a8389b15fe8879b4962daeca1fb59db9938278"
+        },
+        {
+          "name": "flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar",
+          "sha256": "0bdbfcf8205daed79cd985608e207679a9a2193bf5958dc670e2249e05ff3baa"
+        }
+      ],
+      "release_observation": {
+        "ports_checked": 200,
+        "busy_ports": [],
+        "owned_jvm_count": 8,
+        "owned_remaining": [],
+        "locks_reacquired": [
+          true,
+          true,
+          true
+        ],
+        "limitations": "Earlier post-audit port 61000 briefly busy, cause unassigned; final release free. PPID1 zombie shell wrapper101647 remained outside the owned JVM set; no claim that every OS process disappeared. Final 200-port range is supported by archived release-audit and collection command; the original port-scan MCP envelope was not retained."
+      },
+      "artifacts": [
+        {
+          "file": "source-manifest.json",
+          "sha256": "046087ec6ff54469ea56c6d44181bc408587986aa4c91f2618d62c6460c72707"
+        },
+        {
+          "file": "source-jar-verification.json",
+          "sha256": "9c82cc5d2c68a6ad98283221f6fa2d86a8c666e9b7713dd031e3c5488756b0de"
+        },
+        {
+          "file": "parent-dryrun.json",
+          "sha256": "acee014bf9ada561ff19618f9d4bba349bf21769070b67d6faabe81827e9786e"
+        },
+        {
+          "file": "master-two/aggregate.json",
+          "sha256": "b1f65a416819ad64a43ed9048ada7e5611d5b93195ca55c7c9fe8ea3c79b58d6"
+        },
+        {
+          "file": "master-two/manifest.json",
+          "sha256": "39b5baee14a4f01b03e6faa766488d03008374bd7e4dc33e72d38fbb6d5a8683"
+        },
+        {
+          "file": "master-two/lane0/part0-yaml/scenarios.json",
+          "sha256": "75a0f022881d353a2682e6dd6440b43601520f6b91903e5cfcc838c34617b2cf"
+        },
+        {
+          "file": "master-two-live-lock-audit.json",
+          "sha256": "ebd1597ee973fe83405fda16647abe305b7d9eca4c316cdaee543cb5f63eea64"
+        },
+        {
+          "file": "master-two-post-audit.json",
+          "sha256": "ba4fd1926d9914b6cb3e5ad0a04ffe463e537c7d43e3b89494d485f7a15287be"
+        },
+        {
+          "file": "release-audit.json",
+          "sha256": "7c6e105ce17280c0422bed7595b62f5508cf507198e8feae363e329cd55b2b41"
+        },
+        {
+          "file": "lease-release.json",
+          "sha256": "04353ec6f94699a61ad2a668ed7cfb4ac65cb9d374965cf9a773ce9b6a8a748c"
+        },
+        {
+          "file": "final-process-audit.json",
+          "sha256": "280db1aba5fb9d5d45f50ad7414a6ce4689d22a9fc208ac4dbb314202ad050bc"
+        },
+        {
+          "file": "master-two/lane0/part0-yaml/instances/instance-90ef592edf09c5dcdbbb6dd6143cb34243727aafa8f61491271add8ea49e81f6/result.json",
+          "sha256": "4355a74b799cd54b2241a13a57d31b1e6d78f8484efcd3cc17ac1172309252db"
+        },
+        {
+          "file": "master-two/lane0/part0-yaml/instances/instance-bbb5608367a28ebf53ee32c3742e08777d9a6837a49f5080ba4e03ebbb03d09b/result.json",
+          "sha256": "1cd581aee0e312ba1ee6b3a73245ef126dccee212b5fd2dca826cf14d1160a2f"
+        }
+      ]
     }
   ]
 }

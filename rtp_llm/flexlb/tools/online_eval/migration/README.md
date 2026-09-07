@@ -19,7 +19,8 @@ contracts are assigned explicitly to existing families, never silently dropped.
   marked migrated merely because a pilot has a similar name or parses correctly.
 - `runtime_evidence.json` anchors selected real Java results to source revisions,
   artifact hashes and cleanup observations. The three admission passes apply
-  only to their named batch-window instances. The earlier elastic P6 failure
+  only to their named batch-window instances; the Master passes likewise cover only
+  two named lifecycle instances. The earlier elastic P6 failure
   remains recorded as unresolved; selected passes are not a full execution census.
 
 Run `python3 migration/audit_manifest.py --out PATH` from `online_eval` to verify
