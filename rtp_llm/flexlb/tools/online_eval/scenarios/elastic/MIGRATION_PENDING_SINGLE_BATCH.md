@@ -71,5 +71,7 @@ Negative fixtures bypass the modeled batch cap (so the pending estimate must
 fail), inject an earlier completed count, return the non-batch stream path, and
 exercise recovery19/20 versus18/20. The same shared40s/50s boundary tests remain in
 the pending suite. None of these modeled results execute Java's SINGLE decision.
-Independent static review and a fixed-SHA real single-batch run remain required;
-legacy single-batch remains available until acceptance.
+Independent static review passed at `df767a6e93af21cc4a436adc34e7b4ee725446a6`
+on core4e2139 (95 elastic tests rerun independently). A fixed-SHA real
+single-batch run and new/old comparison remain required; legacy single-batch
+remains available until acceptance.

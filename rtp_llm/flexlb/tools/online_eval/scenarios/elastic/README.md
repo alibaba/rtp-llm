@@ -197,8 +197,9 @@ engine completion, the 40s terminal boundary, empty/cancelled terminals, recover
 19/20 versus 18/20, and missing owner counters. Independent static review passed
 at `33f9d1d1e0f7f64af5e9af2691e55435fd984034`, for the batch-window legacy
 terminal candidate only. Real Java acceptance remains pending; legacy code stays
-available. The separate single-batch candidate still requires independent
-static review and real Java acceptance.
+available. The separate single-batch candidate passed independent static review
+at `df767a6e93af21cc4a436adc34e7b4ee725446a6` on core4e2139 with95 elastic
+tests rerun independently. Its real Java acceptance remains pending.
 
 ## Steady recovery variant
 
