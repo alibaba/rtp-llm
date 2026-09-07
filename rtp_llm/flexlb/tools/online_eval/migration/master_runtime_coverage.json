@@ -12,10 +12,21 @@
   "instances": [
     {
       "id": "client_fallback_failback::all_masters_down::batch-window",
-      "runtime_status": "NOT_RUN",
+      "runtime_status": "PASS",
       "independent_acceptance": "pending",
       "execution_group": "batch-window",
-      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json"
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json",
+      "duration_ms": 77530,
+      "error": null,
+      "cleanup_statuses": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "result_evidence": "/tmp/agent1-yaml-evidence/master-remaining5aff/batch-window/lane0/part0-yaml/instances/instance-0588cbd009a0bc75119b5b86269add6856e211116585a7463c31969c5ef8ce78/result.json",
+      "result_sha256": "d9fdf6bca259206b1e0bbfe267bbd9f7a4dd67f81d047fe24d9b6e210e09e836",
+      "failure_stages": []
     },
     {
       "id": "client_fallback_failback::all_masters_down::single-batch",
@@ -26,10 +37,21 @@
     },
     {
       "id": "client_fallback_failback::all_masters_down::single-nonbatch",
-      "runtime_status": "NOT_RUN",
+      "runtime_status": "PASS",
       "independent_acceptance": "pending",
       "execution_group": "single-nonbatch",
-      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/single-nonbatch.json"
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/single-nonbatch.json",
+      "duration_ms": 77363,
+      "error": null,
+      "cleanup_statuses": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "result_evidence": "/tmp/agent1-yaml-evidence/master-remaining5aff/single-nonbatch/lane0/part0-yaml/instances/instance-03cc7f35281c24fa2294943c67c755adeddc5ed23ed91b597d40113a09af6bef/result.json",
+      "result_sha256": "34c1ef640443e7e0b4fc9004548b77e14d8fb7da609c1a9d6dcf7c770aef6ea1",
+      "failure_stages": []
     },
     {
       "id": "client_fallback_failback::all_masters_down::window-nonbatch",
@@ -40,10 +62,22 @@
     },
     {
       "id": "client_fallback_failback::direct_generate_error::batch-window",
-      "runtime_status": "NOT_RUN",
+      "runtime_status": "PASS",
       "independent_acceptance": "pending",
       "execution_group": "batch-window",
-      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json"
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json",
+      "duration_ms": 10460,
+      "error": null,
+      "cleanup_statuses": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "result_evidence": "/tmp/agent1-yaml-evidence/master-remaining5aff/batch-window/lane0/part0-yaml/instances/instance-5584c1f4912e27cd11b59fb13713a1c00f685fb92110588adb83a44ef88fa9b1/result.json",
+      "result_sha256": "af2f211ed18082a79ef9a4c69ab0587ae94bd333610746ccbd84951f12a66ea0",
+      "failure_stages": []
     },
     {
       "id": "client_fallback_failback::direct_generate_error::single-batch",
@@ -54,10 +88,22 @@
     },
     {
       "id": "client_fallback_failback::direct_generate_error::single-nonbatch",
-      "runtime_status": "NOT_RUN",
+      "runtime_status": "PASS",
       "independent_acceptance": "pending",
       "execution_group": "single-nonbatch",
-      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/single-nonbatch.json"
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/single-nonbatch.json",
+      "duration_ms": 11450,
+      "error": null,
+      "cleanup_statuses": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "result_evidence": "/tmp/agent1-yaml-evidence/master-remaining5aff/single-nonbatch/lane0/part0-yaml/instances/instance-07fcc4c101f5447a07cc9dc85ff5adba60f5a65832346277d0765a6fba3366cf/result.json",
+      "result_sha256": "9a970895d61bedfbda2fc360b48846ed6657cdc38dd8d9c3863beb4794d814ed",
+      "failure_stages": []
     },
     {
       "id": "client_fallback_failback::direct_generate_error::window-nonbatch",
@@ -68,17 +114,47 @@
     },
     {
       "id": "client_fallback_failback::negative_errorcode::batch-window",
-      "runtime_status": "NOT_RUN",
+      "runtime_status": "PASS",
       "independent_acceptance": "pending",
       "execution_group": "batch-window",
-      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json"
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json",
+      "duration_ms": 94643,
+      "error": null,
+      "cleanup_statuses": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "result_evidence": "/tmp/agent1-yaml-evidence/master-remaining5aff/batch-window/lane0/part0-yaml/instances/instance-f11df85362ef4b7dce325ec1dc5f97f211cdb94be358437a6873ebde6e502854/result.json",
+      "result_sha256": "f6ff5c111091489e0bad13f795dc12e5b52251b73ca128eaa1284c5b726bd28a",
+      "failure_stages": []
     },
     {
       "id": "client_fallback_failback::wraparound::batch-window",
-      "runtime_status": "NOT_RUN",
+      "runtime_status": "TIMEOUT",
       "independent_acceptance": "pending",
       "execution_group": "batch-window",
-      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json"
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json",
+      "duration_ms": 131941,
+      "error": "StageTimeout: stage wall-clock deadline expired",
+      "cleanup_statuses": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "result_evidence": "/tmp/agent1-yaml-evidence/master-remaining5aff/batch-window/lane0/part0-yaml/instances/instance-2a4bd9e058561f63527a4c7de9f11bd362176f9d292a9171ed2ca124e943df77/result.json",
+      "result_sha256": "3a5f4256ed6b7ab6c2480f81d3df2ee7ea8155fdfa621adb2f2c715c88ce728c",
+      "failure_stages": [
+        {
+          "id": "clean_a",
+          "status": "TIMEOUT",
+          "error": "StageTimeout: stage wall-clock deadline expired"
+        }
+      ]
     },
     {
       "id": "client_fallback_failback::wraparound::single-batch",
@@ -89,10 +165,29 @@
     },
     {
       "id": "client_fallback_failback::wraparound::single-nonbatch",
-      "runtime_status": "NOT_RUN",
+      "runtime_status": "TIMEOUT",
       "independent_acceptance": "pending",
       "execution_group": "single-nonbatch",
-      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/single-nonbatch.json"
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/single-nonbatch.json",
+      "duration_ms": 133400,
+      "error": "StageTimeout: stage wall-clock deadline expired",
+      "cleanup_statuses": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "result_evidence": "/tmp/agent1-yaml-evidence/master-remaining5aff/single-nonbatch/lane0/part0-yaml/instances/instance-31737f4752e9c0352c6d51f7845ed2844eebdfae721d8709099e97de52656a16/result.json",
+      "result_sha256": "1896ebd5d908799a7c83b061ca08c9cbf13319b3cff899f409c4c0a1c9b263dd",
+      "failure_stages": [
+        {
+          "id": "clean_a",
+          "status": "TIMEOUT",
+          "error": "StageTimeout: stage wall-clock deadline expired"
+        }
+      ]
     },
     {
       "id": "client_fallback_failback::wraparound::window-nonbatch",
@@ -103,10 +198,19 @@
     },
     {
       "id": "master_coldstart::burst_twenty::batch-window",
-      "runtime_status": "NOT_RUN",
+      "runtime_status": "PASS",
       "independent_acceptance": "pending",
       "execution_group": "batch-window",
-      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json"
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json",
+      "duration_ms": 18538,
+      "error": null,
+      "cleanup_statuses": [
+        "PASS",
+        "PASS"
+      ],
+      "result_evidence": "/tmp/agent1-yaml-evidence/master-remaining5aff/batch-window/lane0/part0-yaml/instances/instance-e61d3160beb8a64f419e92c243338d1743c0b3bff5f7eb0a3abe96bec3f76b83/result.json",
+      "result_sha256": "eae0872df4680a4e73cb43f009d176eb94dcad34806a9ed9275073201583180e",
+      "failure_stages": []
     },
     {
       "id": "master_coldstart::burst_twenty::single-batch",
@@ -117,10 +221,19 @@
     },
     {
       "id": "master_coldstart::burst_twenty::single-nonbatch",
-      "runtime_status": "NOT_RUN",
+      "runtime_status": "PASS",
       "independent_acceptance": "pending",
       "execution_group": "single-nonbatch",
-      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/single-nonbatch.json"
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/single-nonbatch.json",
+      "duration_ms": 19038,
+      "error": null,
+      "cleanup_statuses": [
+        "PASS",
+        "PASS"
+      ],
+      "result_evidence": "/tmp/agent1-yaml-evidence/master-remaining5aff/single-nonbatch/lane0/part0-yaml/instances/instance-57c68f2bea2cd8b5e77ab1d822987011763a2124e817292e9a29d992a5ffdc11/result.json",
+      "result_sha256": "8e22880fce00c40791665cdd6a4260b7b741bab90c7599bb4a6d95a64a3df1b3",
+      "failure_stages": []
     },
     {
       "id": "master_coldstart::burst_twenty::window-nonbatch",
@@ -131,24 +244,67 @@
     },
     {
       "id": "master_dispatch_quota::single_prefill_ttl::batch-window",
-      "runtime_status": "NOT_RUN",
+      "runtime_status": "ERROR",
       "independent_acceptance": "pending",
       "execution_group": "batch-window",
-      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json"
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json",
+      "duration_ms": 45200,
+      "error": "KeyError: 'PREFILL'",
+      "cleanup_statuses": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "result_evidence": "/tmp/agent1-yaml-evidence/master-remaining5aff/batch-window/lane0/part0-yaml/instances/instance-c7b904908ccf0223ae796394cdc242c7ec9191e255682377a611cd00c68491f6/result.json",
+      "result_sha256": "fff86bcd9bdea2a6594184ee5b528b527ccbb50ba666ae286a1924d5d8f52040",
+      "failure_stages": [
+        {
+          "id": "blocked",
+          "status": "ERROR",
+          "error": "KeyError: 'PREFILL'"
+        }
+      ]
     },
     {
       "id": "master_ha_failover::standalone_a_to_b::batch-window",
-      "runtime_status": "NOT_RUN",
+      "runtime_status": "PASS",
       "independent_acceptance": "pending",
       "execution_group": "batch-window",
-      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json"
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json",
+      "duration_ms": 79529,
+      "error": null,
+      "cleanup_statuses": [
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "result_evidence": "/tmp/agent1-yaml-evidence/master-remaining5aff/batch-window/lane0/part0-yaml/instances/instance-a21a7d2a6bf9a9d2742dba8a9d440040da17a4d74e06a5eb916c4a260a07c2d3/result.json",
+      "result_sha256": "8797f0607b38f7d38ad657e48e4b2c4efd80e549c0a0eff8d8354087c87d5a0f",
+      "failure_stages": []
     },
     {
       "id": "master_lifecycle::freeze_short_long::batch-window",
-      "runtime_status": "NOT_RUN",
+      "runtime_status": "FAIL",
       "independent_acceptance": "pending",
       "execution_group": "batch-window",
-      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json"
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/batch-window.json",
+      "duration_ms": 100243,
+      "error": null,
+      "cleanup_statuses": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "result_evidence": "/tmp/agent1-yaml-evidence/master-remaining5aff/batch-window/lane0/part0-yaml/instances/instance-bc329be9cb4ace28b0a25a7a6d12b86332d1d64572a508911439f43d286dfcf7/result.json",
+      "result_sha256": "55a378914d52335f61ccd2b80ae130051dbee0e238a6049cfd5cef7176634be0",
+      "failure_stages": [
+        {
+          "id": "continuity",
+          "status": "FAIL",
+          "error": null
+        }
+      ]
     },
     {
       "id": "master_lifecycle::freeze_short_long::single-batch",
@@ -159,10 +315,27 @@
     },
     {
       "id": "master_lifecycle::freeze_short_long::single-nonbatch",
-      "runtime_status": "NOT_RUN",
+      "runtime_status": "FAIL",
       "independent_acceptance": "pending",
       "execution_group": "single-nonbatch",
-      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/single-nonbatch.json"
+      "dry_run_evidence": "/tmp/agent4-master-remaining-plans/single-nonbatch.json",
+      "duration_ms": 99936,
+      "error": null,
+      "cleanup_statuses": [
+        "PASS",
+        "PASS",
+        "PASS",
+        "PASS"
+      ],
+      "result_evidence": "/tmp/agent1-yaml-evidence/master-remaining5aff/single-nonbatch/lane0/part0-yaml/instances/instance-7cea58e65937e27659b2ce4d9db263ce5d06e809fc0b2c35d0ff886214092adb/result.json",
+      "result_sha256": "62377cc869ba19e646628ef634a0f73d65f11f68ef53c0e0229a839d2637e153",
+      "failure_stages": [
+        {
+          "id": "continuity",
+          "status": "FAIL",
+          "error": null
+        }
+      ]
     },
     {
       "id": "master_lifecycle::freeze_short_long::window-nonbatch",
@@ -182,6 +355,133 @@
       "runtime_status": "PASS",
       "independent_acceptance": "accepted",
       "evidence_root": "/tmp/agent1-yaml-evidence/master5aff"
+    }
+  ],
+  "execution_groups": [
+    {
+      "id": "batch-window-remaining-eight",
+      "source_commit": "5affc1c6de64fc8a1bf0d74dc3789d035c9a7307",
+      "evidence_root": "/tmp/agent1-yaml-evidence/master-remaining5aff",
+      "status_counts": {
+        "PASS": 5,
+        "FAIL": 1,
+        "TIMEOUT": 1,
+        "ERROR": 1
+      },
+      "aggregate_summary": {
+        "total": 8,
+        "passed": 5,
+        "failed": 3,
+        "errors": 1,
+        "timeouts": 1,
+        "finding_confirmed": 0,
+        "finding_resolved": 0,
+        "exit_code": 1,
+        "profile": "batch-window",
+        "grade": "normal",
+        "parallel": 1,
+        "wall_time_s": 558.384
+      },
+      "independent_acceptance": "pending",
+      "cleanup_scope": "All 27 owned PIDs gone; final 200-port scan free and three locks reacquired. First port61003 busy observation retained. Group release only: lease remains active for serial single-nonbatch group.",
+      "artifacts": [
+        {
+          "file": "batch-window/aggregate.json",
+          "sha256": "765143985349da6aebba1e978ef66a55b56c2ce63ab4417bacb57aa6bb1a811f"
+        },
+        {
+          "file": "batch-window/manifest.json",
+          "sha256": "013fc01b70327ba20c0fc39ee929285e2718cdda0842d40040646864920708ae"
+        },
+        {
+          "file": "batch-window/lane0/part0-yaml/scenarios.json",
+          "sha256": "1432ad6abb2b1142d0294a897625effd9ef31bea55e74fbad387b6063c4fb7ec"
+        },
+        {
+          "file": "source-jar-verification.json",
+          "sha256": "9c82cc5d2c68a6ad98283221f6fa2d86a8c666e9b7713dd031e3c5488756b0de"
+        },
+        {
+          "file": "batch-window-live-lock-audit.json",
+          "sha256": "238e8d335649bffce8a99176491b8459cfe40d006bf2491dcde8307d9c1411b2"
+        },
+        {
+          "file": "batch-window-first-group-audit.json",
+          "sha256": "e18b28b6f0198d33afed1c80ff4ed8d246bd6329664e7764cfccbd837b76a6ab"
+        },
+        {
+          "file": "batch-window-group-audit.json",
+          "sha256": "95f1d7f3865dfb01a18fc4663532c715f4b1721cadad9fa62e6cd4ab63d313ac"
+        },
+        {
+          "file": "1788807861418003000-collect-batch-window.json",
+          "sha256": "06b4c8f4fc8e65db7e6ab2aa2b85b7c88bd55d50d21e9feb0c401d15b828f387"
+        }
+      ]
+    },
+    {
+      "id": "single-nonbatch-remaining",
+      "source_commit": "5affc1c6de64fc8a1bf0d74dc3789d035c9a7307",
+      "evidence_root": "/tmp/agent1-yaml-evidence/master-remaining5aff",
+      "status_counts": {
+        "PASS": 3,
+        "TIMEOUT": 1,
+        "FAIL": 1
+      },
+      "aggregate_summary": {
+        "total": 5,
+        "passed": 3,
+        "failed": 2,
+        "errors": 0,
+        "timeouts": 1,
+        "finding_confirmed": 0,
+        "finding_resolved": 0,
+        "exit_code": 1,
+        "profile": "single-nonbatch",
+        "grade": "normal",
+        "parallel": 1,
+        "wall_time_s": 341.441
+      },
+      "independent_acceptance": "pending",
+      "cleanup_scope": "All 17 owned PIDs gone; final 200-port scan free and three locks reacquired. First port61003 busy observation retained. Group release only, not lease release.",
+      "artifacts": [
+        {
+          "file": "single-nonbatch/aggregate.json",
+          "sha256": "de8408c0e4b5e3bdd000441afbc8f1c8df38cf8a833999a7ef0bd381e09e7449"
+        },
+        {
+          "file": "single-nonbatch/manifest.json",
+          "sha256": "991c17a498682e9b6186dbb71867f4a3af64a2b4d13da66a9b01de04ffdcc483"
+        },
+        {
+          "file": "single-nonbatch/lane0/part0-yaml/scenarios.json",
+          "sha256": "8f51c4203aeeb65604ad5437e4f39595a22a749ca2ad347934ec4cc6d6b6d799"
+        },
+        {
+          "file": "source-jar-verification.json",
+          "sha256": "9c82cc5d2c68a6ad98283221f6fa2d86a8c666e9b7713dd031e3c5488756b0de"
+        },
+        {
+          "file": "single-nonbatch-live-lock-audit.json",
+          "sha256": "51e3c8101f044db04aa974cf5352e2972d38ef998d89aaae3674d4936b158905"
+        },
+        {
+          "file": "single-nonbatch-first-group-audit.json",
+          "sha256": "0fe81a7bd35f56e846fc8cd309fc63b9b834c8b87654e4458e1e3b4258877454"
+        },
+        {
+          "file": "single-nonbatch-group-audit.json",
+          "sha256": "0c204b25be397ac350a0e81716caf2497e26afe2f0c55c84f0a37729183dc722"
+        },
+        {
+          "file": "1788808407735261000-collect-single-nonbatch.json",
+          "sha256": "996b5b5f08f0c9dadf065cf417c6e103ba70ce7d95bd4ddd4d80f4891b621b84"
+        },
+        {
+          "file": "1788808336553247000-collect-single-nonbatch.json",
+          "sha256": "b28a5328dde5f7839b8813631519a5883258b516d339ed439c2e2b31e90d1d7a"
+        }
+      ]
     }
   ]
 }

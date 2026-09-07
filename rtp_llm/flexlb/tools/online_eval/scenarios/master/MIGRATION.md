@@ -212,8 +212,10 @@ readiness convergence grace period. `continuity` uses the immediate scheduler
 count and the later readiness/discovered state, while requiring all three PIDs
 and owners to agree. A pre-freeze nonzero ledger followed by immediate zero
 still FAILs even if the late sample refills: this existing business predicate
-is not removed or moved to make the real failure pass. Missing/invalid evidence
-remains ERROR rather than the old helper's unknown-value bypass.
+is not removed or moved to make the real failure pass. Missing/invalid scheduler or discovered-count evidence remains ERROR rather
+than the old helper's unknown-value bypass. The post-window ready flag is
+compared with true by the continuity predicate; an absent or non-boolean ready
+value yields FAIL, not ERROR.
 
 The new formal-loader tests pin these boundaries on all four profiles. Actual
 runtime evidence from the corrected program is still pending; the original

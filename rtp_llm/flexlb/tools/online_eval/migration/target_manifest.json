@@ -876,7 +876,7 @@
         "logical_scenarios": 1,
         "variants": 3,
         "instances": 6,
-        "checks": 82
+        "checks": 74
       },
       "source_files": [
         "scenarios/master/master_lifecycle.yaml"
@@ -998,7 +998,7 @@
         "logical_scenarios": 1,
         "variants": 4,
         "instances": 13,
-        "checks": 116
+        "checks": 108
       },
       "source_files": [
         "scenarios/master/client_fallback_failback.yaml"
