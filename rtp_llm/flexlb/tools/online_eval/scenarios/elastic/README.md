@@ -48,13 +48,19 @@ legacy function is retained.
 
 ## Ordered lifecycle
 
-`lifecycle.yaml` defines seven explicit `batch-window` variants. `normal` and
+`lifecycle.yaml` defines explicit variants. `normal` and
 `strict` each contain 57 stages and preserve four original lifecycle
-contracts below. The independent 10-stage `rebalance` variant preserves the fifth
+contracts below. The independent 12-stage `rebalance` program preserves the fifth
 contract without preference traffic warming the new worker. `kv_skew_hot` and `kv_skew_cold` retain the two pilot programs
 with their 2P/2D environment and independent execution budgets. The main program
 uses the 2P/4D fault preset, PRIORITY/FIXED_WINDOW/BATCH axes and omitted queue
 timeout. The compiler/runtime interface requires `23b3893059` or a descendant.
+
+Rebalance also has explicit SB/SN/WN variants. All four rebalance profiles use
+the corrected old-worker counter anchor from before add, with the newcomer
+anchor after convergence. Other variants remain BW-only. See
+[MIGRATION_REBALANCE_PROFILES.md](MIGRATION_REBALANCE_PROFILES.md) for the exact
+window correction and protocol fixtures.
 
 | Legacy contract | Actual stage/check or evidence |
 | --- | --- |

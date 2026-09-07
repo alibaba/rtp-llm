@@ -5,8 +5,11 @@ description: Ordered scale-out, measured preference and rebalance, graceful remo
 category: elastic
 profiles:
 - batch-window
+- single-batch
+- single-nonbatch
+- window-nonbatch
 requires:
-- enqueue_batch
+- queue
 legacy_case_ids:
 - elastic_add_flow
 - elastic_remove_flow
@@ -40,6 +43,10 @@ variants:
   - elastic_remove_flow
   - elastic_add_remove_cycle
   - elastic_add_preference
+  profiles:
+  - batch-window
+  requires:
+  - enqueue_batch
 - id: strict
   stage_overrides:
     preference_shares:
@@ -49,6 +56,10 @@ variants:
   - elastic_remove_flow
   - elastic_add_remove_cycle
   - elastic_add_preference
+  profiles:
+  - batch-window
+  requires:
+  - enqueue_batch
 - id: rebalance
   legacy_case_ids:
   - elastic_rebalance
@@ -64,10 +75,18 @@ variants:
       alive: 2
     timeout_s: 35
   - id: rebalance_baseline
-    action: elastic_batch
+    action: elastic_rebalance_batch
     params:
-      count: 50
+      method: FetchResponse
     timeout_s: 240
+  - id: baseline_after
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      offsets_s:
+      - 0
   - id: add
     action: elastic_add
     params:
@@ -91,10 +110,19 @@ variants:
       - $ref: stages.add.output.engine
       offsets_s:
       - 0
-  - id: rebalance_after_add
-    action: elastic_batch
+  - id: rebalance_anchor
+    action: elastic_rebalance_anchor
     params:
-      count: 50
+      old:
+        $ref: stages.baseline_after.output.last
+      new:
+        $ref: stages.rebalance_before.output.last
+      engine:
+        $ref: stages.add.output.engine
+  - id: rebalance_after_add
+    action: elastic_rebalance_batch
+    params:
+      method: FetchResponse
     timeout_s: 240
   - id: rebalance_after
     action: elastic_timeline
@@ -109,7 +137,7 @@ variants:
     action: elastic_share
     params:
       before:
-        $ref: stages.rebalance_before.output.last
+        $ref: stages.rebalance_anchor.output.before
       after:
         $ref: stages.rebalance_after.output.last
       engine:
@@ -120,6 +148,8 @@ variants:
       require_new: true
   - id: teardown
     action: teardown
+  profiles:
+  - batch-window
 - id: kv_skew_hot
   legacy_case_ids:
   - elastic_kv_skew_shrink_hot
@@ -213,6 +243,10 @@ variants:
       victim: hot
   - id: teardown
     action: teardown
+  profiles:
+  - batch-window
+  requires:
+  - enqueue_batch
 - id: kv_skew_cold
   legacy_case_ids:
   - elastic_kv_skew_shrink_cold
@@ -306,6 +340,10 @@ variants:
       victim: cold
   - id: teardown
     action: teardown
+  profiles:
+  - batch-window
+  requires:
+  - enqueue_batch
 - id: steady_recovery
   legacy_case_ids:
   - elastic_steady_state_recovery
@@ -390,6 +428,10 @@ variants:
         $ref: stages.steady.output.window
   - id: teardown
     action: teardown
+  profiles:
+  - batch-window
+  requires:
+  - enqueue_batch
 - id: kv_full_shrink
   legacy_case_ids:
   - elastic_kv_full_shrink
@@ -621,6 +663,10 @@ variants:
     timeout_s: 100
   - id: teardown
     action: teardown
+  profiles:
+  - batch-window
+  requires:
+  - enqueue_batch
 - id: transient_imbalance
   legacy_case_ids:
   - elastic_transient_imbalance_bound
@@ -740,6 +786,280 @@ variants:
         $ref: stages.burst.output.requests
   - id: teardown
     action: teardown
+  profiles:
+  - batch-window
+  requires:
+  - enqueue_batch
+- id: rebalance_single_batch
+  legacy_case_ids:
+  - elastic_rebalance
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: initial_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    timeout_s: 35
+  - id: rebalance_baseline
+    action: elastic_rebalance_batch
+    params:
+      method: FetchResponse
+    timeout_s: 240
+  - id: baseline_after
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      offsets_s:
+      - 0
+  - id: add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.add.output.port
+      present: true
+    timeout_s: 35
+  - id: rebalance_before
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      - $ref: stages.add.output.engine
+      offsets_s:
+      - 0
+  - id: rebalance_anchor
+    action: elastic_rebalance_anchor
+    params:
+      old:
+        $ref: stages.baseline_after.output.last
+      new:
+        $ref: stages.rebalance_before.output.last
+      engine:
+        $ref: stages.add.output.engine
+  - id: rebalance_after_add
+    action: elastic_rebalance_batch
+    params:
+      method: FetchResponse
+    timeout_s: 240
+  - id: rebalance_after
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      - $ref: stages.add.output.engine
+      offsets_s:
+      - 0
+  - id: rebalance_share
+    action: elastic_share
+    params:
+      before:
+        $ref: stages.rebalance_anchor.output.before
+      after:
+        $ref: stages.rebalance_after.output.last
+      engine:
+        $ref: stages.add.output.engine
+      max_share: 0.6
+      old_floor: 0
+      exclusive: true
+      require_new: true
+  - id: teardown
+    action: teardown
+  profiles:
+  - single-batch
+- id: rebalance_single_nonbatch
+  legacy_case_ids:
+  - elastic_rebalance
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: initial_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    timeout_s: 35
+  - id: rebalance_baseline
+    action: elastic_rebalance_batch
+    params:
+      method: GenerateStreamCall
+    timeout_s: 240
+  - id: baseline_after
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      offsets_s:
+      - 0
+  - id: add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.add.output.port
+      present: true
+    timeout_s: 35
+  - id: rebalance_before
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      - $ref: stages.add.output.engine
+      offsets_s:
+      - 0
+  - id: rebalance_anchor
+    action: elastic_rebalance_anchor
+    params:
+      old:
+        $ref: stages.baseline_after.output.last
+      new:
+        $ref: stages.rebalance_before.output.last
+      engine:
+        $ref: stages.add.output.engine
+  - id: rebalance_after_add
+    action: elastic_rebalance_batch
+    params:
+      method: GenerateStreamCall
+    timeout_s: 240
+  - id: rebalance_after
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      - $ref: stages.add.output.engine
+      offsets_s:
+      - 0
+  - id: rebalance_share
+    action: elastic_share
+    params:
+      before:
+        $ref: stages.rebalance_anchor.output.before
+      after:
+        $ref: stages.rebalance_after.output.last
+      engine:
+        $ref: stages.add.output.engine
+      max_share: 0.6
+      old_floor: 0
+      exclusive: true
+      require_new: true
+  - id: teardown
+    action: teardown
+  profiles:
+  - single-nonbatch
+- id: rebalance_window_nonbatch
+  legacy_case_ids:
+  - elastic_rebalance
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: initial_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 2
+      alive: 2
+    timeout_s: 35
+  - id: rebalance_baseline
+    action: elastic_rebalance_batch
+    params:
+      method: GenerateStreamCall
+    timeout_s: 240
+  - id: baseline_after
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      offsets_s:
+      - 0
+  - id: add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.add.output.port
+      present: true
+    timeout_s: 35
+  - id: rebalance_before
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      - $ref: stages.add.output.engine
+      offsets_s:
+      - 0
+  - id: rebalance_anchor
+    action: elastic_rebalance_anchor
+    params:
+      old:
+        $ref: stages.baseline_after.output.last
+      new:
+        $ref: stages.rebalance_before.output.last
+      engine:
+        $ref: stages.add.output.engine
+  - id: rebalance_after_add
+    action: elastic_rebalance_batch
+    params:
+      method: GenerateStreamCall
+    timeout_s: 240
+  - id: rebalance_after
+    action: elastic_timeline
+    params:
+      engines:
+      - prefill-0
+      - prefill-1
+      - $ref: stages.add.output.engine
+      offsets_s:
+      - 0
+  - id: rebalance_share
+    action: elastic_share
+    params:
+      before:
+        $ref: stages.rebalance_anchor.output.before
+      after:
+        $ref: stages.rebalance_after.output.last
+      engine:
+        $ref: stages.add.output.engine
+      max_share: 0.6
+      old_floor: 0
+      exclusive: true
+      require_new: true
+  - id: teardown
+    action: teardown
+  profiles:
+  - window-nonbatch
 stages:
 - id: setup
   action: setup

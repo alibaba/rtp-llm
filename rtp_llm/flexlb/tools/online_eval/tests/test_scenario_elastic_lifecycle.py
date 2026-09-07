@@ -6,6 +6,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
@@ -173,6 +174,9 @@ class LifecycleTests(unittest.TestCase):
         fail_remove=False,
         batch_error=False,
         no_remove_traffic=False,
+        profile="batch-window",
+        driver_factory=None,
+        delayed_old=0,
     ):
         clock = Clock()
         state = dict(
@@ -197,11 +201,15 @@ class LifecycleTests(unittest.TestCase):
         plans = compile_scenarios(
             load_scenarios(ROOT / "scenarios/elastic/lifecycle.yaml"), handlers=handlers
         )
-        plan = next(p for p in plans if p["variant_id"] == variant)
-        self.assertEqual(len(plan["stages"]), 10 if variant == "rebalance" else 57)
+        plan = next(
+            p for p in plans if p["variant_id"] == variant and p["profile"] == profile
+        )
+        self.assertEqual(
+            len(plan["stages"]), 12 if variant.startswith("rebalance") else 57
+        )
         self.assertEqual(
             plan["resource_budget"]["max_dynamic_additions"],
-            1 if variant == "rebalance" else 4,
+            1 if variant.startswith("rebalance") else 4,
         )
 
         with tempfile.TemporaryDirectory() as root:
@@ -230,9 +238,10 @@ class LifecycleTests(unittest.TestCase):
             class Backend:
                 def setup(self, ctx, environment, deadline):
                     sync_file()
-                    return NS(discovery_file=discovery), NS(
-                        master_http_port=1, next_request_id=next_rid
-                    )
+                    ops = NS(master_http_port=1, next_request_id=next_rid)
+                    if driver_factory:
+                        driver_factory(ops, environment, state, clock)
+                    return NS(discovery_file=discovery), ops
 
                 def start_requests(self, ctx, params, deadline):
                     return ctx.register_resource("requests", object())
@@ -300,6 +309,7 @@ class LifecycleTests(unittest.TestCase):
                     )
                 if endpoint == "add_engine":
                     state["adds"] += 1
+                    state["engines"]["prefill-0"]["accepted"] += delayed_old
                     name = f"prefill-{state['adds']+1}"
                     port = 10003 + 2 * state["adds"]
                     state["engines"][name] = dict(
@@ -352,15 +362,20 @@ class LifecycleTests(unittest.TestCase):
                 records.update(
                     record,
                     business_finished=not (batch_error and index == 50),
+                    prefill_addr=state["engines"][name]["grpc_addr"],
                     schedule=dict(status="OK"),
-                    stream=dict(status="OK"),
+                    stream=dict(status="OK", method="FetchResponse"),
                     consumer_exit_s=clock(),
                     transport_terminal_s=clock(),
                 )
 
             with patch.object(e, "_http", side_effect=http), patch.object(
                 e, "ColdFlow", Flow
-            ), patch.object(e.RecordedRequests, "run", run_record), patch.object(
+            ), (
+                nullcontext()
+                if driver_factory
+                else patch.object(e.RecordedRequests, "run", run_record)
+            ), patch.object(
                 life, "_master_get", side_effect=accounting
             ), patch(
                 "flexlb_ft.harness.http_post_json", side_effect=master
@@ -375,6 +390,11 @@ class LifecycleTests(unittest.TestCase):
                 )
             self.assertTrue(state["cleaned"])
             self.assertTrue(all(flow.stopped for flow in flows))
+            state["artifacts"] = [
+                json.loads(p.read_text())
+                for p in (Path(root) / "artifacts").glob("elastic-batch-*.json")
+            ]
+            state["plan"] = plan
         return result, state
 
     def test_normal_and_strict_complete_all_stages_and_four_additions(self):
@@ -409,7 +429,7 @@ class LifecycleTests(unittest.TestCase):
         row = next(s for s in result["stages"] if s["id"] == "rebalance_after_add")
         self.assertEqual(
             {c["id"]: c["status"] for c in row["checks"]},
-            {"complete": "PASS", "no_errors": "FAIL"},
+            {"complete": "PASS", "no_errors": "FAIL", "protocol": "PASS"},
         )
 
     def test_missing_decode_owner_field_is_error(self):

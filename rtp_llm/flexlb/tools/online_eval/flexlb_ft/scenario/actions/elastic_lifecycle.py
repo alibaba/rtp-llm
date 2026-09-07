@@ -264,7 +264,7 @@ def batch(ctx, params, deadline):
     return bounded_batch(ctx, params["count"], deadline)
 
 
-def bounded_batch(ctx, count, deadline, min_success_rate=1.0):
+def bounded_batch(ctx, count, deadline, min_success_rate=1.0, expected_method=None):
     from .elastic import RecordedRequests, completeness
 
     records = RecordedRequests(ctx.ops, ctx.env_epoch, ctx.clock)
@@ -337,7 +337,7 @@ def bounded_batch(ctx, count, deadline, min_success_rate=1.0):
     finish(deadline, cancel=False)
     result = completeness(records.snapshot_records())
     handle = ctx.register_resource("snapshot", result, historical=True)
-    return StageOutput(
+    output = StageOutput(
         output=dict(result=handle),
         checks=[
             CheckResult(
@@ -359,6 +359,26 @@ def bounded_batch(ctx, count, deadline, min_success_rate=1.0):
         ],
         artifacts=[str(path)],
     )
+    if expected_method is not None:
+        admitted = [
+            r
+            for r in records.snapshot_records()
+            if r["schedule"]["status"] == "OK" and r["prefill_addr"]
+        ]
+        methods = [r["stream"]["method"] for r in admitted]
+        output.checks.append(
+            CheckResult(
+                "protocol",
+                (
+                    "PASS"
+                    if methods and all(m == expected_method for m in methods)
+                    else "FAIL"
+                ),
+                actual=methods,
+                expected=expected_method,
+            )
+        )
+    return output
 
 
 def pause_validate(params, plan):
@@ -579,3 +599,7 @@ HANDLERS = [
         checks=frozenset({"scheduler", "prefill_batches", "decode_load"}),
     ),
 ]
+
+from .elastic_rebalance import HANDLERS as REBALANCE_HANDLERS
+
+HANDLERS += REBALANCE_HANDLERS
