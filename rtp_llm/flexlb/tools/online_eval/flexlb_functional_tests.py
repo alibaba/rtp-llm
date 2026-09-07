@@ -71,9 +71,10 @@ from flexlb_ft.cases import (
     PRIORITY_CASES,
     STATUS_CASES,
 )
-from flexlb_ft.context import CaseContext, CaseDef
+from flexlb_ft.context import CaseContext, CaseDef, CaseExecutionError
 from flexlb_ft.grade import GRADES, VERDICT_LABELS, GradeReport, overall_verdict
 from flexlb_ft.harness import PROFILE_CAPS, PROFILES, EnvManager
+from flexlb_ft.registry import validate_cases
 
 # Category reorg: the nine cases/ modules register into their
 # own CATEGORY_CASES lists; the runner concatenates them in the canonical
@@ -90,6 +91,7 @@ ALL_CASES: list[CaseDef] = (
     + ADMISSION_CASES
     + PRIORITY_CASES
 )
+validate_cases(ALL_CASES)
 
 # CLI spelling (kebab-case) -> CaseDef.category (python identifier).
 CATEGORY_ALIASES = {"engine-fault": "engine_fault"}
@@ -98,6 +100,7 @@ CATEGORY_ALIASES = {"engine-fault": "engine_fault"}
 
 STATUS_PASS = "PASS"  # normal case passed (contract-pass)
 STATUS_FAIL = "FAIL"  # normal case failed → exit 1
+STATUS_ERROR = "ERROR"  # execution/evidence unavailable, never a finding
 # Declared-finding probe failed as predicted — the finding stands.
 STATUS_FINDING_CONFIRMED = "FINDING-CONFIRMED"
 # Declared-finding probe unexpectedly passed — the finding was fixed;
@@ -105,7 +108,9 @@ STATUS_FINDING_CONFIRMED = "FINDING-CONFIRMED"
 STATUS_FINDING_RESOLVED = "FINDING-RESOLVED"
 
 
-def classify_outcome(expected_fail: bool, ok: bool) -> str:
+def classify_outcome(
+    expected_fail: bool, ok: bool, execution_error: bool = False
+) -> str:
     """Three-way classification of one case outcome.
 
     Normal cases: PASS / FAIL.  Declared-finding probes (expected_fail —
@@ -114,6 +119,8 @@ def classify_outcome(expected_fail: bool, ok: bool) -> str:
     FINDING-RESOLVED when they unexpectedly pass.  Neither finding class
     enters failed_count / the verdict roll-up / the exit code.
     """
+    if execution_error:
+        return STATUS_ERROR
     if not expected_fail:
         return STATUS_PASS if ok else STATUS_FAIL
     return STATUS_FINDING_RESOLVED if ok else STATUS_FINDING_CONFIRMED
@@ -280,6 +287,7 @@ def main():
         print(f"[{i}/{len(cases)}] {case.name} ... ", end="", flush=True)
         t0 = time.monotonic()
         report: GradeReport | None = None
+        execution_error = False
         try:
             # Fresh id range per case (dedup table in a reused master).
             CaseContext._case_seq += 1
@@ -289,10 +297,12 @@ def main():
                 ok, detail, report = outcome
             else:
                 ok, detail = outcome
+        except CaseExecutionError as e:
+            ok, detail, execution_error = False, f"ERROR: {e}", True
         except Exception as e:
             ok, detail = False, f"EXCEPTION: {e}\n{traceback.format_exc()}"
         duration_ms = int((time.monotonic() - t0) * 1000)
-        status = classify_outcome(case.expected_fail, ok)
+        status = classify_outcome(case.expected_fail, ok, execution_error)
         achieved = report.achieved if report is not None else None
         # Verdict roll-up takes ONLY normal graded cases: an
         # expected_fail graded case's achieved (e.g. kv_storm_hot_churn's
@@ -334,9 +344,9 @@ def main():
         if status == STATUS_PASS:
             passed_count += 1
             print(f"PASS{grade_note} ({duration_ms}ms)")
-        elif status == STATUS_FAIL:
+        elif status in (STATUS_FAIL, STATUS_ERROR):
             failed_count += 1
-            print(f"FAIL{grade_note} ({duration_ms}ms)")
+            print(f"{status}{grade_note} ({duration_ms}ms)")
             if detail:
                 for line in str(detail).split("\n")[:5]:
                     print(f"    {line}")

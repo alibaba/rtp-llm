@@ -388,11 +388,16 @@ master 自身进程级故障与冷启动行为，以及双实例 HA 链路（冻
 
 ## 新增用例
 
-1. 在 `cases/<分类>.py` 用 `@case("name")` 注册函数；docstring 写明场景与期望契约（断言写正确行为而非当前实现，预期挂掉的用例在 docstring 声明）。
+1. 在 `cases/<分类>/<name>.py` 写一个 case，用 `from ...registry import case` 和 `@case("name", category="分类")` 声明。docstring 写明场景与正确行为契约。`elastic.py` 在迁移期间保持原入口。
 2. 需要时声明 `profiles`（限定调度形态）或 `requires`（能力需求，如 `enqueue_batch`）。
 3. 函数返回 `(passed, detail)`；带数值断言时用 `GradeReport` 返回三元组。
-4. `python3 flexlb_functional_tests.py --filter <name>` 单例验证。
-5. 更新本 README 对应分类表，保持与 `--list` 同步。
+4. 在该分类 `__init__.py` 显式导入函数并追加到 `collect_cases` 的函数列表。列表决定默认执行顺序；不要按目录扫描自动排序，不要重排存量 case。
+5. `python3 flexlb_functional_tests.py --cases <name>` 精确选择单例验证；`--list --profile <profile>` 检查适用范围。名称全局唯一，重复或未知 profile/requires 会在执行前报错。
+6. 更新本 README 对应分类表，保持与 `--list` 同步。
+
+共享函数位于 `support/<分类>.py`；底层 mock 操作继续复用 `EngineOps`，环境继续由 `EnvManager` 管理，分级断言继续使用 `GradeReport`。单例文件只显式导入自己需要的组件，专属逻辑留在该文件。新增共享函数不要反向导入 case 文件。
+
+批请求的 schedule ACK、延后 Fetch 和非批开流是不同阶段，复用请求 helper 时先确认其消费和清理时机。文件拆分保持原 case 的超时、窗口、环境 fingerprint、错误码与 finally 清理语义。
 
 ## 更多细节
 

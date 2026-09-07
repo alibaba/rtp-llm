@@ -26,6 +26,10 @@ from .harness import EnvManager, EnvSpec, default_perf, profile_dispatches_batch
 SMOKE_LABEL_PERF = default_perf()
 
 
+class CaseExecutionError(RuntimeError):
+    """Unavailable execution/evidence, distinct from a failed contract assertion."""
+
+
 @dataclass
 class CaseDef:
     """One test case: name, category, callable and optional profile
