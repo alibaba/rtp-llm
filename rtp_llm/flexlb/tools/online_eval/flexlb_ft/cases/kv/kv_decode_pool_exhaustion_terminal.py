@@ -21,7 +21,7 @@ from ...support.kv import (
 @case(
     "kv_decode_pool_exhaustion_terminal",
     category="kv",
-    requires=["enqueue_batch"],
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
     source="KV v2 decode-exhaustion: D-pool reservation 602 + clean recovery",
 )
 def kv_decode_pool_exhaustion_terminal(ctx: CaseContext):
@@ -123,11 +123,18 @@ def kv_decode_pool_exhaustion_terminal(ctx: CaseContext):
         )
         probe_dur = time.monotonic() - t0
         probe_text = err or ""
+        # Per-dispatcher probe typing: "EnqueueBatch rejected" is the
+        # master BATCH dispatcher's wrapper; under NON_BATCH the same
+        # engine reject surfaces as a stream onError (snap.error) — only
+        # the substring family is dispatcher-shared.
         probe_typed = (
             err is not None
-            and "enqueuebatch rejected" in probe_text.lower()
             and "lack_mem" in probe_text.lower()
             and "decode-side" in probe_text.lower()
+            and (
+                not ctx.batch_dispatch()
+                or "enqueuebatch rejected" in probe_text.lower()
+            )
         )
         probe_fast = err is not None and probe_dur < DSAT_PROBE_BOUND_S
 

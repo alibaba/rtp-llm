@@ -8,7 +8,9 @@ from ...support.cancel import _all_engine_names, _ha_env, _master_http, _restore
 
 
 @case(
-    "cancel_prefill_dead_await_terminal", category="cancel", requires=["enqueue_batch"]
+    "cancel_prefill_dead_await_terminal",
+    category="cancel",
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
 )
 def cancel_prefill_dead_await_terminal(ctx: CaseContext):
     """Dead prefill mid-cancel-window: the decode leg is the authority.
@@ -55,7 +57,9 @@ def cancel_prefill_dead_await_terminal(ctx: CaseContext):
         # at the transport layer for sure (port closed), exercising the
         # awaitAuthoritativeTerminal path deterministically.
         ops.stop_engine("prefill-0")
-        ops.cancel(rid, response)
+        # Response only under BATCH — a NON_BATCH response would add the
+        # worker_cancel direct connect at the now-dead prefill port.
+        ops.cancel(rid, response if response.enqueued_by_master else None)
 
         ended = handle.wait_end(30.0)
         inflight_ok, inflight_detail = AssertUtils.inflight_clean(

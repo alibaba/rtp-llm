@@ -31,7 +31,7 @@ from ...support.engine_fault import (
 @case(
     "engine_fault_status_gap_long_retire",
     category="engine_fault",
-    profiles=["batch-window"],  # _recovery_spec pins the fault axes
+    # sb zero-adapt; sn + wn legs smoke-verified (NON_BATCH fence-payload contract holds)
     source="E5: a long status gap must retire the generation and fence its ledger",
 )
 def status_gap_long_retire(ctx: CaseContext):

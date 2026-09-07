@@ -21,7 +21,7 @@ from ...support.cancel import (
 @case(
     "cancel_engine_restarted_tombstoned_settle",
     category="cancel",
-    requires=["enqueue_batch"],
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
 )
 def cancel_engine_restarted_tombstoned_settle(ctx: CaseContext):
     """Engine restart + pre-restart cancel: TOMBSTONED settles immediately.
@@ -79,7 +79,10 @@ def cancel_engine_restarted_tombstoned_settle(ctx: CaseContext):
 
         baseline_cancel = _cancel_rpc_total(ops)
         settle_t0 = time.monotonic()
-        ops.cancel(rid, response)
+        # Response only under BATCH (its batch_id rides the master Cancel);
+        # a NON_BATCH response would add the worker_cancel direct connect
+        # — a second engine-side Cancel and a dead-port RpcError risk.
+        ops.cancel(rid, response if response.enqueued_by_master else None)
         settled_fast = handle.wait_end(CANCEL_SETTLE_BOUND_S)
         settle_latency = time.monotonic() - settle_t0
         # The master settles the slot locally within milliseconds, but the

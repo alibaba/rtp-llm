@@ -18,7 +18,7 @@ from ...support.master import HA_STEADY_S, _check_client_fields
 @case(
     "master_freeze",
     category="master",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
     source="Mode 2 freeze (SIGSTOP→SIGCONT): content-not-lost assertions, "
     "short + long hang tiers (brief p3/p4)",
 )

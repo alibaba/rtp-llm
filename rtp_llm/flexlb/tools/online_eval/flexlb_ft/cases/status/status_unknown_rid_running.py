@@ -20,7 +20,6 @@ from ...support.status import (
 @case(
     "status_unknown_rid_running",
     category="status",
-    profiles=["batch-window"],
     source="P1 status fault family: status_fake_task(running, unknown rid), one-shot",
 )
 def status_unknown_rid_running(ctx: CaseContext):

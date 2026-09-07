@@ -56,8 +56,9 @@ def inflight_ttl_cleanup(ctx: CaseContext):
     population (105s event window); the fleet still serves after the
     release (recovery).
 
-    Profile semantics (v2): the env pins the legacy fault
-    axes (PRIORITY + FIXED_WINDOW + BATCH, no queueTimeoutMs — the Java
+    Profile semantics (v2): PRIORITY ordering over the ctx
+    profile's own decision/dispatcher axes (profile-aware since the
+    tier2 spec unpick), no queueTimeoutMs — the Java
     default 1h cannot expire these requests before the TTL; formerly
     harness.ttl_spec) — the
     declaration stays batch-window (label honesty + regression
@@ -74,8 +75,6 @@ def inflight_ttl_cleanup(ctx: CaseContext):
             discovery="discovery_file",
             config_overrides=ConfigOverride(
                 ordering="priority",
-                decision="fixed_window",
-                dispatcher="batch",
                 queue_timeout_ms=OMIT,
             ),
         )

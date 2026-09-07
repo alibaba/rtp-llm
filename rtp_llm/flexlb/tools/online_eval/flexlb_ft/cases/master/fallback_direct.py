@@ -18,7 +18,7 @@ from ...support.master import HA_STEADY_S, HA_SWITCH_S, _check_client_fields
 @case(
     "fallback_direct",
     category="master",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
     source="scenario 3 positive (brief p7/p8): kill A + kill B (all masters "
     "down) -> ENABLE_FALLBACK -> direct-to-engine streams",
 )

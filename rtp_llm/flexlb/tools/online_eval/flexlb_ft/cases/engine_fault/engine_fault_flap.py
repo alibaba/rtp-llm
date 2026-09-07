@@ -21,7 +21,6 @@ from ...support.engine_fault import MASTER_EVICT_S, _master_http
 @case(
     "engine_fault_flap",
     category="engine_fault",
-    profiles=["batch-window"],  # _elastic_env pins the legacy fault axes
     source="gap G2: rapid /stop_engine+/start_engine oscillation, 3-strike eviction vs re-discovery race",
 )
 def engine_flap(ctx: CaseContext):

@@ -205,7 +205,8 @@ def _fault_spec(ctx: CaseContext) -> EnvSpec:
     master ledger entry of an accepted-but-abandoned request is settled
     by the stale-inflight TTL, not by an immediate terminal (formerly
     harness._fault_spec; queueTimeoutMs stays at the functional-profile
-    60s).
+    60s; decision/dispatcher axes are the ctx profile's own since the
+    tier2 spec unpick).
     """
     return EnvSpec(
         label=f"inject_fault_{ctx.profile}",
@@ -215,8 +216,6 @@ def _fault_spec(ctx: CaseContext) -> EnvSpec:
         master_profile=ctx.profile,
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=60_000,
             stale_inflight_ms=30_000,
         ),
@@ -293,7 +292,9 @@ SYNC_LOG_ROOT = Path(tempfile.gettempdir()) / "flexlb_ft_sync"
 
 
 def _recovery_spec(ctx: CaseContext, suffix: str = "") -> EnvSpec:
-    """Dedicated E1-E6 env: 2P+2D, dynamic file discovery, fault axes, 30s
+    """Dedicated E1-E6 env: 2P+2D, dynamic file discovery, PRIORITY
+    ordering over the profile's own decision/dispatcher axes
+    (profile-aware since the tier2 spec unpick), 30s
     TTL — deliberately a separate label from the shared fault_/kv_ envs.
     A non-empty *suffix* gives a case its OWN env: E2's routing-shape
     assertions (regime A stick / regime B spread) are perturbed by a
@@ -312,8 +313,6 @@ def _recovery_spec(ctx: CaseContext, suffix: str = "") -> EnvSpec:
         discovery="discovery_file",
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=OMIT,
         ),
         # Route ALL master logback output (application/sync/flexlb/pv) into

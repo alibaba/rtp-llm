@@ -8,7 +8,9 @@ from ...support.cancel import _all_engine_names, _ha_env, _master_http, _restore
 
 
 @case(
-    "cancel_decode_retire_closes_fence", category="cancel", requires=["enqueue_batch"]
+    "cancel_decode_retire_closes_fence",
+    category="cancel",
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
 )
 def cancel_decode_retire_closes_fence(ctx: CaseContext):
     """Decode generation retire closes an AWAIT_TERMINAL cancel fence.
@@ -58,7 +60,9 @@ def cancel_decode_retire_closes_fence(ctx: CaseContext):
         # Fence parks in AWAIT_TERMINAL (cancel to the dead prefill port
         # fails at the transport layer), then the decode dies too.
         ops.stop_engine("prefill-0")
-        ops.cancel(rid, response)
+        # Response only under BATCH — a NON_BATCH response would add the
+        # worker_cancel direct connect at the now-dead prefill port.
+        ops.cancel(rid, response if response.enqueued_by_master else None)
         ops.stop_engine("decode-0")
 
         ended = handle.wait_end(45.0)

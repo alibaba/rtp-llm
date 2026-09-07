@@ -19,7 +19,6 @@ from ...support.status import (
 @case(
     "status_unknown_rid_finished",
     category="status",
-    profiles=["batch-window"],
     source="P0 status fault family: status_fake_task(finished, unknown rid), one-shot",
 )
 def status_unknown_rid_finished(ctx: CaseContext):

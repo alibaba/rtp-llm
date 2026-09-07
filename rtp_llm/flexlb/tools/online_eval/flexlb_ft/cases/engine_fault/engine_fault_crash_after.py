@@ -23,7 +23,10 @@ from ...support.engine_fault import (
 @case(
     "engine_fault_crash_after",
     category="engine_fault",
-    profiles=["batch-window"],
+    profiles=[
+        "batch-window",
+        "single-batch",
+    ],  # crash fires at the EnqueueBatch entry (BATCH dispatcher only)
     source="gap G6/G7: /inject type=crash_after (enqueue-count triggered true crash)",
 )
 def inject_crash_after(ctx: CaseContext):
@@ -50,10 +53,12 @@ def inject_crash_after(ctx: CaseContext):
     (and whose memory the crash wiped anyway), must be fully clean.
 
     Profile semantics (v2): the fault fires at the engine's
-    EnqueueBatch entry (BATCH dispatcher only) and _fault_spec pins the
-    legacy fault axes (PRIORITY + FIXED_WINDOW + BATCH) via FLEXLB_CONFIG,
-    so the declaration stays batch-window — re-running under another
-    --profile would execute the identical configuration.
+    EnqueueBatch entry (BATCH dispatcher only) and _fault_spec layers
+    PRIORITY ordering on the ctx profile's own decision/dispatcher axes
+    (profile-aware since the tier2 spec unpick) — so the declaration
+    covers the BATCH-dispatch profiles (batch-window, single-batch);
+    the NON_BATCH dispatch channel never reaches the EnqueueBatch entry,
+    mechanically excluding single-nonbatch / window-nonbatch.
     """
     ops = ctx.engine_ops(ctx.env_manager.ensure(_fault_spec(ctx)))
     base = rid_base(ctx, "engine_fault")

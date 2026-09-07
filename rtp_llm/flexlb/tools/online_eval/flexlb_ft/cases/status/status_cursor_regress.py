@@ -19,7 +19,6 @@ from ...support.status import (
 @case(
     "status_cursor_regress",
     category="status",
-    profiles=["batch-window"],
     source="P1 status fault family: status_cursor_regress(3) — completion cursor rewinds",
 )
 def status_cursor_regress(ctx: CaseContext):

@@ -20,7 +20,6 @@ from ...support.status import (
 @case(
     "status_zombie_fake_running",
     category="status",
-    profiles=["batch-window"],
     source="P2 status fault family (DECLARED FINDING PROBE): persistent fake RUNNING for N ghost rids, >= 2x TTL",
     expected_fail=True,
 )

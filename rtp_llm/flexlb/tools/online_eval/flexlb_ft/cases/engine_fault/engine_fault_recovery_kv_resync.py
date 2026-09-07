@@ -32,7 +32,13 @@ from ...support.engine_fault import (
 @case(
     "engine_fault_recovery_kv_resync",
     category="engine_fault",
-    profiles=["batch-window"],  # _recovery_spec pins the fault axes
+    profiles=["batch-window", "single-batch", "window-nonbatch"],
+    # routing-shape bars calibrated on bw; sb/wn smoke-verified as-is.
+    # single-nonbatch DEFERRED: 6 sampled sn runs swung between <=3/5,
+    # 4/5 and 5/5 holder-stick (3 FAIL / 3 PASS, holder switching sides)
+    # — the spread bar cannot separate the routing variance from the
+    # 5/5 stale-baseline FINDING fingerprint on the SINGLE decision axis,
+    # so the sn registration is parked until that variance is understood.
     source="E2: recovery must rebuild the cache view from a full snapshot",
 )
 def recovery_kv_resync(ctx: CaseContext):

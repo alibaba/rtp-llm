@@ -19,7 +19,6 @@ from ...support.status import (
 @case(
     "status_finished_then_running",
     category="status",
-    profiles=["batch-window"],
     source="P1 status fault family: fake_task sequence — finished replay then persistent RUNNING for a settled rid",
 )
 def status_finished_then_running(ctx: CaseContext):

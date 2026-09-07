@@ -29,7 +29,6 @@ from ...support.engine_fault import (
 @case(
     "engine_fault_recovery_generation_bump",
     category="engine_fault",
-    profiles=["batch-window"],  # _recovery_spec pins the fault axes
     source="E1: engine recovery must publish a fresh endpoint generation",
 )
 def recovery_generation_bump(ctx: CaseContext):

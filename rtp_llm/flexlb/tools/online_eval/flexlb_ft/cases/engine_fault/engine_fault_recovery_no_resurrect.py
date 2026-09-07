@@ -31,7 +31,10 @@ from ...support.engine_fault import (
 @case(
     "engine_fault_recovery_no_resurrect",
     category="engine_fault",
-    profiles=["batch-window"],  # _recovery_spec pins the fault axes
+    profiles=[
+        "batch-window",
+        "single-batch",
+    ],  # crash_after trigger rides EnqueueBatch (BATCH dispatcher only)
     source="E3: pre-outage inflight requests must not resurrect after recovery",
 )
 def recovery_no_resurrect(ctx: CaseContext):

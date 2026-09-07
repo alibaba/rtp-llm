@@ -31,7 +31,6 @@ from ...support.engine_fault import (
 @case(
     "engine_fault_recovery_kv_usage_reset",
     category="engine_fault",
-    profiles=["batch-window"],  # _recovery_spec pins the fault axes
     source="E6: KV usage must restart from zero after a full restart",
 )
 def recovery_kv_usage_reset(ctx: CaseContext):

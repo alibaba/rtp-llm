@@ -21,8 +21,9 @@ def master_quota_block(ctx: CaseContext):
 
     Profile semantics (v2): the quota knob itself
     (dispatcher.maxInflightBatchesPerPrefillWorker) exists only under the
-    BATCH dispatcher, and _quota_spec pins the legacy fault axes (PRIORITY +
-    FIXED_WINDOW + BATCH, maxInflightBatches=1) via config override — the
+    BATCH dispatcher, and _quota_spec layers PRIORITY ordering on the ctx
+    profile's own decision/dispatcher axes with maxInflightBatches=1 via
+    config override (profile-aware since the tier2 spec unpick) — the
     declaration stays batch-window.
     """
     env = ctx.env_manager.ensure(_quota_spec(ctx))

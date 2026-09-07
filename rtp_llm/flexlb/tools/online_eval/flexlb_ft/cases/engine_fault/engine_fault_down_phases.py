@@ -20,7 +20,6 @@ from ...support.engine_fault import MASTER_EVICT_S, _master_http
 @case(
     "engine_fault_down_phases",
     category="engine_fault",
-    profiles=["batch-window"],  # _elastic_env pins the legacy fault axes
     source="flexlb_behavior_test.sh S2/S4 merged — five-phase engine-down assertion set",
 )
 def engine_down_http_stop_prefill(ctx: CaseContext):

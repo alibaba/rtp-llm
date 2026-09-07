@@ -13,13 +13,13 @@ from ...support.status import (
     _prefill_names,
     _run_requests,
     _status_spec,
+    _wait_scheduler_zero,
 )
 
 
 @case(
     "status_duplicate_finished",
     category="status",
-    profiles=["batch-window"],
     source="P1 status fault family: status_duplicate_finished — same terminal reported twice",
 )
 def status_duplicate_finished(ctx: CaseContext):
@@ -47,7 +47,15 @@ def status_duplicate_finished(ctx: CaseContext):
             errs = _run_requests(ops, base, 4, concurrency=4)
             # Fingerprint pair taken INSIDE the replay window (the injection
             # is still armed) — a clear-then-compare pair would only observe
-            # the post-injection calm and never the replay itself.
+            # the post-injection calm and never the replay itself.  The
+            # before baseline must sit on a SETTLED ledger: under the SINGLE
+            # decision axis the ledger release trails the client streams by
+            # a few seconds, so a snapshot taken straight after
+            # _run_requests carries the drain tail and the window would
+            # measure the tail settling, not the replay (batch-window
+            # settles synchronously, which is why the baseline never
+            # needed this gate there).
+            _wait_scheduler_zero(ops)
             before = _inflight_fingerprint(ops)
             time.sleep(5.0)  # replay window: terminals re-delivered
             after = _inflight_fingerprint(ops)

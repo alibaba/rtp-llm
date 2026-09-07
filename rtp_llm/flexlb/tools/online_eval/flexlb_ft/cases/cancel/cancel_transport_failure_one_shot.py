@@ -16,7 +16,9 @@ from ...support.cancel import (
 
 
 @case(
-    "cancel_transport_failure_one_shot", category="cancel", requires=["enqueue_batch"]
+    "cancel_transport_failure_one_shot",
+    category="cancel",
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
 )
 def cancel_transport_failure_one_shot(ctx: CaseContext):
     """One-shot cancel under transport failure: no retry, decode settles.
@@ -63,7 +65,10 @@ def cancel_transport_failure_one_shot(ctx: CaseContext):
         prefill_names = _prefill_names(ops)
         inject_type_all(ops, prefill_names, "cancel_no_respond")
         baseline_cancel = _cancel_rpc_total(ops)
-        ops.cancel(rid, response)
+        # Response only under BATCH — a NON_BATCH response would add the
+        # worker_cancel direct connect: a SECOND engine-side Cancel that
+        # breaks the hard cancel_delta == 1 one-shot assertion below.
+        ops.cancel(rid, response if response.enqueued_by_master else None)
         # Settle window: the decode leg finishes R1 (~4s) and its
         # WorkerStatus terminal settles the slot; a master retry would
         # move the engine counter past 1 inside this window — the

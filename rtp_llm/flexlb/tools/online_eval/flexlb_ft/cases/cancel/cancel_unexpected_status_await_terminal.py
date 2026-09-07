@@ -18,7 +18,7 @@ from ...support.cancel import (
 @case(
     "cancel_unexpected_status_await_terminal",
     category="cancel",
-    requires=["enqueue_batch"],
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
 )
 def cancel_unexpected_status_await_terminal(ctx: CaseContext):
     """Out-of-contract cancel ack: no false success, no false terminal.
@@ -63,7 +63,10 @@ def cancel_unexpected_status_await_terminal(ctx: CaseContext):
         prefill_names = _prefill_names(ops)
         inject_type_all(ops, prefill_names, "cancel_unexpected_status")
         baseline_cancel = _cancel_rpc_total(ops)
-        ops.cancel(rid, response)
+        # Response only under BATCH — a NON_BATCH response would add the
+        # worker_cancel direct connect: a SECOND engine-side Cancel that
+        # breaks the hard cancel_delta == 1 one-shot assertion below.
+        ops.cancel(rid, response if response.enqueued_by_master else None)
         # Settle window: the UNSPECIFIED ack fails the master's mapping,
         # the fence parks in awaitAuthoritativeTerminal and the decode
         # terminal settles the slot; re-sample the counter afterwards so

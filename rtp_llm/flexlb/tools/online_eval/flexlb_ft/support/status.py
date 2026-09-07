@@ -68,7 +68,9 @@ GHOST_RID_OFFSET = 900_000
 
 
 def _status_spec(ctx: CaseContext) -> EnvSpec:
-    """Family env: 2P+2D, legacy fault axes, TTL=30s, queueTimeout=10s.
+    """Family env: 2P+2D, PRIORITY ordering over the profile's own
+    decision/dispatcher axes (profile-aware since the tier2 spec
+    unpick), TTL=30s, queueTimeout=10s.
 
     queueTimeoutMs=10s is the zombie keep-alive bottom line: a request
     whose terminal is suppressed but which keeps appearing RUNNING on the
@@ -84,8 +86,6 @@ def _status_spec(ctx: CaseContext) -> EnvSpec:
         master_profile=ctx.profile,
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=int(QUEUE_TIMEOUT_S * 1000),
             stale_inflight_ms=int(STALE_INFLIGHT_TTL_S * 1000),
         ),

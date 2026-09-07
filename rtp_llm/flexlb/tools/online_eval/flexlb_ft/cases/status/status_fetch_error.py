@@ -22,11 +22,11 @@ def inject_fetch_error(ctx: CaseContext):
 
     Profile semantics (v2): the fault is checked only at the
     engine's fetchResponse entry, which exists only under the BATCH
-    dispatcher — and the env below pins the legacy fault axes
-    (PRIORITY + FIXED_WINDOW + BATCH; formerly harness._fault_spec)
-    via the config override layer, so re-running
-    under another --profile would execute the identical configuration.
-    The declaration stays batch-window (regression efficiency + label
+    dispatcher — and the env below layers PRIORITY ordering on the ctx
+    profile's own decision/dispatcher axes (profile-aware since the
+    tier2 spec unpick; formerly harness._fault_spec)
+    via the config override layer.  The declaration stays batch-window
+    (regression efficiency + label
     honesty); a NON_BATCH master-path generate_error variant is
     dedicated-phase material.
     """
@@ -40,8 +40,6 @@ def inject_fetch_error(ctx: CaseContext):
                 master_profile=ctx.profile,
                 config_overrides=ConfigOverride(
                     ordering="priority",
-                    decision="fixed_window",
-                    dispatcher="batch",
                     queue_timeout_ms=60_000,
                     stale_inflight_ms=30_000,
                 ),

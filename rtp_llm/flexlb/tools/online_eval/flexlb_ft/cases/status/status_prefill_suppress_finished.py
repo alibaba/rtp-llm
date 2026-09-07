@@ -17,7 +17,6 @@ from ...support.status import (
 @case(
     "status_prefill_suppress_finished",
     category="status",
-    profiles=["batch-window"],
     source="P0 status fault family: status_suppress_finished on every prefill",
 )
 def status_prefill_suppress_finished(ctx: CaseContext):

@@ -18,7 +18,6 @@ from ...support.status import (
 @case(
     "status_zombie_completed_running",
     category="status",
-    profiles=["batch-window"],
     source="P1 status fault family: status_zombie_running — completed tasks re-reported RUNNING",
 )
 def status_zombie_completed_running(ctx: CaseContext):

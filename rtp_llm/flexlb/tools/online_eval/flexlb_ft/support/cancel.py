@@ -275,7 +275,17 @@ def _crash_and_restart(ops, engine_name: str) -> tuple:
     inject_type(ops, engine_name, "crash_after", n=1)
     try:
         sacrificial = ops.next_request_id()
-        ops.schedule(sacrificial, timeout_s=8.0)
+        response = ops.schedule(sacrificial, timeout_s=8.0)
+        if not response.enqueued_by_master:
+            # NON_BATCH: Schedule is routing-only — the engine (and its
+            # crash_after trigger) never sees the request until the client
+            # opens the stream, so fire it directly (the _fire_request
+            # schedule+start_stream precedent).
+            ops.start_stream(
+                response,
+                sacrificial,
+                input_pb=ops.build_generate_input(sacrificial),
+            )
     except Exception:
         # The crash may cut the RPC mid-flight — either way the port dies.
         pass

@@ -19,7 +19,6 @@ from ...support.engine_fault import (
 @case(
     "engine_fault_status_gap_no_bump",
     category="engine_fault",
-    profiles=["batch-window"],  # _recovery_spec pins the fault axes
     source="E4: a short status-reporting gap must not retire the generation",
 )
 def status_gap_no_bump(ctx: CaseContext):

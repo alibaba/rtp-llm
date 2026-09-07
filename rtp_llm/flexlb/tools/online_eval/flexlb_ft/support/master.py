@@ -62,7 +62,8 @@ def _quota_spec(ctx: CaseContext) -> EnvSpec:
     """Quota-block env (S3): 1P+1D, maxInflightBatches=1 via config
     override (dispatcher.maxInflightBatchesPerPrefillWorker — the v1 env
     var FLEXLB_BATCH_FIXED_MAX_INFLIGHT_BATCHES has no v2 consumer;
-    formerly harness.quota_spec)."""
+    formerly harness.quota_spec; decision/dispatcher axes are the ctx
+    profile's own since the tier2 spec unpick)."""
     return EnvSpec(
         label=f"fault_quota_{ctx.profile}",
         n_prefill=1,
@@ -72,8 +73,6 @@ def _quota_spec(ctx: CaseContext) -> EnvSpec:
         discovery="discovery_file",
         config_overrides=ConfigOverride(
             ordering="priority",
-            decision="fixed_window",
-            dispatcher="batch",
             queue_timeout_ms=OMIT,
             max_inflight_batches=1,
         ),

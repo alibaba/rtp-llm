@@ -20,7 +20,6 @@ from ...support.priority import (
 @case(
     "atpm_preempt_cancel_tombstoned",
     category="priority",
-    profiles=["single-batch"],
     requires=["enqueue_batch"],
     source="preemption-stages audit (2026-09) — Cancel TOMBSTONED branch",
 )

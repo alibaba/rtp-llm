@@ -15,7 +15,7 @@ from ...support.master import STREAM_TIMEOUT_S, _coldstart_spec
 @case(
     "master_coldstart_burst",
     category="master",
-    profiles=["batch-window"],
+    profiles=["batch-window", "single-nonbatch", "single-batch", "window-nonbatch"],
     source="intake defect regression probe (cold-start first-connect storm)",
 )
 def coldstart_burst(ctx: CaseContext):
