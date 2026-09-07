@@ -57,7 +57,7 @@ class AdmissionTests(unittest.TestCase):
                 min_samples=1,
                 scope="all",
             ),
-            **params
+            **params,
         )
         return admission._check(self.ctx, params, self.deadline).checks[0]
 
@@ -159,3 +159,174 @@ class AdmissionTests(unittest.TestCase):
             if variant == "master_capacity":
                 self.assertEqual(2, overrides["max_outstanding"])
                 self.assertEqual(60000, overrides["queue_timeout_ms"])
+
+
+class AdmissionProgramsTest(unittest.TestCase):
+    """Execute complete shipped programs with explicit external-I/O fixtures."""
+
+    setUp = AdmissionTests.setUp
+    row = AdmissionTests.row
+
+    def run_program(
+        self,
+        variant,
+        profile="batch-window",
+        bad_code=False,
+        bad_latency=False,
+        cleanup_error=False,
+    ):
+        import copy
+        import threading
+        from dataclasses import replace
+
+        from flexlb_ft.scenario.contracts import CheckResult, StageOutput
+        from flexlb_ft.scenario.runtime import execute_instance
+
+        root = Path(__file__).resolve().parents[1] / "scenarios/admission"
+        registry = handlers()
+        registry.update({h.name: h for h in admission.HANDLERS})
+        plans = compile_scenarios(load_scenarios(root), handlers=registry)
+        plan = next(
+            p for p in plans if p["variant_id"] == variant and p["profile"] == profile
+        )
+        state = SimpleNamespace(sent=0, active=False, lock=threading.Lock())
+        test = self
+
+        class Batch:
+            def __init__(self, ctx, params):
+                self.ctx = ctx
+                self.entries = []
+                self.records = []
+
+            def submit(self, deadline):
+                with state.lock:
+                    state.sent += 1
+                    i = state.sent
+                code, text, latency = 200, None, 0.1
+                if variant == "master_capacity" and 2 < i <= 4:
+                    code, text = (
+                        85020 if bad_code else 8502
+                    ), "8502 TooManyRequests QUEUE_FULL"
+                if variant == "slo_deadline" and state.active:
+                    code, text, latency = (
+                        8431,
+                        "queue deadline expired",
+                        (0.5 if bad_latency else 1.5),
+                    )
+                if variant == "queue_depth" and state.active and i >= 3:
+                    code, text = 8510, "queue depth limit exceeded"
+                row = test.row(code, text, latency)
+                row["wire_request_id"] = i
+                self.records = [row]
+                self.entries = [
+                    dict(
+                        record=row,
+                        response=SimpleNamespace(
+                            code=code, success=code == 200, error_message=text or ""
+                        ),
+                    )
+                ]
+
+            def wait(self, deadline):
+                pass
+
+            def cancel(self, reason):
+                pass
+
+            def cleanup(self, deadline):
+                if cleanup_error:
+                    raise RuntimeError("fixture consumer cleanup failed")
+
+            def snapshot_records(self):
+                return copy.deepcopy(self.records)
+
+        def external(handler):
+            def execute(ctx, params, deadline):
+                if handler.name == "engine_inject":
+                    state.active = True
+                if handler.name == "engine_clear":
+                    state.active = False
+                output = {}
+                for key, kind in handler.outputs.items():
+                    output[key] = (
+                        True
+                        if kind == "boolean"
+                        else (
+                            1.0 if kind == "number" else ctx.register_resource(kind, {})
+                        )
+                    )
+                return StageOutput(
+                    output,
+                    [
+                        CheckResult(name, "PASS", detail="external I/O fixture")
+                        for name in handler.checks
+                    ],
+                )
+
+            return replace(handler, execute=execute)
+
+        for name in [
+            "engine_control",
+            "engine_inject",
+            "engine_clear",
+            "master_mark",
+            "master_ready",
+            "master_direct_clean",
+        ]:
+            registry[name] = external(registry[name])
+        backend = SimpleNamespace(
+            setup=lambda *args: (SimpleNamespace(), None), teardown=lambda *args: None
+        )
+        with patch.object(admission, "RequestBatch", Batch), patch.object(
+            admission, "_http", return_value={}
+        ), patch.object(
+            admission,
+            "_engines",
+            side_effect=lambda *args: {
+                f"prefill-{i}": {"waiting": int(state.sent >= 2), "running": 0}
+                for i in range(2)
+            },
+        ):
+            return execute_instance(
+                plan, backend, registry, Path(self.tmp.name) / f"{variant}-{profile}"
+            )
+
+    def test_all_six_compiled_programs_execute_every_declared_check(self):
+        for variant in ("queue_depth", "slo_deadline", "master_capacity"):
+            for profile in ("batch-window", "single-batch"):
+                with self.subTest(variant=variant, profile=profile):
+                    result = self.run_program(variant, profile)
+                    self.assertEqual("PASS", result["status"], result)
+                    self.assertTrue(
+                        all(s["status"] == "PASS" for s in result["stages"])
+                    )
+                    self.assertTrue(
+                        all(c["status"] == "PASS" for c in result["cleanup"])
+                    )
+                    self.assertTrue(
+                        any(
+                            s["action"] == "admission_check" and s["checks"]
+                            for s in result["stages"]
+                        )
+                    )
+
+    def test_wrong_numeric_capacity_code_fails_its_actual_program_check(self):
+        result = self.run_program("master_capacity", bad_code=True)
+        self.assertEqual("FAIL", result["status"], result)
+        stage = next(s for s in result["stages"] if s["id"] == "typed_code")
+        self.assertEqual("FAIL", stage["checks"][0]["status"])
+
+    def test_too_early_slo_failure_is_not_a_valid_queue_deadline(self):
+        result = self.run_program("slo_deadline", bad_latency=True)
+        self.assertEqual("FAIL", result["status"], result)
+        self.assertEqual(
+            "FAIL",
+            next(s for s in result["stages"] if s["id"] == "waited")["checks"][0][
+                "status"
+            ],
+        )
+
+    def test_green_business_checks_cannot_hide_consumer_cleanup_error(self):
+        result = self.run_program("master_capacity", cleanup_error=True)
+        self.assertEqual("ERROR", result["status"], result)
+        self.assertTrue(any(c["status"] == "ERROR" for c in result["cleanup"]))
