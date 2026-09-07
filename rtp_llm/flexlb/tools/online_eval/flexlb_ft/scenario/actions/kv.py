@@ -1,0 +1,375 @@
+"""Per-engine cache evidence and routing checks, composed explicitly by YAML."""
+
+import copy
+import json
+import math
+import uuid
+
+from ...grade import GradeReport
+from ..contracts import CheckResult, StageHandler, StageOutput
+from .elastic import request_success
+from .engine_control import ENGINE_NAME, _engines, _http
+
+
+def _fields(params, allowed, required):
+    if (
+        not isinstance(params, dict)
+        or set(params) - set(allowed)
+        or set(required) - set(params)
+    ):
+        raise ValueError("invalid KV action parameters")
+    return copy.deepcopy(params)
+
+
+def _engine(value, plan):
+    if isinstance(value, dict):
+        plan.reference(value, "string")
+    elif not isinstance(value, str) or not ENGINE_NAME.fullmatch(value):
+        raise ValueError("KV engine must be an explicit name or typed string reference")
+
+
+def _keys(value):
+    if (
+        not isinstance(value, list)
+        or not 1 <= len(value) <= 4096
+        or any(type(k) is not int or not -(2**63) <= k < 2**63 for k in value)
+    ):
+        raise ValueError("KV keys must be a nonempty bounded int64 list")
+
+
+def _target(ctx, value):
+    name = ctx.resolve(value)
+    if not isinstance(name, str) or not ENGINE_NAME.fullmatch(name):
+        raise ValueError("resolved KV target is not an engine name")
+    return name
+
+
+def _artifact(ctx, prefix, value):
+    path = ctx.artifact_dir / f"{prefix}-{uuid.uuid4().hex}.json"
+    path.write_text(json.dumps(value, indent=2))
+    return str(path)
+
+
+def _snapshot(ctx, targets, deadline):
+    entries = _engines(_http(ctx.ops, "snapshot", deadline), targets)
+    for row in entries.values():
+        # An absent key-set is unavailable evidence, never an empty cache.
+        value = row.get("cache_key_set")
+        if not isinstance(value, list) or any(
+            type(k) is not int or not -(2**63) <= k < 2**63 for k in value
+        ):
+            raise ValueError("snapshot lacks a typed cache key set")
+    return dict(engines=entries, sampled_s=ctx.clock(), env_epoch=ctx.env_epoch)
+
+
+def _snapshot_validate(params, plan):
+    p = _fields(params, {"targets", "quiet_s"}, {"targets"})
+    if not isinstance(p["targets"], list) or not 1 <= len(p["targets"]) <= 32:
+        raise ValueError("KV snapshot needs 1..32 explicit targets")
+    for name in p["targets"]:
+        _engine(name, plan)
+    p.setdefault("quiet_s", 0)
+    if (
+        type(p["quiet_s"]) not in (int, float)
+        or not math.isfinite(p["quiet_s"])
+        or not 0 <= p["quiet_s"] <= 30
+    ):
+        raise ValueError("quiet window must be finite and at most 30 seconds")
+    return p
+
+
+def snapshot(ctx, params, deadline):
+    targets = [_target(ctx, value) for value in params["targets"]]
+    if len(set(targets)) != len(targets):
+        raise ValueError("duplicate resolved KV targets")
+    samples, previous, changed = [], None, ctx.clock()
+    try:
+        while True:
+            deadline.check()
+            current = _snapshot(ctx, targets, deadline)
+            samples.append(current)
+            sets = {
+                name: frozenset(row["cache_key_set"])
+                for name, row in current["engines"].items()
+            }
+            if sets != previous:
+                previous, changed = sets, ctx.clock()
+            if ctx.clock() - changed >= params["quiet_s"]:
+                break
+            deadline.sleep(0.5)
+    finally:
+        path = _artifact(ctx, "kv-key-observations", samples)
+    current["quiet_s"] = params["quiet_s"]
+    current["sample_count"] = len(samples)
+    return StageOutput(
+        {"snapshot": ctx.register_resource("kv_snapshot", current)}, artifacts=[path]
+    )
+
+
+def _landing_validate(params, plan):
+    p = _fields(params, {"requests", "phase"}, {"requests"})
+    plan.reference(p["requests"], "requests")
+    p.setdefault("phase", "terminal")
+    if p["phase"] not in ("scheduled", "terminal"):
+        raise ValueError("landing phase must be scheduled or terminal")
+    return p
+
+
+def landing(ctx, params, deadline):
+    records = ctx.resource(params["requests"], "requests").snapshot_records()
+    if len(records) != 1 or records[0]["schedule"]["status"] != "OK":
+        raise ValueError("landing requires exactly one successful Schedule record")
+    record = records[0]
+    if params["phase"] == "terminal" and (
+        not request_success(record)
+        or record.get("consumer_completion_verified") is not True
+    ):
+        raise ValueError("terminal landing lacks successful consumer completion")
+    raw = _http(ctx.ops, "snapshot", deadline)
+    matches = [
+        row
+        for row in raw.get("engines", [])
+        if row.get("grpc_addr") == record["prefill_addr"]
+        and row.get("role") == "prefill"
+    ]
+    if len(matches) != 1:
+        raise ValueError("landing address has no unique prefill engine identity")
+    name = matches[0]["name"]
+    _engines(raw, [name])
+    return StageOutput(
+        {"engine": name},
+        artifacts=[
+            _artifact(
+                ctx,
+                "kv-landing",
+                dict(record=record, engine=matches[0], phase=params["phase"]),
+            )
+        ],
+    )
+
+
+def _evict_validate(params, plan):
+    p = _fields(params, {"engine", "keys"}, {"engine", "keys"})
+    _engine(p["engine"], plan)
+    _keys(p["keys"])
+    return p
+
+
+def _distinct_validate(params, plan):
+    p = _fields(params, {"first", "second"}, {"first", "second"})
+    _engine(p["first"], plan)
+    _engine(p["second"], plan)
+    return p
+
+
+def distinct(ctx, params, deadline):
+    deadline.check()
+    first, second = (_target(ctx, params[key]) for key in ("first", "second"))
+    passed = first != second
+    return StageOutput(
+        {"distinct": passed},
+        [
+            CheckResult(
+                "distinct_holders",
+                "PASS" if passed else "FAIL",
+                actual=[first, second],
+                expected="two distinct prefill engines",
+                evidence=dict(complete=True, sample_count=2, min_samples=2),
+            )
+        ],
+    )
+
+
+def evict(ctx, params, deadline):
+    name = _target(ctx, params["engine"])
+    evidence = dict(
+        before=_snapshot(ctx, [name], deadline), keys=params["keys"], response=None
+    )
+    try:
+        response = _http(
+            ctx.ops, "cache_evict", deadline, {"engine": name, "keys": params["keys"]}
+        )
+        evidence["response"] = response
+        if response.get("status") != "ok" or response.get("engine") != name:
+            raise ValueError("cache eviction lacks owned target acknowledgement")
+        after = _snapshot(ctx, [name], deadline)
+        evidence["after"] = after
+        if (
+            after["engines"][name]["grpc_addr"]
+            != evidence["before"]["engines"][name]["grpc_addr"]
+        ):
+            raise ValueError("cache eviction endpoint changed")
+        remaining = set(params["keys"]) & set(after["engines"][name]["cache_key_set"])
+        evidence.update(complete=True, sample_count=2, min_samples=2)
+    finally:
+        path = _artifact(ctx, "kv-eviction", evidence)
+    return StageOutput(
+        {"snapshot": ctx.register_resource("kv_snapshot", after)},
+        [
+            CheckResult(
+                "evicted",
+                "PASS" if not remaining else "FAIL",
+                actual=sorted(remaining),
+                expected=[],
+                evidence=evidence,
+            )
+        ],
+        [path],
+    )
+
+
+def _prefix_validate(params, plan):
+    p = _fields(
+        params,
+        {"snapshot", "engine", "keys", "expected"},
+        {"snapshot", "engine", "keys", "expected"},
+    )
+    plan.reference(p["snapshot"], "kv_snapshot")
+    _engine(p["engine"], plan)
+    _keys(p["keys"])
+    if type(p["expected"]) is not int or not 0 <= p["expected"] <= len(p["keys"]):
+        raise ValueError("expected contiguous run outside key count")
+    return p
+
+
+def prefix(ctx, params, deadline):
+    deadline.check()
+    data = ctx.resource(params["snapshot"], "kv_snapshot")
+    name = _target(ctx, params["engine"])
+    keys = set(data["engines"][name]["cache_key_set"])
+    run = 0
+    for key in params["keys"]:
+        if key not in keys:
+            break
+        run += 1
+    return StageOutput(
+        {"run": run},
+        [
+            CheckResult(
+                "contiguous_prefix",
+                "PASS" if run == params["expected"] else "FAIL",
+                actual=run,
+                expected=params["expected"],
+                evidence=dict(
+                    complete=True,
+                    sample_count=1,
+                    min_samples=1,
+                    snapshot=data,
+                    engine=name,
+                ),
+            )
+        ],
+    )
+
+
+def _affinity_validate(params, plan):
+    p = _fields(
+        params,
+        {"requests", "holder", "min_samples", "bands"},
+        {"requests", "holder", "min_samples", "bands"},
+    )
+    if not isinstance(p["requests"], list) or not 1 <= len(p["requests"]) <= 100:
+        raise ValueError("affinity requires explicit bounded request cohorts")
+    for value in p["requests"]:
+        plan.reference(value, "requests")
+    _engine(p["holder"], plan)
+    if type(p["min_samples"]) is not int or p["min_samples"] < 1:
+        raise ValueError("affinity requires positive sample floor")
+    bands = p["bands"]
+    if (
+        not isinstance(bands, dict)
+        or set(bands) != {"strict", "normal", "loose"}
+        or any(
+            type(v) not in (int, float) or not math.isfinite(v) or not 0 <= v <= 1
+            for v in bands.values()
+        )
+        or not bands["strict"] >= bands["normal"] >= bands["loose"]
+    ):
+        raise ValueError("affinity requires ordered explicit concentration bands")
+    return p
+
+
+def affinity(ctx, params, deadline):
+    rows = [
+        row
+        for ref in params["requests"]
+        for row in ctx.resource(ref, "requests").snapshot_records()
+    ]
+    if not rows or len({row["wire_request_id"] for row in rows}) != len(rows):
+        raise ValueError("affinity cohort empty or duplicated")
+    if any(row.get("consumer_completion_verified") is not True for row in rows):
+        raise ValueError("affinity cohort lacks consumer exit evidence")
+    name = _target(ctx, params["holder"])
+    holder = _engines(_http(ctx.ops, "snapshot", deadline), [name])[name]
+    share = sum(row["prefill_addr"] == holder["grpc_addr"] for row in rows) / len(rows)
+    complete = len(rows) >= params["min_samples"] and all(
+        request_success(row) for row in rows
+    )
+    report = GradeReport(run_grade=ctx.instance.get("grade", "normal"))
+    passed = report.check("M3", share, bands=params["bands"])
+    evidence = dict(
+        complete=True,
+        sample_count=len(rows),
+        min_samples=params["min_samples"],
+        records=rows,
+        holder=holder,
+        grade=report.run_grade,
+        achieved=report.achieved,
+        bands=params["bands"],
+    )
+    return StageOutput(
+        {"share": share},
+        [
+            CheckResult(
+                "P6",
+                "PASS" if complete else "FAIL",
+                actual=complete,
+                expected=True,
+                evidence=evidence,
+            ),
+            CheckResult(
+                "M3",
+                "PASS" if passed and len(rows) >= params["min_samples"] else "FAIL",
+                actual=share,
+                expected=params["bands"][report.run_grade],
+                evidence=evidence,
+            ),
+        ],
+        [_artifact(ctx, "kv-affinity", evidence)],
+    )
+
+
+HANDLERS = [
+    StageHandler(
+        "kv_snapshot", _snapshot_validate, snapshot, {"snapshot": "kv_snapshot"}
+    ),
+    StageHandler("kv_landing", _landing_validate, landing, {"engine": "string"}),
+    StageHandler(
+        "kv_distinct",
+        _distinct_validate,
+        distinct,
+        {"distinct": "boolean"},
+        checks=frozenset({"distinct_holders"}),
+    ),
+    StageHandler(
+        "kv_evict",
+        _evict_validate,
+        evict,
+        {"snapshot": "kv_snapshot"},
+        checks=frozenset({"evicted"}),
+    ),
+    StageHandler(
+        "kv_prefix_check",
+        _prefix_validate,
+        prefix,
+        {"run": "integer"},
+        checks=frozenset({"contiguous_prefix"}),
+    ),
+    StageHandler(
+        "kv_affinity_check",
+        _affinity_validate,
+        affinity,
+        {"share": "number"},
+        checks=frozenset({"P6", "M3"}),
+    ),
+]

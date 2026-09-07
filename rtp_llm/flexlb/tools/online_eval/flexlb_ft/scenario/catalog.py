@@ -4,6 +4,7 @@ from .actions.balance import HANDLERS as BALANCE_HANDLERS
 from .actions.elastic import HANDLERS as ELASTIC_HANDLERS
 from .actions.engine_control import HANDLERS as ENGINE_CONTROL_HANDLERS
 from .actions.engine_fault import HANDLERS as ENGINE_FAULT_HANDLERS
+from .actions.kv import HANDLERS as KV_HANDLERS
 from .actions.master import HANDLERS as MASTER_HANDLERS
 from .actions.observation import HANDLERS as OBSERVATION_HANDLERS
 from .actions.rpc_measurement import HANDLERS as RPC_MEASUREMENT_HANDLERS
@@ -17,6 +18,7 @@ def handlers():
         *ELASTIC_HANDLERS,
         *ENGINE_CONTROL_HANDLERS,
         *ENGINE_FAULT_HANDLERS,
+        *KV_HANDLERS,
         *MASTER_HANDLERS,
         *OBSERVATION_HANDLERS,
         *RPC_MEASUREMENT_HANDLERS,
