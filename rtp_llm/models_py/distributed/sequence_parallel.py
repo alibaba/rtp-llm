@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 
@@ -95,6 +95,56 @@ def sequence_parallel_layout(
     )
 
 
+def sequence_parallel_layout_from_attention_inputs(
+    attention_inputs: Any,
+    *,
+    physical_tokens: int,
+    world_size: int,
+    rank: int,
+) -> SequenceParallelLayout:
+    """Build a physical token layout from framework attention metadata."""
+
+    is_target_verify = bool(getattr(attention_inputs, "is_target_verify", False))
+    if is_target_verify:
+        mode: ForwardMode = "target_verify"
+    elif attention_inputs.is_prefill:
+        mode = "prefill"
+    else:
+        mode = "decode"
+
+    physical_requests = int(attention_inputs.input_lengths.numel())
+    logical_tokens = int(
+        getattr(attention_inputs, "logical_token_count", 0) or physical_tokens
+    )
+    logical_requests = int(
+        getattr(attention_inputs, "logical_request_count", 0) or physical_requests
+    )
+    tokens_per_request = 0
+    if mode != "prefill":
+        if physical_requests <= 0 or physical_tokens % physical_requests:
+            raise ValueError(
+                f"{mode} physical tokens must be uniform by request: "
+                f"tokens={physical_tokens}, requests={physical_requests}"
+            )
+        tokens_per_request = physical_tokens // physical_requests
+
+    return sequence_parallel_layout(
+        mode=mode,
+        logical_requests=logical_requests,
+        physical_requests=physical_requests,
+        tokens_per_request=tokens_per_request,
+        logical_tokens=logical_tokens,
+        physical_tokens=physical_tokens,
+        world_size=world_size,
+        rank=rank,
+        graph_batch_size=(
+            physical_requests
+            if bool(getattr(attention_inputs, "is_cuda_graph", False))
+            else 0
+        ),
+    )
+
+
 def shard_physical_tokens(
     tensor: torch.Tensor,
     layout: SequenceParallelLayout,
@@ -109,71 +159,10 @@ def shard_physical_tokens(
     return tensor.narrow(0, layout.local_start, layout.local_tokens).contiguous()
 
 
-# Compatibility helpers for callers that have not moved padding to the model
-# boundary yet. New token-SP paths should use ``SequenceParallelLayout`` and
-# ``shard_physical_tokens`` so no layer allocates padding storage.
-@dataclass(frozen=True)
-class TokenShardLayout:
-    logical_tokens: int
-    local_tokens: int
-    local_start: int
-    local_valid_tokens: int
-
-
-def token_shard_layout(
-    logical_tokens: int,
-    world_size: int,
-    rank: int,
-) -> TokenShardLayout:
-    if logical_tokens < 0:
-        raise ValueError(f"logical_tokens must be non-negative, got {logical_tokens}")
-    if world_size <= 0:
-        raise ValueError(f"world_size must be positive, got {world_size}")
-    if rank < 0 or rank >= world_size:
-        raise ValueError(f"rank must be in [0, {world_size}), got {rank}")
-    local_tokens = (logical_tokens + world_size - 1) // world_size
-    local_start = rank * local_tokens
-    return TokenShardLayout(
-        logical_tokens=logical_tokens,
-        local_tokens=local_tokens,
-        local_start=local_start,
-        local_valid_tokens=max(0, min(local_tokens, logical_tokens - local_start)),
-    )
-
-
-def shard_tokens(tensor: torch.Tensor, layout: TokenShardLayout) -> torch.Tensor:
-    if tensor.ndim == 0 or int(tensor.shape[0]) != layout.logical_tokens:
-        raise ValueError(
-            "token shard expects dim0 to equal logical_tokens: "
-            f"shape={tuple(tensor.shape)}, logical={layout.logical_tokens}"
-        )
-    if layout.local_valid_tokens == layout.local_tokens:
-        return tensor.narrow(0, layout.local_start, layout.local_tokens).contiguous()
-    local = tensor.new_zeros((layout.local_tokens, *tensor.shape[1:]))
-    if layout.local_valid_tokens:
-        local.narrow(0, 0, layout.local_valid_tokens).copy_(
-            tensor.narrow(0, layout.local_start, layout.local_valid_tokens)
-        )
-    return local
-
-
-def shard_tokens_with_padding(
-    tensor: torch.Tensor,
-    logical_tokens: int,
-    world_size: int,
-    rank: int,
-) -> tuple[torch.Tensor, int]:
-    layout = token_shard_layout(logical_tokens, world_size, rank)
-    return shard_tokens(tensor, layout), layout.local_valid_tokens
-
-
 __all__ = [
     "ForwardMode",
     "SequenceParallelLayout",
-    "TokenShardLayout",
     "sequence_parallel_layout",
+    "sequence_parallel_layout_from_attention_inputs",
     "shard_physical_tokens",
-    "shard_tokens",
-    "shard_tokens_with_padding",
-    "token_shard_layout",
 ]
