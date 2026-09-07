@@ -130,7 +130,10 @@ JAR hash mismatch, and unchanged Java/build inputs relative to the already built
 interval locks and the output-directory lock. `master-two-post-audit.json`
 retains the initial transient busy port 61000; no root cause is inferred.
 The later `release-audit.json` records no busy ports, all three locks reacquired
-and all eight owned process IDs gone. The unrelated sentinel survived scenario
+and all eight owned process IDs gone. This release JSON is an executor-produced
+record; the raw tool receipt for that final port/lock recheck was not archived,
+so its provenance is weaker than the retained live-lock and process receipts.
+The unrelated sentinel survived scenario
 cleanup. `lease-release.json` confirms lease release; the wrapper was already
 PPID-1 zombie state rather than a live test process.
 
