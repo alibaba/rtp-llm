@@ -81,7 +81,7 @@ stages:
       $ref: stages.seed_first.output.requests
     fleet:
       $ref: stages.fleet.output.snapshot
-  timeout_s: 10
+  timeout_s: 6
 - id: first_holder
   action: kv_landing
   params:

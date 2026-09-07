@@ -8,7 +8,7 @@ The original `kv_pe_prefix_continuity` callable remains retained.
 | --- | --- |
 | 2P/2D, decode12blocks, input10240/output2 | environment and each request shape |
 | Slow both P workers to2000ms, wait1.5s | slow, perf_sync |
-| First Schedule holds a live engine ledger, second lands elsewhere | seed_first, first_pending, seed_second, two_holders |
+| First Schedule holds a live engine ledger within the original6s helper limit, second lands elsewhere | seed_first, first_pending, seed_second, two_holders |
 | BATCH first request performs no Fetch until drain | continuity_batch overrides seed_first consume=deferred |
 | Both seeds finish; restore100ms; key-set quiet >=3.5s within8s | first/second_terminal, restore_perf, seed_quiet |
 | e1 loses key2; e2 loses keys9/10 | carve_gap, carve_tail |

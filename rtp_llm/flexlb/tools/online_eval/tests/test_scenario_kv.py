@@ -124,6 +124,12 @@ class KvScenarioTests(unittest.TestCase):
         plans = self.plans()
         self.assertEqual(len(plans), 4)
         for plan in plans:
+            self.assertEqual(
+                next(row for row in plan["stages"] if row["id"] == "first_pending")[
+                    "timeout_s"
+                ],
+                6,
+            )
             result = self.run_plan(plan, Backend())
             self.assertEqual(result["status"], "PASS", result["error"])
             self.assertEqual(len(result["stages"]), 31)
