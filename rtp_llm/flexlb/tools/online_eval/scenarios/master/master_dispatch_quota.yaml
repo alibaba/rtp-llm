@@ -100,9 +100,7 @@ stages:
     perf:
       prefill_fixed_ms: 100
 - id: ready
-  action: master_ready
-  params:
-    inflight_zero: true
+  action: master_prefill_alive
   timeout_s: 30
 - id: settle
   action: master_mark
