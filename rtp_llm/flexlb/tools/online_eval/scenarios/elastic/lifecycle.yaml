@@ -513,13 +513,20 @@ variants:
       flow:
         $ref: stages.steady_flow.output.flow
     timeout_s: 65
+  - id: steady_end
+    action: elastic_balance_finish_window
+    params:
+      window:
+        $ref: stages.steady.output.window
+      observation:
+        $ref: stages.observe.output.observation
   - id: steady_bounds
     action: elastic_full_steady
     params:
       baseline:
         $ref: stages.baseline.output.window
       steady:
-        $ref: stages.steady.output.window
+        $ref: stages.steady_end.output.window
       newcomer:
         $ref: stages.add_decode.output.engine
   - id: transient_ok
