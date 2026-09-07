@@ -33,7 +33,7 @@ Each check below is qualified as `stage.check`. Windows use the actual Java clie
 | kill_dual_b_to_a | surviving A serves 20 serial recovery requests with >=95% success | recovery_rate.comparison |
 | freeze_short_long | short-hang requests, if issued, complete on B; >=3 post-thaw burst rows all OK on B; post window stays B | short_verdict.short_hang |
 | freeze_short_long | same master process survives freeze | continuity.same_process |
-| freeze_short_long | discovered topology full, no regression, ready after thaw | continuity.discovered_continuity; ready_b.topology |
+| freeze_short_long | discovered topology full, no regression, ready after thaw | continuity.discovered_continuity (post-10s state) |
 | freeze_short_long | if scheduler inflight was nonzero before freeze, it stays >=1 immediately after thaw | continuity.scheduler_continuity |
 | freeze_short_long | long-hang judged window contains failover and at least one A target | retry_seen.criterion; switch_to_a.criterion |
 | freeze_short_long | >=1 pre-freeze issued row, every row has visible success/error terminal | visible_terminal.criterion |
@@ -194,3 +194,27 @@ suite passed 343 tests (74.857s). Full fixed-5aff artifacts subsequently showed
 sample. Thus the observed gate was held by ongoing ledger occupancy, not missing
 topology. This evidence does not establish a leaked ledger or prove that the
 restored 10s legacy predicate will pass under continuing client traffic.
+
+
+## Freeze observation-boundary repair
+
+Fixed 5aff `freeze_short_long::batch-window` remains FAIL. The immediate post-thaw
+state had unchanged PID 130170, full discovered counts 2P/4D, ready=false and
+scheduler_inflight=0 versus pre-freeze 11. The old source checks the immediate
+scheduler count, but reads readiness/discovered state only after a 10s window.
+The migration incorrectly reused the immediate ready flag for the later topology
+predicate, while a separate readiness poll did not feed that predicate.
+
+The corrected program explicitly uses three typed observations: pre-freeze
+scheduler then topology; immediate post-thaw scheduler only; after the 10s
+post-thaw window a single topology/readiness sample only. There is no extra
+readiness convergence grace period. `continuity` uses the immediate scheduler
+count and the later readiness/discovered state, while requiring all three PIDs
+and owners to agree. A pre-freeze nonzero ledger followed by immediate zero
+still FAILs even if the late sample refills: this existing business predicate
+is not removed or moved to make the real failure pass. Missing/invalid evidence
+remains ERROR rather than the old helper's unknown-value bypass.
+
+The new formal-loader tests pin these boundaries on all four profiles. Actual
+runtime evidence from the corrected program is still pending; the original
+scheduler 11-to-0 observation cannot by itself identify the mechanism of change.

@@ -1225,11 +1225,11 @@ def _state_validate(params, plan):
 
 def _state(ctx, params, deadline):
     proc = _process(ctx, params["target"])
-    info = _master_json(ctx, params["target"], "/rtp_llm/master/info", deadline, True)
     inflight = _master_json(ctx, params["target"], "/rtp_llm/inflight_status", deadline)
     count = inflight["scheduler_inflight"]
     if type(count) is not int or count < 0:
         raise ValueError("master state has no valid scheduler count")
+    info = _master_json(ctx, params["target"], "/rtp_llm/master/info", deadline, True)
     topology = {}
     for role in ("PREFILL", "DECODE"):
         value = info["worker_summary"][role]["discovered"]
@@ -1250,8 +1250,52 @@ def _state(ctx, params, deadline):
     return StageOutput({"state": handle}, artifacts=[str(artifact)])
 
 
+def _scheduler_state(ctx, params, deadline):
+    """One immediate scheduler sample without a preceding topology HTTP call."""
+    proc = _process(ctx, params["target"])
+    raw = _master_json(ctx, params["target"], "/rtp_llm/inflight_status", deadline)
+    count = raw["scheduler_inflight"]
+    if type(count) is not int or count < 0:
+        raise ValueError("master state has no valid scheduler count")
+    state = dict(
+        target=params["target"],
+        pid=proc.pid,
+        scheduler_inflight=count,
+        sampled_s=ctx.clock(),
+    )
+    handle = ctx.register_resource("master_state", state, historical=True)
+    artifact = ctx.artifact_dir / f"master-state-{handle['id']}.json"
+    artifact.write_text(json.dumps(dict(state=state, raw=raw), indent=2) + "\n")
+    return StageOutput({"state": handle}, artifacts=[str(artifact)])
+
+
+def _topology_state(ctx, params, deadline):
+    """One post-window readiness/discovered sample, without polling or ledger IO."""
+    proc = _process(ctx, params["target"])
+    raw = _master_json(ctx, params["target"], "/rtp_llm/master/info", deadline, True)
+    topology = {
+        role: raw["worker_summary"][role]["discovered"]
+        for role in ("PREFILL", "DECODE")
+    }
+    if any(type(v) is not int or v < 0 for v in topology.values()):
+        raise ValueError("master state lacks discovered count")
+    state = dict(
+        target=params["target"],
+        pid=proc.pid,
+        ready=raw.get("ready"),
+        topology=topology,
+        sampled_s=ctx.clock(),
+    )
+    handle = ctx.register_resource("master_state", state, historical=True)
+    artifact = ctx.artifact_dir / f"master-state-{handle['id']}.json"
+    artifact.write_text(json.dumps(dict(state=state, raw=raw), indent=2) + "\n")
+    return StageOutput({"state": handle}, artifacts=[str(artifact)])
+
+
 def _continuity_validate(params, plan):
-    p = _params(params, plan, {"before", "after"}, {"before", "after"})
+    p = _params(
+        params, plan, {"before", "after", "settled"}, {"before", "after", "settled"}
+    )
     for key in p:
         plan.reference(p[key], "master_state")
     return p
@@ -1259,15 +1303,16 @@ def _continuity_validate(params, plan):
 
 def _continuity(ctx, params, deadline):
     deadline.check()
-    before, after = [
-        ctx.resource(params[key], "master_state") for key in ("before", "after")
+    before, after, settled = [
+        ctx.resource(params[key], "master_state")
+        for key in ("before", "after", "settled")
     ]
-    if before["target"] != after["target"]:
+    if len({state["target"] for state in (before, after, settled)}) != 1:
         raise ValueError("cannot compare different master owners")
-    identity = before["pid"] == after["pid"]
-    topology = after["ready"] is True and all(
-        after["topology"][role] >= before["topology"][role]
-        and after["topology"][role] == expected
+    identity = before["pid"] == after["pid"] == settled["pid"]
+    topology = settled["ready"] is True and all(
+        settled["topology"][role] >= before["topology"][role]
+        and settled["topology"][role] == expected
         for role, expected in (
             ("PREFILL", ctx.env.spec.n_prefill),
             ("DECODE", ctx.env.spec.n_decode),
@@ -1281,13 +1326,13 @@ def _continuity(ctx, params, deadline):
             CheckResult(
                 "same_process",
                 "PASS" if identity else "FAIL",
-                actual=after["pid"],
+                actual=[after["pid"], settled["pid"]],
                 expected=before["pid"],
             ),
             CheckResult(
                 "discovered_continuity",
                 "PASS" if topology else "FAIL",
-                actual=after["topology"],
+                actual=settled["topology"],
                 expected=before["topology"],
             ),
             CheckResult(
@@ -1306,6 +1351,18 @@ def _continuity(ctx, params, deadline):
 
 HANDLERS += [
     StageHandler("master_state", _state_validate, _state, {"state": "master_state"}),
+    StageHandler(
+        "master_topology_state",
+        _state_validate,
+        _topology_state,
+        {"state": "master_state"},
+    ),
+    StageHandler(
+        "master_scheduler_state",
+        _state_validate,
+        _scheduler_state,
+        {"state": "master_state"},
+    ),
     StageHandler(
         "master_continuity",
         _continuity_validate,
