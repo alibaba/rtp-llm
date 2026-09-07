@@ -2,6 +2,7 @@
 #include "torch/all.h"
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 
 #define private public
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
@@ -493,6 +494,21 @@ TEST_F(NormalEngineTest, testChunkedPrefillWarmupStartup) {
                   {7, 0, 1},
                   {7, 0, 1}}));
     ASSERT_EQ(engine->resourceContext().cache_manager->cacheConfig().block_num, 100);
+}
+
+TEST_F(NormalEngineTest, testChunkedPrefillWarmupCapsIntMaxBudgetByContextBatchSize) {
+    CustomConfig config;
+    config.warm_up                = true;
+    config.prefill_chunk_size     = std::numeric_limits<int>::max();
+    config.max_context_batch_size = 8;
+    config.forward_shapes         = std::make_shared<std::vector<ForwardShape>>();
+    (void)createMockEngine(config);
+
+    ASSERT_EQ(*config.forward_shapes,
+              (std::vector<ForwardShape>{
+                  {19, 0, 1},
+                  {8, 18, 8},
+              }));
 }
 
 TEST_F(NormalEngineTest, testChunkedPrefillLossWarmupUsesWholeSegment) {
