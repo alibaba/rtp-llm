@@ -1,8 +1,8 @@
 # Priority migration checkpoint
 
-Candidate only: 2 of 19 old priority cases. `priority_queue::same_level_fifo`
+Candidate only: 3 of 19 old priority cases. `priority_queue::same_level_fifo`
 maps `prio_same_level_fifo` on `single-nonbatch`. No legacy callable is invoked
-or removed. Three remaining queue cases are pending here. The separate preemption module is owned by agent4.
+or removed. Two remaining queue cases are pending here. The separate preemption module is owned by agent4.
 Default catalog registration is owned by the central framework task; this
 checkpoint's tests explicitly merge the exported HANDLERS.
 
@@ -63,3 +63,24 @@ in fixtures while exact configured gaps/quiet periods are separately asserted.
 An unfinished stream fails the final completion check. Missing records raise
 ERROR. Existing FIFO seven-request tests still run unchanged in scope; tests
 load only priority_queue.yaml so independent preemption definitions coexist.
+
+## Queue expiry
+
+`queue_timeout_terminal` maps `prio_queue_timeout_terminal`, single-nonbatch
+T1 1P4D/PRIORITY/SINGLE/NON_BATCH/delivery1/wait8/queueTimeout8000.
+Prefill10000ms+1.5s -> priority70 placeholder Schedule settles -> at least one
+Prefill waiting/running within6s at0.1s intervals -> 30,30,30,70 wave at0.15s
+including last gap. All wave Schedule workers settle before the placeholder
+35s drain, followed by each wave consumer's own35s drain. Schedule90 and
+Generate120 remain unchanged. No extra owner-clean verdict is inserted: the
+old timeout case only used hygiene in finally. Explicit restore and owned
+teardown remain, with registered cleanup on failure.
+
+`expiry.P6` requires the placeholder success and all four exact Schedule8511
+responses. `expiry.PR8` uses max of three low Schedule-settled minus per-worker
+submitted timestamps divided by8, via GradeReport at the instance grade;
+strict1.25/normal1.50/loose2 come from the registry. No lower bound is added.
+Whole-program external-RPC fixtures verify one actual consumer/four rejected
+requests, wrong8503 FAIL and stage ordering. A measured-record fixture checks
+1.4 ratio strictFAIL/normalPASS. Synthetic immediate expiry fixtures are not
+real8s deadline measurements and do not claim Java coverage.

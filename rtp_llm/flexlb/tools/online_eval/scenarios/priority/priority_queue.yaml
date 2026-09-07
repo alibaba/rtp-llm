@@ -5,6 +5,7 @@ category: priority
 legacy_case_ids:
 - prio_same_level_fifo
 - prio_low_no_starvation
+- prio_queue_timeout_terminal
 profiles:
 - single-nonbatch
 environment:
@@ -242,6 +243,111 @@ variants:
     params:
       expected_prefill: 2
       prefill_fixed_ms: 100
+  - id: teardown
+    action: teardown
+    timeout_s: 120
+- id: queue_timeout_terminal
+  legacy_case_ids:
+  - prio_queue_timeout_terminal
+  environment_overrides:
+    n_prefill: 1
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms: 8000
+      max_inflight_requests_per_worker: 1
+      max_waiting_requests_per_prefill_worker: 8
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: priority_fleet
+  - id: slow
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 10000
+  - id: sync
+    action: balance_pause
+    params:
+      seconds: 1.5
+  - id: placeholder
+    action: priority_start
+    timeout_s: 95
+    params:
+      serial_schedule: true
+      gap_s: 0
+      requests:
+      - tag: h1
+        priority: 70
+        input_len: 2048
+        output_len: 2
+  - id: pending
+    action: priority_pending
+    timeout_s: 6
+    params:
+      prefill:
+        $ref: stages.fleet.output.prefill
+      requests:
+        $ref: stages.placeholder.output.requests
+  - id: wave
+    action: priority_start
+    timeout_s: 15
+    params:
+      gap_s: 0.15
+      requests:
+      - tag: low0
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: low1
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: low2
+        priority: 30
+        input_len: 2048
+        output_len: 2
+      - tag: h2
+        priority: 70
+        input_len: 2048
+        output_len: 2
+  - id: wave_settled
+    action: priority_settled
+    timeout_s: 95
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+  - id: placeholder_terminal
+    action: priority_wait
+    timeout_s: 35
+    params:
+      requests:
+        $ref: stages.placeholder.output.requests
+  - id: wave_terminal
+    action: priority_wait
+    timeout_s: 235
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+  - id: expiry
+    action: priority_expiry
+    params:
+      placeholder:
+        $ref: stages.placeholder.output.requests
+      wave:
+        $ref: stages.wave.output.requests
+  - id: restore
+    action: engine_control
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.prefill
+      perf:
+        prefill_fixed_ms: 100
   - id: teardown
     action: teardown
     timeout_s: 120
