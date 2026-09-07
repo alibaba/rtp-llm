@@ -499,6 +499,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
                     AuthoritativeTerminalOwner.ENGINE_FENCE);
         }
 
+        /** Settle the exact protected reservation from an authoritative peer-role terminal. */
+        public void settleAuthoritativeTerminal() {
+            endpoint.settleAuthoritativeTerminal(authoritativeTerminalProof());
+        }
+
         @Override
         public void close() {
             endpoint.closeEngineFenceExact(this);
@@ -1284,7 +1289,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
             }
         }
         if (!decodeRequests.containsKey(requestId)
-                && (proof.owner == AuthoritativeTerminalOwner.ENGINE_FENCE
+                && ((proof.owner == AuthoritativeTerminalOwner.WORKER_STATUS
+                        && exactState)
+                    || proof.owner == AuthoritativeTerminalOwner.ENGINE_FENCE
                     || proof.owner
                         == AuthoritativeTerminalOwner.DISPATCH_REJECTION
                     || exactProtection)) {

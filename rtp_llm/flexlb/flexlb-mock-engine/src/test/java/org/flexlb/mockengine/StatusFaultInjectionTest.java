@@ -388,16 +388,18 @@ class StatusFaultInjectionTest {
         assertEquals(1, prefill.getCompletedCount(),
                 "the request DID complete internally");
 
-        // The report keeps it RUNNING forever and never publishes finished.
+        long cursor = 0L;
+        // The first report publishes the real terminal; later reports retain
+        // only the stale RUNNING entry after the caller advances its cursor.
         for (int i = 0; i < 3; i++) {
-            EngineRpcService.WorkerStatusPB status = workerStatus(prefill, 0);
+            EngineRpcService.WorkerStatusPB status = workerStatus(prefill, cursor);
             assertEquals(1, status.getRunningTaskInfoCount(),
                     "zombie must stay in runningTaskInfo (poll " + i + ")");
             assertEquals("51", status.getRunningTaskInfo(0).getRequestId());
-            assertEquals(0, status.getFinishedTaskListCount(),
-                    "zombie must never appear in finishedTaskList (poll " + i + ")");
-            assertEquals(0, status.getLatestFinishedVersion(),
-                    "no completion version is ever published (poll " + i + ")");
+            assertEquals(i == 0 ? 1 : 0, status.getFinishedTaskListCount(),
+                    "the completion must be published exactly once to this cursor");
+            assertTrue(status.getLatestFinishedVersion() > 0L);
+            cursor = status.getLatestFinishedVersion();
             Thread.sleep(50);
         }
 
@@ -420,15 +422,16 @@ class StatusFaultInjectionTest {
 
         // One decode step (1ms) finishes internally.
         Thread.sleep(150);
+        long cursor = 0L;
         for (int i = 0; i < 3; i++) {
-            EngineRpcService.WorkerStatusPB status = workerStatus(decode, 0);
+            EngineRpcService.WorkerStatusPB status = workerStatus(decode, cursor);
             assertEquals(1, status.getRunningTaskInfoCount(),
                     "decode zombie must stay in runningTaskInfo (poll " + i + ")");
             assertEquals("61", status.getRunningTaskInfo(0).getRequestId());
-            assertEquals(0, status.getFinishedTaskListCount(),
-                    "decode zombie must never appear in finishedTaskList (poll " + i + ")");
-            assertEquals(0, status.getLatestFinishedVersion(),
-                    "no decode completion version is published (poll " + i + ")");
+            assertEquals(i == 0 ? 1 : 0, status.getFinishedTaskListCount(),
+                    "the decode completion must be published exactly once to this cursor");
+            assertTrue(status.getLatestFinishedVersion() > 0L);
+            cursor = status.getLatestFinishedVersion();
             Thread.sleep(50);
         }
         assertEquals(0, decode.getInflightCount(),

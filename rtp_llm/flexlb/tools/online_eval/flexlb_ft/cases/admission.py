@@ -510,6 +510,13 @@ def admission_master_capacity(ctx: CaseContext):
             for code, msg, _ in rejected
         )
 
+        # Stream completion precedes the Master's asynchronous WorkerStatus
+        # terminal reduction. Wait for those permits to be returned before
+        # probing recovery; otherwise a delayed status poll looks like a
+        # permanently exhausted admission gate.
+        capacity_released, capacity_release_detail = AssertUtils.inflight_clean(
+            _master_http(ops), 15.0
+        )
         for n in names:
             ops.set_perf(n, prefill_fixed_ms=100.0)
         rid5 = ops.next_request_id(base)
@@ -531,6 +538,7 @@ def admission_master_capacity(ctx: CaseContext):
             and not serve_failures
             and reject_fast
             and reject_typed
+            and capacity_released
             and err5 is None
             and inflight_ok
         )
@@ -539,6 +547,7 @@ def admission_master_capacity(ctx: CaseContext):
             f"(fast={reject_fast}, typed_8502_queue_full={reject_typed}, "
             f"types={reject_types[:2]}), "
             f"serve_failures={serve_failures[:1]}, "
+            f"capacity_released={capacity_released}({capacity_release_detail}), "
             f"sequential_recovery={err5 is None}{err5_detail}, "
             f"inflight_clean={inflight_ok}({inflight_detail})"
         )
@@ -1184,6 +1193,9 @@ def _master_side_parked(ops, prefill_names, decode_names) -> tuple:
     if data is None:
         return -1, "inflight_status unavailable"
     sched = int(data.get("scheduler_inflight", 0))
+    if "scheduler_blocked" in data:
+        blocked = int(data.get("scheduler_blocked", 0))
+        return blocked, f"blocked={blocked}, sched={sched}"
     snap = ops.snapshot_by_name()
 
     def live(n: str) -> int:

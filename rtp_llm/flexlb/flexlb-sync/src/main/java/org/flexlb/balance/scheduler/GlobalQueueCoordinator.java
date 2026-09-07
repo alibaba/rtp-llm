@@ -146,6 +146,15 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
     }
 
+    int blockedSize() {
+        lock.lock();
+        try {
+            return blockedRequests.size();
+        } finally {
+            lock.unlock();
+        }
+    }
+
     private void runDecisionLoop() {
         try {
             while (!closed.get()) {

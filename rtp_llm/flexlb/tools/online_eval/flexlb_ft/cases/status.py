@@ -391,7 +391,13 @@ def _log_count(env, anchor: str) -> int:
     stdout redirect (mp.log_file) the old reader watched — a structural
     0 there.  Cases take a before/after delta because the shared env
     keeps one master log across cases."""
-    flexlb_log = Path.home() / "ai-whale" / "logs" / "flexlb.log"
+    flexlb_log = Path(
+        getattr(
+            env,
+            "flexlb_log_path",
+            Path.home() / "ai-whale" / "logs" / "flexlb.log",
+        )
+    )
     offset = getattr(env, "flexlb_log_offset", 0)
     try:
         with open(flexlb_log, "rb") as fh:
@@ -2318,6 +2324,13 @@ def status_special_ids(ctx: CaseContext):
                     else ops.build_generate_input(target_rid, output_len=2)
                 )
                 handle = ops.start_stream(response, target_rid, input_pb=input_pb)
+                # Deliver the malformed fact while the 3s Prefill is live, then
+                # remove it before the real completion. Keeping a duplicate rid
+                # through completion overwrites the real terminal in the
+                # response-local id map and tests cursor loss instead of the
+                # special batch-id lookup contract.
+                time.sleep(1.0)
+                clear_type_all(ops, names, "status_fake_task")
                 handle.wait_end(STREAM_TIMEOUT_S)
                 if handle.snap.error:
                     target_err = str(handle.snap.error)
@@ -2576,6 +2589,9 @@ def status_duplicate_finished(ctx: CaseContext):
         inject_type_all(ops, names, "status_duplicate_finished")
         try:
             errs = _run_requests(ops, base, 4, concurrency=4)
+            baseline_clean, baseline_detail = AssertUtils.inflight_clean(
+                _master_http(ops), 30.0
+            )
             # Fingerprint pair taken INSIDE the replay window (the injection
             # is still armed) — a clear-then-compare pair would only observe
             # the post-injection calm and never the replay itself.
@@ -2602,9 +2618,10 @@ def status_duplicate_finished(ctx: CaseContext):
         }
         master_ok = _master_ok(ops)
 
-        passed = ok == 4 and clean_ok and stable and master_ok
+        passed = ok == 4 and baseline_clean and clean_ok and stable and master_ok
         return passed, (
             f"requests_ok={ok}/4, "
+            f"baseline_clean={baseline_clean}({baseline_detail}), "
             f"inflight_clean={clean_ok}({clean_detail}), "
             f"replay_ledger_stable={stable} (fp_before={before}, "
             f"fp_after={after}), mock_counters={mock_obs}, "

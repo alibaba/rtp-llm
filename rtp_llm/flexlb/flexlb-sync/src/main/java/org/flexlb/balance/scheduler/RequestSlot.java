@@ -1145,9 +1145,44 @@ final class RequestSlot {
         return materializePendingReplay(exact, exact.isUnknown(), exact);
     }
 
+    /**
+     * Whether inactive-TTL maintenance may retire an ordinary Engine fence
+     * without consuming an authoritative terminal.
+     *
+     * <p>Transferred preemption retains a stronger cross-request owner and must
+     * keep waiting for its typed reducer. Plain delivery and client-cancellation
+     * fences may be retired after a full interval with no Worker activity; an
+     * active Engine report refreshes that interval and prevents reclamation.</p>
+     */
+    boolean ownsReclaimableInactiveFence(ScheduledRequest expected) {
+        requireSlotLock("inactive delivery-fence lookup");
+        return ownsActiveItem(expected)
+                && preemption == null
+                && engineFence != null
+                && engineFence.isReclaimableAfterInactivity();
+    }
+
+    void settleCancellationFenceDecodeTerminal() {
+        requireSlotLock("cancellation fence Decode settlement");
+        if (cancellationReason != null && engineFence != null) {
+            engineFence.resources.settleDecodeAuthoritativeTerminal();
+        }
+    }
+
     PreemptionReduction reducePriorityCanceled(PrefillEndpoint source, ScheduledRequest expected) {
         requireSlotLock("priority cancellation reduction");
-        PreemptionRegistration exact = ownsPrefillFact(source, expected) ? preemptionOwner() : null;
+        if (!ownsPrefillFact(source, expected)) {
+            return PreemptionReduction.STALE;
+        }
+        if (cancellationReason != null) {
+            return reduceWorkerTerminal(
+                    expected,
+                    DeferredTerminal.worker(
+                            WorkerTerminalSource.PREFILL_BACKED,
+                            false,
+                            StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode()));
+        }
+        PreemptionRegistration exact = preemptionOwner();
         DecodeEndpoint decode = expected.decodeEp();
         if (exact == null
                 || exact.isSettled()
@@ -2188,6 +2223,7 @@ final class RequestSlot {
      * proof while retaining all exact resources.
      */
     static final class EngineFenceRegistration {
+        private final EngineFenceCause cause;
         private final String detail;
         private final PreemptionRegistration transferredPreemption;
         private final EngineFenceResources resources;
@@ -2198,9 +2234,17 @@ final class RequestSlot {
                 String detail,
                 PreemptionRegistration transferredPreemption,
                 EngineFenceResources resources) {
+            this.cause = Objects.requireNonNull(cause, "cause");
             this.detail = detail;
             this.transferredPreemption = transferredPreemption;
             this.resources = resources;
+        }
+
+        private boolean isReclaimableAfterInactivity() {
+            return (cause == EngineFenceCause.DELIVERY_UNCERTAIN
+                    || cause == EngineFenceCause.CANCELLATION)
+                    && transferredPreemption == null
+                    && phase != FencePhase.CLOSED;
         }
 
         void release() {
@@ -2451,6 +2495,12 @@ final class RequestSlot {
             return decodeProtection == null
                     ? null
                     : decodeProtection.authoritativeTerminalProof();
+        }
+
+        private void settleDecodeAuthoritativeTerminal() {
+            if (decodeProtection != null) {
+                decodeProtection.settleAuthoritativeTerminal();
+            }
         }
 
         /**

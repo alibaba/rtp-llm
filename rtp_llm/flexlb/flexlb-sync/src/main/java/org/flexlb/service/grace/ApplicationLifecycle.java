@@ -2,6 +2,7 @@ package org.flexlb.service.grace;
 
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.listener.ApplicationWarmupState;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.env.Environment;
@@ -12,7 +13,7 @@ import java.util.Arrays;
 /** Owns the fixed application online, health and graceful-shutdown workflow. */
 @Slf4j
 @Component
-public class ApplicationLifecycle {
+public class ApplicationLifecycle implements ApplicationWarmupState {
 
     private static final long DEFAULT_WARM_UP_WAIT_MS = 3_000L;
     private static final long DEFAULT_SHUTDOWN_TIMEOUT_MS = 300_000L;
@@ -131,6 +132,11 @@ public class ApplicationLifecycle {
 
     public boolean isHealthy() {
         return warmUpFinished && !shutdownReceived;
+    }
+
+    @Override
+    public boolean isWarmupFinished() {
+        return warmUpFinished;
     }
 
     public boolean shutdownCompletedSuccessfully() {

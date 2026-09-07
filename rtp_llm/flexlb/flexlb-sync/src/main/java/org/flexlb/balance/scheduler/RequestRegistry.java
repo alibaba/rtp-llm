@@ -1362,7 +1362,13 @@ public class RequestRegistry {
     private TerminalAction settleCancellationFromWorkerStatusLocked(
             RequestSlot entry,
             String proof,
-            WorkerTerminalSource source) {
+            DeferredTerminal terminal) {
+        WorkerTerminalSource source = terminal.workerSource();
+        if (source == WorkerTerminalSource.PREFILL_BACKED
+                && terminal.workerErrorCode()
+                        == StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode()) {
+            entry.settleCancellationFenceDecodeTerminal();
+        }
         return settleCancellationAfterEndpointSettlementLocked(
                 entry,
                 proof,
@@ -1518,7 +1524,7 @@ public class RequestRegistry {
                             : "Decode terminal observed after cancellation";
             return terminalPublication(
                     settleCancellationFromWorkerStatusLocked(
-                            entry, proof, terminal.workerSource()));
+                            entry, proof, terminal));
         }
         Function<RequestSlot, RequestState> transition;
         Response response;
@@ -1638,12 +1644,17 @@ public class RequestRegistry {
         synchronized (exactSlot) {
             if (!isCurrentSlot(exactSlot)
                     || !exactSlot.isLiveGeneration()
-                    || nowMs - exactSlot.lastWorkerStatusAtMs() <= staleTtlMs
-                    || exactSlot.hasCancellationFirstCause()) {
+                    || nowMs - exactSlot.lastWorkerStatusAtMs() <= staleTtlMs) {
+                return false;
+            }
+            ScheduledRequest activeItem = exactSlot.activeItem();
+            boolean reclaimableFence = activeItem != null
+                    && exactSlot.ownsReclaimableInactiveFence(activeItem);
+            if (exactSlot.hasCancellationFirstCause() && !reclaimableFence) {
                 return false;
             }
             String detail = "inflight inactive TTL expired";
-            if (exactSlot.activeItem() == null) {
+            if (activeItem == null) {
                 direct = beginTerminalLocked(
                         exactSlot,
                         false,
@@ -1651,10 +1662,32 @@ public class RequestRegistry {
                         owner -> owner.timeout(detail),
                         buildErrorResponse(
                                 exactSlot.timeoutErrorType(), detail));
+            } else if (reclaimableFence) {
+                // The fence owns endpoint cleanup until this terminal claim
+                // closes it. The endpoint orphan sweep later in the same
+                // maintenance pass then sees no live scheduler generation.
+                CancelReason cancellation = exactSlot.hasCancellationFirstCause()
+                        ? exactSlot.requireCancellationFirstCause() : null;
+                String terminalDetail = cancellation == null
+                        ? detail : cancelDetail(cancellation) + "; " + detail;
+                direct = beginTerminalLocked(
+                        exactSlot,
+                        false,
+                        false,
+                        false,
+                        null,
+                        cancellation == null
+                                ? owner -> owner.timeout(terminalDetail)
+                                : owner -> settleCancellationLifecycle(
+                                        owner, cancellation, terminalDetail),
+                        buildErrorResponse(cancellation == null
+                                        ? exactSlot.timeoutErrorType()
+                                        : exactSlot.cancellationErrorType(cancellation),
+                                terminalDetail));
             } else {
                 RequestSlot.PreemptionReduction reduction =
                         exactSlot.reduceOrdinaryTerminal(
-                                exactSlot.activeItem(),
+                                activeItem,
                                 DeferredTerminal.timeout(detail));
                 terminalized = reduction.status()
                         == RequestSlot.PreemptionReduction.Status.REPLAY;

@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -16,6 +17,25 @@ import static org.mockito.Mockito.when;
 class BlockedRequestIndexTest {
     private final OrderedRequestQueue queue = new OrderedRequestQueue(true);
     private final BlockedRequestIndex blocked = new BlockedRequestIndex(true);
+
+    @Test
+    void sizeTracksExactAndSelectorWaiters() {
+        var endpoint = mock(org.flexlb.balance.endpoint.PrefillEndpoint.class);
+        when(endpoint.ipPort()).thenReturn("p:1");
+        var key = PlacementKey.exact(RoleType.PREFILL, "a", "p:1");
+        GlobalQueueEntry exact = entry("a", 50);
+        GlobalQueueEntry selector = entry("b", 50);
+
+        assertEquals(0, blocked.size());
+        blocked.parkExact(exact, key, endpoint);
+        blocked.parkSelector(selector, new PlacementKey(RoleType.DECODE, "b"));
+        assertEquals(2, blocked.size());
+
+        blocked.clearEntry(exact);
+        assertEquals(1, blocked.size());
+        blocked.clearEntry(selector);
+        assertEquals(0, blocked.size());
+    }
 
     @Test
     void higherPriorityCanRescueAnEndpointWithLowerPriorityWaiters() {

@@ -3032,11 +3032,9 @@ public final class JavaMockEngineCluster {
                             && asyncFaultCursor[0]++ < asyncFaultBudget;
                     EngineRpcService.TaskInfoPB removed = runningTasks.remove(requestId);
                     // status_zombie_running: re-insert the entry right after the
-                    // removal so this request keeps being reported RUNNING
-                    // forever (its completion record is dropped inside
-                    // publishCompletion). Every counter below still releases
-                    // normally — the zombie poisons only the status report,
-                    // not engine capacity.
+                    // removal so a completed request is reported FINISHED once
+                    // and then keeps being reported RUNNING. Every counter below
+                    // still releases normally; only the status view is stale.
                     if (faultConfig.isStatusZombieRunning() && removed != null) {
                         runningTasks.put(requestId, removed);
                     }
@@ -3741,10 +3739,9 @@ public final class JavaMockEngineCluster {
                 return; // cancel won the terminal race; it released everything
             }
             // status_zombie_running: re-insert the entry after the removal so
-            // this request keeps being reported RUNNING forever (its completion
-            // record is dropped inside publishCompletion); the slot/KV/pending
-            // counters below still release normally so the engine keeps
-            // admitting — the zombie poisons only the status report.
+            // this request keeps being reported RUNNING after its one real
+            // terminal report. The slot/KV/pending counters below still release
+            // normally, so the fault poisons only later status snapshots.
             if (faultConfig.isStatusZombieRunning()) {
                 runningTasks.put(requestId, removed);
             }
@@ -4015,13 +4012,6 @@ public final class JavaMockEngineCluster {
 
         private void publishCompletion(EngineRpcService.TaskInfoPB task) {
             synchronized (completionLock) {
-                // status_zombie_running: drop the completion record entirely —
-                // the request finished internally but is never reported
-                // finished (paired with the runningTasks re-insert at the
-                // completion points).
-                if (faultConfig.isStatusZombieRunning()) {
-                    return;
-                }
                 long version = completionVersion.incrementAndGet();
                 completions.add(new VersionedTask(version, task));
                 // status_duplicate_finished: enqueue the SAME completion twice

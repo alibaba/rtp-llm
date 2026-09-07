@@ -1027,7 +1027,13 @@ def _master_log_text(env) -> str:
         parts.append(log_path.read_text(encoding="utf-8", errors="replace"))
     except Exception:
         pass
-    flexlb_log = Path.home() / "ai-whale" / "logs" / "flexlb.log"
+    flexlb_log = Path(
+        getattr(
+            env,
+            "flexlb_log_path",
+            Path.home() / "ai-whale" / "logs" / "flexlb.log",
+        )
+    )
     offset = getattr(env, "flexlb_log_offset", 0)
     try:
         with open(flexlb_log, "rb") as fh:
@@ -1046,7 +1052,9 @@ def _pv_log_tail(env, rids: Optional[list] = None, max_lines: int = 400) -> str:
     when *rids* is given, keep only the JSON rows whose "requestId" field
     matches one of them (PvLogData.java serialises requestId per row) —
     eliminating sibling-instance read crosstalk."""
-    path = Path.home() / "ai-whale" / "logs" / "pv.log"
+    path = Path(
+        getattr(env, "pv_log_path", Path.home() / "ai-whale" / "logs" / "pv.log")
+    )
     offset = getattr(env, "pv_log_offset", 0)
     try:
         with open(path, "rb") as fh:
