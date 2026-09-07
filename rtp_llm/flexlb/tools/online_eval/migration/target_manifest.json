@@ -447,25 +447,39 @@
         "elastic_kv_skew_shrink_cold",
         "elastic_kv_skew_shrink_hot",
         "elastic_rebalance",
-        "elastic_remove_flow"
+        "elastic_remove_flow",
+        "elastic_steady_state_recovery"
       ],
       "pending_contracts": [
         "elastic_kv_full_shrink",
-        "elastic_steady_state_recovery",
         "elastic_transient_imbalance_bound"
       ],
       "candidate_counts": {
         "logical_scenarios": 1,
-        "variants": 5,
-        "instances": 5,
-        "checks": 158
+        "variants": 6,
+        "instances": 6,
+        "checks": 173
       },
       "source_files": [
         "scenarios/elastic/lifecycle.yaml"
       ],
       "replacement_status": "retain_legacy_pending_paired_evidence",
       "static_review": {
-        "status": "pending"
+        "status": "passed_at_revision",
+        "revision": "84e6250228bf1777980590a779d07b4706a6b300",
+        "reviewed_contracts": [
+          "elastic_steady_state_recovery"
+        ],
+        "unreviewed_candidate_contracts": [
+          "elastic_add_flow",
+          "elastic_add_preference",
+          "elastic_add_remove_cycle",
+          "elastic_kv_skew_shrink_cold",
+          "elastic_kv_skew_shrink_hot",
+          "elastic_rebalance",
+          "elastic_remove_flow"
+        ],
+        "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
       },
       "candidate_scenario_ids": [
         "elastic_lifecycle"
@@ -475,26 +489,36 @@
       "id": "elastic_pending_drain",
       "category": "elastic",
       "owner": "agent1",
-      "implementation_status": "planned",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "elastic_remove_pending_drain"
       ],
-      "candidate_contracts": [],
-      "pending_contracts": [
+      "candidate_contracts": [
         "elastic_remove_pending_drain"
       ],
+      "pending_contracts": [],
       "candidate_counts": {
-        "logical_scenarios": 0,
-        "variants": 0,
-        "instances": 0,
-        "checks": 0
+        "logical_scenarios": 1,
+        "variants": 1,
+        "instances": 1,
+        "checks": 12
       },
-      "source_files": [],
+      "source_files": [
+        "scenarios/elastic/pending_drain.yaml"
+      ],
       "replacement_status": "retain_legacy_pending_paired_evidence",
       "static_review": {
-        "status": "pending"
+        "status": "passed_at_revision",
+        "revision": "33f9d1d1e0f7f64af5e9af2691e55435fd984034",
+        "reviewed_contracts": [
+          "elastic_remove_pending_drain"
+        ],
+        "unreviewed_candidate_contracts": [],
+        "scope": "batch-window legacy_terminal only; zero_errors is an additional unmapped variant. Legacy single-batch remains retained and has no candidate yet. Static predicates and declared construction differences only, no Java acceptance."
       },
-      "candidate_scenario_ids": []
+      "candidate_scenario_ids": [
+        "elastic_pending_drain"
+      ]
     },
     {
       "id": "elastic_concurrent_mutation",
@@ -1025,7 +1049,7 @@
       "id": "priority_queue",
       "category": "priority",
       "owner": "agent6",
-      "implementation_status": "candidate_partial",
+      "implementation_status": "candidate_complete",
       "legacy_case_ids": [
         "prio_order_basic",
         "prio_same_level_fifo",
@@ -1035,18 +1059,17 @@
       ],
       "candidate_contracts": [
         "prio_low_no_starvation",
+        "prio_normalize",
+        "prio_order_basic",
         "prio_queue_timeout_terminal",
         "prio_same_level_fifo"
       ],
-      "pending_contracts": [
-        "prio_normalize",
-        "prio_order_basic"
-      ],
+      "pending_contracts": [],
       "candidate_counts": {
         "logical_scenarios": 1,
-        "variants": 3,
-        "instances": 3,
-        "checks": 10
+        "variants": 8,
+        "instances": 20,
+        "checks": 68
       },
       "source_files": [
         "scenarios/priority/priority_queue.yaml"
@@ -1054,16 +1077,19 @@
       "replacement_status": "retain_legacy_pending_paired_evidence",
       "static_review": {
         "status": "passed_at_revision",
-        "revision": "9f6960a8be63c2dcab98e3e641b0cff1ff947129",
+        "revision": "323265f95c924b28e4033a751b94f988ae0db577",
         "reviewed_contracts": [
           "prio_low_no_starvation",
+          "prio_normalize",
+          "prio_order_basic",
           "prio_queue_timeout_terminal",
           "prio_same_level_fifo"
         ],
         "unreviewed_candidate_contracts": [],
         "scope": "Reviewed named programs only, conditional on listed shared fixes; not all current variants or real Java execution.",
         "dependencies": [
-          "d955a8434b9c1458e1eadb76f90734eda47b1c23"
+          "d955a8434b9c1458e1eadb76f90734eda47b1c23",
+          "d9da0cfde685e72b30224f204431689ce319403f"
         ]
       },
       "candidate_scenario_ids": [
@@ -1103,6 +1129,8 @@
       "candidate_contracts": [
         "atpm_comparator_frozen_weak",
         "atpm_config_strict_reject",
+        "atpm_error_code_family",
+        "atpm_preempt_decode_engine_owned",
         "atpm_preempt_prefill_queued",
         "atpm_preemption_disabled_zero_eviction",
         "atpm_same_priority_zero_eviction",
@@ -1110,19 +1138,17 @@
       ],
       "pending_contracts": [
         "atpm_decode_reservation_priority",
-        "atpm_error_code_family",
         "atpm_observability_integrity",
         "atpm_preempt_cancel_not_found",
         "atpm_preempt_cancel_tombstoned",
-        "atpm_preempt_decode_engine_owned",
         "atpm_preempt_decode_reserved_live",
         "atpm_preempt_prefill_queued_live"
       ],
       "candidate_counts": {
         "logical_scenarios": 1,
-        "variants": 6,
-        "instances": 6,
-        "checks": 51
+        "variants": 8,
+        "instances": 8,
+        "checks": 69
       },
       "source_files": [
         "scenarios/priority/priority_preemption.yaml"
@@ -1130,10 +1156,12 @@
       "replacement_status": "retain_legacy_pending_paired_evidence",
       "static_review": {
         "status": "passed_at_revision",
-        "revision": "d3f7864cedb6a8d6316d7a43e2092c01aebca6e6",
+        "revision": "a7b0936435ffbe78c7b51f81f0979728e2863595",
         "reviewed_contracts": [
           "atpm_comparator_frozen_weak",
           "atpm_config_strict_reject",
+          "atpm_error_code_family",
+          "atpm_preempt_decode_engine_owned",
           "atpm_preempt_prefill_queued",
           "atpm_preemption_disabled_zero_eviction",
           "atpm_same_priority_zero_eviction",
@@ -1144,7 +1172,8 @@
         "dependencies": [
           "d955a8434b9c1458e1eadb76f90734eda47b1c23",
           "e8e53612d995a2f97dcdd3069a8e021c65b5df03",
-          "7a1d3aa2f91ba1a3cd46c7b18c4b792ff99608c3"
+          "7a1d3aa2f91ba1a3cd46c7b18c4b792ff99608c3",
+          "8a74dfe2c96a75966df266e5ab28c84a28c46bdd"
         ]
       },
       "candidate_scenario_ids": [

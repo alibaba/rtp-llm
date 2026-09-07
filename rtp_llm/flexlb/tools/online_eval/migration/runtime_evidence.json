@@ -282,6 +282,181 @@
           "sha256": "1cd581aee0e312ba1ee6b3a73245ef126dccee212b5fd2dca826cf14d1160a2f"
         }
       ]
+    },
+    {
+      "kind": "real_java_selected_candidates",
+      "source_revision": "0be83d8363b6bec01b0d998d3f1c57d710b35b48",
+      "evidence_root": "/tmp/agent1-yaml-evidence/preemption-env0be83",
+      "scope": "Two environment-capability instances. Both failed; this run does not validate the environment reconstruction or Master-parser rejection capability.",
+      "independent_acceptance": "verified_original_outcomes_and_cleanup_by_agent3",
+      "instances": [
+        {
+          "id": "priority_preemption::comparator_frozen_weak::single-nonbatch",
+          "status": "FAIL",
+          "duration_ms": 29877,
+          "observed_checks": 3,
+          "failure_stages": [
+            {
+              "id": "r1_same_priority",
+              "status": "FAIL",
+              "error": null
+            }
+          ],
+          "cleanup_statuses": [
+            "PASS",
+            "PASS",
+            "PASS"
+          ],
+          "result_evidence": "/tmp/agent1-yaml-evidence/preemption-env0be83/comparator/lane0/part0-yaml/instances/instance-5deda712b81badba4619912ca1afa52b2e484acb3d48c5a436220a585276ba4d/result.json",
+          "result_sha256": "2960586767a21abfbfa5e79a398d2edfbd0bd983b314634de9546127cc248e2b"
+        },
+        {
+          "id": "priority_preemption::config_strict_reject::single-nonbatch",
+          "status": "ERROR",
+          "duration_ms": 70103,
+          "observed_checks": 0,
+          "failure_stages": [
+            {
+              "id": "removed_auto_tpm",
+              "status": "ERROR",
+              "error": "RuntimeError: startup probe has no owned Master process evidence"
+            }
+          ],
+          "cleanup_statuses": [
+            "PASS",
+            "PASS"
+          ],
+          "result_evidence": "/tmp/agent1-yaml-evidence/preemption-env0be83/config/lane0/part0-yaml/instances/instance-1f6a4f799d20a0aef31cdcebc951ac01aaaf70a4f20807705ce5188384c531cc/result.json",
+          "result_sha256": "db8ec3bef4d7051e8c3a98b1ba62f603fed0beac990d7c49d281945a01d49cda"
+        }
+      ],
+      "findings": [
+        "Comparator first-half pure-priority order differed from the preserved first-parker predicate; all six consumers completed. FIFO half was blocked in this version.",
+        "Invalid autoTpmEnabled was rejected by the supporting mock ConfigService before Master startup. No owned Master evidence correctly produced ERROR; a mock rejection is not a Master-parser PASS."
+      ],
+      "cleanup_scope": "Five owned PIDs exited; final original audit scanned 200 ports free and four lock files free, protected sentinel survived, both wrapper rows were PPID1 Zs and final lease release was recorded. Initial busy port observations retained.",
+      "artifacts": [
+        {
+          "file": "1788814401450338000-flexlb_status.json",
+          "sha256": "3706a28bcc814505d7168caae642cff2bb0abbb8e8b06ce46c274f479deb467f"
+        },
+        {
+          "file": "1788814447401241000-flexlb_acquire.json",
+          "sha256": "c5f179ef0916a157d5532da3979a6be633a38cf1224006a653767691a038dabb"
+        },
+        {
+          "file": "1788814460481799000-flexlb_sync.json",
+          "sha256": "3e5538e55d78e6a4f2d2ba657110db254bcca0332f2594e552b3dc80366452a7"
+        },
+        {
+          "file": "1788814501479110000-write-source.json",
+          "sha256": "c11f17fe0bd914f3e032465307abd8e064546046d746915d588a612215dc729b"
+        },
+        {
+          "file": "1788814501575521000-flexlb_sync.json",
+          "sha256": "36110a91e119252b3fd8dfa8c1cdda5d7e6ae512333aacb00b35f926cd7eb24a"
+        },
+        {
+          "file": "1788814577882990000-preflight.json",
+          "sha256": "7ca5f4750324117135330dcbcaaede511acc26211343e347d539e724de9f1ec5"
+        },
+        {
+          "file": "1788814673699447000-comparator-start.json",
+          "sha256": "0aebee41167eabe8fc137502493506bf4c48a4e098b587ef6f3999c116687680"
+        },
+        {
+          "file": "1788814728451518000-inspect-comparator.json",
+          "sha256": "3db8ca537c2ae386f97ab23e0d9093c0fc084298013d12e1d3f563addf99fcc7"
+        },
+        {
+          "file": "1788814833364230000-collect-comparator.json",
+          "sha256": "a4d77d6b5edb157eb85678a3fb36a7105c88976572a8fa3b4987af5756b4c310"
+        },
+        {
+          "file": "1788814889335223000-config-start.json",
+          "sha256": "eaec58bf780b3f890a9af3dd056b7065c19c8e294fe8be5d15f089a9e8132f78"
+        },
+        {
+          "file": "1788814976805993000-inspect-config.json",
+          "sha256": "e17216c7e2c5bb41756c1ee5b2359be48ae106e9801d09527ccdbbf192637e84"
+        },
+        {
+          "file": "1788815018793342000-collect-config.json",
+          "sha256": "feb884d4890501d73374158404c3b3bd9d0c49b5fc1f18e07dec9ead6a44d2c3"
+        },
+        {
+          "file": "1788815095521090000-flexlb_job_status.json",
+          "sha256": "0e0ce923e9dcf72f3bc8fe9da70a00e438bad5524c77d43111db4e555f592d9a"
+        },
+        {
+          "file": "1788815122456458000-flexlb_docker_exec.json",
+          "sha256": "d5d82e341ac7bc64cfe47b32aa8182b195fd28fe6c3c460bf62c13b5a1f1b17f"
+        },
+        {
+          "file": "1788815157893418000-release-audit-envelope.json",
+          "sha256": "b6aa4c00c0aeeaaa1eb2e4aba3a5e8ab8ea0c8a2e77cb9ddbb84038f7032077c"
+        },
+        {
+          "file": "1788815462556270000-flexlb_release.json",
+          "sha256": "03869531ead12dad8ca6cfddf9916964ccb0d13a7f622dd7bdab0e24164a6b8b"
+        },
+        {
+          "file": "comparator-dryrun.json",
+          "sha256": "4a25150b8ad7b84322ba7fefdf79ad49cc34c42ed35bb12f4983ab644b52e512"
+        },
+        {
+          "file": "comparator-group-audit.json",
+          "sha256": "611e89303138bd2bca6492297427f5fc7c1bac6426918afed4def46d2f80443f"
+        },
+        {
+          "file": "comparator-live-lock-audit.json",
+          "sha256": "f0d6e1ac1ba85b6d41d8e91f63fde7d61095d7319330114ebbb6917ce5fe6bcf"
+        },
+        {
+          "file": "comparator-post-audit.json",
+          "sha256": "cf57aed9fe689932f51d49e5016fdd76e5e93c40a060ffa4b80e163c78e0167f"
+        },
+        {
+          "file": "config-dryrun.json",
+          "sha256": "c0789ca452b0bf44ff072dea2dba037201e3491c0a1070af1fd39d3972339cf7"
+        },
+        {
+          "file": "config-group-audit.json",
+          "sha256": "f9c5f868b842fb350b45fea8c8c4bdd9211f106a8246d9cffeba6c52206b5bb1"
+        },
+        {
+          "file": "config-live-lock-audit.json",
+          "sha256": "43d05ddb216b77b734689b9114234a6a75e0d04b0034e2eff3092a00e0932139"
+        },
+        {
+          "file": "config-post-audit.json",
+          "sha256": "b8dd9ac37b47ac9bf8fe232b3d376fac8640857a81002eca96a0f08593bd6c24"
+        },
+        {
+          "file": "environment-dryrun.json",
+          "sha256": "a33f4da8f2dfd99e412809b9b822dbd11eaa307cd7f5a62d92625baab65fdfdd"
+        },
+        {
+          "file": "jar-manifest.json",
+          "sha256": "19f01f3c311cc4d1ca608e6642663d08bd016172791b6793db1a41d72a386c43"
+        },
+        {
+          "file": "preflight.json",
+          "sha256": "385cf6534bcd55c059982e70da9d9f71eee1c67c3b262cac3e23967697f265af"
+        },
+        {
+          "file": "release-audit.json",
+          "sha256": "01df471e6a0c9cdbafd7b73ac79e5fcac6a778c6445e135310504c5ca76fd8f1"
+        },
+        {
+          "file": "run-summary.json",
+          "sha256": "06e26538da61d62e09711442a5b867d4baa7ef804a4deccf958d5029198497ab"
+        },
+        {
+          "file": "source-manifest.json",
+          "sha256": "917318bd560ea1800ba7baaab101bbd9f9178b167d39e429117df9b926ea3924"
+        }
+      ]
     }
   ]
 }
