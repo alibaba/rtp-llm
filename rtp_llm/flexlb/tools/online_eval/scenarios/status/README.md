@@ -27,7 +27,7 @@ Prefill members, Decode admission and mock engine lifecycle remain distinct owne
 
 Verification so far:
 
-- 94 local scenario tests pass, including 14 status-specific tests for prepared
+- 95 local scenario tests pass, including 15 status-specific tests for prepared
   cohorts, typed error boundaries, consumer exit evidence, source failures,
   independent owner metrics, cleanup and the complete legacy/profile mapping.
 - Isolated host-111 Java mock runs used the unchanged 9821d9dc73 Java sources and

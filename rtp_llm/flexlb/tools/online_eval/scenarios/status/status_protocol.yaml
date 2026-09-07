@@ -524,7 +524,7 @@ variants:
     params:
       duration_s: 95
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 110
@@ -543,15 +543,6 @@ variants:
       snapshot:
         $ref: stages.after_clear.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: after_clear_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.after_clear.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
@@ -1089,7 +1080,7 @@ variants:
     params:
       duration_s: 20
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 35
@@ -1108,15 +1099,6 @@ variants:
       snapshot:
         $ref: stages.clean_baseline.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: clean_baseline_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.clean_baseline.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
@@ -1210,7 +1192,7 @@ variants:
     params:
       duration_s: 20
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 35
@@ -1229,15 +1211,6 @@ variants:
       snapshot:
         $ref: stages.clean_baseline.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: clean_baseline_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.clean_baseline.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
@@ -1409,7 +1382,7 @@ variants:
     params:
       duration_s: 95
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 110
@@ -1428,15 +1401,6 @@ variants:
       snapshot:
         $ref: stages.after_clear.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: after_clear_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.after_clear.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
@@ -1484,7 +1448,7 @@ variants:
     params:
       duration_s: 20
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 35
@@ -1503,15 +1467,6 @@ variants:
       snapshot:
         $ref: stages.clean_baseline.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: clean_baseline_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.clean_baseline.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
@@ -1682,7 +1637,7 @@ variants:
     params:
       duration_s: 30
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 45
@@ -1701,15 +1656,6 @@ variants:
       snapshot:
         $ref: stages.after_clear.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: after_clear_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.after_clear.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
@@ -1752,7 +1698,7 @@ variants:
     params:
       duration_s: 20
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 35
@@ -1771,15 +1717,6 @@ variants:
       snapshot:
         $ref: stages.clean_baseline.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: clean_baseline_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.clean_baseline.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
@@ -2013,7 +1950,7 @@ variants:
     params:
       duration_s: 20
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 35
@@ -2032,15 +1969,6 @@ variants:
       snapshot:
         $ref: stages.after_clear.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: after_clear_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.after_clear.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
@@ -2083,7 +2011,7 @@ variants:
     params:
       duration_s: 20
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 35
@@ -2102,15 +2030,6 @@ variants:
       snapshot:
         $ref: stages.clean_baseline.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: clean_baseline_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.clean_baseline.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
@@ -2200,7 +2119,7 @@ variants:
     params:
       duration_s: 30
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 45
@@ -2219,15 +2138,6 @@ variants:
       snapshot:
         $ref: stages.after_foreign.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: after_foreign_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.after_foreign.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
@@ -2339,7 +2249,7 @@ variants:
     params:
       duration_s: 30
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 45
@@ -2358,15 +2268,6 @@ variants:
       snapshot:
         $ref: stages.after_clear.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: after_clear_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.after_clear.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
@@ -2439,7 +2340,7 @@ variants:
     params:
       duration_s: 30
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 45
@@ -2458,15 +2359,6 @@ variants:
       snapshot:
         $ref: stages.clean_baseline.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: clean_baseline_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.clean_baseline.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
@@ -2520,7 +2412,7 @@ variants:
     params:
       duration_s: 20
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 35
@@ -2539,15 +2431,6 @@ variants:
       snapshot:
         $ref: stages.after_replay.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: after_replay_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.after_replay.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
@@ -2647,7 +2530,7 @@ variants:
     params:
       duration_s: 20
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 35
@@ -2666,15 +2549,6 @@ variants:
       snapshot:
         $ref: stages.clean_baseline.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: clean_baseline_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.clean_baseline.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
@@ -2751,7 +2625,7 @@ variants:
     params:
       duration_s: 20
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 35
@@ -2770,15 +2644,6 @@ variants:
       snapshot:
         $ref: stages.after_replay.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: after_replay_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.after_replay.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
@@ -2870,7 +2735,7 @@ variants:
     params:
       duration_s: 95
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 110
@@ -2889,15 +2754,6 @@ variants:
       snapshot:
         $ref: stages.after_zombie.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: after_zombie_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.after_zombie.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
@@ -2952,7 +2808,7 @@ variants:
     params:
       duration_s: 20
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 35
@@ -2971,15 +2827,6 @@ variants:
       snapshot:
         $ref: stages.clean_baseline.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: clean_baseline_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.clean_baseline.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
@@ -3324,7 +3171,7 @@ variants:
     params:
       duration_s: 95
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 110
@@ -3343,15 +3190,6 @@ variants:
       snapshot:
         $ref: stages.after_clear.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: after_clear_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.after_clear.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
@@ -3508,7 +3346,7 @@ variants:
     params:
       duration_s: 95
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 110
@@ -3527,15 +3365,6 @@ variants:
       snapshot:
         $ref: stages.after_clear.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: after_clear_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.after_clear.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
@@ -3648,7 +3477,7 @@ variants:
     params:
       duration_s: 95
       until:
-        metric: all_inflight
+        metric: cleanup_inflight
         op: eq
         value: 0
     timeout_s: 110
@@ -3667,15 +3496,6 @@ variants:
       snapshot:
         $ref: stages.after_fetch_error.output.snapshot
       metric: prefill_batches
-      op: eq
-      expected: 0
-      aggregate: last
-  - id: after_fetch_error_prefill_members
-    action: status_check
-    params:
-      snapshot:
-        $ref: stages.after_fetch_error.output.snapshot
-      metric: prefill_requests
       op: eq
       expected: 0
       aggregate: last
