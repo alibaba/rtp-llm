@@ -64,6 +64,8 @@ class ResourceHandle:
 class PlanContext:
     path: str
     outputs: dict
+    environment: dict = field(default_factory=dict)
+    profiles: tuple[str, ...] = ()
 
     def reference(self, value, expected_kind=None):
         from .compiler import reference

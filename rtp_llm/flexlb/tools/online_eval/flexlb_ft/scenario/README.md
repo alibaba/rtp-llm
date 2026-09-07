@@ -56,3 +56,26 @@ or cleanup errors yield 1, invalid configuration or selection yields 2.
 The child writes `scenarios.json` with schema version, summary and instance rows,
 plus per-instance `result.json` and artifacts. Listing, parsing, dryrun and fake
 transport tests are not substitutes for the required real Java mock execution.
+
+Variants may supply a complete `stages` list instead of the top-level default.
+Each such program gets its own prior-stage reference namespace and resource
+budget; it cannot also use `stage_overrides`. This expresses distinct flows
+explicitly, without choosing hidden Python case implementations. Variant execution
+budgets, additional requirements, findings and narrowed `legacy_case_ids` are also
+explicit. If the document omits top-level stages, every variant must provide them.
+
+`PlanContext.environment` is an isolated copy of the variant's environment fields;
+`PlanContext.profiles` is its selected profile tuple. Validators may reject
+incompatible action/layout combinations before startup. These fields do not imply
+that processes exist or that any runtime capability has been observed.
+
+`master_layout: single|dual_standalone` selects one master or two actual standalone
+masters at the leased A/B port groups; it does not activate ZK or claim elected HA.
+`master_stable_window_s: 0` explicitly disables the usual stable-window prewarming
+for cold-start experiments. Started process objects remain in the backend ledger
+even when a restart helper clears the current environment slot.
+
+List output includes separate selected `logical_scenarios`, `variants`, `instances`
+and declared `checks` counts. Its filesystem storage key hashes the public ID to
+avoid JVM `-Xlog` colon delimiters; explicit output roots containing colons are
+rejected before process startup.
