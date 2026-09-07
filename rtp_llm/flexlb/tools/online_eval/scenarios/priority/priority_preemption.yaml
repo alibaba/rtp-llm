@@ -1,0 +1,160 @@
+schema_version: 1
+id: priority_preemption
+description: Explicit preemption boundaries; only the completed same-priority candidate
+  is registered here.
+category: priority
+profiles:
+- single-nonbatch
+legacy_case_ids:
+- atpm_same_priority_zero_eviction
+environment:
+  backend: java_mock
+  n_prefill: 1
+  n_decode: 4
+  perf_preset: default
+  config_overrides:
+    ordering: priority
+    decision: single
+    dispatcher: non_batch
+    queue_timeout_ms: 60000
+    max_inflight_requests_per_worker: 1
+    max_waiting_requests_per_prefill_worker: 8
+    preemption:
+      allowed_victim_stages:
+      - PREFILL_QUEUED
+execution:
+  timeout_s: 720
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: same_priority_zero_eviction
+  legacy_case_ids:
+  - atpm_same_priority_zero_eviction
+stages:
+- id: setup
+  action: setup
+  timeout_s: 180
+- id: fleet
+  action: priority_fleet
+- id: slow
+  action: engine_control
+  params:
+    operation: set_perf
+    targets:
+    - $ref: stages.fleet.output.prefill
+    perf:
+      prefill_fixed_ms: 4000
+- id: sync
+  action: balance_pause
+  params:
+    seconds: 1.5
+- id: placeholder
+  action: priority_start
+  timeout_s: 5
+  params:
+    gap_s: 0
+    requests:
+    - tag: placeholder
+      priority: 50
+      input_len: 2048
+      output_len: 2
+- id: placeholder_settled
+  action: preemption_settled
+  timeout_s: 90
+  params:
+    requests:
+      $ref: stages.placeholder.output.requests
+- id: placeholder_admitted
+  action: check
+  params:
+    actual:
+      $ref: stages.placeholder_settled.output.admitted
+    op: eq
+    expected: true
+- id: placeholder_pending
+  action: preemption_pending
+  timeout_s: 6
+  params:
+    target:
+      $ref: stages.fleet.output.prefill
+- id: wave
+  action: priority_start
+  timeout_s: 15
+  params:
+    gap_s: 0.15
+    requests:
+    - tag: peer0
+      priority: 50
+      input_len: 2048
+      output_len: 2
+    - tag: peer1
+      priority: 50
+      input_len: 2048
+      output_len: 2
+    - tag: peer2
+      priority: 50
+      input_len: 2048
+      output_len: 2
+    - tag: peer3
+      priority: 50
+      input_len: 2048
+      output_len: 2
+    - tag: peer4
+      priority: 50
+      input_len: 2048
+      output_len: 2
+    - tag: peer5
+      priority: 50
+      input_len: 2048
+      output_len: 2
+    - tag: peer6
+      priority: 50
+      input_len: 2048
+      output_len: 2
+    - tag: peer7
+      priority: 50
+      input_len: 2048
+      output_len: 2
+    - tag: incoming
+      priority: 50
+      input_len: 2048
+      output_len: 2
+- id: wave_settled
+  action: preemption_settled
+  timeout_s: 90
+  params:
+    requests:
+      $ref: stages.wave.output.requests
+- id: placeholder_drain
+  action: priority_wait
+  timeout_s: 35
+  params:
+    requests:
+      $ref: stages.placeholder.output.requests
+- id: wave_drain
+  action: priority_wait
+  timeout_s: 315
+  params:
+    requests:
+      $ref: stages.wave.output.requests
+- id: same_priority
+  action: preemption_same_priority
+  params:
+    placeholder:
+      $ref: stages.placeholder.output.requests
+    wave:
+      $ref: stages.wave.output.requests
+- id: master_clean
+  action: balance_clean
+  timeout_s: 30
+- id: restore
+  action: engine_control
+  params:
+    operation: set_perf
+    targets:
+    - $ref: stages.fleet.output.prefill
+    perf:
+      prefill_fixed_ms: 100
+- id: teardown
+  action: teardown
+  timeout_s: 120
