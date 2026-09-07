@@ -10,6 +10,47 @@ from test_scenario_compile import scenario
 
 
 class VariantProgramsTest(unittest.TestCase):
+    def test_startup_prefill_budget_preserves_disabled_zero_and_variant_values(self):
+        from flexlb_ft.harness import default_perf
+
+        doc = scenario()
+        disabled = dict(
+            fixed_ms=3000, scale=1, max_batch_tokens=0, max_batch_requests=0
+        )
+        limited = dict(disabled, max_batch_tokens=1024, max_batch_requests=2)
+        doc["environment"]["prefill_perf"] = disabled
+        doc["variants"] = [
+            dict(id="disabled"),
+            dict(id="limited", environment_overrides=dict(prefill_perf=limited)),
+        ]
+        for plan, expected in zip(
+            compile_scenarios([("budget.yaml", doc)], "batch-window"),
+            (disabled, limited),
+        ):
+            spec = make_env_spec(
+                plan["environment"], plan["profile"], dict(master_base=28000)
+            )
+            self.assertEqual(spec.perf["prefill"], expected)
+            self.assertEqual(spec.perf["decode"], default_perf()["decode"])
+            spec.perf["prefill"]["fixed_ms"] = 0
+            self.assertEqual(plan["environment"]["prefill_perf"]["fixed_ms"], 3000)
+        self.assertEqual(doc["environment"]["prefill_perf"], disabled)
+
+    def test_startup_prefill_budget_rejects_incomplete_unknown_and_nonfinite_values(
+        self,
+    ):
+        valid = dict(fixed_ms=3000, scale=1, max_batch_tokens=0, max_batch_requests=0)
+        invalid = [{}, dict(valid, unknown=1)]
+        for key in valid:
+            for value in (True, -1, float("nan"), float("inf"), "1"):
+                invalid.append(dict(valid, **{key: value}))
+        invalid.append(dict(valid, max_batch_requests=1.5))
+        for perf in invalid:
+            with self.subTest(perf=perf), self.assertRaises(ScenarioError):
+                doc = scenario()
+                doc["environment"]["prefill_perf"] = perf
+                compile_scenarios([("invalid.yaml", doc)])
+
     def test_variant_programs_are_local_and_explicit(self):
         doc = scenario()
         alternate = copy.deepcopy(doc["stages"])
