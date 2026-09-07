@@ -56,8 +56,10 @@ class Deadline:
         self.cancelled = cancelled or threading.Event()
 
     def remaining(self):
-        self.check()
-        return self.expires_at - self.clock()
+        remaining = self.expires_at - self.clock()
+        if self.cancelled.is_set() or remaining <= 0:
+            raise StageTimeout("deadline expired or operation cancelled")
+        return remaining
 
     def check(self):
         if self.cancelled.is_set() or self.clock() >= self.expires_at:
@@ -65,8 +67,13 @@ class Deadline:
 
     def sleep(self, seconds):
         target = self.clock() + seconds
-        while self.clock() < target:
-            self.sleeper(min(0.1, target - self.clock(), self.remaining()))
+        while True:
+            now = self.clock()
+            if self.cancelled.is_set() or now >= self.expires_at:
+                raise StageTimeout("deadline expired or operation cancelled")
+            if now >= target:
+                break
+            self.sleeper(min(0.1, target - now, self.expires_at - now))
         self.check()
 
 
