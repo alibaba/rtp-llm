@@ -53,6 +53,15 @@ variants:
   - status_inflight_ttl_cleanup
   profiles:
   - batch-window
+  environment_overrides:
+    n_prefill: 2
+    n_decode: 2
+    discovery: discovery_file
+    perf_preset: fault_env
+    config_overrides:
+      ordering: priority
+      queue_timeout_ms:
+        omit: true
   stages:
   - id: setup
     action: setup

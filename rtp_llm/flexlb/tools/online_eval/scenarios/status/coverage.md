@@ -247,3 +247,19 @@ The four TTL-metric variants retain the old 180-second cold-exporter readiness g
 ACK multi-error checks only scheduler drain and its three-second endpoint sample. Execution partial compares fingerprint endpoints and restores serial Prefill to 100 ms immediately after clearing its fault. Duplicate-finished does not promote the ignored preliminary drain result to an assertion. Decode-before-Prefill keeps fallback drain observational and checks final Prefill batches after clear.
 
 Special-ID real-request probes retain `error_code: 8500` for both batch zero and batch negative-one. The unknown-batch program installs 3000 ms Prefill performance before its control request, then sends its target request, matching the original construction order.
+
+## TTL environment parity correction
+
+`inflight_ttl_cleanup` now explicitly restores the old `EnvSpec`: 2P/2D,
+`discovery_file`, `fault_env_perf` (flat Prefill 100 ms), priority ordering, and
+omitted `queueTimeoutMs`. The inherited generic status environment previously
+used file discovery, default perf and a 10-second queue deadline, which could
+confound deadline expiration with the intended TTL path. The existing 10-second
+slow Prefill control and its 100 ms restoration remain unchanged.
+
+The regression fixture evaluates only the old declarative EnvSpec expression and
+compares every rendered environment field except its fresh-instance label;
+ConfigOverride representations are compared as full rendered config. Mutating
+any of queue timeout, perf preset or discovery back to the generic base is
+rejected. This is local configuration evidence, not a Java execution or retroactive
+acceptance of earlier runs. No old FAIL/ERROR result is changed.

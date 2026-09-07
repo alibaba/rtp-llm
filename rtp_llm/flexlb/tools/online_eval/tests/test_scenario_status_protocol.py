@@ -235,6 +235,79 @@ class StatusProtocolTest(unittest.TestCase):
         self.assertEqual(2, status.metric(frame, "prefill_accepted"))
         self.assertEqual(22, status.metric(frame, "accepted"))
 
+    def test_ttl_environment_matches_full_legacy_spec_and_rejects_base_fallbacks(self):
+        from dataclasses import asdict
+
+        from flexlb_cfg import OMIT, ConfigOverride, render_env
+        from flexlb_ft.harness import EnvSpec, fault_env_perf
+        from flexlb_ft.scenario.backend import make_env_spec
+        from flexlb_ft.scenario.catalog import handlers
+        from flexlb_ft.scenario.compiler import compile_scenarios
+        from flexlb_ft.scenario.loader import load_scenarios
+
+        root = Path(__file__).resolve().parents[1]
+        old_source = root / "flexlb_ft/cases/status/status_inflight_ttl_cleanup.py"
+        # Evaluate only the legacy declarative EnvSpec expression, never its
+        # case body, environment manager or any service-starting operation.
+        calls = [
+            node
+            for node in ast.walk(ast.parse(old_source.read_text()))
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "EnvSpec"
+        ]
+        self.assertEqual(1, len(calls))
+        old = eval(
+            compile(ast.Expression(calls[0]), str(old_source), "eval"),
+            {
+                "__builtins__": {},
+                "EnvSpec": EnvSpec,
+                "ConfigOverride": ConfigOverride,
+                "fault_env_perf": fault_env_perf,
+                "OMIT": OMIT,
+                "ctx": NS(profile="batch-window"),
+            },
+        )
+        registry = handlers()
+        registry.update({h.name: h for h in status.HANDLERS})
+        plans = compile_scenarios(
+            load_scenarios(root / "scenarios/status/status_protocol.yaml"),
+            handlers=registry,
+        )
+        plan = next(p for p in plans if p["variant_id"] == "inflight_ttl_cleanup")
+        self.assertEqual("batch-window", plan["profile"])
+
+        def assert_equivalent(environment):
+            actual = make_env_spec(environment, plan["profile"], {})
+            expected_fields, actual_fields = asdict(old), asdict(actual)
+            for fields in (expected_fields, actual_fields):
+                fields.pop("label")  # fresh scenario label is intentional
+                fields.pop("config_overrides")  # compare the rendered config below
+            self.assertEqual(expected_fields, actual_fields)
+            self.assertEqual(
+                render_env(old.master_profile, old.config_overrides),
+                render_env(actual.master_profile, actual.config_overrides),
+            )
+
+        assert_equivalent(plan["environment"])
+        self.assertNotIn(
+            "queueTimeoutMs", plan["environment"]["resolved_config"]["scheduler"]
+        )
+        # Each inherited base setting changes a real test channel: expiry,
+        # Prefill timing, or discovery/retirement. None may silently return.
+        for channel, value in (
+            ("queue_timeout_ms", 10000),
+            ("perf_preset", "default"),
+            ("discovery", "file"),
+        ):
+            broken = copy.deepcopy(plan["environment"])
+            if channel == "queue_timeout_ms":
+                broken["config_overrides"][channel] = value
+            else:
+                broken[channel] = value
+            with self.subTest(channel=channel), self.assertRaises(AssertionError):
+                assert_equivalent(broken)
+
     def test_all_legacy_cases_have_explicit_programs_and_profile_mapping(self):
         from flexlb_cfg import PROFILES
         from flexlb_ft.scenario.catalog import handlers
