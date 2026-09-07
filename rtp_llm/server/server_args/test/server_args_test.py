@@ -100,6 +100,9 @@ class ServerArgsSetTest(TestCase):
         os.environ["MM_VIDEO_MAX_FILE_SIZE_KB"] = "4096"
         os.environ["THINK_MODE"] = "adaptive"
         os.environ["DISABLE_FLASHINFER_HYBRID_PREFILL"] = "1"
+        os.environ["MOE_STRATEGY"] = "fp4_b12x"
+        os.environ["FP4_MOE_OP"] = "b12x"
+        os.environ["RTP_LLM_B12X_ZEROED_ENERGY_LIMIT"] = "0.25"
 
         sys.argv = ["prog"]
 
@@ -176,6 +179,9 @@ class ServerArgsSetTest(TestCase):
         self.assertFalse(py_env_configs.load_config.loader_recycle_handles)
         # MOE_PURE_TP_PRESHARD=true explicitly enables the opt-in path.
         self.assertTrue(py_env_configs.load_config.moe_pure_tp_preshard)
+        self.assertEqual(py_env_configs.moe_config.moe_strategy, "fp4_b12x")
+        self.assertEqual(py_env_configs.moe_config.fp4_moe_op, "b12x")
+        self.assertEqual(py_env_configs.moe_config.b12x_zeroed_energy_limit, 0.25)
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
         self.assertEqual(py_env_configs.vit_config.mm_image_max_file_size_kb, 2048)
@@ -233,6 +239,12 @@ class ServerArgsSetTest(TestCase):
             "true",
             "--disable_flashinfer_hybrid_prefill",
             "true",
+            "--moe_strategy",
+            "fp4_b12x",
+            "--fp4_moe_op",
+            "b12x",
+            "--b12x_zeroed_energy_limit",
+            "0.5",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -289,6 +301,9 @@ class ServerArgsSetTest(TestCase):
         # Pins the shipped defaults: neither env nor argv sets the flags here.
         self.assertTrue(py_env_configs.load_config.loader_recycle_handles)
         self.assertFalse(py_env_configs.load_config.moe_pure_tp_preshard)
+        self.assertEqual(py_env_configs.moe_config.moe_strategy, "fp4_b12x")
+        self.assertEqual(py_env_configs.moe_config.fp4_moe_op, "b12x")
+        self.assertEqual(py_env_configs.moe_config.b12x_zeroed_energy_limit, 0.5)
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
 
@@ -435,6 +450,26 @@ class ServerArgsSetTest(TestCase):
 
         # Not set via env or cmd args: verify the default value
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_hybrid_prefill)
+
+    def test_invalid_b12x_zeroed_energy_limit_cli_is_rejected(self):
+        import rtp_llm.server.server_args.server_args
+
+        for value in ("-0.1", "1.1", "nan", "inf", "not-a-number"):
+            with self.subTest(value=value):
+                sys.argv = ["prog", "--b12x_zeroed_energy_limit", value]
+                importlib.reload(rtp_llm.server.server_args.server_args)
+                with self.assertRaises(SystemExit):
+                    rtp_llm.server.server_args.server_args.setup_args()
+
+    def test_invalid_b12x_zeroed_energy_limit_mixed_env_is_rejected(self):
+        os.environ["RTP_LLM_B12X_ZEROED_ENERGY_LIMIT"] = "1.1"
+        sys.argv = ["prog", "--model_type", "qwen"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        with self.assertRaises(SystemExit):
+            rtp_llm.server.server_args.server_args.setup_args()
 
     def test_batch_decode_scheduler_config(self):
         """Test that batch_decode_scheduler_config is correctly set."""
