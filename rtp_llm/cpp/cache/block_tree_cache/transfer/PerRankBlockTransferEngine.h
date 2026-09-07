@@ -21,22 +21,21 @@ class BlockTreeCacheTestPeer;
 class PerRankBlockTransferEngine {
 public:
     explicit PerRankBlockTransferEngine(std::vector<GroupSetPtr> group_sets,
+                                        bool                     enable_disk_cache                         = false,
                                         DeviceHostCopyOptions    device_host_options                       = {},
                                         size_t                   device_disk_staging_block_count           = 4,
                                         size_t                   max_device_host_descriptors_per_batch     = 8,
                                         size_t                   transfer_worker_count                     = 4,
                                         size_t                   max_non_device_host_descriptors_per_batch = 16,
                                         size_t                   transfer_queue_max_size                   = 10000,
-                                        int                      host_queue_wait_timeout_ms                = 10000,
-                                        int                      disk_queue_wait_timeout_ms                = 30000);
+                                        std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter    = nullptr);
     PerRankBlockTransferEngine() = delete;
     virtual ~PerRankBlockTransferEngine();
 
-    virtual std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors);
+    virtual std::shared_ptr<AsyncContext> execute(TransferTask task);
     void                                  cancelPendingStagingTransfers();
     void                                  stopAdmission();
     void                                  shutdown();
-    void                                  setQueueWaitReporter(TransferQueueWaitReporter reporter);
     BlockTreeQueueSizes                   queueSizes() const;
 
     size_t transferWorkerCount() const {
@@ -46,9 +45,6 @@ public:
 private:
     friend class block_tree_cache_test::BlockTreeCacheTestPeer;
 
-    TransferStatus        execute(const std::vector<HostBufferView>&     hosts,
-                                  const std::vector<TransferDescriptor>& descriptors,
-                                  const std::vector<const GroupSet*>&    group_sets) const;
     static HostBufferView resolveHostView(const GroupSet& group_set, BlockIdxType host_block);
 
     std::vector<GroupSetPtr> group_sets_;
@@ -56,13 +52,8 @@ private:
     std::unique_ptr<BlockTreeTaskPool>          transfer_task_pool_;
     std::unique_ptr<DeviceHostTransferExecutor> device_host_executor_;
     std::unique_ptr<HostDiskTransferExecutor>   host_disk_executor_;
-    std::unique_ptr<DeviceDiskTransferExecutor> device_disk_executor_;  // nullable; present when a disk pool exists
-    size_t                                      max_device_host_descriptors_per_batch_{8};
-    size_t                                      max_non_device_host_descriptors_per_batch_{16};
+    std::unique_ptr<DeviceDiskTransferExecutor> device_disk_executor_;
     size_t                                      transfer_worker_count_{4};
-    int                                         host_queue_wait_timeout_ms_{10000};
-    int                                         disk_queue_wait_timeout_ms_{30000};
-    TransferQueueWaitReporter                   queue_wait_reporter_;
 };
 
 using PerRankBlockTransferEnginePtr = std::shared_ptr<PerRankBlockTransferEngine>;

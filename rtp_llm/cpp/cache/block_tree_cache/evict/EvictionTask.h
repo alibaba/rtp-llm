@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <vector>
 
@@ -23,9 +24,20 @@ struct EvictionTimingSnapshot {
 };
 
 struct EvictionTransferTask {
-    std::vector<TransferDescriptor>     descs;
+    explicit EvictionTransferTask(TransferTask task): transfer_task(std::move(task)) {}
+    EvictionTransferTask(TransferTask task, std::vector<EvictionTimingSnapshot> timing_snapshots):
+        transfer_task(std::move(task)), timings(std::move(timing_snapshots)) {}
+
+    const std::vector<TransferDescriptor>& descriptors() const {
+        return transfer_task.descriptors();
+    }
+
+    std::vector<TransferDescriptor>& mutableDescriptorsForPreparation() {
+        return transfer_task.mutableDescriptorsForPreparation();
+    }
+
+    TransferTask                        transfer_task;
     std::vector<EvictionTimingSnapshot> timings;
-    int64_t                             enqueue_time_us{0};
 };
 
 struct EvictionDropTask {

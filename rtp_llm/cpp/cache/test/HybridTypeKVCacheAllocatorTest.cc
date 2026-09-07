@@ -35,16 +35,16 @@ public:
     explicit PausableHybridPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups):
         PerRankBlockTransferEngine(groups) {}
 
-    std::shared_ptr<AsyncContext> submit(const std::vector<TransferDescriptor>& descriptors) override {
+    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ++submit_count_;
             if (released_) {
-                return PerRankBlockTransferEngine::submit(descriptors);
+                return PerRankBlockTransferEngine::execute(std::move(task));
             }
             auto context = std::make_shared<TransferBatchAsyncContext>();
-            entered_ = true;
-            pending_.push_back({descriptors, context});
+            entered_     = true;
+            pending_.push_back({std::move(task), context});
             cv_.notify_all();
             return context;
         }
@@ -64,7 +64,7 @@ public:
             cv_.notify_all();
         }
         for (auto& submit : pending) {
-            auto context = PerRankBlockTransferEngine::submit(submit.descriptors);
+            auto context = PerRankBlockTransferEngine::execute(std::move(submit.task));
             context->waitDone();
             submit.context->complete(context->errorInfo());
         }
@@ -77,7 +77,7 @@ public:
 
 private:
     struct PendingSubmit {
-        std::vector<TransferDescriptor>            descriptors;
+        TransferTask                               task;
         std::shared_ptr<TransferBatchAsyncContext> context;
     };
 
@@ -1083,8 +1083,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DeviceLoadSourceMatchRefBecomesRequestRef
     cache->transfer_dispatcher_->per_rank_engine_ = transfer_engine;
     ScopedHybridTransferRelease transfer_release(transfer_engine);
 
-    const CacheKeysType                        cached_keys{100, 101};
-    std::vector<std::vector<GroupSetResource>> slots(cached_keys.size(),
+    const CacheKeysType                                                         cached_keys{100, 101};
+    std::vector<std::vector<GroupSetResource>>                                  slots(cached_keys.size(),
                                                      std::vector<GroupSetResource>(cache->groupSets().size()));
     std::vector<std::pair<GroupSetPtr, block_tree_cache_test::MultiNodeBlocks>> device_resources;
     for (const GroupSetPtr& group_set : cache->groupSets()) {
@@ -1113,7 +1113,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DeviceLoadSourceMatchRefBecomesRequestRef
 
     const CacheKeysType request_keys{100, 101, 102};
     auto                request_resource = makeBatchResource(/*batch_size=*/1, config, request_keys);
-    auto request_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/9, /*seq_size_per_block=*/4);
+    auto       request_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/9, /*seq_size_per_block=*/4);
     MallocInfo malloc_info{request_resource, request_tokens};
     malloc_info.enable_cache_lookup = true;
     malloc_info.reuse_cache         = true;
@@ -1209,7 +1209,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly
     }
     auto seeded_match = allocator->blockTreeCacheOwner()->match(seed_keys);
     ASSERT_EQ(seeded_match.matched_device_blocks, seed_keys.size());
-    block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(), seeded_match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(),
+                                                     seeded_match.matched_device_resources);
 
     const auto& full_blocks   = seeded_blocks[static_cast<size_t>(full_group_id)];
     const auto& linear_blocks = seeded_blocks[static_cast<size_t>(linear_group_id)];
@@ -1330,8 +1331,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, PreparedLoadReclaimsSharedPoolTreeCandida
     ASSERT_EQ(allocator->freeBlocksNum(), 1u);
     ASSERT_GT(allocator->blockTreeCacheOwner()->getStats().device_heap_total_size, 0u);
 
-    auto resource  = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{200});
-    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+    auto       resource  = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{200});
+    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
     MallocInfo malloc_info{resource, token_ids};
     malloc_info.reuse_cache = true;
     malloc_info.verbose     = false;
@@ -1339,8 +1340,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, PreparedLoadReclaimsSharedPoolTreeCandida
     // A one-token-block request needs one LINEAR and one FULL physical block.
     // The shared pool has only one free block, but its tree candidates are
     // reclaimable; prepared admission must reclaim instead of retrying forever.
-    EXPECT_EQ(allocator->preparedReserveStatusForTest(malloc_info, /*reserve_blocks=*/0, {{}, {}}),
-              MallocStatus::NONE);
+    EXPECT_EQ(allocator->preparedReserveStatusForTest(malloc_info, /*reserve_blocks=*/0, {{}, {}}), MallocStatus::NONE);
     EXPECT_GE(allocator->freeBlocksNum(), 2u);
 }
 
@@ -1648,8 +1648,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCachePreservesLinearHoleAndPubl
     block_pool->incRef(blocks);
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102});
-    batch_res->mutableBlockIds(/*batch_id=*/0, /*group_id=*/0)
-        .assign({blocks[0], NULL_BLOCK_IDX, blocks[1]});
+    batch_res->mutableBlockIds(/*batch_id=*/0, /*group_id=*/0).assign({blocks[0], NULL_BLOCK_IDX, blocks[1]});
     batch_res->mutableBlockIds(/*batch_id=*/0, /*group_id=*/1).assign({blocks[2], blocks[3], blocks[4]});
 
     EXPECT_NO_THROW(allocator->insertIntoCache(InsertInfo{batch_res, nullptr, /*is_resident=*/false}));
@@ -1684,8 +1683,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheStopsBeforeFullHole) {
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102});
     batch_res->mutableBlockIds(/*batch_id=*/0, /*group_id=*/0).assign({blocks[0], blocks[1], blocks[2]});
-    batch_res->mutableBlockIds(/*batch_id=*/0, /*group_id=*/1)
-        .assign({blocks[3], NULL_BLOCK_IDX, blocks[4]});
+    batch_res->mutableBlockIds(/*batch_id=*/0, /*group_id=*/1).assign({blocks[3], NULL_BLOCK_IDX, blocks[4]});
 
     allocator->insertIntoCache(InsertInfo{batch_res, nullptr, /*is_resident=*/false});
     const auto path = allocator->blockTreeCacheOwner()->tree()->findNode(CacheKeysType{100, 101, 102});
@@ -1719,7 +1717,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DefaultHybridLinearPrefixReuseSupportsIns
                   ->matchedBlocksForGroup(/*group_id=*/0, seed_match.matched_device_resources)
                   .size(),
               1u);
-    block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(), seed_match.matched_device_resources);
+    block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(),
+                                                     seed_match.matched_device_resources);
 
     auto hit_res    = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102, 103});
     auto hit_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/16, /*seq_size_per_block=*/4);

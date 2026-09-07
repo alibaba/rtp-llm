@@ -177,7 +177,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4ReuseCacheFalsePressureDoesNotDistur
     ASSERT_NE(manager_, nullptr);
     auto cache = manager_->blockTreeCache();
 
-    auto pausable_engine = std::make_shared<PausableRecordingTransferEngine>(cache->groupSets());
+    auto pausable_engine =
+        std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, pausable_engine);
     transfer_engine_.reset();
 
@@ -411,7 +412,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerTierMatchPublishesAsyncContext)
     const size_t batches_before_load     = transfer_engine_->submittedBatchCount();
     const size_t descriptors_before_load = transfer_engine_->submittedDescriptorCount();
     auto         resource                = makeResource(cache_config_);
-    auto         tokens              = makeTokenIds(0,
+    auto         tokens                  = makeTokenIds(0,
                                2 * cache_config_.seq_size_per_block,
                                2 * cache_config_.seq_size_per_block,
                                cache_config_.seq_size_per_block);
@@ -444,7 +445,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
     }
     ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/16));
     auto cache  = manager_->blockTreeCache();
-    auto engine = std::make_shared<PausableRecordingTransferEngine>(cache->groupSets());
+    auto engine = std::make_shared<PausableRecordingTransferEngine>(cache->groupSets(), cache->isDiskCacheEnabled());
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, engine);
     transfer_engine_.reset();
 

@@ -41,7 +41,7 @@ bool BlockTransferRequestConverter::decodeDeviceBlocks(const CopyItem&          
                                                        const GroupSet&            group_set,
                                                        std::vector<BlockIdxType>& blocks) {
     const auto&                              device_pools = group_set.devicePools();
-    const auto& group_ids = group_set.groupIds();
+    const auto&                              group_ids    = group_set.groupIds();
     std::unordered_map<size_t, BlockIdxType> blocks_by_group_id;
     for (const auto& group_block : item.group_blocks()) {
         blocks_by_group_id.emplace(static_cast<size_t>(group_block.group_id()), group_block.block_id());
@@ -57,10 +57,12 @@ bool BlockTransferRequestConverter::decodeDeviceBlocks(const CopyItem&          
     return true;
 }
 
-bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&              request,
-                                                   const std::vector<TransferDescriptor>& descriptors,
-                                                   const std::vector<GroupSetPtr>&        group_sets) {
-    const TransferDescriptor&               first = descriptors.front();
+bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&       request,
+                                                   const TransferTask&             task,
+                                                   const std::vector<GroupSetPtr>& group_sets) {
+    request.set_timeout_ms(task.remainingTimeout().value().count());
+    const auto&                             descriptors = task.descriptors();
+    const TransferDescriptor&               first       = descriptors.front();
     MemoryOperationRequestPB::CopyDirection request_direction;
     if (!directionFor(first, request_direction)) {
         return false;

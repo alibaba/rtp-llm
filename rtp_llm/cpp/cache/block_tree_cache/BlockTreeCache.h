@@ -113,11 +113,12 @@ class BlockTreeCache {
 public:
     using TierWatermark = BlockTreeCacheConfig::TierWatermark;
 
-    BlockTreeCache(std::unique_ptr<BlockTree>               tree,
-                   BlockTreeCacheConfig                     config,
-                   std::shared_ptr<StorageBackend>          storage_backend,
-                   std::unique_ptr<BlockTransferDispatcher> transfer_dispatcher,
-                   std::unique_ptr<BlockTreeTaskPool>       task_pool);
+    BlockTreeCache(std::unique_ptr<BlockTree>                     tree,
+                   BlockTreeCacheConfig                           config,
+                   std::shared_ptr<StorageBackend>                storage_backend,
+                   std::unique_ptr<BlockTransferDispatcher>       transfer_dispatcher,
+                   std::unique_ptr<BlockTreeTaskPool>             task_pool,
+                   std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter);
 
     ~BlockTreeCache();
     bool init();
@@ -140,9 +141,7 @@ public:
     BlockIndicesType matchedBlocksForGroup(size_t                                group_id,
                                            const std::vector<MultiNodeResource>& matched_resources) const;
 
-    bool executeTransfer(const std::vector<TransferDescriptor>& descriptors);
-
-    void setMetricsReporter(const std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter);
+    bool executeTransfer(TransferTask task);
 
     // Accessors
     BlockTree* tree() const {
@@ -181,15 +180,15 @@ private:
     // Caller holds mutex_.
     void onWorkflowSettledLocked(bool tree_data_mutated, bool check_watermark);
 
-    BlockTreeCacheConfig                     config_;
-    std::unique_ptr<BlockTree>               tree_;
-    std::shared_ptr<StorageBackend>          storage_backend_;
-    std::unique_ptr<BlockTransferDispatcher> transfer_dispatcher_;
-    std::unique_ptr<BlockTreeTaskPool>       task_pool_;
-    BlockTreeCacheMetricsReporter            metrics_reporter_;
-    mutable std::mutex                       mutex_;
-    BlockTreeEvictor                         evictor_;
-    bool                                     initialized_{false};
+    BlockTreeCacheConfig                           config_;
+    std::unique_ptr<BlockTree>                     tree_;
+    std::shared_ptr<StorageBackend>                storage_backend_;
+    std::unique_ptr<BlockTransferDispatcher>       transfer_dispatcher_;
+    std::unique_ptr<BlockTreeTaskPool>             task_pool_;
+    std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter_;
+    mutable std::mutex                             mutex_;
+    BlockTreeEvictor                               evictor_;
+    bool                                           initialized_{false};
     // Preserve the historical empty-cache wire value. The first successful
     // topology mutation advances the version to zero.
     int64_t                                     mutation_version_{-1};

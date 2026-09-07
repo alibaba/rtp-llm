@@ -21,7 +21,7 @@ public:
         return pool_.start();
     }
     bool submit(Task task) override {
-        return pool_.submit(std::move(task));
+        return pool_.submit(BlockTreeTaskClass::BACKGROUND, std::move(task));
     }
     void shutdown() noexcept override {
         std::lock_guard<std::mutex> lock(shutdown_mutex_);

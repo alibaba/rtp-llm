@@ -30,6 +30,8 @@ struct BlockTreeQueueSizes {
 
 class BlockTreeTaskPool {
 public:
+    using Clock = std::chrono::steady_clock;
+
     static constexpr size_t                    kDefaultQueueSize = 10000;
     static constexpr std::chrono::milliseconds kDefaultQueueWaitTimeout{30000};
     // Normal-queue slots and workflow credits only LOAD tasks may occupy, so
@@ -45,13 +47,10 @@ public:
     BlockTreeTaskPool& operator=(const BlockTreeTaskPool&) = delete;
 
     bool start();
-    bool submit(std::function<void()>     task,
-                std::chrono::milliseconds max_queue_wait = std::chrono::milliseconds::zero(),
-                std::function<void()>     on_timeout     = {});
-    bool submit(BlockTreeTaskClass        task_class,
-                std::function<void()>     task,
-                std::chrono::milliseconds max_queue_wait = std::chrono::milliseconds::zero(),
-                std::function<void()>     on_timeout     = {});
+    bool submit(BlockTreeTaskClass               task_class,
+                std::function<void()>            task,
+                std::optional<Clock::time_point> deadline   = std::nullopt,
+                std::function<void()>            on_timeout = {});
     bool submitCompletion(std::function<void()> task);
     // A workflow credit spans business-task execution, asynchronous transfer,
     // and final cache-state settlement. The task class must match on release so
@@ -68,9 +67,9 @@ private:
     static constexpr size_t kMaxLoadBurst = 4;
 
     struct QueuedTask {
-        std::function<void()>                                run;
-        std::function<void()>                                on_timeout;
-        std::optional<std::chrono::steady_clock::time_point> deadline;
+        std::function<void()>            run;
+        std::function<void()>            on_timeout;
+        std::optional<Clock::time_point> deadline;
     };
 
     void       workerLoop();
