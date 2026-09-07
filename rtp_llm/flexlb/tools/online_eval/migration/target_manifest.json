@@ -1035,18 +1035,18 @@
       ],
       "candidate_contracts": [
         "prio_low_no_starvation",
+        "prio_queue_timeout_terminal",
         "prio_same_level_fifo"
       ],
       "pending_contracts": [
         "prio_normalize",
-        "prio_order_basic",
-        "prio_queue_timeout_terminal"
+        "prio_order_basic"
       ],
       "candidate_counts": {
         "logical_scenarios": 1,
-        "variants": 2,
-        "instances": 2,
-        "checks": 7
+        "variants": 3,
+        "instances": 3,
+        "checks": 10
       },
       "source_files": [
         "scenarios/priority/priority_queue.yaml"
@@ -1054,9 +1054,10 @@
       "replacement_status": "retain_legacy_pending_paired_evidence",
       "static_review": {
         "status": "passed_at_revision",
-        "revision": "94aeb81c1adc8acf4761cb77149e672f7317de53",
+        "revision": "9f6960a8be63c2dcab98e3e641b0cff1ff947129",
         "reviewed_contracts": [
           "prio_low_no_starvation",
+          "prio_queue_timeout_terminal",
           "prio_same_level_fifo"
         ],
         "unreviewed_candidate_contracts": [],
