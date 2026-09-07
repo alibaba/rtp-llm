@@ -1,6 +1,6 @@
 # Admission migration checkpoint
 
-Five admission families are now implemented: `admission_queue` (3 variants/6 instances), `engine_admission_gate` (4/8), `priority_admission` (1/1), `batcher_placement_admission` (3/6), and `prefill_batch_token_budget` (4/4). Total:15 explicit programs,25 profile instances covering15 retained legacy cases. The first three families passed independent local static review. The final two remain pending independent review. Complete local external-I/O fixtures are implementation evidence, not real Java execution or full migration acceptance. Existing cases are retained.
+Five admission families are now implemented: `admission_queue` (3 variants/6 instances), `engine_admission_gate` (4/8), `priority_admission` (1/1), `batcher_placement_admission` (3/6), and `prefill_batch_token_budget` (4/4). Total:15 explicit programs,25 profile instances covering15 retained legacy cases. All five families passed independent local static review; the final two were reviewed atda36e996da5d5da7e69a602e1366484c9ba24eda with34 admission tests passing (30.482s, exit0). Complete local external-I/O fixtures are implementation evidence, not real Java execution or full migration acceptance. Existing cases are retained.
 
 The profiles follow the current case declarations, not the older mapping table: both SLO and master-capacity now include single-batch; queue-depth requires the BATCH dispatcher. Queue-depth uses the original default 2P/4D; SLO and master-capacity use dedicated 2P/2D environments. Config overrides preserve each selected profile's decision/dispatcher axes.
 
@@ -16,10 +16,10 @@ Explicit stricter observations: master_clean also requires current full ready to
 
 Complete compile-to-execute fixtures exercise all six programs and distinguish wrong numeric capacity codes, SLO errors that arrive too early, and consumer cleanup errors from a green run. External Java I/O is explicitly replaced in these fixtures; no real Java success is inferred.
 
-Pending before acceptance: independent legacy-contract review, integration through the core-owned catalog, and scheduled real Java validation. No remote load was started for this checkpoint.
+Independent review status is summarized at the top. Default child catalog integration is available at9d8576c44bf6dda4191f5d9070c3cc929b7fc5a0; its actual scenario_runner CLI lists all25 admission instances. The real-execution handoff found this revision still lacks the structured parent planner; parent integration is required before remote load. Real Java validation remains pending. No remote load was started by this implementation task.
 
 
-## Engine gate programs awaiting independent acceptance
+## Engine gate programs
 
 | Legacy case | Variant | Retained predicates / stage.check |
 |---|---|---|
@@ -41,7 +41,7 @@ Independent review corrections: KV fresh_lease retains the old15s stream timeout
 
 ## Batcher and placement admission checkpoint
 
-`batcher_placement_admission` adds three variants/six instances. All six complete compile-to-execute fixtures with real owned sampler/drain threads and replaced external RPC/HTTP only. Local negative fixtures reject an absent park, an out-of-window park and a too-fast deadline. This brings implementation to four families/21 instances; the four token-budget legacy cases remain pending.
+`batcher_placement_admission` adds three variants/six instances. All six complete compile-to-execute fixtures with real owned sampler/drain threads and replaced external RPC/HTTP only. Local negative fixtures reject an absent park, an out-of-window park and a too-fast deadline. These six instances are included in the current five-family/25-instance total; the final token-budget programs are documented below.
 
 - `batcher_queue_capacity_park` preserves1P/2D, PRIORITY/queue60000/waiting cap2, seven immediate-consumer fires400ms apart under3000ms prefill, all seven admitted/completed, park>=1 during fire, concurrent wait-return FIFO, engine waiting+prefill_waiting_batches empty10s, master clean30s and fresh recovery. Drain span remains an observation, never a minimum-duration requirement.
 - `batcher_queue_deadline` preserves queue1500ms, eight fires150ms apart, six admissions/completions plus two Schedule rejects, exact8511 OR the original literal error family, each reject1..5s. Park>=1 must be sampled between the first rejected Schedule start and last rejected Schedule end. Zero serving errors, relieved perf100, master clean30s and recovery remain required.
