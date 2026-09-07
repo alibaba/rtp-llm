@@ -400,13 +400,13 @@ Scenario makeContextParallelScenario() {
                              /*block_ids=*/{3, 4, 5, 6, 7, 8, 1, 2, 3, -1, -1, -1},
                              /*group_count=*/2,
                              /*block_table_width=*/6,
-                             /*global_tokens_per_block=*/2,
+                             /*global_tokens_per_block=*/1,
                              /*global_stride_bytes=*/24);
     Scenario scenario{std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     scenario.parallelism.tp_size                            = 2;
     scenario.parallelism.tp_rank                            = 1;
     scenario.parallelism.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
-    scenario.parallelism.prefill_cp_config.kv_cache_sharded = true;
+    scenario.parallelism.prefill_cp_config.kv_cache_sharded = false;
     scenario.replace_cp_processor                           = true;
     return scenario;
 }
