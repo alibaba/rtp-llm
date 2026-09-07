@@ -11,9 +11,14 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+import test_scenario_elastic_concurrent_profiles as rpc_fixture
+from flexlb_cfg import render_env
+from flexlb_ft.harness import _elastic_env
 from flexlb_ft.scenario import compile_scenarios
 from flexlb_ft.scenario.actions import elastic as e
+from flexlb_ft.scenario.actions import elastic_added_worker as aw
 from flexlb_ft.scenario.actions import engine_control as ec
+from flexlb_ft.scenario.backend import make_env_spec
 from flexlb_ft.scenario.loader import load_scenarios
 from flexlb_ft.scenario.runtime import execute_instance
 
@@ -30,23 +35,55 @@ class Clock:
 
 
 class AddedWorkerTests(unittest.TestCase):
-    def run_program(self, resumed=True, survivor_ok=True):
+    def run_program(
+        self,
+        resumed=True,
+        survivor_ok=True,
+        profile="batch-window",
+        reset=False,
+        opposite=False,
+        late=False,
+        initial=0,
+    ):
         clock = Clock()
-        state = dict(stopped=False, added=False, accepted=0, flow_starts=0)
-        flows = []
-        handlers = {h.name: h for h in [*e.HANDLERS, *ec.HANDLERS]}
-        plan = compile_scenarios(
+        state = dict(
+            stopped=False,
+            added=False,
+            accepted=initial,
+            flow_starts=0,
+            restarted=False,
+            engines={"prefill-0": {"grpc_addr": "127.0.0.1:10005"}},
+        )
+        handlers = {h.name: h for h in [*e.HANDLERS, *ec.HANDLERS, *aw.HANDLERS]}
+        plans = compile_scenarios(
             load_scenarios(ROOT / "scenarios/elastic/added_worker_fault.yaml"),
             handlers=handlers,
-        )[0]
+        )
+        plan = next(p for p in plans if p["profile"] == profile)
         self.assertEqual(plan["resource_budget"]["max_dynamic_additions"], 1)
         self.assertEqual(plan["legacy_case_ids"], ["elastic_stop_after_add"])
-        config = plan["environment"]["resolved_config"]
-        self.assertEqual(config["scheduler"]["ordering"]["type"], "PRIORITY")
-        self.assertEqual(config["scheduler"]["decision"]["type"], "FIXED_WINDOW")
-        self.assertEqual(config["dispatcher"]["type"], "BATCH")
-        self.assertEqual(config["dispatcher"]["maxInflightBatchesPerPrefillWorker"], 4)
-        self.assertNotIn("queueTimeoutMs", str(config))
+        old, _ = _elastic_env(
+            NS(
+                profile=profile,
+                env_manager=NS(ensure=lambda s: s),
+                engine_ops=lambda env: None,
+            )
+        )
+        spec = make_env_spec(plan["environment"], profile, {"master_base": 28000})
+        self.assertEqual(
+            plan["environment"]["resolved_config"],
+            json.loads(render_env(old.master_profile, old.config_overrides)),
+        )
+        for key in (
+            "perf",
+            "n_prefill",
+            "n_decode",
+            "discovery",
+            "prefill_cache_blocks",
+            "decode_cache_blocks",
+        ):
+            self.assertEqual(getattr(spec, key), getattr(old, key))
+        self.assertNotIn("queueTimeoutMs", str(plan["environment"]["resolved_config"]))
 
         with tempfile.TemporaryDirectory() as temp:
             file = Path(temp) / "discovery.json"
@@ -63,42 +100,111 @@ class AddedWorkerTests(unittest.TestCase):
                             }
                         )
                     )
-                    return NS(discovery_file=file), NS(master_http_port=1)
+                    ops = NS(master_http_port=1)
+                    rpc_fixture.ProfileTests().driver(opposite=opposite)(
+                        ops, environment, state, clock
+                    )
+                    counter = iter(range(20001, 30001))
+                    ops.next_request_id = lambda: next(counter)
+                    stub_factory = ops.pb2_grpc.RpcServiceStub
+
+                    def stub(ch):
+                        original = stub_factory(ch)
+
+                        def consume(method):
+                            def call(req, timeout):
+                                result = getattr(original, method)(req, timeout)
+                                if state["stopped"] and not survivor_ok:
+                                    return iter(
+                                        [
+                                            NS(
+                                                HasField=lambda name: True,
+                                                error_info=NS(
+                                                    error_code=8431,
+                                                    error_message="survivor failed",
+                                                ),
+                                                flatten_output=NS(finished=[False]),
+                                            )
+                                        ]
+                                    )
+                                if not state["stopped"]:
+                                    if not state["restarted"] or resumed:
+                                        state["accepted"] += 1
+                                return result
+
+                            return call
+
+                        return NS(
+                            FetchResponse=consume("FetchResponse"),
+                            GenerateStreamCall=consume("GenerateStreamCall"),
+                        )
+
+                    ops.pb2_grpc.RpcServiceStub = stub
+                    # Survivor uses its own legacy fixed key rather than pump's cold key.
+                    original_schedule = ops.schedule_pb2_grpc.FlexlbServiceStub
+
+                    def schedule_stub(ch):
+                        wrapped = original_schedule(ch)
+
+                        def future(req, timeout):
+                            if state["stopped"]:
+                                state["survivor_actual_shape"] = copy.deepcopy(
+                                    vars(req)
+                                )
+                                response = NS(
+                                    code=200,
+                                    success=True,
+                                    error_message="",
+                                    target="127.0.0.1:10001",
+                                    enqueued_by_master=("nonbatch" not in profile)
+                                    != opposite,
+                                )
+                                return NS(result=lambda: response, cancel=lambda: True)
+                            future = wrapped.Schedule.future(req, timeout)
+                            original_result = future.result
+
+                            def result():
+                                if late:
+                                    clock.now += 21  # within the 30s Schedule timeout
+                                return original_result()
+
+                            future.result = result
+                            return future
+
+                        return NS(Schedule=NS(future=future))
+
+                    ops.schedule_pb2_grpc.FlexlbServiceStub = schedule_stub
+                    state["ops"] = ops
+                    return NS(discovery_file=file), ops
 
                 def start_requests(self, ctx, params, deadline):
                     state["survivor_shape"] = params
-                    return ctx.register_resource("requests", object())
+                    records = e.RecordedRequests(ctx.ops, ctx.env_epoch, clock)
+                    r = records.issue(ctx.ops.next_request_id(), clock)
+                    records.run(
+                        r,
+                        {
+                            k: params[k]
+                            for k in ("input_len", "output_len", "block_keys")
+                        },
+                        schedule_timeout_s=30,
+                        stream_timeout_s=10,
+                    )
+                    state["survivor_records"] = records.snapshot_records()
+                    return ctx.register_resource(
+                        "requests", records, cleanup=lambda d: records.cancel_active()
+                    )
 
                 def wait_requests(self, ctx, requests, deadline):
-                    return dict(completed=survivor_ok, error_count=int(not survivor_ok))
+                    rows = requests.snapshot_records()
+                    result = e.completeness(rows)
+                    return dict(
+                        completed=result["complete"],
+                        error_count=len(result["failed_request_ids"]),
+                    )
 
                 def teardown(self, ctx, deadline):
                     state["cleaned"] = True
-
-            class Flow(e.ClientRecords):
-                pump_error = None
-
-                def __init__(self, ops, epoch, clock):
-                    super().__init__(epoch)
-                    flows.append(self)
-
-                def start(self):
-                    state["flow_starts"] += 1
-                    if state["flow_starts"] == 1 or resumed:
-                        state["accepted"] += 1
-                    r = self.issue(state["flow_starts"], clock)
-                    self.update(
-                        r,
-                        business_finished=True,
-                        schedule=dict(status="OK"),
-                        stream=dict(status="OK"),
-                        consumer_exit_s=clock(),
-                        transport_terminal_s=clock(),
-                    )
-
-                def stop(self, deadline, cancel=False):
-                    self.stopped = True
-                    return e.completeness(self.snapshot_records())
 
             def http(ops, endpoint, deadline, body=None):
                 if endpoint == "snapshot":
@@ -136,6 +242,10 @@ class AddedWorkerTests(unittest.TestCase):
                     )
                 if endpoint in {"stop_engine", "start_engine"}:
                     state["stopped"] = endpoint == "stop_engine"
+                    if endpoint == "start_engine":
+                        state["restarted"] = True
+                        if reset:
+                            state["accepted"] = 0
                     return dict(status="ok", engine="prefill-2", port=10005)
                 raise AssertionError(endpoint)
 
@@ -150,9 +260,7 @@ class AddedWorkerTests(unittest.TestCase):
 
             with patch.object(e, "_http", side_effect=http), patch.object(
                 ec, "_http", side_effect=http
-            ), patch.object(e, "ColdFlow", Flow), patch(
-                "flexlb_ft.harness.http_post_json", side_effect=master
-            ):
+            ), patch("flexlb_ft.harness.http_post_json", side_effect=master):
                 result = execute_instance(
                     plan,
                     Backend(),
@@ -162,13 +270,17 @@ class AddedWorkerTests(unittest.TestCase):
                     sleeper=clock.sleep,
                 )
             self.assertTrue(state["cleaned"])
-            self.assertTrue(all(flow.stopped for flow in flows))
+            state["artifacts"] = [
+                json.loads(p.read_text())
+                for p in (Path(temp) / "artifacts").glob("elastic-added-probe-*.json")
+            ]
+            state["plan"] = plan
         return result, state
 
     def test_full_program_preserves_stop_survivor_restart_and_fresh_traffic(self):
         result, state = self.run_program()
         self.assertEqual(result["status"], "PASS", result)
-        self.assertEqual(state["flow_starts"], 2)
+        self.assertEqual(len(state["artifacts"]), 2)
         self.assertEqual(state["survivor_shape"]["stream_timeout_s"], 10)
         rows = {row["id"]: row for row in result["stages"]}
         self.assertEqual(rows["stopped_topology"]["checks"][1]["actual"]["alive"], 2)
@@ -190,3 +302,63 @@ class AddedWorkerTests(unittest.TestCase):
             "BLOCKED",
         )
         self.assertTrue(all(r["status"] == "PASS" for r in result["cleanup"]))
+
+    def test_all_profiles_actual_driver_configs_and_terminal_records(self):
+        for profile in [
+            "batch-window",
+            "single-batch",
+            "single-nonbatch",
+            "window-nonbatch",
+        ]:
+            with self.subTest(profile=profile):
+                result, state = self.run_program(profile=profile)
+                self.assertEqual(result["status"], "PASS", result)
+                expected = (
+                    "GenerateStreamCall" if "nonbatch" in profile else "FetchResponse"
+                )
+                self.assertEqual({m for m, _ in state["protocol_calls"]}, {expected})
+                self.assertEqual(
+                    state["survivor_records"][0]["stream"]["method"], expected
+                )
+                self.assertTrue(state["survivor_records"][0]["business_finished"])
+                self.assertEqual(state["survivor_actual_shape"]["block_keys"], [7])
+                for artifact in state["artifacts"]:
+                    self.assertTrue(
+                        all(
+                            r["business_finished"]
+                            and r["consumer_exit_s"] is not None
+                            and r["transport_terminal_s"] is not None
+                            for r in artifact["requests"]
+                        )
+                    )
+
+    def test_successful_opposite_protocol_fails(self):
+        for profile in ["single-batch", "single-nonbatch", "window-nonbatch"]:
+            result, _ = self.run_program(profile=profile, opposite=True)
+            stage = next(s for s in result["stages"] if s["id"] == "first_traffic")
+            self.assertEqual(
+                next(c for c in stage["checks"] if c["id"] == "protocol")["status"],
+                "FAIL",
+                result,
+            )
+
+    def test_last_admitted_request_can_complete_after_issuance_window(self):
+        result, state = self.run_program(late=True)
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertTrue(
+            all(
+                a["samples"][-1]["time_s"] > a["issuance_end_s"]
+                for a in state["artifacts"]
+            )
+        )
+
+    def test_restart_counter_reset_cannot_pass_with_one_fresh_request(self):
+        result, _ = self.run_program(reset=True, initial=10)
+        rows = {s["id"]: s for s in result["stages"]}
+        self.assertEqual(rows["resumed_traffic"]["status"], "PASS", result)
+        self.assertEqual(rows["cross_restart_growth"]["status"], "FAIL", result)
+
+    def test_existing_counter_cannot_prove_recovery(self):
+        result, _ = self.run_program(resumed=False, initial=10)
+        rows = {s["id"]: s for s in result["stages"]}
+        self.assertEqual(rows["resumed_traffic"]["status"], "FAIL", result)

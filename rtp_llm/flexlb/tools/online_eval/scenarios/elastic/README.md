@@ -8,21 +8,24 @@ additional final family. No production failure is converted into a finding.
 ## Added worker fault
 
 `added_worker_fault.yaml` implements `elastic_added_worker_fault` as one explicit
-program for the `batch-window` profile, preserving the 2P/4D fault preset,
-PRIORITY/FIXED_WINDOW/BATCH axes, four batch leases and omitted queue timeout.
-The compiler supplies FIXED_WINDOW and BATCH from the profile. The core request
-shape/timeout interface requires commit `23b3893059` or a descendant.
+program with explicit variants for all four profiles, preserving the 2P/4D fault
+preset, PRIORITY ordering, profile-selected decision/dispatcher and omitted queue
+timeout. The corrected serial probe restores legacy issuance-window semantics
+and the cross-restart cumulative counter check for BW and the three new profiles.
+See [MIGRATION_ADDED_WORKER_PROFILES.md](MIGRATION_ADDED_WORKER_PROFILES.md) for
+the correction, declared strengthening, fixtures and catalog integration.
 
 | Legacy `elastic_stop_after_add` contract | Actual stage/check |
 | --- | --- |
 | Add succeeds and the new engine exists | `add.membership` |
 | Discovery entry appears within 10s | `added_topology.discovery` |
 | Master sees the third alive prefill within 30s | `added_topology.master` |
-| New engine receives traffic within 15s | `first_traffic.received` |
+| New engine accepts traffic from the 15s issuance window | `first_traffic.received` |
 | Stop makes alive count fall to two within 30s | `stopped_topology.master` |
 | A request succeeds while the engine is stopped | `survivor_completed.comparison`, `survivor_no_errors.comparison` |
 | Restart restores three alive prefills within 30s | `restored_topology.master` |
-| Restarted engine accepts fresh traffic within 20s | `resumed_traffic.received` |
+| Restarted engine accepts fresh traffic from the 20s issuance window | `resumed_traffic.received` |
+| Post-restart cumulative accepted exceeds pre-stop count | `cross_restart_growth.increased` |
 
 The restarted-worker check freezes a fresh accepted counter before starting its
 probe flow. Pre-stop traffic cannot satisfy this check. The previous implementation

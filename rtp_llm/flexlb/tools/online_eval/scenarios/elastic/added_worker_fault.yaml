@@ -1,10 +1,17 @@
 schema_version: 1
 id: elastic_added_worker_fault
-description: A newly added worker serves traffic, stops, and serves fresh traffic after restart.
+description: A newly added worker serves traffic, stops, and serves fresh traffic
+  after restart.
 category: elastic
-profiles: [batch-window]
-requires: [enqueue_batch]
-legacy_case_ids: [elastic_stop_after_add]
+profiles:
+- batch-window
+- single-batch
+- single-nonbatch
+- window-nonbatch
+requires:
+- queue
+legacy_case_ids:
+- elastic_stop_after_add
 estimated_duration_s: 100
 environment:
   backend: java_mock
@@ -14,55 +21,174 @@ environment:
   perf_preset: fault_env
   config_overrides:
     ordering: priority
-    queue_timeout_ms: {omit: true}
+    queue_timeout_ms:
+      omit: true
 execution:
   timeout_s: 400
   stage_timeout_s: 40
   cleanup_timeout_s: 120
 stages:
+- id: setup
+  action: setup
+  timeout_s: 180
+- id: add
+  action: elastic_add
+  params:
+    role: prefill
+- id: added_topology
+  action: elastic_topology
+  params:
+    role: PREFILL
+    discovered: 3
+    alive: 3
+    port:
+      $ref: stages.add.output.port
+    present: true
+- id: first_traffic
+  action: elastic_added_probe
+  timeout_s: 60
+  params:
+    engine:
+      $ref: stages.add.output.engine
+    window_s: 15
+    method: FetchResponse
+- id: before_stop
+  action: elastic_accepted_snapshot
+  params:
+    engine:
+      $ref: stages.add.output.engine
+- id: stop
+  action: engine_control
+  params:
+    operation: stop
+    targets:
+    - $ref: stages.add.output.engine
+- id: stopped_topology
+  action: elastic_topology
+  params:
+    role: PREFILL
+    discovered: 3
+    alive: 2
+    port:
+      $ref: stages.add.output.port
+    present: true
+- id: survivor_request
+  action: request
+  params:
+    input_len: 2048
+    output_len: 2
+    count: 1
+    block_keys:
+    - 7
+    schedule_timeout_s: 30
+    stream_timeout_s: 10
+- id: survivor_terminal
+  action: wait
+  params:
+    requests:
+      $ref: stages.survivor_request.output.requests
+- id: survivor_completed
+  action: check
+  params:
+    actual:
+      $ref: stages.survivor_terminal.output.completed
+    op: eq
+    expected: true
+- id: survivor_no_errors
+  action: check
+  params:
+    actual:
+      $ref: stages.survivor_terminal.output.error_count
+    op: eq
+    expected: 0
+- id: restart
+  action: engine_control
+  params:
+    operation: start
+    targets:
+    - $ref: stages.add.output.engine
+- id: restored_topology
+  action: elastic_topology
+  params:
+    role: PREFILL
+    discovered: 3
+    alive: 3
+    port:
+      $ref: stages.add.output.port
+    present: true
+- id: resumed_traffic
+  action: elastic_added_probe
+  timeout_s: 65
+  params:
+    engine:
+      $ref: stages.add.output.engine
+    window_s: 20
+    method: FetchResponse
+- id: after_restart
+  action: elastic_accepted_snapshot
+  params:
+    engine:
+      $ref: stages.add.output.engine
+- id: cross_restart_growth
+  action: elastic_added_growth
+  params:
+    before:
+      $ref: stages.before_stop.output.accepted
+    after:
+      $ref: stages.after_restart.output.accepted
+- id: teardown
+  action: teardown
+variants:
+- id: default
+  profiles:
+  - batch-window
+- id: single_batch
+  profiles:
+  - single-batch
+  stages:
   - id: setup
     action: setup
     timeout_s: 180
   - id: add
     action: elastic_add
-    params: {role: prefill}
+    params:
+      role: prefill
   - id: added_topology
     action: elastic_topology
     params:
       role: PREFILL
       discovered: 3
       alive: 3
-      port: {$ref: stages.add.output.port}
+      port:
+        $ref: stages.add.output.port
       present: true
-  - id: initial_counter
+  - id: first_traffic
+    action: elastic_added_probe
+    timeout_s: 60
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      window_s: 15
+      method: FetchResponse
+  - id: before_stop
     action: elastic_accepted_snapshot
     params:
-      engine: {$ref: stages.add.output.engine}
-  - id: initial_flow
-    action: elastic_cold_flow
-  - id: first_traffic
-    action: elastic_accepted
-    params:
-      engine: {$ref: stages.add.output.engine}
-      baseline: {$ref: stages.initial_counter.output.accepted}
-      window_s: 15
-  - id: initial_flow_stop
-    action: elastic_flow_stop
-    timeout_s: 45
-    params:
-      flow: {$ref: stages.initial_flow.output.flow}
+      engine:
+        $ref: stages.add.output.engine
   - id: stop
     action: engine_control
     params:
       operation: stop
-      targets: [{$ref: stages.add.output.engine}]
+      targets:
+      - $ref: stages.add.output.engine
   - id: stopped_topology
     action: elastic_topology
     params:
       role: PREFILL
       discovered: 3
       alive: 2
-      port: {$ref: stages.add.output.port}
+      port:
+        $ref: stages.add.output.port
       present: true
   - id: survivor_request
     action: request
@@ -70,57 +196,291 @@ stages:
       input_len: 2048
       output_len: 2
       count: 1
-      block_keys: [7]
+      block_keys:
+      - 7
       schedule_timeout_s: 30
       stream_timeout_s: 10
   - id: survivor_terminal
     action: wait
     params:
-      requests: {$ref: stages.survivor_request.output.requests}
+      requests:
+        $ref: stages.survivor_request.output.requests
   - id: survivor_completed
     action: check
     params:
-      actual: {$ref: stages.survivor_terminal.output.completed}
+      actual:
+        $ref: stages.survivor_terminal.output.completed
       op: eq
       expected: true
   - id: survivor_no_errors
     action: check
     params:
-      actual: {$ref: stages.survivor_terminal.output.error_count}
+      actual:
+        $ref: stages.survivor_terminal.output.error_count
       op: eq
       expected: 0
   - id: restart
     action: engine_control
     params:
       operation: start
-      targets: [{$ref: stages.add.output.engine}]
+      targets:
+      - $ref: stages.add.output.engine
   - id: restored_topology
     action: elastic_topology
     params:
       role: PREFILL
       discovered: 3
       alive: 3
-      port: {$ref: stages.add.output.port}
+      port:
+        $ref: stages.add.output.port
       present: true
-  - id: restart_counter
+  - id: resumed_traffic
+    action: elastic_added_probe
+    timeout_s: 65
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      window_s: 20
+      method: FetchResponse
+  - id: after_restart
     action: elastic_accepted_snapshot
     params:
-      engine: {$ref: stages.add.output.engine}
-  - id: recovery_flow
-    action: elastic_cold_flow
-  - id: resumed_traffic
-    action: elastic_accepted
+      engine:
+        $ref: stages.add.output.engine
+  - id: cross_restart_growth
+    action: elastic_added_growth
     params:
-      engine: {$ref: stages.add.output.engine}
-      baseline: {$ref: stages.restart_counter.output.accepted}
-      window_s: 20
-  - id: recovery_flow_stop
-    action: elastic_flow_stop
-    timeout_s: 45
-    params:
-      flow: {$ref: stages.recovery_flow.output.flow}
+      before:
+        $ref: stages.before_stop.output.accepted
+      after:
+        $ref: stages.after_restart.output.accepted
   - id: teardown
     action: teardown
-# Legacy pre-stop/post-start probe traffic has no rate assertion. Every attempt
-# is still retained and cleaned. Survivor business success is asserted above.
-# No findings: stage errors, request errors and missing evidence remain failures.
+- id: single_nonbatch
+  profiles:
+  - single-nonbatch
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.add.output.port
+      present: true
+  - id: first_traffic
+    action: elastic_added_probe
+    timeout_s: 60
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      window_s: 15
+      method: GenerateStreamCall
+  - id: before_stop
+    action: elastic_accepted_snapshot
+    params:
+      engine:
+        $ref: stages.add.output.engine
+  - id: stop
+    action: engine_control
+    params:
+      operation: stop
+      targets:
+      - $ref: stages.add.output.engine
+  - id: stopped_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 2
+      port:
+        $ref: stages.add.output.port
+      present: true
+  - id: survivor_request
+    action: request
+    params:
+      input_len: 2048
+      output_len: 2
+      count: 1
+      block_keys:
+      - 7
+      schedule_timeout_s: 30
+      stream_timeout_s: 10
+  - id: survivor_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.survivor_request.output.requests
+  - id: survivor_completed
+    action: check
+    params:
+      actual:
+        $ref: stages.survivor_terminal.output.completed
+      op: eq
+      expected: true
+  - id: survivor_no_errors
+    action: check
+    params:
+      actual:
+        $ref: stages.survivor_terminal.output.error_count
+      op: eq
+      expected: 0
+  - id: restart
+    action: engine_control
+    params:
+      operation: start
+      targets:
+      - $ref: stages.add.output.engine
+  - id: restored_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.add.output.port
+      present: true
+  - id: resumed_traffic
+    action: elastic_added_probe
+    timeout_s: 65
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      window_s: 20
+      method: GenerateStreamCall
+  - id: after_restart
+    action: elastic_accepted_snapshot
+    params:
+      engine:
+        $ref: stages.add.output.engine
+  - id: cross_restart_growth
+    action: elastic_added_growth
+    params:
+      before:
+        $ref: stages.before_stop.output.accepted
+      after:
+        $ref: stages.after_restart.output.accepted
+  - id: teardown
+    action: teardown
+- id: window_nonbatch
+  profiles:
+  - window-nonbatch
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: add
+    action: elastic_add
+    params:
+      role: prefill
+  - id: added_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.add.output.port
+      present: true
+  - id: first_traffic
+    action: elastic_added_probe
+    timeout_s: 60
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      window_s: 15
+      method: GenerateStreamCall
+  - id: before_stop
+    action: elastic_accepted_snapshot
+    params:
+      engine:
+        $ref: stages.add.output.engine
+  - id: stop
+    action: engine_control
+    params:
+      operation: stop
+      targets:
+      - $ref: stages.add.output.engine
+  - id: stopped_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 2
+      port:
+        $ref: stages.add.output.port
+      present: true
+  - id: survivor_request
+    action: request
+    params:
+      input_len: 2048
+      output_len: 2
+      count: 1
+      block_keys:
+      - 7
+      schedule_timeout_s: 30
+      stream_timeout_s: 10
+  - id: survivor_terminal
+    action: wait
+    params:
+      requests:
+        $ref: stages.survivor_request.output.requests
+  - id: survivor_completed
+    action: check
+    params:
+      actual:
+        $ref: stages.survivor_terminal.output.completed
+      op: eq
+      expected: true
+  - id: survivor_no_errors
+    action: check
+    params:
+      actual:
+        $ref: stages.survivor_terminal.output.error_count
+      op: eq
+      expected: 0
+  - id: restart
+    action: engine_control
+    params:
+      operation: start
+      targets:
+      - $ref: stages.add.output.engine
+  - id: restored_topology
+    action: elastic_topology
+    params:
+      role: PREFILL
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.add.output.port
+      present: true
+  - id: resumed_traffic
+    action: elastic_added_probe
+    timeout_s: 65
+    params:
+      engine:
+        $ref: stages.add.output.engine
+      window_s: 20
+      method: GenerateStreamCall
+  - id: after_restart
+    action: elastic_accepted_snapshot
+    params:
+      engine:
+        $ref: stages.add.output.engine
+  - id: cross_restart_growth
+    action: elastic_added_growth
+    params:
+      before:
+        $ref: stages.before_stop.output.accepted
+      after:
+        $ref: stages.after_restart.output.accepted
+  - id: teardown
+    action: teardown
