@@ -1301,7 +1301,7 @@ TEST_F(MtpExecutorTest, testDSparkDraftZeroTemperatureUsesClampedFullSoftmaxQ) {
     EXPECT_TRUE(torch::equal(output.token_ids.cpu(), expected_q.argmax(-1).to(torch::kInt32).cpu()));
 }
 
-TEST_F(MtpExecutorTest, testDSparkDraftGreedyRequestsCollapseQToArgmaxOneHot) {
+TEST_F(MtpExecutorTest, testDSparkDraftGreedyRequestsUseArgmaxPointMass) {
     constexpr int32_t gamma      = 3;
     constexpr int32_t vocab_size = 4;
 
@@ -1317,7 +1317,7 @@ TEST_F(MtpExecutorTest, testDSparkDraftGreedyRequestsCollapseQToArgmaxOneHot) {
                            .reshape({1, gamma, vocab_size})
                            .to(torch::kCUDA);
     auto anchors    = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-    auto expected_q = torch::softmax(base_logits / 1.0e-6f, -1);
+    auto expected_tokens = base_logits.argmax(-1).to(torch::kInt32);
 
     // do_sample=false is greedy even with a hot request temperature: the target
     // takes its argmax and acceptance requires an exact token match.
@@ -1330,8 +1330,9 @@ TEST_F(MtpExecutorTest, testDSparkDraftGreedyRequestsCollapseQToArgmaxOneHot) {
 
         auto output =
             components.executor->sampleDSparkDraft(stream_groups, base_logits.reshape({gamma, vocab_size}), anchors);
-        EXPECT_TRUE(torch::allclose(output.all_probs, expected_q));
-        EXPECT_TRUE(torch::equal(output.token_ids.cpu(), expected_q.argmax(-1).to(torch::kInt32).cpu()));
+        EXPECT_TRUE(output.token_ids_are_point_mass);
+        EXPECT_FALSE(output.all_probs.defined());
+        EXPECT_TRUE(torch::equal(output.token_ids.cpu(), expected_tokens.cpu()));
     }
 
     // top_k=1 is greedy as well regardless of do_sample/temperature.
@@ -1345,8 +1346,9 @@ TEST_F(MtpExecutorTest, testDSparkDraftGreedyRequestsCollapseQToArgmaxOneHot) {
 
         auto output =
             components.executor->sampleDSparkDraft(stream_groups, base_logits.reshape({gamma, vocab_size}), anchors);
-        EXPECT_TRUE(torch::allclose(output.all_probs, expected_q));
-        EXPECT_TRUE(torch::equal(output.token_ids.cpu(), expected_q.argmax(-1).to(torch::kInt32).cpu()));
+        EXPECT_TRUE(output.token_ids_are_point_mass);
+        EXPECT_FALSE(output.all_probs.defined());
+        EXPECT_TRUE(torch::equal(output.token_ids.cpu(), expected_tokens.cpu()));
     }
 }
 

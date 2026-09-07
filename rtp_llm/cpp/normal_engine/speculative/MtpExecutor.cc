@@ -1904,6 +1904,7 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
         torch::empty({batch_size}, torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(true));
     auto*           temperatures         = temperature_cpu.data_ptr<float>();
     int64_t         row                  = 0;
+    bool            all_greedy           = true;
     constexpr float kMinDraftTemperature = 1.0e-6f;
     for (const auto& stream : stream_groups.allStreams()) {
         RTP_LLM_CHECK_WITH_INFO(stream->maxBatchSize() == 1 && !stream->needTilingForSampling(),
@@ -1920,13 +1921,14 @@ SamplerOutput MtpExecutor::sampleDSparkDraft(const StreamGroups&  stream_groups,
         // the draft q must collapse to the argmax one-hot as well; a stochastic
         // q there tanks the acceptance rate. Only stochastic requests use the
         // request temperature.
-        temperatures[row++] =
-            config->stochastic() ? std::max(config->temperature, kMinDraftTemperature) : kMinDraftTemperature;
+        const bool stochastic = config->stochastic();
+        all_greedy             = all_greedy && !stochastic;
+        temperatures[row++] = stochastic ? std::max(config->temperature, kMinDraftTemperature) : kMinDraftTemperature;
     }
     buffer_holder_.hold_host(temperature_cpu);
     auto temperature = temperature_cpu.to(base_logits.device(), /*non_blocking=*/true);
     return speculative_sampler_->sampleDSparkDraft(
-        base_logits, anchors, temperature, dspark_markov_w1_, dspark_markov_w2_, draft_vocab_size_);
+        base_logits, anchors, temperature, dspark_markov_w1_, dspark_markov_w2_, draft_vocab_size_, all_greedy);
 }
 
 void MtpExecutor::dsparkModelDecode(GptModelInputs&                                 model_input,
