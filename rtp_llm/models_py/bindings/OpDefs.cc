@@ -163,6 +163,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def("__repr__", [](const PyAttentionInputs& self) { return "PyAttentionInputs"; })
         .def_readwrite("prefill_cuda_graph_copy_params", &PyAttentionInputs::prefill_cuda_graph_copy_params)
         .def_readwrite("headwise_config", &PyAttentionInputs::headwise_config)
+        .def_readonly("bert_uqi_mask", &PyAttentionInputs::bert_uqi_mask)
         .def("__copy__", [](const PyAttentionInputs& self) { return PyAttentionInputs(self); });
 
     pybind11::class_<BertEmbeddingInputs>(m, "BertEmbeddingInputs")
@@ -195,6 +196,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("multimodal_features", &PyMultimodalInputs::multimodal_features, "Multimodal features tensor")
         .def_readwrite(
             "mm_features_locs", &PyMultimodalInputs::mm_features_locs, "Multimodal features locations tensor")
+        .def_readwrite("mm_features_locs_host",
+                       &PyMultimodalInputs::mm_features_locs_host,
+                       "Optional CPU multimodal feature locations")
         .def_readwrite(
             "mm_extra_input", &PyMultimodalInputs::mm_extra_input, "Multimodal model-specific extra input tensor")
         .def("__repr__", [](const PyMultimodalInputs& self) { return "PyMultimodalInputs"; });

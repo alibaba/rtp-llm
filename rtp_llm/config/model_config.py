@@ -114,6 +114,7 @@ class ModelConfig(CppModelConfig):
         "model_type",
         "ptuning_path",
         "mm_model_config",
+        "bert_uqi_config",
         "deepseek_rope_mscale",
         "deepseek_mscale_all_dim",
         "moe_topk_group",

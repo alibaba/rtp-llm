@@ -157,13 +157,27 @@ cc_library(
 )
 
 cc_library(
+    name = "bert_uqi_attention",
+    srcs = ["BertUqiAttention.cc"],
+    hdrs = ["BertUqiAttention.h"],
+    deps = ["//rtp_llm/models_py/bindings/core:op_data"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "models",
     hdrs = glob([
         "*.h",
-    ], exclude = ["ModelInputsLogger.h"]),
+    ], exclude = [
+        "BertUqiAttention.h",
+        "ModelInputsLogger.h",
+    ]),
     srcs = glob([
         "*.cc",
-    ], exclude = ["ModelInputsLogger.cc"]),
+    ], exclude = [
+        "BertUqiAttention.cc",
+        "ModelInputsLogger.cc",
+    ]),
     deps = [
         ":model_inputs_logger",
         ":sample_infos",

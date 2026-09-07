@@ -230,6 +230,19 @@ py_test(
     },
 )
 
+py_test(
+    name = "test_bert_uqi",
+    srcs = [
+        "test_flashinfer_prefill/test_bert_uqi.py",
+    ],
+    data = ["//rtp_llm/models_py:modules"],
+    deps = flashinfer_test_deps,
+    tags = ["H20"],
+    exec_properties = {
+        "gpu": "H20",
+    },
+)
+
 # Test for MhaRotaryEmbeddingOp - RoPE implementation for MHA
 py_test(
     name = "test_mha_rotary_emb",

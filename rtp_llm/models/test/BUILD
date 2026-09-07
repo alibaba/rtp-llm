@@ -4,3 +4,9 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     exec_properties = {"gpu": "H20"},
 )
+
+py_test(
+    name = "bert_uqi_config_test",
+    srcs = ["bert_uqi_config_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)

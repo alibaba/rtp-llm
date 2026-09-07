@@ -1737,6 +1737,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("include_sep_tokens", &MMModelConfig::include_sep_tokens)
         .def_readwrite("mm_position_ids_style", &MMModelConfig::mm_position_ids_style);
 
+    py::class_<BertUqiConfig>(m, "BertUqiConfig")
+        .def(py::init<>())
+        .def_readwrite("enabled", &BertUqiConfig::enabled)
+        .def_readwrite("segment_token_id", &BertUqiConfig::segment_token_id)
+        .def_readwrite("separator_token_id", &BertUqiConfig::separator_token_id);
+
     py::class_<CacheReusePolicyDesc>(m, "CacheReusePolicyDesc")
         .def(py::init<>())
         .def_readwrite("enable_prefix_reuse", &CacheReusePolicyDesc::enable_prefix_reuse)
@@ -2006,6 +2012,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("model_type", &ModelConfig::model_type)
         .def_readwrite("ptuning_path", &ModelConfig::ptuning_path)
         .def_readwrite("mm_model_config", &ModelConfig::mm_model_config)
+        .def_readwrite("bert_uqi_config", &ModelConfig::bert_uqi_config)
         .def("getAttentionConfigs", &ModelConfig::getAttentionConfigs)
         .def("isGatedActivation", &ModelConfig::isGatedActivation)
         .def("isKvCacheQuant", &ModelConfig::isKvCacheQuant)

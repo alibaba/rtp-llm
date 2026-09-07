@@ -27,6 +27,18 @@ enum class ParallelMode {
     EPLB      = 5,
 };
 
+// Host-side metadata for BERT UQI attention. It is produced by the embedding
+// executor while token IDs are still on CPU and is intentionally not part of
+// the autoregressive engine's tensor-parallel transport contract.
+struct BertUqiBatchMetadata {
+    torch::Tensor attention_mask;     // pinned CPU bool, flattened [length, length] per sequence
+    torch::Tensor pooling_positions;  // pinned CPU int64 [batch, 2]: CLS_QI and CLS_UQI rows
+
+    bool isDefined() const {
+        return attention_mask.defined();
+    }
+};
+
 // A batch includes two parts: context batch and decoder batch.
 // context batch is request for initial word, decoder batch is request for incremental word.
 // ids and lengths are int32_t
@@ -44,6 +56,8 @@ struct GptModelInputs {
     torch::Tensor         lm_output_lengths;        // [total_batch_size]
     torch::Tensor         prefix_lengths;           // [context_batch_size]
     torch::Tensor         sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
+
+    BertUqiBatchMetadata bert_uqi;
 
     torch::Tensor combo_tokens_type_ids;  // [cumulated_seq_len]
     torch::Tensor combo_position_ids;     // [cumulated_seq_len]

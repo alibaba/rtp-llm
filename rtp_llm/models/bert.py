@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, TypeVar
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
@@ -16,6 +16,52 @@ from rtp_llm.models.downstream_modules.classifier.roberta_classifier import (
 )
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.ops import TaskType
+from rtp_llm.utils.util import str_to_bool
+
+_T = TypeVar("_T")
+
+
+def _read_aliased_env(
+    primary: str,
+    legacy: str,
+    default: _T,
+    parser: Callable[[str], _T],
+) -> _T:
+    """Accept equivalent parsed aliases, but reject conflicting rollout settings."""
+    values = [parser(os.environ[name]) for name in (primary, legacy) if name in os.environ]
+    if len(values) == 2 and values[0] != values[1]:
+        raise ValueError(f"{primary} conflicts with legacy alias {legacy}")
+    return values[0] if values else default
+
+
+def _configure_bert_uqi(config: ModelConfig) -> None:
+    uqi = config.bert_uqi_config
+    uqi.enabled = _read_aliased_env(
+        "ENABLE_BERT_UQI_ATTENTION",
+        "USE_VISION_BERT_UQI_BLOCK_MASK",
+        False,
+        str_to_bool,
+    )
+    uqi.segment_token_id = _read_aliased_env(
+        "BERT_UQI_SEGMENT_TOKEN_ID",
+        "VISION_BERT_CLS_UQI_TOKEN_ID",
+        2,
+        int,
+    )
+    uqi.separator_token_id = int(os.getenv("BERT_UQI_SEPARATOR_TOKEN_ID", "102"))
+
+    # A disabled feature must not impose delimiter constraints on ordinary BERT
+    # models (in particular, models with a vocabulary smaller than the defaults).
+    if not uqi.enabled:
+        return
+
+    token_ids = (uqi.segment_token_id, uqi.separator_token_id)
+    if any(token_id < 0 or token_id >= config.vocab_size for token_id in token_ids):
+        raise ValueError(
+            "BERT UQI delimiter token IDs must be within the model vocabulary"
+        )
+    if uqi.segment_token_id == uqi.separator_token_id:
+        raise ValueError("BERT UQI delimiter token IDs must be distinct")
 
 
 class Bert(BaseModel):
@@ -44,10 +90,11 @@ class Bert(BaseModel):
             content = reader.read()
             config_json = json.loads(content)
             cls.from_huggingface(config, config_json)
+        _configure_bert_uqi(config)
         return config
 
     def support_cuda_graph(self) -> bool:
-        return True
+        return not self.model_config.bert_uqi_config.enabled
 
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.bert import BertModel

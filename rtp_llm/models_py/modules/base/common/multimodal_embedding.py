@@ -1,4 +1,4 @@
-from typing import List, Sequence
+from typing import List, Sequence, Union
 
 import torch
 from torch import nn
@@ -33,14 +33,20 @@ class MultimodalEmbeddingInjector(nn.Module):
         self,
         embeddings: torch.Tensor,
         multimodal_features: Sequence[torch.Tensor],
-        multimodal_locs: torch.Tensor,
+        multimodal_locs: Union[torch.Tensor, Sequence[int]],
     ) -> torch.Tensor:
         if not multimodal_features:
             return embeddings
 
-        if multimodal_locs.numel() != len(multimodal_features):
+        if isinstance(multimodal_locs, torch.Tensor):
+            location_count = multimodal_locs.numel()
+            locs = multimodal_locs.to(device="cpu", dtype=torch.long).view(-1).tolist()
+        else:
+            location_count = len(multimodal_locs)
+            locs = multimodal_locs
+        if location_count != len(multimodal_features):
             raise ValueError(
-                f"multimodal_locs has {multimodal_locs.numel()} entries "
+                f"multimodal_locs has {location_count} entries "
                 f"but {len(multimodal_features)} features were provided"
             )
 
@@ -48,8 +54,6 @@ class MultimodalEmbeddingInjector(nn.Module):
             raise ValueError(
                 "embeddings must be a 2D tensor of shape [tokens, hidden_size]"
             )
-
-        locs = multimodal_locs.to(device="cpu", dtype=torch.long).view(-1).tolist()
 
         hidden_size = embeddings.size(-1)
         for idx, (feature, loc) in enumerate(zip(multimodal_features, locs)):

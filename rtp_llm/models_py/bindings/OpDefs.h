@@ -322,6 +322,9 @@ struct PyAttentionInputs {
 
     std::optional<PyContextParallelParams> context_parallel_info;
 
+    // Present only when BERT UQI attention is enabled for this model.
+    torch::Tensor bert_uqi_mask;  // pinned CPU bool, flattened per-sequence attention masks
+
     // Headwise attention config (Python dict or None).
     py::object headwise_config{py::none()};
 };
@@ -343,6 +346,9 @@ struct PyMultimodalInputs {
     std::vector<torch::Tensor> multimodal_features;
     torch::Tensor              mm_features_locs;
     std::vector<torch::Tensor> mm_extra_input;
+    // Optional original CPU locations for host-side span consumers. Keep the
+    // existing device field unchanged for models that consume it on CUDA.
+    torch::Tensor mm_features_locs_host;
 };
 
 using AttentionInputsByTag = std::map<std::string, PyAttentionInputs>;

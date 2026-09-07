@@ -312,6 +312,10 @@ std::string ModelConfig::to_string() const {
             oss << ", ";
     }
     oss << "]\n}\n"
+        << "bert_uqi_config: {\n"
+        << "  enabled: " << (bert_uqi_config.enabled ? "true" : "false") << "\n"
+        << "  segment_token_id: " << bert_uqi_config.segment_token_id << "\n"
+        << "  separator_token_id: " << bert_uqi_config.separator_token_id << "\n}\n"
         << "extra_data_path: " << extra_data_path << "\n"
         << "local_extra_data_path: " << local_extra_data_path
         << "\n"

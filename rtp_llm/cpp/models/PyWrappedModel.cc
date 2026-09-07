@@ -244,6 +244,12 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
                             context_batch_size,
                             decode_batch_size);
 
+    if (inputs.bert_uqi.isDefined()) {
+        RTP_LLM_CHECK_WITH_INFO(context_batch_size > 0 && decode_batch_size == 0,
+                                "BERT UQI metadata is only valid for prefill batches");
+        py_attn_inputs.bert_uqi_mask = inputs.bert_uqi.attention_mask;
+    }
+
     const auto cuda_i32 = torch::TensorOptions(torch::kInt32).device(torch::kCUDA);
     const auto host_i32 = torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true);
 
@@ -650,6 +656,9 @@ torch_ext::PyMultimodalInputs PyWrappedModel::buildPyMultimodalInputs(const GptM
         multimodal_input.mm_extra_input = mm_extra_input;
     }
     if (inputs.mm_features_locs.defined()) {
+        if (inputs.mm_features_locs.device().is_cpu()) {
+            multimodal_input.mm_features_locs_host = inputs.mm_features_locs;
+        }
         multimodal_input.mm_features_locs = inputs.mm_features_locs.cuda();
     }
     return multimodal_input;
@@ -1374,6 +1383,10 @@ void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
     buffer_holder_.hold_host(inputs.sequence_lengths);
     buffer_holder_.hold_host(inputs.lm_output_indexes);
     buffer_holder_.hold_host(inputs.prefix_lengths);
+    if (inputs.bert_uqi.isDefined()) {
+        buffer_holder_.hold_host(inputs.bert_uqi.attention_mask);
+        buffer_holder_.hold_host(inputs.bert_uqi.pooling_positions);
+    }
 
     buffer_holder_.hold_host(inputs.combo_position_ids);
     buffer_holder_.hold_host(inputs.combo_tokens_type_ids);

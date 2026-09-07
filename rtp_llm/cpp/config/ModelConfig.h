@@ -40,6 +40,17 @@ public:
     int64_t                           mm_position_ids_style = 0;  // 0 for default; 1 for chatglm4v; 2 for qwen2 vl
 };
 
+// Configuration for BERT's optional UQI (user-query-item) visibility rule.
+// The UQI segment is delimited by [segment_token_id, separator_token_id].
+// Tokens outside that segment cannot attend to it; UQI tokens can attend to
+// the complete sequence.
+class BertUqiConfig {
+public:
+    bool    enabled            = false;
+    int32_t segment_token_id   = 2;
+    int32_t separator_token_id = 102;
+};
+
 class ModelConfig {
 public:
     // model variant params used in ft
@@ -135,6 +146,9 @@ public:
 
     // Multimodal model configuration
     MMModelConfig mm_model_config;
+
+    // BERT UQI attention configuration
+    BertUqiConfig bert_uqi_config;
 
     // Declarative per-model KV cache layout. C++ cache config consumes this
     // and performs runtime finalization such as block/ring sizing.

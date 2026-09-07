@@ -23,6 +23,7 @@ enum class Arg : uint32_t {
     INPUT_IDS,
     ATTENTION_MASK,
     MOE_GATING,
+    UQI_POOLING_POSITIONS,
     // reserve as number marker
     NUM_INPUT_TYPES
 };
