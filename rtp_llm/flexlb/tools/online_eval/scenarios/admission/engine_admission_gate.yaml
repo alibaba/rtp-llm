@@ -651,7 +651,7 @@ variants:
       input_len: 512
       output_len: 2
       consume: immediate
-      request_timeout_s: 45
+      request_timeout_s: 15
       spacing_s: 0
       spacing_every: 1
       keys_per_request: 8
@@ -670,6 +670,12 @@ variants:
       metric: success_count
       expected: 1
       op: eq
+  - id: master_clean
+    action: master_ready
+    params:
+      target: single
+      inflight_zero: true
+    timeout_s: 30
   - id: engine_clean
     action: admission_engine_clean
     params:
@@ -678,12 +684,6 @@ variants:
       - decode-0
       - decode-1
     timeout_s: 15
-  - id: master_clean
-    action: master_ready
-    params:
-      target: single
-      inflight_zero: true
-    timeout_s: 30
   - id: recovery
     action: admission_wave
     params:
