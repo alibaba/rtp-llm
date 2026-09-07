@@ -90,11 +90,8 @@ HybridKVCacheAllocator::HybridKVCacheAllocator(const CacheConfig&               
 int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cache_keys,
                                        BatchKVCacheResource&                kv_resource,
                                        const std::shared_ptr<CPSlotMapper>& cp_mapper) {
-    // Under cp shard, FULL groups index block_ids by cp-virtual-block units
-    // (one entry covers cp_size physical blocks). LINEAR/SWA groups index by
-    // raw block_size logical blocks. So when populating tail blocks for
-    // LINEAR/SWA we need to scale the array length and matched-block position
-    // back to the logical-block coordinate system.
+    // FULL matches count CP virtual blocks. Tail groups place the same matched
+    // token frontier in their own checkpoint/window coordinates.
     const int                     cp_scale = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
     int                           min_full_reuse_blocks = static_cast<int>(cache_keys.size());
     std::vector<BlockIndicesType> full_matched_blocks(kv_cache_groups_.size());
@@ -161,17 +158,15 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
         kv_resource.mutableBlockIds(0, gid).assign(std::move(full_blocks));
     }
 
-    // LINEAR/SWA arrays are sized in logical-block units (cp_size× larger
-    // than the FULL groups' cp-virtual-block units). The matched tail block
-    // corresponds to the LAST logical block in the canonical (last-rank)
-    // namespace, so its index is `(reuse_blocks_len * cp_size) - 1` in
-    // logical units, NOT `reuse_blocks_len - 1`.
+    // Raw P-page count is retained for ordinary SWA; K3 LINEAR checkpoints use V.
     const int logical_reuse_len = reuse_blocks_len * cp_scale;
     for (size_t i = 0; i < linear_group_ids_.size(); ++i) {
         const int gid = linear_group_ids_[i];
+        const int group_reuse_len =
+            logical_reuse_len * seqSizePerBlock() / kv_cache_groups_[static_cast<size_t>(gid)]->seqSizePerBlock();
         kv_resource.mutableBlockIds(0, gid).assign(
-            BlockIndicesType(static_cast<size_t>(logical_reuse_len), NULL_BLOCK_IDX));
-        kv_resource.mutableBlockIds(0, gid).setAt(static_cast<size_t>(logical_reuse_len - 1), linear_tail_blocks[i]);
+            BlockIndicesType(static_cast<size_t>(group_reuse_len), NULL_BLOCK_IDX));
+        kv_resource.mutableBlockIds(0, gid).setAt(static_cast<size_t>(group_reuse_len - 1), linear_tail_blocks[i]);
     }
     for (size_t i = 0; i < swa_group_ids_.size(); ++i) {
         const int gid             = swa_group_ids_[i];
@@ -418,10 +413,8 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
         // merges multiple puts on the same key into a single item with each group's slot
         // populated independently (NULL_BLOCK_IDX entries are skipped by the merge path).
         //
-        // CP per-group key namespace: paged FULL groups use cp-subsampled (last-rank) keys
-        // to align 1:1 with rank-local blocks; non-paged groups (SWA / LINEAR) keep the
-        // full key sequence so their tail blocks (real entries at positions >= length-2)
-        // get inserted alongside the keys that the reuseCache tail-loop later queries.
+        // FULL and V-interval checkpoint/tail groups use last-rank canonical keys.
+        // Groups retaining P-interval slots keep their full key sequence.
         CacheKeysType         cp_keys = cpEffectiveCacheKeys(cp_mapper, full_keys);
         BlockDependenciesType cp_dependencies;
         cp_dependencies.reserve(cp_keys.size());
@@ -456,7 +449,9 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
             }
             const bool           gp_sharded   = cpShardThisGroup(cp_mapper, group_type);
             const bool           compact_swa  = cpCompactSwaGroup(gid, cp_mapper);
-            const bool           use_cp_keys  = cp_active && (gp_sharded || compact_swa);
+            const bool           cp_linear    = group_type == CacheGroupType::LINEAR
+                                                && raw_group_seq == cp_mapper->virtualBlockSize();
+            const bool           use_cp_keys  = cp_active && (gp_sharded || compact_swa || cp_linear);
             const CacheKeysType& src_keys     = use_cp_keys ? cp_keys : full_keys;
             const auto&          dependencies = use_cp_keys ? cp_dependencies : full_dependencies;
             const auto           namespace_id =

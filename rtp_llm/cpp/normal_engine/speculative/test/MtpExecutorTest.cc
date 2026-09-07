@@ -8,6 +8,7 @@
 #include "gtest/gtest.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
@@ -2012,9 +2013,16 @@ TEST_F(MtpExecutorTest, testLinearKvCacheBlockPatchKernel) {
     EXPECT_TRUE(torch::equal(allocator_edited.cpu(), allocator_edited_expected));
 }
 
-TEST_F(MtpExecutorTest, testLinearKvCacheSnapshotEpochPreventsDoubleSwap) {
+class MtpLinearCacheTest: public MtpExecutorTest, public testing::WithParamInterface<int> {};
+
+INSTANTIATE_TEST_SUITE_P(CheckpointInterval, MtpLinearCacheTest, testing::Values(4, 32));
+
+TEST_P(MtpLinearCacheTest, testLinearKvCacheSnapshotEpochPreventsDoubleSwap) {
     auto cache_config = test::makeSimpleHybridMhaCacheConfig(
         /*layer_num=*/4, /*block_num=*/64, /*tokens_per_block=*/4, TYPE_INT8, /*group_layer_num=*/2);
+    cache_config.cp_size = GetParam() / cache_config.seq_size_per_block;
+    cache_config.cache_specs[0]->seq_size_per_block = GetParam();
+    cache_config.group_seq_size_per_block = {static_cast<size_t>(GetParam()), 4};
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
 
@@ -2065,8 +2073,151 @@ TEST_F(MtpExecutorTest, testLinearKvCacheSnapshotEpochPreventsDoubleSwap) {
 
     auto after = stream->snapshotKVCacheBlocks();
     EXPECT_FALSE(after.needs_mtp_linear_patch);
-    EXPECT_EQ(after.kernel_blocks[0][0], (BlockIndicesType{11, 12, 10, 13}));
+    const BlockIndicesType expected = GetParam() == 4 ? BlockIndicesType{11, 12, 10, 13} :
+                                                       BlockIndicesType{12, 11, 10, 13};
+    EXPECT_EQ(after.kernel_blocks[0][0], expected);
     EXPECT_EQ(after.kernel_blocks[0][1], before.kernel_blocks[0][1]);
+}
+
+TEST_P(MtpLinearCacheTest, testLinearKvCacheAsyncDispatchFeedsNextGather) {
+    // These flags are cached process-wide by the executor. Run this scenario
+    // with both enabled; async-prepare alone does not select this lifecycle.
+    if (autil::EnvUtil::getEnv("RTP_LLM_STREAM_ASYNC", std::string()) != "1"
+        || autil::EnvUtil::getEnv("RTP_LLM_DROP_BROAD_SYNC", std::string()) != "1") {
+        GTEST_SKIP() << "requires RTP_LLM_STREAM_ASYNC=1 and RTP_LLM_DROP_BROAD_SYNC=1";
+    }
+    ModelConfig model;
+    model.num_layers = 2;
+    model.max_seq_len = 128;
+    model.vocab_size = 32;
+    model.data_type = TYPE_FP16;
+    model.attn_config.use_mla = true;
+    model.attn_config.kv_lora_rank = 16;
+    model.attn_config.rope_head_dim = 8;
+    model.attn_config.tokens_per_block = 4;
+    model.hybrid_attention_config.enable_hybrid_attention = true;
+    model.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    model.hybrid_attention_config.hybrid_attention_types = {
+        HybridAttentionType::LINEAR, HybridAttentionType::NONE};
+    model.linear_attention_config.linear_num_key_heads = 8;
+    model.linear_attention_config.linear_num_value_heads = 8;
+    model.linear_attention_config.linear_key_head_dim = 4;
+    model.linear_attention_config.linear_value_head_dim = 4;
+    model.linear_attention_config.linear_conv_kernel_dim = 4;
+    auto draft = model;
+    draft.num_layers = 1;
+    draft.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::NONE};
+    ParallelismConfig parallelism;
+    parallelism.tp_size = 8;
+    parallelism.role_type = RoleType::DECODE;
+    parallelism.decode_cp_kv_cache_sharded = GetParam() == 32;
+    KVCacheConfig kv_config;
+    kv_config.seq_size_per_block = 4;
+    kv_config.test_block_num = 64;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.gen_num_per_cycle = 4;
+    auto cache_config = CacheConfigCreator::createSpConfig(
+        model, draft, parallelism, RuntimeConfig{}, kv_config, sp_config, std::nullopt, true, true);
+    ASSERT_EQ(cache_config.linearSeqSizePerBlock(), GetParam());
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    // This lifecycle does not execute model weights. Keep the declared hybrid
+    // config; MockEngine's weight helper replaces it with a tiny MHA config.
+    EngineInitParams params;
+    params.model_id = 0;
+    params.model_config_ = model;
+    params.kv_cache_config = kv_config;
+    params.sp_config = sp_config;
+    params.py_model = py::none();
+    params.py_sp_model = py::none();
+    params.py_eplb = py::none();
+    auto mtp_params = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+    mtp_params->push_back(std::make_unique<EngineInitParams>(params));
+    auto propose_params = std::make_unique<ProposeModelEngineInitParams>(SP_TYPE_EAGLE3, 4, std::move(mtp_params));
+    MtpExecutor executor(params, propose_params, cache_manager);
+    ASSERT_TRUE(executor.useAsyncLinearBlockSwap());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    StreamSpecUpdateInfo first_token{torch::tensor({{3}}, torch::kInt32), 1, 4,
+                                     torch::zeros({1, 2}), torch::zeros({1, 32})};
+    auto stream = createDecodeStream(model, RuntimeConfig{}, resource_context, {1, 2}, first_token);
+    ASSERT_TRUE(stream->streamCacheResource().initKVBlock(4).ok());
+    const auto initial = stream->snapshotKVCacheBlocks().kernel_blocks[0];
+    const auto linear_gid = static_cast<size_t>(std::find(cache_config.group_types.begin(),
+                                                        cache_config.group_types.end(), CacheGroupType::LINEAR)
+                                               - cache_config.group_types.begin());
+    ASSERT_LT(linear_gid, initial.size());
+    ASSERT_GE(initial[linear_gid].size(), 4);
+    auto expected = initial;
+    TensorHolder holder;
+    uint64_t previous_epoch = 0;
+    for (int round = 0; round < 2; ++round) {
+        SCOPED_TRACE(round);
+        StreamGroups groups({stream});
+        auto gathered = executor.batch_stream_processor_->gatherMtpLinearKvCacheKernelBlockId(groups, holder);
+        ASSERT_TRUE(gathered.ok());
+        auto input = std::move(gathered.value());
+        ASSERT_TRUE(input.device_patch_ready);
+#if USING_CUDA
+        invokeMtpLinearKvCacheBlockPatchApply(input.block_ids, input.group_types, input.valid_block_counts,
+                                              input.patch_positions, input.patch_source_slots,
+                                              input.patch_before_values, input.patch_after_values,
+                                              input.patch_valid, input.pending_patches,
+                                              at::cuda::getCurrentCUDAStream().stream());
+#endif
+        auto actual = input.block_ids.cpu();
+        for (size_t gid = 0; gid < expected.size(); ++gid) {
+            EXPECT_EQ(toVec<int>(actual[gid][0].narrow(0, 0, expected[gid].size())), expected[gid]);
+        }
+        spec::SpeculativeSamplerOutput accepted;
+        accepted.accept_tokens_cpu = torch::tensor({{4 + round * 3, 5 + round * 3, 6 + round * 3, 0, 0}}, torch::kInt32);
+        accepted.accept_len_cpu = torch::tensor({3}, torch::kInt32);
+        accepted.accept_tokens = accepted.accept_tokens_cpu.cuda();
+        accepted.accept_len = accepted.accept_len_cpu.cuda();
+        MergedOutput draft_output;
+        draft_output.model_output.all_hidden_states = torch::arange(10, torch::kFloat32).reshape({5, 2}).cuda();
+        draft_output.sampler_output.token_ids = torch::tensor({{10}}, torch::kInt32).cuda();
+        draft_output.sampler_output.all_probs = torch::ones({1, 32}).cuda();
+        ASSERT_TRUE(executor.dispatchDecodeAsync(groups, accepted, std::move(draft_output), input.block_ids,
+                                                 input.group_types, input.valid_block_counts, nullptr, nullptr).ok());
+        // Independent expected permutations for seq 3→6→9, accept=3. Do not
+        // derive the oracle from the same swap helpers as the CPU/GPU paths.
+        if (GetParam() == 32) {
+            std::swap(expected[linear_gid][0], expected[linear_gid][2]);
+        } else if (round == 0) {
+            std::swap(expected[linear_gid][0], expected[linear_gid][1]);
+            std::swap(expected[linear_gid][1], expected[linear_gid][2]);
+        } else {
+            std::swap(expected[linear_gid][1], expected[linear_gid][3]);
+        }
+        // The worker may finish before the next gather. Inspect the actual
+        // published GPU patch too, so fast host bookkeeping cannot hide an
+        // incorrect checkpoint interval in dispatchDecodeAsync.
+        const auto patch = stream->snapshotKVCacheBlocks().linear_patch;
+        ASSERT_GT(patch.epoch, previous_epoch);
+        previous_epoch = patch.epoch;
+        ASSERT_TRUE(patch.positions_gpu.defined());
+        auto positions = patch.positions_gpu.cpu();
+        auto values = patch.after_values_gpu.cpu();
+        auto valid = patch.valid_gpu.cpu();
+        for (size_t gid = 0; gid < expected.size(); ++gid) {
+            EXPECT_EQ(valid[0][gid].item<int>(), gid == linear_gid ? 1 : 0);
+        }
+        for (int slot = 0; slot < positions.size(1); ++slot) {
+            const int position = positions[0][slot].item<int>();
+            if (position >= 0) {
+                ASSERT_LT(position, expected[linear_gid].size());
+                EXPECT_EQ(values[0][linear_gid][slot].item<int>(), expected[linear_gid][position]);
+            }
+        }
+    }
+    executor.spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+    const auto committed = stream->snapshotKVCacheBlocks();
+    EXPECT_FALSE(committed.needs_mtp_linear_patch);
+    EXPECT_EQ(committed.kernel_blocks[0], expected);
+    EXPECT_EQ(stream->seqLength(), 9);
+    EXPECT_EQ(stream->getNextSeqLenGpu().item<int>(), 9);
+    EXPECT_EQ(stream->getCompleteTokenIds()->completeTokenIdsVec(0), (std::vector<int>{1, 2, 3, 4, 5, 6, 7, 8, 9}));
 }
 
 TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {

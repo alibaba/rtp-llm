@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
@@ -378,6 +379,121 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitCreatesIndependentBlockPoolPerGroup) 
     // Per-pool totalBlocksNum = group_block_nums[gid] - 1 (block 0 reserved).
     EXPECT_EQ(allocator->groupBlockPools()[0]->totalBlocksNum(), 6u - 1u);
     EXPECT_EQ(allocator->groupBlockPools()[1]->totalBlocksNum(), 8u - 1u);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, K3CheckpointGeometrySurvivesReuseGrowthAndRollback) {
+    ModelConfig model;
+    model.model_type = "kimi_k3";
+    model.num_layers = 4;
+    model.attn_config.use_mla = true;
+    model.mla_ops_type = MlaOpsType::AUTO;
+    model.attn_config.kv_lora_rank = 16;
+    model.attn_config.rope_head_dim = 8;
+    model.attn_config.tokens_per_block = 4;
+    model.hybrid_attention_config.enable_hybrid_attention = true;
+    model.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    model.hybrid_attention_config.hybrid_attention_types = {
+        HybridAttentionType::LINEAR, HybridAttentionType::NONE, HybridAttentionType::LINEAR, HybridAttentionType::NONE};
+    model.linear_attention_config.linear_num_key_heads = 8;
+    model.linear_attention_config.linear_num_value_heads = 8;
+    model.linear_attention_config.linear_key_head_dim = 4;
+    model.linear_attention_config.linear_value_head_dim = 4;
+    model.linear_attention_config.linear_conv_kernel_dim = 4;
+    ParallelismConfig par;
+    par.role_type = RoleType::DECODE;
+    par.tp_size = 8;
+    auto dense = CacheConfigCreator::createBasicConfig(model, par, KVCacheConfig{}, false, 0);
+    par.decode_cp_kv_cache_sharded = true;
+    auto config = CacheConfigCreator::createBasicConfig(model, par, KVCacheConfig{}, false, 0);
+    ASSERT_EQ(config.group_types, (std::vector<CacheGroupType>{CacheGroupType::FULL, CacheGroupType::LINEAR}));
+    ASSERT_EQ(config.cp_size, 8);
+    ASSERT_EQ(config.seq_size_per_block, 4);
+    ASSERT_EQ(config.linearSeqSizePerBlock(), 32);
+    EXPECT_EQ(dense.linearSeqSizePerBlock(), 4);
+    EXPECT_EQ(config.group_seq_size_per_block[1], 32);
+    EXPECT_EQ(config.cache_specs[0]->seq_size_per_block, dense.cache_specs[0]->seq_size_per_block);
+    EXPECT_EQ(config.group_block_size_bytes, dense.group_block_size_bytes);
+    EXPECT_EQ(config.cache_specs[1]->block_size_bytes(), dense.cache_specs[1]->block_size_bytes());
+    config.block_num = 20;
+    config.group_block_nums = {20, 6};
+    config.linear_step = 2;
+    const int interval = 32;
+    auto mapper = std::make_shared<CPSlotMapper>(0, 8, 4);
+
+    for (bool reuse : {false, true}) {
+        SCOPED_TRACE(reuse);
+        auto allocator = makeAllocator(config);
+        allocator->setCPSlotMapper(mapper);
+        ASSERT_TRUE(allocator->init());
+        const auto initial = snapshotPoolCounters(allocator);
+        auto resource = makeBatchResource(1, config);
+        auto tokens = makeCompleteTokenIds(1, 9 * interval + 1, 4);
+        tokens->setSeqLength(3 * interval + 1);
+        CacheKeysType keys;
+        for (int i = 0; i < 24; ++i) {
+            keys.push_back(1000 + i);
+        }
+        resource->setBatchCacheKeys(0, keys);
+        MallocInfo info{resource, tokens};
+        info.cp_slot_mapper = mapper;
+        info.reuse_cache = reuse;
+        info.enable_device_cache = false;
+        ASSERT_TRUE(allocator->malloc(info).success);
+        ASSERT_EQ(resource->blocksNum(0, 0), 4);
+        ASSERT_EQ(resource->blocksNum(0, 1), 4);
+
+        if (reuse) {
+            const auto checkpoint = resource->blocks(0, 1)[2];
+            ASSERT_FALSE(isNullBlockIdx(checkpoint));
+            InsertInfo insert{resource, tokens, false};
+            insert.cp_slot_mapper = mapper;
+            allocator->insertIntoCache(insert);
+            allocator->free(FreeInfo{resource, tokens});
+            resource->setBatchCacheKeys(0, keys);
+            info.enable_device_cache = true;
+            auto hit = allocator->malloc(info);
+            ASSERT_TRUE(hit.success);
+            EXPECT_EQ(hit.reuse_len, 3 * interval);
+            ASSERT_EQ(resource->blocksNum(0, 1), 4);
+            EXPECT_EQ(resource->blocks(0, 1)[2], checkpoint);
+        } else {
+            // No-reuse growth retains only active/tail state, not all past checkpoints.
+            for (int slots = 5; slots <= 9; ++slots) {
+                tokens->setSeqLength((slots - 1) * interval + 1);
+                ASSERT_TRUE(allocator->malloc(info).success);
+                EXPECT_EQ(resource->blocksNum(0, 0), slots);
+                EXPECT_EQ(resource->blocksNum(0, 1), slots);
+                EXPECT_EQ(validBlockCount(resource->blocks(0, 1)), 2);
+            }
+        }
+
+        // FULL has room to grow, but LINEAR cannot materialize six speculative
+        // states. Rollback preserves live tables/refs; attempted allocation may
+        // evict non-resident cache entries, even when it cannot satisfy the reserve.
+        const auto before = snapshotPoolCounters(allocator);
+        const auto full_before = resource->blocks(0, 0);
+        const auto linear_before = resource->blocks(0, 1);
+        tokens->setReserveStep(7);
+        info.incr_seq_len_override = tokens->seqLength() + interval;
+        EXPECT_FALSE(allocator->malloc(info).success);
+        EXPECT_EQ(resource->blocks(0, 0), full_before);
+        EXPECT_EQ(resource->blocks(0, 1), linear_before);
+        auto expected = before;
+        if (reuse) {
+            for (size_t gid = 0; gid < expected.size(); ++gid) {
+                expected[gid].block_cache_refs = 0;
+                expected[gid].free_blocks = initial[gid].free_blocks - before[gid].request_refs;
+            }
+        }
+        expectPoolCountersEq(allocator, expected);
+        allocator->free(FreeInfo{resource, tokens});
+        for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
+            const auto& pool = allocator->groupBlockPools()[gid];
+            EXPECT_EQ(pool->requestRefBlocksNum(), 0);
+            EXPECT_EQ(pool->connectorRefBlocksNum(), 0);
+            EXPECT_EQ(pool->availableBlocksNum(), initial[gid].available_blocks);
+        }
+    }
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, SwaDefaultRegionGroupPoolUsesGpuBacking) {

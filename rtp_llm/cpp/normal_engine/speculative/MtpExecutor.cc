@@ -3304,7 +3304,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
                                               linear_patch_before_values,
                                               linear_patch_after_values,
                                               linear_patch_valid,
-                                              static_cast<int32_t>(cache_manager_->cacheConfig().seq_size_per_block),
+                                              static_cast<int32_t>(cache_manager_->cacheConfig().linearSeqSizePerBlock()),
                                               at::cuda::getCurrentCUDAStream().stream());
         auto ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
         ready_event->record(cuda_graph::graphGetCurrentStream());

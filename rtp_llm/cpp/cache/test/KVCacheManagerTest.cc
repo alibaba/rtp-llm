@@ -25,6 +25,7 @@
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace rtp_llm {
 namespace test {
@@ -520,6 +521,133 @@ TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
     FreeInfo free_info{resource, tokens};
     manager->free(free_info);
     EXPECT_EQ(manager->freeBlocksNum(), free_before);
+}
+
+TEST_F(KVCacheManagerTest, K3LayerViewsKeepPhysicalStorageAndCheckpointIntervalsSeparate) {
+    ModelConfig model;
+    model.model_type = "kimi_k3";
+    model.num_layers = 4;
+    model.data_type = DataType::TYPE_FP16;
+    model.attn_config.use_mla = true;
+    model.mla_ops_type = MlaOpsType::AUTO;
+    model.attn_config.kv_lora_rank = 16;
+    model.attn_config.rope_head_dim = 8;
+    model.attn_config.tokens_per_block = 4;
+    model.hybrid_attention_config.enable_hybrid_attention = true;
+    model.hybrid_attention_config.hybrid_attention_types = {
+        HybridAttentionType::LINEAR, HybridAttentionType::NONE, HybridAttentionType::LINEAR, HybridAttentionType::NONE};
+    model.linear_attention_config.linear_num_key_heads = 8;
+    model.linear_attention_config.linear_num_value_heads = 8;
+    model.linear_attention_config.linear_key_head_dim = 4;
+    model.linear_attention_config.linear_value_head_dim = 4;
+    model.linear_attention_config.linear_conv_kernel_dim = 4;
+    ParallelismConfig par;
+    par.role_type = RoleType::DECODE;
+    par.tp_size = 8;
+    KVCacheConfig kv_config;
+    kv_config.seq_size_per_block = 4;
+    kv_config.kernel_seq_size_per_block = 2;
+    kv_config.test_block_num = 16;
+
+    // Cache geometry must not depend on a model-name whitelist. Exercise the
+    // same lifecycle for named Decode and unnamed Prefill configurations.
+    for (auto [independent, model_type] : {std::pair{false, "kimi_k3"}, {true, "kimi_k3"}, {false, ""}, {true, ""}}) {
+        model.model_type = model_type;
+        par.role_type = model.model_type.empty() ? RoleType::PREFILL : RoleType::DECODE;
+        model.hybrid_attention_config.enable_independent_kv_cache_pools = independent;
+        for (bool sharded : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "model_type=" << model_type
+                                            << " independent=" << independent << " sharded=" << sharded);
+            par.prefill_cp_config.kv_cache_sharded = sharded;
+            par.decode_cp_kv_cache_sharded = sharded;
+            auto config = CacheConfigCreator::createConfig(model, par, RuntimeConfig{}, kv_config);
+            // Geometry comes from the real creator; single-rank manager skips only TP block-count synchronization.
+            KVCacheManager manager(config);
+            ASSERT_TRUE(manager.init());
+            const auto layout = manager.getMainModelCacheLayerLayout();
+            torch_ext::KVCache cache;
+            cache.seq_size_per_block = config.seq_size_per_block;
+            cache.kernel_seq_size_per_block = config.kernel_seq_size_per_block;
+            cache.use_mla = true;
+            cache.kv_lora_rank = 16;
+            cache.rope_head_dim = 8;
+            cache.kv_cache_base_by_layer = layout.layers_to_kv_buffer_ptrs;
+            cache.layer_group_types = layout.layer_group_types;
+            cache.layer_region_to_group_id = layout.layer_region_to_group_id;
+            cache.group_seq_size_per_block.assign(
+                layout.group_seq_size_per_block.begin(), layout.group_seq_size_per_block.end());
+
+            for (int layer = 0; layer < model.num_layers; ++layer) {
+                const auto view = cache.getLayerCache(layer);
+                const auto& base = layout.layers_to_kv_buffer_ptrs[layer];
+                EXPECT_EQ(view.group_id, config.layer_to_group_id[layer]);
+                EXPECT_EQ(view.kv_cache_base.data_ptr(), base.data_ptr());
+                if (layout.layer_group_types[layer] == CacheGroupType::LINEAR) {
+                    EXPECT_EQ(view.seq_size_per_block, sharded ? 32 : 4);
+                    EXPECT_EQ(view.kv_cache_base.sizes(), base.sizes());
+                    EXPECT_EQ(view.kv_cache_base.strides(), base.strides());
+                } else {
+                    EXPECT_EQ(view.seq_size_per_block, 2);
+                    EXPECT_EQ(view.kv_cache_base.size(0), base.size(0) * 2);
+                    EXPECT_EQ(view.kv_cache_base.size(1), 2);
+                    EXPECT_EQ(view.kv_cache_base.size(2), 24);
+                    EXPECT_EQ(view.kv_cache_base.stride(0) * 2, base.stride(0));
+                }
+            }
+
+            // Exercise the views through manager-owned keys and allocator
+            // lifetime, including the shared-pool path used without independent pools.
+            const int interval = config.linearSeqSizePerBlock();
+            const int linear_gid = config.layer_to_group_id[0];
+            auto resource = std::make_shared<BatchKVCacheResource>();
+            resource->resetBatchSize(1);
+            resource->initGroups(config.groupNums(), config.layer_all_num, config.layer_to_group_id,
+                                 config.kernelBlocksPerKvBlock(), config.group_types, config.layer_region_to_group_id);
+            auto input = std::make_shared<GenerateInput>();
+            input->input_ids = torch::arange(24 * interval + 1, torch::kInt32);
+            input->generate_config = std::make_shared<GenerateConfig>();
+            auto tokens = std::make_shared<CompleteTokenIds>(1, 1, 25 * interval, config.seq_size_per_block);
+            tokens->init(input);
+            tokens->setSeqLength(3 * interval + 1);
+            const auto available_before = manager.availableBlocksNum();
+            MallocInfo info{resource, tokens};
+            info.reuse_cache = true;
+            info.enable_device_cache = false;
+            ASSERT_TRUE(manager.malloc(info).success);
+            ASSERT_EQ(resource->blocksNum(0, linear_gid), 4);
+            const auto checkpoint = resource->blocks(0, linear_gid)[2];
+            ASSERT_FALSE(isNullBlockIdx(checkpoint));
+            auto linear_view = cache.getLayerCache(0);
+            linear_view.kv_cache_base[checkpoint].fill_(17);
+            manager.insertIntoCache(InsertInfo{resource, tokens, false});
+            manager.free(FreeInfo{resource, tokens});
+
+            info.enable_device_cache = true;
+            const auto hit = manager.malloc(info);
+            ASSERT_TRUE(hit.success);
+            EXPECT_EQ(hit.reuse_len, 3 * interval);
+            EXPECT_EQ(resource->blocks(0, linear_gid)[2], checkpoint);
+            EXPECT_TRUE(linear_view.kv_cache_base[checkpoint].eq(17).all().item<bool>());
+
+            tokens->setSeqLength(5 * interval + 1);
+            ASSERT_TRUE(manager.malloc(info).success);
+            ASSERT_EQ(resource->blocksNum(0, linear_gid), 6);
+            std::vector<BlockIndicesType> live_blocks;
+            for (int gid = 0; gid < resource->groupNums(); ++gid) {
+                live_blocks.push_back(resource->blocks(0, gid));
+            }
+            const auto live_refs = manager.allocator_->requestRefBlocksNum();
+            info.incr_seq_len_override = 24 * interval + 1;
+            EXPECT_FALSE(manager.malloc(info).success);
+            for (int gid = 0; gid < resource->groupNums(); ++gid) {
+                EXPECT_EQ(resource->blocks(0, gid), live_blocks[gid]);
+            }
+            EXPECT_EQ(manager.allocator_->requestRefBlocksNum(), live_refs);
+            manager.free(FreeInfo{resource, tokens});
+            EXPECT_EQ(manager.allocator_->requestRefBlocksNum(), 0);
+            EXPECT_EQ(manager.availableBlocksNum(), available_before);
+        }
+    }
 }
 
 TEST_F(KVCacheManagerTest, DSV4LayerRegionBlockTablesMatchInferenceAccessPattern) {

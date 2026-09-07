@@ -11,8 +11,9 @@ from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import (
     KimiK3ChunkSlice,
     build_chunk_model_inputs,
 )
+from rtp_llm.models_py.modules.kimi_k3.kda.module import KimiK3KDA
 from rtp_llm.models_py.modules.kimi_k3.kda.prefill import KimiKDACurrentStateRegistry
-from rtp_llm.ops.compute_ops import PyAttentionInputs
+from rtp_llm.ops.compute_ops import CacheGroupType, KVCache, PyAttentionInputs
 
 
 class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
@@ -29,13 +30,23 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
         object.__setattr__(model, "_layer_group_ids", None)
         object.__setattr__(model, "config", SimpleNamespace(hidden_size=4))
         object.__setattr__(model, "embedding_weight", torch.empty((1, 4)))
-        object.__setattr__(model, "kv_cache", SimpleNamespace(seq_size_per_block=64))
+        cache = KVCache()
+        cache.seq_size_per_block = 64
+        cache.layer_group_types = [CacheGroupType.LINEAR]
+        cache.group_seq_size_per_block = [64]
+        cache.layer_region_to_group_id = [[0]]
+        cache.kv_cache_base_by_layer = [torch.empty((8, 16))]
+        object.__setattr__(model, "kv_cache", cache)
         object.__setattr__(
             model,
             "parallelism_config",
             SimpleNamespace(get_attn_tp_size=lambda: 1, ep_size=ep_size),
         )
-        object.__setattr__(model, "layers", [])
+        kda = KimiK3KDA.__new__(KimiK3KDA)
+        nn.Module.__init__(kda)
+        object.__setattr__(
+            model, "layers", [SimpleNamespace(is_kda=True, self_attn=kda)]
+        )
         return model
 
     @staticmethod
@@ -328,6 +339,77 @@ class KimiK3MtpChunkPrefillUnitTest(unittest.TestCase):
         self.assertTrue(result.lm_output_already_selected)
         self.assertTrue(torch.equal(result.hidden_states, torch.tensor([[127.0]])))
         self.assertTrue(torch.equal(model._mtp_hidden_buffer, torch.tensor([[1127.0]])))
+
+    def test_chunk_checkpoint_alignment_keeps_physical_publication_frontiers(self) -> None:
+        from rtp_llm.models_py.modules.kimi_k3.chunk_prefill import (
+            KimiK3ChunkCachePublisher,
+            KimiK3ChunkRdmaPublisher,
+        )
+
+        for checkpoint_interval in (64, 512):
+            with self.subTest(checkpoint_interval=checkpoint_interval):
+                model = self._model()
+                model.kv_cache.group_seq_size_per_block = [checkpoint_interval]
+                model.parallelism_config.get_attn_tp_rank = lambda: 0
+                model.num_attn_res_blocks = 1
+                model._kda_local_heads = 1
+                model._kda_head_dim = 16
+                object.__setattr__(model, "_embed", lambda ids, _mm: ids.float().reshape(-1, 1))
+                object.__setattr__(model, "norm", lambda hidden, _residual: hidden)
+                rounds = []
+                writes = []
+                metadata_seen = []
+
+                def layer_forward(hidden, residual, **kwargs):
+                    metadata = kwargs["attn_meta"].kda_prefill_metadata
+                    metadata_seen.append(metadata)
+                    self.assertEqual(metadata.page_size, checkpoint_interval)
+                    self.assertEqual(metadata.page_size, kwargs["kv_cache"].seq_size_per_block)
+                    return SimpleNamespace(hidden_states=hidden, block_residual=residual)
+
+                layer = MagicMock(side_effect=layer_forward)
+                layer.is_kda = True
+                layer.self_attn = model.layers[0].self_attn
+                object.__setattr__(model, "layers", [layer])
+                publisher = KimiK3ChunkRdmaPublisher(
+                    [1153], [512], page_size=64, kda_layer_indices=[0]
+                )
+                cache_publisher = KimiK3ChunkCachePublisher(
+                    writer=lambda _cache, plan: writes.append(
+                        (plan.begin_block_host.tolist(), plan.end_block_host.tolist())
+                    ),
+                    publisher=publisher,
+                    layers=model.layers,
+                    kv_cache=model.kv_cache,
+                )
+
+                def forward_one(round_inputs, _fmha, **kwargs):
+                    rounds.append(kwargs["round_plan"])
+                    return KimiK3Model._forward_impl_one(model, round_inputs, _fmha, **kwargs)
+
+                object.__setattr__(model, "_forward_impl_one", forward_one)
+                with patch.dict("os.environ", {"SP_TYPE": ""}), patch("rtp_llm.models_py.model_desc.kimi_k3.barrier"), patch(
+                    "rtp_llm.models_py.model_desc.kimi_k3.KimiK3ChunkCachePublisher.create",
+                    return_value=cache_publisher,
+                ) as create_publisher:
+                    result = model._forward_whole_chunk_prefill(
+                        self._inputs(1153, [1153], [512]),
+                        SimpleNamespace(prepare=lambda _inputs: None, fmha_params=None),
+                        768,
+                    )
+
+                expected_first = 768 if checkpoint_interval == 64 else 512
+                self.assertEqual([r.token_count for r in rounds], [expected_first, 1153 - expected_first])
+                self.assertEqual(rounds[0].slices[0].absolute_end % checkpoint_interval, 0)
+                self.assertEqual(
+                    [meta.required_pages for meta in metadata_seen],
+                    [(item.slices[0].absolute_end + checkpoint_interval - 1) // checkpoint_interval for item in rounds],
+                )
+                self.assertEqual([meta.continuation_mask_host for meta in metadata_seen], [(False,), (True,)])
+                self.assertEqual(create_publisher.call_args.kwargs["page_size"], 64)
+                self.assertEqual(publisher.frontier, (27,))
+                self.assertEqual(writes, [([(512 + expected_first) // 64], [27])])
+                self.assertEqual(result.hidden_states.tolist(), [[1152.0]])
 
     def test_whole_chunk_prefill_collects_one_terminal_row_per_request(self) -> None:
         model = self._model()

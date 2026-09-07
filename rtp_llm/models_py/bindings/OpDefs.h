@@ -167,6 +167,10 @@ struct KVCache {
         } else {
             layer_cache.group_id = 0;
         }
+        if (layer_group_types[layer] == rtp_llm::CacheGroupType::LINEAR) {
+            // State slots retain their physical storage; their logical checkpoint interval may differ from P.
+            layer_cache.seq_size_per_block = groupSeqSizePerBlock(layer_cache.group_id);
+        }
         return layer_cache;
     }
 

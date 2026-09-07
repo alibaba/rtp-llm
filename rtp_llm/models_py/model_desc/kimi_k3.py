@@ -1020,6 +1020,12 @@ class KimiK3Model(GptModelBase):
                 f"lengths={sum(input_lengths)} tokens={total_tokens}"
             )
         page_size = int(self.kv_cache.seq_size_per_block)
+        # KDA checkpoints cover a logical interval; publication still uses physical pages.
+        checkpoint_interval = next(
+            int(self.kv_cache.get_layer_cache(layer_idx).seq_size_per_block)
+            for layer_idx, layer in enumerate(self.layers)
+            if layer.is_kda and isinstance(layer.self_attn, KimiK3KDA)
+        )
         if self._layer_group_ids is None:
             layer_map_host = getattr(
                 attention_inputs, "kv_cache_layer_to_group_host", None
@@ -1035,7 +1041,7 @@ class KimiK3Model(GptModelBase):
             input_lengths,
             prefix_lengths,
             chunk_budget=chunk_tokens,
-            page_size=page_size,
+            page_size=checkpoint_interval,
         )
         chunk_cache_publisher = KimiK3ChunkCachePublisher.create(
             attention_inputs,
@@ -1067,12 +1073,12 @@ class KimiK3Model(GptModelBase):
         for layer_idx, layer in enumerate(self.layers):
             if layer.is_kda and isinstance(layer.self_attn, KimiK3KDA):
                 layer_cache = self.kv_cache.get_layer_cache(layer_idx)
-                if int(layer_cache.seq_size_per_block) != page_size:
+                if int(layer_cache.seq_size_per_block) != checkpoint_interval:
                     raise RuntimeError(
                         "whole-model K3 KDA/cache checkpoint step mismatch: "
                         f"layer={layer_idx} linear_page="
                         f"{layer_cache.seq_size_per_block} "
-                        f"physical_page={page_size}"
+                        f"checkpoint_interval={checkpoint_interval}"
                     )
         chunk_cache_publisher.publish_prefix()
         for round_idx, round_plan in enumerate(rounds):
@@ -1300,15 +1306,18 @@ class KimiK3Model(GptModelBase):
                 raise RuntimeError(
                     "cache-backed K3 Prefill requires host sequence metadata"
                 )
-            page_size = int(self.kv_cache.seq_size_per_block)
+            kda_layer_indices = [
+                layer_idx
+                for layer_idx, layer in enumerate(self.layers)
+                if layer.is_kda
+            ]
+            page_size = int(
+                self.kv_cache.get_layer_cache(kda_layer_indices[0]).seq_size_per_block
+            )
             materialized_maps = kda_materialized_block_maps(
                 attention_inputs,
                 layer_group_ids=self._layer_group_ids,
-                kda_layer_indices=[
-                    layer_idx
-                    for layer_idx, layer in enumerate(self.layers)
-                    if layer.is_kda
-                ],
+                kda_layer_indices=kda_layer_indices,
             )
             active_indices, continuation_mask = kda_round_state_mapping(round_plan)
             kda_prefill_metadata = prepare_kimi_kda_prefill_metadata(

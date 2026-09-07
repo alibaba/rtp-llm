@@ -918,7 +918,8 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     int nxt_cached_len   = seqLength() - 1;
     int accept_token_num = nxt_cached_len - cur_cached_len;
     if (accept_token_num > 1 && stream_cache_resource_) {
-        int seq_size_per_block = seqSizePerBlock();
+        int seq_size_per_block =
+            stream_cache_resource_->resourceContext().cache_manager->cacheConfig().linearSeqSizePerBlock();
 
         // 1. swap cache blocks of accept tokens to corresponding blocks
         auto [cached_src_block_idx, cached_des_block_idx] =

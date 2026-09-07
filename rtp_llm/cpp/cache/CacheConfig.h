@@ -63,6 +63,15 @@ struct CacheConfig {
         return std::max<size_t>(1, seq_size_per_block / kernel_seq_size_per_block);
     }
 
+    size_t linearSeqSizePerBlock() const {
+        for (size_t gid = 0; gid < group_types.size(); ++gid) {
+            if (group_types[gid] == CacheGroupType::LINEAR) {
+                return cache_specs[gid]->seq_size_per_block;
+            }
+        }
+        return seq_size_per_block;
+    }
+
     // Block sizing information
     // ---- Per-block sizes (all layers) ----
     size_t kv_block_size_bytes  = 0;

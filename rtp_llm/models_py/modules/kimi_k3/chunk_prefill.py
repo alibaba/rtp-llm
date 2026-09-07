@@ -381,7 +381,7 @@ def plan_kimi_k3_chunk_rounds(
     chunk_budget: int,
     page_size: int,
 ) -> tuple[KimiK3ChunkRound, ...]:
-    """Split a packed Prefill batch at absolute MLA page boundaries."""
+    """Split a packed Prefill batch at absolute KDA checkpoint boundaries."""
 
     lengths = [int(value) for value in input_lengths]
     prefixes = [int(value) for value in prefix_lengths]
@@ -395,7 +395,7 @@ def plan_kimi_k3_chunk_rounds(
     if chunk_budget <= 0:
         raise ValueError(f"K3 chunk budget must be positive, got {chunk_budget}")
     if page_size <= 0:
-        raise ValueError(f"K3 MLA page size must be positive, got {page_size}")
+        raise ValueError(f"K3 checkpoint page size must be positive, got {page_size}")
     if any(prefix < 0 for prefix in prefixes):
         raise ValueError(f"K3 prefix lengths must be non-negative, got {prefixes}")
     if any(prefix % page_size for prefix in prefixes):
@@ -405,7 +405,7 @@ def plan_kimi_k3_chunk_rounds(
         )
     if chunk_budget < page_size and any(length > chunk_budget for length in lengths):
         raise ValueError(
-            "K3 chunk budget must cover one MLA page when a request spans "
+            "K3 chunk budget must cover one checkpoint page when a request spans "
             f"rounds: budget={chunk_budget}, page={page_size}"
         )
 
@@ -463,7 +463,7 @@ def plan_kimi_k3_chunk_rounds(
             ]
             raise RuntimeError(
                 "K3 chunk budget cannot advance any pending request to an "
-                "MLA page boundary: "
+                "checkpoint page boundary: "
                 f"budget={chunk_budget}, page={page_size}, pending={pending}"
             )
         rounds.append(KimiK3ChunkRound(tuple(round_slices)))

@@ -467,12 +467,18 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
 
     @torch.inference_mode()
     def test_two_round_physical_cache_reload_matches_unsplit_kda(self) -> None:
+        # Retain the original interval and cover CP8 with both a small fixture
+        # and the production 4096-token physical page (V = 4096 * 8).
+        for page_size in (64, 512, 32768):
+            with self.subTest(page_size=page_size):
+                self._two_round_physical_cache_reload_case(page_size)
+
+    def _two_round_physical_cache_reload_case(self, page_size: int) -> None:
         chunk_kda = self._chunk_kda()
-        page_size = 64
         heads = 1
         state_dim = 128
         channels = 3 * state_dim
-        lengths = [130, 77]
+        lengths = [2 * page_size + 2, page_size + 13]
         token_count = sum(lengths)
         block_map = self._linear_block_map(len(lengths), 4)
         block_count = int(block_map.max().item()) + 3
@@ -602,7 +608,7 @@ class KimiKDAFusedPagedPrefillTest(unittest.TestCase):
         split_output = torch.empty_like(unsplit_output)
         source_starts = [0, lengths[0]]
         processed = [0, 0]
-        for round_lengths in ([64, 64], [66, 13]):
+        for round_lengths in ([page_size, page_size], [page_size + 2, 13]):
             pieces = []
             gate_pieces = []
             beta_pieces = []
