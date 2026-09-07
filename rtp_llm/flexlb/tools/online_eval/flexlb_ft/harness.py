@@ -2248,6 +2248,10 @@ class BalanceSampler:
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._series: dict = {}
+        # {engine_name: role} from the per_engine "role" label — the
+        # per-role TPS routing key (P -> context_tps, D -> generate_tps,
+        # design §1.2 dim 5; the off-role series stay 0 on the Java side).
+        self._engine_roles: dict = {}
         self._events: dict = {}
         self._t0: Optional[float] = None
 
@@ -2266,6 +2270,10 @@ class BalanceSampler:
             engine = labels.get("engine_name")
             if not engine:
                 continue
+            role = labels.get("role")
+            if role:
+                with self._lock:
+                    self._engine_roles[engine] = role
             self._record(engine, name, t_rel, value)
 
     def _poll_master(self, t_rel: float) -> None:
@@ -2337,6 +2345,13 @@ class BalanceSampler:
         with self._lock:
             return self._events.get(event_name)
 
+    def engine_roles(self) -> dict:
+        """{engine_name: role} snapshot ("prefill" / "decode", from the
+        per_engine role label) — the per-role series-routing key for
+        consumers (context vs generate TPS)."""
+        with self._lock:
+            return dict(self._engine_roles)
+
     # -- window extraction ----------------------------------------------------
 
     def window_series(self, metric: str, t_lo: float, t_hi: float, mode: str = "value"):
@@ -2366,16 +2381,37 @@ class BalanceSampler:
         return out
 
     def dump(self, path) -> None:
-        """Persist the full store + events + meta as json.gz (case evidence)."""
-        payload = {
-            "sample_s": self.POLL_INTERVAL_S,
-            "events": dict(self._events),
-            "series": self._series,
-        }
+        """Persist the full store + events + roles + meta as json.gz
+        (case evidence).
+
+        Reliability contract (code-review fix, three properties):
+          1. the payload snapshot is taken under the SAME lock the
+             poller thread takes, with per-series list copies — a daemon
+             thread that outlives stop()'s join can never mutate the
+             dicts mid-serialization;
+          2. atomic publish — write a ``.tmp`` sibling then os.replace
+             onto the final path, so an interrupted dump never leaves a
+             TRUNCATED evidence file behind;
+          3. engine_roles rides along so the per-role TPS routing is
+             reproducible from the artifact alone.
+        """
+        with self._lock:
+            payload = {
+                "sample_s": self.POLL_INTERVAL_S,
+                "events": dict(self._events),
+                "engine_roles": dict(self._engine_roles),
+                "series": {
+                    key: {metric: list(pts) for metric, pts in per.items()}
+                    for key, per in self._series.items()
+                },
+            }
+
         out_path = Path(path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        with gzip.open(out_path, "wt") as f:
+        tmp_path = out_path.with_name(out_path.name + ".tmp")
+        with gzip.open(tmp_path, "wt") as f:
             json.dump(payload, f)
+        os.replace(tmp_path, out_path)
 
 
 # ---------------------------------------------------------------------------
