@@ -1,0 +1,1042 @@
+schema_version: 1
+id: cancel_lifecycle
+description: Explicit client, Master and engine cancellation boundaries; initial four legacy mappings.
+category: cancel
+profiles:
+- batch-window
+- single-nonbatch
+- single-batch
+- window-nonbatch
+tags:
+- migration
+- cancel
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+execution:
+  timeout_s: 600
+  stage_timeout_s: 120
+  cleanup_timeout_s: 120
+legacy_case_ids:
+- cancel_after_terminal
+- cancel_basic
+- cancel_idempotent
+- cancel_unknown_rid
+variants:
+- id: basic_batch
+  profiles:
+  - batch-window
+  - single-batch
+  legacy_case_ids:
+  - cancel_basic
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: target
+    action: cancel_prepare
+    params:
+      count: 1
+      concurrency: 1
+      output_len: 10
+  - id: target_dispatch
+    action: cancel_dispatch
+    params:
+      requests:
+        $ref: stages.target.output.requests
+    timeout_s: 60
+  - id: first_output_window
+    action: cancel_observe
+    params:
+      duration_s: 15
+      requests:
+        $ref: stages.target.output.requests
+      until:
+        metric: first_output
+        op: eq
+        value: 1
+    timeout_s: 30
+  - id: first_output_before_cancel
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.first_output_window.output.snapshot
+      metric: first_output
+      expected: 1
+      op: eq
+  - id: first_master_cancel
+    action: cancel_rpc
+    params:
+      requests:
+        $ref: stages.target.output.requests
+      destination: master
+    timeout_s: 30
+  - id: first_master_rpc_ok
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.first_master_cancel.output.snapshot
+      metric: rpc_ok
+      expected: 1
+      op: eq
+  - id: termination_window
+    action: cancel_observe
+    params:
+      duration_s: 5
+      requests:
+        $ref: stages.target.output.requests
+      until:
+        metric: stream_ended
+        op: eq
+        value: 1
+    timeout_s: 30
+  - id: stream_terminated
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.termination_window.output.snapshot
+      metric: stream_ended
+      expected: 1
+      op: eq
+  - id: engine_receipt_window
+    action: cancel_observe
+    params:
+      duration_s: 5
+      requests:
+        $ref: stages.target.output.requests
+      until:
+        metric: engine_cancelled
+        op: eq
+        value: 1
+      since:
+        $ref: stages.first_master_cancel.output.snapshot
+    timeout_s: 30
+  - id: engine_receives_cancel_within_five
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.engine_receipt_window.output.snapshot
+      metric: engine_cancelled
+      expected: 1
+      op: eq
+      within_s: 5
+  - id: recovery
+    action: cancel_prepare
+    params:
+      count: 1
+      concurrency: 1
+      output_len: 2
+  - id: recovery_dispatch
+    action: cancel_dispatch
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 60
+  - id: recovery_window
+    action: cancel_observe
+    params:
+      duration_s: 30
+      requests:
+        $ref: stages.recovery.output.requests
+      until:
+        metric: success
+        op: eq
+        value: 1
+    timeout_s: 45
+  - id: recovery_succeeds
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.recovery_window.output.snapshot
+      metric: success
+      expected: 1
+      op: eq
+  - id: closing_drain
+    action: cancel_observe
+    params:
+      duration_s: 10
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    timeout_s: 30
+  - id: closing_drain_scheduler
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.closing_drain.output.snapshot
+      metric: scheduler
+      expected: 0
+      op: eq
+  - id: closing_drain_prefill_batches
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.closing_drain.output.snapshot
+      metric: prefill_batches
+      expected: 0
+      op: eq
+  - id: closing_drain_decode_load
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.closing_drain.output.snapshot
+      metric: decode_total_load
+      expected: 0
+      op: eq
+  - id: cleanup
+    action: teardown
+- id: idempotent_batch
+  profiles:
+  - batch-window
+  - single-batch
+  legacy_case_ids:
+  - cancel_idempotent
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: target
+    action: cancel_prepare
+    params:
+      count: 1
+      concurrency: 1
+      output_len: 10
+  - id: target_dispatch
+    action: cancel_dispatch
+    params:
+      requests:
+        $ref: stages.target.output.requests
+    timeout_s: 60
+  - id: first_output_window
+    action: cancel_observe
+    params:
+      duration_s: 15
+      requests:
+        $ref: stages.target.output.requests
+      until:
+        metric: first_output
+        op: eq
+        value: 1
+    timeout_s: 30
+  - id: first_output_before_cancel
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.first_output_window.output.snapshot
+      metric: first_output
+      expected: 1
+      op: eq
+  - id: cancel_count_baseline
+    action: cancel_observe
+    params:
+      duration_s: 0
+      requests:
+        $ref: stages.target.output.requests
+    timeout_s: 30
+  - id: first_master_cancel
+    action: cancel_rpc
+    params:
+      requests:
+        $ref: stages.target.output.requests
+      destination: master
+    timeout_s: 30
+  - id: first_master_rpc_ok
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.first_master_cancel.output.snapshot
+      metric: rpc_ok
+      expected: 1
+      op: eq
+  - id: first_engine_receipt
+    action: cancel_observe
+    params:
+      duration_s: 5
+      requests:
+        $ref: stages.target.output.requests
+      until:
+        metric: engine_cancelled
+        op: eq
+        value: 1
+      since:
+        $ref: stages.first_master_cancel.output.snapshot
+    timeout_s: 30
+  - id: engine_receives_first_cancel
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.first_engine_receipt.output.snapshot
+      metric: engine_cancelled
+      expected: 1
+      op: eq
+      within_s: 5
+  - id: first_cancel_forwarded
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.first_engine_receipt.output.snapshot
+      metric: cancel_rpc_count
+      expected: 1
+      op: ge
+      baseline:
+        $ref: stages.cancel_count_baseline.output.snapshot
+  - id: second_master_cancel
+    action: cancel_rpc
+    params:
+      requests:
+        $ref: stages.target.output.requests
+      destination: master
+    timeout_s: 30
+  - id: second_master_rpc_ok
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.second_master_cancel.output.snapshot
+      metric: rpc_ok
+      expected: 1
+      op: eq
+  - id: termination_window
+    action: cancel_observe
+    params:
+      duration_s: 5
+      requests:
+        $ref: stages.target.output.requests
+      until:
+        metric: stream_ended
+        op: eq
+        value: 1
+    timeout_s: 30
+  - id: stream_terminated
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.termination_window.output.snapshot
+      metric: stream_ended
+      expected: 1
+      op: eq
+  - id: recovery
+    action: cancel_prepare
+    params:
+      count: 1
+      concurrency: 1
+      output_len: 2
+  - id: recovery_dispatch
+    action: cancel_dispatch
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 60
+  - id: recovery_window
+    action: cancel_observe
+    params:
+      duration_s: 30
+      requests:
+        $ref: stages.recovery.output.requests
+      until:
+        metric: success
+        op: eq
+        value: 1
+    timeout_s: 45
+  - id: recovery_succeeds
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.recovery_window.output.snapshot
+      metric: success
+      expected: 1
+      op: eq
+  - id: after_second_cancel
+    action: cancel_observe
+    params:
+      duration_s: 0
+      requests:
+        $ref: stages.target.output.requests
+    timeout_s: 30
+  - id: second_cancel_not_forwarded
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.after_second_cancel.output.snapshot
+      metric: cancel_rpc_count
+      expected: 0
+      op: eq
+      baseline:
+        $ref: stages.first_engine_receipt.output.snapshot
+  - id: closing_drain_observed
+    action: cancel_observe
+    params:
+      duration_s: 10
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    timeout_s: 30
+  - id: cleanup
+    action: teardown
+- id: after_terminal_batch
+  profiles:
+  - batch-window
+  - single-batch
+  legacy_case_ids:
+  - cancel_after_terminal
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: target
+    action: cancel_prepare
+    params:
+      count: 1
+      concurrency: 1
+      output_len: 1
+  - id: target_dispatch
+    action: cancel_dispatch
+    params:
+      requests:
+        $ref: stages.target.output.requests
+    timeout_s: 60
+  - id: completion_window
+    action: cancel_observe
+    params:
+      duration_s: 30
+      requests:
+        $ref: stages.target.output.requests
+      until:
+        metric: business_finished
+        op: eq
+        value: 1
+    timeout_s: 45
+  - id: completed_before_cancel
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.completion_window.output.snapshot
+      metric: business_finished
+      expected: 1
+      op: eq
+  - id: first_master_cancel
+    action: cancel_rpc
+    params:
+      requests:
+        $ref: stages.target.output.requests
+      destination: master
+    timeout_s: 30
+  - id: first_master_rpc_ok
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.first_master_cancel.output.snapshot
+      metric: rpc_ok
+      expected: 1
+      op: eq
+  - id: termination_window
+    action: cancel_observe
+    params:
+      duration_s: 2
+      requests:
+        $ref: stages.target.output.requests
+      until:
+        metric: stream_ended
+        op: eq
+        value: 1
+    timeout_s: 30
+  - id: recovery
+    action: cancel_prepare
+    params:
+      count: 1
+      concurrency: 1
+      output_len: 2
+  - id: recovery_dispatch
+    action: cancel_dispatch
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 60
+  - id: recovery_window
+    action: cancel_observe
+    params:
+      duration_s: 30
+      requests:
+        $ref: stages.recovery.output.requests
+      until:
+        metric: success
+        op: eq
+        value: 1
+    timeout_s: 45
+  - id: recovery_succeeds
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.recovery_window.output.snapshot
+      metric: success
+      expected: 1
+      op: eq
+  - id: terminal_after_cancel
+    action: cancel_observe
+    params:
+      duration_s: 0
+      requests:
+        $ref: stages.target.output.requests
+    timeout_s: 30
+  - id: terminal_not_rewritten_as_cancelled
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.terminal_after_cancel.output.snapshot
+      metric: engine_cancelled
+      expected: 0
+      op: eq
+  - id: closing_drain
+    action: cancel_observe
+    params:
+      duration_s: 10
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    timeout_s: 30
+  - id: closing_drain_scheduler
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.closing_drain.output.snapshot
+      metric: scheduler
+      expected: 0
+      op: eq
+  - id: closing_drain_prefill_batches
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.closing_drain.output.snapshot
+      metric: prefill_batches
+      expected: 0
+      op: eq
+  - id: closing_drain_decode_load
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.closing_drain.output.snapshot
+      metric: decode_total_load
+      expected: 0
+      op: eq
+  - id: cleanup
+    action: teardown
+- id: basic_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  legacy_case_ids:
+  - cancel_basic
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: target
+    action: cancel_prepare
+    params:
+      count: 1
+      concurrency: 1
+      output_len: 10
+  - id: target_dispatch
+    action: cancel_dispatch
+    params:
+      requests:
+        $ref: stages.target.output.requests
+    timeout_s: 60
+  - id: first_output_window
+    action: cancel_observe
+    params:
+      duration_s: 15
+      requests:
+        $ref: stages.target.output.requests
+      until:
+        metric: first_output
+        op: eq
+        value: 1
+    timeout_s: 30
+  - id: first_output_before_cancel
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.first_output_window.output.snapshot
+      metric: first_output
+      expected: 1
+      op: eq
+  - id: first_master_cancel
+    action: cancel_rpc
+    params:
+      requests:
+        $ref: stages.target.output.requests
+      destination: master
+    timeout_s: 30
+  - id: first_worker_cancel
+    action: cancel_rpc
+    params:
+      requests:
+        $ref: stages.target.output.requests
+      destination: prefill
+    timeout_s: 30
+  - id: first_master_rpc_ok
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.first_master_cancel.output.snapshot
+      metric: rpc_ok
+      expected: 1
+      op: eq
+  - id: first_worker_rpc_ok
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.first_worker_cancel.output.snapshot
+      metric: rpc_ok
+      expected: 1
+      op: eq
+  - id: termination_window
+    action: cancel_observe
+    params:
+      duration_s: 5
+      requests:
+        $ref: stages.target.output.requests
+      until:
+        metric: stream_ended
+        op: eq
+        value: 1
+    timeout_s: 30
+  - id: stream_terminated
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.termination_window.output.snapshot
+      metric: stream_ended
+      expected: 1
+      op: eq
+  - id: engine_receipt_window
+    action: cancel_observe
+    params:
+      duration_s: 0
+      requests:
+        $ref: stages.target.output.requests
+      since:
+        $ref: stages.first_master_cancel.output.snapshot
+    timeout_s: 30
+  - id: recovery
+    action: cancel_prepare
+    params:
+      count: 1
+      concurrency: 1
+      output_len: 2
+  - id: recovery_dispatch
+    action: cancel_dispatch
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 60
+  - id: recovery_window
+    action: cancel_observe
+    params:
+      duration_s: 30
+      requests:
+        $ref: stages.recovery.output.requests
+      until:
+        metric: success
+        op: eq
+        value: 1
+    timeout_s: 45
+  - id: recovery_succeeds
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.recovery_window.output.snapshot
+      metric: success
+      expected: 1
+      op: eq
+  - id: cleanup
+    action: teardown
+- id: idempotent_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  legacy_case_ids:
+  - cancel_idempotent
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: target
+    action: cancel_prepare
+    params:
+      count: 1
+      concurrency: 1
+      output_len: 10
+  - id: target_dispatch
+    action: cancel_dispatch
+    params:
+      requests:
+        $ref: stages.target.output.requests
+    timeout_s: 60
+  - id: first_output_window
+    action: cancel_observe
+    params:
+      duration_s: 15
+      requests:
+        $ref: stages.target.output.requests
+      until:
+        metric: first_output
+        op: eq
+        value: 1
+    timeout_s: 30
+  - id: first_output_before_cancel
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.first_output_window.output.snapshot
+      metric: first_output
+      expected: 1
+      op: eq
+  - id: cancel_count_baseline
+    action: cancel_observe
+    params:
+      duration_s: 0
+      requests:
+        $ref: stages.target.output.requests
+    timeout_s: 30
+  - id: first_master_cancel
+    action: cancel_rpc
+    params:
+      requests:
+        $ref: stages.target.output.requests
+      destination: master
+    timeout_s: 30
+  - id: first_worker_cancel
+    action: cancel_rpc
+    params:
+      requests:
+        $ref: stages.target.output.requests
+      destination: prefill
+    timeout_s: 30
+  - id: first_master_rpc_ok
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.first_master_cancel.output.snapshot
+      metric: rpc_ok
+      expected: 1
+      op: eq
+  - id: first_worker_rpc_ok
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.first_worker_cancel.output.snapshot
+      metric: rpc_ok
+      expected: 1
+      op: eq
+  - id: first_engine_receipt
+    action: cancel_observe
+    params:
+      duration_s: 0
+      requests:
+        $ref: stages.target.output.requests
+      since:
+        $ref: stages.first_master_cancel.output.snapshot
+    timeout_s: 30
+  - id: second_master_cancel
+    action: cancel_rpc
+    params:
+      requests:
+        $ref: stages.target.output.requests
+      destination: master
+    timeout_s: 30
+  - id: second_worker_cancel
+    action: cancel_rpc
+    params:
+      requests:
+        $ref: stages.target.output.requests
+      destination: prefill
+    timeout_s: 30
+  - id: second_master_rpc_ok
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.second_master_cancel.output.snapshot
+      metric: rpc_ok
+      expected: 1
+      op: eq
+  - id: second_worker_rpc_ok
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.second_worker_cancel.output.snapshot
+      metric: rpc_ok
+      expected: 1
+      op: eq
+  - id: termination_window
+    action: cancel_observe
+    params:
+      duration_s: 5
+      requests:
+        $ref: stages.target.output.requests
+      until:
+        metric: stream_ended
+        op: eq
+        value: 1
+    timeout_s: 30
+  - id: stream_terminated
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.termination_window.output.snapshot
+      metric: stream_ended
+      expected: 1
+      op: eq
+  - id: recovery
+    action: cancel_prepare
+    params:
+      count: 1
+      concurrency: 1
+      output_len: 2
+  - id: recovery_dispatch
+    action: cancel_dispatch
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 60
+  - id: recovery_window
+    action: cancel_observe
+    params:
+      duration_s: 30
+      requests:
+        $ref: stages.recovery.output.requests
+      until:
+        metric: success
+        op: eq
+        value: 1
+    timeout_s: 45
+  - id: recovery_succeeds
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.recovery_window.output.snapshot
+      metric: success
+      expected: 1
+      op: eq
+  - id: after_second_cancel
+    action: cancel_observe
+    params:
+      duration_s: 0
+      requests:
+        $ref: stages.target.output.requests
+    timeout_s: 30
+  - id: cleanup
+    action: teardown
+- id: after_terminal_nonbatch
+  profiles:
+  - single-nonbatch
+  - window-nonbatch
+  legacy_case_ids:
+  - cancel_after_terminal
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: target
+    action: cancel_prepare
+    params:
+      count: 1
+      concurrency: 1
+      output_len: 1
+  - id: target_dispatch
+    action: cancel_dispatch
+    params:
+      requests:
+        $ref: stages.target.output.requests
+    timeout_s: 60
+  - id: completion_window
+    action: cancel_observe
+    params:
+      duration_s: 30
+      requests:
+        $ref: stages.target.output.requests
+      until:
+        metric: business_finished
+        op: eq
+        value: 1
+    timeout_s: 45
+  - id: completed_before_cancel
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.completion_window.output.snapshot
+      metric: business_finished
+      expected: 1
+      op: eq
+  - id: first_master_cancel
+    action: cancel_rpc
+    params:
+      requests:
+        $ref: stages.target.output.requests
+      destination: master
+    timeout_s: 30
+  - id: first_worker_cancel
+    action: cancel_rpc
+    params:
+      requests:
+        $ref: stages.target.output.requests
+      destination: prefill
+    timeout_s: 30
+  - id: first_master_rpc_ok
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.first_master_cancel.output.snapshot
+      metric: rpc_ok
+      expected: 1
+      op: eq
+  - id: first_worker_rpc_ok
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.first_worker_cancel.output.snapshot
+      metric: rpc_ok
+      expected: 1
+      op: eq
+  - id: termination_window
+    action: cancel_observe
+    params:
+      duration_s: 2
+      requests:
+        $ref: stages.target.output.requests
+      until:
+        metric: stream_ended
+        op: eq
+        value: 1
+    timeout_s: 30
+  - id: recovery
+    action: cancel_prepare
+    params:
+      count: 1
+      concurrency: 1
+      output_len: 2
+  - id: recovery_dispatch
+    action: cancel_dispatch
+    params:
+      requests:
+        $ref: stages.recovery.output.requests
+    timeout_s: 60
+  - id: recovery_window
+    action: cancel_observe
+    params:
+      duration_s: 30
+      requests:
+        $ref: stages.recovery.output.requests
+      until:
+        metric: success
+        op: eq
+        value: 1
+    timeout_s: 45
+  - id: recovery_succeeds
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.recovery_window.output.snapshot
+      metric: success
+      expected: 1
+      op: eq
+  - id: terminal_after_cancel
+    action: cancel_observe
+    params:
+      duration_s: 0
+      requests:
+        $ref: stages.target.output.requests
+    timeout_s: 30
+  - id: terminal_not_rewritten_as_cancelled
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.terminal_after_cancel.output.snapshot
+      metric: engine_cancelled
+      expected: 0
+      op: eq
+  - id: cleanup
+    action: teardown
+- id: unknown_rid
+  legacy_case_ids:
+  - cancel_unknown_rid
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: clean_baseline
+    action: cancel_observe
+    params:
+      duration_s: 20
+      until:
+        metric: cleanup_inflight
+        op: eq
+        value: 0
+    timeout_s: 35
+  - id: clean_baseline_scheduler
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: scheduler
+      expected: 0
+      op: eq
+  - id: clean_baseline_prefill_batches
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: prefill_batches
+      expected: 0
+      op: eq
+  - id: clean_baseline_decode_load
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.clean_baseline.output.snapshot
+      metric: decode_total_load
+      expected: 0
+      op: eq
+  - id: unknown
+    action: cancel_prepare
+    params:
+      count: 1
+      concurrency: 1
+  - id: unknown_master_cancel
+    action: cancel_rpc
+    params:
+      requests:
+        $ref: stages.unknown.output.requests
+      destination: master
+      expected_rpc_statuses:
+      - NOT_FOUND
+    timeout_s: 30
+  - id: unknown_is_typed_not_found
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.unknown_master_cancel.output.snapshot
+      metric: rpc_not_found
+      expected: 1
+      op: eq
+  - id: after_unknown
+    action: cancel_observe
+    params:
+      duration_s: 0
+    timeout_s: 30
+  - id: unknown_does_not_mutate_ledger
+    action: cancel_check
+    params:
+      snapshot:
+        $ref: stages.after_unknown.output.snapshot
+      metric: fingerprint
+      expected: true
+      op: eq
+      baseline:
+        $ref: stages.clean_baseline.output.snapshot
+  - id: cleanup
+    action: teardown
