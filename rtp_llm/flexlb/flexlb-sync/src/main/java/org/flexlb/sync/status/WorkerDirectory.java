@@ -5,6 +5,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
 import org.slf4j.Logger;
 import org.springframework.stereotype.Component;
@@ -28,7 +29,7 @@ import java.util.function.Supplier;
  * hiding it behind a derived capacity value.</p>
  */
 @Component
-public final class WorkerDirectory {
+public final class WorkerDirectory implements WorkerStatusProvider {
 
     private final Map<RoleType, ConcurrentHashMap<String, WorkerStatus>>
             statusesByRole = new EnumMap<>(RoleType.class);
@@ -48,6 +49,21 @@ public final class WorkerDirectory {
             return Map.of();
         }
         return Map.copyOf(statusesByRole.get(role));
+    }
+
+    @Override
+    public List<WorkerStatus> getWorkerStatuses(RoleType role, String group) {
+        if (role == null) {
+            return List.of();
+        }
+        List<WorkerStatus> statuses = List.copyOf(
+                statusSnapshot(role).values());
+        if (group == null) {
+            return statuses;
+        }
+        return statuses.stream()
+                .filter(status -> group.equals(status.getGroup()))
+                .toList();
     }
 
     /** Identity check used by asynchronous callbacks under the status lock. */
