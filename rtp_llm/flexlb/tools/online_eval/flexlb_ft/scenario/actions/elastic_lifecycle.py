@@ -222,6 +222,37 @@ def share(ctx, params, deadline):
     )
 
 
+def window_received_validate(params, plan):
+    p = _params(
+        params, plan, {"before", "after", "engine"}, {"before", "after", "engine"}
+    )
+    _name(p["engine"], plan)
+    for key in ("before", "after"):
+        plan.reference(p[key], "snapshot")
+    return p
+
+
+def window_received(ctx, params, deadline):
+    deadline.check()
+    name = ctx.resolve(params["engine"])
+    before, after = (ctx.resource(params[k], "snapshot") for k in ("before", "after"))
+    values = [s.get("counts", {}).get(name) for s in (before, after)]
+    if any(type(v) is not int or v < 0 for v in values) or values[1] < values[0]:
+        raise ValueError("invalid newcomer window accepted counters")
+    delta = values[1] - values[0]
+    return StageOutput(
+        checks=[
+            CheckResult(
+                "received",
+                "PASS" if delta > 0 else "FAIL",
+                actual=delta,
+                expected=">0",
+                evidence=dict(engine=name, before=before, after=after),
+            )
+        ]
+    )
+
+
 def batch_validate(params, plan):
     p = _params(params, plan, {"count"}, {"count"})
     if type(p["count"]) is not int or p["count"] != 50:
@@ -466,6 +497,13 @@ def add_availability(ctx, params, deadline):
 
 
 HANDLERS = [
+    StageHandler(
+        "elastic_window_received",
+        window_received_validate,
+        window_received,
+        {},
+        checks=frozenset({"received"}),
+    ),
     StageHandler(
         "elastic_accepted_timed",
         accepted_timed_validate,

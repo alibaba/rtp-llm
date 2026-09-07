@@ -45,9 +45,10 @@ legacy function is retained.
 
 ## Ordered lifecycle
 
-`lifecycle.yaml` defines four explicit `batch-window` variants. `normal` and
-`strict` each contain 59 stages and preserve the five original lifecycle
-contracts below. `kv_skew_hot` and `kv_skew_cold` retain the two pilot programs
+`lifecycle.yaml` defines five explicit `batch-window` variants. `normal` and
+`strict` each contain 57 stages and preserve four original lifecycle
+contracts below. The independent 10-stage `rebalance` variant preserves the fifth
+contract without preference traffic warming the new worker. `kv_skew_hot` and `kv_skew_cold` retain the two pilot programs
 with their 2P/2D environment and independent execution budgets. The main program
 uses the 2P/4D fault preset, PRIORITY/FIXED_WINDOW/BATCH axes and omitted queue
 timeout. The compiler/runtime interface requires `23b3893059` or a descendant.
@@ -57,11 +58,13 @@ timeout. The compiler/runtime interface requires `23b3893059` or a descendant.
 | `elastic_add_flow`: new worker receives traffic within 10s | `first_traffic.received` |
 | Add-flow success rate at least 90% | `add_availability.nonempty`, `.complete`, `.success_rate` |
 | `elastic_add_preference`: 15s baseline, 45s post-add observation | `baseline_window`, `post_window` timestamped counters and HTTP health probes |
+| New worker receives traffic during the full post-convergence 45s window | `preference_received.received` (transient-only traffic is allowed) |
 | Steady newcomer share at most 60% normal/loose, 50% strict | `preference_shares.new_share`; explicit normal/strict variants |
 | Every old worker retains at least 10% steady share | `preference_shares.old_floor` |
 | Preference flow success rate at least 90% | `preference_availability.success_rate` |
 | `elastic_rebalance`: 50 requests before and after addition | `rebalance_baseline`, `rebalance_after_add`: `.complete`, `.no_errors` |
 | New worker receives positive share strictly below 60% | `rebalance_share.nonempty`, `.new_share` |
+| Remove flow reaches the new worker within 10s of its fresh accepted baseline | `remove_counter`, `remove_traffic.received` |
 | `elastic_remove_flow`: graceful removal, no request errors | `remove.membership`, `remove_zero_errors.success_rate` |
 | Removed worker disappears from discovery and Master | `removed_topology.discovery`, `.master` |
 | Scheduler, Prefill batch and Decode load drain | `remove_accounting.scheduler`, `.prefill_batches`, `.decode_load` |
@@ -72,7 +75,9 @@ timeout. The compiler/runtime interface requires `23b3893059` or a descendant.
 The normal variant also represents the legacy loose share ceiling; selecting a
 variant is explicit and does not silently depend on the runner's ambient grade.
 Preference transient peak and steady subwindow swing remain observations, not
-invented pass thresholds. Rebalance retains concurrency 10, 50 unique cold-key
+invented pass thresholds. Rebalance runs in its own fresh environment: baseline batch, add and topology
+convergence, then the immediate post-add batch with no intervening warmup. It
+retains concurrency 10, 50 unique cold-key
 requests per batch, 2048 input / 2 output tokens, and separate Schedule/stream
 budgets. Removal accounting retains its 95s drain budget and checks each owner;
 missing owner fields are ERROR rather than zero.
@@ -85,6 +90,11 @@ restarting an identical short legacy flow; independent acceptance must review
 that adaptation. Cohort completeness, exact topology and explicit consumer
 termination are additional construction checks. Removal and each cycle keep
 independent zero-error checks; the preference 90% floor cannot hide their errors.
+Cycle construction also merges the old traffic-pumping phase and removal flow:
+its zero-error assertion covers the entire combined flow, including pre-removal
+traffic. That wider denominator is an explicit **new assertion**, not an exact
+replacement for the legacy removal-only success scope. The legacy function stays
+available pending acceptance of this stronger construction.
 A blocked later stage is not counted as covered by an earlier passing stage.
 
 Local tests compile and execute both main programs and both skew variants with
