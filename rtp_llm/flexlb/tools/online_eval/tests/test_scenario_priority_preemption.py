@@ -19,7 +19,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class Backend:
-    def __init__(self, reverse=False, missing=False, rejected=None, queued=False):
+    def __init__(
+        self,
+        reverse=False,
+        missing=False,
+        rejected=None,
+        queued=False,
+        expiry=False,
+        reason=0,
+    ):
         self.ops = Ops(batch=False)
         self.ops.master_http_port = 1
         self.reverse, self.missing = reverse, missing
@@ -33,6 +41,11 @@ class Backend:
                 response.code = 8400
                 response.success = False
                 response.error_message = "fixture yielded"
+            if expiry and req[0] not in (1, 13):
+                response = self.ops.responses[-1]
+                response.code = 8511
+                response.success = False
+                response.admission_reject_reason = reason
             return call
 
         self.ops.future = future
@@ -114,7 +127,7 @@ class PreemptionPrograms(unittest.TestCase):
             load_scenarios(ROOT / "scenarios/priority/priority_preemption.yaml"),
             handlers=registry,
         )
-        self.assertEqual(2, len(plans))
+        self.assertEqual(3, len(plans))
         return next(p for p in plans if p["variant_id"] == variant), registry
 
     def run_program(self, variant="same_priority_zero_eviction", **kwargs):
@@ -264,3 +277,45 @@ class PreemptionPrograms(unittest.TestCase):
         self.assertEqual("FAIL", result["status"])
         self.assertEqual(11, len(backend.shapes))
         self.assertEqual(10, backend.ops.generate_count)
+
+    def test_expiry_preserves_two_successful_placeholders_and_twenty_rejections(self):
+        result, cohorts, backend = self.run_program(
+            variant="timeout_attribution", expiry=True
+        )
+        self.assertEqual("PASS", result["status"], result)
+        self.assertEqual(22, len(backend.shapes))
+        self.assertEqual(2, backend.ops.generate_count)
+        self.assertEqual([1, 1, 9, 11], sorted(map(len, cohorts)))
+        plan, _ = self.plan("timeout_attribution")
+        self.assertEqual(
+            7000, plan["environment"]["resolved_config"]["scheduler"]["queueTimeoutMs"]
+        )
+        stages = {s["id"]: s for s in plan["stages"]}
+        self.assertEqual(12000, stages["slow"]["params"]["perf"]["prefill_fixed_ms"])
+        self.assertEqual(
+            10000, stages["round2_slow"]["params"]["perf"]["prefill_fixed_ms"]
+        )
+        self.assertEqual(385, stages["r1_wave_drain"]["timeout_s"])
+        self.assertTrue(all(c["status"] == "PASS" for c in result["cleanup"]))
+
+    def test_expiry_wrong_reason_fails_pr7_even_with_correct_code(self):
+        result, _, backend = self.run_program(
+            variant="timeout_attribution", expiry=True, reason=1
+        )
+        self.assertEqual("FAIL", result["status"])
+        self.assertEqual(12, len(backend.shapes))
+        checks = next(s for s in result["stages"] if s["id"] == "r1_same_priority")[
+            "checks"
+        ]
+        self.assertEqual(
+            {"PR7": "FAIL", "P6_terminal": "PASS"},
+            {c["id"]: c["status"] for c in checks},
+        )
+
+    def test_expiry_missing_reason_is_error(self):
+        result, _, backend = self.run_program(
+            variant="timeout_attribution", expiry=True, reason=None
+        )
+        self.assertEqual("ERROR", result["status"])
+        self.assertEqual(12, len(backend.shapes))
+        self.assertTrue(all(c["status"] == "PASS" for c in result["cleanup"]))

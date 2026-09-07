@@ -1,7 +1,7 @@
 # Priority preemption migration
 
 Owner: agent4. Source baseline: `295af797bd7ed3a842c9cad42b5722c64cd24c9a`.
-This checkpoint implements two complete candidate programs out of fourteen old
+This checkpoint implements three complete candidate programs out of fourteen old
 contracts. No old case is called or deleted. Independent review, default catalog
 integration and actual Java execution remain pending.
 
@@ -55,11 +55,10 @@ observed order and terminal outcomes are saved as artifacts.
   restores its original blocking dependency. An explicit zero submission gap
   avoids inserting a .15s pause after the standalone placeholder.
 
-## Pending contracts (12)
+## Pending contracts (11)
 
 - atpm_preempt_decode_engine_owned
 - atpm_preemption_disabled_zero_eviction
-- atpm_timeout_attribution
 - atpm_comparator_frozen_weak
 - atpm_error_code_family
 - atpm_config_strict_reject
@@ -127,3 +126,32 @@ The first candidate 2a664 was independently accepted only together with this
 fix; bare 2a664 is not equivalent for P6. The shared owner has independent
 0/7 TIMEOUT and missing-fields ERROR evidence. No local duplicate cleaner is
 introduced by the preemption implementation.
+
+
+## Third candidate: timeout_attribution
+
+The old atpm_timeout_attribution A1 configuration uses queueTimeoutMs=7000
+and PREFILL_QUEUED preemption, with the same 1P/4D cap1/waiting8 axes.
+Round one sets P12000, waits1.5, admits placeholder90 and observes pending,
+then submits eight30, incoming70 and two90. Round two follows clean30,
+sets P10000 and waits1.5, then admits placeholder70 and submits eight30 plus
+incoming70. All requests remain 2048/2; cohorts keep .15 issue gaps and
+Schedule90/Generate120/fresh consumer35. Round-one eleven-peer drain has
+385s envelope; round two retains315s.
+
+Each PR7 requires every queued outcome to be8511, every actual response's
+admission_reject_reason to be UNSPECIFIED(0), zero8400 low-peer victims and
+successful placeholder completion. Each P6_terminal only checks placeholder
+success and zero8400 low-peer victims, exactly preserving the old final P6
+conjunction across both rounds when combined with clean30 gates. P6 is not
+silently strengthened to assert8511 itself; PR7 supplies that requirement.
+The incoming Schedule wall time is retained raw in the artifact with no PR8
+band check, as in the old contract. Missing response/reason evidence is ERROR
+rather than passing the old filtered/vacuous reason comprehension.
+A failed earlier check blocks later stages; this preserves case failure but
+can suppress second-round diagnostics which the old GradeReport accumulated.
+
+Fixture tests cover all22 actual Schedule requests, two successful consumers,
+twenty actual Schedule rejections and the correct-code/wrong-reason negative
+where PR7 fails independently of P6_terminal. This is not Java evidence and
+does not claim the old classifier gap still exists on a new Java source.
