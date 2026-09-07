@@ -255,14 +255,22 @@ def stages(values, path, default_timeout, handlers, env=None, profiles=()):
                 {"actual", "op", "expected"},
             )
             kind = reference(params["actual"], loc + ".params.actual", outputs)
-            expected_type = {"boolean": bool, "integer": int}.get(kind)
-            if expected_type is None or type(params["expected"]) is not expected_type:
+            expected_types = {
+                "boolean": (bool,),
+                "integer": (int,),
+                "number": (int, float),
+                "string": (str,),
+            }.get(kind, ())
+            if type(params["expected"]) not in expected_types or (
+                type(params["expected"]) is float
+                and not math.isfinite(params["expected"])
+            ):
                 fail(
                     loc,
                     "checks compare scalar values with matching types, not live handles",
                 )
             if params["op"] not in ("eq", "le", "ge") or (
-                kind == "boolean" and params["op"] != "eq"
+                kind in ("boolean", "string") and params["op"] != "eq"
             ):
                 fail(loc, "invalid comparison for output type")
         compiled.append(
