@@ -1,7 +1,7 @@
 # Priority preemption migration
 
 Owner: agent4. Source baseline: `295af797bd7ed3a842c9cad42b5722c64cd24c9a`.
-This checkpoint implements five complete candidate programs out of fourteen old
+This checkpoint implements six complete candidate programs out of fourteen old
 contracts. No old case is called or deleted. Independent review, default catalog
 integration and actual Java execution remain pending.
 
@@ -55,11 +55,10 @@ observed order and terminal outcomes are saved as artifacts.
   restores its original blocking dependency. An explicit zero submission gap
   avoids inserting a .15s pause after the standalone placeholder.
 
-## Pending contracts (9)
+## Pending contracts (8)
 
 - atpm_preempt_decode_engine_owned
 - atpm_error_code_family
-- atpm_config_strict_reject
 - atpm_decode_reservation_priority
 - atpm_observability_integrity
 - atpm_preempt_prefill_queued_live
@@ -260,3 +259,37 @@ FIFO inversion failing the second half, and rejected first placeholder
 preventing the second environment. Fixed7a1 plus these owned files is the
 verification composition; this branch alone lacks the shared environment
 registration/backend. These tests are not Java execution acceptance.
+
+
+## Sixth candidate: config_strict_reject
+
+Legacy atpm_config_strict_reject sends three raw JSON payloads directly to
+the Java Master: removed top-level autoTpmEnabled, FIFO with defaultPriority,
+and DECODE_ENGINE_OWNED without engineCancellation. Each legal base uses
+1P/4D, SINGLE/NON_BATCH, cap1/waiting8 and omitted queueTimeoutMs; payloads
+are fully compared with the old _prio_config/render_env plus identical raw
+mutations. The third legal base retains both DECODE_RESERVED and
+DECODE_ENGINE_OWNED with ack50/completion1000 before removing cancellation.
+
+The program runs all three shared environment_startup_probe stages before
+AT1, so a normal unexpected success or unrelated startup error still permits
+the remaining diagnostic probes. AT1 requires all three rejected outputs;
+P6 uses the third probe's current_absent_before_cleanup, matching the old
+final EnvManager.current test. Successful forced teardown cannot turn P6
+green. Ordinary timeout/IO exceptions remain TIMEOUT/ERROR and stop dependent
+work rather than masquerading as strict parser rejection.
+
+The shared7a1 interface requires an owned exited Master and this epoch's
+private parser log. This is stronger evidence than merely finding parser
+text in any exception. It also adds a legal initial setup before the three
+raw epochs, an explicit framework setup requirement absent from the old
+case. Each probe has a300s outer setup/cleanup envelope; the unchanged
+harness startup readiness/liveness loop retains its90s cap with early exit
+when the owned process dies. No Java timeout was increased. Final cleanup
+is mandatory, including partial starts, and historical probe artifacts remain.
+
+Four full-program fixtures cover exact raw payloads and cleanup ordering,
+unexpected third success failing AT1/P6 despite cleanup success, unrelated
+first error failing AT1 while all three probes run, and actual deadline
+remaining TIMEOUT. All process observations in these tests are external-IO
+fixtures; actual Java strict-parser acceptance remains pending.

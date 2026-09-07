@@ -10,6 +10,7 @@ legacy_case_ids:
 - atpm_timeout_attribution
 - atpm_preemption_disabled_zero_eviction
 - atpm_comparator_frozen_weak
+- atpm_config_strict_reject
 environment:
   backend: java_mock
   n_prefill: 1
@@ -1003,6 +1004,79 @@ variants:
       preemption:
         allowed_victim_stages:
         - PREFILL_QUEUED
+- id: config_strict_reject
+  legacy_case_ids:
+  - atpm_config_strict_reject
+  environment_overrides:
+    config_overrides:
+      ordering: priority
+      decision: single
+      dispatcher: non_batch
+      queue_timeout_ms:
+        omit: true
+      max_inflight_requests_per_worker: 1
+      max_waiting_requests_per_prefill_worker: 8
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: removed_auto_tpm
+    action: environment_startup_probe
+    timeout_s: 300
+    params:
+      config_overrides:
+        ordering: priority
+        decision: single
+        dispatcher: non_batch
+        queue_timeout_ms:
+          omit: true
+        max_inflight_requests_per_worker: 1
+        max_waiting_requests_per_prefill_worker: 8
+      mutation: removed_auto_tpm
+  - id: fifo_default_priority
+    action: environment_startup_probe
+    timeout_s: 300
+    params:
+      config_overrides:
+        ordering: fifo
+        decision: single
+        dispatcher: non_batch
+        queue_timeout_ms:
+          omit: true
+        max_inflight_requests_per_worker: 1
+        max_waiting_requests_per_prefill_worker: 8
+      mutation: fifo_default_priority
+  - id: owned_without_cancellation
+    action: environment_startup_probe
+    timeout_s: 300
+    params:
+      config_overrides:
+        ordering: priority
+        decision: single
+        dispatcher: non_batch
+        queue_timeout_ms:
+          omit: true
+        max_inflight_requests_per_worker: 1
+        max_waiting_requests_per_prefill_worker: 8
+        preemption:
+          allowed_victim_stages:
+          - DECODE_RESERVED
+          - DECODE_ENGINE_OWNED
+          engine_cancellation:
+            ack_timeout_ms: 50
+            completion_timeout_ms: 1000
+      mutation: owned_without_cancellation
+  - id: strict_rejection
+    action: preemption_config_reject
+    params:
+      rejected:
+      - $ref: stages.removed_auto_tpm.output.rejected
+      - $ref: stages.fifo_default_priority.output.rejected
+      - $ref: stages.owned_without_cancellation.output.rejected
+      environment_absent:
+        $ref: stages.owned_without_cancellation.output.environment_absent
+  - id: teardown
+    action: teardown
 stages:
 - id: setup
   action: setup
