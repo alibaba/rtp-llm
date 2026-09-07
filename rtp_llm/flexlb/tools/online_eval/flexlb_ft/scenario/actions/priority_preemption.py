@@ -142,13 +142,13 @@ def _terminal_wait(ctx, p, deadline):
     return StageOutput(artifacts=[str(wave.path)])
 
 
-def _observations(ctx, p, deadline):
+def _observations(ctx, p, deadline, size=9):
     placeholder, wave = [_cohort(ctx, p[key]) for key in ("placeholder", "wave")]
     if not placeholder.complete or not wave.complete:
         raise ValueError("preemption verdict requires drained owned cohorts")
     ph, rows = placeholder.records(), wave.records()
-    if len(ph) != 1 or len(rows) != 9 or len(wave.entries) != 9:
-        raise ValueError("preemption program needs placeholder plus nine peers")
+    if len(ph) != 1 or len(rows) != size or len(wave.entries) != size:
+        raise ValueError("preemption program has an unexpected cohort size")
     ordered = sorted(
         ph + rows, key=lambda r: (r["schedule"]["ended_s"], r["wire_request_id"])
     )
@@ -410,7 +410,93 @@ def _disabled(ctx, p, deadline):
     )
 
 
+def _comparator_params(p, plan):
+    p = _params(
+        p, {"placeholder", "wave", "ordering"}, {"placeholder", "wave", "ordering"}
+    )
+    for key in ("placeholder", "wave"):
+        plan.reference(p[key], "requests")
+    if p["ordering"] not in ("priority", "fifo"):
+        raise ValueError("comparator ordering must be priority or fifo")
+    return p
+
+
+def _comparator(ctx, p, deadline):
+    ph_wave, wave, ph, rows, raw, dispatch, actual, outcomes = _observations(
+        ctx, p, deadline, size=5
+    )
+    priorities = [r["priority"] for r in wave.p["requests"]]
+    if priorities != [30, 30, 70, 70, 70] or ph_wave.p["requests"][0]["priority"] != 30:
+        raise ValueError("comparator cohort differs from the legacy load shape")
+    indices = [0, 2, 3, 4, 1] if p["ordering"] == "priority" else list(range(5))
+    expected = [rows[i]["wire_request_id"] for i in indices]
+    ph_ok = _outcome(ph_wave.entries[0], ph[0])[0]
+    all_ok, shape = all(ok for ok, _ in outcomes), actual == expected
+    passed = ph_ok and all_ok and shape
+    path = ctx.artifact_dir / f"preemption-comparator-{uuid.uuid4().hex}.json"
+    path.write_text(
+        json.dumps(
+            dict(
+                ordering=p["ordering"],
+                placeholder=ph,
+                wave=rows,
+                raw=raw,
+                dispatch=dispatch,
+                expected=expected,
+                outcomes=outcomes,
+                placeholder_ok=ph_ok,
+            ),
+            indent=2,
+        )
+        + "\n"
+    )
+    return StageOutput(
+        {"passed": passed},
+        checks=[
+            CheckResult(
+                "order_and_terminal",
+                "PASS" if passed else "FAIL",
+                actual=dict(dispatch=actual, placeholder_ok=ph_ok, all_ok=all_ok),
+                expected=expected,
+            )
+        ],
+        artifacts=[str(path)],
+    )
+
+
+def _comparator_pair_params(p, plan):
+    p = _params(p, {"priority_half", "fifo_half"}, {"priority_half", "fifo_half"})
+    for value in p.values():
+        plan.reference(value, "boolean")
+    return p
+
+
+def _comparator_pair(ctx, p, deadline):
+    values = {key: ctx.resolve(value) for key, value in p.items()}
+    passed = all(value is True for value in values.values())
+    return StageOutput(
+        checks=[
+            CheckResult(key, "PASS" if passed else "FAIL", actual=values)
+            for key in ("PR9", "P6")
+        ]
+    )
+
+
 HANDLERS = [
+    StageHandler(
+        "preemption_comparator_pair",
+        _comparator_pair_params,
+        _comparator_pair,
+        {},
+        checks=frozenset({"PR9", "P6"}),
+    ),
+    StageHandler(
+        "preemption_comparator_half",
+        _comparator_params,
+        _comparator,
+        {"passed": "boolean"},
+        checks=frozenset({"order_and_terminal"}),
+    ),
     StageHandler("preemption_wait", _settled_params, _terminal_wait, {}),
     StageHandler(
         "preemption_disabled",
