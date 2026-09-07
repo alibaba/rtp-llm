@@ -1,7 +1,7 @@
 # Priority preemption migration
 
 Owner: agent4. Source baseline: `295af797bd7ed3a842c9cad42b5722c64cd24c9a`.
-This checkpoint implements twelve complete candidate families out of fourteen old
+This checkpoint implements thirteen complete candidate families out of fourteen old
 contracts. No old case is called or deleted. Independent review, default catalog
 integration and actual Java execution remain pending.
 
@@ -55,9 +55,8 @@ observed order and terminal outcomes are saved as artifacts.
   restores its original blocking dependency. An explicit zero submission gap
   avoids inserting a .15s pause after the standalone placeholder.
 
-## Pending contracts (2)
+## Pending contracts (1)
 
-- atpm_preempt_cancel_not_found
 - atpm_preempt_cancel_tombstoned
 
 These require their own actual profile/config axes, typed terminal evidence,
@@ -632,3 +631,50 @@ zero Fetch until all three Schedule responses, two serial real survivors
 plus recovery,427 versus428,8429 versus8400 and engine-seen victim.
 These and the preceding PQ fixtures are run together; no Java or paired
 result is claimed.
+
+
+## Cancel NOT_FOUND construction
+
+`cancel_not_found` ports `atpm_preempt_cancel_not_found` on its only
+single-nonbatch profile: exact `_nf_spec` 1P/1D default perf, PRIORITY,
+SINGLE/NON_BATCH, queue60000, inflight1/waiting8, decode maxEngineRequests1,
+all three victim stages with ack50/completion1000. Actual EnvSpec config,
+perf/topology/master_env are compared to the old factory. This raises the
+checkpoint to13 families/15 instances; tombstoned remains pending.
+
+An admitted victim30/512/200 reaches actual Decode RUNNING (10s/.1),
+then pause.6, capture engine Cancel RPC baseline, and inject the old
+status_no_respond type into the sole Decode owner. Shared status_control
+binds cleanup to that exact environment/owner before the POST; explicit
+clear and idempotent teardown clear both keep the original type format.
+The frozen window remains3s/.05 for engine-side non-running end_state;
+no health-demotion window is widened. Incoming70/512/2 follows only after
+that evidence. Both Schedule RPCs remain90, direct stream transport120,
+and the victim has its original fresh35 drain. An unexpectedly admitted
+incoming keeps its owned consumer but is not mistaken for the required
+8431 rejection and gets no extra business wait stage.
+
+PR6 requires incoming Schedule8431 with success=false, full normal victim
+output with actual consumer completion, and no victim entry in engine
+cancelled_rids nor a lifecycle end_state=cancelled. A finished construction
+probe alone does not prove normal output; the later two facts are separate.
+AT5 independently requires aggregate per-engine Cancel delta>=1. Missing
+cancel keys inside valid per-engine RPC maps retain old zero semantics
+and are explicitly listed; missing maps/invalid counts are ERROR with raw
+error artifacts. Before/after snapshots must share the same environment
+and engine-name inventory. These black-box predicates do not expose or
+assert a literal Cancel ACK enum.
+
+After the census/verdict, clear the fault, Masterclean30, engineclean20/.5,
+and one fresh unset-priority2048/2 recovery (Schedule30, transport60,
+observation30, unique RID*100+1). P6 is independent of PR6 and AT5 after
+the mandatory Master cleanup gate. No performance override is added.
+Missing lifecycle/owner/cancellation fields and timed-out construction
+raise ERROR/TIMEOUT rather than old soft/default evidence; a three-second
+construction miss blocks incoming and still clears the injected fault.
+
+Six complete-program regressions cover exact original environment and
+payloads,8431 versus8403, zero Cancel delta, normal output accompanied by
+engine cancellation evidence, the unchanged three-second finish window
+and cleanup, and missing census map failing before injection. No Java,
+ACK-enum or paired acceptance is claimed.

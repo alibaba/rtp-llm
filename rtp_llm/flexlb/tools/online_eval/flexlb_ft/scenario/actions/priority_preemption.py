@@ -1568,7 +1568,7 @@ def _live_prefill(ctx, p, deadline):
 
 
 def _live_engine_clean(ctx, p, deadline):
-    end = min(deadline.expires_at, ctx.clock() + 30)
+    end = min(deadline.expires_at, ctx.clock() + p.get("seconds", 30))
     samples = []
     passed = False
     while ctx.clock() < end:
@@ -1689,7 +1689,213 @@ def _live_reserved(ctx, p, deadline):
     )
 
 
+def _nf_state_params(p, plan):
+    p = _params(p, {"requests", "state"}, {"requests", "state"})
+    plan.reference(p["requests"], "requests")
+    if p["state"] not in ("running", "finished"):
+        raise ValueError("unknown NF construction state")
+    return p
+
+
+def _nf_state(ctx, p, deadline):
+    wave = _cohort(ctx, p["requests"])
+    rows = wave.records()
+    if len(rows) != 1 or rows[0]["schedule"]["status"] != "OK":
+        raise ValueError("NF construction requires one admitted victim")
+    rid = str(rows[0]["wire_request_id"])
+    samples = []
+    path = ctx.artifact_dir / f"preemption-nf-{p['state']}-{uuid.uuid4().hex}.json"
+    try:
+        while True:
+            deadline.check()
+            raw, engines = _live_engine_rows(ctx, deadline)
+            owners = [e for e in engines if e["role"] == "decode"]
+            if len(owners) != 1 or not isinstance(
+                owners[0].get("request_lifecycle"), dict
+            ):
+                raise ValueError("NF needs one real Decode lifecycle owner")
+            lc = owners[0]["request_lifecycle"].get(rid, {})
+            if not isinstance(lc, dict):
+                raise ValueError("malformed NF victim lifecycle")
+            end = lc.get("end_state")
+            if end is not None and not isinstance(end, str):
+                raise ValueError("malformed NF terminal state")
+            if p["state"] == "running":
+                matched = end == "running" or (
+                    not end
+                    and lc.get("running_ms") is not None
+                    and _number(lc["running_ms"], 0, 1e18) > 0
+                )
+            else:
+                # Old engine-finished probe accepts any non-running end state;
+                # normal output and absence of cancellation are separate PR6 facts.
+                matched = bool(end) and end != "running"
+            samples.append(dict(at_s=ctx.clock(), raw=raw, matched=matched))
+            if matched:
+                break
+            deadline.sleep(0.1 if p["state"] == "running" else 0.05)
+    finally:
+        path.write_text(json.dumps(samples, indent=2) + "\n")
+    return StageOutput(artifacts=[str(path)])
+
+
+def _cancel_census(ctx, p, deadline):
+    path = ctx.artifact_dir / f"preemption-cancel-census-{uuid.uuid4().hex}.json"
+    evidence = dict(env_epoch=ctx.env_epoch, counts={}, missing_cancel_keys=[])
+    try:
+        raw, engines = _live_engine_rows(ctx, deadline)
+        evidence["raw"] = raw
+        for engine in engines:
+            rpc = engine.get("rpc_counts")
+            if not isinstance(rpc, dict):
+                raise ValueError("Cancel census lacks per-engine RPC map")
+            if "cancel" not in rpc:
+                evidence["missing_cancel_keys"].append(engine["name"])
+            evidence["counts"][engine["name"]] = _number(
+                rpc.get("cancel", 0), 0, 1e18, True
+            )
+        evidence["total"] = sum(evidence["counts"].values())
+    except Exception as exc:
+        evidence["error"] = repr(exc)
+        raise
+    finally:
+        path.write_text(json.dumps(evidence, indent=2) + "\n")
+    return StageOutput(
+        {"snapshot": ctx.register_resource("snapshot", evidence, historical=True)},
+        artifacts=[str(path)],
+    )
+
+
+def _nf_verdict_params(p, plan):
+    p = _params(
+        p,
+        {"victim", "incoming", "before", "after"},
+        {"victim", "incoming", "before", "after"},
+    )
+    for key in ("victim", "incoming"):
+        plan.reference(p[key], "requests")
+    for key in ("before", "after"):
+        plan.reference(p[key], "snapshot")
+    return p
+
+
+def _nf_verdict(ctx, p, deadline):
+    victim, incoming = [_cohort(ctx, p[k]) for k in ("victim", "incoming")]
+    vr, ir = victim.records(), incoming.records()
+    if not victim.complete or len(vr) != 1 or len(ir) != 1:
+        raise ValueError(
+            "NF verdict requires one drained victim and one settled incoming"
+        )
+    for wave, shape in ((victim, (30, 512, 200)), (incoming, (70, 512, 2))):
+        shapes = wave.p["requests"]
+        if (
+            len(shapes) != 1
+            or (
+                shapes[0].get("priority"),
+                shapes[0]["input_len"],
+                shapes[0]["output_len"],
+            )
+            != shape
+        ):
+            raise ValueError("NF request shape differs from old contract")
+    response = incoming.entries[0]["batch"].entries[0]["response"]
+    if response is None:
+        raise ValueError("NF incoming lacks Schedule response")
+    before, after = [ctx.resource(p[k], "snapshot") for k in ("before", "after")]
+    if (
+        before.get("env_epoch") != ctx.env_epoch
+        or after.get("env_epoch") != ctx.env_epoch
+        or set(before["counts"]) != set(after["counts"])
+    ):
+        raise ValueError("Cancel census belongs to a different environment/fleet")
+    delta = after["total"] - before["total"]
+    rid = vr[0]["wire_request_id"]
+    cancelled_by = []
+    for engine in after["raw"]["engines"]:
+        cancelled = engine.get("cancelled_rids")
+        lc = engine.get("request_lifecycle")
+        if (
+            not isinstance(cancelled, list)
+            or any(type(r) is not int for r in cancelled)
+            or not isinstance(lc, dict)
+        ):
+            raise ValueError("NF cancellation proof lacks typed engine evidence")
+        row = lc.get(str(rid), {})
+        if not isinstance(row, dict):
+            raise ValueError("malformed cancellation lifecycle")
+        if rid in cancelled or row.get("end_state") == "cancelled":
+            cancelled_by.append(engine["name"])
+    completed = request_success(vr[0])
+    rejected = response.code == 8431 and not response.success
+    settled = rejected and completed and not cancelled_by
+    evidence = dict(
+        victim=vr,
+        incoming=ir,
+        before=before,
+        after=after,
+        incoming_code=response.code,
+        victim_completed=completed,
+        cancelled_by=cancelled_by,
+        cancel_delta=delta,
+        settled=settled,
+        cancel_seen=delta >= 1,
+    )
+    path = ctx.artifact_dir / f"preemption-nf-verdict-{uuid.uuid4().hex}.json"
+    path.write_text(json.dumps(evidence, indent=2) + "\n")
+    return StageOutput(
+        {"settled": settled, "cancel_seen": delta >= 1}, artifacts=[str(path)]
+    )
+
+
+def _nf_final_params(p, plan):
+    keys = {"settled", "cancel_seen", "engine_clean", "recovery"}
+    p = _params(p, keys, keys)
+    for key in p:
+        plan.reference(p[key], "boolean")
+    return p
+
+
+def _nf_final(ctx, p, deadline):
+    values = {k: ctx.resolve(v) for k, v in p.items()}
+    return StageOutput(
+        checks=[
+            CheckResult(k, "PASS" if passed else "FAIL", actual=passed, expected=True)
+            for k, passed in (
+                ("PR6", values["settled"]),
+                ("AT5", values["cancel_seen"]),
+                ("P6", values["engine_clean"] and values["recovery"]),
+            )
+        ]
+    )
+
+
 HANDLERS = [
+    StageHandler("preemption_nf_state", _nf_state_params, _nf_state, {}),
+    StageHandler(
+        "preemption_cancel_census",
+        lambda p, plan: _params(p, (), ()),
+        _cancel_census,
+        {"snapshot": "snapshot"},
+    ),
+    StageHandler(
+        "preemption_nf_verdict",
+        _nf_verdict_params,
+        _nf_verdict,
+        {"settled": "boolean", "cancel_seen": "boolean"},
+    ),
+    StageHandler(
+        "preemption_nf_engine_clean",
+        lambda p, plan: _params(p, (), ()),
+        lambda ctx, p, d: _live_engine_clean(ctx, {"seconds": 20}, d),
+        {"passed": "boolean"},
+    ),
+    StageHandler(
+        "preemption_nf_final",
+        _nf_final_params,
+        _nf_final,
+        {},
+        checks=frozenset({"PR6", "AT5", "P6"}),
+    ),
     StageHandler(
         "preemption_live_reserved",
         _same_params,

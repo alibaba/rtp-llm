@@ -19,6 +19,7 @@ legacy_case_ids:
 - atpm_observability_integrity
 - atpm_preempt_prefill_queued_live
 - atpm_preempt_decode_reserved_live
+- atpm_preempt_cancel_not_found
 environment:
   backend: java_mock
   n_prefill: 1
@@ -3006,6 +3007,162 @@ variants:
   - id: teardown
     action: teardown
     timeout_s: 120
+- id: cancel_not_found
+  profiles:
+  - single-nonbatch
+  legacy_case_ids:
+  - atpm_preempt_cancel_not_found
+  environment_overrides:
+    n_decode: 1
+    config_overrides:
+      decode_max_engine_requests: 1
+      preemption:
+        allowed_victim_stages:
+        - PREFILL_QUEUED
+        - DECODE_RESERVED
+        - DECODE_ENGINE_OWNED
+        engine_cancellation:
+          ack_timeout_ms: 50
+          completion_timeout_ms: 1000
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: victim
+    action: priority_start
+    timeout_s: 5
+    params:
+      gap_s: 0
+      requests:
+      - tag: victim
+        priority: 30
+        input_len: 512
+        output_len: 200
+  - id: victim_settled
+    action: preemption_settled
+    timeout_s: 90
+    params:
+      requests:
+        $ref: stages.victim.output.requests
+  - id: victim_admitted
+    action: check
+    params:
+      actual:
+        $ref: stages.victim_settled.output.admitted
+      op: eq
+      expected: true
+  - id: victim_running
+    action: preemption_nf_state
+    timeout_s: 10
+    params:
+      requests:
+        $ref: stages.victim.output.requests
+      state: running
+  - id: before_freeze_pause
+    action: balance_pause
+    params:
+      seconds: 0.6
+  - id: baseline_cancel
+    action: preemption_cancel_census
+  - id: freeze_status
+    action: status_control
+    params:
+      role: decode
+      selection: first
+      fault: status_no_respond
+      enabled: true
+  - id: victim_engine_finished
+    action: preemption_nf_state
+    timeout_s: 3
+    params:
+      requests:
+        $ref: stages.victim.output.requests
+      state: finished
+  - id: incoming
+    action: priority_start
+    timeout_s: 5
+    params:
+      gap_s: 0
+      requests:
+      - tag: incoming
+        priority: 70
+        input_len: 512
+        output_len: 2
+  - id: incoming_settled
+    action: preemption_settled
+    timeout_s: 90
+    params:
+      requests:
+        $ref: stages.incoming.output.requests
+  - id: victim_drain
+    action: preemption_wait
+    timeout_s: 35
+    params:
+      requests:
+        $ref: stages.victim.output.requests
+  - id: after_cancel
+    action: preemption_cancel_census
+  - id: nf_verdict
+    action: preemption_nf_verdict
+    params:
+      victim:
+        $ref: stages.victim.output.requests
+      incoming:
+        $ref: stages.incoming.output.requests
+      before:
+        $ref: stages.baseline_cancel.output.snapshot
+      after:
+        $ref: stages.after_cancel.output.snapshot
+  - id: clear_status
+    action: status_control
+    params:
+      role: decode
+      selection: first
+      fault: status_no_respond
+      enabled: false
+  - id: master_clean
+    action: balance_clean
+    timeout_s: 30
+  - id: engine_clean
+    action: preemption_nf_engine_clean
+    timeout_s: 25
+  - id: recovery_prepare
+    action: recovery_prepare
+    params:
+      count: 1
+      concurrency: 1
+      input_len: 2048
+      output_len: 2
+      consume: immediate
+      schedule_timeout_s: 30
+      stream_timeout_s: 30
+      unique_key_count: 1
+      unique_key_start: 1
+      generate_payload: match_schedule
+  - id: recovery_dispatch
+    action: recovery_dispatch
+    params:
+      requests:
+        $ref: stages.recovery_prepare.output.requests
+    timeout_s: 60
+  - id: recovery_result
+    action: preemption_error_recovery
+    params:
+      requests:
+        $ref: stages.recovery_prepare.output.requests
+  - id: nf_final
+    action: preemption_nf_final
+    params:
+      settled:
+        $ref: stages.nf_verdict.output.settled
+      cancel_seen:
+        $ref: stages.nf_verdict.output.cancel_seen
+      engine_clean:
+        $ref: stages.engine_clean.output.passed
+      recovery:
+        $ref: stages.recovery_result.output.passed
+  - id: teardown
+    action: teardown
 stages:
 - id: setup
   action: setup
