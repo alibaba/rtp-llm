@@ -157,3 +157,40 @@ runtime acceptance, not full-family acceptance.
 (8 batch-window, 5 each other profile), using the same fixed 5aff source. Assignment
 and passing dry-runs are not runtime PASS. Business failures retain their original
 predicates; environment or cleanup anomalies stop later groups for investigation.
+
+## Wraparound predicate repair after fixed 5aff runtime
+
+The original 5aff `wraparound::batch-window` TIMEOUT is retained: `clean_a`
+exhausted its inherited 60s stage clock; all six cleanup entries passed.
+The initial inspection does not establish whether topology, scheduler count or
+endpoint load prevented the combined readiness gate from completing.
+
+The legacy source has independent checks, now represented literally:
+
+- Immediately after `restart_a` returns, `ready_a` starts a fresh 60s budget.
+  `master_topology_ready` polls only Master info at 1s intervals and requires
+  PREFILL alive >=2 and DECODE alive >=4, as `instance_alive_full` actually does.
+  It adds no readiness flag, discovered equality or inflight-zero predicate.
+- After `kill_b`, `switched_a` waits 10s and captures the switch-window boundary.
+  `clean_a` then starts a separate 10s budget. `master_inflight_clean` polls only
+  the scheduler/P/D ledger at .5s intervals; no topology endpoint is consulted.
+  Decode preserves the legacy `inflight_requests or total_load` fallback when
+  both fields exist. Scheduler zero cannot hide either endpoint owner's load.
+- The original five-second post-clean pause is explicit before collecting the
+  client. Neither cleanup nor recovery time is borrowed to extend a verdict.
+
+Strict malformed/missing observations remain ERROR, and a stage-bound timeout
+remains TIMEOUT. This differs from legacy helpers' default values and returned
+False and is not claimed to be identical failure classification. Samples are
+retained even on timeout. The ongoing 5aff execution is not modified or rerun by
+this patch, and no claim that these changes cure its observed timeout is made.
+`test_scenario_master_wraparound.py` uses the formal loader/compiler for all four
+profiles and counterexamples for independent clocks, topology-only success,
+ledger-only success, each nonzero owner, and malformed topology evidence.
+
+Patch validation: 31 Master tests passed (0.765s), and the complete scenario
+suite passed 343 tests (74.857s). Full fixed-5aff artifacts subsequently showed
+118 clean_a samples with ready 2P/4D topology throughout and no all-zero owner
+sample. Thus the observed gate was held by ongoing ledger occupancy, not missing
+topology. This evidence does not establish a leaked ledger or prove that the
+restored 10s legacy predicate will pass under continuing client traffic.

@@ -181,10 +181,10 @@ variants:
         $ref: stages.kill_a.output.fault
     timeout_s: 180
   - id: ready_a
-    action: master_ready
+    action: master_topology_ready
+    timeout_s: 60
     params:
       target: A
-      inflight_zero: true
   - id: recovery_a
     action: master_request_batch
     params:
@@ -213,10 +213,14 @@ variants:
     params:
       wait_s: 10
   - id: clean_a
-    action: master_ready
+    action: master_inflight_clean
+    timeout_s: 10
     params:
       target: A
-      inflight_zero: true
+  - id: post_clean
+    action: master_mark
+    params:
+      wait_s: 5
   - id: finish
     action: master_client_finish
     params:
