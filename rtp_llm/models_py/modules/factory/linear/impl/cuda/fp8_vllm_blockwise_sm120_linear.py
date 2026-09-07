@@ -9,7 +9,6 @@ keep using DeepGEMM via `CudaFp8GEMMLinear`.
 from typing import Optional
 
 import torch
-import torch.nn.functional as F
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.factory.linear import LinearBase
@@ -52,21 +51,23 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
     required; its Optional annotation only preserves the LinearBase/factory
     constructor signature.
 
-    Scale layout (matches CUTLASS Sm120BlockwiseScaleConfig<1, 1, 128, MN, K>):
+    Scale layout (CUTLASS Sm120BlockwiseScaleConfig<1, 128, 128, MN, K>):
       - input_scales : (M, K//128), MN-major (M-stride=1, K-group-stride=M)
-      - weight_scales: (N, K//128), K-major  (K-stride = 1)
+      - weight_scales: (N//128, K//128), K-major (K-stride = 1)
     Input scales use column_major_scales=True, scale_tma_aligned=False
     because CUTLASS tile_atom_to_shape_SFA computes K-group stride as exactly
     M (no alignment padding).  scale_tma_aligned=True would pad to ceil4(M),
     causing a stride mismatch for non-multiple-of-4 M values.
     """
 
-    supports_deferred_bias = True
-    supports_fused_bias_gelu_quant = True
-    fused_activation_quant_format = "fp8_float_block128_colmajor"
+    # Materialize GEMM+bias(+GELU) in BF16 before a separate quantization.
+    # In particular, do not move output bias into residual LayerNorm.
+    supports_deferred_bias = False
+    supports_fused_bias_gelu_quant = False
+    fused_activation_quant_format = None
     # Generic prequantized inputs may carry DeepGEMM UE8M0 scales.  Keep this
-    # capability disabled; DenseMLP uses forward_quantized directly only with
-    # the float scales produced by this backend's fused GELU path.
+    # capability disabled so callers cannot fuse LayerNorm with quantization
+    # using the incompatible UE8M0 scale contract.
     supports_prequantized_activation = False
 
     @staticmethod
@@ -88,14 +89,17 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
             raise ValueError("SM120 FP8 blockwise weight scales must be contiguous")
         K, N = weight.shape
         scale_K, scale_N = weight_scales.shape
-        if N != scale_N or (K + block_size - 1) // block_size != scale_K:
+        if (
+            scale_N != (N + block_size - 1) // block_size
+            or (K + block_size - 1) // block_size != scale_K
+        ):
             raise ValueError(
                 "SM120 FP8 blockwise weight scale dimension mismatch: "
                 f"N={N}, scale_N={scale_N}, K={K}, scale_K={scale_K}"
             )
         return (
             weight.reshape(N, K),
-            weight_scales.reshape(N, scale_K),
+            weight_scales.reshape(scale_N, scale_K),
             K,
             N,
             scale_K,
@@ -247,7 +251,7 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
             self.bias = self.bias.to(device=self.weight.device)
 
     def _forward_impl(
-        self, input: torch.Tensor, apply_bias: bool = True
+        self, input: torch.Tensor, apply_bias: bool = True, use_gelu: bool = False
     ) -> torch.Tensor:
         if input.dtype != torch.bfloat16:
             raise ValueError(f"Input tensor dtype must be bfloat16, got {input.dtype}")
@@ -282,7 +286,7 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
             input_scales,
             self.weight_scales,
             self.bias if apply_bias else None,
-            False,
+            use_gelu,
         )
         return output
 
@@ -293,28 +297,7 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         return self._forward_impl(input, apply_bias=False)
 
     def forward_with_bias_gelu(self, input: torch.Tensor) -> torch.Tensor:
-        return F.gelu(self._forward_impl(input))
-
-    def forward_with_bias_gelu_quantized(
-        self, input: torch.Tensor
-    ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
-        if self.bias is None or self.N % 128 != 0:
-            return None
-        output = self._forward_impl(input, apply_bias=True)
-        output_fp8 = torch.empty_like(output, dtype=torch.float8_e4m3fn)
-        groups = self.N // 128
-        output_scales = torch.empty_strided(
-            (output.shape[0], groups),
-            (1, output.shape[0]),
-            dtype=torch.float32,
-            device=output.device,
-        )
-        from rtp_llm.ops.compute_ops import rtp_llm_ops
-
-        rtp_llm_ops.fused_bias_gelu_quant_fp8(
-            output, self.bias.to(output.dtype), output_fp8, output_scales, False
-        )
-        return output_fp8, output_scales
+        return self._forward_impl(input, use_gelu=True)
 
     def forward_quantized(
         self,

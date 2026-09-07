@@ -64,14 +64,16 @@ def _install_stubs(calls):
     sys.modules["rtp_llm.models_py.kernels.cuda.fp8_kernel"] = fp8_kernel
     sys.modules["rtp_llm.models_py.modules.factory.linear"] = linear_pkg
     sys.modules["rtp_llm.ops"] = ops_mod
+    compute_ops = types.ModuleType("rtp_llm.ops.compute_ops")
+    compute_ops.rtp_llm_ops = types.SimpleNamespace(
+        fused_bias_add=lambda output, bias: output.add_(bias)
+    )
+    sys.modules["rtp_llm.ops.compute_ops"] = compute_ops
 
 
 def _load_module(calls):
     _install_stubs(calls)
-    path = (
-        Path(__file__).resolve().parents[1]
-        / "fp8_deepgemm_linear.py"
-    )
+    path = Path(__file__).resolve().parents[1] / "fp8_deepgemm_linear.py"
     spec = importlib.util.spec_from_file_location("fp8_deepgemm_linear_contract", path)
     mod = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

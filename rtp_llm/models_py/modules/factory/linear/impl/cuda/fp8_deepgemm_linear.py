@@ -274,7 +274,9 @@ class CudaFp8DeepGEMMLinear(LinearBase):
     ) -> torch.Tensor:
         """Run DeepGEMM with a caller-provided FP8 input and matching scales."""
         if input_fp8.dtype != torch.float8_e4m3fn:
-            error_msg = f"Quantized input dtype must be float8_e4m3fn, got {input_fp8.dtype}"
+            error_msg = (
+                f"Quantized input dtype must be float8_e4m3fn, got {input_fp8.dtype}"
+            )
             logger.error(error_msg)
             raise ValueError(error_msg)
         M, _ = self._validate_input(input_fp8)
@@ -319,7 +321,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
     ) -> Optional[tuple[torch.Tensor, torch.Tensor]]:
         if not self.scale_ue8m0 or self.bias is None or self.N % 128 != 0:
             return None
-        output = self._forward_impl(input, apply_bias=False)
+        output = self.forward_without_bias(input)
         return self._bias_gelu_quantize_output(output)
 
     def _bias_gelu_quantize_output(
@@ -348,31 +350,3 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             return None
         output = self.forward_quantized(input, input_scales, apply_bias=False)
         return self._bias_gelu_quantize_output(output)
-
-    def forward_quantized(
-        self,
-        input: torch.Tensor,
-        input_scales: torch.Tensor,
-        apply_bias: bool = True,
-    ) -> torch.Tensor:
-        if not self.scale_ue8m0:
-            raise ValueError("pre-quantized activation requires UE8M0 scales")
-        if input.dtype != torch.float8_e4m3fn or input.dim() != 2:
-            raise ValueError("pre-quantized input must be a 2D float8_e4m3fn tensor")
-        if input.shape[1] != self.K:
-            raise ValueError(f"input K must be {self.K}, got {input.shape[1]}")
-        output = torch.empty(
-            input.shape[0], self.N, dtype=torch.bfloat16, device=input.device
-        )
-        fp8_gemm_nt(
-            (input, input_scales),
-            (self.weight, self.weight_scales),
-            output,
-            c=None,
-            disable_ue8m0_cast=False,
-        )
-        if apply_bias and self.bias is not None:
-            from rtp_llm.ops.compute_ops import rtp_llm_ops
-
-            rtp_llm_ops.fused_bias_add(output, self.bias.to(output.dtype))
-        return output
