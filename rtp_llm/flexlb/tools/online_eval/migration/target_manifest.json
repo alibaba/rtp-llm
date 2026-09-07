@@ -1101,14 +1101,14 @@
         "atpm_preempt_cancel_tombstoned"
       ],
       "candidate_contracts": [
+        "atpm_comparator_frozen_weak",
+        "atpm_config_strict_reject",
         "atpm_preempt_prefill_queued",
         "atpm_preemption_disabled_zero_eviction",
         "atpm_same_priority_zero_eviction",
         "atpm_timeout_attribution"
       ],
       "pending_contracts": [
-        "atpm_comparator_frozen_weak",
-        "atpm_config_strict_reject",
         "atpm_decode_reservation_priority",
         "atpm_error_code_family",
         "atpm_observability_integrity",
@@ -1120,9 +1120,9 @@
       ],
       "candidate_counts": {
         "logical_scenarios": 1,
-        "variants": 4,
-        "instances": 4,
-        "checks": 39
+        "variants": 6,
+        "instances": 6,
+        "checks": 51
       },
       "source_files": [
         "scenarios/priority/priority_preemption.yaml"
@@ -1130,8 +1130,10 @@
       "replacement_status": "retain_legacy_pending_paired_evidence",
       "static_review": {
         "status": "passed_at_revision",
-        "revision": "11ead5a073787b270130277880b9465892c01804",
+        "revision": "d3f7864cedb6a8d6316d7a43e2092c01aebca6e6",
         "reviewed_contracts": [
+          "atpm_comparator_frozen_weak",
+          "atpm_config_strict_reject",
           "atpm_preempt_prefill_queued",
           "atpm_preemption_disabled_zero_eviction",
           "atpm_same_priority_zero_eviction",
@@ -1141,7 +1143,8 @@
         "scope": "Reviewed named programs only, conditional on listed shared fixes; not all current variants or real Java execution.",
         "dependencies": [
           "d955a8434b9c1458e1eadb76f90734eda47b1c23",
-          "e8e53612d995a2f97dcdd3069a8e021c65b5df03"
+          "e8e53612d995a2f97dcdd3069a8e021c65b5df03",
+          "7a1d3aa2f91ba1a3cd46c7b18c4b792ff99608c3"
         ]
       },
       "candidate_scenario_ids": [
