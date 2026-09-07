@@ -1,14 +1,25 @@
 """Configuration resolver tests"""
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, Fp8PerTensorQuantConfig
 from rtp_llm.device.device_type import DeviceType
-from rtp_llm.models_py.distributed.deepep_wrapper import DeepepWrapperConfig
+from rtp_llm.models_py.distributed.deepep_wrapper import (
+    DeepEPMode,
+    DeepEPWrapper,
+    DeepepWrapperConfig,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+    FusedMoEQuantConfig,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_low_latency_router import (
+    DeepEpLowLatencyRouter,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
@@ -157,6 +168,44 @@ class TestMoeConfigResolver(unittest.TestCase):
         self.assertEqual(quantized_capacity, 16)
         self.assertEqual(unquantized_capacity, 64)
         self.assertEqual(process_capacity, unquantized_capacity)
+
+    def test_deepep_low_latency_capacity_uses_physical_tp_under_cp(self):
+        config = create_config_adapter(
+            ep_size=2,
+            tp_size=4,
+            use_deepep_low_latency=True,
+            cp_enabled=True,
+        )
+        self.assertEqual(config.tp_size, 1)
+        self.assertEqual(config.parallelism_config.tp_size, 4)
+
+        wrapper = SimpleNamespace(
+            mode=DeepEPMode.LOW_LATENCY,
+            buffer=object(),
+            num_topk=config.moe_k,
+            ll_num_max_token_per_rank=64,
+            use_accl_ep=False,
+        )
+        with (
+            patch.object(
+                DeepepWrapperConfig,
+                "calc_model_low_latency_max_token_per_rank",
+                return_value=64,
+            ) as calc_capacity,
+            patch.object(
+                DeepepWrapperConfig,
+                "from_config_adapter",
+                return_value=object(),
+            ),
+            patch.object(DeepEPWrapper, "get_instance", return_value=wrapper),
+        ):
+            DeepEpLowLatencyRouter(config, FusedMoEQuantConfig())
+
+        calc_capacity.assert_called_once_with(
+            config.ll_num_max_token,
+            4,
+            config.model_config.quant_config,
+        )
 
     def test_is_bf16_false(self):
         """Test is_bf16 returns False for fp16"""

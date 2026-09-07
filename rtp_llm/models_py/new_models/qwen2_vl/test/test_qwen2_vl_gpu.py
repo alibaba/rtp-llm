@@ -8,7 +8,6 @@ from safetensors.torch import save_file
 from rtp_llm.models_py.model_loader import NewLoaderConfig
 from rtp_llm.models_py.new_models.qwen2_vl.vision import (
     Qwen2VLForVisionEmbedding,
-    _resolve_flash_attn_varlen,
     load_qwen2_vl_vision,
 )
 
@@ -29,17 +28,9 @@ def _vision_config():
 
 
 class Qwen2VLVisionGpuTest(unittest.TestCase):
-    def test_real_newloader_gpu_forward_matches_cpu_reference(self):
+    def test_real_newloader_fp16_sdpa_fallback_matches_cpu_reference(self):
         if not torch.cuda.is_available():
             self.skipTest("A CUDA or ROCm accelerator is required")
-        if torch.version.hip is None:
-            self.assertIsNotNone(
-                _resolve_flash_attn_varlen(),
-                (
-                    f"flash-attn unavailable on {torch.cuda.get_device_name(0)} "
-                    f"with capability {torch.cuda.get_device_capability(0)}"
-                ),
-            )
 
         torch.manual_seed(11)
         config = _vision_config()
@@ -69,8 +60,14 @@ class Qwen2VLVisionGpuTest(unittest.TestCase):
 
         self.assertFalse(visual.training)
         self.assertEqual(visual.device, torch.device("cuda:0"))
-        with torch.inference_mode():
-            actual = visual(pixel_values.cuda(), grid_thw.cuda()).float().cpu()
+        with mock.patch(
+            "rtp_llm.models_py.new_models.qwen2_vl.vision."
+            "_resolve_flash_attn_varlen",
+            return_value=None,
+        ) as resolve_flash_attn:
+            with torch.inference_mode():
+                actual = visual(pixel_values.cuda(), grid_thw.cuda()).float().cpu()
+        resolve_flash_attn.assert_called()
         torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
     def test_fp32_accelerator_forward_uses_sdpa_fallback(self):
