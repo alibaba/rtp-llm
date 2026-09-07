@@ -1,3 +1,4 @@
+import os
 from typing import Dict, Optional
 
 import torch
@@ -22,6 +23,10 @@ from rtp_llm.ops.compute_ops import (
     PyAttentionInputs,
     PyModelInputs,
     PyModelOutputs,
+)
+from rtp_llm.utils.bert_user_profile import (
+    build_bert_uqi_flashinfer_mask,
+    derive_bert_uqi_segment_ids,
 )
 from rtp_llm.utils.model_weight import W
 
@@ -163,6 +168,59 @@ class BertModel(GptModelBase):
                 for idx in range(self.layer_num)
             ]
         )
+
+        # 用户画像分支: 显式 opt-in, 默认关 -> 普通 BERT 老路逐字节不变。
+        # 开启后 A 段(Q+I)看不到 B 段(User), B 段从 CLS_UQI(token id) 起。
+        self.use_user_profile_mask = (
+            os.environ.get("USE_VISION_BERT_UQI_BLOCK_MASK", "0") == "1"
+        )
+        self.cls_uqi_token_id = int(os.environ.get("VISION_BERT_CLS_UQI_TOKEN_ID", "2"))
+
+    def prepare_fmha_impl(
+        self, inputs: PyModelInputs, is_cuda_graph: bool = False
+    ) -> FMHAImplBase:
+        # Use FlashInfer native ragged attention for both masked and unmasked
+        # requests when the BERT user-profile path is enabled.
+        if self.use_user_profile_mask and is_cuda_graph:
+            raise ValueError("BERT user-profile attention does not support CUDA graphs")
+        if self.use_user_profile_mask:
+            attn_inputs = inputs.attention_inputs
+            if attn_inputs.is_prefill:
+                # Build logical masks on device; variable-size planning uses host scalars.
+                token_ids = inputs.input_ids
+                text_mask = inputs.embedding_inputs.text_tokens_mask
+                if text_mask is not None and text_mask.numel():
+                    token_ids = token_ids.masked_fill(
+                        ~text_mask.to(device=token_ids.device, dtype=torch.bool), -1
+                    )
+                cu_seqlens = attn_inputs.cu_seqlens_device
+                if cu_seqlens is None or cu_seqlens.numel() == 0:
+                    cu_seqlens = attn_inputs.cu_seqlens
+                cu_seqlens = cu_seqlens[: attn_inputs.input_lengths.numel() + 1]
+                uqi_segment_ids = derive_bert_uqi_segment_ids(
+                    token_ids,
+                    cu_seqlens,
+                    self.cls_uqi_token_id,
+                )
+                attn_configs = self.config.getAttentionConfigs(
+                    self.parallelism_config.get_attn_tp_size()
+                )
+                from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
+                    PyFlashinferPrefillImpl,
+                )
+
+                custom_mask = None
+                if bool(uqi_segment_ids.any()):
+                    custom_mask = build_bert_uqi_flashinfer_mask(
+                        uqi_segment_ids, cu_seqlens
+                    )
+                return PyFlashinferPrefillImpl(
+                    attn_configs,
+                    attn_inputs,
+                    self.parallelism_config,
+                    custom_mask=custom_mask,
+                )
+        return super().prepare_fmha_impl(inputs, is_cuda_graph)
 
     def forward(
         self, inputs: PyModelInputs, fmha_impl: FMHAImplBase = None

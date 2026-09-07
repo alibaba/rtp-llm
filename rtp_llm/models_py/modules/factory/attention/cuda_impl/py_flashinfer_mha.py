@@ -434,6 +434,7 @@ class PyFlashinferPrefillAttnOp(object):
         self,
         attn_configs: AttentionConfigs,
         backend: str = "auto",
+        custom_mask: Optional[torch.Tensor] = None,
     ) -> None:
         self.g_workspace_buffer = get_py_flashinfer_workspace_buffer()
         # attn_configs.head_num and kv_head_num are already divided by tp_size in ModelConfig::getAttentionConfigs
@@ -451,6 +452,7 @@ class PyFlashinferPrefillAttnOp(object):
         self.q_dtype = attn_q_dtype(attn_configs)
         self.kv_dtype = attn_kv_dtype(attn_configs)
         self.is_causal = attn_configs.is_causal
+        self.custom_mask = custom_mask
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
 
     def __del__(self):
@@ -493,7 +495,8 @@ class PyFlashinferPrefillAttnOp(object):
             self.local_kv_head_num,
             self.head_dim_qk,
             self.head_dim_vo,
-            causal=self.is_causal,
+            causal=False if self.custom_mask is not None else self.is_causal,
+            custom_mask=self.custom_mask,
             q_data_type=self.q_dtype,
             kv_data_type=self.kv_dtype,
             o_data_type=self.dtype,
@@ -953,11 +956,21 @@ class PyFlashinferHybridPrefillImpl(PyFlashinferPrefillImplBase):
 class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
     """FlashInfer prefill implementation with ragged KV cache layout using MhaRotaryEmbeddingOp."""
 
+    def __init__(
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        parallelism_config: Optional[ParallelismConfig] = None,
+        custom_mask: Optional[torch.Tensor] = None,
+    ) -> None:
+        self.custom_mask = custom_mask
+        super().__init__(attn_configs, attn_inputs, parallelism_config)
+
     def _create_fmha_impl(
         self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> Any:
         """Create ragged FMHA implementation."""
-        return PyFlashinferPrefillAttnOp(attn_configs)
+        return PyFlashinferPrefillAttnOp(attn_configs, custom_mask=self.custom_mask)
 
     def _create_rope_impl(self, attn_configs: AttentionConfigs) -> Any:
         """Create RoPE implementation for ragged layout."""
