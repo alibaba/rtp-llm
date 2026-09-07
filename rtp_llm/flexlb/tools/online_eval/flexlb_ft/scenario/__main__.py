@@ -5,6 +5,7 @@ import json
 import sys
 
 from . import ScenarioError, compile_scenarios, load_scenarios
+from .catalog import handlers
 
 
 def main(argv=None):
@@ -15,7 +16,7 @@ def main(argv=None):
     parser.add_argument("--profile")
     args = parser.parse_args(argv)
     try:
-        plans = compile_scenarios(load_scenarios(args.root), args.profile)
+        plans = compile_scenarios(load_scenarios(args.root), args.profile, handlers())
         if not plans:
             raise ScenarioError("selection contains no scenario instances")
     except ScenarioError as exc:

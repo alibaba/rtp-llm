@@ -1,6 +1,8 @@
 """status cases in stable execution order."""
 
 from ...registry import collect_cases
+from ..debug_snapshot_readonly import CASE_DEF as MASTER_DEBUG_SNAPSHOT
+from ..no_fetch_observation import CASE_DEF as NORMAL_NO_FETCH_OBSERVATION
 from .status_ack_empty_no_crash import status_ack_empty_no_crash
 from .status_ack_multi_error import status_ack_multi_error
 from .status_ack_partial_fail import status_ack_partial_fail
@@ -57,3 +59,4 @@ STATUS_CASES = collect_cases(
         inject_fetch_error,
     ],
 )
+STATUS_CASES.extend([MASTER_DEBUG_SNAPSHOT, NORMAL_NO_FETCH_OBSERVATION])

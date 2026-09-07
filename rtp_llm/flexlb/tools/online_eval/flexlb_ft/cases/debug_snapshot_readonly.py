@@ -4,7 +4,7 @@ import json
 import time
 from dataclasses import replace
 
-from ..context import CaseDef, rid_base
+from ..context import CaseDef, CaseExecutionError, rid_base
 from ..debug_client import DebugClient, DebugUnavailable, check_scheduler_tombstone
 
 
@@ -60,8 +60,9 @@ def master_debug_snapshot(ctx):
             f"scheduler tombstone not observed before deadline; evidence={artifact}",
         )
     except DebugUnavailable as error:
-        # Legacy CaseDef's boolean contract: unavailable evidence cannot return True.
-        return False, f"ERROR debug observation: {error}; evidence={artifact}"
+        raise CaseExecutionError(
+            f"debug observation: {error}; evidence={artifact}"
+        ) from error
 
 
 CASE_DEF = CaseDef(

@@ -4,7 +4,7 @@ import json
 import time
 from dataclasses import replace
 
-from ..context import CaseDef, rid_base
+from ..context import CaseDef, CaseExecutionError, rid_base
 from ..debug_client import DebugClient, DebugUnavailable
 
 
@@ -162,7 +162,9 @@ def normal_no_fetch_observation(ctx):
         )
     except Exception as error:
         evidence["error"] = f"{type(error).__name__}: {error}"
-        return False, f"ERROR normal no-Fetch observation: {error}; evidence={artifact}"
+        raise CaseExecutionError(
+            f"normal no-Fetch observation: {error}; evidence={artifact}"
+        ) from error
     finally:
         artifact.write_text(json.dumps(evidence, indent=2), encoding="utf-8")
 
