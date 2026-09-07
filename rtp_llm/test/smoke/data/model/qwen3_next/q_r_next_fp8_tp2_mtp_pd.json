@@ -18,7 +18,7 @@
                 "_prompt_source": "chat-template wrapping $prompt:l2"
             },
             "result": {
-                "response": "<think>\n\n</think>\n\n这是一份经过深度润色和逻辑重构的文本。我提供了两个版本",
+                "response": "<think>\nHere's a thinking process that leads to the suggested revisions:\n\n1.  **An",
                 "response_alternatives": null,
                 "hidden_states": null,
                 "logits": null,
@@ -66,7 +66,7 @@
                 "_prompt_source": "chat-template wrapping $prompt:l2"
             },
             "result": {
-                "response": "<think>\n\n</think>\n\n这是一份经过深度润色和逻辑重构的文本。我提供了两个版本",
+                "response": "<think>\nHere's a thinking process that leads to the suggested revisions:\n\n1.  **An",
                 "response_alternatives": null,
                 "hidden_states": null,
                 "logits": null,
@@ -114,7 +114,7 @@
                 "_prompt_source": "chat-template wrapping $prompt:l2"
             },
             "result": {
-                "response": "<think>\n\n</think>\n\n这是一份经过深度润色和逻辑重构的文本。我提供了两个版本",
+                "response": "<think>\nHere's a thinking process that leads to the suggested revisions:\n\n1.  **An",
                 "response_alternatives": null,
                 "hidden_states": null,
                 "logits": null,
