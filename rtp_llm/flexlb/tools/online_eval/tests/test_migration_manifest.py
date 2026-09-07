@@ -20,7 +20,7 @@ class MigrationManifestTest(unittest.TestCase):
         self.assertEqual(result["bookkeeping_counts"]["retained_legacy_cases"], 139)
         self.assertEqual(result["bookkeeping_counts"]["claimed_migrated_cases"], 0)
         self.assertEqual(result["planning_counts"]["target_logical_scenarios"], 29)
-        self.assertEqual(result["legacy_instances"], 375)
+        self.assertEqual(result["legacy_instances"], 371)
 
     def test_missing_contract_and_profile_are_errors(self):
         for change in ("missing", "profile"):

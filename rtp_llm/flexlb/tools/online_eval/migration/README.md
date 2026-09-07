@@ -7,7 +7,11 @@ eight. The reviewed 29 target families remain the planning structure; supplement
 contracts are assigned explicitly to existing families, never silently dropped.
 
 - `baseline.json` freezes current ordered registrations, profiles, findings and
-  source digests. A digest is an audit anchor, not proof of YAML equivalence.
+  source digests. `baseline_revision_e505ab602d.json` records the independently
+  reviewed correction of exactly three old contracts from revision 7419 to e505,
+  including every before/after row and the separately hashed shared helper.
+  Two impossible NON_BATCH crash lanes per restart case are excluded (375 to
+  371 selected instances); duplicate FINISHED requires a settled replay baseline. A digest is an audit anchor, not proof of YAML equivalence.
 - `target_manifest.json` assigns all 139 contracts to the 29 planned families and
   records module ownership, candidate source files and counts, pending contract
   IDs, and static reviews anchored to immutable revisions. `candidate_complete`
@@ -29,7 +33,7 @@ rejects omitted contracts, dropped profiles, duplicate family assignments and
 unreviewed source drift. It reuses the independent acceptance oracle rather than
 changing that oracle to fit current results.
 
-The selected legacy inventory has 375 profile instances (122/88/91/74). These are
+The selected legacy inventory has 371 profile instances (122/86/91/72). These are
 selection counts, not passed runs. The report separately lists runnable YAML
 scenario, variant, instance and declared-check counts. `legacy.contract` is only
 the existing callable's result boundary for retained coverage; it is not a claim

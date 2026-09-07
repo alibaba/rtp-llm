@@ -129,9 +129,7 @@ legacy_cases:
     planned_scenario: cancel_fence_settlement
     retained_profiles:
     - batch-window
-    - single-nonbatch
     - single-batch
-    - window-nonbatch
     rationale: Stage/check equivalence and compatible-profile execution evidence remain
       pending; retain the complete legacy callable.
   cancel_prefill_dead_await_terminal:
@@ -159,9 +157,7 @@ legacy_cases:
     planned_scenario: cancel_fence_settlement
     retained_profiles:
     - batch-window
-    - single-nonbatch
     - single-batch
-    - window-nonbatch
     rationale: Stage/check equivalence and compatible-profile execution evidence remain
       pending; retain the complete legacy callable.
   cancel_transport_failure_one_shot:

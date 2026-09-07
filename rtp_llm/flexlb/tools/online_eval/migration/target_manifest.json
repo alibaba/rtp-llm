@@ -589,7 +589,21 @@
       ],
       "replacement_status": "retain_legacy_pending_paired_evidence",
       "static_review": {
-        "status": "pending"
+        "status": "passed_at_revision",
+        "revision": "b71551aacc6536981b744835a9db14827e33e9cd",
+        "reviewed_contracts": [
+          "engine_fault_crash_after",
+          "engine_fault_down_phases",
+          "engine_fault_flap",
+          "engine_fault_recovery_generation_bump",
+          "engine_fault_recovery_kv_resync",
+          "engine_fault_recovery_kv_usage_reset",
+          "engine_fault_recovery_no_resurrect",
+          "engine_fault_status_gap_long_retire",
+          "engine_fault_status_gap_no_bump"
+        ],
+        "unreviewed_candidate_contracts": [],
+        "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
       },
       "candidate_scenario_ids": [
         "engine_fault_recovery"
@@ -1029,7 +1043,13 @@
       ],
       "replacement_status": "retain_legacy_pending_paired_evidence",
       "static_review": {
-        "status": "pending"
+        "status": "passed_at_revision",
+        "revision": "633928795d091fbb53c691d1b835cd6f2f5ffef3",
+        "reviewed_contracts": [
+          "prio_same_level_fifo"
+        ],
+        "unreviewed_candidate_contracts": [],
+        "scope": "old predicates and declared differences; local fixtures only, not complete Java execution"
       },
       "candidate_scenario_ids": [
         "priority_queue"

@@ -1,0 +1,147 @@
+{
+  "previous_revision": "7419b2943559c2d78f65baf4da15790a5494016d",
+  "proposed_source_revision": "e505ab602d7cd6ba467225379700b8412ddc08b0",
+  "changes": [
+    {
+      "id": "cancel_engine_restarted_tombstoned_settle",
+      "before": {
+        "id": "cancel_engine_restarted_tombstoned_settle",
+        "category": "cancel",
+        "profiles": [
+          "batch-window",
+          "single-nonbatch",
+          "single-batch",
+          "window-nonbatch"
+        ],
+        "declared_profiles": [
+          "batch-window",
+          "single-nonbatch",
+          "single-batch",
+          "window-nonbatch"
+        ],
+        "requires": [],
+        "expected_fail": false,
+        "source": "",
+        "contract_digest": "c21de6a5099e8e30d012b1254b77c8f472a62a749023321ac54b37746a0b0726"
+      },
+      "after": {
+        "id": "cancel_engine_restarted_tombstoned_settle",
+        "category": "cancel",
+        "profiles": [
+          "batch-window",
+          "single-batch"
+        ],
+        "declared_profiles": null,
+        "requires": [
+          "enqueue_batch"
+        ],
+        "expected_fail": false,
+        "source": "",
+        "contract_digest": "3dc0ebc2805fd31f9f5582ddbd32cc213b856e29cf7068bd8fe0e854373febed"
+      }
+    },
+    {
+      "id": "cancel_fencing_lost_on_engine_restart",
+      "before": {
+        "id": "cancel_fencing_lost_on_engine_restart",
+        "category": "cancel",
+        "profiles": [
+          "batch-window",
+          "single-nonbatch",
+          "single-batch",
+          "window-nonbatch"
+        ],
+        "declared_profiles": [
+          "batch-window",
+          "single-nonbatch",
+          "single-batch",
+          "window-nonbatch"
+        ],
+        "requires": [],
+        "expected_fail": false,
+        "source": "",
+        "contract_digest": "0917a902fbaad23ac9cb043d6e2fe9fcf77876c0fd369e4a85f78405bb624d36"
+      },
+      "after": {
+        "id": "cancel_fencing_lost_on_engine_restart",
+        "category": "cancel",
+        "profiles": [
+          "batch-window",
+          "single-batch"
+        ],
+        "declared_profiles": null,
+        "requires": [
+          "enqueue_batch"
+        ],
+        "expected_fail": false,
+        "source": "",
+        "contract_digest": "76bb51e464f7ae2a9220251a4663c9ffde30a603681f3bd88ee0bf1b17a6d26f"
+      }
+    },
+    {
+      "id": "status_duplicate_finished",
+      "before": {
+        "id": "status_duplicate_finished",
+        "category": "status",
+        "profiles": [
+          "batch-window",
+          "single-nonbatch",
+          "single-batch",
+          "window-nonbatch"
+        ],
+        "declared_profiles": null,
+        "requires": [],
+        "expected_fail": false,
+        "source": "P1 status fault family: status_duplicate_finished \u2014 same terminal reported twice",
+        "contract_digest": "57e219ca2e0b7c36dbc55348ce860a7d68d37cf1d929ce70bd538c27deef70e8"
+      },
+      "after": {
+        "id": "status_duplicate_finished",
+        "category": "status",
+        "profiles": [
+          "batch-window",
+          "single-nonbatch",
+          "single-batch",
+          "window-nonbatch"
+        ],
+        "declared_profiles": null,
+        "requires": [],
+        "expected_fail": false,
+        "source": "P1 status fault family: status_duplicate_finished \u2014 same terminal reported twice",
+        "contract_digest": "ad34b09e43f668e8fc57174b61036705d47f40d18afb30c287ea3ba702b94b05"
+      }
+    }
+  ],
+  "counts_before": {
+    "batch-window": 122,
+    "single-nonbatch": 88,
+    "single-batch": 91,
+    "window-nonbatch": 74
+  },
+  "counts_after": {
+    "batch-window": 122,
+    "single-nonbatch": 86,
+    "single-batch": 91,
+    "window-nonbatch": 72
+  },
+  "schema_version": 1,
+  "independent_static_review": {
+    "reviewer": "agent3",
+    "status": "passed",
+    "scope": "Exact three contract corrections and separately hashed helper; no Java or replacement acceptance."
+  },
+  "unchanged_contracts": 136,
+  "retained_legacy_contracts": 139,
+  "rationale": {
+    "cancel_restart_profiles": "Mock crash_after is only used at EnqueueBatch; NON_BATCH streams cannot trigger it. Both incompatible NON_BATCH profiles are removed from two registrations.",
+    "status_duplicate_finished": "Reject an unsettled scheduler ledger before taking the replay fingerprint; keep successful two-snapshot five-second window and fault cleanup."
+  },
+  "helper_evidence": {
+    "path": "rtp_llm/flexlb/tools/online_eval/flexlb_ft/support/cancel.py",
+    "parent_revision": "6f53cf12ded4f90495f210a8d5e68ab59e575a3c",
+    "before_sha256": "aba8eb4ae7ce99261b04fbff42376bc46dccff2eab1baa82f805f3608e96ee1d",
+    "after_sha256": "1079fce996c663acd0ef51e431d3a2486f5d18bfa9939e1d0c4f73265043607c",
+    "diff": ""
+  },
+  "limits": "The 45s engine-clean bound is unchanged; all 139 legacy callables remain retain_legacy. This explicitly corrects legacy contracts; it does not establish YAML equivalence."
+}
