@@ -402,29 +402,17 @@ void BlockTreeCacheMetricsReporter::reportBusinessQueueWaitFinished(CacheTransfe
                           currentTimeUs() - begin_time_us);
 }
 
-int64_t BlockTreeCacheMetricsReporter::reportTransferQueueWaitStarted(Tier source_tier, Tier target_tier) noexcept {
-    if (!enabled()) {
-        return 0;
-    }
-    const int index = transferDirectionIndex(source_tier, target_tier);
-    if (index < 0) {
-        return 0;
-    }
-    return currentTimeUs();
-}
-
-void BlockTreeCacheMetricsReporter::reportTransferQueueWaitFinished(Tier    source_tier,
-                                                                    Tier    target_tier,
-                                                                    int64_t begin_time_us,
-                                                                    bool    report_latency) noexcept {
-    if (begin_time_us == 0 || !report_latency) {
+void BlockTreeCacheMetricsReporter::reportTransferQueueWait(Tier    source_tier,
+                                                            Tier    target_tier,
+                                                            int64_t latency_us) noexcept {
+    if (latency_us < 0) {
         return;
     }
     const int index = transferDirectionIndex(source_tier, target_tier);
     if (index < 0) {
         return;
     }
-    reportQueueWaitMetric(false, "transfer", nullptr, source_tier, target_tier, currentTimeUs() - begin_time_us);
+    reportQueueWaitMetric(false, "transfer", nullptr, source_tier, target_tier, latency_us);
 }
 
 void BlockTreeCacheMetricsReporter::reportQueueWaitMetric(bool        callback,
@@ -452,20 +440,18 @@ void BlockTreeCacheMetricsReporter::reportQueueWaitMetric(bool        callback,
     } catch (...) {}
 }
 
-void BlockTreeCacheMetricsReporter::reportQueueBacklog(BlockTreeTaskPool& task_pool, const char* pool_type) const {
+void BlockTreeCacheMetricsReporter::reportQueueBacklog(const BlockTreeQueueSizes& queue_sizes,
+                                                       const char*                pool_type) const {
     if (!enabled()) {
         return;
     }
     RtpLLMCacheTransferMetricsCollector collector;
-    {
-        std::lock_guard<std::mutex> lock(task_pool.lifecycle_mutex_);
-        collector.load_queue_backlog       = task_pool.load_queue_.size();
-        collector.background_queue_backlog = task_pool.background_queue_.size();
-        collector.completion_queue_backlog = task_pool.completion_queue_.size();
-    }
-    collector.pool_type            = pool_type;
-    collector.report_transfer      = false;
-    collector.report_queue_backlog = true;
+    collector.load_queue_backlog       = queue_sizes.load;
+    collector.background_queue_backlog = queue_sizes.background;
+    collector.completion_queue_backlog = queue_sizes.completion;
+    collector.pool_type                = pool_type;
+    collector.report_transfer          = false;
+    collector.report_queue_backlog     = true;
     metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(nullptr, &collector);
 }
 
