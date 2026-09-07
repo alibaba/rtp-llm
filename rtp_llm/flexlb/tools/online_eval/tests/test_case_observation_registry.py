@@ -1,10 +1,13 @@
 """New evidence cases stay registered and cannot hide unavailable sources as findings."""
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from flexlb_ft.cases.debug_snapshot_readonly import master_debug_snapshot
 from flexlb_ft.cases.no_fetch_observation import normal_no_fetch_observation

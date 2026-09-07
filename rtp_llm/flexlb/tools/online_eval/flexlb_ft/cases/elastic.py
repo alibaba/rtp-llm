@@ -65,7 +65,7 @@ from ..harness import (
     http_get_status,
     wait_for,
 )
-from ..support.kv import _fam_keys
+from ..support.kv import _cache_evict, _fam_keys, _wait_cache_sync
 
 ELASTIC_CASES: list[CaseDef] = []
 
@@ -1637,34 +1637,23 @@ def _bal_snap_series_mean(
 # (design §2.1)
 # ===========================================================================
 
-# Private decode pool: 24 blocks (EnvSpec.decode_cache_blocks is a
-# first-class field forwarded to the mock as --decode-kv-pool-blocks).
-# Decode block demand per request = ceil(inputLen / block_size)
-# (JavaMockEngineCluster.decodeDemandBlocks; input_len 2048 / 1024 = 2
-# blocks), so ~12 concurrent in-flight decode requests saturate a 24-block
-# pool (24 x (1 - reserveRatio 0.05) = 22.8 usable — the 12th 2-block
-# request crosses the reserve line and RETRY-fails).
+# Keep input + output in the same 1024-token block interval. The old
+# input_len=2048 grew from two to three blocks on its FIRST decode step,
+# consuming the admission reserve and testing growth exhaustion as well as
+# scale-in. Here a lease stays two blocks for its entire lifetime.
 FULL_SHRINK_DECODE_CACHE_BLOCKS = 24
-FULL_SHRINK_INPUT_LEN = 2048
-FULL_SHRINK_FILL_DEPTH = 100  # deep wave: ~=50/engine ~= 5x block cap
-FULL_SHRINK_FILL_BATCH = 8  # top-up fire granularity per poll round
+FULL_SHRINK_OUTPUT_LEN = 13
+FULL_SHRINK_INPUT_LEN = 2048 - FULL_SHRINK_OUTPUT_LEN
+FULL_SHRINK_DEMAND_BLOCKS = 2
+FULL_SHRINK_RESERVE_BLOCKS = math.ceil(FULL_SHRINK_DECODE_CACHE_BLOCKS * 0.05)
+FULL_SHRINK_FILL_BATCH = 8
 FULL_SHRINK_FILL_TIMEOUT_S = 60.0
-FULL_SHRINK_AVAIL_TOL = 1  # "full": available_blocks <= 1 (per sample)
-# Sustained-full verdict (fill loop + post-fill pre-assertion): a
-# single-POINT snapshot read (the pre-fix _both_full) is unreliable on
-# a pool that flaps at sub-second scale — completions admit blocks
-# back (release != delete: pure-LRU blocks count as available) while
-# the routed arrival rate re-leases them, so a partially-loaded pool
-# oscillates between ~0 and a few free blocks and the point verdict
-# can miss it for the whole budget even while admission rejects keep
-# accumulating.  The verdict therefore reads the sampler's own
-# 1s-sampled trailing window: a pool is "full" when the MAJORITY of
-# the window's samples sit at/below the tolerance AND the window shows
-# fresh KV rejections (available-low WITHOUT rejects is "no traffic",
-# not "full" — the reject counters are the load-pressure evidence).
-FULL_SHRINK_FILL_WINDOW_S = 10.0
-FULL_SHRINK_FILL_LOW_FRAC = 0.6
-FULL_SHRINK_FILL_MIN_SAMPLES = 6
+# RoutingConfig.AvailabilityConfig default: the functional profile leaves
+# maxKvUsagePercent unset, so Master dispatch stops at 90%, before the
+# mock's 5% reserve. Do not disable that production protection to force an
+# engine rejection. Price the NEXT request with the same expected tokens.
+FULL_SHRINK_MASTER_KV_PERCENT = 90
+FULL_SHRINK_EXPECTED_TOKENS = FULL_SHRINK_INPUT_LEN + FULL_SHRINK_OUTPUT_LEN
 # Decode-tail construction — DESIGN CONFLICT, recorded per the brief: the
 # design text says "set_perf decode_step_ms"; the mock's /set_perf
 # implements decode_scale (a multiplier on stepMs — MockPerformanceModel
@@ -1675,10 +1664,10 @@ FULL_SHRINK_FILL_MIN_SAMPLES = 6
 # (production DSv4 fit code default, tokens_per_step 2.6 MTP fold ->
 # output_len 13 = 5 steps):
 #   drain_ok tail <= 8s:   5 x ~21ms x 60  ~= 6.3s (drain waits it out)
-#   drain_timeout tail > 5s: 5 x ~21ms x 100 ~= 10.5s (crosses the 5s cap)
-FULL_SHRINK_OUTPUT_LEN = 13
+#   drain_timeout tail > fill budget + 5s: 5 x ~21ms x 1000 ~= 105s.
+# Only the victim is slowed this far; the survivor keeps its <=8s tail.
 FULL_SHRINK_DRAIN_OK_SCALE = 60.0
-FULL_SHRINK_DRAIN_TIMEOUT_SCALE = 100.0
+FULL_SHRINK_DRAIN_TIMEOUT_SCALE = 1000.0
 FULL_SHRINK_DRAIN_TIMEOUT_MS = 5_000
 # drain_ms ~= timeout PROVES the fallback branch — MILLISECONDS (Ryan
 # fix: the remove_engine response's drain_ms is the Java-side
@@ -1701,6 +1690,20 @@ FULL_SHRINK_CLEAN_S = 50.0
 # sit OUTSIDE the zero-failure contract (they never entered the victim's
 # in-flight set — admission refused them).
 FULL_SHRINK_DECODE_KV_FAIL_CODE = 8211
+
+
+def _full_shrink_saturated(entry: dict) -> bool:
+    """A real running lease pool blocks one more request at Master dispatch."""
+    projected_tokens = (entry["cache_blocks"] - entry["available_blocks"]) * entry[
+        "block_size"
+    ] + FULL_SHRINK_EXPECTED_TOKENS
+    return (
+        entry["cache_blocks"] == FULL_SHRINK_DECODE_CACHE_BLOCKS
+        and entry["available_blocks"] >= FULL_SHRINK_RESERVE_BLOCKS
+        and entry["running"] > 0
+        and projected_tokens * 100
+        > FULL_SHRINK_MASTER_KV_PERCENT * entry["total_kv_tokens"]
+    )
 
 
 def _full_shrink_spec(ctx: CaseContext) -> EnvSpec:
@@ -1739,6 +1742,20 @@ def _full_shrink_spec(ctx: CaseContext) -> EnvSpec:
     )
 
 
+def _full_shrink_saturated(entry: dict) -> bool:
+    """A real running lease pool blocks one more request at Master dispatch."""
+    projected_tokens = (entry["cache_blocks"] - entry["available_blocks"]) * entry[
+        "block_size"
+    ] + FULL_SHRINK_EXPECTED_TOKENS
+    return (
+        entry["cache_blocks"] == FULL_SHRINK_DECODE_CACHE_BLOCKS
+        and entry["available_blocks"] >= FULL_SHRINK_RESERVE_BLOCKS
+        and entry["running"] > 0
+        and projected_tokens * 100
+        > FULL_SHRINK_MASTER_KV_PERCENT * entry["total_kv_tokens"]
+    )
+
+
 @case(
     "elastic_kv_full_shrink",
     profiles=["batch-window"],  # elastic family: BATCH dispatcher + fault axes
@@ -1759,9 +1776,10 @@ def elastic_kv_full_shrink(ctx: CaseContext):
     decode requests hold their blocks long enough to fill the pool with
     real in-flight work (no set_kv_pressure shortcut — the design
     explicitly wants the long-tail construction).  A pre-assertion proves
-    "full" on BOTH engines: available_blocks <= 1 AND the counter delta
-    (kv_admission_fails + lack_mem_rejects) > 0 (counter evidence, not
-    eyeballing).
+    admission saturation on the victim: real running requests hold enough
+    blocks that the next request exceeds Master's 90% KV dispatch gate.
+    Engine rejection counters remain observations: a working Master gate
+    prevents those rejections rather than causing them.
 
     Background-flow structure (conflict handling, see the assertion
     list): the flow runs through W_base and W_ss but is PAUSED around the
@@ -1805,10 +1823,8 @@ def elastic_kv_full_shrink(ctx: CaseContext):
       8. Survivor Δ(lack_mem + admission_fails) over W_tr <= K_reject =
          ceil(max(0, victim occupied blocks - survivor free blocks))
          (caliber note on _bal_k_reject: occupied includes parked LRU
-         keys, the looser direction; the deep-wave fill pins the
-         victim's occupied at ~24 = the whole pool, so the demand
-         numerator reads stable run-to-run instead of a partial-load
-         artifact).
+         keys, the looser direction; the fill snapshot records the
+         victim and survivor at the same instant).
       Steady-state recovery (after variant 1, on the 2-decode cluster
       {decode-1, newcomer}; last third of W_ss):
       9. KV occupancy spread <= baseline + 0.05 (PK spread).
@@ -1871,77 +1887,37 @@ def elastic_kv_full_shrink(ctx: CaseContext):
         )
         base_tps = _bal_cluster_tps(sampler, 0.0, t_base)
 
-        # ---- fill helper: fire long-decode waves until BOTH pools full ----
-        # Sustained-window verdict (FULL_SHRINK_FILL_* above): majority
-        # of the trailing window's available samples at/below tol AND
-        # fresh per-engine reject deltas — the single-point pre-fix
-        # verdict never converged on an oscillating pool.  Time anchor:
-        # sampler-relative seconds (the window_series caliber), derived
-        # from one mark() taken at fill start.
-        _t_fill_rel0 = sampler.mark("fill_anchor")
-        _t_fill_wall0 = time.monotonic()
-
-        def _both_full(names) -> bool:
-            t_now = _t_fill_rel0 + (time.monotonic() - _t_fill_wall0)
-            t_lo = t_now - FULL_SHRINK_FILL_WINDOW_S
-            avail = sampler.window_series("mock_engine_available_blocks", t_lo, t_now)
-            for n in names:
-                pts = avail.get(n, [])
-                if len(pts) < FULL_SHRINK_FILL_MIN_SAMPLES:
-                    return False  # not enough window evidence yet
-                low = sum(1 for _t, v in pts if v <= FULL_SHRINK_AVAIL_TOL)
-                if low / len(pts) < FULL_SHRINK_FILL_LOW_FRAC:
-                    return False
-                rejects = sum(
-                    sampler.window_series(m, t_lo, t_now, mode="delta").get(n, 0.0)
-                    for m in (
-                        "mock_engine_kv_admission_fails_total",
-                        "mock_engine_lack_mem_rejects_total",
-                    )
-                )
-                if rejects <= 0:
-                    return False
-            return True
-
-        def _fire(n: int, handles: list) -> None:
-            """Fire n long-decode requests; failed schedules / non-200
-            admissions just fall through — the KV rejects they represent
-            are exactly the load-pressure evidence _both_full reads."""
-            for _ in range(n):
-                rid = ops.next_request_id(base)
-                try:
+        # Each variant needs its VICTIM saturated at removal, not both
+        # engines simultaneously full over an invented majority window.
+        # Read real capacity and running work in one snapshot. The next
+        # request cannot pass Master dispatch; engine rejects may stay zero.
+        def _fill(victim: str, handles: list) -> tuple:
+            deadline = time.monotonic() + FULL_SHRINK_FILL_TIMEOUT_S
+            latest = {}
+            while time.monotonic() < deadline:
+                for _ in range(FULL_SHRINK_FILL_BATCH):
+                    rid = ops.next_request_id(base)
                     resp = ops.schedule(
                         rid,
                         input_len=FULL_SHRINK_INPUT_LEN,
                         output_len=FULL_SHRINK_OUTPUT_LEN,
-                        block_keys=[rid * 100 + j for j in range(3)],
+                        block_keys=[
+                            rid * 100 + j for j in range(FULL_SHRINK_DEMAND_BLOCKS)
+                        ],
                     )
-                except Exception:
-                    continue
-                if resp.code != 200 or not resp.success:
-                    continue
-                handle = ops.start_stream(resp, rid)
-                handles.append((rid, resp, handle))
-                fired.append((rid, resp, handle))
-
-        def _fill(names: list, handles: list) -> tuple:
-            # Deep wave first: one ~FULL_SHRINK_FILL_DEPTH burst (≈50
-            # per engine ≈ 5x the block cap) so the block-reserve arrival
-            # rate outruns completion releases from the very start (the
-            # shallow 8-per-round-only waves left release/lease gaps a
-            # flapping pool could slip through); top-up rounds then keep
-            # the pressure on while the sustained verdict accumulates
-            # window evidence.
-            _fire(FULL_SHRINK_FILL_DEPTH, handles)
-            deadline = time.monotonic() + FULL_SHRINK_FILL_TIMEOUT_S
-            while time.monotonic() < deadline:
-                if _both_full(names):
-                    return True, ""
-                _fire(FULL_SHRINK_FILL_BATCH, handles)
-                time.sleep(0.5)
-            return (
-                _both_full(names),
-                f"fill timeout after {FULL_SHRINK_FILL_TIMEOUT_S:.0f}s",
+                    if resp.code != 200 or not resp.success:
+                        continue
+                    handle = ops.start_stream(resp, rid)
+                    handles.append((rid, resp, handle))
+                    fired.append((rid, resp, handle))
+                    latest = ops.snapshot_by_name()
+                    if _full_shrink_saturated(latest[victim]):
+                        return latest, ""
+                time.sleep(0.1)
+            return None, (
+                f"fill timeout: victim={victim}, next request must exceed "
+                f"Master KV gate={FULL_SHRINK_MASTER_KV_PERCENT}%, "
+                f"snapshot={ {k: latest.get(victim, {}).get(k) for k in ('running', 'available_blocks', 'held_blocks', 'kv_admission_fails')} }"
             )
 
         def _classify(handles: list) -> list:
@@ -1969,23 +1945,15 @@ def elastic_kv_full_shrink(ctx: CaseContext):
         time.sleep(1.0)  # perf sync
 
         v1_handles: list = []
-        v1_full, v1_fill_detail = _fill(("decode-0", "decode-1"), v1_handles)
-        if not v1_full:
+        pre1, v1_fill_detail = _fill("decode-0", v1_handles)
+        if pre1 is None:
             return False, f"variant-1 construction failed: {v1_fill_detail}"
-
-        pre1 = ops.snapshot_by_name()
-        # Same sustained-window verdict as the fill loop (an instantaneous
-        # point read would re-introduce the flapping-pool miss right after
-        # a successful fill); pre1 keeps feeding ONLY the K_reject inputs
-        # (victim demand / survivor free at the removal instant) and the
-        # cumulative reject counters.
-        v1_avail_ok = _both_full(("decode-0", "decode-1"))
-        v1_rejects = sum(_bal_rejects(pre1.get(n)) for n in ("decode-0", "decode-1"))
-        if not v1_avail_ok or v1_rejects <= 0:
-            return False, (
-                f"variant-1 pre-assertion failed: pools full={v1_avail_ok}, "
-                f"kv rejects={v1_rejects} (need >0 — counter evidence)"
-            )
+        v1_rejects = _bal_rejects(pre1["decode-0"])
+        obs.append(
+            f"v1_full: available={pre1['decode-0']['available_blocks']}, "
+            f"running={pre1['decode-0']['running']}, gate={FULL_SHRINK_MASTER_KV_PERCENT}%, "
+            f"engine_rejects={v1_rejects}"
+        )
         # K_reject inputs (victim demand = occupied blocks at removal;
         # survivor free = available blocks, same snapshot).
         v1_demand = (
@@ -2191,25 +2159,20 @@ def elastic_kv_full_shrink(ctx: CaseContext):
         )
 
         # ---- variant 2: drain_timeout (victim = decode-1) ----
-        for name in ("decode-1", v2_survivor):
-            ops.set_perf(name, decode_scale=FULL_SHRINK_DRAIN_TIMEOUT_SCALE)
-        time.sleep(1.0)  # perf sync
+        ops.set_perf("decode-1", decode_scale=FULL_SHRINK_DRAIN_TIMEOUT_SCALE)
+        ops.set_perf(v2_survivor, decode_scale=FULL_SHRINK_DRAIN_OK_SCALE)
+        time.sleep(1.0)
 
         v2_handles: list = []
-        v2_full, v2_fill_detail = _fill(("decode-1", v2_survivor), v2_handles)
-        if not v2_full:
+        pre2, v2_fill_detail = _fill("decode-1", v2_handles)
+        if pre2 is None:
             return False, f"variant-2 construction failed: {v2_fill_detail}"
-
-        pre2 = ops.snapshot_by_name()
-        # Sustained-window verdict (same as variant 1 — see the note at
-        # the v1 pre-assertion; the point read is flapping-pool blind).
-        v2_avail_ok = _both_full(("decode-1", v2_survivor))
-        v2_rejects = sum(_bal_rejects(pre2.get(n)) for n in ("decode-1", v2_survivor))
-        if not v2_avail_ok or v2_rejects <= 0:
-            return False, (
-                f"variant-2 pre-assertion failed: pools full={v2_avail_ok}, "
-                f"kv rejects={v2_rejects} (need >0)"
-            )
+        v2_rejects = _bal_rejects(pre2["decode-1"])
+        obs.append(
+            f"v2_full: available={pre2['decode-1']['available_blocks']}, "
+            f"running={pre2['decode-1']['running']}, gate={FULL_SHRINK_MASTER_KV_PERCENT}%, "
+            f"engine_rejects={v2_rejects}"
+        )
         v2_demand = (
             pre2["decode-1"]["cache_blocks"] - pre2["decode-1"]["available_blocks"]
         )
@@ -2456,20 +2419,18 @@ def elastic_kv_full_shrink(ctx: CaseContext):
 # under sustained affinity traffic, hit-drop model + recovery contrast.
 # ===========================================================================
 
-# Asymmetric prefill: hot fast (50ms) / cold slow (500ms) — the cost
-# router (ESTIMATED_TTFT) concentrates both traffic and family seeds on
-# the hot engine (the balance_overload_avoid family proved the mechanism
-# controllable; same caliber as its perf axes).
-SKEW_PREFILL_FAST_MS = 50.0
-SKEW_PREFILL_SLOW_MS = 500.0
-SKEW_PREFILL_SYMMETRIC_MS = 100.0  # post-seed restore (fault_env_perf caliber)
-# Prefix families (kv.py _fam_keys: 10 blocks x 1024 tokens per family,
-# 1000-key stride).  8 families x 3 rounds = 24 seed requests.
-SKEW_FAMILIES = 8
-SKEW_FAM_ROUNDS = 3
-SKEW_FAM_INPUT_LEN = 2048
-# Pre-assertion "skew holds": hot's cache_key count >= R x cold's (the
-# design's "R 由构造流量配比导出，目标 >= 3").
+# Seed real requests on the normal router, retain nine families observed
+# on hot and one on cold, then evict only discarded trial keys. /set_perf
+# changes mock execution time, not the master's token-based predictor; an
+# idle serial 50/500ms seed loop therefore does not construct routing skew.
+# The uniform pump gives cold 1/10 of family traffic, matching its 0.10
+# absolute miss budget. Both engines retain actual cache families.
+SKEW_HOT_FAMILIES = 9
+SKEW_COLD_FAMILIES = 1
+SKEW_FAMILIES = SKEW_HOT_FAMILIES + SKEW_COLD_FAMILIES
+SKEW_SEED_MAX_REQUESTS = 4 * SKEW_FAMILIES
+SKEW_FAM_BLOCKS = 10
+SKEW_FAM_INPUT_LEN = SKEW_FAM_BLOCKS * 1024
 SKEW_MIN_RATIO = 3.0
 # PC transient bounds (design §2.2 assertion 1 — construction-derived,
 # NOT eyeballed): shrink hot — measured cluster hit drop <= expected
@@ -2483,7 +2444,8 @@ SKEW_DROP_TOLERANCE = 0.10
 SKEW_COLD_DROP_ABS = 0.10
 # Family-affinity pump cadence through the measurement windows (the
 # sustained affinity traffic the PC recovery slope needs).
-SKEW_PUMP_INTERVAL_S = 0.15
+SKEW_PUMP_INTERVAL_S = 0.5
+SKEW_PUMP_MAX_INFLIGHT = 2
 # PC steady OBSERVATION (design §2.2 assertion 2 — first-run calibration,
 # never gates): last-third hit >= baseline - 0.15 and >= trough + 50% of
 # (baseline - trough) rebound; shrink cold has almost no recovery need.
@@ -2539,9 +2501,9 @@ def _skew_spec(ctx: CaseContext, variant: str) -> EnvSpec:
 def _run_kv_skew_shrink(ctx: CaseContext, shrink_hot: bool):
     """Shared body of the KV-skew pair (design §2.2).
 
-    Scenario: asymmetric prefill perf routes family seeds onto the hot
-    engine; a pre-assertion proves the skew (hot cache_key count >= 3x
-    cold's, construction-derived R); perf is restored to symmetric; a
+    Scenario: select nine hot-held families and one cold-held family
+    from witnessed real seed placements; a pre-assertion proves the skew
+    (hot cache_key count >= 3x cold's, construction-derived R); a
     family-affinity pump keeps hitting the families through every window
     (W_base 20s / W_tr 2x staleAfter 20s / W_ss 60s from t_settle, last
     third = recovery view).  The shrink then removes hot (elastic_kv_
@@ -2581,6 +2543,7 @@ def _run_kv_skew_shrink(ctx: CaseContext, shrink_hot: bool):
     base = rid_base(ctx, "elastic")
     sampler: Optional[BalanceSampler] = None
     pump_stop = threading.Event()
+    pump_errors: list = []
     pump_thread: Optional[threading.Thread] = None
     obs: list = []
     hot = "prefill-0"
@@ -2598,81 +2561,90 @@ def _run_kv_skew_shrink(ctx: CaseContext, shrink_hot: bool):
         if not _wait_master_topology(ops, "PREFILL", 2, MASTER_EVICT_S):
             return False, "prefill topology did not converge to 2"
 
-        # ---- asymmetric seed: concentrate family seeds on the hot engine
-        ops.set_perf(hot, prefill_fixed_ms=SKEW_PREFILL_FAST_MS)
-        ops.set_perf(cold, prefill_fixed_ms=SKEW_PREFILL_SLOW_MS)
-        time.sleep(1.0)  # perf sync
-
+        # Select the workload from witnessed placements. This constructs
+        # KV distribution without changing production routing or injecting
+        # fake occupancy. Each family is cold and unique at first dispatch.
         addr_map = ops.addr_to_name()
-        fams = [_fam_keys(base + 10_000 + i * 100_000, 0) for i in range(SKEW_FAMILIES)]
-        hot_routes = 0
-        total_routes = 0
-        for _round in range(SKEW_FAM_ROUNDS):
-            for keys in fams:
-                rid = ops.next_request_id(base)
-                addr, err = ops.run_one_request(
-                    rid,
-                    input_len=SKEW_FAM_INPUT_LEN,
-                    output_len=2,
-                    block_keys=keys,
-                    stream_timeout_s=30.0,
-                )
-                if err is not None:
-                    continue
-                total_routes += 1
-                if addr_map.get(addr) == hot:
-                    hot_routes += 1
-        hot_share_constructed = hot_routes / total_routes if total_routes else None
-
+        selected = {hot: [], cold: []}
+        wanted = {hot: SKEW_HOT_FAMILIES, cold: SKEW_COLD_FAMILIES}
+        for trial in range(SKEW_SEED_MAX_REQUESTS):
+            keys = _fam_keys(base + 10_000, trial, blocks=SKEW_FAM_BLOCKS)
+            rid = ops.next_request_id(base)
+            addr, err = ops.run_one_request(
+                rid,
+                input_len=SKEW_FAM_INPUT_LEN,
+                output_len=2,
+                block_keys=keys,
+                stream_timeout_s=30.0,
+            )
+            name = addr_map.get(addr)
+            if err is not None or name not in selected:
+                return False, f"seed request failed: route={name}, error={err}"
+            if len(selected[name]) < wanted[name]:
+                selected[name].append(keys)
+            if all(len(selected[n]) == wanted[n] for n in selected):
+                break
+        if any(len(selected[n]) != wanted[n] for n in selected):
+            return (
+                False,
+                f"seed placement incomplete: counts={ {n: len(v) for n, v in selected.items()} }",
+            )
+        fams = selected[hot] + selected[cold]
         seed_snap = ops.snapshot_by_name()
-        # Mark-C1 fix: read the per-engine key LIST (cache_key_set, the
-        # kv.py _engine_cache_keys convention).  JavaMockEngineCluster's
-        # getSnapshot actually puts BOTH fields — cache_keys (int) and
-        # cache_key_set (sorted list), sourced from the SAME
-        # cache.snapshotKeys() (JavaMockEngineCluster.java) — so the old
-        # int read was not "always 0" as the review assumed; the residual
-        # defect was the missing-field silent-0 (a schema-drift trap:
-        # hot_keys=0 would fail the pre-assertion with a MISLEADING
-        # message).  A missing field now fails LOUD with its own message.
-        hot_entry = seed_snap.get(hot) or {}
-        cold_entry = seed_snap.get(cold) or {}
-        if "cache_key_set" not in hot_entry or "cache_key_set" not in cold_entry:
-            return False, (
-                f"snapshot schema drift: no cache_key_set field on "
-                f"{hot}/{cold} — keys={sorted(hot_entry)[:8]}"
+        for name in (hot, cold):
+            keep = {key for family in selected[name] for key in family}
+            held = set(seed_snap[name]["cache_key_set"])
+            if not keep <= held:
+                return False, f"seed placement missing keys on {name}"
+            _cache_evict(ops, name, held - keep)
+        if not _wait_cache_sync(ops, [hot, cold]):
+            return False, "seed cache synchronization did not converge"
+        seed_snap = ops.snapshot_by_name()
+        hot_keys = len(seed_snap[hot]["cache_key_set"])
+        cold_keys = len(seed_snap[cold]["cache_key_set"])
+        if cold_keys <= 0 or hot_keys < SKEW_MIN_RATIO * cold_keys:
+            return (
+                False,
+                f"skew construction failed: hot_keys={hot_keys}, cold_keys={cold_keys}",
             )
-        hot_keys = len(hot_entry["cache_key_set"])
-        cold_keys = len(cold_entry["cache_key_set"])
-        if hot_keys < SKEW_MIN_RATIO * max(cold_keys, 1) or hot_keys <= 0:
-            return False, (
-                f"skew construction failed: hot_keys={hot_keys}, "
-                f"cold_keys={cold_keys} "
-                f"(need hot >= {SKEW_MIN_RATIO:.0f}x cold), "
-                f"routes={hot_routes}/{total_routes}"
-            )
-
-        # restore symmetric perf (design: "再 set_perf 恢复对称")
-        ops.set_perf(hot, prefill_fixed_ms=SKEW_PREFILL_SYMMETRIC_MS)
-        ops.set_perf(cold, prefill_fixed_ms=SKEW_PREFILL_SYMMETRIC_MS)
-        time.sleep(1.0)  # perf sync
+        hot_share_constructed = len(selected[hot]) / len(fams)
 
         sampler = BalanceSampler(ops.mock_http_port, ops.master_http_port)
         sampler.start()
 
         def _pump_loop() -> None:
-            while not pump_stop.is_set():
-                for keys in fams:
-                    if pump_stop.is_set():
-                        break
-                    rid = ops.next_request_id(base)
-                    ops.run_one_request(
-                        rid,
-                        input_len=SKEW_FAM_INPUT_LEN,
-                        output_len=2,
-                        block_keys=keys,
-                        stream_timeout_s=30.0,
-                    )
-                    pump_stop.wait(SKEW_PUMP_INTERVAL_S)
+            # Keep a single slow/retired stream from stopping ALL offered
+            # traffic for a 20s transient window. Bounded at two requests;
+            # every failure is retained and fails P6, never hidden by the
+            # successful survivor traffic.
+            pending = {}
+            family_index = 0
+            with ThreadPoolExecutor(max_workers=SKEW_PUMP_MAX_INFLIGHT) as pool:
+                while not pump_stop.is_set() or pending:
+                    for future in list(pending):
+                        if future.done():
+                            rid = pending.pop(future)
+                            try:
+                                _addr, err = future.result()
+                            except Exception as exc:
+                                err = repr(exc)
+                            if err is not None:
+                                pump_errors.append((rid, str(err)))
+                    if not pump_stop.is_set() and len(pending) < SKEW_PUMP_MAX_INFLIGHT:
+                        rid = ops.next_request_id(base)
+                        keys = fams[family_index % len(fams)]
+                        family_index += 1
+                        future = pool.submit(
+                            ops.run_one_request,
+                            rid,
+                            input_len=SKEW_FAM_INPUT_LEN,
+                            output_len=2,
+                            block_keys=keys,
+                            stream_timeout_s=30.0,
+                            typed_stream_error=True,
+                        )
+                        pending[future] = rid
+                    time.sleep(SKEW_PUMP_INTERVAL_S)
 
         pump_thread = threading.Thread(
             target=_pump_loop, name=f"skew-fam-pump-{variant}", daemon=True
@@ -2688,6 +2660,15 @@ def _run_kv_skew_shrink(ctx: CaseContext, shrink_hot: bool):
             return False, "baseline window void: no cache-key traffic"
         base_tps = _bal_cluster_tps(sampler, 0.0, t_base)
 
+        event_snap = ops.snapshot_by_name()
+        event_hot_keys = len(event_snap[hot]["cache_key_set"])
+        event_cold_keys = len(event_snap[cold]["cache_key_set"])
+        if event_cold_keys <= 0 or event_hot_keys < SKEW_MIN_RATIO * event_cold_keys:
+            return False, (
+                f"skew lost during baseline: hot_keys={event_hot_keys}, "
+                f"cold_keys={event_cold_keys}"
+            )
+
         # ---- the shrink event (graceful) ----
         t_remove = sampler.mark("remove")
         status, rm_body = ops.remove_engine(engine_name=victim)
@@ -2700,7 +2681,10 @@ def _run_kv_skew_shrink(ctx: CaseContext, shrink_hot: bool):
         t_tr_end = sampler.mark("transient_end")
         tr_hit = _bal_hit_rate(sampler, t_remove, t_tr_end)
         if tr_hit is None:
-            return False, "transient window void: no cache-key traffic"
+            return (
+                False,
+                f"transient window void: no cache-key traffic; flow_errors={pump_errors[:8]}",
+            )
         drop = base_hit - tr_hit
 
         alive_ok = _wait_master_alive(ops, "PREFILL", 1, MASTER_EVICT_S)
@@ -2712,6 +2696,15 @@ def _run_kv_skew_shrink(ctx: CaseContext, shrink_hot: bool):
         t_ss_end = sampler.mark("steady_end")
         ss_tail_lo = t_settle + BAL_STEADY_S * 2.0 / 3.0
         ss_hit = _bal_hit_rate(sampler, ss_tail_lo, t_ss_end)
+
+        pump_stop.set()
+        pump_thread.join(65.0)  # schedule deadline + stream deadline + margin
+        report.invariant(
+            "P6",
+            not pump_errors and not pump_thread.is_alive(),
+            context=f"kv_skew_{variant}_flow_completeness",
+            detail=f"pump_alive={pump_thread.is_alive()}, errors={pump_errors[:8]}",
+        )
 
         # ---- 1. PC transient (HARD, construction-derived; LOWER form so
         #      the PC key keeps its lower-kind semantics) ----
