@@ -1,0 +1,169 @@
+schema_version: 1
+id: priority_admission
+description: 'No preemption: after the victim reaches decode running, its acceptance
+  permit is free and a higher-priority incomer is admitted alongside it.'
+category: admission
+profiles:
+- batch-window
+requires:
+- enqueue_batch
+legacy_case_ids:
+- admission_priority_incomer_reject
+environment:
+  backend: java_mock
+  n_prefill: 1
+  n_decode: 1
+  perf_preset: default
+  config_overrides:
+    ordering: priority
+    queue_timeout_ms: 60000
+    max_delivered_not_accepted: 1
+execution:
+  timeout_s: 420
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: permit_released_without_preemption
+stages:
+- id: setup
+  action: setup
+  timeout_s: 180
+- id: victim
+  action: admission_fire
+  params:
+    count: 1
+    consume: immediate
+    input_len: 512
+    output_len: 200
+    priority: 30
+    keys_per_request: 1
+    spacing_s: 0
+    request_timeout_s: 30
+- id: victim_admitted
+  action: admission_check
+  params:
+    rows:
+      $ref: stages.victim.output.rows
+    metric: admitted_count
+    expected: 1
+    op: eq
+- id: running
+  action: admission_observe
+  params:
+    targets:
+    - decode-0
+    fields:
+    - running
+    duration_s: 10
+    until_op: ge
+    until_value: 1
+  timeout_s: 15
+- id: victim_running
+  action: admission_gauge_check
+  params:
+    snapshot:
+      $ref: stages.running.output.snapshot
+    fields:
+    - running
+    stat: max_seen
+    op: ge
+    expected: 1
+- id: incomer
+  action: admission_fire
+  params:
+    count: 1
+    consume: immediate
+    input_len: 512
+    output_len: 2
+    priority: 70
+    keys_per_request: 1
+    spacing_s: 0
+    request_timeout_s: 30
+- id: incomer_admitted
+  action: admission_check
+  params:
+    rows:
+      $ref: stages.incomer.output.rows
+    metric: admitted_count
+    expected: 1
+    op: eq
+- id: incomer_code
+  action: admission_check
+  params:
+    rows:
+      $ref: stages.incomer.output.rows
+    metric: all_schedule_code
+    expected: 200
+    op: eq
+- id: accepted_fast
+  action: admission_check
+  params:
+    rows:
+      $ref: stages.incomer.output.rows
+    metric: schedule_latency_max
+    expected: 3
+    op: lt
+- id: victim_done
+  action: admission_wait
+  params:
+    wave:
+      $ref: stages.victim.output.wave
+  timeout_s: 40
+- id: victim_unmolested
+  action: admission_check
+  params:
+    rows:
+      $ref: stages.victim_done.output.rows
+    metric: success_count
+    expected: 1
+    op: eq
+- id: incomer_done
+  action: admission_wait
+  params:
+    wave:
+      $ref: stages.incomer.output.wave
+  timeout_s: 40
+- id: incomer_completed
+  action: admission_check
+  params:
+    rows:
+      $ref: stages.incomer_done.output.rows
+    metric: success_count
+    expected: 1
+    op: eq
+- id: recovery
+  action: admission_wave
+  params:
+    count: 1
+    input_len: 2048
+    output_len: 2
+    request_timeout_s: 30
+- id: recovery_done
+  action: admission_wait
+  params:
+    wave:
+      $ref: stages.recovery.output.wave
+  timeout_s: 40
+- id: recovered
+  action: admission_check
+  params:
+    rows:
+      $ref: stages.recovery_done.output.rows
+    metric: success_count
+    expected: 1
+    op: eq
+- id: master_clean
+  action: master_ready
+  params:
+    target: single
+    inflight_zero: true
+  timeout_s: 30
+- id: engine_clean
+  action: admission_engine_clean
+  params:
+    targets:
+    - prefill-0
+    - decode-0
+  timeout_s: 15
+- id: cleanup
+  action: teardown

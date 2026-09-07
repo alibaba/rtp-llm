@@ -33,6 +33,7 @@ def _traffic_validate(params, plan):
             "request_timeout_s",
             "consume",
             "keys_per_request",
+            "priority",
         },
     )
     for key, default, limit in (
@@ -44,6 +45,10 @@ def _traffic_validate(params, plan):
         p.setdefault(key, default)
         if type(p[key]) is not int or not 1 <= p[key] <= limit:
             raise ValueError(f"invalid bounded admission {key}")
+    if "priority" in p and (
+        type(p["priority"]) is not int or not -(2**31) <= p["priority"] < 2**31
+    ):
+        raise ValueError("priority must be an explicit int32 when present")
     p.setdefault("request_timeout_s", 20)
     if (
         type(p["request_timeout_s"]) not in (int, float)
@@ -92,6 +97,8 @@ class AdmissionWave:
                 stream_timeout_s=p["request_timeout_s"],
             ),
         )
+        if "priority" in p:
+            batch.params["priority"] = p["priority"]
         if p.get("keys_per_request", 0):
             seed = self.ctx.ops.next_request_id()
             batch.params["block_keys"] = [
@@ -307,6 +314,8 @@ METRICS = {
     "all_error_contains",
     "any_error_contains",
     "all_reject_code",
+    "all_schedule_code",
+    "schedule_latency_max",
     "latency_min",
     "latency_max",
 }
@@ -372,11 +381,12 @@ def _check(ctx, params, deadline):
             r["schedule"]["status"] != "REJECTED" and not request_success(r)
             for r in selected
         )
-    elif metric == "all_reject_code":
-        actual = bool(rejected) and all(
+    elif metric in {"all_reject_code", "all_schedule_code"}:
+        checked = rejected if metric == "all_reject_code" else selected
+        actual = bool(checked) and all(
             r["schedule_response"] is not None
             and r["schedule_response"]["code"] == params["expected"]
-            for r in rejected
+            for r in checked
         )
         # This metric compares actual response codes, never text substrings.
         expected = True
@@ -407,6 +417,7 @@ def _check(ctx, params, deadline):
             end = (
                 row["schedule"]["ended_s"]
                 if row["schedule"]["status"] == "REJECTED"
+                or metric == "schedule_latency_max"
                 else row["consumer_exit_s"]
             )
             start = row["schedule"]["started_s"]
@@ -424,7 +435,11 @@ def _check(ctx, params, deadline):
             if values
             else None
         )
-    expected = True if metric == "all_reject_code" else params["expected"]
+    expected = (
+        True
+        if metric in {"all_reject_code", "all_schedule_code"}
+        else params["expected"]
+    )
     good = len(selected) >= params["min_samples"] and actual is not None
     if good:
         good = (
