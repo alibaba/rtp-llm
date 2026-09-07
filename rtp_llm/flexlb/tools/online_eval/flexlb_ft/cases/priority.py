@@ -4405,7 +4405,15 @@ def _ts_spec(ctx: CaseContext) -> EnvSpec:
     """ENV for atpm_preempt_cancel_tombstoned: the live preemption config
     (all three stages + engineCancellation) + decode maxEngineRequests=1
     on the BATCH dispatcher (1P+1D) — same shape as cancel.py's
-    cancel_preemption_victim."""
+    cancel_preemption_victim.
+
+    Lane note (coverage matrix): unlike _pq_live_spec this spec is NOT
+    lane-derived — decision stays SINGLE on every lane (the unpassed
+    _prio_config default), so the bw expansion runs SINGLE+BATCH, the
+    same config as sb: a pure lane-regression gain, not a shape
+    increment (audit positioning, kept deliberately — do not read the
+    bw row as FIXED_WINDOW coverage).
+    """
     return _spec(
         ctx,
         "atpm_ts",

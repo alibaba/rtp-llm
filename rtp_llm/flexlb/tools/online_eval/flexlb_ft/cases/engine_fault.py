@@ -520,7 +520,10 @@ def _fault_spec(ctx: CaseContext) -> EnvSpec:
 
 @case(
     "engine_fault_crash_after",
-    profiles=["batch-window", "single-batch"],  # crash fires at the EnqueueBatch entry (BATCH dispatcher only)
+    profiles=[
+        "batch-window",
+        "single-batch",
+    ],  # crash fires at the EnqueueBatch entry (BATCH dispatcher only)
     source="gap G6/G7: /inject type=crash_after (enqueue-count triggered true crash)",
 )
 def inject_crash_after(ctx: CaseContext):
@@ -1327,7 +1330,10 @@ def recovery_kv_resync(ctx: CaseContext):
 
 @case(
     "engine_fault_recovery_no_resurrect",
-    profiles=["batch-window", "single-batch"],  # crash_after trigger rides EnqueueBatch (BATCH dispatcher only)
+    profiles=[
+        "batch-window",
+        "single-batch",
+    ],  # crash_after trigger rides EnqueueBatch (BATCH dispatcher only)
     source="E3: pre-outage inflight requests must not resurrect after recovery",
 )
 def recovery_no_resurrect(ctx: CaseContext):

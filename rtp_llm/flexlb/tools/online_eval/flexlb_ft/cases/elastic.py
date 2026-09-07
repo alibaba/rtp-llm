@@ -1698,7 +1698,9 @@ def _full_shrink_spec(ctx: CaseContext) -> EnvSpec:
 
 @case(
     "elastic_kv_full_shrink",
-    profiles=["batch-window"],  # elastic family: BATCH dispatcher + fault axes
+    profiles=[
+        "batch-window"
+    ],  # spec is profile-aware since the tier2 unpick; bw-only scope is historical/pending expansion
     source=(
         "balance-metrics v2 design §2.1 "
         "(flexlb-balance-metrics-v2-design.md): KV-full scale-in, "
@@ -2696,7 +2698,9 @@ def _run_kv_skew_shrink(ctx: CaseContext, shrink_hot: bool):
 
 @case(
     "elastic_kv_skew_shrink_hot",
-    profiles=["batch-window"],  # elastic family: BATCH dispatcher + fault axes
+    profiles=[
+        "batch-window"
+    ],  # spec is profile-aware since the tier2 unpick; bw-only scope is historical/pending expansion
     source=(
         "balance-metrics v2 design §2.2 "
         "(flexlb-balance-metrics-v2-design.md): KV-skew shrink, hot variant"
@@ -2711,7 +2715,9 @@ def elastic_kv_skew_shrink_hot(ctx: CaseContext):
 
 @case(
     "elastic_kv_skew_shrink_cold",
-    profiles=["batch-window"],  # elastic family: BATCH dispatcher + fault axes
+    profiles=[
+        "batch-window"
+    ],  # spec is profile-aware since the tier2 unpick; bw-only scope is historical/pending expansion
     source=(
         "balance-metrics v2 design §2.2 "
         "(flexlb-balance-metrics-v2-design.md): KV-skew shrink, cold variant"
@@ -2796,7 +2802,9 @@ def _transient_spec(ctx: CaseContext) -> EnvSpec:
 
 @case(
     "elastic_transient_imbalance_bound",
-    profiles=["batch-window"],  # elastic family: BATCH dispatcher + fault axes
+    profiles=[
+        "batch-window"
+    ],  # spec is profile-aware since the tier2 unpick; bw-only scope is historical/pending expansion
     source=(
         "balance-metrics v2 design §2.3 "
         "(flexlb-balance-metrics-v2-design.md): abrupt scale-in under "
@@ -3383,7 +3391,9 @@ def _bal_exec_cv(
 
 @case(
     "elastic_steady_state_recovery",
-    profiles=["batch-window"],  # elastic family: BATCH dispatcher + fault axes
+    profiles=[
+        "batch-window"
+    ],  # spec is profile-aware since the tier2 unpick; bw-only scope is historical/pending expansion
     source=(
         "balance-metrics v2 design §2.4 "
         "(flexlb-balance-metrics-v2-design.md): graceful scale-in, "

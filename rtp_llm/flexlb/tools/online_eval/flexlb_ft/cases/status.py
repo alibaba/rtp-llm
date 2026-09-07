@@ -25,8 +25,9 @@ the agreed spec — do not invent alternatives):
     enqueue_ack_partial_fail(int k) / enqueue_ack_error_code(int code)
     enqueue_ack_drop(bool)
 
-Shared environment (_status_spec): 2P+2D, legacy fault axes pinned via
-FLEXLB_CONFIG (PRIORITY + FIXED_WINDOW + BATCH), staleInflightTimeoutMs=30s
+Shared environment (_status_spec): 2P+2D, PRIORITY ordering over the
+profile's own decision/dispatcher axes (profile-aware since the tier2
+spec unpick), staleInflightTimeoutMs=30s
 (TTL observations cap at TTL+margin) and scheduler.queueTimeoutMs=10s —
 zombie keep-alive scenarios (a suppressed-finished request keeps appearing
 RUNNING, which refreshes lastWorkerStatusAtMs and disarms the stale TTL)
@@ -708,7 +709,9 @@ def inflight_ttl_cleanup(ctx: CaseContext):
 
 @case(
     "status_ack_partial_fail",
-    profiles=["batch-window"],  # _status_spec pins the legacy fault axes
+    profiles=[
+        "batch-window"
+    ],  # EnqueueBatch ack/batchId settlement channel — BATCH-dispatcher only
     source="P0 status fault family: enqueue_ack_partial_fail(k=1) on a 4-request batch",
     expected_fail=True,  # MIXED form (see docstring) — whole-case probe
 )
@@ -890,7 +893,9 @@ def status_ack_partial_fail(ctx: CaseContext):
 
 @case(
     "status_batch_async_partial_fail",
-    profiles=["batch-window"],  # _status_spec pins the legacy fault axes
+    profiles=[
+        "batch-window"
+    ],  # EnqueueBatch ack/batchId settlement channel — BATCH-dispatcher only
     source="P0 status fault family: prefill_async_partial_fail(k=1, code=8500) "
     "on 4 concurrent requests (execution-phase in-batch failure)",
 )
@@ -2596,7 +2601,14 @@ def status_duplicate_finished(ctx: CaseContext):
             # measure the tail settling, not the replay (batch-window
             # settles synchronously, which is why the baseline never
             # needed this gate there).
-            _wait_scheduler_zero(ops)
+            # The gate result IS part of the case verdict: a timeout here
+            # means the before-baseline would snapshot a mid-drain ledger
+            # and the replay window would measure the tail settling (bw
+            # passes the gate synchronously — behaviour unchanged).
+            if not _wait_scheduler_zero(ops):
+                return False, (
+                    "ledger did not settle before replay-window baseline sample"
+                )
             before = _inflight_fingerprint(ops)
             time.sleep(5.0)  # replay window: terminals re-delivered
             after = _inflight_fingerprint(ops)

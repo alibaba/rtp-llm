@@ -3067,8 +3067,13 @@ def kv_decode_pool_exhaustion_terminal(ctx: CaseContext):
       * the probe fails FAST (< 3s — no park: the QUEUE scheduler's
         wait-condition path applies to ROUTE-time delivery capacity,
         not to an engine-side reservation reject) with a typed error
-        carrying "EnqueueBatch rejected" + "LACK_MEM" + "decode-side"
-        (the master wraps the engine ack error verbatim);
+        whose dispatcher-shared substrings are "lack_mem" +
+        "decode-side" — per-dispatcher probe typing: the BATCH lane
+        additionally asserts the "EnqueueBatch rejected" wrapper
+        prefix (the master wraps the engine ack error verbatim), while
+        under NON_BATCH the same engine reject surfaces through the
+        stream onError path (snap.error) and only the shared substring
+        family applies;
       * counter split: the target D engine's lack_mem_rejects grew by
         EXACTLY 1 (permanent-family accounting for the structurally
         unfittable request) while its kv_admission_fails stayed flat
