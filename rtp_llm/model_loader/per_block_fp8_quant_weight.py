@@ -98,8 +98,14 @@ def cast_to_fp8(x: torch.Tensor):
 
 
 def per_block_cast_to_fp8(
-    x: torch.Tensor, group_size: int
+    x: torch.Tensor, group_size: int, *, use_ue8m0: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize with the final scale while retaining logical tail dimensions.
+
+    UE8M0 rounding precedes the FP8 cast to avoid a second quantization.
+    """
+    if group_size <= 0 or x.dim() not in (2, 3):
+        raise ValueError("block FP8 requires a positive group size and a 2D/3D tensor")
     is_2d = x.dim() == 2
     if is_2d:
         x = x.unsqueeze(0)  # (1, m, n)
@@ -115,9 +121,13 @@ def per_block_cast_to_fp8(
         b, m_padded // group_size, group_size, n_padded // group_size, group_size
     )
     x_amax = x_view.abs().float().amax(dim=(2, 4), keepdim=True).clamp(1e-4)
-    x_scaled = (x_view * (FP8_E4M3_MAX / x_amax)).to(torch.float8_e4m3fn)
-    x_quantized = x_scaled.view(b, m_padded, n_padded)[:, :m, :n]
     scales = (x_amax / FP8_E4M3_MAX).to(torch.float32)
+    if use_ue8m0:
+        scales = torch.pow(2.0, torch.ceil(torch.log2(scales)))
+    # Preserve the existing non-UE8M0 rounding path for other models.
+    multiplier = 1.0 / scales if use_ue8m0 else FP8_E4M3_MAX / x_amax
+    x_scaled = (x_view * multiplier).to(torch.float8_e4m3fn)
+    x_quantized = x_scaled.view(b, m_padded, n_padded)[:, :m, :n]
     squeeze_dims = []
 
     if scales.size(2) == 1:

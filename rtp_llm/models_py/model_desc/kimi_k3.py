@@ -480,9 +480,18 @@ class KimiK3Model(GptModelBase):
         )
         max_local_tokens = (max_global_tokens + tp_size - 1) // tp_size
         max_physical_tokens = max_local_tokens * tp_size
+        fp8_attention = (
+            getattr(self.config, "k3_attention_quant_config", None) is not None
+        )
+        fp8_collective_mode = os.environ.get("KIMI_K3_FP8_COLLECTIVE_GEMM", "1")
+        if fp8_attention and fp8_collective_mode not in ("0", "1"):
+            raise ValueError("KIMI_K3_FP8_COLLECTIVE_GEMM must be 0 or 1")
+        collective_enabled = not fp8_attention or fp8_collective_mode == "1"
+        fp8_kwargs = {"fp8": True} if fp8_attention else {}
         if not getattr(self, "_all_gather_gemm_configured", False):
             all_gather_gemm_requested = (
                 not init_resource.is_decode_role
+                and collective_enabled
                 and tp_size > 1
                 and self.embedding_weight.is_cuda
                 and self.embedding_weight.dtype == torch.bfloat16
@@ -496,12 +505,14 @@ class KimiK3Model(GptModelBase):
                     max_m=max_physical_tokens,
                     k=int(self.config.hidden_size),
                     dtype=self.embedding_weight.dtype,
+                    **fp8_kwargs,
                 )
             self._all_gather_gemm_configured = True
 
         if not getattr(self, "_gemm_reduce_scatter_configured", False):
             gemm_reduce_scatter_requested = (
                 not init_resource.is_decode_role
+                and collective_enabled
                 and tp_size > 1
                 and self.embedding_weight.is_cuda
                 and self.embedding_weight.dtype == torch.bfloat16
@@ -514,6 +525,7 @@ class KimiK3Model(GptModelBase):
                     enabled=True,
                     max_m=max_physical_tokens,
                     n=int(self.config.hidden_size),
+                    **fp8_kwargs,
                 )
             self._gemm_reduce_scatter_configured = True
         return True

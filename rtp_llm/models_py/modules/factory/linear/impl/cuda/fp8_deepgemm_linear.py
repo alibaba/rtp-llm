@@ -138,6 +138,66 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         self.cached_scales = None
         self.cached_scales_max_len = 0
 
+    def supports_skip_head_mid(
+        self, input: torch.Tensor, head_splits: tuple[int, int, int]
+    ) -> bool:
+        """Support packed MLA K/RoPE/V output without padding FP8 weights."""
+        if len(head_splits) != 3 or any(type(v) is not int for v in head_splits):
+            return False
+        left, middle, right = head_splits
+        return (
+            left > 0
+            and middle >= 0
+            and right > 0
+            and self.N % (left + right) == 0
+            and input.ndim == 2
+            and input.shape[1] == self.K
+            and input.dtype == torch.bfloat16
+            and input.is_cuda
+            and input.device == self.weight.device
+        )
+
+    def forward_skip_head_mid(
+        self,
+        input: torch.Tensor,
+        head_splits: tuple[int, int, int],
+        *,
+        output: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """FP8 GEMM followed by BF16 K/V placement, preserving the RoPE gap.
+
+        The historical-prefix gather has already written RoPE into the middle
+        region of caller-owned output. Do not zero or overwrite that region.
+        The only temporary is the ordinary unpadded BF16 GEMM result.
+        """
+        if not self.supports_skip_head_mid(input, head_splits):
+            raise ValueError("unsupported FP8 skip-head-mid input or head layout")
+        left, middle, right = head_splits
+        heads = self.N // (left + right)
+        shape = (input.shape[0], heads * (left + middle + right))
+        if output is None:
+            output = input.new_empty(shape)
+        elif (
+            tuple(output.shape) != shape
+            or output.dtype != torch.bfloat16
+            or output.device != input.device
+            or not output.is_contiguous()
+        ):
+            raise ValueError(
+                "FP8 skip-head-mid output buffer shape/dtype/layout mismatch"
+            )
+        for source in (input, self.weight, self.weight_scales):
+            if (
+                output.untyped_storage().data_ptr()
+                == source.untyped_storage().data_ptr()
+            ):
+                raise ValueError("FP8 skip-head-mid output must not alias its operands")
+        kv = self.forward(input).view(input.shape[0], heads, left + right)
+        packed = output.view(input.shape[0], heads, left + middle + right)
+        packed[..., :left].copy_(kv[..., :left])
+        packed[..., left + middle :].copy_(kv[..., left:])
+        return output
+
     def maybe_cache_quant_scale(self, max_len: int) -> None:
         if not self.scale_ue8m0:
             return
@@ -265,7 +325,9 @@ class CudaFp8DeepGEMMLinear(LinearBase):
     ) -> torch.Tensor:
         """Run DeepGEMM with a caller-provided FP8 input and matching scales."""
         if input_fp8.dtype != torch.float8_e4m3fn:
-            error_msg = f"Quantized input dtype must be float8_e4m3fn, got {input_fp8.dtype}"
+            error_msg = (
+                f"Quantized input dtype must be float8_e4m3fn, got {input_fp8.dtype}"
+            )
             logger.error(error_msg)
             raise ValueError(error_msg)
         M, _ = self._validate_input(input_fp8)

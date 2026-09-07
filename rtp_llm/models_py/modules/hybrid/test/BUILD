@@ -144,3 +144,10 @@ py_test (
    tags = ["open_skip", "H20"],
    exec_properties = {'gpu':'H20'},
 )
+
+py_test(
+    name = "kimi_k3_fp8_weight_test",
+    srcs = ["kimi_k3_fp8_weight_test.py"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"],
+    timeout = "short",
+)

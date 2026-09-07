@@ -38,6 +38,7 @@ from rtp_llm.ops import HybridAttentionType, MlaOpsType, RoleType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
+    concat_0,
     ffn_sp_0,
     ffn_sp_neg1,
     identity,
@@ -69,6 +70,11 @@ def _merge_kda_qkvg_fa_beta(ts: List[torch.Tensor]) -> torch.Tensor:
         raise ValueError(f"K3 KDA fused projection expects six tensors, got {len(ts)}")
     q, k, v, g, f_a, beta = ts
     return torch.cat((q.T, k.T, v.T, g.T, f_a.T, beta.T), dim=1).contiguous()
+
+
+def _merge_mla_latents(ts: List[torch.Tensor]) -> torch.Tensor:
+    """Keep KV-A's partial block at the end of the replicated FP8 matrix."""
+    return concat_0(ts).T.contiguous()
 
 
 def _merge_mla_input_projections(
@@ -610,6 +616,12 @@ class KimiK3Weight(ModelDeployWeightInfo):
             ),
         ]
 
+        if getattr(self.model_config, "k3_attention_quant_config", None) is not None:
+            fused = next(w for w in weights if w.name == W.mla_fusedqkrope_w)
+            fused.weights = fused.weights[:2]
+            fused.process_fun = _merge_mla_latents
+            weights.append(_mla(W.attn_gate_w, "self_attn.g_proj.weight", transpose))
+
         # Absorbed decode weights: slice kv_b into the compressed-cache
         # bmm operands the FlashInfer decode kernel expects.
         if (
@@ -698,9 +710,7 @@ class KimiK3Weight(ModelDeployWeightInfo):
                     f"size={self.ffn_tp_size} rank={self.ffn_tp_rank}"
                 )
             projection_suffix = (
-                gate_suffix
-                if self.ffn_tp_rank < self.ffn_tp_size // 2
-                else up_suffix
+                gate_suffix if self.ffn_tp_rank < self.ffn_tp_size // 2 else up_suffix
             )
             shared_gate_up_ckpts = [
                 CkptWeightInfo(self._layer_ckpt(projection_suffix), identity)
@@ -806,11 +816,31 @@ class KimiK3Weight(ModelDeployWeightInfo):
             )
         for layer_id, layer_type in enumerate(layer_types[: self._num_layers]):
             weights = self._common_layer_weights()
-            weights.extend(
+            attention = (
                 self._kda_weights()
                 if layer_type == HybridAttentionType.LINEAR
                 else self._mla_weights()
             )
+            quant_config = getattr(self.model_config, "k3_attention_quant_config", None)
+            if quant_config is not None and not isinstance(self, KimiK3Eagle3Weight):
+                from rtp_llm.models.kimi_k3.fp8_weight import KimiK3LoadFp8Weight
+
+                derive_mla = any(w.name == W.mla_kc for w in attention)
+                attention = [
+                    (
+                        KimiK3LoadFp8Weight(
+                            w,
+                            quant_config,
+                            derive_mla=derive_mla and w.name == W.mla_kv_b_w,
+                            layer_id=layer_id,
+                        )
+                        if w.name in KimiK3LoadFp8Weight.w8a8_weight_list
+                        else w
+                    )
+                    for w in attention
+                    if w.name not in (W.mla_kc, W.mla_vc)
+                ]
+            weights.extend(attention)
             weights.extend(
                 self._moe_weights() if layer_id in moe_layers else self._dense_weights()
             )
@@ -828,7 +858,9 @@ class KimiK3Eagle3Weight(KimiK3Weight):
 
     def _global_weights(self) -> List[WeightModule]:
         return [
-            AtomicWeight(W.embedding, [CkptWeightInfo("embed_tokens.weight", identity)]),
+            AtomicWeight(
+                W.embedding, [CkptWeightInfo("embed_tokens.weight", identity)]
+            ),
             AtomicWeight(W.lm_head, [CkptWeightInfo("lm_head.weight", identity)]),
             AtomicWeight(W.final_ln_gamma, [CkptWeightInfo("norm.weight", identity)]),
         ]
@@ -880,13 +912,17 @@ class KimiK3Eagle3Weight(KimiK3Weight):
                 device="cuda",
             )
             half_dim = config.attn_config.rope_config.dim // 2
-            return torch.cat(
-                [
-                    rotary.cos_cached[:, :half_dim],
-                    rotary.sin_cached[:, :half_dim],
-                ],
-                dim=-1,
-            ).float().contiguous()
+            return (
+                torch.cat(
+                    [
+                        rotary.cos_cached[:, :half_dim],
+                        rotary.sin_cached[:, :half_dim],
+                    ],
+                    dim=-1,
+                )
+                .float()
+                .contiguous()
+            )
 
         return AtomicWeight(
             W.rope_cos_sin_cache,

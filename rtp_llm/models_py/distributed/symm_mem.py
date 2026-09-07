@@ -305,3 +305,41 @@ def fused_all_gather_matmul(
         return_A=return_gathered,
     )
     return gathered, list(outputs)
+
+
+def fused_all_gather_fp8_linear(local_a, projections, group):
+    """Consume each arriving BF16 shard with scale-aware FP8 projections.
+
+    The PyTorch pipeline owns the copy/consumer stream handshakes. Quantization
+    temporaries are private to each consumer invocation, never global caches.
+    """
+    pipeline = getattr(torch_symm_mem, "_pipelined_all_gather_and_consume", None)
+    if pipeline is None:
+        raise RuntimeError("installed PyTorch lacks the FP8 AG consumer pipeline")
+    if not projections:
+        return []
+    for projection in projections:
+        if (
+            projection.K != local_a.shape[1]
+            or projection.scale_ue8m0 != projections[0].scale_ue8m0
+        ):
+            raise ValueError(
+                "FP8 AG projections must share the activation quantization recipe"
+            )
+    local_m = local_a.shape[0]
+    physical_m = local_m * group.size()
+    outputs = [
+        torch.empty((physical_m, p.N), device=local_a.device, dtype=torch.bfloat16)
+        for p in projections
+    ]
+    gathered = local_a.new_empty((physical_m, local_a.shape[1]))
+
+    def consume(shard, rank):
+        quantized = projections[0].quantize_input(shard)
+        for projection, output in zip(projections, outputs):
+            projection.forward_quantized(
+                *quantized, out=output.narrow(0, rank * local_m, local_m)
+            )
+
+    pipeline(local_a, consume, gathered, group.group_name, ag_out_needed=False)
+    return outputs

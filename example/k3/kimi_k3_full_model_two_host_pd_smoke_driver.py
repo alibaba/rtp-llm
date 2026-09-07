@@ -16,7 +16,6 @@ import time
 from dataclasses import dataclass
 from typing import TextIO
 
-
 ROLE_SCRIPT = "./example/k3/kimi_k3_full_model_two_host_pd_smoke.sh"
 
 
@@ -32,7 +31,9 @@ def parse_args() -> argparse.Namespace:
             "start Prefill on the other SSH host and return a combined exit status."
         )
     )
-    parser.add_argument("--prefill-ssh-target", default=env_default("PREFILL_SSH_TARGET"))
+    parser.add_argument(
+        "--prefill-ssh-target", default=env_default("PREFILL_SSH_TARGET")
+    )
     parser.add_argument("--decode-ssh-target", default=env_default("DECODE_SSH_TARGET"))
     parser.add_argument("--prefill-repo-root", default=env_default("PREFILL_REPO_ROOT"))
     parser.add_argument("--decode-repo-root", default=env_default("DECODE_REPO_ROOT"))
@@ -112,7 +113,9 @@ def parse_args() -> argparse.Namespace:
         "--artifact-root",
         type=pathlib.Path,
         default=pathlib.Path(
-            env_default("SMOKE_CONTROLLER_ARTIFACT_ROOT", "/tmp/kimi-k3-pd-smoke-controller")
+            env_default(
+                "SMOKE_CONTROLLER_ARTIFACT_ROOT", "/tmp/kimi-k3-pd-smoke-controller"
+            )
         ),
     )
     parser.add_argument(
@@ -152,12 +155,17 @@ def parse_args() -> argparse.Namespace:
     if missing:
         parser.error("missing required settings: " + ", ".join(missing))
     if not re.fullmatch(r"[A-Za-z0-9._-]+", args.run_id):
-        parser.error("--run-id may contain only letters, digits, dot, underscore and dash")
+        parser.error(
+            "--run-id may contain only letters, digits, dot, underscore and dash"
+        )
     endpoint_pattern = r"[^:]+:[0-9]+"
     for name in ("prefill_endpoint", "decode_endpoint"):
         if re.fullmatch(endpoint_pattern, getattr(args, name)) is None:
             parser.error(f"--{name.replace('_', '-')} must have host:port form")
-    if args.result_endpoint and re.fullmatch(endpoint_pattern, args.result_endpoint) is None:
+    if (
+        args.result_endpoint
+        and re.fullmatch(endpoint_pattern, args.result_endpoint) is None
+    ):
         parser.error("--result-endpoint must have host:port form")
     if args.overall_timeout <= 0:
         parser.error("--overall-timeout must be positive")
@@ -192,6 +200,9 @@ def forwarded_optional_environment(role: str) -> dict[str, str]:
         "SMOKE_LINEAR_STEP",
         "SMOKE_CHUNKWISE_RDMA",
         "RTP_LLM_SKIP_BUILD",
+        "KIMI_K3_ATTENTION_QUANTIZATION",
+        "KIMI_K3_FP8_COLLECTIVE_GEMM",
+        "LOAD_METHOD",
     )
     for name in names:
         value = env_default(name)
@@ -283,7 +294,7 @@ def build_detached_remote_command(args: argparse.Namespace, role: str) -> str:
             "child=$!",
             f"printf '%s\\n' \"$child\" >{shlex.quote(paths['pid'])}",
             "set +e",
-            "wait \"$child\"",
+            'wait "$child"',
             "rc=$?",
             f"printf '%s\\n' \"$rc\" >{shlex.quote(paths['status'])}",
             "exit 0",
@@ -446,7 +457,7 @@ def stop_detached_role(args: argparse.Namespace, role: str) -> None:
             f"test -f {shlex.quote(paths['pid'])} || exit 0",
             f"read -r pid <{shlex.quote(paths['pid'])}",
             "case \"$pid\" in ''|*[!0-9]*) exit 2;; esac",
-            "kill -TERM -- \"-$pid\" 2>/dev/null || true",
+            'kill -TERM -- "-$pid" 2>/dev/null || true',
         )
     )
     remote_command = shlex.join(
@@ -670,7 +681,9 @@ def main() -> int:
             statuses = {role: remote.poll() for role, remote in roles.items()}
             if all(status is not None for status in statuses.values()):
                 break
-            failed = [role for role, status in statuses.items() if status not in (None, 0)]
+            failed = [
+                role for role, status in statuses.items() if status not in (None, 0)
+            ]
             if failed:
                 for role, remote in roles.items():
                     if statuses[role] is None:

@@ -133,6 +133,20 @@ def row_parallel_linear(
         raise ValueError(
             "pad_reduce_scatter_tokens requires reduce_scatter_tokens=True"
         )
+    # Quantized Linear objects own both the weight layout and its scales.
+    if not isinstance(weight, torch.Tensor):
+        output = weight(x)
+        if world_size <= 1:
+            return output
+        if reduce_scatter_tokens:
+            # Match DeepGEMM RS: BF16 partials, FP32 sum, BF16 output.
+            summed = (
+                reduce_scatter_padded(output.float(), group=group)
+                if pad_reduce_scatter_tokens
+                else reduce_scatter(output.float(), group=group)
+            )
+            return summed.to(output.dtype)
+        return all_reduce(output, group=group)
     if x.shape[-1] != weight.shape[0]:
         raise ValueError(
             f"linear input width {x.shape[-1]} does not match weight "

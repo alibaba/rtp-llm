@@ -9,6 +9,7 @@ import torch
 from rtp_llm.models_py.distributed.collective_torch import Group, get_process_group
 from rtp_llm.models_py.distributed.sequence_parallel import TokenShardLayout
 from rtp_llm.models_py.modules.base import RMSNorm
+from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.linear.parallel import row_parallel_linear
 from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
 from rtp_llm.models_py.modules.kimi_k3.all_gather_gemm import all_gather_gemm
@@ -54,7 +55,7 @@ class KimiK3MLA(MlaAttention):
             weights,
             layer_idx,
             _MLA_LATENT_NORM_EPS,
-            config.quant_config,
+            getattr(config, "k3_attention_quant_config", None) or config.quant_config,
         )
         # The framework RMSNorm consumes dense rows. The previous K3 wrapper
         # also materialized these split views before invoking the same kernel.
@@ -89,7 +90,16 @@ class KimiK3MLA(MlaAttention):
 
         self._q_a_norm = weights[W.mla_q_a_ln_gamma]
         self._kv_a_norm = weights[W.mla_kv_a_ln_gamma]
-        self._o_w = weights[W.attn_o_w]
+        quant_config = getattr(config, "k3_attention_quant_config", None)
+        self._fp8_enabled = quant_config is not None
+        self._fp8_gate = (
+            LinearFactory.create_linear_from_weights(
+                weights, W.attn_gate_w, W.attn_gate_s, None, quant_config=quant_config
+            )
+            if self._fp8_enabled
+            else None
+        )
+        self._o_w = self.o_proj if self._fp8_enabled else weights[W.attn_o_w]
         self._packed_qkv_gate_w = weights[W.mla_fusedqkrope_w]
         # These are only the two small MLA latent norms; decoder-wide norms keep
         # the framework kernel.
@@ -104,6 +114,23 @@ class KimiK3MLA(MlaAttention):
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         prefill_layout = getattr(self, "_sp_prefill_layout_for_forward", None)
+        if getattr(self, "_fp8_enabled", False):
+            if self._sp_prefill_input_is_sharded:
+                logical_tokens = (
+                    hidden_states.shape[0] * self.attn_tp_size
+                    if prefill_layout is None
+                    else prefill_layout.logical_tokens
+                )
+                qkv, gate = all_gather_gemm(
+                    hidden_states,
+                    [self.fused_qkv_a_proj, self._fp8_gate],
+                    logical_m=logical_tokens,
+                )
+            else:
+                quantized = self.fused_qkv_a_proj.quantize_input(hidden_states)
+                qkv = self.fused_qkv_a_proj.forward_quantized(*quantized)
+                gate = self._fp8_gate.forward_quantized(*quantized)
+            return qkv, gate
         if self._sp_prefill_input_is_sharded:
             logical_tokens = (
                 hidden_states.shape[0] * self.attn_tp_size

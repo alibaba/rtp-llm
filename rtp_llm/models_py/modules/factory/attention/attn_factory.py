@@ -79,8 +79,7 @@ def get_mla_impl(
         else:
             use_fast_path = (
                 attn_inputs.is_prefill
-                and attn_inputs.cu_kv_seqlens.max().item()
-                <= attn_configs.indexer_topk
+                and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
             )
         use_fast_path = use_fast_path and not (
             parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
@@ -246,7 +245,8 @@ class AttnImplFactory(object):
             weight,
             attn_inputs,
             fmha_config,
-            model_config.quant_config,
+            getattr(model_config, "k3_attention_quant_config", None)
+            or model_config.quant_config,
             is_cuda_graph,
             model_config.max_seq_len,
             parallelism_config,
