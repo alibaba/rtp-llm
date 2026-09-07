@@ -44,6 +44,54 @@ class Backend:
 
 
 class ElasticRuntimeTests(unittest.TestCase):
+    def test_actual_mutation_handlers_follow_typed_reference_and_budget(self):
+        source = self.source()
+        source.pop("variants")
+        source["stages"] = [
+            dict(id="setup", action="setup"),
+            dict(id="add", action="elastic_add", params=dict(role="prefill")),
+            dict(
+                id="remove",
+                action="elastic_remove",
+                params=dict(
+                    engine={"$ref": "stages.add.output.engine"}, drain_timeout_ms=5000
+                ),
+            ),
+            dict(id="teardown", action="teardown"),
+        ]
+        handlers = {h.name: h for h in e.HANDLERS}
+        plan = compile_scenarios([("mutation.yaml", source)], handlers=handlers)[0]
+        self.assertEqual(plan["resource_budget"]["max_dynamic_additions"], 1)
+        engine = dict(role="prefill", grpc_addr="127.0.0.1:12345")
+        responses = [
+            dict(status="ok", action="added", engine="p2", port=12345, http_port=12344),
+            dict(
+                status="ok",
+                action="removed",
+                engine="p2",
+                port=12345,
+                mode="graceful",
+                drained=False,
+            ),
+        ]
+        clock = Clock()
+        with tempfile.TemporaryDirectory() as root, patch.object(
+            e, "_snapshot", side_effect=[{}, {"p2": engine}, {"p2": engine}, {}]
+        ), patch.object(e, "_http", side_effect=responses) as http:
+            result = execute_instance(
+                plan,
+                Backend(),
+                handlers=handlers,
+                artifact_dir=root,
+                clock=clock,
+                sleeper=clock.sleep,
+            )
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertEqual(http.call_args.args[3]["engine"], "p2")
+        # This program asserts membership only; it deliberately makes no
+        # business-drain claim from drained=false or from a successful ack.
+        self.assertEqual(result["stages"][2]["checks"][0]["id"], "membership")
+
     def source(self):
         return yaml.safe_load(
             (ROOT / "scenarios/elastic/kv_skew_shrink.yaml").read_text()

@@ -347,6 +347,133 @@ def _validate(params, plan, fields, required=()):
     return copy.deepcopy(params)
 
 
+def _add_validate(params, plan):
+    p = _validate(params, plan, {"role"}, {"role"})
+    if p["role"] not in {"prefill", "decode"}:
+        raise ValueError(f"{plan.path}: role must be prefill or decode")
+    return p
+
+
+def _remove_validate(params, plan):
+    p = _validate(params, plan, {"engine", "drain_timeout_ms"}, {"engine"})
+    if isinstance(p["engine"], dict):
+        plan.reference(p["engine"], "string")
+    elif not isinstance(p["engine"], str) or not p["engine"]:
+        raise ValueError(f"{plan.path}: engine must be a name or string reference")
+    p.setdefault("drain_timeout_ms", 60000)
+    # Explicit 5s retirement-deadline and 60s planned-drain contracts only.
+    if type(p["drain_timeout_ms"]) is not int or p["drain_timeout_ms"] not in {
+        5000,
+        60000,
+    }:
+        raise ValueError(f"{plan.path}: drain_timeout_ms must be 5000 or 60000")
+    return p
+
+
+def _engine_identity(engine):
+    if not isinstance(engine, dict) or engine.get("role") not in {"prefill", "decode"}:
+        raise ValueError("engine snapshot lacks role evidence")
+    address = engine.get("grpc_addr")
+    if not isinstance(address, str) or ":" not in address:
+        raise ValueError("engine snapshot lacks address evidence")
+    port = int(address.rsplit(":", 1)[1])
+    if not 1 <= port <= 65535:
+        raise ValueError("engine snapshot has invalid port")
+    return engine["role"], port
+
+
+def _mutation(ctx, params, deadline, operation):
+    """One explicit mutation, retaining its response even if validation fails.
+
+    Snapshot membership is control-plane evidence only. Discovery, master
+    convergence, actual traffic and request outcomes are separate stages.
+    The instance owns the entire mock cluster and its teardown cleanup.
+    """
+    evidence = dict(operation=operation, started_s=ctx.clock(), complete=False)
+    path = ctx.artifact_dir / f"elastic-{operation}-{time.time_ns()}.json"
+    try:
+        before = _snapshot(ctx, deadline)
+        evidence["before"] = before
+        if operation == "add":
+            body = dict(role=params["role"])
+        else:
+            name = ctx.resolve(params["engine"])
+            if name not in before:
+                raise ValueError(f"cannot remove missing engine {name}")
+            role, port = _engine_identity(before[name])
+            required = params["drain_timeout_ms"] / 1000 + 5
+            if deadline.remaining() < required:
+                raise TimeoutError(f"remove requires {required}s remaining for drain")
+            body = dict(
+                engine=name,
+                mode="graceful",
+                drain_timeout_ms=params["drain_timeout_ms"],
+            )
+        evidence["request"] = body
+        response = _http(ctx.ops, f"{operation}_engine", deadline, body)
+        evidence["response"] = response
+        if not isinstance(response, dict) or response.get("status") != "ok":
+            raise ValueError("mutation did not acknowledge success")
+        acknowledged = response.get("engine")
+        if not isinstance(acknowledged, str) or not acknowledged:
+            raise ValueError("mutation response lacks engine identity")
+        response_port = response.get("port")
+        if type(response_port) is not int or not 1 <= response_port <= 65535:
+            raise ValueError("mutation response lacks valid port")
+        if response.get("action") != ("added" if operation == "add" else "removed"):
+            raise ValueError("mutation action acknowledgement mismatch")
+        after = _snapshot(ctx, deadline)
+        evidence["after"] = after
+        if operation == "add":
+            name, port = acknowledged, response_port
+            if name in before or name not in after:
+                raise ValueError("added engine must be new and present in snapshot")
+            role, actual_port = _engine_identity(after[name])
+            if (
+                role != params["role"]
+                or actual_port != port
+                or response.get("http_port") != port - 1
+            ):
+                raise ValueError("added engine role or address mismatch")
+        else:
+            if acknowledged != name or response_port != port or name in after:
+                raise ValueError("removed engine identity or membership mismatch")
+            if (
+                response.get("mode") != "graceful"
+                or type(response.get("drained")) is not bool
+            ):
+                raise ValueError("remove response lacks graceful drain evidence")
+        evidence.update(complete=True, engine=name, role=role, port=port)
+        # drained=false is retained for a later contract check; an ack alone
+        # cannot establish successful draining or zero request failures.
+        handle = ctx.register_resource("snapshot", evidence, historical=True)
+        return StageOutput(
+            output=dict(engine=name, port=port, mutation=handle),
+            checks=[
+                CheckResult(
+                    "membership",
+                    "PASS",
+                    actual=dict(engine=name, present=operation == "add"),
+                )
+            ],
+            artifacts=[str(path)],
+        )
+    except BaseException as exc:
+        evidence["error"] = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        evidence["ended_s"] = ctx.clock()
+        path.write_text(json.dumps(evidence, indent=2), encoding="utf-8")
+
+
+def _add(ctx, params, deadline):
+    return _mutation(ctx, params, deadline, "add")
+
+
+def _remove(ctx, params, deadline):
+    return _mutation(ctx, params, deadline, "remove")
+
+
 def _seed_validate(params, plan):
     p = _validate(params, plan, {"hot", "cold"})
     p.setdefault("hot", "prefill-0")
@@ -613,6 +740,21 @@ def _recovery(ctx, params, deadline):
 
 
 HANDLERS = [
+    StageHandler(
+        "elastic_add",
+        _add_validate,
+        _add,
+        {"engine": "string", "port": "integer", "mutation": "snapshot"},
+        checks=frozenset({"membership"}),
+        max_dynamic_additions=1,
+    ),
+    StageHandler(
+        "elastic_remove",
+        _remove_validate,
+        _remove,
+        {"engine": "string", "port": "integer", "mutation": "snapshot"},
+        checks=frozenset({"membership"}),
+    ),
     StageHandler(
         "elastic_seed",
         _seed_validate,
