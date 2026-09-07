@@ -1,0 +1,255 @@
+schema_version: 1
+id: balance_overload_transfer
+category: balance
+environment:
+  backend: java_mock
+  n_prefill: 2
+  n_decode: 4
+execution:
+  timeout_s: 1800
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+variants:
+- id: decode_pressure
+  legacy_case_ids:
+  - balance_overload_avoid_decode
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: balance_snapshot
+    timeout_s: 60
+    params:
+      role: decode
+  - id: pressure
+    action: balance_pressure
+    timeout_s: 60
+    params:
+      fleet:
+        $ref: stages.fleet.output.snapshot
+      target:
+        $ref: stages.fleet.output.first
+  - id: status_sync
+    action: balance_pause
+    timeout_s: 6
+    params:
+      seconds: 1
+  - id: before
+    action: balance_snapshot
+    timeout_s: 60
+    params:
+      role: decode
+  - id: traffic
+    action: balance_start
+    timeout_s: 60
+    params:
+      count: 10
+  - id: terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.traffic.output.requests
+  - id: after
+    action: balance_snapshot
+    timeout_s: 60
+    params:
+      role: decode
+  - id: p6
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.traffic.output.requests
+      fleet:
+        $ref: stages.before.output.snapshot
+      metric: decode_complete
+      property: P6
+      after:
+        $ref: stages.after.output.snapshot
+  - id: p5
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.traffic.output.requests
+      fleet:
+        $ref: stages.before.output.snapshot
+      metric: target_delta
+      property: P5
+      after:
+        $ref: stages.after.output.snapshot
+      target:
+        $ref: stages.pressure.output.target
+      bands:
+        strict: 0
+        normal: 1
+        loose: 2
+  - id: p2
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.traffic.output.requests
+      fleet:
+        $ref: stages.before.output.snapshot
+      metric: takeover
+      property: P2
+      after:
+        $ref: stages.after.output.snapshot
+      target:
+        $ref: stages.pressure.output.target
+  - id: teardown
+    action: teardown
+    timeout_s: 120
+- id: prefill_pressure
+  legacy_case_ids:
+  - balance_overload_avoid_prefill
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: fleet
+    action: balance_snapshot
+    timeout_s: 60
+    params:
+      role: prefill
+  - id: slow_both
+    action: engine_control
+    timeout_s: 60
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.first
+      - $ref: stages.fleet.output.second
+      perf:
+        prefill_fixed_ms: 5000
+  - id: perf_sync
+    action: balance_pause
+    timeout_s: 6.5
+    params:
+      seconds: 1.5
+  - id: seed
+    action: balance_start
+    timeout_s: 60
+    params:
+      input_len: 147456
+      unique_keys: false
+      defer_batch: true
+      stream_timeout_s: 20
+  - id: seed_pending
+    action: balance_pending
+    timeout_s: 6
+    params:
+      requests:
+        $ref: stages.seed.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+  - id: restore_cool
+    action: engine_control
+    timeout_s: 60
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.seed_pending.output.cool
+      perf:
+        prefill_fixed_ms: 100
+  - id: cool_sync
+    action: balance_pause
+    timeout_s: 5.3
+    params:
+      seconds: 0.3
+  - id: baseline
+    action: balance_start
+    timeout_s: 60
+    params:
+      unique_keys: false
+  - id: baseline_terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.baseline.output.requests
+  - id: baseline_p6
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.baseline.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+      metric: complete
+      property: P6
+  - id: wave
+    action: balance_start
+    timeout_s: 60
+    params:
+      count: 5
+      unique_keys: false
+      await_completion: false
+      interval_s: 0.12
+  - id: wave_terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.wave.output.requests
+  - id: p6
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.wave.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+      metric: complete
+      property: P6
+  - id: p5
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.wave.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+      metric: target_share
+      property: P5
+      target:
+        $ref: stages.seed_pending.output.hot
+  - id: p7
+    action: balance_check
+    timeout_s: 60
+    params:
+      requests:
+      - $ref: stages.wave.output.requests
+      fleet:
+        $ref: stages.fleet.output.snapshot
+      metric: latency_ratio
+      property: P7
+      baseline:
+        $ref: stages.baseline.output.requests
+  - id: restore_perf
+    action: engine_control
+    timeout_s: 60
+    params:
+      operation: set_perf
+      targets:
+      - $ref: stages.fleet.output.first
+      - $ref: stages.fleet.output.second
+      perf:
+        prefill_fixed_ms: 100
+  - id: seed_terminal
+    action: balance_wait
+    timeout_s: 120
+    params:
+      requests:
+        $ref: stages.seed.output.requests
+  - id: teardown
+    action: teardown
+    timeout_s: 120
+description: Explicit balance stages preserving client landing, token share, Decode
+  deltas and latency contracts.
+legacy_case_ids:
+- balance_overload_avoid_decode
+- balance_overload_avoid_prefill
