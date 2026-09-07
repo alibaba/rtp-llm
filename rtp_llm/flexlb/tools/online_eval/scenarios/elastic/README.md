@@ -131,7 +131,9 @@ response or exception and timestamps; health request outcomes are retained too.
 `crossfire.workers_finished` and `health.complete` are additional construction
 checks. Independent done events replace the old unchecked 15s thread joins;
 final discovery is read only after every mutation worker exits. Slow graceful
-calls may finish after the 10s admission window, within the 100s stage budget.
+calls may finish after the 10s admission window, within the 120s stage budget. HTTP client timeouts preserve the legacy
+10s add / 95s graceful-remove budgets, clipped only by the remaining stage
+deadline; 120s covers a removal begun just before the 10s admission cutoff.
 Cleanup cancels request work and waits for mutation workers before tearing down
 the instance-owned environment. The legacy function remains until independent
 acceptance; real Java mock acceptance of this new family is pending.

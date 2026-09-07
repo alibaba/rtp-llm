@@ -4,6 +4,7 @@ import json
 import random
 import threading
 import time
+import urllib.request
 
 from ..contracts import CheckResult, StageHandler, StageOutput
 
@@ -14,8 +15,23 @@ def validate(params, plan):
     return _validate(params, plan, set())
 
 
+def mutation_http(ops, endpoint, deadline, body):
+    """Preserve the legacy per-operation client timeout within the stage budget."""
+    cap = {"add_engine": 10.0, "remove_engine": 95.0}[endpoint]
+    deadline.check()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{ops.mock_http_port}/{endpoint}",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(
+        request, timeout=min(cap, deadline.remaining())
+    ) as response:
+        return json.load(response)
+
+
 def crossfire(ctx, params, deadline):
-    from .elastic import RecordedRequests, _http, completeness
+    from .elastic import RecordedRequests, completeness
     from .elastic_lifecycle import _master_get
 
     stop = threading.Event()
@@ -80,7 +96,7 @@ def crossfire(ctx, params, deadline):
                         started_s=ctx.clock(),
                     )
                     try:
-                        response = _http(
+                        response = mutation_http(
                             ctx.ops,
                             "add_engine" if adder else "remove_engine",
                             deadline,

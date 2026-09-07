@@ -1,6 +1,7 @@
 """Exercise formal YAML loading and real crossfire threads with fake services."""
 
 import copy
+import io
 import json
 import sys
 import tempfile
@@ -15,13 +16,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from flexlb_ft.scenario import compile_scenarios
 from flexlb_ft.scenario.actions import elastic as e
+from flexlb_ft.scenario.actions import elastic_concurrent as concurrent
 from flexlb_ft.scenario.actions import elastic_lifecycle as life
 from flexlb_ft.scenario.loader import load_scenarios
 from flexlb_ft.scenario.runtime import execute_instance
 
 
 class ConcurrentTests(unittest.TestCase):
-    def run_program(self, bad_master=False, bad_discovery=False):
+    def run_program(self, bad_master=False, bad_discovery=False, slow_remove=False):
         handlers = {h.name: h for h in e.HANDLERS}
         plan = compile_scenarios(
             load_scenarios(ROOT / "scenarios/elastic/concurrent_mutation.yaml"),
@@ -75,6 +77,8 @@ class ConcurrentTests(unittest.TestCase):
             def http(ops, endpoint, deadline, body=None):
                 if endpoint == "snapshot":
                     with lock:
+                        self.assertEqual(state["active"], 0)
+                        state["snapshot_s"] = clock()
                         return dict(
                             engines=copy.deepcopy(list(state["engines"].values()))
                         )
@@ -85,7 +89,9 @@ class ConcurrentTests(unittest.TestCase):
                 try:
                     if first:
                         barrier.wait(timeout=2)
-                    time.sleep(0.005)
+                    time.sleep(
+                        0.9 if slow_remove and endpoint == "remove_engine" else 0.005
+                    )
                     with lock:
                         if endpoint == "add_engine":
                             state["added"] += 1
@@ -97,6 +103,7 @@ class ConcurrentTests(unittest.TestCase):
                         else:
                             item = state["engines"].pop(str(body["port"]), None)
                             state["removed"] += int(item is not None)
+                            state["last_remove_s"] = clock()
                             response = dict(status="ok" if item else "missing")
                         write_file()
                         return response
@@ -119,9 +126,13 @@ class ConcurrentTests(unittest.TestCase):
                     raise ValueError("HTTP 503")
                 return {}
 
-            with patch.object(e, "_http", side_effect=http), patch.object(
+            with patch.object(
+                concurrent, "mutation_http", side_effect=http
+            ), patch.object(e, "_http", side_effect=http), patch.object(
                 e.RecordedRequests, "run", run
-            ), patch.object(life, "_master_get", side_effect=master):
+            ), patch.object(
+                life, "_master_get", side_effect=master
+            ):
                 result = execute_instance(
                     plan,
                     Backend(),
@@ -138,6 +149,29 @@ class ConcurrentTests(unittest.TestCase):
                 )
             )
             return result, state
+
+    def test_mutation_http_preserves_add_remove_budgets(self):
+        for endpoint, remaining, expected in [
+            ("add_engine", 120, 10),
+            ("remove_engine", 120, 95),
+            ("remove_engine", 7, 7),
+        ]:
+            deadline = NS(check=lambda: None, remaining=lambda: remaining)
+            with patch.object(
+                concurrent.urllib.request,
+                "urlopen",
+                return_value=io.BytesIO(b'{"status":"ok"}'),
+            ) as opening:
+                concurrent.mutation_http(
+                    NS(mock_http_port=1234), endpoint, deadline, {"port": 1235}
+                )
+                self.assertEqual(opening.call_args.kwargs["timeout"], expected)
+
+    def test_slow_removal_finishes_after_window_before_discovery(self):
+        result, state = self.run_program(slow_remove=True)
+        self.assertEqual(result["status"], "PASS", result)
+        self.assertGreater(state["last_remove_s"], 10)
+        self.assertGreaterEqual(state["snapshot_s"], state["last_remove_s"])
 
     def test_four_real_workers_overlap_and_final_discovery_matches(self):
         result, state = self.run_program()
