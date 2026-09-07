@@ -12,7 +12,7 @@ py_test(
     env = {"GPU_COUNT": "1"},
     # CPU-only contract test (mocks + CPU tensors); needs an accelerator image
     # solely to import librtp_compute_ops, so any CUDA worker works — no H20 pin.
-    exec_properties = {'gpu_count': '1'},
+    exec_properties = {'gpu':'A10', 'gpu_count': '1'},
 )
 
 py_test(
@@ -37,7 +37,7 @@ py_test(
     env = {"GPU_COUNT": "1"},
     # Mock-based routing test on CPU tensors; needs only a generic CUDA worker
     # (librtp_compute_ops import), not an H20.
-    exec_properties = {'gpu_count': '1'},
+    exec_properties = {'gpu':'A10', 'gpu_count': '1'},
 )
 
 py_test(
@@ -47,7 +47,7 @@ py_test(
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
     env = {"GPU_COUNT": "1"},
-    exec_properties = {'gpu_count': '1'},
+    exec_properties = {'gpu':'A10', 'gpu_count': '1'},
 )
 
 py_test(

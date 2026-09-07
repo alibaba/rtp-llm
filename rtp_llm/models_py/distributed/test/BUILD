@@ -45,7 +45,7 @@ py_test(
     timeout = 'moderate',
     env = {"GPU_COUNT": "4"},
     tags = ["open_skip"],
-    exec_properties = {'gpu_count':'4'},
+    exec_properties = {'gpu':'A10', 'gpu_count':'4'},
 )
 
 py_test(
@@ -101,5 +101,5 @@ py_test(
     timeout = 'moderate',
     env = {"GPU_COUNT": "4"},
     tags = ["open_skip"],
-    exec_properties = {'gpu_count':'4'},
+    exec_properties = {'gpu':'A10', 'gpu_count':'4'},
 )

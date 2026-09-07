@@ -30,7 +30,7 @@ py_test (
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
     env = {"GPU_COUNT": "1"},
-    exec_properties = {'gpu_count':'1'},
+    exec_properties = {'gpu':'A10', 'gpu_count':'1'},
 )
 
 py_test (
@@ -40,5 +40,5 @@ py_test (
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
     env = {"GPU_COUNT": "1"},
-    exec_properties = {'gpu_count':'1'},
+    exec_properties = {'gpu':'A10', 'gpu_count':'1'},
 )

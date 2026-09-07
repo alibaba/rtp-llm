@@ -32,6 +32,7 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_library(

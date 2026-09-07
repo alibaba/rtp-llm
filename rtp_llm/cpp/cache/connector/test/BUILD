@@ -46,6 +46,7 @@ cc_test(
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     ],
     env = {},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -60,4 +61,5 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
     ],
     env = {},
+    exec_properties = {'gpu':'A10'},
 )

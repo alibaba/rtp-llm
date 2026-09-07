@@ -37,6 +37,7 @@ py_test (
     # Verified on sm86: bit-exact (torch.equal) vs the torch float8_e4m3fn
     # reference across 18 shapes, 0 skips. Our AOT cubins cover sm86.
     tags = ["open_skip"],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test (
@@ -46,6 +47,7 @@ py_test (
     # Verified on sm86: bit-exact (torch.equal) vs the torch float8_e4m3fn
     # reference across 18 shapes, 0 skips.
     tags = ["open_skip"],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test (

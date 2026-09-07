@@ -9,6 +9,7 @@ cc_test(
         "//rtp_llm/cpp/cuda_graph:combo_position_ids_validation",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_library(
@@ -65,6 +66,7 @@ py_test(
         "HACK_LAYER_NUM": "1",
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
     },
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -88,6 +90,7 @@ py_test(
         "SEQ_SIZE_PER_BLOCK": "64",
         "ACT_TYPE": "BF16",
     },
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -106,6 +109,7 @@ py_test(
         "NOT_USE_DEFAULT_STREAM": "1",
         "TEST_USING_DEVICE": "CUDA",
     },
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -126,4 +130,5 @@ py_test(
         "CUDA_LAUNCH_BLOCKING": "1",
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
     },
+    exec_properties = {'gpu':'A10'},
 )

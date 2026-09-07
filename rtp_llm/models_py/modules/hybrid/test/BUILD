@@ -26,6 +26,7 @@ py_test (
     }),
     # Verified on sm86: passes with 0 skips via the FlashInfer MLA fa2 fallback.
     tags = ["open_skip"],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test (
@@ -40,6 +41,7 @@ py_test (
     }),
     # Verified on sm86: passes with 0 skips via the FlashInfer MLA fa2 fallback.
     tags = ["open_skip"],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test (
@@ -63,6 +65,7 @@ py_test (
    ],
    env = test_envs,
    tags = ["open_skip"],
+   exec_properties = {'gpu':'A10'},
 )
 
 py_test (

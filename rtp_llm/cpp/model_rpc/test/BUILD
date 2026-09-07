@@ -33,6 +33,7 @@ py_test (
     data = [
         "//:th_transformer"
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 test_deps = [
@@ -71,6 +72,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
     env = {},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -85,6 +87,7 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -99,6 +102,7 @@ cc_test(
         "@havenask//aios/autil:net",
     ],
     env = {},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -107,6 +111,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
     env = {},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -115,6 +120,7 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
     env = {},
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -140,6 +146,7 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -152,6 +159,7 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -166,6 +174,7 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -178,4 +187,5 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
+    exec_properties = {'gpu':'A10'},
 )

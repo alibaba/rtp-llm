@@ -20,6 +20,7 @@ py_test(
         "//rtp_llm/models_py/triton_kernels:moe",
     ] + [":triton", ":torch", ":numpy"],
     visibility = ["//visibility:public"],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -29,4 +30,5 @@ py_test(
         "//rtp_llm/models_py/triton_kernels:moe",
     ] + [":triton", ":torch"],
     visibility = ["//visibility:public"],
+    exec_properties = {'gpu':'A10'},
 )

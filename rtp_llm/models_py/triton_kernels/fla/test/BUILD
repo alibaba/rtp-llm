@@ -23,6 +23,7 @@ py_test(
         "//rtp_llm/models_py/triton_kernels:fla",
     ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
     visibility = ["//visibility:public"],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -34,6 +35,7 @@ py_test(
         "//rtp_llm/models_py/triton_kernels:fla",
     ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
     visibility = ["//visibility:public"],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -65,6 +67,7 @@ py_test(
         "//rtp_llm/models_py/triton_kernels:fla",
     ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
     visibility = ["//visibility:public"],
+    exec_properties = {'gpu':'A10'},
 )
 
 # Reuse test_chunk_prefill on AMD to verify chunk-gdn Triton path on ROCm.
@@ -98,6 +101,7 @@ py_test(
         "//rtp_llm/models_py/triton_kernels:fla",
     ] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
     visibility = ["//visibility:public"],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(

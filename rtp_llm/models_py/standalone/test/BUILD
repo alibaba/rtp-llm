@@ -9,5 +9,6 @@ py_test (
     ],
     env = test_envs,
     # Verified on sm86: full auto_model load + forward passes with 0 skips.
+    exec_properties = {'gpu':'A10'},
 )
 

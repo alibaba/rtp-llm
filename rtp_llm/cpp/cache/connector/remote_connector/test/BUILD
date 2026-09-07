@@ -49,6 +49,7 @@ cc_test(
     deps = test_deps + [
         "//rtp_llm/cpp/cache/connector/remote_connector",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -62,6 +63,7 @@ cc_test(
     deps = test_deps + [
         "//rtp_llm/cpp/cache/connector/remote_connector",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -75,6 +77,7 @@ cc_test(
     deps = test_deps + [
         ":remote_connector_mock_base",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -88,6 +91,7 @@ cc_test(
     deps = test_deps + [
         ":remote_connector_mock_base",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -101,6 +105,7 @@ cc_test(
     deps = test_deps + [
         ":mock",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_library(

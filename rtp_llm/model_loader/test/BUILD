@@ -6,6 +6,7 @@ py_test(
     name = "test_stacked_moe_weight",
     srcs = ["test_stacked_moe_weight.py"],
     deps = py_test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -21,6 +22,7 @@ py_test(
     name = "test_compressed_w4a8_int4_per_channel",
     srcs = ["test_compressed_w4a8_int4_per_channel.py"],
     deps = py_test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -35,6 +37,7 @@ py_test(
     name = "test_compressed_w8a8_int8_per_channel",
     srcs = ["test_compressed_w8a8_int8_per_channel.py"],
     deps = py_test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -46,6 +49,7 @@ py_test(
     ],
     # Metadata-only weight-info test (fake ckpt objects, no device copies):
     # no H20 pin, runs on the default gpu_cuda12 pool.
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(

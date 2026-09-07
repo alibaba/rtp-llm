@@ -6,6 +6,7 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -20,6 +21,7 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -36,6 +38,7 @@ py_test(
         "//rtp_llm/test/model_test/test_util",
     ],
     imports = ["aios/kmonitor/python_client"],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -49,6 +52,7 @@ py_test(
         "//rtp_llm/test/model_test/test_util",
     ],
     imports = [],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -61,6 +65,7 @@ py_test(
         "//rtp_llm:testlib",
     ],
     imports = [],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -73,6 +78,7 @@ py_test(
         "//rtp_llm:testlib",
     ],
     imports = [],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -84,6 +90,7 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -97,6 +104,7 @@ py_test(
         "//rtp_llm/test/model_test/test_util",
     ],
     imports = [],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -112,6 +120,7 @@ py_test(
         "//rtp_llm/test/model_test/fake_test/testdata:testdata",
         "//rtp_llm/test/tokenizer_test:testdata",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -142,6 +151,7 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -178,6 +188,7 @@ py_test(
     ],
     timeout = 'short',
     shard_count = 1,
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -200,6 +211,7 @@ py_test(
         "//rtp_llm/test/model_test/fake_test/testdata:testdata",
         "//rtp_llm/test/tokenizer_test:testdata",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -211,6 +223,7 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm:sdk",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -221,6 +234,7 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -232,6 +246,7 @@ py_test(
         "//rtp_llm:sdk",
         "//rtp_llm:testlib",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -243,6 +258,7 @@ py_test(
         "//rtp_llm:testlib",
         "//rtp_llm:sdk",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -255,6 +271,7 @@ py_test(
         "//rtp_llm:testlib"
     ],
     imports = [],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -265,6 +282,7 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -275,6 +293,7 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -287,6 +306,7 @@ py_test(
         "//rtp_llm:testlib"
     ],
     imports = [],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -297,6 +317,7 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -317,6 +338,7 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -327,6 +349,7 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -339,6 +362,7 @@ py_test(
     ],
     deps=["//rtp_llm:testlib"],
     imports=[],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -349,6 +373,7 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -359,6 +384,7 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -369,6 +395,7 @@ py_test(
     data=[],
     deps=["//rtp_llm:testlib"],
     imports=[],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -382,6 +409,7 @@ py_test(
     ],
     deps=["//rtp_llm:testlib"],
     imports=[],
+    exec_properties = {'gpu':'A10'},
 )
 
 # NOTE: 纯配置校验测试，但 generate_config.py 导入链拉起 rtp_llm.ops (CUDA .so)，import 阶段需 CUDA worker 在场。
@@ -395,4 +423,5 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
+    exec_properties = {'gpu':'A10'},
 )

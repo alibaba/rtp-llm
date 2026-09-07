@@ -37,6 +37,7 @@ py_test(
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -47,6 +48,7 @@ py_test(
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -57,6 +59,7 @@ py_test(
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(

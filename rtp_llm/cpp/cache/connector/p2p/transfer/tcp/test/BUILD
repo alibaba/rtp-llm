@@ -24,6 +24,7 @@ cc_test(
         "@havenask//aios/autil:log",
         "@com_google_googletest//:gtest",
     ] + device_impl_target() + torch_deps(),
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -43,6 +44,7 @@ cc_test(
         "@havenask//aios/autil:log",
         "@com_google_googletest//:gtest",
     ] + device_impl_target() + torch_deps(),
+    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -62,4 +64,5 @@ cc_test(
         "@havenask//aios/autil:log",
         "@com_google_googletest//:gtest",
     ] + device_impl_target() + torch_deps(),
+    exec_properties = {'gpu':'A10'},
 )

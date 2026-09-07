@@ -243,6 +243,7 @@ py_test(
         "test_flashinfer_prefill/test_mha_rotary_emb.py",
     ],
     deps = py_test_deps,
+    exec_properties = {'gpu':'A10'},
 )
 
 # PrefillImpl BenchTest

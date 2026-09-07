@@ -15,7 +15,7 @@ py_test(
         "//rtp_llm:config",
     ],
     env = {"GPU_COUNT": "1"},
-    exec_properties = {'gpu_count':'1'},
+    exec_properties = {'gpu':'A10', 'gpu_count':'1'},
 )
 
 py_test(

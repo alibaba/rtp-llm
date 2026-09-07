@@ -31,6 +31,6 @@ py_test(
     timeout = 'short',
     flaky = True,
     imports = ["aios/kmonitor/python_client"],
-    exec_properties = {'gpu_count':'2'},
+    exec_properties = {'gpu':'A10', 'gpu_count':'2'},
     env = {"GPU_COUNT": "2"},
 )

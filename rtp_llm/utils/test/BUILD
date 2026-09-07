@@ -171,6 +171,7 @@ py_test(
         "//:th_transformer_config",
         "//:rtp_compute_ops",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
@@ -187,6 +188,7 @@ py_test(
         "//:th_transformer_config",
         "//:rtp_compute_ops",
     ],
+    exec_properties = {'gpu':'A10'},
 )
 
 py_test(
