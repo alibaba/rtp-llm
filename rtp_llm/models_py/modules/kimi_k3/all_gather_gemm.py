@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -15,6 +16,7 @@ from rtp_llm.models_py.distributed.collective_torch import (
     get_process_group,
 )
 from rtp_llm.models_py.distributed.symm_mem import (
+    fused_all_gather_fp8_linear,
     fused_all_gather_matmul,
     reserve_fused_all_gather_matmul_workspace,
 )
@@ -60,9 +62,15 @@ def configure_all_gather_gemm(
     max_m: int,
     k: int,
     dtype: torch.dtype,
+    fp8: bool = False,
 ) -> bool:
     """Reserve one process-lifetime Torch AG-GEMM workspace per group/device."""
 
+    if fp8 and enabled:
+        import torch.distributed._symmetric_memory as symm
+
+        if not callable(getattr(symm, "_pipelined_all_gather_and_consume", None)):
+            raise RuntimeError("installed PyTorch lacks the FP8 AG consumer pipeline")
     device = torch.device(device)
     key = collective_gemm_state_key(group, device)
     device = torch.device("cuda", key[1])
@@ -145,6 +153,12 @@ def all_gather_gemm(
     use_fused = (
         state is not None and state.enabled and should_use_all_gather_gemm(physical_m)
     )
+    # Draft may have configured a shared BF16 workspace even when target FP8
+    # collectives are disabled. Honor the target reference mode at dispatch.
+    if weights and not isinstance(weights[0], torch.Tensor):
+        use_fused = (
+            use_fused and os.environ.get("KIMI_K3_FP8_COLLECTIVE_GEMM", "1") != "0"
+        )
     if use_fused:
         assert state is not None
         if local_input.device != state.device:
@@ -168,12 +182,19 @@ def all_gather_gemm(
                 f"contiguous={local_input.is_contiguous()}"
             )
         with torch.profiler.record_function("RTP::kimi_k3.all_gather_gemm.fused"):
-            _, outputs = fused_all_gather_matmul(
-                local_input,
-                weights,
-                process_group,
-                return_gathered=False,
-            )
+            if all(isinstance(weight, torch.Tensor) for weight in weights):
+                _, outputs = fused_all_gather_matmul(
+                    local_input,
+                    weights,
+                    process_group,
+                    return_gathered=False,
+                )
+            elif all(not isinstance(weight, torch.Tensor) for weight in weights):
+                outputs = fused_all_gather_fp8_linear(
+                    local_input, weights, process_group
+                )
+            else:
+                raise TypeError("AG projections must use a consistent precision policy")
     else:
         with torch.profiler.record_function("RTP::kimi_k3.all_gather_gemm.all_gather"):
             gathered = all_gather_into(
@@ -183,7 +204,15 @@ def all_gather_gemm(
             )
             gathered = gathered.narrow(0, 0, logical_m)
         with torch.profiler.record_function("RTP::kimi_k3.all_gather_gemm.gemm"):
-            outputs = [torch.matmul(gathered, weight) for weight in weights]
+            outputs = []
+            quantized_input = None
+            for weight in weights:
+                if isinstance(weight, torch.Tensor):
+                    outputs.append(torch.matmul(gathered, weight))
+                else:
+                    if quantized_input is None:
+                        quantized_input = weight.quantize_input(gathered)
+                    outputs.append(weight.forward_quantized(*quantized_input))
 
     trimmed = []
     for output in outputs:

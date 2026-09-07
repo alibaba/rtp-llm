@@ -480,6 +480,7 @@ verify_role_environment() {
         "${sp_checkpoint_real}" \
         "${smoke_eagle3_aux_layer_ids}" \
         "${smoke_accl_use_nics}" <<'PY'
+import os
 import pathlib
 import sys
 
@@ -571,6 +572,10 @@ else:
         "ENABLE_MEMORY_CACHE",
         "MEMORY_CACHE_SIZE_MB",
     ])
+
+for key in ("KIMI_K3_ATTENTION_QUANTIZATION", "KIMI_K3_FP8_COLLECTIVE_GEMM"):
+    if key in os.environ:
+        expected[key] = os.environ[key]
 
 for key, value in expected.items():
     if env.get(key) != value:

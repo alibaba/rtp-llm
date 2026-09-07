@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set
 import torch
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3Eagle3Weight, KimiK3Weight
@@ -56,7 +57,11 @@ class KimiK3RuntimeConfig:
 class KimiK3ModelConfig(ModelConfig):
     """RTP model config with a K3-scoped, strongly typed Python extension."""
 
-    _python_fields = ModelConfig._python_fields | {"k3_runtime_config"}
+    _python_fields = ModelConfig._python_fields | {
+        "k3_runtime_config",
+        "k3_attention_quant_config",
+    }
+    k3_attention_quant_config = None
     k3_runtime_config: KimiK3RuntimeConfig
 
     def disables_framework_deepep_moe(self) -> bool:
@@ -72,6 +77,16 @@ class KimiK3ModelConfig(ModelConfig):
                 "Kimi K3 currently supports only BF16 compute, got "
                 f"{self.compute_dtype}"
             )
+        method = (
+            os.environ.get("KIMI_K3_ATTENTION_QUANTIZATION", "none").strip().lower()
+        )
+        if method not in ("none", "fp8_per_block"):
+            raise ValueError(
+                "KIMI_K3_ATTENTION_QUANTIZATION must be none or fp8_per_block"
+            )
+        # Standalone draft checkpoints retain their own BF16 policy.
+        enabled = method == "fp8_per_block" and "eagle3" not in self.model_type
+        self.k3_attention_quant_config = Fp8BlockWiseQuantConfig() if enabled else None
         if self.quant_config is not None:
             raise ValueError(
                 "Kimi K3 does not support runtime weight quantization; its "

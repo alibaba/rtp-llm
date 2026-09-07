@@ -1,4 +1,4 @@
-"""DeepGEMM BF16 GEMM/ReduceScatter for Kimi K3 Prefill."""
+"""DeepGEMM BF16 and FP8 GEMM/ReduceScatter for Kimi K3 Prefill."""
 
 from __future__ import annotations
 
@@ -37,6 +37,16 @@ class _GemmReduceScatterState:
 _STATES: dict[tuple[dist.ProcessGroup, int], _GemmReduceScatterState] = {}
 
 
+def _validate_fp8_workspace(deep_gemm: Any, workspace: Any) -> None:
+    required = ("_mapping_handle", "_launch_lock", "_last_stream", "_barrier")
+    if (
+        getattr(workspace, "_data_offset_bytes", None) != 128
+        or any(not hasattr(workspace, key) for key in required)
+        or not hasattr(getattr(deep_gemm, "_C", None), "bf16_gemm_rs_reduce")
+    ):
+        raise RuntimeError("installed DeepGEMM lacks the FP8 peer-output RS ABI")
+
+
 def gemm_reduce_scatter_backend() -> str:
     """Return the process-lifetime backend selected for K3 o_proj + RS."""
 
@@ -65,6 +75,7 @@ def configure_gemm_reduce_scatter(
     enabled: bool,
     max_m: int,
     n: int,
+    fp8: bool = False,
 ) -> bool:
     """Create one process-lifetime DeepGEMM workspace per TP group/device."""
 
@@ -79,6 +90,8 @@ def configure_gemm_reduce_scatter(
                 f"existing=(max_m={existing.max_m}, n={existing.n}), "
                 f"requested=(max_m={max_m}, n={n})"
             )
+        if fp8 and existing.enabled:
+            _validate_fp8_workspace(existing.deep_gemm, existing.workspace)
         return existing.enabled
 
     backend = gemm_reduce_scatter_backend()
@@ -145,8 +158,10 @@ def configure_gemm_reduce_scatter(
             n=n,
             device=device,
         )
+        if fp8:
+            _validate_fp8_workspace(deep_gemm, workspace)
         logging.info(
-            "[K3_GEMM_REDUCE_SCATTER] enabled BF16 o_proj+RS: "
+            "[K3_GEMM_REDUCE_SCATTER] enabled o_proj+RS: "
             "TP%d max_m=%d n=%d "
             "runtime_min_m=%d workspace=%.3f GiB deep_gemm=%s",
             world_size,
@@ -185,6 +200,11 @@ def gemm_reduce_scatter(
     with ``torch.mm`` fallback.  This path never transposes or caches a copy.
     """
 
+    if (
+        not isinstance(weight, torch.Tensor)
+        and os.environ.get("KIMI_K3_FP8_COLLECTIVE_GEMM", "1") == "0"
+    ):
+        return None
     if not x.is_cuda:
         return None
     state = _STATES.get(collective_gemm_state_key(group, x.device))
@@ -212,6 +232,8 @@ def gemm_reduce_scatter(
         )
     if not should_use_gemm_reduce_scatter(physical_m):
         return None
+    if not isinstance(weight, torch.Tensor):
+        return _fp8_remote_gemm_reduce_scatter(x, weight, state, physical_m)
     if (
         weight.ndim != 2
         or weight.dtype != torch.bfloat16
@@ -262,3 +284,54 @@ __all__ = [
     "gemm_reduce_scatter_backend",
     "should_use_gemm_reduce_scatter",
 ]
+
+
+def _fp8_remote_gemm_reduce_scatter(x, projection, state, physical_m):
+    """Write FP8 GEMM BF16 outputs directly to destination-owned source slots.
+
+    Destination-sized GEMMs reuse DeepGEMM's existing TMA output descriptor.
+    No full local partial or post-GEMM peer copy is materialized. The published
+    BF16 source-slot layout and both barriers match GemmRSBuffer's ABI.
+    """
+    if projection.K != x.shape[1] or projection.N != state.n:
+        raise ValueError("FP8 RS projection does not match the configured workspace")
+    if physical_m > state.max_m:
+        raise RuntimeError("FP8 RS exceeds the configured token capacity")
+    if physical_m != x.shape[0]:
+        padded = x.new_zeros((physical_m, x.shape[1]))
+        padded[: x.shape[0]].copy_(x)
+        x = padded
+    else:
+        x = x.contiguous()
+    workspace = state.workspace
+    rows = physical_m // state.world_size
+    output = x.new_empty((rows, state.n))
+    if workspace is None or workspace._mapping_handle is None:
+        raise RuntimeError("FP8 RS requires a live DeepGEMM symmetric workspace")
+    if workspace._data_offset_bytes != 128:
+        raise RuntimeError("unsupported DeepGEMM GEMM/RS workspace ABI")
+    slot_offset = workspace._data_offset_bytes // 2 + workspace.rank * rows * state.n
+    # Materialize all peer views before the first collective write.
+    peers = [
+        workspace._mapping_handle.get_buffer(
+            dst, (rows, state.n), torch.bfloat16, storage_offset=slot_offset
+        )
+        for dst in range(state.world_size)
+    ]
+    with workspace._launch_lock, torch.cuda.device(workspace.device):
+        stream = torch.cuda.current_stream(workspace.device)
+        if workspace._last_stream is not None and workspace._last_stream != stream:
+            stream.wait_stream(workspace._last_stream)
+        with torch.profiler.record_function(
+            "RTP::kimi_k3.gemm_reduce_scatter.fp8_remote"
+        ):
+            for step in range(state.world_size):
+                dst = (workspace.rank + step) % state.world_size
+                projection(x.narrow(0, dst * rows, rows), out=peers[dst])
+            workspace._barrier(0)
+            state.deep_gemm._C.bf16_gemm_rs_reduce(
+                output, workspace.buffer, state.world_size, physical_m, state.n
+            )
+            workspace._barrier(1)
+            workspace._last_stream = stream
+    return output

@@ -1193,6 +1193,8 @@ class W:
     linear_attn_b_w = "linear_attn.b_proj.weight"
     linear_attn_f_a_w = "linear_attn.f_a_proj.weight"
     linear_attn_f_b_w = "linear_attn.f_b_proj.weight"
+    linear_attn_f_b_s = "linear_attn.f_b.scale"
+    linear_attn_qkvg_fa_beta_s = "linear_attn.qkvg_fa_beta.scale"
     # Reserved for the kimi_linear low-rank output-gate variant so a future
     # rebase converges. K3's own checkpoint uses the full-rank g_proj below, so
     # no K3 weight-manifest entry references these two keys today; only the

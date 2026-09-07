@@ -69,3 +69,17 @@ py_test(
     tags = ["B300"],
     visibility = ["//visibility:public"],
 )
+
+py_test(
+    name = "fp8_quant_test",
+    srcs = ["fp8_quant_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        "//rtp_llm/models_py/triton_kernels:kimi_kda",
+        ":torch",
+        ":triton",
+    ],
+    exec_properties = {"gpu": "B300"},
+    tags = ["B300"],
+    visibility = ["//visibility:public"],
+)
