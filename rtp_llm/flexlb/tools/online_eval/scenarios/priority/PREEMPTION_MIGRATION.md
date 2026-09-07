@@ -1,7 +1,7 @@
 # Priority preemption migration
 
 Owner: agent4. Source baseline: `295af797bd7ed3a842c9cad42b5722c64cd24c9a`.
-This checkpoint implements seven complete candidate programs out of fourteen old
+This checkpoint implements eight complete candidate programs out of fourteen old
 contracts. No old case is called or deleted. Independent review, default catalog
 integration and actual Java execution remain pending.
 
@@ -55,9 +55,8 @@ observed order and terminal outcomes are saved as artifacts.
   restores its original blocking dependency. An explicit zero submission gap
   avoids inserting a .15s pause after the standalone placeholder.
 
-## Pending contracts (7)
+## Pending contracts (6)
 
-- atpm_error_code_family
 - atpm_decode_reservation_priority
 - atpm_observability_integrity
 - atpm_preempt_prefill_queued_live
@@ -374,3 +373,54 @@ PR9/P6 FAIL with priority_half=false and fifo_half=true. The existing FIFO
 inversion still yields final FAIL; construction failure still prevents
 reconfiguration. This correction provides missing diagnostic coverage,
 not a green result for the original runtime failure.
+
+
+## Eighth candidate: error_code_family
+
+The old atpm_error_code_family contains three executable NON_BATCH segments;
+the reserved BATCH8514/8515 arm remains unimplemented and is not claimed.
+Segment1 uses C1 2P/2D, global outstanding2, queue/inflight/waiting omitted,
+and no preemption. Segments2/3 rebuild Q2/A1 1P/4D, cap1/wait8, PQ preemption,
+queue60000/7000. All three complete resolved configurations are compared to
+old _c1_spec/_q2_spec/_a1_spec. The cdd856f699fddbfd16c1a9456ee5a15bbf1b8be0
+shared interface preserves actual initial4 workers and pre-reserves max5;
+no C1 topology is silently changed to avoid the transition.
+
+Segment1 sets both P4000 and waits1.5, admits two50 placeholders with .15
+gaps and observes pending on the first actual P. Two arrivals30/70 must
+both terminate8502, with actual settled-minus-submitted strictly below3s.
+Both placeholders must succeed; forbidden families are8402/8403/8431/8400/
+8429/8511. Rejection reasons are retained as diagnostics only, exactly as
+in the old executable predicate (the old detail says expected0 but does
+not enforce it). After restoring both P100, a single recovery uses unset
+priority,2048/2, unique block key RID*100+1, Schedule30, Generate60 and
+observation30. Its actual consumer success is required, followed by clean30.
+The shared prepared recovery driver may allocate an unused wire ID; no
+contiguous-ID assumption is part of this program's contract.
+
+Segment2 sets P3000/sync1.5, then ph70 and eight70+incoming90. All ten
+requests succeed, with peer dispatch indices[0,8,1,2,3,4,5,6,7] from actual
+Prefill running_ms/settlement-rank/ID. The no8502/8403/8431/8400/8429/8511
+isolation and clean30 remain. Segment3 sets P10000/sync1.5, then ph70 and
+eight30+incoming90. All nine queued terminals must be8511, low peers have
+no8400, placeholder succeeds, and the original isolation/clean30 remain.
+Incoming rejection reason remains diagnostic here too. Each segment retains
+Schedule90/Generate120, fresh35 consumer drains, .15 peer gaps, ph pending
+6/.1, and a separately bounded environment rebuild before the next segment.
+
+Segment results are scalar evidence until the final AT4/P6 conjunction,
+so ordinary wrong-code/slow-rejection/shape failures do not hide later
+segments. Missing/ambiguous evidence and failed clean gates stop execution
+and trigger owned cleanup; the latter is an explicitly stronger stopping
+rule than the old report's continuation after dirty segment cleanup.
+Recovery is an owned RequestBatch-based worker with completion witnesses,
+not a call to the legacy case or an assumed success.
+
+
+Four complete-program fixtures cover25 Schedule requests,14 actual consumer
+completions, all three exact configs/topologies and recovery key/priority;
+a wrong segment1 code still runs segments2/3 but fails final AT4/P6; an
+actual3.1s Schedule rejection fails the unchanged3s bound; reason99 remains
+diagnostic and does not add an old-absent predicate. The fixed cdd source
+plus owned preemption files is the verification composition, not bare
+branch execution or Java acceptance.
