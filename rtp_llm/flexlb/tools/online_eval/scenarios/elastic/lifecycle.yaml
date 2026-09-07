@@ -15,6 +15,7 @@ legacy_case_ids:
 - elastic_add_preference
 - elastic_kv_skew_shrink_hot
 - elastic_kv_skew_shrink_cold
+- elastic_steady_state_recovery
 estimated_duration_s: 420
 environment:
   backend: java_mock
@@ -301,6 +302,90 @@ variants:
       recovery:
         $ref: stages.recovery.output.requests
       victim: cold
+  - id: teardown
+    action: teardown
+- id: steady_recovery
+  legacy_case_ids:
+  - elastic_steady_state_recovery
+  execution:
+    timeout_s: 900
+    stage_timeout_s: 40
+    cleanup_timeout_s: 120
+  stages:
+  - id: setup
+    action: setup
+    timeout_s: 180
+  - id: initial_topology
+    action: elastic_topology
+    timeout_s: 35
+    params:
+      role: DECODE
+      discovered: 4
+      alive: 4
+  - id: observe
+    action: elastic_balance_observe
+  - id: flow
+    action: elastic_balance_flow
+    params:
+      interval_s: 0.2
+  - id: baseline
+    action: elastic_balance_window
+    timeout_s: 25
+    params:
+      observation:
+        $ref: stages.observe.output.observation
+      duration_s: 20
+  - id: baseline_guard
+    action: elastic_steady_baseline
+    params:
+      window:
+        $ref: stages.baseline.output.window
+  - id: remove
+    action: elastic_balance_remove
+    timeout_s: 110
+    params:
+      engine: decode-0
+      drain_timeout_ms: 60000
+  - id: transient
+    action: elastic_balance_window
+    timeout_s: 25
+    params:
+      observation:
+        $ref: stages.observe.output.observation
+      duration_s: 20
+  - id: settled_topology
+    action: elastic_topology
+    timeout_s: 35
+    params:
+      role: DECODE
+      discovered: 3
+      alive: 3
+      port:
+        $ref: stages.remove.output.port
+      present: false
+  - id: steady
+    action: elastic_balance_window
+    timeout_s: 65
+    params:
+      observation:
+        $ref: stages.observe.output.observation
+      duration_s: 60
+  - id: recovery
+    action: elastic_pending_recovery
+    timeout_s: 100
+  - id: flow_stop
+    action: elastic_flow_stop
+    timeout_s: 65
+    params:
+      flow:
+        $ref: stages.flow.output.flow
+  - id: verdict
+    action: elastic_steady_verdict
+    params:
+      baseline:
+        $ref: stages.baseline.output.window
+      steady:
+        $ref: stages.steady.output.window
   - id: teardown
     action: teardown
 stages:

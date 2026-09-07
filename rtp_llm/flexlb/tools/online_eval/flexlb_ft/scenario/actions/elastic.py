@@ -574,7 +574,7 @@ def _engine_identity(engine):
     return engine["role"], port
 
 
-def _mutation(ctx, params, deadline, operation):
+def _mutation(ctx, params, deadline, operation, request_http=None):
     """One explicit mutation, retaining its response even if validation fails.
 
     Snapshot membership is control-plane evidence only. Discovery, master
@@ -602,7 +602,11 @@ def _mutation(ctx, params, deadline, operation):
                 drain_timeout_ms=params["drain_timeout_ms"],
             )
         evidence["request"] = body
-        response = _http(ctx.ops, f"{operation}_engine", deadline, body)
+        if request_http is not None:
+            evidence["started_s"] = ctx.clock()
+        response = (request_http or _http)(
+            ctx.ops, f"{operation}_engine", deadline, body
+        )
         evidence["response"] = response
         if not isinstance(response, dict) or response.get("status") != "ok":
             raise ValueError("mutation did not acknowledge success")
@@ -1129,6 +1133,11 @@ HANDLERS = [
 
 
 METRICS = {
+    "mock_engine_completed_total",
+    "mock_engine_accepted_total",
+    "mock_engine_decode_ms_avg",
+    "mock_engine_lack_mem_rejects_total",
+    "mock_engine_kv_admission_fails_total",
     "mock_engine_cache_key_hits_total",
     "mock_engine_cache_keys_requested_total",
     "mock_engine_waiting",
@@ -1591,3 +1600,7 @@ HANDLERS += CONCURRENT_HANDLERS
 from .elastic_pending import HANDLERS as PENDING_HANDLERS
 
 HANDLERS += PENDING_HANDLERS
+
+from .elastic_balance import HANDLERS as BALANCE_HANDLERS
+
+HANDLERS += BALANCE_HANDLERS
